@@ -522,20 +522,14 @@ fn parse_multipart(body: &str, boundary: &str) -> Vec<MimePart> {
 
     for line in body.lines() {
         if line.starts_with(&end_delimiter) {
-            if in_part
-                && !current_part.is_empty()
-                && let Some(part) = parse_single_part(&current_part)
-            {
-                parts.push(part);
+            if in_part && !current_part.is_empty() {
+                parts.push(parse_single_part(&current_part));
             }
             break;
         }
         if line.starts_with(&delimiter) {
-            if in_part
-                && !current_part.is_empty()
-                && let Some(part) = parse_single_part(&current_part)
-            {
-                parts.push(part);
+            if in_part && !current_part.is_empty() {
+                parts.push(parse_single_part(&current_part));
             }
             in_part = true;
             current_part = String::new();
@@ -550,8 +544,13 @@ fn parse_multipart(body: &str, boundary: &str) -> Vec<MimePart> {
     parts
 }
 
-/// Parse a single MIME part
-fn parse_single_part(text: &str) -> Option<MimePart> {
+/// Parse a single MIME part.
+//
+// Always returns successfully — even an empty `text` yields a default-typed
+// part. Returning `MimePart` directly (rather than `Option<MimePart>`) lets
+// the two callers drop their `if let Some(...)` wrappers and matches
+// `unnecessary_wraps`.
+fn parse_single_part(text: &str) -> MimePart {
     let (header_text, body_text) = if let Some(sep) = text.find("\n\n") {
         (
             text.get(..sep).unwrap_or(""),
@@ -563,7 +562,7 @@ fn parse_single_part(text: &str) -> Option<MimePart> {
 
     let headers = EmailHeaders::parse(header_text);
     let ct = ContentType::parse(headers.get("Content-Type").unwrap_or("text/plain"));
-    Some(parse_mime_body(&ct, body_text, &headers))
+    parse_mime_body(&ct, body_text, &headers)
 }
 
 /// Find text part with given subtype in MIME tree
@@ -618,7 +617,15 @@ fn base64_decode(input: &str) -> Vec<u8> {
     result
 }
 
-/// Encode to base64
+/// Encode to base64.
+//
+// All `CHARS[idx]` index ops below are masked with `& 0x3F`, so idx is
+// always in 0..64 and CHARS is exactly 64 bytes. Clippy can't see this
+// arithmetic invariant, so we suppress `indexing_slicing` for the whole
+// function rather than reaching for `.get(...).unwrap_or(b'A')` four
+// times — that would *hide* an out-of-range bug if the mask ever
+// changed.
+#[allow(clippy::indexing_slicing)]
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
@@ -1495,6 +1502,8 @@ mod colors {
     pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
     pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
     pub const BLUE: Color = Color::from_hex(0x89B4FA);
+    // Kept for palette completeness (Catppuccin Mocha) even if no current caller.
+    #[allow(dead_code)]
     pub const GREEN: Color = Color::from_hex(0xA6E3A1);
     pub const RED: Color = Color::from_hex(0xF38BA8);
     pub const YELLOW: Color = Color::from_hex(0xF9E2AF);

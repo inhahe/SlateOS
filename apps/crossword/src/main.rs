@@ -380,7 +380,7 @@ impl CrosswordApp {
     fn find_numbered_cell(&self, num: u16) -> Option<usize> {
         self.cells
             .iter()
-            .position(|c| c.as_ref().map_or(false, |cell| cell.number == num))
+            .position(|c| c.as_ref().is_some_and(|cell| cell.number == num))
     }
 
     fn word_length(&self, row: usize, col: usize, dir: Direction) -> usize {
@@ -514,13 +514,12 @@ impl CrosswordApp {
     }
 
     fn delete_letter(&mut self) {
-        if let Some(cell) = self.cell_at_mut(self.cursor_row, self.cursor_col) {
-            if cell.entry.is_some() {
+        if let Some(cell) = self.cell_at_mut(self.cursor_row, self.cursor_col)
+            && cell.entry.is_some() {
                 cell.entry = None;
                 cell.flagged_wrong = false;
                 return;
             }
-        }
         // If current cell empty, go back and delete
         self.retreat_cursor();
         if let Some(cell) = self.cell_at_mut(self.cursor_row, self.cursor_col) {
@@ -532,20 +531,17 @@ impl CrosswordApp {
     fn check_answers(&mut self) {
         self.check_mode = true;
         for cell_opt in &mut self.cells {
-            if let Some(cell) = cell_opt {
-                if let Some(entry) = cell.entry {
+            if let Some(cell) = cell_opt
+                && let Some(entry) = cell.entry {
                     cell.flagged_wrong = entry != cell.solution;
                 }
-            }
         }
     }
 
     fn clear_checks(&mut self) {
         self.check_mode = false;
-        for cell_opt in &mut self.cells {
-            if let Some(cell) = cell_opt {
-                cell.flagged_wrong = false;
-            }
+        for cell in self.cells.iter_mut().flatten() {
+            cell.flagged_wrong = false;
         }
     }
 
@@ -617,14 +613,13 @@ impl CrosswordApp {
     fn current_clue(&self) -> Option<&Clue> {
         let (start_r, start_c) = self.word_start(self.cursor_row, self.cursor_col, self.direction);
         // Find the clue number at the start of this word
-        if let Some(cell) = self.cell_at(start_r, start_c) {
-            if cell.number > 0 {
+        if let Some(cell) = self.cell_at(start_r, start_c)
+            && cell.number > 0 {
                 return self
                     .clues
                     .iter()
                     .find(|cl| cl.number == cell.number && cl.direction == self.direction);
             }
-        }
         None
     }
 
@@ -650,8 +645,8 @@ impl CrosswordApp {
 
     fn move_cursor(&mut self, key: Key) {
         match key {
-            Key::Up => {
-                if self.cursor_row > 0 {
+            Key::Up
+                if self.cursor_row > 0 => {
                     let mut r = self.cursor_row - 1;
                     loop {
                         if self.is_playable(r, self.cursor_col) {
@@ -665,7 +660,6 @@ impl CrosswordApp {
                         r -= 1;
                     }
                 }
-            }
             Key::Down => {
                 let mut r = self.cursor_row + 1;
                 while r < self.height {
@@ -677,8 +671,8 @@ impl CrosswordApp {
                     r += 1;
                 }
             }
-            Key::Left => {
-                if self.cursor_col > 0 {
+            Key::Left
+                if self.cursor_col > 0 => {
                     let mut c = self.cursor_col - 1;
                     loop {
                         if self.is_playable(self.cursor_row, c) {
@@ -692,7 +686,6 @@ impl CrosswordApp {
                         c -= 1;
                     }
                 }
-            }
             Key::Right => {
                 let mut c = self.cursor_col + 1;
                 while c < self.width {
@@ -719,23 +712,21 @@ impl CrosswordApp {
         let filled = self
             .cells
             .iter()
-            .filter(|c| c.as_ref().map_or(false, |cell| cell.entry.is_some()))
+            .filter(|c| c.as_ref().is_some_and(|cell| cell.entry.is_some()))
             .count();
         (filled, total)
     }
 
     fn handle_event_select(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key: Key::Up, .. }) => {
-                if self.selected_puzzle > 0 {
+            Event::Key(KeyEvent { key: Key::Up, .. })
+                if self.selected_puzzle > 0 => {
                     self.selected_puzzle -= 1;
                 }
-            }
-            Event::Key(KeyEvent { key: Key::Down, .. }) => {
-                if self.selected_puzzle + 1 < PUZZLES.len() {
+            Event::Key(KeyEvent { key: Key::Down, .. })
+                if self.selected_puzzle + 1 < PUZZLES.len() => {
                     self.selected_puzzle += 1;
                 }
-            }
             Event::Key(KeyEvent {
                 key: Key::Enter, ..
             }) => {
@@ -1190,7 +1181,7 @@ impl CrosswordApp {
         };
 
         for clue in clues.iter().skip(scroll).take(8) {
-            let is_current = self.current_clue().map_or(false, |c| {
+            let is_current = self.current_clue().is_some_and(|c| {
                 c.number == clue.number && c.direction == clue.direction
             });
 
@@ -1341,7 +1332,7 @@ impl CrosswordApp {
         let revealed = self
             .cells
             .iter()
-            .filter(|c| c.as_ref().map_or(false, |cell| cell.revealed))
+            .filter(|c| c.as_ref().is_some_and(|cell| cell.revealed))
             .count();
         if revealed > 0 {
             cmds.push(RenderCommand::Text {

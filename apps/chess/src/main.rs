@@ -361,8 +361,8 @@ impl Board {
         squares[0][5] = Some(Piece::new(Side::White, PieceKind::Bishop));
         squares[0][6] = Some(Piece::new(Side::White, PieceKind::Knight));
         squares[0][7] = Some(Piece::new(Side::White, PieceKind::Rook));
-        for col in 0..8 {
-            squares[1][col] = Some(Piece::new(Side::White, PieceKind::Pawn));
+        for sq in &mut squares[1] {
+            *sq = Some(Piece::new(Side::White, PieceKind::Pawn));
         }
 
         // Black pieces (rank 8 = row 7)
@@ -374,8 +374,8 @@ impl Board {
         squares[7][5] = Some(Piece::new(Side::Black, PieceKind::Bishop));
         squares[7][6] = Some(Piece::new(Side::Black, PieceKind::Knight));
         squares[7][7] = Some(Piece::new(Side::Black, PieceKind::Rook));
-        for col in 0..8 {
-            squares[6][col] = Some(Piece::new(Side::Black, PieceKind::Pawn));
+        for sq in &mut squares[6] {
+            *sq = Some(Piece::new(Side::Black, PieceKind::Pawn));
         }
 
         Self {
@@ -423,11 +423,10 @@ impl Board {
     fn find_king(&self, side: Side) -> Option<Pos> {
         for row in 0..8 {
             for col in 0..8 {
-                if let Some(p) = self.squares[row][col] {
-                    if p.side == side && p.kind == PieceKind::King {
+                if let Some(p) = self.squares[row][col]
+                    && p.side == side && p.kind == PieceKind::King {
                         return Some(Pos::new(row as i8, col as i8));
                     }
-                }
             }
         }
         None
@@ -447,11 +446,10 @@ impl Board {
             (2, 1),
         ] {
             let p = Pos::new(pos.row + dr, pos.col + dc);
-            if let Some(piece) = self.get(p) {
-                if piece.side == attacker && piece.kind == PieceKind::Knight {
+            if let Some(piece) = self.get(p)
+                && piece.side == attacker && piece.kind == PieceKind::Knight {
                     return true;
                 }
-            }
         }
 
         // Check king attacks (adjacent squares)
@@ -461,11 +459,10 @@ impl Board {
                     continue;
                 }
                 let p = Pos::new(pos.row + dr, pos.col + dc);
-                if let Some(piece) = self.get(p) {
-                    if piece.side == attacker && piece.kind == PieceKind::King {
+                if let Some(piece) = self.get(p)
+                    && piece.side == attacker && piece.kind == PieceKind::King {
                         return true;
                     }
-                }
             }
         }
 
@@ -473,18 +470,17 @@ impl Board {
         let pawn_dir: i8 = if attacker == Side::White { -1 } else { 1 };
         for &dc in &[-1i8, 1] {
             let p = Pos::new(pos.row + pawn_dir, pos.col + dc);
-            if let Some(piece) = self.get(p) {
-                if piece.side == attacker && piece.kind == PieceKind::Pawn {
+            if let Some(piece) = self.get(p)
+                && piece.side == attacker && piece.kind == PieceKind::Pawn {
                     return true;
                 }
-            }
         }
 
         // Check sliding piece attacks (rook/queen on ranks/files)
         for &(dr, dc) in &[(0, 1), (0, -1), (1, 0), (-1, 0)] {
             let mut r = pos.row + dr;
             let mut c = pos.col + dc;
-            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+            while (0..8).contains(&r) && (0..8).contains(&c) {
                 let p = Pos::new(r, c);
                 if let Some(piece) = self.get(p) {
                     if piece.side == attacker
@@ -503,7 +499,7 @@ impl Board {
         for &(dr, dc) in &[(1, 1), (1, -1), (-1, 1), (-1, -1)] {
             let mut r = pos.row + dr;
             let mut c = pos.col + dc;
-            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+            while (0..8).contains(&r) && (0..8).contains(&c) {
                 let p = Pos::new(r, c);
                 if let Some(piece) = self.get(p) {
                     if piece.side == attacker
@@ -671,7 +667,7 @@ impl Board {
         for &(dr, dc) in dirs {
             let mut r = pos.row + dr;
             let mut c = pos.col + dc;
-            while r >= 0 && r < 8 && c >= 0 && c < 8 {
+            while (0..8).contains(&r) && (0..8).contains(&c) {
                 let to = Pos::new(r, c);
                 match self.get(to) {
                     None => {
@@ -1157,8 +1153,8 @@ impl ChessApp {
         }
 
         // Select a piece (must be own piece)
-        if let Some(piece) = self.board.get(pos) {
-            if piece.side == Side::White {
+        if let Some(piece) = self.board.get(pos)
+            && piece.side == Side::White {
                 self.selected = Some(pos);
                 self.legal_moves_for_selected = self
                     .board
@@ -1168,7 +1164,6 @@ impl ChessApp {
                     .collect();
                 return;
             }
-        }
 
         // Clicked empty square or opponent piece without selection
         self.selected = None;
@@ -1454,8 +1449,8 @@ impl ChessApp {
                 });
 
                 // Last move highlight
-                if let Some(last) = self.last_move {
-                    if pos == last.from || pos == last.to {
+                if let Some(last) = self.last_move
+                    && (pos == last.from || pos == last.to) {
                         commands.push(RenderCommand::FillRect {
                             x: sx,
                             y: sy,
@@ -1465,7 +1460,6 @@ impl ChessApp {
                             corner_radii: CornerRadii::ZERO,
                         });
                     }
-                }
 
                 // Check highlight on king
                 if in_check && king_pos == Some(pos) {

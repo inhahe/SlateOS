@@ -213,7 +213,9 @@ impl MoveSequence {
         Self { steps: vec![mv] }
     }
 
-    fn from_pos(&self) -> Pos {
+    // Renamed from `from_pos` to satisfy `wrong_self_convention`
+    // (from_* should not take `&self`).
+    fn origin_pos(&self) -> Pos {
         self.steps.first().map_or(Pos::new(0, 0), |s| s.from)
     }
 
@@ -222,7 +224,7 @@ impl MoveSequence {
     }
 
     fn is_jump(&self) -> bool {
-        self.steps.first().map_or(false, |s| s.is_jump())
+        self.steps.first().is_some_and(|s| s.is_jump())
     }
 
     fn captured_count(&self) -> usize {
@@ -327,7 +329,7 @@ impl Board {
         self.squares
             .iter()
             .flatten()
-            .filter(|p| p.map_or(false, |p| p.side == side))
+            .filter(|p| p.is_some_and(|p| p.side == side))
             .count()
     }
 
@@ -336,7 +338,7 @@ impl Board {
         self.squares
             .iter()
             .flatten()
-            .filter(|p| p.map_or(false, |p| p.side == side && p.is_king))
+            .filter(|p| p.is_some_and(|p| p.side == side && p.is_king))
             .count()
     }
 
@@ -408,13 +410,11 @@ impl Board {
         for (dr, dc) in dirs {
             let mid = Pos::new(pos.row + dr, pos.col + dc);
             let to = Pos::new(pos.row + 2 * dr, pos.col + 2 * dc);
-            if to.is_valid() {
-                if let Some(mid_piece) = self.get(mid) {
-                    if mid_piece.side != piece.side && self.get(to).is_none() {
+            if to.is_valid()
+                && let Some(mid_piece) = self.get(mid)
+                    && mid_piece.side != piece.side && self.get(to).is_none() {
                         jumps.push(CheckersMove::jump(pos, to, mid));
                     }
-                }
-            }
         }
         jumps
     }
@@ -444,21 +444,20 @@ impl Board {
             let to = Pos::new(pos.row + 2 * dr, pos.col + 2 * dc);
             if to.is_valid() {
                 // Cannot jump a piece that was already captured in this chain
-                if captured.iter().any(|&c| c == mid) {
+                if captured.contains(&mid) {
                     continue;
                 }
-                if let Some(mid_piece) = self.get(mid) {
-                    if mid_piece.side != piece.side {
+                if let Some(mid_piece) = self.get(mid)
+                    && mid_piece.side != piece.side {
                         // Landing square must be empty. It reads as occupied
                         // if it's the origin square (piece logically left),
                         // so treat that as empty.
                         let landing_empty = self.get(to).is_none()
-                            || origin.map_or(false, |o| o == to);
+                            || (origin == Some(to));
                         if landing_empty {
                             jumps.push(CheckersMove::jump(pos, to, mid));
                         }
                     }
-                }
             }
         }
         jumps
@@ -568,7 +567,7 @@ impl Board {
     fn generate_legal_moves_from(&self, pos: Pos) -> Vec<MoveSequence> {
         self.generate_legal_moves()
             .into_iter()
-            .filter(|seq| seq.from_pos() == pos)
+            .filter(|seq| seq.origin_pos() == pos)
             .collect()
     }
 
@@ -578,11 +577,10 @@ impl Board {
         for row in 0..8i8 {
             for col in 0..8i8 {
                 let pos = Pos::new(row, col);
-                if let Some(piece) = self.get(pos) {
-                    if piece.side == side && !self.generate_jumps_for(pos).is_empty() {
+                if let Some(piece) = self.get(pos)
+                    && piece.side == side && !self.generate_jumps_for(pos).is_empty() {
                         return true;
                     }
-                }
             }
         }
         false
@@ -601,7 +599,7 @@ impl Board {
             return;
         }
 
-        let origin = seq.from_pos();
+        let origin = seq.origin_pos();
         let piece = match self.get(origin) {
             Some(p) => p,
             None => return,
@@ -689,7 +687,7 @@ impl Board {
                     let mut bonus = 0i32;
 
                     // Center control bonus (columns 2-5, rows 2-5)
-                    if col >= 2 && col <= 5 && row >= 2 && row <= 5 {
+                    if (2..=5).contains(&col) && (2..=5).contains(&row) {
                         bonus += CENTER_BONUS;
                     }
 
@@ -737,8 +735,8 @@ fn minimax(
 ) -> (i32, Option<usize>) {
     let result = board.check_result();
     match result {
-        GameResult::BlackWins => return (100_000 + depth as i32, None),
-        GameResult::RedWins => return (-100_000 - depth as i32, None),
+        GameResult::BlackWins => return (100_000 + depth, None),
+        GameResult::RedWins => return (-100_000 - depth, None),
         GameResult::Draw => return (0, None),
         GameResult::Ongoing => {}
     }
@@ -879,23 +877,21 @@ impl CheckersApp {
             }
 
             // Clicked on a different own piece? Select it instead.
-            if let Some(piece) = self.board.get(pos) {
-                if piece.side == Side::Red {
+            if let Some(piece) = self.board.get(pos)
+                && piece.side == Side::Red {
                     self.select_piece(pos);
                     return;
                 }
-            }
 
             // Clicked elsewhere: deselect
             self.selected = None;
             self.legal_moves_for_selected.clear();
         } else {
             // No piece selected: try to select one
-            if let Some(piece) = self.board.get(pos) {
-                if piece.side == Side::Red {
+            if let Some(piece) = self.board.get(pos)
+                && piece.side == Side::Red {
                     self.select_piece(pos);
                 }
-            }
         }
     }
 
@@ -916,7 +912,7 @@ impl CheckersApp {
         let notation = mv.notation();
         let captured = mv.captured_count();
 
-        self.last_move_from = Some(mv.from_pos());
+        self.last_move_from = Some(mv.origin_pos());
         self.last_move_to = Some(mv.to_pos());
 
         self.board.apply_move_in_place(mv);
@@ -950,7 +946,7 @@ impl CheckersApp {
             let notation = ai_mv.notation();
             let captured = ai_mv.captured_count();
 
-            self.last_move_from = Some(ai_mv.from_pos());
+            self.last_move_from = Some(ai_mv.origin_pos());
             self.last_move_to = Some(ai_mv.to_pos());
 
             self.board.apply_move_in_place(&ai_mv);
@@ -1847,7 +1843,7 @@ mod tests {
         // The jump (5,0) -> (7,2) should stop at promotion, not continue
         let jump_from = moves
             .iter()
-            .filter(|m| m.from_pos() == Pos::new(5, 0) && m.is_jump())
+            .filter(|m| m.origin_pos() == Pos::new(5, 0) && m.is_jump())
             .collect::<Vec<_>>();
         assert!(!jump_from.is_empty());
         // All chains from this piece should end at row 7
@@ -2119,7 +2115,7 @@ mod tests {
             CheckersMove::jump(Pos::new(0, 1), Pos::new(2, 3), Pos::new(1, 2)),
             CheckersMove::jump(Pos::new(2, 3), Pos::new(4, 5), Pos::new(3, 4)),
         ]);
-        assert_eq!(mv.from_pos(), Pos::new(0, 1));
+        assert_eq!(mv.origin_pos(), Pos::new(0, 1));
         assert_eq!(mv.to_pos(), Pos::new(4, 5));
     }
 

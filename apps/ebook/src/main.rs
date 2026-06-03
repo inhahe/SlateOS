@@ -433,12 +433,11 @@ pub fn paginate(text: &str, chars_per_line: usize, lines_per_page: usize) -> Pag
                 continue;
             }
 
-            // How many wrapped lines does this logical line produce?
+            // How many wrapped lines does this logical line produce? Use
+            // `div_ceil` to get ceiling-division without the manual
+            // (n + d - 1) / d dance (and to satisfy manual_checked_ops).
             let wrapped = if chars_per_line > 0 {
-                line_char_count
-                    .saturating_add(chars_per_line)
-                    .saturating_sub(1)
-                    / chars_per_line
+                line_char_count.div_ceil(chars_per_line).max(1)
             } else {
                 1
             };
@@ -1080,11 +1079,10 @@ impl EbookApp {
     /// Go to the next page.
     pub fn next_page(&mut self) {
         let total = self.total_pages();
-        if let Some(state) = self.current_reading_state_mut() {
-            if state.current_page < total.saturating_sub(1) {
+        if let Some(state) = self.current_reading_state_mut()
+            && state.current_page < total.saturating_sub(1) {
                 state.current_page = state.current_page.saturating_add(1);
             }
-        }
     }
 
     /// Go to the previous page.
@@ -1194,13 +1192,11 @@ impl EbookApp {
             } else {
                 self.current_match_idx = Some(0);
                 // Jump to the page containing the first match.
-                if let Some(paginated) = &self.paginated {
-                    if let Some(first) = self.search_matches.first() {
-                        if let Some(page) = page_for_offset(&paginated.pages, first.byte_offset) {
+                if let Some(paginated) = &self.paginated
+                    && let Some(first) = self.search_matches.first()
+                        && let Some(page) = page_for_offset(&paginated.pages, first.byte_offset) {
                             self.go_to_page(page);
                         }
-                    }
-                }
             }
         }
     }
@@ -1215,13 +1211,11 @@ impl EbookApp {
             None => 0,
         };
         self.current_match_idx = Some(next);
-        if let Some(paginated) = &self.paginated {
-            if let Some(m) = self.search_matches.get(next) {
-                if let Some(page) = page_for_offset(&paginated.pages, m.byte_offset) {
+        if let Some(paginated) = &self.paginated
+            && let Some(m) = self.search_matches.get(next)
+                && let Some(page) = page_for_offset(&paginated.pages, m.byte_offset) {
                     self.go_to_page(page);
                 }
-            }
-        }
     }
 
     /// Go to the previous search match.
@@ -1235,13 +1229,11 @@ impl EbookApp {
             None => 0,
         };
         self.current_match_idx = Some(prev);
-        if let Some(paginated) = &self.paginated {
-            if let Some(m) = self.search_matches.get(prev) {
-                if let Some(page) = page_for_offset(&paginated.pages, m.byte_offset) {
+        if let Some(paginated) = &self.paginated
+            && let Some(m) = self.search_matches.get(prev)
+                && let Some(page) = page_for_offset(&paginated.pages, m.byte_offset) {
                     self.go_to_page(page);
                 }
-            }
-        }
     }
 
     // --------------------------------------------------------------------
@@ -1278,15 +1270,12 @@ impl EbookApp {
 
     /// Jump to a chapter by its byte offset.
     pub fn jump_to_chapter(&mut self, chapter_idx: usize) {
-        if let Some(book) = self.library.get(self.selected_book) {
-            if let Some(chapter) = book.chapters.get(chapter_idx) {
-                if let Some(paginated) = &self.paginated {
-                    if let Some(page) = page_for_offset(&paginated.pages, chapter.byte_offset) {
+        if let Some(book) = self.library.get(self.selected_book)
+            && let Some(chapter) = book.chapters.get(chapter_idx)
+                && let Some(paginated) = &self.paginated
+                    && let Some(page) = page_for_offset(&paginated.pages, chapter.byte_offset) {
                         self.go_to_page(page);
                     }
-                }
-            }
-        }
         self.view = AppView::Reading;
     }
 
@@ -1311,15 +1300,13 @@ impl EbookApp {
 
     /// Get the text content for the current page.
     pub fn current_page_text(&self) -> &str {
-        if let Some(book) = self.library.get(self.selected_book) {
-            if let Some(paginated) = &self.paginated {
-                if let Some(&(start, end)) = paginated.pages.get(self.current_page()) {
+        if let Some(book) = self.library.get(self.selected_book)
+            && let Some(paginated) = &self.paginated
+                && let Some(&(start, end)) = paginated.pages.get(self.current_page()) {
                     let safe_start = start.min(book.text.len());
                     let safe_end = end.min(book.text.len());
                     return &book.text[safe_start..safe_end];
                 }
-            }
-        }
         ""
     }
 
@@ -1453,12 +1440,11 @@ impl EbookApp {
             }
             _ => {
                 // If the key produces a character, add it to the query.
-                if let Some(ch) = event.text {
-                    if !ch.is_control() {
+                if let Some(ch) = event.text
+                    && !ch.is_control() {
                         self.search_query.push(ch);
                         return true;
                     }
-                }
                 false
             }
         }
@@ -1520,37 +1506,34 @@ impl EbookApp {
 
     /// Handle a mouse click. Returns true if consumed.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
-        match &event.kind {
-            MouseEventKind::Press(MouseButton::Left) => {
-                match self.view {
-                    AppView::Library => {
-                        // Check if a library item was clicked.
-                        let y = event.y - TOOLBAR_HEIGHT;
-                        if y >= 0.0 {
-                            let idx = (y / LIBRARY_ITEM_HEIGHT) as usize;
-                            if idx < self.library.len() {
-                                self.selected_book = idx;
-                                self.open_book(idx);
-                                return true;
-                            }
-                        }
-                    }
-                    AppView::Reading => {
-                        // Click on left/right half to navigate pages.
-                        let mid = self.window_width / 2.0;
-                        if event.y > TOOLBAR_HEIGHT && event.y < self.window_height - STATUS_BAR_HEIGHT {
-                            if event.x < mid {
-                                self.prev_page();
-                            } else {
-                                self.next_page();
-                            }
+        if let MouseEventKind::Press(MouseButton::Left) = &event.kind {
+            match self.view {
+                AppView::Library => {
+                    // Check if a library item was clicked.
+                    let y = event.y - TOOLBAR_HEIGHT;
+                    if y >= 0.0 {
+                        let idx = (y / LIBRARY_ITEM_HEIGHT) as usize;
+                        if idx < self.library.len() {
+                            self.selected_book = idx;
+                            self.open_book(idx);
                             return true;
                         }
                     }
-                    _ => {}
                 }
+                AppView::Reading => {
+                    // Click on left/right half to navigate pages.
+                    let mid = self.window_width / 2.0;
+                    if event.y > TOOLBAR_HEIGHT && event.y < self.window_height - STATUS_BAR_HEIGHT {
+                        if event.x < mid {
+                            self.prev_page();
+                        } else {
+                            self.next_page();
+                        }
+                        return true;
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
         false
     }
@@ -1764,7 +1747,7 @@ impl EbookApp {
         });
 
         // Bookmark indicator
-        if self.current_reading_state().map_or(false, |s| s.is_bookmarked(self.current_page())) {
+        if self.current_reading_state().is_some_and(|s| s.is_bookmarked(self.current_page())) {
             cmds.push(RenderCommand::Text {
                 x: self.window_width - 80.0,
                 y: 12.0,
@@ -1822,9 +1805,9 @@ impl EbookApp {
         }
 
         // -- Search highlight overlay --
-        if !self.search_matches.is_empty() {
-            if let Some(paginated) = &self.paginated {
-                if let Some(&(page_start, page_end)) = paginated.pages.get(self.current_page()) {
+        if !self.search_matches.is_empty()
+            && let Some(paginated) = &self.paginated
+                && let Some(&(page_start, page_end)) = paginated.pages.get(self.current_page()) {
                     // Highlight matches that fall on this page.
                     for (mi, m) in self.search_matches.iter().enumerate() {
                         if m.byte_offset >= page_start && m.byte_offset < page_end {
@@ -1855,8 +1838,6 @@ impl EbookApp {
                         }
                     }
                 }
-            }
-        }
 
         // -- Search bar --
         if self.search_active {

@@ -885,25 +885,23 @@ fn find_latest_backup(dest: &Path) -> Option<(String, Manifest)> {
                 if manifest_path.exists() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     // Extract timestamp from backup-NNNNNN format
-                    if let Some(ts_str) = name.strip_prefix("backup-") {
-                        if let Ok(ts) = ts_str.parse::<u64>() {
+                    if let Some(ts_str) = name.strip_prefix("backup-")
+                        && let Ok(ts) = ts_str.parse::<u64>() {
                             backups.push((name, ts));
                         }
-                    }
                 }
             }
         }
     }
 
-    backups.sort_by(|a, b| b.1.cmp(&a.1)); // Most recent first
+    backups.sort_by_key(|b| std::cmp::Reverse(b.1)); // Most recent first
 
     for (name, _) in &backups {
         let manifest_path = dest.join(name).join(MANIFEST_NAME);
-        if let Ok(text) = fs::read_to_string(&manifest_path) {
-            if let Ok(manifest) = Manifest::parse(&text) {
+        if let Ok(text) = fs::read_to_string(&manifest_path)
+            && let Ok(manifest) = Manifest::parse(&text) {
                 return Some((name.clone(), manifest));
             }
-        }
     }
 
     None
@@ -997,7 +995,7 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
                     errors += 1;
                 }
             }
-            ManifestEntry::Symlink { target, path } => {
+            ManifestEntry::Symlink { target: _, path } => {
                 if !files_filter.is_empty()
                     && !files_filter.iter().any(|f| path.starts_with(f.as_str()))
                 {
@@ -1143,12 +1141,11 @@ fn cmd_list(dest: &Path) {
             let path = entry.path();
             if path.is_dir() {
                 let manifest_path = path.join(MANIFEST_NAME);
-                if let Ok(text) = fs::read_to_string(&manifest_path) {
-                    if let Ok(manifest) = Manifest::parse(&text) {
+                if let Ok(text) = fs::read_to_string(&manifest_path)
+                    && let Ok(manifest) = Manifest::parse(&text) {
                         let name = entry.file_name().to_string_lossy().to_string();
                         backups.push((name, manifest));
                     }
-                }
             }
         }
     }
@@ -1159,11 +1156,11 @@ fn cmd_list(dest: &Path) {
     }
 
     // Sort by creation time
-    backups.sort_by(|a, b| a.1.created.cmp(&b.1.created));
+    backups.sort_by_key(|a| a.1.created);
 
     println!(
-        "{:<24} {:<12} {:<20} {:<8} {:<12} {}",
-        "BACKUP ID", "TYPE", "CREATED", "FILES", "SIZE", "SOURCE"
+        "{:<24} {:<12} {:<20} {:<8} {:<12} SOURCE",
+        "BACKUP ID", "TYPE", "CREATED", "FILES", "SIZE"
     );
 
     for (name, manifest) in &backups {
@@ -1329,13 +1326,12 @@ fn main() {
     let mut filtered_args: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--exclude" {
-            if let Some(pattern) = args.get(i + 1) {
+        if args[i] == "--exclude"
+            && let Some(pattern) = args.get(i + 1) {
                 exclude.push(pattern.clone());
                 i += 2;
                 continue;
             }
-        }
         filtered_args.push(args[i].clone());
         i += 1;
     }

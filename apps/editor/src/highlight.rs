@@ -261,7 +261,7 @@ fn advance(bytes: &[u8], i: usize) -> usize {
 
 /// Check if `bytes[i..]` starts with the given ASCII slice.
 fn starts_with_at(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
-    bytes.get(i..i + needle.len()).map_or(false, |s| s == needle)
+    bytes.get(i..i + needle.len()) == Some(needle)
 }
 
 /// Check whether `word` is in the given sorted keyword list.
@@ -708,37 +708,34 @@ fn highlight_python(line: &str, state: &mut HighlightState) -> Vec<StyledToken> 
     let mut i = 0;
 
     // Continue multi-line string from previous line.
-    match state {
-        HighlightState::MultiLineString { delimiter } => {
-            let needle: &[u8] = match delimiter {
-                StringDelimiter::TripleDouble => b"\"\"\"",
-                StringDelimiter::TripleSingle => b"'''",
-                _ => {
-                    *state = HighlightState::Normal;
-                    return highlight_python_normal(line, 0, &mut tokens, state);
-                }
-            };
-            let start = 0;
-            while i + 2 < len {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if starts_with_at(bytes, i, needle) {
-                    i += 3;
-                    push_token(&mut tokens, start, i, Token::String);
-                    *state = HighlightState::Normal;
-                    // Continue highlighting the rest of the line.
-                    highlight_python_normal(line, i, &mut tokens, state);
-                    return tokens;
-                }
-                i += 1;
+    if let HighlightState::MultiLineString { delimiter } = state {
+        let needle: &[u8] = match delimiter {
+            StringDelimiter::TripleDouble => b"\"\"\"",
+            StringDelimiter::TripleSingle => b"'''",
+            _ => {
+                *state = HighlightState::Normal;
+                return highlight_python_normal(line, 0, &mut tokens, state);
             }
-            // Didn't find closing — rest of line is string.
-            push_token(&mut tokens, start, len, Token::String);
-            return tokens;
+        };
+        let start = 0;
+        while i + 2 < len {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if starts_with_at(bytes, i, needle) {
+                i += 3;
+                push_token(&mut tokens, start, i, Token::String);
+                *state = HighlightState::Normal;
+                // Continue highlighting the rest of the line.
+                highlight_python_normal(line, i, &mut tokens, state);
+                return tokens;
+            }
+            i += 1;
         }
-        _ => {}
+        // Didn't find closing — rest of line is string.
+        push_token(&mut tokens, start, len, Token::String);
+        return tokens;
     }
 
     highlight_python_normal(line, 0, &mut tokens, state);
@@ -956,12 +953,11 @@ fn highlight_c(line: &str, state: &mut HighlightState) -> Vec<StyledToken> {
     // Only check when we haven't already consumed a block comment prefix.
     if i == 0 {
         let trimmed_start = bytes.iter().position(|&b| b != b' ' && b != b'\t');
-        if let Some(ts) = trimmed_start {
-            if bytes[ts] == b'#' {
+        if let Some(ts) = trimmed_start
+            && bytes[ts] == b'#' {
                 push_token(&mut tokens, 0, len, Token::Preprocessor);
                 return tokens;
             }
-        }
     }
 
     while i < len {

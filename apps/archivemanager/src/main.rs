@@ -133,12 +133,14 @@ impl ArchiveFormat {
 
 /// Compression level presets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum CompressionLevel {
     /// No compression, store only.
     Store,
     /// Fast compression with lower ratio.
     Fast,
     /// Balanced compression (default).
+    #[default]
     Normal,
     /// Maximum compression, slower.
     Best,
@@ -171,11 +173,6 @@ impl CompressionLevel {
     }
 }
 
-impl Default for CompressionLevel {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 // ============================================================================
 // Encryption settings
@@ -741,8 +738,10 @@ impl OperationProgress {
 
 /// Drag state for drag-and-drop operations.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub enum DragState {
     /// Not dragging anything.
+    #[default]
     Idle,
     /// Dragging files from the archive out (to extract).
     DraggingOut {
@@ -762,11 +761,6 @@ pub enum DragState {
     },
 }
 
-impl Default for DragState {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
 
 impl DragState {
     /// Whether a drag is currently active.
@@ -1132,7 +1126,7 @@ impl CreateArchiveSettings {
             problems.push("Volume size must be at least 64 KB".into());
         }
 
-        if self.encryption.is_enabled() && self.encryption.password.len() < 1 {
+        if self.encryption.is_enabled() && self.encryption.password.is_empty() {
             problems.push("Password cannot be empty when encryption is enabled".into());
         }
 
@@ -1146,18 +1140,15 @@ impl CreateArchiveSettings {
 
 /// View mode for the file list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ViewMode {
     /// Flat list of all entries.
     FlatList,
     /// Only entries in the currently selected directory.
+    #[default]
     DirectoryView,
 }
 
-impl Default for ViewMode {
-    fn default() -> Self {
-        Self::DirectoryView
-    }
-}
 
 /// The full application state.
 #[derive(Clone, Debug)]
@@ -1373,7 +1364,7 @@ pub fn render_toolbar(
     let has_selection = state
         .archive
         .as_ref()
-        .map_or(false, |a| a.entries.iter().any(|e| e.selected));
+        .is_some_and(|a| a.entries.iter().any(|e| e.selected));
 
     let buttons = [
         ToolbarButton {

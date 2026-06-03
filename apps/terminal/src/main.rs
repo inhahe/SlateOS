@@ -464,7 +464,7 @@ impl TerminalState {
             0x07 => self.bell(),
             0x08 => self.backspace(),
             0x09 => self.tab(),
-            0x0A | 0x0B | 0x0C => self.linefeed(),
+            0x0A..=0x0C => self.linefeed(),
             0x0D => self.carriage_return(),
             0x1B => {
                 self.parser_state = ParserState::Escape;
@@ -706,12 +706,11 @@ impl TerminalState {
         }
 
         // Write the character to the cell
-        if let Some(line) = self.screen.get_mut(self.cursor_row) {
-            if let Some(cell) = line.cells.get_mut(self.cursor_col) {
+        if let Some(line) = self.screen.get_mut(self.cursor_row)
+            && let Some(cell) = line.cells.get_mut(self.cursor_col) {
                 cell.ch = ch;
                 cell.attrs = self.current_attrs;
             }
-        }
 
         // Advance cursor
         if self.cursor_col >= cols.saturating_sub(1) {
@@ -788,14 +787,12 @@ impl TerminalState {
             if self.scroll_top == 0
                 && self.scroll_bottom == self.rows().saturating_sub(1)
                 && !self.alt_screen_active
-            {
-                if let Some(line) = self.screen.get(0) {
+                && let Some(line) = self.screen.first() {
                     self.scrollback.push_back(line.clone());
                     if self.scrollback.len() > self.config.scrollback_limit {
                         self.scrollback.pop_front();
                     }
                 }
-            }
 
             // Remove the top line of the scroll region and insert a blank at the bottom
             let top = self.scroll_top;
@@ -1474,11 +1471,10 @@ impl TerminalState {
         if let Some(line) = self.screen.get_mut(row) {
             for c in 0..count {
                 let target = col + c;
-                if target < cols {
-                    if let Some(cell) = line.cells.get_mut(target) {
+                if target < cols
+                    && let Some(cell) = line.cells.get_mut(target) {
                         *cell = Cell::default();
                     }
-                }
             }
         }
     }
@@ -1526,11 +1522,10 @@ impl TerminalState {
         // Resize tab stops
         self.tab_stops.resize(new_cols, false);
         for i in (0..new_cols).step_by(8) {
-            if let Some(stop) = self.tab_stops.get_mut(i) {
-                if !*stop {
+            if let Some(stop) = self.tab_stops.get_mut(i)
+                && !*stop {
                     *stop = true;
                 }
-            }
         }
 
         // Resize screen lines
@@ -1610,20 +1605,18 @@ impl TerminalState {
         let mods = &event.modifiers;
 
         // If there is a text character (and no ctrl/alt modifiers), send it as UTF-8
-        if let Some(ch) = event.text {
-            if !mods.ctrl && !mods.alt {
+        if let Some(ch) = event.text
+            && !mods.ctrl && !mods.alt {
                 let mut buf = [0u8; 4];
                 let encoded = ch.encode_utf8(&mut buf);
                 return encoded.as_bytes().to_vec();
             }
-        }
 
         // Ctrl+letter produces control characters (^A = 0x01, ^Z = 0x1A, etc.)
-        if mods.ctrl && !mods.alt {
-            if let Some(code) = self.ctrl_key_code(&event.key) {
+        if mods.ctrl && !mods.alt
+            && let Some(code) = self.ctrl_key_code(&event.key) {
                 return vec![code];
             }
-        }
 
         // Alt+key sends ESC prefix
         let prefix = if mods.alt { b"\x1b" as &[u8] } else { &[] };
@@ -2077,9 +2070,9 @@ impl TerminalState {
                         cursor_color.r, cursor_color.g, cursor_color.b, 180,
                     ));
                     // Re-draw the character under the cursor in inverse
-                    if let Some(line) = self.screen.get(self.cursor_row) {
-                        if let Some(cell) = line.cells.get(self.cursor_col) {
-                            if cell.ch != ' ' {
+                    if let Some(line) = self.screen.get(self.cursor_row)
+                        && let Some(cell) = line.cells.get(self.cursor_col)
+                            && cell.ch != ' ' {
                                 tree.push(RenderCommand::Text {
                                     x: cx,
                                     y: cy,
@@ -2090,8 +2083,6 @@ impl TerminalState {
                                     max_width: Some(cw),
                                 });
                             }
-                        }
-                    }
                 }
                 CursorStyle::Underline => {
                     let uy = cy + ch - 2.0;
@@ -2207,11 +2198,10 @@ impl TerminalState {
                 self.selection_start(event.x, event.y);
             }
             MouseEventKind::Move => {
-                if let Some(ref sel) = self.selection {
-                    if sel.active {
+                if let Some(ref sel) = self.selection
+                    && sel.active {
                         self.selection_extend(event.x, event.y);
                     }
-                }
             }
             MouseEventKind::Release(MouseButton::Left) => {
                 self.selection_end();

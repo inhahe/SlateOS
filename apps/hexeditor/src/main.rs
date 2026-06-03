@@ -105,8 +105,10 @@ const MAX_UNDO_DEPTH: usize = 10_000;
 
 /// Number of bytes displayed per line in the hex dump.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum BytesPerLine {
     Eight = 8,
+    #[default]
     Sixteen = 16,
     ThirtyTwo = 32,
 }
@@ -118,24 +120,16 @@ impl BytesPerLine {
     }
 }
 
-impl Default for BytesPerLine {
-    fn default() -> Self {
-        Self::Sixteen
-    }
-}
 
 /// How to display the offset column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum OffsetDisplay {
+    #[default]
     Hex,
     Decimal,
 }
 
-impl Default for OffsetDisplay {
-    fn default() -> Self {
-        Self::Hex
-    }
-}
 
 /// Hex view configuration.
 #[derive(Clone, Debug)]
@@ -165,17 +159,14 @@ impl Default for HexView {
 
 /// Editing mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum EditMode {
     ReadOnly,
     Insert,
+    #[default]
     Overwrite,
 }
 
-impl Default for EditMode {
-    fn default() -> Self {
-        Self::Overwrite
-    }
-}
 
 // ============================================================================
 // Data model — Data types for inspector
@@ -341,16 +332,13 @@ impl Selection {
 
 /// Direction for search operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum SearchDirection {
+    #[default]
     Forward,
     Backward,
 }
 
-impl Default for SearchDirection {
-    fn default() -> Self {
-        Self::Forward
-    }
-}
 
 /// What kind of pattern to search for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,6 +373,7 @@ impl Default for SearchQuery {
 
 /// State of an active search / replace dialog.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct SearchState {
     pub query: SearchQuery,
     pub replace_pattern: Option<Vec<u8>>,
@@ -397,19 +386,6 @@ pub struct SearchState {
     pub replace_text: String,
 }
 
-impl Default for SearchState {
-    fn default() -> Self {
-        Self {
-            query: SearchQuery::default(),
-            replace_pattern: None,
-            last_match: None,
-            match_count: 0,
-            visible: false,
-            input_text: String::new(),
-            replace_text: String::new(),
-        }
-    }
-}
 
 // ============================================================================
 // Data model — Bookmarks
@@ -987,7 +963,7 @@ impl HexDocument {
                 }
             } else {
                 // Case-insensitive: compare lowercase ASCII.
-                if d.to_ascii_lowercase() != p.to_ascii_lowercase() {
+                if !d.eq_ignore_ascii_case(&p) {
                     return false;
                 }
             }
@@ -1393,8 +1369,7 @@ impl HexDocument {
                 }
                 let matches = self
                     .data
-                    .get(check_start..check_start.saturating_add(pat_len))
-                    .map_or(false, |slice| slice == hl.pattern.as_slice());
+                    .get(check_start..check_start.saturating_add(pat_len)) == Some(hl.pattern.as_slice());
                 if matches
                     && offset >= check_start
                     && offset < check_start.saturating_add(pat_len)
@@ -1959,8 +1934,8 @@ impl HexEditor {
             }
         } else {
             // ASCII editing: accept printable characters.
-            if let Some(ch) = key.text {
-                if ch.is_ascii() && !ch.is_ascii_control() {
+            if let Some(ch) = key.text
+                && ch.is_ascii() && !ch.is_ascii_control() {
                     let cur = doc.cursor;
                     let byte = ch as u8;
                     if doc.edit_mode == EditMode::Overwrite && cur < doc.data.len() {
@@ -1976,7 +1951,6 @@ impl HexEditor {
                     self.active_doc_mut().ensure_cursor_visible(vis);
                     return true;
                 }
-            }
         }
 
         false
@@ -2380,11 +2354,7 @@ impl HexEditor {
                     Some(colors::SURFACE0)
                 } else if doc.bookmarks.iter().any(|b| b.offset == offset) {
                     Some(Color::rgba(250, 179, 135, 60))
-                } else if let Some(hl) = doc.highlight_color_at(offset) {
-                    Some(Color::rgba(hl.r, hl.g, hl.b, 40))
-                } else {
-                    None
-                };
+                } else { doc.highlight_color_at(offset).map(|hl| Color::rgba(hl.r, hl.g, hl.b, 40)) };
 
                 if let Some(bg) = bg_color {
                     tree.push(RenderCommand::FillRect {
@@ -2895,7 +2865,7 @@ impl HexEditor {
 /// Parse a hex string like "FF 00 AB" or "FF00AB" into bytes.
 pub fn parse_hex_string(s: &str) -> Option<Vec<u8>> {
     let cleaned: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    if cleaned.is_empty() || cleaned.len() % 2 != 0 {
+    if cleaned.is_empty() || !cleaned.len().is_multiple_of(2) {
         return None;
     }
     if !cleaned.chars().all(|c| c.is_ascii_hexdigit()) {

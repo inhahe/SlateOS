@@ -1077,6 +1077,10 @@ impl CleanupUI {
         self.render_button(cmds, clean_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT, "Clean Up", clean_color);
     }
 
+    // 8 args mirror the (cmds, x, y, w, h, label, bg) button signature used
+    // elsewhere in the app's render layer; struct-bundling would only shift
+    // the verbosity to the call site.
+    #[allow(clippy::too_many_arguments)]
     fn render_button(
         &self,
         cmds: &mut Vec<RenderCommand>,

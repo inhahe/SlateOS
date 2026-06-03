@@ -1,3 +1,5 @@
+#![deny(clippy::all)]
+
 //! OurOS Paint
 //!
 //! A full-featured drawing and image editing application with:
@@ -353,11 +355,10 @@ impl PixelBuffer {
             for sx in 0..src.width {
                 let dx = dest_x.saturating_add(sx as i32);
                 let dy = dest_y.saturating_add(sy as i32);
-                if dx >= 0 && dy >= 0 {
-                    if let Some(c) = src.get_pixel(sx, sy) {
+                if dx >= 0 && dy >= 0
+                    && let Some(c) = src.get_pixel(sx, sy) {
                         self.blend_pixel(dx as u32, dy as u32, c);
                     }
-                }
             }
         }
     }
@@ -368,11 +369,10 @@ impl PixelBuffer {
             for sx in 0..src.width {
                 let dx = dest_x.saturating_add(sx as i32);
                 let dy = dest_y.saturating_add(sy as i32);
-                if dx >= 0 && dy >= 0 {
-                    if let Some(c) = src.get_pixel(sx, sy) {
+                if dx >= 0 && dy >= 0
+                    && let Some(c) = src.get_pixel(sx, sy) {
                         self.set_pixel(dx as u32, dy as u32, c);
                     }
-                }
             }
         }
     }
@@ -681,6 +681,10 @@ pub fn draw_ellipse_filled(
 }
 
 /// Draws a rounded rectangle outline on the pixel buffer.
+// 8 args mirror the (x,y,w,h,radius,color,thickness) geometry signature used
+// throughout the paint primitives — splitting these into a struct would just
+// shift the call-site verbosity without adding clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_rounded_rect_outline(
     buf: &mut PixelBuffer,
     x: i32,
@@ -734,6 +738,9 @@ pub fn draw_rounded_rect_filled(
 }
 
 /// Draws a quarter arc. Quadrant: 0=bottom-right, 1=top-right, 2=top-left, 3=bottom-left.
+// 8 args — same rationale as draw_rounded_rect_outline above (intrinsic
+// geometry signature, struct-bundling would only shift verbosity).
+#[allow(clippy::too_many_arguments)]
 fn draw_corner_arc(
     buf: &mut PixelBuffer,
     cx: i32,
@@ -1476,14 +1483,13 @@ impl ColorPicker {
     /// Tries to parse the hex input and update the color sliders.
     pub fn apply_hex_input(&mut self) -> bool {
         let text = self.hex_input.text.trim().trim_start_matches('#');
-        if text.len() == 6 {
-            if let Ok(val) = u32::from_str_radix(text, 16) {
+        if text.len() == 6
+            && let Ok(val) = u32::from_str_radix(text, 16) {
                 self.red = ((val >> 16) & 0xFF) as u8;
                 self.green = ((val >> 8) & 0xFF) as u8;
                 self.blue = (val & 0xFF) as u8;
                 return true;
             }
-        }
         false
     }
 
@@ -1744,13 +1750,12 @@ impl PaintApp {
         let canvas_height = DEFAULT_CANVAS_HEIGHT;
         let bg = Color::WHITE;
 
-        let mut layers = Vec::new();
-        layers.push(Layer::with_background(
+        let layers = vec![Layer::with_background(
             "Background".to_string(),
             canvas_width,
             canvas_height,
             bg,
-        ));
+        )];
 
         Self {
             window_width,
@@ -2118,13 +2123,11 @@ impl PaintApp {
 
     /// Applies the floating selection (pastes it onto the active layer).
     pub fn apply_selection(&mut self) {
-        if let Some(sel) = self.selection.take() {
-            if let Some(content) = &sel.content {
-                if let Some(layer) = self.layers.get_mut(self.active_layer) {
+        if let Some(sel) = self.selection.take()
+            && let Some(content) = &sel.content
+                && let Some(layer) = self.layers.get_mut(self.active_layer) {
                     layer.pixels.paste(content, sel.x, sel.y);
                 }
-            }
-        }
     }
 
     /// Crops the canvas to the current selection.
@@ -2288,11 +2291,10 @@ impl PaintApp {
             Tool::Fill => {
                 self.push_history("flood fill");
                 let color = self.drawing_color();
-                if canvas_x >= 0 && canvas_y >= 0 {
-                    if let Some(layer) = self.layers.get_mut(self.active_layer) {
+                if canvas_x >= 0 && canvas_y >= 0
+                    && let Some(layer) = self.layers.get_mut(self.active_layer) {
                         flood_fill(&mut layer.pixels, canvas_x as u32, canvas_y as u32, color);
                     }
-                }
             }
             Tool::Eyedropper => {
                 if canvas_x >= 0 && canvas_y >= 0 {
@@ -2333,12 +2335,11 @@ impl PaintApp {
             }
             Tool::Select => {
                 // Check if clicking inside an existing selection
-                if let Some(sel) = &self.selection {
-                    if sel.contains(canvas_x, canvas_y) {
+                if let Some(sel) = &self.selection
+                    && sel.contains(canvas_x, canvas_y) {
                         self.moving_selection = true;
                         return;
                     }
-                }
                 // Start a new selection
                 self.apply_selection();
                 self.selection = None;
@@ -2923,7 +2924,7 @@ impl PaintApp {
         // Swap indicator
         cmds.push(RenderCommand::Text {
             x: x + 28.0,
-            y: y,
+            y,
             text: "X".to_string(),
             font_size: 9.0,
             color: MOCHA_SUBTEXT0,

@@ -18,6 +18,13 @@
 //   lvresize  - resize logical volume
 
 #![cfg_attr(not(test), no_main)]
+// LVM_SIGNATURE / LVM_LABEL_SECTOR / PE_DEFAULT_SIZE_MB / PE_SIZE_BYTES
+// and the PhysicalVolume / VolumeGroup / LogicalVolume structs (plus
+// the size-parsing/formatting helpers below) are declared up-front
+// because they encode the LVM2 on-disk label and metadata format the
+// real implementation must speak. They are kept as documentation for
+// the eventual block-device integration.
+#![allow(dead_code)]
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -480,6 +487,14 @@ fn cmd_vgcreate(args: &LvmArgs) -> i32 {
         } else {
             print_out(b"4.00 MiB");
         }
+        // Echo back the participating PVs so vgcreate -v matches real LVM.
+        for pv in pvs {
+            print_out(b"\n  Adding physical volume \"");
+            print_out(pv);
+            print_out(b"\" to volume group \"");
+            print_out(vg_name);
+            print_out(b"\"");
+        }
         print_out(b"\n");
     }
 
@@ -633,9 +648,13 @@ fn cmd_lvcreate(args: &LvmArgs) -> i32 {
     let vg_name = &args.targets[0];
     let lv_name = args.name.as_deref().unwrap_or(b"lvol0");
 
+    // Real lvcreate names the VG too — matches "Logical volume <lv>
+    // created in volume group <vg>." format.
     print_out(b"  Logical volume \"");
     print_out(lv_name);
-    print_out(b"\" created.\n");
+    print_out(b"\" created in volume group \"");
+    print_out(vg_name);
+    print_out(b"\".\n");
 
     0
 }

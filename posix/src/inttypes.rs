@@ -204,14 +204,16 @@ pub unsafe extern "C" fn wcstoimax(
         if negative { i64::MIN } else { i64::MAX }
     } else if negative {
         let min_mag = (i64::MAX as u64).wrapping_add(1); // 9223372036854775808
-        if acc > min_mag {
-            crate::errno::set_errno(crate::errno::ERANGE);
-            i64::MIN
-        } else if acc == min_mag {
-            i64::MIN // Exactly representable.
-        } else {
-            // acc <= i64::MAX, safe to cast and negate.
-            -(acc as i64)
+        match acc.cmp(&min_mag) {
+            core::cmp::Ordering::Greater => {
+                crate::errno::set_errno(crate::errno::ERANGE);
+                i64::MIN
+            }
+            core::cmp::Ordering::Equal => i64::MIN, // Exactly representable.
+            core::cmp::Ordering::Less => {
+                // acc <= i64::MAX, safe to cast and negate.
+                -(acc as i64)
+            }
         }
     } else if acc > i64::MAX as u64 {
         crate::errno::set_errno(crate::errno::ERANGE);

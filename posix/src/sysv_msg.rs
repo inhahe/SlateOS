@@ -363,16 +363,18 @@ unsafe fn select_msg(q: *mut Queue, msgtyp: i64, except: bool) -> Option<usize> 
         if unsafe { (*q).msgs[i].in_use } {
             let mt = unsafe { (*q).msgs[i].mtype };
             let seq = unsafe { (*q).msgs[i].seq };
-            let matches = if msgtyp == 0 {
-                true
-            } else if msgtyp > 0 {
-                if except { mt != msgtyp } else { mt == msgtyp }
-            } else {
-                // msgtyp < 0: any message with 1 <= type <= |msgtyp|.
-                // Linux additionally requires returning the lowest type
-                // among the candidates (ties broken by seq).
-                let limit = msgtyp.wrapping_neg();
-                mt >= 1 && mt <= limit
+            let matches = match msgtyp.cmp(&0) {
+                core::cmp::Ordering::Equal => true,
+                core::cmp::Ordering::Greater => {
+                    if except { mt != msgtyp } else { mt == msgtyp }
+                }
+                core::cmp::Ordering::Less => {
+                    // msgtyp < 0: any message with 1 <= type <= |msgtyp|.
+                    // Linux additionally requires returning the lowest type
+                    // among the candidates (ties broken by seq).
+                    let limit = msgtyp.wrapping_neg();
+                    mt >= 1 && mt <= limit
+                }
             };
             if matches {
                 if msgtyp < 0 {

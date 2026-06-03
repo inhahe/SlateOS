@@ -174,7 +174,13 @@ const MAX_INIT_PTRS: usize = 512;
 ///
 /// Layout: `SpawnArgsHeader` (16 bytes) + packed argv strings + packed
 /// envp strings.  Lives in .bss (zeroed at load, no binary size cost).
-static mut INIT_ARGS_BUF: [u8; INIT_ARGS_BUF_SIZE] = [0u8; INIT_ARGS_BUF_SIZE];
+///
+/// Aligned to 8 bytes so the leading `SpawnArgsHeader` (4-byte-aligned
+/// `u32` fields, but force a stronger alignment to be future-proof for
+/// header extensions) can be read directly without `read_unaligned`.
+#[repr(C, align(8))]
+struct InitArgsBuf([u8; INIT_ARGS_BUF_SIZE]);
+static mut INIT_ARGS_BUF: InitArgsBuf = InitArgsBuf([0u8; INIT_ARGS_BUF_SIZE]);
 
 /// Static argv pointer array (null-terminated).
 ///
@@ -282,7 +288,7 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
     use crate::syscall::{SYS_PROCESS_GET_ARGS, syscall2};
 
     let buf_ptr = addr_of_mut!(INIT_ARGS_BUF);
-    let buf = unsafe { (*buf_ptr).as_mut_ptr() };
+    let buf = unsafe { (*buf_ptr).0.as_mut_ptr() };
 
     // Call SYS_PROCESS_GET_ARGS.  Returns total bytes written, or
     // the needed size if our buffer is too small (data is preserved
@@ -303,9 +309,14 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
         return (0, core::ptr::null(), core::ptr::null());
     }
 
-    // Parse the header.
-    // SAFETY: buf points to INIT_ARGS_BUF which has `total` valid bytes.
-    let header = unsafe { &*(buf as *const SpawnArgsHeader) };
+    // Parse the header.  `INIT_ARGS_BUF` is `#[repr(align(8))]` so `buf`
+    // is guaranteed to be aligned for a `SpawnArgsHeader` (which only
+    // needs 4-byte alignment).  Clippy doesn't see through the
+    // wrapper, so silence the lint at this single cast.
+    #[allow(clippy::cast_ptr_alignment)]
+    // SAFETY: buf points into the aligned `INIT_ARGS_BUF` which holds
+    // at least `header_size` valid bytes (checked just above).
+    let header = unsafe { &*buf.cast::<SpawnArgsHeader>().cast_const() };
     let argc = header.argc as usize;
     let envc = header.envc as usize;
     let argv_data_len = header.argv_data_len as usize;

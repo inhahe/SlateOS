@@ -27,6 +27,13 @@
 //! - `hcreate(nel)` allocates at least `nel` buckets.
 //! - `hsearch(ENTER)` inserts if not found; `hsearch(FIND)` never inserts.
 
+// `crate::malloc::malloc` returns memory aligned for any standard type
+// (POSIX/C guarantee: at least `_Alignof(max_align_t)`), so casting its
+// `*mut u8` return to `*mut Node` / `*mut HashNode` / `*mut QueueEntry`
+// is always safe.  clippy cannot see through `malloc` to verify this,
+// so allow the lint at module scope rather than annotating every cast.
+#![allow(clippy::cast_ptr_alignment)]
+
 use crate::errno;
 
 // ---------------------------------------------------------------------------
@@ -129,13 +136,17 @@ pub extern "C" fn tsearch(key: *const u8, rootp: *mut *mut u8, compar: ComparFn)
         }
 
         let cmp = compar(key, unsafe { (*current).key });
-        if cmp < 0 {
-            slot = unsafe { &raw mut (*current).left };
-        } else if cmp > 0 {
-            slot = unsafe { &raw mut (*current).right };
-        } else {
-            // Found — return existing node.
-            return current.cast::<u8>();
+        match cmp.cmp(&0) {
+            core::cmp::Ordering::Less => {
+                slot = unsafe { &raw mut (*current).left };
+            }
+            core::cmp::Ordering::Greater => {
+                slot = unsafe { &raw mut (*current).right };
+            }
+            core::cmp::Ordering::Equal => {
+                // Found — return existing node.
+                return current.cast::<u8>();
+            }
         }
     }
 }
@@ -157,12 +168,10 @@ pub extern "C" fn tfind(key: *const u8, rootp: *const *mut u8, compar: ComparFn)
     let mut current: *mut Node = unsafe { *rootp }.cast::<Node>();
     while !current.is_null() {
         let cmp = compar(key, unsafe { (*current).key });
-        if cmp < 0 {
-            current = unsafe { (*current).left };
-        } else if cmp > 0 {
-            current = unsafe { (*current).right };
-        } else {
-            return current.cast::<u8>();
+        match cmp.cmp(&0) {
+            core::cmp::Ordering::Less => current = unsafe { (*current).left },
+            core::cmp::Ordering::Greater => current = unsafe { (*current).right },
+            core::cmp::Ordering::Equal => return current.cast::<u8>(),
         }
     }
 
@@ -194,13 +203,20 @@ pub extern "C" fn tdelete(key: *const u8, rootp: *mut *mut u8, compar: ComparFn)
         }
 
         let cmp = compar(key, unsafe { (*current).key });
-        if cmp < 0 {
-            parent = current;
-            slot = unsafe { &raw mut (*current).left };
-        } else if cmp > 0 {
-            parent = current;
-            slot = unsafe { &raw mut (*current).right };
-        } else {
+        match cmp.cmp(&0) {
+            core::cmp::Ordering::Less => {
+                parent = current;
+                slot = unsafe { &raw mut (*current).left };
+                continue;
+            }
+            core::cmp::Ordering::Greater => {
+                parent = current;
+                slot = unsafe { &raw mut (*current).right };
+                continue;
+            }
+            core::cmp::Ordering::Equal => {}
+        }
+        {
             // Found the node to delete.
             let left = unsafe { (*current).left };
             let right = unsafe { (*current).right };

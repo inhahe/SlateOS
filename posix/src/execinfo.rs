@@ -20,6 +20,11 @@
 //! `backtrace_symbols_fd()` writes the same format directly to a file
 //! descriptor without calling `malloc`.
 
+// `crate::malloc::malloc` returns memory aligned for any standard type;
+// casting its `*mut u8` to `*mut *mut u8` is safe.  See `search.rs` for
+// the full rationale.
+#![allow(clippy::cast_ptr_alignment)]
+
 use crate::file;
 
 // ---------------------------------------------------------------------------

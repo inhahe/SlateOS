@@ -571,9 +571,11 @@ pub extern "C" fn semtimedop(
     let deadline = if timeout.is_null() {
         None
     } else {
-        let ts_ptr = timeout.cast::<Timespec>();
-        // SAFETY: caller contract.
-        let ts = unsafe { *ts_ptr };
+        // The public C ABI exposes `*const u8` (opaque), so the pointer
+        // may not be Timespec-aligned.  Use `read_unaligned` rather than
+        // a typed deref.
+        // SAFETY: caller contract — non-null pointer to a Timespec.
+        let ts = unsafe { core::ptr::read_unaligned(timeout.cast::<Timespec>()) };
         if ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 || ts.tv_sec < 0 {
             errno::set_errno(errno::EINVAL);
             return -1;

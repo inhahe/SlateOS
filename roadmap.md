@@ -5032,8 +5032,8 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
 - [ ] Rust toolchain (for kernel recompilation)
 - [ ] CPython (latest, for ecosystem compatibility and fastpy bootstrapping)
 - [ ] fastpy compiler (Python AOT compiler — first-class language for OS userspace components)
-- [ ] Custom Rust target for the OS (`x86_64-unknown-youros`)
-- [ ] Port Rust std library to native syscalls
+- [x] Custom Rust target for the OS — `toolchain/x86_64-ouros.json` defines a custom target spec (linux/musl ABI shape, code-model=large, panic=abort, +sse/+sse2, gnu-lld linker). All userspace tools (~280 binaries) build against this target via `-Zbuild-std=core,alloc,std,panic_abort` and the pre-built sysroot. The "youros" name in this roadmap entry was a working-name slip; the actual target is named `x86_64-ouros`. See CLAUDE.md "Build Environment Notes / Rust toolchains" section for usage.
+- [x] Port Rust std library to native syscalls — std runs against the custom target above. The `posix` crate is built as a `staticlib` and installed at `toolchain/sysroot/lib/libc.a`, providing libc-shaped wrappers (open/read/write/mmap/clock_gettime/etc.) that translate Linux/musl-style calls into OurOS native syscalls (SYS_FS_OPEN, SYS_TCP_CONNECT, SYS_CLOCK_REALTIME, etc.). `toolchain/stubs/` fills in the handful of symbols std references that posix doesn't yet implement; `libunwind.a` provides unwinding support. The full sysroot (libc.a + libstubs.a + libunwind.a) is built by `toolchain/build-sysroot.ps1` and every userspace crate links against it, so `std::fs`, `std::net`, `std::time`, `std::process`, etc. all transparently dispatch through the native OurOS syscall ABI. This is the "port via libc-compatible shim" approach (the same way std is "ported" to musl on Linux) rather than a fork of std itself — equivalent and far less maintenance burden.
 
 ### 4.5 Remote desktop
 - [ ] Port FreeRDP (working remote desktop early)

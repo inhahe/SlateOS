@@ -21,6 +21,17 @@
     clippy::struct_excessive_bools,
     clippy::cast_possible_truncation
 )]
+// WpaConfig parse/serialize/parse_global_field/parse_network_field, the
+// AuthAlg/KeyMgmt::from_str_ci helpers, KeyMgmt::Wpa & ::Wpa3 variants,
+// Proto::as_str, and the unread NetworkConfig::key_mgmt / ::proto and
+// WpaConfig::update_config / ::country fields encode the wpa_supplicant
+// configuration-file grammar (wpa_supplicant.conf), the EAPOL key-management
+// negotiation vocabulary, and the wpa_cli control interface. The current
+// multi-personality stub exercises only a subset; the full surface is
+// intentionally kept so the future driver-attached implementation can
+// drop in without reshaping public types. Dead-code lint cannot see across
+// that future boundary.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};

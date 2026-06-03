@@ -15,6 +15,12 @@
 //   mingetty [OPTIONS] <tty>
 
 #![cfg_attr(not(test), no_main)]
+// Config::term_type and Termios::{echo, canonical, cr_to_nl} encode the
+// TERM environment variable and the c_lflag/c_iflag bits the real getty
+// pumps into tcsetattr(2). The stub only exercises the line discipline
+// surface needed to print /etc/issue and read a username; the rest is
+// preserved for the future driver-attached implementation.
+#![allow(dead_code)]
 
 use std::env;
 use std::io::{self, BufRead, Read, Write};
@@ -201,7 +207,6 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             "-w" | "--wait-cr" => {} // accept, no-op
             "--nohints" => {} // accept, no-op
             "--nohostname" => cfg.no_hostname = true,
-            "--long-hostname" => cfg.long_hostname = true,
             "--erase-chars" => {
                 i += 1;
                 let s = args.get(i).ok_or("--erase-chars requires a char")?;

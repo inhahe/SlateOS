@@ -75,14 +75,10 @@ fn sha256_hex(data: &[u8]) -> String {
     // Process 64-byte blocks.
     for chunk in padded.chunks(64) {
         let mut w = [0u32; 64];
-        for i in 0..16 {
-            let base = i * 4;
-            w[i] = u32::from_be_bytes([
-                chunk[base],
-                chunk[base + 1],
-                chunk[base + 2],
-                chunk[base + 3],
-            ]);
+        for (w_slot, word_bytes) in w.iter_mut().take(16).zip(chunk.chunks_exact(4)) {
+            // chunks_exact(4) yields a &[u8] of length 4; try_into is infallible.
+            let arr: [u8; 4] = word_bytes.try_into().unwrap_or([0; 4]);
+            *w_slot = u32::from_be_bytes(arr);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -144,13 +140,12 @@ fn hash_password(password: &str, salt: &str) -> String {
 
 /// Verify a password against a stored `$sha256$<salt>$<hash>` string.
 fn verify_password(password: &str, stored_hash: &str) -> bool {
-    if let Some(rest) = stored_hash.strip_prefix("$sha256$") {
-        if let Some(dollar_pos) = rest.find('$') {
+    if let Some(rest) = stored_hash.strip_prefix("$sha256$")
+        && let Some(dollar_pos) = rest.find('$') {
             let salt = &rest[..dollar_pos];
             let expected = hash_password(password, salt);
             return constant_time_eq(stored_hash.as_bytes(), expected.as_bytes());
         }
-    }
     false
 }
 
@@ -621,11 +616,10 @@ fn evaluate_rules(
             continue;
         }
 
-        if let Some(ref target) = rule.target {
-            if target != target_name {
+        if let Some(ref target) = rule.target
+            && target != target_name {
                 continue;
             }
-        }
 
         if let Some(ref cmd) = rule.cmd {
             match command {
@@ -876,13 +870,11 @@ fn current_uid() -> u32 {
     // Try /proc/self/status first.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(uid_str) = rest.trim().split_whitespace().next() {
-                    if let Ok(uid) = uid_str.parse::<u32>() {
+            if let Some(rest) = line.strip_prefix("Uid:")
+                && let Some(uid_str) = rest.split_whitespace().next()
+                    && let Ok(uid) = uid_str.parse::<u32>() {
                         return uid;
                     }
-                }
-            }
         }
     }
 

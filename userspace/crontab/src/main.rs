@@ -295,16 +295,14 @@ fn validate_crontab(content: &str) -> (Vec<Error>, usize) {
 /// Determine the current username. Checks `$USER`, then `$LOGNAME`, then
 /// falls back to the UID.
 fn current_username() -> String {
-    if let Ok(user) = env::var("USER") {
-        if !user.is_empty() {
+    if let Ok(user) = env::var("USER")
+        && !user.is_empty() {
             return user;
         }
-    }
-    if let Ok(user) = env::var("LOGNAME") {
-        if !user.is_empty() {
+    if let Ok(user) = env::var("LOGNAME")
+        && !user.is_empty() {
             return user;
         }
-    }
     // Fallback: use the numeric UID as the "username" so we at least have a
     // unique spool path. On a real OurOS system this would call getuid().
     format!("uid{}", std::process::id())
@@ -314,11 +312,10 @@ fn current_username() -> String {
 ///
 /// Checks `$EUID` first (set by our shell), then assumes non-root.
 fn effective_uid() -> u32 {
-    if let Ok(val) = env::var("EUID") {
-        if let Ok(uid) = val.parse::<u32>() {
+    if let Ok(val) = env::var("EUID")
+        && let Ok(uid) = val.parse::<u32>() {
             return uid;
         }
-    }
     // Conservative default: not root.
     1000
 }
@@ -586,16 +583,14 @@ fn ensure_spool_dir() -> Result<(), Error> {
 /// Pick the best available editor, checking `$VISUAL`, `$EDITOR`, then the
 /// default fallback.
 fn pick_editor() -> String {
-    if let Ok(ed) = env::var("VISUAL") {
-        if !ed.is_empty() {
+    if let Ok(ed) = env::var("VISUAL")
+        && !ed.is_empty() {
             return ed;
         }
-    }
-    if let Ok(ed) = env::var("EDITOR") {
-        if !ed.is_empty() {
+    if let Ok(ed) = env::var("EDITOR")
+        && !ed.is_empty() {
             return ed;
         }
-    }
     DEFAULT_EDITOR.to_string()
 }
 

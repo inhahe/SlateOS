@@ -279,14 +279,10 @@ fn sha256_hex(data: &[u8]) -> String {
     // Process 64-byte blocks.
     for chunk in padded.chunks(64) {
         let mut w = [0u32; 64];
-        for i in 0..16 {
-            let base = i * 4;
-            w[i] = u32::from_be_bytes([
-                chunk[base],
-                chunk[base + 1],
-                chunk[base + 2],
-                chunk[base + 3],
-            ]);
+        for (w_slot, word_bytes) in w.iter_mut().take(16).zip(chunk.chunks_exact(4)) {
+            // chunks_exact(4) yields a &[u8] of length 4; try_into is infallible.
+            let arr: [u8; 4] = word_bytes.try_into().unwrap_or([0; 4]);
+            *w_slot = u32::from_be_bytes(arr);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7)
@@ -988,7 +984,7 @@ fn days_to_date_string(days: i64) -> String {
 
 /// Check if a year is a leap year.
 fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ============================================================================

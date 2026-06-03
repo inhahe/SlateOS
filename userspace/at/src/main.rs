@@ -173,7 +173,7 @@ fn is_leap_year(year: i64) -> bool {
 fn days_in_month(year: i64, month: u32) -> u32 {
     if month == 2 && is_leap_year(year) {
         29
-    } else if month >= 1 && month <= 12 {
+    } else if (1..=12).contains(&month) {
         DAYS_IN_MONTH[month as usize]
     } else {
         0
@@ -291,7 +291,7 @@ fn format_datetime(dt: &DateTime) -> String {
         "???"
     };
     let m = dt.month as usize;
-    let mon = if m >= 1 && m <= 12 {
+    let mon = if (1..=12).contains(&m) {
         MONTH_ABBR[m]
     } else {
         "???"
@@ -353,8 +353,8 @@ fn parse_timespec(spec: &str, now_epoch: i64) -> Result<i64, Error> {
             "teatime" => Some(16u32),
             _ => None,
         };
-        if let Some(hour) = named_hour {
-            if tokens[1] == "tomorrow" {
+        if let Some(hour) = named_hour
+            && tokens[1] == "tomorrow" {
                 let now_dt = epoch_to_datetime(now_epoch);
                 let mut dt = DateTime {
                     year: now_dt.year,
@@ -365,28 +365,25 @@ fn parse_timespec(spec: &str, now_epoch: i64) -> Result<i64, Error> {
                     second: 0,
                 };
                 advance_day(&mut dt);
-                return datetime_to_epoch(&dt).map_err(|e| Error::TimeParse(e));
+                return datetime_to_epoch(&dt).map_err(Error::TimeParse);
             }
-        }
     }
 
     // "HH:MM YYYY-MM-DD"
-    if tokens.len() == 2 {
-        if let Some(epoch) = try_parse_hhmm_date(&tokens) {
+    if tokens.len() == 2
+        && let Some(epoch) = try_parse_hhmm_date(&tokens) {
             return epoch;
         }
-    }
 
     // "HH:MM" alone (today or tomorrow)
-    if tokens.len() == 1 {
-        if let Some(epoch) = try_parse_hhmm(tokens[0], now_epoch) {
+    if tokens.len() == 1
+        && let Some(epoch) = try_parse_hhmm(tokens[0], now_epoch) {
             return epoch;
         }
-    }
 
     // "HH:MM tomorrow"
-    if tokens.len() == 2 && tokens[1] == "tomorrow" {
-        if let Some((hour, minute)) = parse_hhmm_pair(tokens[0]) {
+    if tokens.len() == 2 && tokens[1] == "tomorrow"
+        && let Some((hour, minute)) = parse_hhmm_pair(tokens[0]) {
             let now_dt = epoch_to_datetime(now_epoch);
             let mut dt = DateTime {
                 year: now_dt.year,
@@ -397,9 +394,8 @@ fn parse_timespec(spec: &str, now_epoch: i64) -> Result<i64, Error> {
                 second: 0,
             };
             advance_day(&mut dt);
-            return datetime_to_epoch(&dt).map_err(|e| Error::TimeParse(e));
+            return datetime_to_epoch(&dt).map_err(Error::TimeParse);
         }
-    }
 
     Err(Error::TimeParse(format!(
         "cannot parse time specification: '{spec}'"
@@ -443,7 +439,7 @@ fn try_parse_hhmm(token: &str, now_epoch: i64) -> Option<Result<i64, Error>> {
     // If the time has already passed today, schedule for tomorrow.
     if target <= now_epoch {
         advance_day(&mut dt);
-        Some(datetime_to_epoch(&dt).map_err(|e| Error::TimeParse(e)))
+        Some(datetime_to_epoch(&dt).map_err(Error::TimeParse))
     } else {
         Some(Ok(target))
     }
@@ -475,7 +471,7 @@ fn try_parse_hhmm_date(tokens: &[&str]) -> Option<Result<i64, Error>> {
         second: 0,
     };
 
-    Some(datetime_to_epoch(&dt).map_err(|e| Error::TimeParse(e)))
+    Some(datetime_to_epoch(&dt).map_err(Error::TimeParse))
 }
 
 /// Resolve a named time (noon, midnight, teatime) to today or tomorrow.
@@ -490,10 +486,10 @@ fn resolve_named_time(now_epoch: i64, hour: u32, minute: u32) -> Result<i64, Err
         second: 0,
     };
 
-    let target = datetime_to_epoch(&dt).map_err(|e| Error::TimeParse(e))?;
+    let target = datetime_to_epoch(&dt).map_err(Error::TimeParse)?;
     if target <= now_epoch {
         advance_day(&mut dt);
-        datetime_to_epoch(&dt).map_err(|e| Error::TimeParse(e))
+        datetime_to_epoch(&dt).map_err(Error::TimeParse)
     } else {
         Ok(target)
     }
@@ -551,7 +547,7 @@ fn parse_next(now_epoch: i64, unit: &str) -> Result<i64, Error> {
             if dt.day > max_day {
                 dt.day = max_day;
             }
-            datetime_to_epoch(&dt).map_err(|e| Error::TimeParse(e))
+            datetime_to_epoch(&dt).map_err(Error::TimeParse)
         }
         _ => Err(Error::TimeParse(format!(
             "unknown unit after 'next': '{unit}' (expected 'week' or 'month')"
@@ -580,16 +576,14 @@ fn advance_day(dt: &mut DateTime) {
 
 /// Determine the current username from environment.
 fn current_username() -> String {
-    if let Ok(user) = env::var("USER") {
-        if !user.is_empty() {
+    if let Ok(user) = env::var("USER")
+        && !user.is_empty() {
             return user;
         }
-    }
-    if let Ok(user) = env::var("LOGNAME") {
-        if !user.is_empty() {
+    if let Ok(user) = env::var("LOGNAME")
+        && !user.is_empty() {
             return user;
         }
-    }
     format!("uid{}", process::id())
 }
 
@@ -857,8 +851,8 @@ fn print_jobs_table(jobs: &[Job]) {
         return;
     }
     println!(
-        "{:<8}{:<7}{:<25}{}",
-        "Job ID", "Queue", "When", "User"
+        "{:<8}{:<7}{:<25}User",
+        "Job ID", "Queue", "When"
     );
     for job in jobs {
         let dt = epoch_to_datetime(job.epoch);
@@ -1294,25 +1288,25 @@ fn run() -> Result<(), Error> {
         Action::Remove(id) => cmd_remove(id),
         Action::Cat(id) => cmd_cat(id),
         Action::Verify(ref timespec) => {
-            let now = get_current_time().map_err(|e| Error::Io(e))?;
+            let now = get_current_time().map_err(Error::Io)?;
             let target = parse_timespec(timespec, now)?;
             cmd_verify(target);
             Ok(())
         }
         Action::Schedule(ref timespec) => {
-            let now = get_current_time().map_err(|e| Error::Io(e))?;
+            let now = get_current_time().map_err(Error::Io)?;
             let target = parse_timespec(timespec, now)?;
             let commands = read_commands_stdin()?;
             cmd_schedule(&commands, target, args.queue, args.mail, &username, now)
         }
         Action::ScheduleFile(ref path, ref timespec) => {
-            let now = get_current_time().map_err(|e| Error::Io(e))?;
+            let now = get_current_time().map_err(Error::Io)?;
             let target = parse_timespec(timespec, now)?;
             let commands = read_commands_file(path)?;
             cmd_schedule(&commands, target, args.queue, args.mail, &username, now)
         }
         Action::Batch => {
-            let now = get_current_time().map_err(|e| Error::Io(e))?;
+            let now = get_current_time().map_err(Error::Io)?;
             let commands = read_commands_stdin()?;
             cmd_batch(&commands, args.queue, args.mail, &username, now)
         }

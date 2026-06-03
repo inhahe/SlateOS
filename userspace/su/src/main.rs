@@ -157,7 +157,7 @@ fn find_user<'a>(users: &'a [User], name: &str) -> Option<&'a User> {
 }
 
 /// Look up a user by uid.
-fn find_user_by_uid<'a>(users: &'a [User], uid: u32) -> Option<&'a User> {
+fn find_user_by_uid(users: &[User], uid: u32) -> Option<&User> {
     users.iter().find(|u| u.uid == uid)
 }
 
@@ -283,22 +283,19 @@ fn get_caller_uid(users: &[User]) -> u32 {
     // Try /proc/self/status for the real UID.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(uid_str) = rest.trim().split_whitespace().next() {
-                    if let Ok(uid) = uid_str.parse::<u32>() {
+            if let Some(rest) = line.strip_prefix("Uid:")
+                && let Some(uid_str) = rest.split_whitespace().next()
+                    && let Ok(uid) = uid_str.parse::<u32>() {
                         return uid;
                     }
-                }
-            }
         }
     }
 
     // Fallback: resolve USER env var against the database.
-    if let Ok(name) = env::var("USER") {
-        if let Some(user) = find_user(users, &name) {
+    if let Ok(name) = env::var("USER")
+        && let Some(user) = find_user(users, &name) {
             return user.uid;
         }
-    }
 
     // Unknown caller.
     u32::MAX
@@ -881,15 +878,15 @@ fn run_sudo(args: &[String]) -> i32 {
 
     // Execute the command as the target user.
     let command_str = opts.command.join(" ");
-    let exit_code = exec_as_user(
+    
+
+    exec_as_user(
         target,
         None,
         Some(&command_str),
         false, // not a login shell
         false, // don't preserve env
-    );
-
-    exit_code
+    )
 }
 
 /// Log a sudo authorisation failure to syslog or a fallback file.

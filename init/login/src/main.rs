@@ -204,9 +204,10 @@ const SHA256_K: [u32; 64] = [
 fn sha256_compress(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
 
-    for i in 0..16 {
-        let off = i * 4;
-        w[i] = u32::from_be_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
+    for (w_slot, word_bytes) in w.iter_mut().take(16).zip(block.chunks_exact(4)) {
+        // chunks_exact(4) yields a &[u8] of length 4; try_into is infallible.
+        let arr: [u8; 4] = word_bytes.try_into().unwrap_or([0; 4]);
+        *w_slot = u32::from_be_bytes(arr);
     }
 
     for i in 16..64 {
@@ -343,7 +344,7 @@ const HEX_CHARS: [char; 16] = [
 
 /// Parse a hex string into bytes. Returns None on invalid input.
 fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     let mut result = Vec::with_capacity(hex.len() / 2);
@@ -900,6 +901,12 @@ pub struct LoginManager {
     clock_display: String,
 }
 
+impl Default for LoginManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LoginManager {
     /// Create a new login manager with accounts loaded from the database.
     pub fn new() -> Self {
@@ -983,15 +990,14 @@ impl LoginManager {
         };
 
         // Check lockout.
-        if let Some(lockout) = self.locked_accounts.get(&user.uid) {
-            if lockout.is_locked(now) {
+        if let Some(lockout) = self.locked_accounts.get(&user.uid)
+            && lockout.is_locked(now) {
                 let remaining = lockout.remaining_lockout_secs(now);
                 return Err(format!(
                     "Account locked. Try again in {} seconds.",
                     remaining
                 ));
             }
-        }
 
         // Guest accounts don't need a password.
         if !user.requires_password() {
@@ -1232,12 +1238,11 @@ impl LoginManager {
             }
             _ => {
                 // Type character into password field.
-                if let Some(ch) = key.text {
-                    if !ch.is_control() {
+                if let Some(ch) = key.text
+                    && !ch.is_control() {
                         self.password_input.push(ch);
                         self.error_message = None;
                     }
-                }
                 EventResult::Consumed
             }
         }
@@ -1271,12 +1276,11 @@ impl LoginManager {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text {
-                    if !ch.is_control() {
+                if let Some(ch) = key.text
+                    && !ch.is_control() {
                         self.password_input.push(ch);
                         self.error_message = None;
                     }
-                }
                 EventResult::Consumed
             }
         }
@@ -1363,15 +1367,15 @@ impl LoginManager {
                 // Check accessibility toggle buttons (bottom-left).
                 let acc_y = SCREEN_HEIGHT - 50.0;
                 if y >= acc_y && y <= acc_y + 30.0 {
-                    if x >= 20.0 && x <= 60.0 {
+                    if (20.0..=60.0).contains(&x) {
                         self.accessibility.high_contrast = !self.accessibility.high_contrast;
                         return EventResult::Consumed;
                     }
-                    if x >= 70.0 && x <= 110.0 {
+                    if (70.0..=110.0).contains(&x) {
                         self.accessibility.large_text = !self.accessibility.large_text;
                         return EventResult::Consumed;
                     }
-                    if x >= 120.0 && x <= 160.0 {
+                    if (120.0..=160.0).contains(&x) {
                         self.accessibility.onscreen_keyboard =
                             !self.accessibility.onscreen_keyboard;
                         return EventResult::Consumed;
@@ -2134,8 +2138,8 @@ impl LoginManager {
         });
 
         // Show locked user avatar.
-        if let Some(uid) = self.locked_session_uid {
-            if let Some(user) = self.users.iter().find(|u| u.uid == uid) {
+        if let Some(uid) = self.locked_session_uid
+            && let Some(user) = self.users.iter().find(|u| u.uid == uid) {
                 let avatar_x = center_x - AVATAR_SIZE / 2.0;
                 let avatar_y = box_y + 70.0;
 
@@ -2170,7 +2174,6 @@ impl LoginManager {
                     max_width: Some(LOGIN_BOX_WIDTH - 40.0),
                 });
             }
-        }
 
         // Password input.
         let input_x = center_x - INPUT_WIDTH / 2.0;

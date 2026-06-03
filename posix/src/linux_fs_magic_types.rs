@@ -48,7 +48,7 @@ pub const DEVPTS_SUPER_MAGIC: u64 = 0x1CD1;
 /// cgroup v2.
 pub const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
 /// cgroup v1.
-pub const CGROUP_SUPER_MAGIC: u64 = 0x27E0_EB;
+pub const CGROUP_SUPER_MAGIC: u64 = 0x0027_E0EB;
 /// BPF filesystem.
 pub const BPF_FS_MAGIC: u64 = 0xCAFE_4A11;
 /// Security filesystem.

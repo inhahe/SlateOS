@@ -1762,9 +1762,9 @@ pub extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut u8 {
     let stream = fdopen(
         parent_fd,
         if is_read {
-            b"r\0".as_ptr()
+            c"r".as_ptr().cast::<u8>()
         } else {
-            b"w\0".as_ptr()
+            c"w".as_ptr().cast::<u8>()
         },
     );
     if stream.is_null() {

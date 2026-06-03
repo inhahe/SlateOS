@@ -21,7 +21,7 @@ pub const SHM_REMAP: u32 = 0o40000;
 /// Use huge pages for this segment.
 pub const SHM_HUGETLB: u32 = 0o4000;
 /// Don't reserve swap space (Linux extension).
-pub const SHM_NORESERVE: u32 = 0o10000_0000;
+pub const SHM_NORESERVE: u32 = 0o100_000_000;
 
 // ---------------------------------------------------------------------------
 // shmctl() commands (in addition to IPC_RMID, IPC_SET, IPC_STAT)

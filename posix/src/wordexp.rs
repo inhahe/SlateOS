@@ -341,8 +341,8 @@ fn expand_single_word(
         };
         // Expand if ~ is alone or followed by /
         if next == 0 || next == b'/' || rp.wrapping_add(1) >= end {
-            // SAFETY: "HOME\0" is a valid C string on the stack.
-            let home = unsafe { crate::environ::getenv(b"HOME\0".as_ptr()) };
+            // SAFETY: c"HOME" is a valid C string in static storage.
+            let home = unsafe { crate::environ::getenv(c"HOME".as_ptr().cast::<u8>()) };
             if home.is_null() {
                 // HOME not set — emit literal ~.
                 emit_byte(&mut exp, b'~');

@@ -70,9 +70,9 @@ pub const DW_REG_RETURN_ADDR: u32 = 16;
 // ---------------------------------------------------------------------------
 
 /// Rust exception class ("RUST\0\0\0\0" encoded as u64).
-pub const EXCEPTION_CLASS_RUST: u64 = 0x525553_5400_000000;
+pub const EXCEPTION_CLASS_RUST: u64 = 0x5255_5354_0000_0000;
 /// GNU C++ exception class ("GNUCC++\0" encoded as u64).
-pub const EXCEPTION_CLASS_GNUCXX: u64 = 0x474E55_4343_2B2B00;
+pub const EXCEPTION_CLASS_GNUCXX: u64 = 0x474E_5543_432B_2B00;
 
 // ---------------------------------------------------------------------------
 // Tests

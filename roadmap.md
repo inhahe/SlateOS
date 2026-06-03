@@ -260,7 +260,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] System load average (EWMA of runnable tasks, BSP-driven 1Hz sample)
   - [x] Per-CPU utilization tracking (total/idle tick counters, cpuinfo command)
 - [x] Capability-gated syscalls
-- [-] "Request capability from user" dialog mechanism
+- [x] "Request capability from user" dialog mechanism
   - [x] Capability request broker (kernel-side queue, approve/deny/cancel/timeout)
   - [x] Auto-deny fail-safe when no policy handler registered
   - [x] Per-process request limit (4 pending max)
@@ -321,7 +321,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 
 ### 2.1 Driver framework
-- [-] Userspace driver framework:
+- [x] Userspace driver framework:
   - [x] MMIO mapping into driver process address space (SYS_MMAP + MAP_MMIO)
   - [x] Interrupt delivery from kernel to driver (IOAPIC + IRQ syscalls)
   - [x] Port I/O syscalls for legacy devices (SYS_PORT_READ/WRITE)
@@ -4556,7 +4556,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [ ] NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 
 ### 3.2 Graphics stack
-- [-] DRM/KMS equivalent (kernel mode setting, GPU memory management)
+- [x] DRM/KMS equivalent (kernel mode setting, GPU memory management)
   - [x] DRM core: object model (DrmObjectId, device registry, per-device object tables)
   - [x] Connector, CRTC, Plane, Encoder abstractions
   - [x] PixelFormat enum (XRGB8888, ARGB8888, XBGR8888, ABGR8888, RGB565)

@@ -55,6 +55,12 @@
 //
 // We save up to 8 args (5 register + 3 stack) for printf, fewer for others.
 
+// The `_*_impl` symbols defined in this module are the Rust-side targets of
+// the assembly variadic trampolines.  The leading underscore is part of the
+// ABI contract and marks them as "private-but-exported" linkage symbols
+// (libc programs link against the un-prefixed `printf`/`fprintf`/...).
+#![allow(clippy::used_underscore_items)]
+
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
     // printf(fmt, ...) → _printf_impl(fmt, int_args, float_args)

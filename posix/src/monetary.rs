@@ -10,6 +10,15 @@
 //! `^` (no grouping), `+`/`(` (sign position), `!` (no currency),
 //! and width/precision modifiers are supported.
 
+// The strfmon format-string parser writes to several underscore-prefixed
+// locals (`_fill_char`, `_width`, `_suppress_grouping`, `_suppress_currency`)
+// to consume those modifiers from the format.  The leading underscore marks
+// them as "parsed but not yet acted on" — the values are read out of the
+// format but a no-op locale ignores most of them.  Removing the underscore
+// would silently invite "unused variable" warnings the day someone forgets
+// to wire the value into the emitter.
+#![allow(clippy::used_underscore_binding)]
+
 /// `strfmon` — format monetary value.
 ///
 /// Writes at most `maxsize` bytes (including the null terminator) to

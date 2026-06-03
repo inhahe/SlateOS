@@ -26,6 +26,11 @@
 //! - The format string is now printf-expanded: a literal `%` in a message
 //!   must be written `%%` (matching every real libc).
 
+// Calls `printf::_snprintf_impl`; underscore is the ABI convention for libc
+// impl trampoline targets, not a privacy marker.  Also defines a local
+// `_syslog_impl` trampoline target with the same convention.
+#![allow(clippy::used_underscore_items)]
+
 use crate::file;
 use crate::printf::{self, VaList};
 use crate::string;

@@ -43,6 +43,11 @@
 // sscanf(str, fmt, ...) → _sscanf_impl(str, fmt, args_ptr)
 // scanf(fmt, ...) → reads from stdin (stub)
 
+// The `_*_impl` symbols defined in this module are the Rust-side targets of
+// the assembly variadic trampolines.  The leading underscore is part of the
+// ABI contract.
+#![allow(clippy::used_underscore_items)]
+
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
     // sscanf(str, fmt, ...) → _sscanf_impl(str, fmt, args_ptr)

@@ -2427,6 +2427,10 @@ fn read_process_count() -> u16 {
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+// `s._pad` / `s._padding` are the Linux `struct sysinfo` reserved fields
+// — their names (with the leading underscore) are part of the kernel ABI
+// and cannot be renamed.
+#[allow(clippy::used_underscore_binding)]
 pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
     if info.is_null() {
         errno::set_errno(errno::EFAULT);

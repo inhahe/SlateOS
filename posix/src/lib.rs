@@ -210,6 +210,9 @@
     clippy::decimal_bitwise_operands, // ABI/syscall constant tables mirror Linux headers verbatim (e.g. AUDIT_ARCH_ARM = 40 | ...); rewriting to hex obscures the source correspondence
     clippy::unreadable_literal,       // Linux/POSIX constant tables (errno codes, ioctl numbers, capability bits, etc.) are copied from the upstream headers verbatim. Inserting `_` separators breaks easy cross-referencing with man pages and kernel sources.
     clippy::must_use_candidate,       // POSIX C functions return error codes that callers are explicitly allowed to ignore (e.g. write(2) without checking the return value is well-defined C); the error channel is errno, not the return value. Adding #[must_use] everywhere would not match C/POSIX semantics.
+    clippy::pub_underscore_fields,    // Linux ABI structs (`struct statx`, `struct sysinfo`, `struct shmid_ds`, etc.) carry padding/reserved fields whose names (`__reserved`, `__unused`, `__pad`) are part of the kernel ABI and cannot be renamed.
+    clippy::doc_lazy_continuation,    // POSIX docs frequently use bulleted lists whose continuation lines align under the bullet text for readability of long error-condition descriptions. Reflowing every such list would hurt readability for a purely stylistic check.
+    clippy::doc_overindented_list_items, // Same rationale: enumerated POSIX validation-order lists align continuation text under the start of the item text (e.g. "1. reserved fields nonzero   → EINVAL"), which is more readable than a 5-space continuation.
     non_upper_case_globals,           // POSIX globals: environ, stdin, stdout, optarg, etc.
     non_snake_case,                   // POSIX/C functions: S_ISREG, _Unwind_Resume, etc.
 )]

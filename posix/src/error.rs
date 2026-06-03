@@ -40,6 +40,10 @@
 //!
 //! As with every real libc, a literal `%` in the format must be written `%%`.
 
+// Calls `printf::_snprintf_impl`; underscore is the ABI convention for
+// libc impl trampoline targets, not a privacy marker.
+#![allow(clippy::used_underscore_items)]
+
 use crate::printf::{self, VaList};
 
 // ---------------------------------------------------------------------------

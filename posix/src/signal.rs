@@ -34,6 +34,10 @@
 //! blocked set actually suppresses delivery.  `sigpending()` queries the
 //! kernel (`SYS_SIGNAL_PENDING`) for the pending set.
 
+// Calls `process::_exit` (a POSIX function whose name is literally
+// underscore-prefixed in the POSIX spec — _exit(2) — not a private item).
+#![allow(clippy::used_underscore_items)]
+
 use crate::errno;
 
 // ---------------------------------------------------------------------------

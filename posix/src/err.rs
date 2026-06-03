@@ -29,6 +29,11 @@
 //! %s", path)` produced `open %s: ...` instead of expanding `%s`.  That is
 //! now fixed.
 
+// Calls `printf::_snprintf_impl` (an underscore-prefixed ABI trampoline
+// target).  The underscore is part of the printf-impl naming convention,
+// not a "private" marker — see `crate::printf` for details.
+#![allow(clippy::used_underscore_items)]
+
 use crate::errno;
 use crate::printf::{self, VaList};
 

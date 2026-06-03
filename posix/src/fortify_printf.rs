@@ -40,6 +40,13 @@
 //! `va_list` (a pointer on x86_64 System V), so they are plain Rust and
 //! host-testable.
 
+// The `_*_impl` symbols defined in this module are deliberately
+// underscore-prefixed: they are the Rust-side targets of the assembly
+// trampolines that implement the glibc `__*_chk` ABI.  The leading
+// underscore marks them as "private-but-exported" linkage symbols rather
+// than ordinary public API.
+#![allow(clippy::used_underscore_items)]
+
 use crate::printf::{self, VaList};
 
 // ---------------------------------------------------------------------------

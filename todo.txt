@@ -2437,6 +2437,25 @@ Remaining net improvements (diminishing returns):
 
 ## Known Bugs / Limitations
 
+- (NOTED 2026-06-03) userspace/ldd ELF parser has 73 remaining defensive
+  clippy warnings (58 arithmetic_side_effects, 11 indexing_slicing, 4
+  slicing). Sites are clustered in:
+    * Dynamic-section walker (lines ~1230-1270): offsets like
+      `dt_off + 16`, `entry_off + size`; convert to checked_add and
+      bail with TruncatedData on overflow.
+    * Section-header parser (lines ~1036-1143): `shoff + i*shentsize`
+      indexing into the file blob; convert to checked_mul/checked_add
+      then .get() with a single TruncatedData mapping.
+    * String-table lookups: `strtab[off..]` followed by .iter().position()
+      — fine if strtab itself was validated, but switch to .get(off..)
+      + .iter() for the clippy gate.
+  The integer-read helpers (read_u16/u32/u64) are already cleaned up
+  via 6e06e8f8. The rest needs a focused refactor pass; expect a
+  ~2-hour session to do it right rather than slap a file-level allow.
+  All 33 tests pass; the parser handles malformed input gracefully
+  via the existing TruncatedData error path — the warnings are about
+  bounds-safety not currently visible to clippy, not real bugs.
+
 - (NOTED 2026-06-03) userspace/lsusb and userspace/strace have no unit
   tests at all (`cargo test -p lsusb` / `-p strace` both report
   "0 passed; 0 failed"). Both are personality-CLI stubs and the test

@@ -862,11 +862,10 @@ impl DeviceManagerState {
 
     /// Toggle the expanded state of a category node.
     pub fn toggle_category(&mut self, index: usize) {
-        if let Some(node) = self.tree_nodes.get_mut(index) {
-            if node.category.is_some() {
+        if let Some(node) = self.tree_nodes.get_mut(index)
+            && node.category.is_some() {
                 node.expanded = !node.expanded;
             }
-        }
     }
 
     /// Select a tree node by index.
@@ -1680,7 +1679,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
 
             let indent = node.depth as f32 * TREE_INDENT + 8.0;
 
-            if node.category.is_some() {
+            if let Some(cat) = node.category {
                 // Category node: show expand/collapse arrow and category icon
                 let arrow = if node.expanded { "v" } else { ">" };
                 cmds.push(RenderCommand::Text {
@@ -1693,7 +1692,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                     max_width: None,
                 });
 
-                let cat = node.category.expect("checked above");
+
                 cmds.push(RenderCommand::Text {
                     x: indent + 14.0,
                     y: y_offset + 5.0,
@@ -2727,13 +2726,12 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
                 return EventResult::Consumed;
             }
             _ => {
-                if let Some(ch) = key.text {
-                    if !ch.is_control() {
+                if let Some(ch) = key.text
+                    && !ch.is_control() {
                         state.search_query.push(ch);
                         state.apply_search_filter();
                         return EventResult::Consumed;
                     }
-                }
             }
         }
         return EventResult::Consumed;
@@ -2792,8 +2790,8 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
         }
         Key::Left => {
             // Collapse category or move to parent category
-            if let Some(idx) = state.selected_tree_index {
-                if let Some(node) = state.tree_nodes.get(idx) {
+            if let Some(idx) = state.selected_tree_index
+                && let Some(node) = state.tree_nodes.get(idx) {
                     if node.category.is_some() && node.expanded {
                         state.toggle_category(idx);
                     } else if node.device_id.is_some() {
@@ -2806,28 +2804,23 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
                         }
                     }
                 }
-            }
             EventResult::Consumed
         }
         Key::Right => {
             // Expand category
-            if let Some(idx) = state.selected_tree_index {
-                if let Some(node) = state.tree_nodes.get(idx) {
-                    if node.category.is_some() && !node.expanded {
+            if let Some(idx) = state.selected_tree_index
+                && let Some(node) = state.tree_nodes.get(idx)
+                    && node.category.is_some() && !node.expanded {
                         state.toggle_category(idx);
                     }
-                }
-            }
             EventResult::Consumed
         }
         Key::Enter | Key::Space => {
-            if let Some(idx) = state.selected_tree_index {
-                if let Some(node) = state.tree_nodes.get(idx) {
-                    if node.category.is_some() {
+            if let Some(idx) = state.selected_tree_index
+                && let Some(node) = state.tree_nodes.get(idx)
+                    && node.category.is_some() {
                         state.toggle_category(idx);
                     }
-                }
-            }
             EventResult::Consumed
         }
         Key::Tab => {
@@ -2897,11 +2890,10 @@ fn handle_mouse_event(
             if mx < SIDEBAR_WIDTH && my >= tree_top && my < tree_bottom {
                 let click_y = my - tree_top + state.tree_scroll;
                 if let Some(idx) = tree_hit_test(state, click_y) {
-                    if let Some(node) = state.tree_nodes.get(idx) {
-                        if node.category.is_some() {
+                    if let Some(node) = state.tree_nodes.get(idx)
+                        && node.category.is_some() {
                             state.toggle_category(idx);
                         }
-                    }
                     state.select_tree_node(idx);
                     return EventResult::Consumed;
                 }
@@ -3033,11 +3025,10 @@ fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
     }
     // Device node: check if parent category is expanded.
     for i in (0..index).rev() {
-        if let Some(parent) = state.tree_nodes.get(i) {
-            if parent.category.is_some() {
+        if let Some(parent) = state.tree_nodes.get(i)
+            && parent.category.is_some() {
                 return parent.expanded;
             }
-        }
     }
     true
 }

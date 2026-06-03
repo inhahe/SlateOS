@@ -1201,15 +1201,14 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
             }
 
             // Reuse check
-            if let Some(ids) = password_counts.get(pw) {
-                if ids.len() > 1 {
+            if let Some(ids) = password_counts.get(pw)
+                && ids.len() > 1 {
                     issues.push(AuditIssue {
                         entry_id: entry.id,
                         entry_name: name.clone(),
                         issue: AuditIssueKind::ReusedPassword,
                     });
                 }
-            }
 
             // Old password check
             if entry.password_age_days(now) > PASSWORD_OLD_DAYS {
@@ -1221,15 +1220,14 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
             }
 
             // Missing TOTP
-            if let EntryData::Login(ref login) = entry.data {
-                if login.totp_secret.is_none() {
+            if let EntryData::Login(ref login) = entry.data
+                && login.totp_secret.is_none() {
                     issues.push(AuditIssue {
                         entry_id: entry.id,
                         entry_name: name.clone(),
                         issue: AuditIssueKind::NoTotp,
                     });
                 }
-            }
         }
     }
 
@@ -1366,8 +1364,8 @@ fn sort_entries(entries: &mut [&Entry], order: SortOrder) {
         SortOrder::NameDesc => entries.sort_by(|a, b| {
             b.display_name().to_ascii_lowercase().cmp(&a.display_name().to_ascii_lowercase())
         }),
-        SortOrder::DateNewest => entries.sort_by(|a, b| b.modified_at.cmp(&a.modified_at)),
-        SortOrder::DateOldest => entries.sort_by(|a, b| a.modified_at.cmp(&b.modified_at)),
+        SortOrder::DateNewest => entries.sort_by_key(|e| std::cmp::Reverse(e.modified_at)),
+        SortOrder::DateOldest => entries.sort_by_key(|a| a.modified_at),
         SortOrder::TypeAsc => entries.sort_by(|a, b| {
             a.entry_type().label().cmp(b.entry_type().label())
         }),
@@ -1558,6 +1556,9 @@ fn draw_rect(
 }
 
 /// Render a stroked rounded rectangle.
+// 8 args: rect (x,y,w,h) + color + line_width + radius; introducing a wrapper
+// struct would only add noise at every call site.
+#[allow(clippy::too_many_arguments)]
 fn draw_stroke_rect(
     rt: &mut RenderTree,
     x: f32, y: f32, w: f32, h: f32,
@@ -1571,6 +1572,8 @@ fn draw_stroke_rect(
 }
 
 /// Render text at a position.
+// 8 args mirror the underlying Text render command; same shape on purpose.
+#[allow(clippy::too_many_arguments)]
 fn draw_text(
     rt: &mut RenderTree,
     x: f32, y: f32,
@@ -1611,6 +1614,9 @@ fn draw_badge(
 }
 
 /// Render a toolbar-style button.
+// 9 args: rect (x,y,w,h) + label + bg/fg colors + hovered flag; grouping these
+// would not improve clarity at the call sites.
+#[allow(clippy::too_many_arguments)]
 fn draw_button(
     rt: &mut RenderTree,
     x: f32, y: f32, w: f32, h: f32,
@@ -2209,6 +2215,9 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 }
 
 /// Render a single labeled field row with optional copy button.
+// 9 args: layout positions (y, label_x, value_x, copy_x, width) + 2 strings +
+// flag + render tree. All needed at the call site; no useful grouping.
+#[allow(clippy::too_many_arguments)]
 fn render_detail_field(
     rt: &mut RenderTree,
     y: f32,
@@ -2696,12 +2705,11 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
                 state.unlock_failed = false;
             }
             _ => {
-                if let Some(ch) = key.text {
-                    if !ch.is_control() {
+                if let Some(ch) = key.text
+                    && !ch.is_control() {
                         state.master_input.push(ch);
                         state.unlock_failed = false;
                     }
-                }
             }
         }
         return;
@@ -2740,12 +2748,11 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
         }
         _ => {
             // Text input for search
-            if let Some(ch) = key.text {
-                if !ch.is_control() {
+            if let Some(ch) = key.text
+                && !ch.is_control() {
                     state.search_query.push(ch);
                     state.refresh_filter();
                 }
-            }
             if key.key == Key::Backspace && !state.search_query.is_empty() {
                 state.search_query.pop();
                 state.refresh_filter();

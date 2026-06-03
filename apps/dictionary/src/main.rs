@@ -526,8 +526,8 @@ impl DictionaryApp {
     }
 
     fn toggle_favorite(&mut self) {
-        if let Some(idx) = self.current_entry {
-            if let Some(entry) = self.dictionary.get(idx) {
+        if let Some(idx) = self.current_entry
+            && let Some(entry) = self.dictionary.get(idx) {
                 let word = entry.word.clone();
                 if self.favorites.contains(&word) {
                     self.favorites.retain(|w| w != &word);
@@ -537,7 +537,6 @@ impl DictionaryApp {
                     self.status_message = format!("Added '{}' to favorites", word);
                 }
             }
-        }
     }
 
     fn is_favorite(&self) -> bool {
@@ -643,18 +642,16 @@ impl DictionaryApp {
                 }
             }
             "Return" | "Enter" if self.screen == Screen::History => {
-                if let Some(word) = self.history.get(self.history_scroll).cloned() {
-                    if let Some(idx) = self.find_word(&word) {
+                if let Some(word) = self.history.get(self.history_scroll).cloned()
+                    && let Some(idx) = self.find_word(&word) {
                         self.select_entry(idx);
                     }
-                }
             }
             "Return" | "Enter" if self.screen == Screen::Favorites => {
-                if let Some(word) = self.favorites.get(self.favorites_scroll).cloned() {
-                    if let Some(idx) = self.find_word(&word) {
+                if let Some(word) = self.favorites.get(self.favorites_scroll).cloned()
+                    && let Some(idx) = self.find_word(&word) {
                         self.select_entry(idx);
                     }
-                }
             }
             // Word of day
             "Return" | "Enter" if self.screen == Screen::WordOfDay => {

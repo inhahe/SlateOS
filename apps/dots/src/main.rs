@@ -287,19 +287,17 @@ impl Board {
     fn is_line_drawn(&self, line: LineId) -> bool {
         match line.orientation {
             Orientation::Horizontal => {
-                if line.row < self.h_lines.len() {
-                    if let Some(&drawn) = self.h_lines[line.row].get(line.col) {
+                if line.row < self.h_lines.len()
+                    && let Some(&drawn) = self.h_lines[line.row].get(line.col) {
                         return drawn;
                     }
-                }
                 false
             }
             Orientation::Vertical => {
-                if line.row < self.v_lines.len() {
-                    if let Some(&drawn) = self.v_lines[line.row].get(line.col) {
+                if line.row < self.v_lines.len()
+                    && let Some(&drawn) = self.v_lines[line.row].get(line.col) {
                         return drawn;
                     }
-                }
                 false
             }
         }
@@ -342,12 +340,14 @@ impl Board {
     }
 
     /// Get the box coordinates adjacent to a line.
+    ///
     /// A horizontal line at (row, col) borders:
-    ///   - box (row-1, col) above (if row > 0)
-    ///   - box (row, col) below (if row < boxes_per_side)
+    /// - box (row-1, col) above (if row > 0)
+    /// - box (row, col) below (if row < boxes_per_side)
+    ///
     /// A vertical line at (row, col) borders:
-    ///   - box (row, col-1) to the left (if col > 0)
-    ///   - box (row, col) to the right (if col < boxes_per_side)
+    /// - box (row, col-1) to the left (if col > 0)
+    /// - box (row, col) to the right (if col < boxes_per_side)
     fn adjacent_boxes(&self, line: LineId) -> Vec<(usize, usize)> {
         let bps = self.boxes_per_side();
         let mut result = Vec::new();
@@ -936,11 +936,10 @@ impl DotsAndBoxes {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Key(ke) => {
-                if ke.pressed {
+            Event::Key(ke)
+                if ke.pressed => {
                     self.handle_key(ke.key);
                 }
-            }
             Event::Mouse(me) => {
                 self.handle_mouse(me);
             }
@@ -972,36 +971,30 @@ impl DotsAndBoxes {
             Key::Num5 => {
                 self.new_game_with_size(5);
             }
-            Key::Left | Key::Right | Key::Up | Key::Down => {
-                if self.phase == GamePhase::Playing && !self.ai_pending {
+            Key::Left | Key::Right | Key::Up | Key::Down
+                if self.phase == GamePhase::Playing && !self.ai_pending => {
                     self.move_cursor(key);
                 }
-            }
-            Key::Tab => {
-                if self.phase == GamePhase::Playing && !self.ai_pending {
+            Key::Tab
+                if self.phase == GamePhase::Playing && !self.ai_pending => {
                     self.toggle_cursor_orientation();
                 }
-            }
-            Key::Enter | Key::Space => {
-                if self.phase == GamePhase::Playing && !self.ai_pending {
+            Key::Enter | Key::Space
+                if self.phase == GamePhase::Playing && !self.ai_pending => {
                     let line = self.cursor.to_line_id();
                     self.try_place_line(line);
                 }
-            }
             _ => {}
         }
     }
 
     fn handle_mouse(&mut self, me: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = me.kind {
-            if self.phase == GamePhase::Playing && !self.ai_pending {
-                if let Some(line) = self.hit_test_line_precise(me.x, me.y) {
-                    if !self.board.is_line_drawn(line) {
+        if let MouseEventKind::Press(MouseButton::Left) = me.kind
+            && self.phase == GamePhase::Playing && !self.ai_pending
+                && let Some(line) = self.hit_test_line_precise(me.x, me.y)
+                    && !self.board.is_line_drawn(line) {
                         self.try_place_line(line);
                     }
-                }
-            }
-        }
     }
 
     fn handle_tick(&mut self, elapsed_ms: u64) {

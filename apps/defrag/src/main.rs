@@ -667,13 +667,11 @@ impl ExcludePattern {
         }
 
         // Extension wildcard `*.ext`.
-        if let Some(ext) = pattern.strip_prefix("*.") {
-            if let Some(file_ext) = path.rsplit_once('.') {
-                if file_ext.1 == ext {
+        if let Some(ext) = pattern.strip_prefix("*.")
+            && let Some(file_ext) = path.rsplit_once('.')
+                && file_ext.1 == ext {
                     return true;
                 }
-            }
-        }
 
         // Simple prefix match (directory prefix).
         if pattern.ends_with('/') && path.starts_with(pattern.as_str()) {
@@ -735,6 +733,12 @@ pub struct DefragProgress {
     pub current_fragmentation: f32,
     /// Error message if state is Error.
     pub error_message: String,
+}
+
+impl Default for DefragProgress {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DefragProgress {
@@ -1213,6 +1217,12 @@ pub struct DefragUI {
     pub exclude_input: String,
 }
 
+impl Default for DefragUI {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefragUI {
     /// Create a new UI with default state.
     pub fn new() -> Self {
@@ -1281,12 +1291,11 @@ impl DefragUI {
     pub fn start_defrag(&mut self) {
         if let Some(analysis) = &self.analysis {
             // Check for SSD.
-            if let Some(drive) = self.current_drive() {
-                if drive.is_ssd() {
+            if let Some(drive) = self.current_drive()
+                && drive.is_ssd() {
                     self.show_ssd_warning = true;
                     return;
                 }
-            }
 
             let mut engine = DefragEngine::new(
                 analysis.block_map.clone(),
@@ -1336,11 +1345,10 @@ impl DefragUI {
         } else {
             false
         };
-        if completed {
-            if let Some(engine) = &self.engine {
+        if completed
+            && let Some(engine) = &self.engine {
                 self.stats = Some(DefragStats::from_engine(engine));
             }
-        }
     }
 
     /// Run a batch of defrag steps.
@@ -1351,11 +1359,10 @@ impl DefragUI {
         } else {
             false
         };
-        if completed {
-            if let Some(engine) = &self.engine {
+        if completed
+            && let Some(engine) = &self.engine {
                 self.stats = Some(DefragStats::from_engine(engine));
             }
-        }
     }
 
     /// Set file sort column, toggling direction if same column.
@@ -1685,8 +1692,8 @@ impl DefragUI {
         }
 
         // SSD indicator for selected drive
-        if let Some(drive) = self.current_drive() {
-            if drive.is_ssd() {
+        if let Some(drive) = self.current_drive()
+            && drive.is_ssd() {
                 dy += 8.0;
                 tree.push(RenderCommand::FillRect {
                     x: 4.0,
@@ -1706,7 +1713,6 @@ impl DefragUI {
                     max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING - 8.0),
                 });
             }
-        }
     }
 
     // -- tabs ------------------------------------------------------------------

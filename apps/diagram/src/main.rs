@@ -1596,8 +1596,9 @@ impl DiagramApp {
         let cols = (self.nodes.len() as f32).sqrt().ceil() as usize;
 
         for (i, node) in self.nodes.iter_mut().enumerate() {
-            let row = i / cols.max(1);
-            let col = i % cols.max(1);
+            let cmax = cols.max(1);
+            let row = i.checked_div(cmax).unwrap_or(0);
+            let col = i.checked_rem(cmax).unwrap_or(0);
             match direction {
                 LayoutDirection::TopDown => {
                     node.x = start_x + col as f32 * (DEFAULT_NODE_W + spacing_h);
@@ -1801,7 +1802,7 @@ impl DiagramApp {
                 node.x, node.y, node.width, node.height,
                 escape_json(&node.label)
             ));
-            if i + 1 < self.nodes.len() {
+            if i.saturating_add(1) < self.nodes.len() {
                 out.push(',');
             }
             out.push('\n');
@@ -1816,7 +1817,7 @@ impl DiagramApp {
                 edge.kind.label(),
                 escape_json(&edge.label)
             ));
-            if i + 1 < self.edges.len() {
+            if i.saturating_add(1) < self.edges.len() {
                 out.push(',');
             }
             out.push('\n');

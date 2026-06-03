@@ -183,7 +183,7 @@ fn parse_u64(s: &[u8]) -> Option<u64> {
     let mut i = 0;
     while i < s.len() {
         let d = s[i];
-        if !(b'0'..=b'9').contains(&d) {
+        if !d.is_ascii_digit() {
             return None;
         }
         val = val.checked_mul(10)?;
@@ -211,7 +211,7 @@ fn parse_hex_u8(s: &[u8]) -> Option<u8> {
     let mut i = 0;
     while i < s.len() {
         let d = s[i];
-        let nibble = if (b'0'..=b'9').contains(&d) {
+        let nibble = if d.is_ascii_digit() {
             d - b'0'
         } else if (b'a'..=b'f').contains(&d) {
             d - b'a' + 10
@@ -231,7 +231,7 @@ fn is_all_hex(s: &[u8]) -> bool {
     let mut i = 0;
     while i < s.len() {
         let c = s[i];
-        if !((b'0'..=b'9').contains(&c) || (b'a'..=b'f').contains(&c) || (b'A'..=b'F').contains(&c)) {
+        if !(c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || (b'A'..=b'F').contains(&c)) {
             return false;
         }
         i += 1;
@@ -764,6 +764,14 @@ impl GptPartition {
 }
 
 /// Detected partition table type.
+///
+/// The Gpt variant carries an inline [GptPartition; 128] which makes it
+/// significantly larger than the Mbr variant; clippy's
+/// large_enum_variant lint would suggest Box::new. We keep the inline
+/// layout deliberately: a no_main, no-allocator personality CLI cannot
+/// rely on a global allocator for table parsing, and stack-resident
+/// tables match the on-disk GPT footprint (128 entries × 128 bytes).
+#[allow(clippy::large_enum_variant)]
 enum DiskLabel {
     Gpt {
         header: GptHeader,
@@ -1078,6 +1086,11 @@ fn build_protective_mbr(disk_sectors: u64) -> [u8; 512] {
 }
 
 /// Build a GPT header sector.
+///
+/// The 9-arg signature mirrors the 9 distinct fields of UEFI 2.x §5.3
+/// "GUID Partition Table Header"; collapsing them into a struct would
+/// only shuffle the same 9 inputs across a constructor boundary.
+#[allow(clippy::too_many_arguments)]
 fn build_gpt_header(
     disk_guid: &[u8; 16],
     my_lba: u64,
@@ -1158,6 +1171,7 @@ fn serialize_mbr_entry(buf: &mut [u8], off: usize, part: &MbrPartition) {
 /// - Hex MBR: "0x83", "83"
 /// - Full GUID: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 /// - Short names: "linux", "efi", "swap", etc.
+///
 /// Returns 16 bytes: for MBR the type byte is in [0], rest zero.
 fn parse_type_code(s: &[u8]) -> Option<[u8; 16]> {
     if s.is_empty() {
@@ -1585,6 +1599,11 @@ fn print_disk_header(out: &mut OutBuf, dev: &[u8], total_bytes: u64, total_secto
     out.push_newline();
 }
 
+// out + dev + header + (parts, count) + sector_size + (extended,
+// show_bytes) — 8 inputs that don't naturally group into a single
+// struct without forcing GptHeader/parts into a wrapper that exists
+// only to satisfy this lint.
+#[allow(clippy::too_many_arguments)]
 fn print_gpt_listing(out: &mut OutBuf, dev: &[u8], header: &GptHeader,
                      parts: &[GptPartition], count: usize,
                      sector_size: u64, extended: bool, show_bytes: bool) {
@@ -1719,6 +1738,9 @@ fn print_gpt_listing(out: &mut OutBuf, dev: &[u8], header: &GptHeader,
     }
 }
 
+// Same shape as print_gpt_listing above; the lint suggests collapsing
+// these into a context struct that exists only to satisfy it.
+#[allow(clippy::too_many_arguments)]
 fn print_mbr_listing(out: &mut OutBuf, dev: &[u8], parts: &[MbrPartition; 4],
                      logical: &[MbrPartition], logical_count: usize,
                      sector_size: u64, extended: bool, show_bytes: bool) {
@@ -2830,14 +2852,10 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         }
         Personality::Gdisk => {
             match opts.action {
-                Action::List => {
-                    if opts.json_output {
+                Action::List
+                    if opts.json_output => {
                         print_json_listing(&mut out, dev, &label, total_bytes, total_sectors, sector_size);
-                    } else {
-                        print_gdisk_listing(&mut out, dev, &label, total_bytes, total_sectors,
-                                           sector_size, opts.show_bytes);
                     }
-                }
                 Action::Interactive => {
                     print_gdisk_listing(&mut out, dev, &label, total_bytes, total_sectors,
                                        sector_size, false);

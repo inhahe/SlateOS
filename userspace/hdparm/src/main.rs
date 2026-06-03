@@ -5,6 +5,14 @@
 //   sdparm  - get/set SCSI disk parameters
 
 #![cfg_attr(not(test), no_main)]
+// The ATA/SATA feature flag set (ATA_FLAG_LBA / LBA48 / HPA / DEVSLP /
+// NCQ / SECURITY / SMART / TRIM / WRITE_CACHE / READ_AHEAD), the
+// DriveSettings / DriveInfo structs, and the unread show_readonly /
+// set_io32bit / set_readonly / trim_sector / idle args fields encode
+// the ATA IDENTIFY DEVICE data layout the real implementation must
+// speak. They are kept as documentation for the eventual ATA SAT
+// driver integration.
+#![allow(dead_code)]
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -197,28 +205,28 @@ fn parse_hdparm_args(args: &[Vec<u8>]) -> HdparmArgs {
             result.security_freeze = true;
             has_action = true;
         } else if arg.starts_with(b"-A") {
-            result.set_read_ahead = Some(parse_bool_arg(arg, b"-A", &args, &mut i));
+            result.set_read_ahead = Some(parse_bool_arg(arg, b"-A", args, &mut i));
             has_action = true;
         } else if arg.starts_with(b"-W") {
-            result.set_write_cache = Some(parse_bool_arg(arg, b"-W", &args, &mut i));
+            result.set_write_cache = Some(parse_bool_arg(arg, b"-W", args, &mut i));
             has_action = true;
         } else if arg.starts_with(b"-B") {
-            result.set_apm = Some(parse_u8_arg(arg, b"-B", &args, &mut i));
+            result.set_apm = Some(parse_u8_arg(arg, b"-B", args, &mut i));
             has_action = true;
         } else if arg.starts_with(b"-M") {
-            result.set_aam = Some(parse_u8_arg(arg, b"-M", &args, &mut i));
+            result.set_aam = Some(parse_u8_arg(arg, b"-M", args, &mut i));
             has_action = true;
         } else if arg.starts_with(b"-S") {
-            result.set_standby = Some(parse_u16_arg(arg, b"-S", &args, &mut i));
+            result.set_standby = Some(parse_u16_arg(arg, b"-S", args, &mut i));
             has_action = true;
         } else if arg.starts_with(b"-m") && arg != b"-m" {
-            result.set_multcount = Some(parse_u16_arg(arg, b"-m", &args, &mut i));
+            result.set_multcount = Some(parse_u16_arg(arg, b"-m", args, &mut i));
             has_action = true;
         } else if arg.starts_with(b"-d") && arg != b"-d" {
-            result.set_dma = Some(parse_bool_arg(arg, b"-d", &args, &mut i));
+            result.set_dma = Some(parse_bool_arg(arg, b"-d", args, &mut i));
             has_action = true;
         } else if arg.starts_with(b"-u") && arg != b"-u" {
-            result.set_unmaskirq = Some(parse_bool_arg(arg, b"-u", &args, &mut i));
+            result.set_unmaskirq = Some(parse_bool_arg(arg, b"-u", args, &mut i));
             has_action = true;
         } else if !arg.starts_with(b"-") {
             result.device = arg.clone();
@@ -373,7 +381,11 @@ fn cmd_hdparm(args: &HdparmArgs) -> i32 {
     0
 }
 
-fn hdparm_identify(device: &[u8]) -> i32 {
+// The `_device` parameter on these query-mode functions documents
+// intent: a real implementation would issue ATA IDENTIFY DEVICE
+// (or its variants) to that path. The personality-CLI stubs print
+// representative output without consulting the device.
+fn hdparm_identify(_device: &[u8]) -> i32 {
     // In real implementation: ATA IDENTIFY DEVICE command
     print_out(b" Model Number:       OurOS Virtual Disk\n");
     print_out(b" Serial Number:      VD00000001\n");
@@ -405,22 +417,22 @@ fn hdparm_identify(device: &[u8]) -> i32 {
     0
 }
 
-fn hdparm_geometry(device: &[u8]) -> i32 {
+fn hdparm_geometry(_device: &[u8]) -> i32 {
     print_out(b" geometry     = 121601/255/63, sectors = 1953525168, start = 0\n");
     0
 }
 
-fn hdparm_timing_read(device: &[u8]) -> i32 {
+fn hdparm_timing_read(_device: &[u8]) -> i32 {
     print_out(b" Timing buffered disk reads: 1024 MB in  3.00 seconds = 341.33 MB/sec\n");
     0
 }
 
-fn hdparm_timing_cache(device: &[u8]) -> i32 {
+fn hdparm_timing_cache(_device: &[u8]) -> i32 {
     print_out(b" Timing buffer-cache reads:  16384 MB in  2.00 seconds = 8192.00 MB/sec\n");
     0
 }
 
-fn hdparm_show_settings(device: &[u8]) -> i32 {
+fn hdparm_show_settings(_device: &[u8]) -> i32 {
     print_out(b" multcount     = 16 (on)\n");
     print_out(b" IO_support    =  1 (32-bit)\n");
     print_out(b" readonly      =  0 (off)\n");

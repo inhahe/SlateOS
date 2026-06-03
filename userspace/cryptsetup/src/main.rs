@@ -2156,9 +2156,9 @@ mod tests {
         let h = LuksHeader::new("serpent", "cbc-essiv", "sha256", 32, 1000, "/dev/sdb");
         let data = h.serialize();
         let h2 = LuksHeader::deserialize(&data).unwrap();
-        assert_eq!(h2.key_slots[0].active, true);
+        assert!(h2.key_slots[0].active);
         for i in 1..LUKS_KEY_SLOTS {
-            assert_eq!(h2.key_slots[i].active, false);
+            assert!(!h2.key_slots[i].active);
         }
         assert_eq!(h.key_slots[0].iterations, h2.key_slots[0].iterations);
         assert_eq!(h.key_slots[0].salt, h2.key_slots[0].salt);

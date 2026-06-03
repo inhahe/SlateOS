@@ -125,4 +125,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, run_sysdig, strip_ext};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sysdig"), "sysdig");
+        assert_eq!(basename(r"C:\bin\sysdig.exe"), "sysdig.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sysdig.exe"), "sysdig");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sysdig(&["--help".to_string()], "sysdig"), 0);
+        assert_eq!(run_sysdig(&["-h".to_string()], "sysdig"), 0);
+        assert_eq!(run_sysdig(&["--version".to_string()], "sysdig"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sysdig(&[], "sysdig"), 0);
+    }
+}

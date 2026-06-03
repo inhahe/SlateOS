@@ -1876,9 +1876,12 @@ mod tests {
 
     #[test]
     fn yaml_parse_float() {
-        let val = YamlParser::parse("ratio: 3.14").unwrap();
+        // 3.25 is exactly representable in IEEE-754 binary64; use it
+        // instead of 3.14 to dodge clippy::approx_constant (which flags
+        // any literal close to PI).
+        let val = YamlParser::parse("ratio: 3.25").unwrap();
         let f = val.get("ratio").unwrap().as_float().unwrap();
-        assert!((f - 3.14).abs() < f64::EPSILON);
+        assert!((f - 3.25).abs() < f64::EPSILON);
     }
 
     #[test]

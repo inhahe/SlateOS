@@ -102,6 +102,47 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::run_otelcol;
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_exits_zero() {
+        assert_eq!(run_otelcol(vec!["--help".to_string()], false), 0);
+        assert_eq!(run_otelcol(vec!["-h".to_string()], true), 0);
+    }
+
+    #[test]
+    fn version_distinguishes_contrib() {
+        assert_eq!(run_otelcol(vec!["--version".to_string()], false), 0);
+        assert_eq!(run_otelcol(vec!["--version".to_string()], true), 0);
+    }
+
+    #[test]
+    fn components_exits_zero() {
+        assert_eq!(run_otelcol(vec!["components".to_string()], false), 0);
+        assert_eq!(run_otelcol(vec!["components".to_string()], true), 0);
+    }
+
+    #[test]
+    fn validate_exits_zero() {
+        assert_eq!(run_otelcol(vec!["validate".to_string()], false), 0);
+        assert_eq!(
+            run_otelcol(
+                vec![
+                    "validate".to_string(),
+                    "--config=my.yaml".to_string(),
+                ],
+                false,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn default_run_exits_zero() {
+        assert_eq!(run_otelcol(vec![], false), 0);
+        assert_eq!(
+            run_otelcol(vec!["--config=etc.yaml".to_string()], true),
+            0
+        );
+    }
 }

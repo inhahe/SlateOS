@@ -2353,7 +2353,7 @@ PRUNENAMES = \".git .hg\"
 
     #[test]
     fn test_database_search_multiple_patterns() {
-        let paths = vec![
+        let paths = [
             "/usr/bin/python3".to_string(),
             "/usr/bin/python2".to_string(),
             "/usr/lib/python3/site.py".to_string(),
@@ -2374,7 +2374,7 @@ PRUNENAMES = \".git .hg\"
 
     #[test]
     fn test_database_search_no_match() {
-        let paths = vec!["/usr/bin/ls".to_string()];
+        let paths = ["/usr/bin/ls".to_string()];
         let config = LocateConfig {
             match_mode: MatchMode::Substring,
             patterns: vec!["nonexistent".to_string()],

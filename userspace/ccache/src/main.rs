@@ -93,6 +93,52 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::run_ccache;
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_exits_zero() {
+        assert_eq!(run_ccache(vec!["--help".to_string()]), 0);
+        assert_eq!(run_ccache(vec!["-h".to_string()]), 0);
+    }
+
+    #[test]
+    fn version_exits_zero() {
+        assert_eq!(run_ccache(vec!["--version".to_string()]), 0);
+        assert_eq!(run_ccache(vec!["-V".to_string()]), 0);
+        assert_eq!(run_ccache(vec!["--print-version".to_string()]), 0);
+    }
+
+    #[test]
+    fn show_stats_exits_zero() {
+        assert_eq!(run_ccache(vec!["-s".to_string()]), 0);
+        assert_eq!(run_ccache(vec!["--show-stats".to_string()]), 0);
+    }
+
+    #[test]
+    fn zero_and_clear_exit_zero() {
+        assert_eq!(run_ccache(vec!["-z".to_string()]), 0);
+        assert_eq!(run_ccache(vec!["--zero-stats".to_string()]), 0);
+        assert_eq!(run_ccache(vec!["-C".to_string()]), 0);
+        assert_eq!(run_ccache(vec!["--clear".to_string()]), 0);
+    }
+
+    #[test]
+    fn show_config_exits_zero() {
+        assert_eq!(run_ccache(vec!["-p".to_string()]), 0);
+        assert_eq!(run_ccache(vec!["--show-config".to_string()]), 0);
+    }
+
+    #[test]
+    fn compiler_wrapper_needs_args() {
+        // `ccache cc` with no compiler args -> error.
+        assert_eq!(run_ccache(vec!["cc".to_string()]), 1);
+    }
+
+    #[test]
+    fn compiler_wrapper_runs_with_args() {
+        assert_eq!(
+            run_ccache(vec!["cc".to_string(), "-c".to_string(), "a.c".to_string()]),
+            0
+        );
+    }
 }

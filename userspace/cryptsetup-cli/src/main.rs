@@ -91,4 +91,59 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, run_cryptsetup, run_integritysetup, run_veritysetup, strip_ext};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cryptsetup"), "cryptsetup");
+        assert_eq!(basename(r"C:\bin\cryptsetup.exe"), "cryptsetup.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cryptsetup.exe"), "cryptsetup");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn cryptsetup_help_and_version() {
+        assert_eq!(run_cryptsetup(&["--help".to_string()], "cryptsetup"), 0);
+        assert_eq!(run_cryptsetup(&["-h".to_string()], "cryptsetup"), 0);
+        assert_eq!(run_cryptsetup(&["--version".to_string()], "cryptsetup"), 0);
+    }
+
+    #[test]
+    fn cryptsetup_actions_succeed() {
+        assert_eq!(run_cryptsetup(&["luksDump".to_string()], "cryptsetup"), 0);
+        assert_eq!(
+            run_cryptsetup(
+                &["status".to_string(), "myvol".to_string()],
+                "cryptsetup",
+            ),
+            0
+        );
+        assert_eq!(
+            run_cryptsetup(&["unknown".to_string()], "cryptsetup"),
+            0
+        );
+    }
+
+    #[test]
+    fn verity_and_integrity_help_and_version() {
+        assert_eq!(run_veritysetup(&["--help".to_string()], "veritysetup"), 0);
+        assert_eq!(
+            run_veritysetup(&["--version".to_string()], "veritysetup"),
+            0
+        );
+        assert_eq!(
+            run_integritysetup(&["--help".to_string()], "integritysetup"),
+            0
+        );
+        assert_eq!(
+            run_integritysetup(&["--version".to_string()], "integritysetup"),
+            0
+        );
+    }
+}

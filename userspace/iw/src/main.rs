@@ -7,6 +7,15 @@
 //   rfkill   - radio frequency kill switch
 
 #![cfg_attr(not(test), no_main)]
+// BAND_6GHZ, print_err, band_str, pad_right, and the unread
+// WifiInterface::beacon_interval / Options::verbose fields are part of
+// the nl80211 / wireless-extensions vocabulary the real implementation
+// must speak. The multi-personality stub only exercises a subset of the
+// surface; the full vocabulary is intentionally kept so the future
+// driver-attached implementation can drop in without reshaping public
+// types or function signatures. Dead-code lint cannot see across that
+// future boundary.
+#![allow(dead_code)]
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -290,7 +299,7 @@ fn band_str(b: u8) -> &'static [u8] {
 
 fn detect_tool(argv0: &[u8]) -> Tool {
     let mut start = 0;
-    for i in 0..argv0.len() { if argv0[i] == b'/' || argv0[i] == b'\\' { start = i + 1; } }
+    for (i, b) in argv0.iter().enumerate() { if *b == b'/' || *b == b'\\' { start = i + 1; } }
     let name = &argv0[start..];
     if starts_with(name, b"iwconfig") { Tool::Iwconfig }
     else if starts_with(name, b"iwlist") { Tool::Iwlist }
@@ -418,7 +427,8 @@ fn get_scan_results() -> ([ScanResult; MAX_SSIDS], usize) {
     let mut results = [ScanResult::new(); MAX_SSIDS];
     let mut count = 0;
 
-    let networks: &[(&[u8], [u8;6], u32, u16, i16, u8, u8, u32)] = &[
+    type ScanFixture<'a> = (&'a [u8], [u8; 6], u32, u16, i16, u8, u8, u32);
+    let networks: &[ScanFixture] = &[
         (b"MyHomeNetwork", [0xAA,0xBB,0xCC,0xDD,0xEE,0xFF], 5180, 36, -45, SEC_WPA2, BAND_5GHZ, 8667),
         (b"MyHomeNetwork", [0xAA,0xBB,0xCC,0xDD,0xEE,0x01], 2437, 6, -55, SEC_WPA2, BAND_24GHZ, 1440),
         (b"Neighbor_5G", [0x11,0x22,0x33,0x44,0x55,0x66], 5240, 48, -62, SEC_WPA3, BAND_5GHZ, 5760),
@@ -483,8 +493,7 @@ fn show_iw_dev_info(opts: &Options) {
     let target = &opts.iface[..opts.iface_len];
     let mut buf = [0u8; 256];
 
-    for i in 0..count {
-        let w = &ifaces[i];
+    for w in ifaces.iter().take(count) {
         if opts.iface_len > 0 && &w.name[..w.name_len] != target { continue; }
 
         let mut pos = copy_bytes(&mut buf, 0, b"Interface ");
@@ -518,7 +527,7 @@ fn show_iw_dev_info(opts: &Options) {
         print_out(&buf[..pos]);
 
         pos = copy_bytes(&mut buf, 0, b"\ttxpower ");
-        pos += format_i16((w.tx_power / 100) as i16, &mut buf[pos..]);
+        pos += format_i16(w.tx_power / 100, &mut buf[pos..]);
         pos = copy_bytes(&mut buf, pos, b".00 dBm\n");
         print_out(&buf[..pos]);
     }
@@ -528,8 +537,7 @@ fn show_iw_scan(_opts: &Options) {
     let (results, count) = get_scan_results();
     let mut buf = [0u8; 256];
 
-    for i in 0..count {
-        let r = &results[i];
+    for r in results.iter().take(count) {
         let mut pos = copy_bytes(&mut buf, 0, b"BSS ");
         pos += format_mac(&r.bssid, &mut buf[pos..]);
         pos = copy_bytes(&mut buf, pos, b"\n");
@@ -562,8 +570,7 @@ fn show_iw_link(opts: &Options) {
     let target = &opts.iface[..opts.iface_len];
     let mut buf = [0u8; 256];
 
-    for i in 0..count {
-        let w = &ifaces[i];
+    for w in ifaces.iter().take(count) {
         if opts.iface_len > 0 && &w.name[..w.name_len] != target { continue; }
         if !w.connected {
             print_out(b"Not connected.\n");
@@ -614,8 +621,7 @@ fn show_iw_list() {
     print_out(b"\tInterface modes:\n");
     print_out(b"\t\t* managed\n\t\t* AP\n\t\t* monitor\n");
 
-    for i in 0..count {
-        let w = &ifaces[i];
+    for w in ifaces.iter().take(count) {
         let mut pos = copy_bytes(&mut buf, 0, b"\nInterface ");
         pos = copy_bytes(&mut buf, pos, &w.name[..w.name_len]);
         pos = copy_bytes(&mut buf, pos, b"\n\ttype ");
@@ -641,8 +647,7 @@ fn cmd_iwconfig(opts: &Options) {
     let target = &opts.iface[..opts.iface_len];
     let mut buf = [0u8; 256];
 
-    for i in 0..count {
-        let w = &ifaces[i];
+    for w in ifaces.iter().take(count) {
         if opts.iface_len > 0 && &w.name[..w.name_len] != target { continue; }
 
         let mut pos = copy_bytes(&mut buf, 0, &w.name[..w.name_len]);
@@ -676,7 +681,7 @@ fn cmd_iwconfig(opts: &Options) {
         buf[pos] = b'.'; pos += 1;
         pos += format_u64(frac as u64, &mut buf[pos..]);
         pos = copy_bytes(&mut buf, pos, b" Mb/s   Tx-Power=");
-        pos += format_i16((w.tx_power / 100) as i16, &mut buf[pos..]);
+        pos += format_i16(w.tx_power / 100, &mut buf[pos..]);
         pos = copy_bytes(&mut buf, pos, b" dBm\n");
         print_out(&buf[..pos]);
 
@@ -696,8 +701,7 @@ fn cmd_iwlist(opts: &Options) {
 
         let (results, count) = get_scan_results();
         let mut buf = [0u8; 256];
-        for i in 0..count {
-            let r = &results[i];
+        for (i, r) in results.iter().enumerate().take(count) {
             let mut pos = copy_bytes(&mut buf, 0, b"          Cell ");
             pos += format_u64((i + 1) as u64, &mut buf[pos..]);
             pos = copy_bytes(&mut buf, pos, b" - Address: ");
@@ -739,8 +743,7 @@ fn cmd_rfkill(opts: &Options) {
 
     if cmd == b"list" || opts.rfkill_cmd_len == 0 {
         let mut buf = [0u8; 256];
-        for i in 0..count {
-            let d = &devs[i];
+        for d in devs.iter().take(count) {
             let mut pos = format_u64(d.index as u64, &mut buf);
             pos = copy_bytes(&mut buf, pos, b": ");
             pos = copy_bytes(&mut buf, pos, &d.name[..d.name_len]);

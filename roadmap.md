@@ -5190,7 +5190,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] Overflow ID (65534) for unmapped UIDs (Linux convention)
     - [x] kshell `userns` command: list/create/delete/uidmap/gidmap/stats/test
     - [x] 15 self-tests including nested two-level UID translation
-- [-] Resource control groups (CPU, memory, I/O limits per group)
+- [x] Resource control groups (CPU, memory, I/O limits per group)
   - [x] cgroup.rs: hierarchical group tree (max 256 groups, root always exists)
   - [x] CPU controller: per-group quota/period (quota_ticks per period_ticks), cpu_charge() hot-path check, cpu_period_reset() for BSP timer
   - [x] Memory controller: per-group frame limit, CAS-based mem_charge() with atomic limit enforcement, mem_uncharge() with underflow saturation

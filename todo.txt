@@ -2437,6 +2437,15 @@ Remaining net improvements (diminishing returns):
 
 ## Known Bugs / Limitations
 
+- (NOTED 2026-06-03) userspace/sshd has 244 defensive clippy warnings
+  (116 arithmetic_side_effects, 109 indexing_slicing, 19 slicing). This
+  is the SSH protocol parser/codec, so all bounds are well-defined by
+  the wire format. The proper fix is a focused refactor pass converting
+  arithmetic to checked_* and indexing to .get() — same shape as the
+  ldd ELF parser cleanup. Tests still pass; the parser handles malformed
+  input gracefully via its existing error path. Plan: a dedicated
+  session, expect ~4 hours given the size.
+
 - (NOTED 2026-06-03) userspace/ldd ELF parser has 73 remaining defensive
   clippy warnings (58 arithmetic_side_effects, 11 indexing_slicing, 4
   slicing). Sites are clustered in:

@@ -448,7 +448,7 @@ pub struct SimpleDate {
 
 impl SimpleDate {
     pub fn new(year: u16, month: u8, day: u8) -> Option<Self> {
-        if month < 1 || month > 12 || day < 1 || day > 31 {
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
             return None;
         }
         Some(Self { year, month, day })
@@ -628,11 +628,10 @@ impl Contact {
         if let Some(c) = self.last_name.chars().next() {
             result.push(c.to_ascii_uppercase());
         }
-        if result.is_empty() {
-            if let Some(c) = self.company.chars().next() {
+        if result.is_empty()
+            && let Some(c) = self.company.chars().next() {
                 result.push(c.to_ascii_uppercase());
             }
-        }
         if result.is_empty() {
             result.push('?');
         }
@@ -923,12 +922,11 @@ pub fn import_vcards(data: &str, start_id: u64) -> Vec<Contact> {
         } else if line.trim().eq_ignore_ascii_case("END:VCARD") {
             current_block.push_str(line);
             current_block.push('\n');
-            if in_vcard {
-                if let Some(c) = Contact::from_vcard(&current_block, next_id) {
+            if in_vcard
+                && let Some(c) = Contact::from_vcard(&current_block, next_id) {
                     contacts.push(c);
                     next_id = next_id.saturating_add(1);
                 }
-            }
             in_vcard = false;
             current_block.clear();
         } else if in_vcard {
@@ -1325,12 +1323,11 @@ impl ContactStore {
 
     /// Add a contact to a group.
     pub fn add_contact_to_group(&mut self, contact_id: u64, group_id: u64) -> bool {
-        if let Some(contact) = self.contacts.iter_mut().find(|c| c.id == contact_id) {
-            if !contact.groups.contains(&group_id) {
+        if let Some(contact) = self.contacts.iter_mut().find(|c| c.id == contact_id)
+            && !contact.groups.contains(&group_id) {
                 contact.groups.push(group_id);
                 return true;
             }
-        }
         false
     }
 
@@ -1358,7 +1355,7 @@ impl ContactStore {
     pub fn sorted_contacts(&self, order: SortOrder) -> Vec<&Contact> {
         let mut refs: Vec<&Contact> = self.contacts.iter().collect();
         match order {
-            SortOrder::Name => refs.sort_by(|a, b| a.sort_key_name().cmp(&b.sort_key_name())),
+            SortOrder::Name => refs.sort_by_key(|a| a.sort_key_name()),
             SortOrder::Company => refs.sort_by(|a, b| {
                 a.company
                     .to_lowercase()
@@ -1366,7 +1363,7 @@ impl ContactStore {
                     .then_with(|| a.sort_key_name().cmp(&b.sort_key_name()))
             }),
             SortOrder::RecentlyAdded => {
-                refs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                refs.sort_by_key(|r| std::cmp::Reverse(r.created_at));
             }
             SortOrder::RecentlyContacted => {
                 refs.sort_by(|a, b| {
@@ -1529,7 +1526,7 @@ impl ContactStore {
             .iter()
             .filter(|c| {
                 c.birthday
-                    .map_or(false, |b| b.is_upcoming_within(today_month, today_day, within_days))
+                    .is_some_and(|b| b.is_upcoming_within(today_month, today_day, within_days))
             })
             .collect()
     }

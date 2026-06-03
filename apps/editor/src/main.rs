@@ -14,9 +14,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#[allow(dead_code)]
 mod highlight;
-#[allow(dead_code)]
 mod syntree;
 
 use guitk::color::Color;
@@ -165,6 +163,12 @@ impl Language {
     }
 }
 
+impl Default for Document {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Document {
     pub fn new() -> Self {
         Self {
@@ -236,7 +240,7 @@ impl Document {
         let path = self
             .path
             .as_ref()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no file path"))?;
+            .ok_or_else(|| std::io::Error::other("no file path"))?;
 
         let content: String = self.lines.join(self.line_ending.chars());
         fs::write(path, &content)?;
@@ -610,6 +614,12 @@ pub struct FindState {
     pub current_match: usize,
 }
 
+impl Default for FindState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FindState {
     pub fn new() -> Self {
         Self {
@@ -733,6 +743,12 @@ pub struct EditorState {
     /// Character dimensions (approximate).
     pub char_width: f32,
     pub line_height: f32,
+}
+
+impl Default for EditorState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EditorState {

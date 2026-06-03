@@ -1067,7 +1067,7 @@ pub fn prune_auto_snapshots(tree: &SnapshotTree, keep_count: usize) -> Vec<Snaps
         .collect();
 
     // Sort newest first.
-    auto_snaps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    auto_snaps.sort_by_key(|s| std::cmp::Reverse(s.created_at));
 
     auto_snaps.iter().skip(keep_count).map(|s| s.id).collect()
 }
@@ -1097,6 +1097,11 @@ impl SnapshotManager {
 
     /// Create a snapshot with the given metadata, storing file data in the
     /// block store.
+    // 8 args mirror the snapshot metadata schema (name/description/type/
+    // includes/created_at/parent_id/files); bundling into a struct would just
+    // shift the verbosity to the call site and obscure that this is the
+    // single, intentional constructor entry point.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_snapshot<'a>(
         &mut self,
         name: impl Into<String>,

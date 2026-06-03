@@ -6,11 +6,8 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha) by default.
 
-#[allow(dead_code)]
 mod associations;
-#[allow(dead_code)]
 mod remote;
-#[allow(dead_code)]
 mod snapshots;
 
 #[allow(unused_imports)]
@@ -754,6 +751,12 @@ pub enum DropdownId {
     ColorFilter,
     CursorSize,
     NarratorVerbosity,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SettingsState {
@@ -1743,7 +1746,7 @@ impl SettingsState {
             }
         }
 
-        let grid_rows = (ACCENT_COLORS.len() + cols - 1) / cols;
+        let grid_rows = ACCENT_COLORS.len().div_ceil(cols);
         y += (grid_rows as f32) * (swatch_size + swatch_spacing) + SECTION_SPACING;
 
         // Preview of current accent color
@@ -1875,10 +1878,9 @@ impl SettingsState {
         let mut y = start_y;
         let right_x = x + 350.0;
 
-        match self.current_page {
-            SettingsPage::LoginOptions => {
-                // Login Options sub-page
-                y = render_section_header(tree, x, y, "Login Options");
+        if let SettingsPage::LoginOptions = self.current_page {
+            // Login Options sub-page
+            y = render_section_header(tree, x, y, "Login Options");
 
                 render_setting_row(tree, x, y, "Auto-login on startup", 0.0);
                 render_toggle(tree, right_x, y + 12.0, self.auto_login_enabled);
@@ -1934,11 +1936,9 @@ impl SettingsState {
                     tree.text(ix + 12.0, y + 12.0, icon, COL_TEXT, 20.0);
                 }
                 return;
-            }
-            _ => {} // UserAccounts (default)
         }
 
-        // User account list
+        // User account list (default UserAccounts page)
         y = render_section_header(tree, x, y, "User Accounts");
 
         for (idx, account) in self.user_accounts.iter().enumerate() {
@@ -2043,10 +2043,9 @@ impl SettingsState {
         let mut y = start_y;
         let right_x = x + 350.0;
 
-        match self.current_page {
-            SettingsPage::Capabilities => {
-                // App permissions summary sub-page
-                y = render_section_header(tree, x, y, "App Permissions Summary");
+        if let SettingsPage::Capabilities = self.current_page {
+            // App permissions summary sub-page
+            y = render_section_header(tree, x, y, "App Permissions Summary");
                 tree.text(
                     x,
                     y + 4.0,
@@ -2146,11 +2145,9 @@ impl SettingsState {
                     y += 28.0;
                 }
                 return;
-            }
-            _ => {} // Permissions (default)
         }
 
-        // Location access
+        // Location access (default Permissions page)
         y = render_section_header(tree, x, y, "Location");
         render_setting_row(tree, x, y, "Allow apps to access location", 0.0);
         render_toggle(tree, right_x, y + 12.0, self.location_enabled);
@@ -3040,7 +3037,7 @@ impl SettingsState {
         }
 
         // Page tab clicks
-        if my >= HEADER_HEIGHT - 20.0 && my < HEADER_HEIGHT {
+        if (HEADER_HEIGHT - 20.0..HEADER_HEIGHT).contains(&my) {
             let pages = self.current_category.pages();
             let mut tab_x = SIDEBAR_WIDTH + CONTENT_PADDING;
             for page in pages {

@@ -58,11 +58,10 @@ fn parse_proc_kv(content: &str) -> Vec<(String, String)> {
 fn get_proc_value(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let line = line.trim();
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim() == key {
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim() == key {
                 return Some(v.trim().to_string());
             }
-        }
     }
     None
 }
@@ -145,13 +144,12 @@ fn show_memory() {
         if let (Some(total_kb), Some(free_kb)) = (
             parse_kb(&total),
             parse_kb(&free),
-        ) {
-            if total_kb > 0 {
+        )
+            && total_kb > 0 {
                 let used_kb = total_kb.saturating_sub(free_kb);
                 let pct = (used_kb as f64 / total_kb as f64) * 100.0;
                 println!("  Used:      {} kB ({:.1}%)", used_kb, pct);
             }
-        }
     } else {
         println!("  (meminfo not available)");
     }
@@ -183,8 +181,8 @@ fn show_disk() {
     println!("=== Filesystems ===");
 
     if let Some(content) = read_proc("/proc/mounts") {
-        println!("  {:20} {:10} {:10} {}", "Device", "Type", "Options", "Mount");
-        println!("  {:20} {:10} {:10} {}", "------", "----", "-------", "-----");
+        println!("  {:20} {:10} {:10} Mount", "Device", "Type", "Options");
+        println!("  {:20} {:10} {:10} -----", "------", "----", "-------");
 
         for line in content.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -268,22 +266,20 @@ fn show_os() {
 
     if let Some(uptime_str) = read_proc("/proc/uptime") {
         let parts: Vec<&str> = uptime_str.split_whitespace().collect();
-        if let Some(secs_str) = parts.first() {
-            if let Ok(secs) = secs_str.parse::<f64>() {
+        if let Some(secs_str) = parts.first()
+            && let Ok(secs) = secs_str.parse::<f64>() {
                 let total_secs = secs as u64;
                 let days = total_secs / 86400;
                 let hours = (total_secs % 86400) / 3600;
                 let mins = (total_secs % 3600) / 60;
                 println!("  Uptime:    {}d {}h {}m", days, hours, mins);
             }
-        }
     }
 
-    if let Some(cmdline) = read_proc("/proc/cmdline") {
-        if !cmdline.is_empty() {
+    if let Some(cmdline) = read_proc("/proc/cmdline")
+        && !cmdline.is_empty() {
             println!("  Cmdline:   {cmdline}");
         }
-    }
 
     // Date from /proc or system.
     println!("  Arch:      x86_64");
@@ -302,11 +298,10 @@ fn show_process() {
 
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.chars().all(|c| c.is_ascii_digit()) {
+            if let Some(name) = entry.file_name().to_str()
+                && name.chars().all(|c| c.is_ascii_digit()) {
                     process_count += 1;
                 }
-            }
         }
         println!("  Running:   {process_count} processes");
     } else {
@@ -321,16 +316,14 @@ fn show_process() {
     // Task stats from /proc/stat.
     if let Some(stat) = read_proc("/proc/stat") {
         for line in stat.lines() {
-            if line.starts_with("procs_running") {
-                if let Some((_, val)) = line.split_once(' ') {
+            if line.starts_with("procs_running")
+                && let Some((_, val)) = line.split_once(' ') {
                     println!("  Running:   {}", val.trim());
                 }
-            }
-            if line.starts_with("procs_blocked") {
-                if let Some((_, val)) = line.split_once(' ') {
+            if line.starts_with("procs_blocked")
+                && let Some((_, val)) = line.split_once(' ') {
                     println!("  Blocked:   {}", val.trim());
                 }
-            }
         }
     }
 }

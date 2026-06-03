@@ -379,18 +379,18 @@ impl Parser {
                 a.tan()
             }
             MathFunc::Asin => {
-                if arg < -1.0 || arg > 1.0 {
+                if !(-1.0..=1.0).contains(&arg) {
                     return Err("Domain error (asin)");
                 }
-                self.from_radians(arg.asin())
+                self.radians_to_user_unit(arg.asin())
             }
             MathFunc::Acos => {
-                if arg < -1.0 || arg > 1.0 {
+                if !(-1.0..=1.0).contains(&arg) {
                     return Err("Domain error (acos)");
                 }
-                self.from_radians(arg.acos())
+                self.radians_to_user_unit(arg.acos())
             }
-            MathFunc::Atan => self.from_radians(arg.atan()),
+            MathFunc::Atan => self.radians_to_user_unit(arg.atan()),
             MathFunc::Ln => {
                 if arg <= 0.0 {
                     return Err("Domain error (ln)");
@@ -446,7 +446,9 @@ impl Parser {
     }
 
     /// Convert an angle from radians to the user's selected unit.
-    fn from_radians(&self, radians: f64) -> f64 {
+    // Renamed from `from_radians` to satisfy `wrong_self_convention`
+    // (from_* should not take `&self`).
+    fn radians_to_user_unit(&self, radians: f64) -> f64 {
         match self.angle_unit {
             AngleUnit::Radians => radians,
             AngleUnit::Degrees => radians.to_degrees(),
@@ -523,6 +525,12 @@ pub struct Calculator {
     pub paren_depth: i32,
 }
 
+impl Default for Calculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Calculator {
     /// Create a new calculator in Standard mode.
     pub fn new() -> Self {
@@ -575,13 +583,12 @@ impl Calculator {
         self.showing_result = false;
         // Replace trailing operator if the user changes their mind.
         let trimmed = self.expression.trim_end();
-        if let Some(last) = trimmed.chars().last() {
-            if "+-*/%".contains(last) && op != '-' {
+        if let Some(last) = trimmed.chars().last()
+            && "+-*/%".contains(last) && op != '-' {
                 // Replace the last operator (but allow unary minus after another op).
                 let end = trimmed.len() - last.len_utf8();
                 self.expression.truncate(end);
             }
-        }
         self.expression.push(' ');
         self.expression.push(op);
         self.expression.push(' ');

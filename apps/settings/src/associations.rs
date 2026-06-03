@@ -1112,10 +1112,9 @@ impl AssociationsPageState {
             let is_expanded = self.expanded_index == Some(idx);
             let is_hovered = self.hovered_row == Some(idx);
 
-            // Row background
-            let row_bg = if is_expanded {
-                COL_SURFACE0
-            } else if is_hovered {
+            // Row background (expanded and hovered both use SURFACE0 to give
+            // a single highlight tone for any "active" row state).
+            let row_bg = if is_expanded || is_hovered {
                 COL_SURFACE0
             } else {
                 COL_BASE

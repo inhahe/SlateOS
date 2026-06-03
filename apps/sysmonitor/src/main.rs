@@ -1127,7 +1127,7 @@ impl SysMonitorState {
                     let rows_start = content_y + HEADER_HEIGHT;
                     if my >= rows_start {
                         let row_f = (my - rows_start) / ROW_HEIGHT;
-                        let row_idx = row_f as usize + self.scroll_offset;
+                        let row_idx = (row_f as usize).saturating_add(self.scroll_offset);
                         if row_idx < self.visible_indices.len() {
                             self.selected_index = Some(row_idx);
                         }
@@ -1143,7 +1143,7 @@ impl SysMonitorState {
                     let content_y = TAB_BAR_HEIGHT + HEADER_HEIGHT;
                     if my >= content_y {
                         let row_f = (my - content_y) / ROW_HEIGHT;
-                        let row_idx = row_f as usize + self.scroll_offset;
+                        let row_idx = (row_f as usize).saturating_add(self.scroll_offset);
                         if row_idx < self.visible_indices.len() {
                             self.selected_index = Some(row_idx);
                             if let Some(&proc_idx) = self.visible_indices.get(row_idx) {
@@ -1179,7 +1179,7 @@ impl SysMonitorState {
                     let content_y = TAB_BAR_HEIGHT + HEADER_HEIGHT;
                     if my >= content_y {
                         let row_f = (my - content_y) / ROW_HEIGHT;
-                        let row_idx = row_f as usize + self.scroll_offset;
+                        let row_idx = (row_f as usize).saturating_add(self.scroll_offset);
                         self.hovered_index = if row_idx < self.visible_indices.len() {
                             Some(row_idx)
                         } else {

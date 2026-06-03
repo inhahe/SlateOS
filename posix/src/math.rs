@@ -696,7 +696,10 @@ fn frexp_internal(x: f64, exp: &mut i32) -> f64 {
         // No implicit leading 1; we must normalize by scaling up.
         // Multiply by 2^64 to move the value into normal range,
         // then recurse and subtract 64 from the exponent.
-        let scaled = x * (1u64 << 54) as f64; // x * 2^54
+        // 2^54 is exactly representable in f64 (sign 0, biased exponent
+        // 1023+54 = 1077 = 0x435, mantissa 0).  Building it via
+        // `f64::from_bits` avoids any precision-loss cast.
+        let scaled = x * f64::from_bits(0x4350_0000_0000_0000); // 2^54
         let m = frexp_internal(scaled, exp);
         *exp -= 54;
         return m;

@@ -590,11 +590,8 @@ pub unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]
         }
 
         // Flags.
-        loop {
-            match unsafe { *fmt.add(fpos) } {
-                b'-' | b'+' | b' ' | b'0' | b'#' => fpos = fpos.wrapping_add(1),
-                _ => break,
-            }
+        while let b'-' | b'+' | b' ' | b'0' | b'#' = unsafe { *fmt.add(fpos) } {
+            fpos = fpos.wrapping_add(1);
         }
 
         // Width (a '*' consumes an integer arg).

@@ -2347,29 +2347,27 @@ pub extern "C" fn renameat(
     let old_needs_resolve = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
     let new_needs_resolve = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
 
-    let old_ptr;
     let mut old_full = [0u8; crate::unistd::PATH_MAX];
-    if old_needs_resolve {
+    let old_ptr = if old_needs_resolve {
         let len = resolve_dirfd_path(olddirfd, oldpath, &mut old_full);
         if len == 0 {
             return -1;
         }
-        old_ptr = old_full.as_ptr();
+        old_full.as_ptr()
     } else {
-        old_ptr = oldpath;
-    }
+        oldpath
+    };
 
-    let new_ptr;
     let mut new_full = [0u8; crate::unistd::PATH_MAX];
-    if new_needs_resolve {
+    let new_ptr = if new_needs_resolve {
         let len = resolve_dirfd_path(newdirfd, newpath, &mut new_full);
         if len == 0 {
             return -1;
         }
-        new_ptr = new_full.as_ptr();
+        new_full.as_ptr()
     } else {
-        new_ptr = newpath;
-    }
+        newpath
+    };
 
     rename(old_ptr, new_ptr)
 }
@@ -2459,29 +2457,27 @@ pub extern "C" fn linkat(
     let old_needs_resolve = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
     let new_needs_resolve = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
 
-    let old_ptr;
     let mut old_full = [0u8; crate::unistd::PATH_MAX];
-    if old_needs_resolve {
+    let old_ptr = if old_needs_resolve {
         let len = resolve_dirfd_path(olddirfd, oldpath, &mut old_full);
         if len == 0 {
             return -1;
         }
-        old_ptr = old_full.as_ptr();
+        old_full.as_ptr()
     } else {
-        old_ptr = oldpath;
-    }
+        oldpath
+    };
 
-    let new_ptr;
     let mut new_full = [0u8; crate::unistd::PATH_MAX];
-    if new_needs_resolve {
+    let new_ptr = if new_needs_resolve {
         let len = resolve_dirfd_path(newdirfd, newpath, &mut new_full);
         if len == 0 {
             return -1;
         }
-        new_ptr = new_full.as_ptr();
+        new_full.as_ptr()
     } else {
-        new_ptr = newpath;
-    }
+        newpath
+    };
 
     link(old_ptr, new_ptr)
 }

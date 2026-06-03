@@ -448,6 +448,11 @@ fn validate_sem_name(name: *const u8) -> Result<usize, i32> {
 /// only live (not-yet-fully-reclaimed) entries.  Returns `None` if no
 /// match.  Caller must hold `SEM_LOCK`.
 fn find_named_sem(name: *const u8, len: usize) -> Option<usize> {
+    // Iterating over indices (not iter()) because NAMED_SEMS is
+    // `static mut` and we must take each slot's address via
+    // `addr_of!` to avoid creating an aliasing reference to the whole
+    // array — that pattern requires an integer index.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..MAX_NAMED_SEMS {
         // SAFETY: SEM_LOCK is held.
         let slot = unsafe { &*core::ptr::addr_of!(NAMED_SEMS[i]) };
@@ -469,6 +474,8 @@ fn find_named_sem(name: *const u8, len: usize) -> Option<usize> {
 
 /// Find a free slot index.  Caller must hold `SEM_LOCK`.
 fn find_free_sem_slot() -> Option<usize> {
+    // See `find_named_sem` — addr_of! pattern needs an integer index.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..MAX_NAMED_SEMS {
         // SAFETY: SEM_LOCK is held.
         let slot = unsafe { &*core::ptr::addr_of!(NAMED_SEMS[i]) };
@@ -483,6 +490,8 @@ fn find_free_sem_slot() -> Option<usize> {
 /// `SEM_LOCK`.  Returns `None` if the pointer isn't a named-semaphore
 /// address (i.e. it's an unnamed semaphore).
 fn slot_for_ptr(sem: *mut SemT) -> Option<usize> {
+    // See `find_named_sem` — addr_of! pattern needs an integer index.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..MAX_NAMED_SEMS {
         // SAFETY: SEM_LOCK is held; stable addresses in `static mut`.
         let p = unsafe { core::ptr::addr_of!(NAMED_SEMS[i].sem) }.cast_mut();

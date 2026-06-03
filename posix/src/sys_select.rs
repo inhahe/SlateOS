@@ -29,6 +29,10 @@ pub fn fd_set(fd: i32, set: &mut FdSet) {
 }
 
 /// Remove a file descriptor from the set.
+///
+/// # Panics
+///
+/// Panics if `fd` is negative or >= `FD_SETSIZE`.
 pub fn fd_clr(fd: i32, set: &mut FdSet) {
     assert!(fd >= 0 && (fd as usize) < FD_SETSIZE);
     let idx = fd as usize / 64;
@@ -37,6 +41,10 @@ pub fn fd_clr(fd: i32, set: &mut FdSet) {
 }
 
 /// Test whether a file descriptor is in the set.
+///
+/// # Panics
+///
+/// Panics if `fd` is negative or >= `FD_SETSIZE`.
 pub fn fd_isset(fd: i32, set: &FdSet) -> bool {
     assert!(fd >= 0 && (fd as usize) < FD_SETSIZE);
     let idx = fd as usize / 64;

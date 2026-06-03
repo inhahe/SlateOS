@@ -283,6 +283,9 @@ unsafe fn retrieve_initial_fds() {
 ///
 /// Must be called exactly once, before main().  The returned pointers
 /// are valid for the entire process lifetime (they point into statics).
+// argc/argv pairing is the canonical libc startup convention; the
+// similar names (`final_argc`/`final_argv`) deliberately mirror it.
+#[allow(clippy::similar_names)]
 unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
     use crate::spawn::SpawnArgsHeader;
     use crate::syscall::{SYS_PROCESS_GET_ARGS, syscall2};
@@ -431,6 +434,10 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
 /// # Safety
 ///
 /// All pointer arguments must be valid per the C ABI.
+// argv/argc pairing is the canonical libc startup convention; the
+// `kernel_argv`/`kernel_argc` and `actual_argv`/`actual_argc` locals
+// are intentionally paired by name to make the convention obvious.
+#[allow(clippy::similar_names)]
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __libc_start_main(
     main: extern "C" fn(i32, *const *const u8, *const *const u8) -> i32,

@@ -882,6 +882,9 @@ fn build_fd_map(
 /// Returns 0 on success, or an error number (NOT -1) on failure.
 /// This matches the POSIX spec: `posix_spawn` returns the error
 /// directly, not via errno.
+// argc/envc and argv/envp pair on the canonical exec-family naming;
+// the visual similarity is intentional and worth keeping.
+#[allow(clippy::similar_names)]
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn(
     pid: *mut PidT,

@@ -1017,6 +1017,11 @@ pub fn timerfd_is_readable(idx: u64) -> bool {
 /// - `Ok(8)`: wrote 8 bytes, at least one expiration.
 /// - `Ok(0)`: no expirations yet (caller should block or return EAGAIN).
 /// - `Err(errno)`: caller-facing error.
+///
+/// # Errors
+///
+/// Returns `EINVAL` if `buf` is shorter than 8 bytes, or `EBADF` if
+/// `idx` does not name a live timerfd.
 pub fn timerfd_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
     if buf.len() < 8 {
         return Err(errno::EINVAL);
@@ -2177,6 +2182,11 @@ pub fn inotify_is_nonblock(idx: u64) -> bool {
 /// Each record is 16 bytes of header followed by a `len`-byte name
 /// field (NUL-padded to an 8-byte boundary).  We require `buf` to be
 /// large enough for at least one full record.
+///
+/// # Errors
+///
+/// Returns `EBADF` if `idx` does not name a live inotify instance, or
+/// `EINVAL` if `buf` is too small to hold the next pending event.
 pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
     // Always pump pending kernel events before serving reads, so events
     // generated since the last call show up.

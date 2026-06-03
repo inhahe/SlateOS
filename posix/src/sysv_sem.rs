@@ -502,9 +502,9 @@ fn semop_common(semid: i32, sops: *const Sembuf, nsops: usize, deadline_ns: Opti
         sem_op: 0,
         sem_flg: 0,
     }; MAX_SEMS_PER_SET];
-    for i in 0..nsops {
+    for (i, slot) in buf.iter_mut().enumerate().take(nsops) {
         // SAFETY: caller contract; we just bounded `nsops` above.
-        buf[i] = unsafe { *sops.add(i) };
+        *slot = unsafe { *sops.add(i) };
     }
     let sops_slice = &buf[..nsops];
     // Detect IPC_NOWAIT: present on any op of the batch.  Linux's

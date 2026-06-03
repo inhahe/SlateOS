@@ -112,6 +112,10 @@ impl Md5 {
         }
     }
 
+    // Single-letter names (a, b, c, d, f, g, i, j, m) match the
+    // canonical RFC 1321 MD5 specification — renaming hurts the ability
+    // to audit this against the reference.
+    #[allow(clippy::many_single_char_names)]
     fn compress(&mut self) {
         let mut m = [0u32; 16];
         for (i, word) in m.iter_mut().enumerate() {

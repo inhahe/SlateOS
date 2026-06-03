@@ -838,6 +838,9 @@ fn validate_link_update(a: &BpfLinkUpdateAttr) -> Result<(), i32> {
 }
 
 /// Validates a link-detach attr.
+// Pass by reference for API symmetry with all other validate_* helpers
+// in this module, even though BpfLinkDetachAttr is only 4 bytes.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn validate_link_detach(a: &BpfLinkDetachAttr) -> Result<(), i32> {
     let fd = a.link_fd as i32;
     if fd < 0 {
@@ -884,6 +887,9 @@ fn validate_prog_bind_map(a: &BpfProgBindMapAttr) -> Result<(), i32> {
 }
 
 /// Validates a map-freeze attr.
+// Pass by reference for API symmetry with all other validate_* helpers
+// in this module, even though BpfMapFreezeAttr is only 4 bytes.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn validate_map_freeze(a: &BpfMapFreezeAttr) -> Result<(), i32> {
     let fd = a.map_fd as i32;
     if fd < 0 {

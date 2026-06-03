@@ -43,6 +43,12 @@ impl MbstateT {
     }
 }
 
+impl Default for MbstateT {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // c32rtomb — char32_t → multibyte
 // ---------------------------------------------------------------------------
@@ -125,11 +131,8 @@ pub extern "C" fn mbrtoc32(
         }
     }
 
-    if byte == 0 {
-        0 // NUL character
-    } else {
-        1 // one byte consumed
-    }
+    // POSIX: return 0 on NUL byte, else 1 (one byte consumed).
+    usize::from(byte != 0)
 }
 
 // ---------------------------------------------------------------------------

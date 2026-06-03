@@ -771,7 +771,10 @@ fn step(inst: &mut Instance) -> *mut FtsEnt {
     }
 
     // If we still have an active directory, walk to its next child.
-    while inst.depth > 0 {
+    // Each iteration either returns a child or pops the frame (also
+    // returning), so this is effectively a single-step decision —
+    // expressed as `if` rather than `while`.
+    if inst.depth > 0 {
         let frame_idx = inst.depth.wrapping_sub(1);
         let cursor = inst.stack[frame_idx].cursor as usize;
         let n = inst.stack[frame_idx].n_children as usize;
@@ -1022,7 +1025,9 @@ pub extern "C" fn fts_set(ftsp: *mut Fts, f: *mut FtsEnt, instr: i32) -> i32 {
                 // No-op in our impl (we don't transparently re-stat).
                 inst.current.fts_instr = FTS_FOLLOW;
             }
-            FTS_NOINSTR | _ => {
+            _ => {
+                // FTS_NOINSTR or any unknown instruction — clear back
+                // to NOINSTR.
                 inst.current.fts_instr = FTS_NOINSTR;
             }
         }

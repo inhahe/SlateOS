@@ -210,10 +210,10 @@ pub extern "C" fn backtrace_symbols(buffer: *const *mut u8, size: i32) -> *mut *
         // SAFETY: `str_area` has at least `n * 19` bytes; offset is in-bounds.
         let str_ptr = unsafe { str_area.add(i * 19) };
         // Write the 18 hex bytes plus a trailing NUL.
-        for j in 0..18 {
-            // SAFETY: same — bounds-checked above.
+        for (j, &b) in hex_buf.iter().enumerate() {
+            // SAFETY: `str_ptr` has 19 bytes reserved (see above); `j < 18`.
             unsafe {
-                *str_ptr.add(j) = hex_buf[j];
+                *str_ptr.add(j) = b;
             }
         }
         // SAFETY: 18 bytes written into a 19-byte slot; final byte is NUL.

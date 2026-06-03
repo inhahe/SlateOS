@@ -30,6 +30,7 @@ pub use crate::wait::WUNTRACED;
 
 /// True if the child terminated normally.
 #[inline]
+#[allow(clippy::verbose_bit_mask)] // matches the canonical glibc `WIFEXITED` macro form
 pub const fn wifexited(status: i32) -> bool {
     (status & 0x7F) == 0
 }

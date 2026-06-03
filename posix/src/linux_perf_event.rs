@@ -231,12 +231,12 @@ const PERF_CPU_MAX: i32 = 1024;
 /// Sentinel passed as `group_fd` to mean "no group" (event is its own group leader).
 const PERF_GROUP_FD_NONE: i32 = -1;
 
-/// Bit position of `exclude_kernel` in `PerfEventAttr.flags`.
-///
-/// The Linux uapi `perf_event_attr` is a packed bitfield whose first
-/// six 1-bit slots are: `disabled`, `inherit`, `pinned`, `exclusive`,
-/// `exclude_user`, `exclude_kernel`.  Bit 5 is therefore
-/// `exclude_kernel`.
+// Bit position of `exclude_kernel` in `PerfEventAttr.flags`.
+//
+// The Linux uapi `perf_event_attr` is a packed bitfield whose first
+// six 1-bit slots are: `disabled`, `inherit`, `pinned`, `exclusive`,
+// `exclude_user`, `exclude_kernel`.  Bit 5 is therefore
+// `exclude_kernel`.
 
 // ---------------------------------------------------------------------------
 // Validators

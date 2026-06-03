@@ -459,13 +459,13 @@ pub extern "C" fn mq_open(name: *const u8, oflag: i32, _mode: u32, attr: *const 
             errno::set_errno(errno::EINVAL);
             return -1;
         }
-        let mm_usz = mm as usize;
-        let ms_usz = ms as usize;
-        if mm_usz > MAX_MSGS_PER_QUEUE || ms_usz > MAX_MSG_SIZE {
+        let max_msgs_u = mm as usize;
+        let msg_size_u = ms as usize;
+        if max_msgs_u > MAX_MSGS_PER_QUEUE || msg_size_u > MAX_MSG_SIZE {
             errno::set_errno(errno::EINVAL);
             return -1;
         }
-        (mm_usz, ms_usz)
+        (max_msgs_u, msg_size_u)
     };
 
     let Some(qidx) = (unsafe { alloc_queue(&name_buf, name_len, max_msgs, msg_size) }) else {

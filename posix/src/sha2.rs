@@ -126,6 +126,10 @@ pub struct Sha256 {
 }
 
 impl Sha256 {
+    // Single-letter names (a..h, w, t1, t2, s0, s1, i, j) follow the
+    // FIPS 180-4 SHA-256 specification — auditability against the
+    // reference is more important here than long names.
+    #[allow(clippy::many_single_char_names)]
     fn compress(&mut self) {
         let mut w = [0u32; 64];
         for (i, word) in w.iter_mut().enumerate().take(16) {
@@ -330,6 +334,10 @@ pub struct Sha512 {
 }
 
 impl Sha512 {
+    // Single-letter names (a..h, w, t1, t2, s0, s1, i, j) follow the
+    // FIPS 180-4 SHA-512 specification — auditability against the
+    // reference is more important here than long names.
+    #[allow(clippy::many_single_char_names)]
     fn compress(&mut self) {
         let mut w = [0u64; 80];
         for (i, word) in w.iter_mut().enumerate().take(16) {

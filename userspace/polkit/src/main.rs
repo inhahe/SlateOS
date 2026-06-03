@@ -253,7 +253,7 @@ fn find_user<'a>(users: &'a [UserInfo], name: &str) -> Option<&'a UserInfo> {
 }
 
 /// Look up a user by UID.
-fn find_user_by_uid<'a>(users: &'a [UserInfo], uid: u32) -> Option<&'a UserInfo> {
+fn find_user_by_uid(users: &[UserInfo], uid: u32) -> Option<&UserInfo> {
     users.iter().find(|u| u.uid == uid)
 }
 
@@ -261,21 +261,18 @@ fn find_user_by_uid<'a>(users: &'a [UserInfo], uid: u32) -> Option<&'a UserInfo>
 fn get_caller_uid(users: &[UserInfo]) -> u32 {
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(uid_str) = rest.trim().split_whitespace().next() {
-                    if let Ok(uid) = uid_str.parse::<u32>() {
+            if let Some(rest) = line.strip_prefix("Uid:")
+                && let Some(uid_str) = rest.split_whitespace().next()
+                    && let Ok(uid) = uid_str.parse::<u32>() {
                         return uid;
                     }
-                }
-            }
         }
     }
 
-    if let Ok(name) = env::var("USER") {
-        if let Some(user) = find_user(users, &name) {
+    if let Ok(name) = env::var("USER")
+        && let Some(user) = find_user(users, &name) {
             return user.uid;
         }
-    }
 
     u32::MAX
 }
@@ -494,11 +491,10 @@ fn parse_policy_xml(content: &str) -> Vec<Action> {
                     if let Some(r) = AuthResult::from_str(&val) {
                         action.defaults_inactive = r;
                     }
-                } else if let Some(val) = extract_xml_text(trimmed, "allow_active") {
-                    if let Some(r) = AuthResult::from_str(&val) {
+                } else if let Some(val) = extract_xml_text(trimmed, "allow_active")
+                    && let Some(r) = AuthResult::from_str(&val) {
                         action.defaults_active = r;
                     }
-                }
             }
         } else if let Some(ref mut action) = current_action {
             if let Some(val) = extract_xml_text(trimmed, "description") {
@@ -525,41 +521,37 @@ fn parse_policy_xml(content: &str) -> Vec<Action> {
 fn extract_xml_text(line: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
-    if let Some(rest) = line.strip_prefix(&open) {
-        if let Some(text) = rest.strip_suffix(&close) {
+    if let Some(rest) = line.strip_prefix(&open)
+        && let Some(text) = rest.strip_suffix(&close) {
             return Some(text.to_string());
         }
-    }
     None
 }
 
 /// Extract action id from `<action id="...">`.
 fn extract_action_id(line: &str) -> Option<String> {
     let prefix = "<action id=\"";
-    if let Some(rest) = line.strip_prefix(prefix) {
-        if let Some(end_quote) = rest.find('"') {
+    if let Some(rest) = line.strip_prefix(prefix)
+        && let Some(end_quote) = rest.find('"') {
             return Some(rest[..end_quote].to_string());
         }
-    }
     None
 }
 
 /// Extract an annotation: `<annotate key="key">value</annotate>`.
 fn extract_annotate(line: &str) -> Option<(String, String)> {
     let prefix = "<annotate key=\"";
-    if let Some(rest) = line.strip_prefix(prefix) {
-        if let Some(end_quote) = rest.find('"') {
+    if let Some(rest) = line.strip_prefix(prefix)
+        && let Some(end_quote) = rest.find('"') {
             let key = rest[..end_quote].to_string();
             let after_key = &rest[end_quote + 1..];
             // Skip the `>`
-            if let Some(after_gt) = after_key.strip_prefix('>') {
-                if let Some(val_end) = after_gt.find("</annotate>") {
+            if let Some(after_gt) = after_key.strip_prefix('>')
+                && let Some(val_end) = after_gt.find("</annotate>") {
                     let val = after_gt[..val_end].to_string();
                     return Some((key, val));
                 }
-            }
         }
-    }
     None
 }
 
@@ -623,11 +615,10 @@ fn parse_rules_file(content: &str) -> Vec<Rule> {
                 if let Some(r) = AuthResult::from_str(val.trim().trim_matches('"')) {
                     rule.result = r;
                 }
-            } else if let Some(val) = trimmed.strip_prefix("priority:") {
-                if let Ok(p) = val.trim().parse::<i32>() {
+            } else if let Some(val) = trimmed.strip_prefix("priority:")
+                && let Ok(p) = val.trim().parse::<i32>() {
                     rule.priority = p;
                 }
-            }
         }
     }
 
@@ -665,11 +656,10 @@ impl PolicyStore {
             for entry in entries {
                 let Ok(entry) = entry else { continue };
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("policy") {
-                    if let Ok(content) = fs::read_to_string(&path) {
+                if path.extension().and_then(|e| e.to_str()) == Some("policy")
+                    && let Ok(content) = fs::read_to_string(&path) {
                         actions.extend(parse_policy_xml(&content));
                     }
-                }
             }
         }
         actions
@@ -724,18 +714,16 @@ impl PolicyStore {
             }
 
             // Check user constraint.
-            if let Some(ref rule_user) = rule.user {
-                if *rule_user != user.username {
+            if let Some(ref rule_user) = rule.user
+                && *rule_user != user.username {
                     continue;
                 }
-            }
 
             // Check group constraint.
-            if let Some(ref rule_group) = rule.group {
-                if !user.groups.iter().any(|g| g == rule_group) {
+            if let Some(ref rule_group) = rule.group
+                && !user.groups.iter().any(|g| g == rule_group) {
                     continue;
                 }
-            }
 
             return rule.result;
         }
@@ -769,9 +757,9 @@ fn authenticate_admin(users: &[UserInfo]) -> bool {
         return false;
     }
 
-    let _ = write!(
+    let _ = writeln!(
         io::stderr(),
-        "Authentication required. Admin users: {}\n",
+        "Authentication required. Admin users: {}",
         admins
             .iter()
             .map(|u| u.username.as_str())
@@ -810,9 +798,9 @@ fn authenticate_admin(users: &[UserInfo]) -> bool {
 
 /// Prompt the calling user to authenticate themselves.
 fn authenticate_self(user: &UserInfo) -> bool {
-    let _ = write!(
+    let _ = writeln!(
         io::stderr(),
-        "Authentication required for user '{}'.\n",
+        "Authentication required for user '{}'.",
         user.username
     );
 
@@ -916,7 +904,7 @@ fn run_polkitd(args: &[String]) -> i32 {
             Ok(0) | Err(_) => break, // EOF or error
             Ok(_) => {}
         }
-        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
             continue;
         }
@@ -1125,11 +1113,10 @@ fn run_pkexec(args: &[String]) -> i32 {
 fn determine_pkexec_action(command_path: &str) -> String {
     let store = PolicyStore::load();
     for action in &store.actions {
-        if let Some(path) = action.annotations.get("org.ouros.policykit.exec.path") {
-            if path == command_path {
+        if let Some(path) = action.annotations.get("org.ouros.policykit.exec.path")
+            && path == command_path {
                 return action.id.clone();
             }
-        }
     }
     "org.ouros.policykit.exec".to_string()
 }
@@ -1186,11 +1173,10 @@ fn exec_command(command_args: &[String], target_user: &str, users: &[UserInfo]) 
 fn caller_uid_string() -> String {
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(uid_str) = rest.trim().split_whitespace().next() {
+            if let Some(rest) = line.strip_prefix("Uid:")
+                && let Some(uid_str) = rest.split_whitespace().next() {
                     return uid_str.to_string();
                 }
-            }
         }
     }
     env::var("UID").unwrap_or_else(|_| "0".to_string())
@@ -1482,11 +1468,10 @@ fn get_process_uid(pid: u32) -> Option<u32> {
     let path = format!("/proc/{pid}/status");
     let content = fs::read_to_string(&path).ok()?;
     for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-            if let Some(uid_str) = rest.trim().split_whitespace().next() {
+        if let Some(rest) = line.strip_prefix("Uid:")
+            && let Some(uid_str) = rest.split_whitespace().next() {
                 return uid_str.parse().ok();
             }
-        }
     }
     None
 }

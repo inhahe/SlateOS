@@ -3973,3 +3973,19 @@ OBSOLETE NOTE BELOW (pre-relaxation):
    weren't part of the 6.9 extension.  Remaining deferred work per
    L3820: re-introduce sig-range + si_signo cross-check at the right
    depths once HandleKind::Pidfd is introduced.
+
+## BUG (noticed 2026-06-03, FIXED in same commit, methodology note):
+##   cargo-clippy --fix removes imports only used in #[cfg(test)] modules.
+##   Caught in apps/match3/src/main.rs during the clippy hygiene sweep:
+##   guitk::event::{KeyEvent, Modifiers} were used only inside `#[cfg(test)]
+##   mod tests`, but clippy --fix saw them as "unused" against the non-test
+##   build and stripped them. The crate built fine; only `cargo test`
+##   caught it (E0422/E0433 in 18 sites).
+##   Fix in match3: split the import into a non-test line + a
+##   `#[cfg(test)] use guitk::event::{KeyEvent, Modifiers};` line.
+##   Mitigation for the rest of the sweep: ALWAYS run `cargo test -p <crate>`
+##   after every `cargo clippy --fix`, never just `cargo clippy`. The build-
+##   passes-but-tests-fail-to-compile signature is otherwise invisible.
+##   Audited all previously-committed batch-C/D/F/G autofix-only crates
+##   (archivemanager, crossword, hexeditor, terminal, editor) — all pass
+##   `cargo test`, so the match3 case was isolated.

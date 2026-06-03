@@ -357,6 +357,12 @@ pub struct Document {
     pub seconds_since_save: u64,
 }
 
+impl Default for Document {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Document {
     /// Create a new empty document.
     pub fn new() -> Self {
@@ -1142,13 +1148,9 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
             let mut quote_lines = Vec::new();
             while idx < lines.len() && lines[idx].trim_start().starts_with('>') {
                 let ql = lines[idx].trim_start();
-                let stripped = if ql.starts_with("> ") {
-                    &ql[2..]
-                } else if ql.starts_with('>') {
-                    &ql[1..]
-                } else {
-                    ql
-                };
+                let stripped = ql.strip_prefix("> ")
+                    .or_else(|| ql.strip_prefix('>'))
+                    .unwrap_or(ql);
                 quote_lines.push(stripped);
                 idx += 1;
             }
@@ -1285,7 +1287,7 @@ fn is_ordered_list_start(line: &str) -> bool {
     let mut chars = trimmed.chars();
     // Must start with a digit.
     let first = chars.next();
-    if !first.map_or(false, |c| c.is_ascii_digit()) {
+    if !first.is_some_and(|c| c.is_ascii_digit()) {
         return false;
     }
     // Skip remaining digits.
@@ -1323,13 +1325,9 @@ fn parse_list_item(line: &str, ordered: bool) -> ListItem {
             .chars()
             .skip_while(|c| c.is_ascii_digit())
             .collect();
-        if after_num.starts_with(". ") {
-            after_num[2..].to_string()
-        } else if after_num.starts_with(") ") {
-            after_num[2..].to_string()
-        } else {
-            after_num
-        }
+        after_num.strip_prefix(". ")
+            .or_else(|| after_num.strip_prefix(") "))
+            .map_or_else(|| after_num.clone(), str::to_string)
     } else {
         // Skip the bullet character and space (e.g., "- ").
         if trimmed.len() > 2 {
@@ -1340,10 +1338,10 @@ fn parse_list_item(line: &str, ordered: bool) -> ListItem {
     };
 
     // Check for task list syntax: [x] or [ ].
-    let (task, final_content) = if content.starts_with("[x] ") || content.starts_with("[X] ") {
-        (Some(true), content[4..].to_string())
-    } else if content.starts_with("[ ] ") {
-        (Some(false), content[4..].to_string())
+    let (task, final_content) = if let Some(rest) = content.strip_prefix("[x] ").or_else(|| content.strip_prefix("[X] ")) {
+        (Some(true), rest.to_string())
+    } else if let Some(rest) = content.strip_prefix("[ ] ") {
+        (Some(false), rest.to_string())
     } else {
         (None, content)
     };
@@ -1485,8 +1483,8 @@ pub fn parse_inlines(input: &str) -> Vec<MdInline> {
                 current_text.clear();
             }
             let alt_start = pos + 2;
-            if let Some(alt_end) = find_single_closing(&chars, alt_start, ']') {
-                if alt_end + 1 < chars.len() && chars[alt_end + 1] == '(' {
+            if let Some(alt_end) = find_single_closing(&chars, alt_start, ']')
+                && alt_end + 1 < chars.len() && chars[alt_end + 1] == '(' {
                     let url_start = alt_end + 2;
                     if let Some(url_end) = find_single_closing(&chars, url_start, ')') {
                         let alt: String = chars[alt_start..alt_end].iter().collect();
@@ -1496,7 +1494,6 @@ pub fn parse_inlines(input: &str) -> Vec<MdInline> {
                         continue;
                     }
                 }
-            }
         }
 
         // Link: [text](url)
@@ -1506,8 +1503,8 @@ pub fn parse_inlines(input: &str) -> Vec<MdInline> {
                 current_text.clear();
             }
             let text_start = pos + 1;
-            if let Some(text_end) = find_single_closing(&chars, text_start, ']') {
-                if text_end + 1 < chars.len() && chars[text_end + 1] == '(' {
+            if let Some(text_end) = find_single_closing(&chars, text_start, ']')
+                && text_end + 1 < chars.len() && chars[text_end + 1] == '(' {
                     let url_start = text_end + 2;
                     if let Some(url_end) = find_single_closing(&chars, url_start, ')') {
                         let link_text: String = chars[text_start..text_end].iter().collect();
@@ -1521,7 +1518,6 @@ pub fn parse_inlines(input: &str) -> Vec<MdInline> {
                         continue;
                     }
                 }
-            }
         }
 
         // Line break: two trailing spaces.
@@ -1602,7 +1598,7 @@ pub fn extract_toc(source: &str) -> Vec<TocEntry> {
     for (line_idx, line) in source.lines().enumerate() {
         let trimmed = line.trim_start();
         let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-        if hashes >= 1 && hashes <= 6 {
+        if (1..=6).contains(&hashes) {
             let rest = &trimmed[hashes..];
             if rest.is_empty() || rest.starts_with(' ') {
                 let text = rest.trim().trim_end_matches('#').trim().to_string();
@@ -1635,6 +1631,12 @@ pub struct FindReplaceState {
     pub matches: Vec<(usize, usize, usize)>,
     /// Index of the currently highlighted match.
     pub current_match: usize,
+}
+
+impl Default for FindReplaceState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FindReplaceState {
@@ -1698,7 +1700,7 @@ impl FindReplaceState {
     }
 
     /// Replace the current match.
-    pub fn replace_current(&mut self, lines: &mut Vec<String>) -> bool {
+    pub fn replace_current(&mut self, lines: &mut [String]) -> bool {
         if self.matches.is_empty() {
             return false;
         }
@@ -1714,7 +1716,7 @@ impl FindReplaceState {
     }
 
     /// Replace all matches.
-    pub fn replace_all(&mut self, lines: &mut Vec<String>) -> usize {
+    pub fn replace_all(&mut self, lines: &mut [String]) -> usize {
         if self.matches.is_empty() || self.query.is_empty() {
             return 0;
         }
@@ -2428,13 +2430,12 @@ pub fn insert_heading(doc: &mut Document, level: u8) {
 
 /// Insert a link template.
 pub fn insert_link(doc: &mut Document) {
-    if doc.selection_anchor.is_some() {
-        if let Some(selected) = doc.selected_text() {
+    if doc.selection_anchor.is_some()
+        && let Some(selected) = doc.selected_text() {
             doc.delete_selection();
             insert_snippet(doc, &format!("[{}](url)", selected));
             return;
         }
-    }
     insert_snippet(doc, "[link text](url)");
 }
 
@@ -3580,7 +3581,7 @@ pub fn render_tab_bar(
             doc.name.clone()
         };
         let tab_width = (label.len() as f32) * 7.5 + 24.0;
-        let tab_width = tab_width.max(80.0).min(200.0);
+        let tab_width = tab_width.clamp(80.0, 200.0);
 
         let bg_color = if is_active { BASE } else { MANTLE };
         let text_color = if is_active { TEXT } else { SUBTEXT0 };
@@ -4636,12 +4637,11 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
             app.active_document_mut().insert_text("    ");
             app.refresh_cache();
         }
-        Key::Char(ch) => {
-            if !modifiers.ctrl && !modifiers.alt {
+        Key::Char(ch)
+            if !modifiers.ctrl && !modifiers.alt => {
                 app.active_document_mut().insert_char(ch);
                 app.refresh_cache();
             }
-        }
         _ => {}
     }
 

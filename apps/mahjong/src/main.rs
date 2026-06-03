@@ -617,11 +617,10 @@ impl Board {
         indices.sort_by(|&a, &b| self.tiles[b].pos.layer.cmp(&self.tiles[a].pos.layer));
 
         for idx in indices {
-            if let Some((tx, ty)) = self.tile_screen_pos(idx) {
-                if sx >= tx && sx < tx + TILE_W && sy >= ty && sy < ty + TILE_H {
+            if let Some((tx, ty)) = self.tile_screen_pos(idx)
+                && sx >= tx && sx < tx + TILE_W && sy >= ty && sy < ty + TILE_H {
                     return Some(idx);
                 }
-            }
         }
         None
     }
@@ -751,11 +750,10 @@ impl Mahjong {
                     self.message = None;
                     self.update_status();
                     // Update cursor to a free tile if current is removed.
-                    if let Some(ci) = self.cursor.tile_idx {
-                        if self.board.tiles.get(ci).map_or(true, |t| t.removed) {
+                    if let Some(ci) = self.cursor.tile_idx
+                        && self.board.tiles.get(ci).is_none_or(|t| t.removed) {
                             self.cursor.tile_idx = self.board.free_tiles().first().copied();
                         }
-                    }
                 } else {
                     self.message = Some("Tiles don't match!");
                     self.selected = Some(idx);
@@ -863,7 +861,7 @@ impl Mahjong {
                     };
                     let dist = main + cross * 2.0;
 
-                    if best.map_or(true, |(_, bd)| dist < bd) {
+                    if best.is_none_or(|(_, bd)| dist < bd) {
                         best = Some((fi, dist));
                     }
                 }
@@ -906,12 +904,11 @@ impl Mahjong {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            if let Some(idx) = self.board.tile_at_screen(event.x, event.y) {
+        if let MouseEventKind::Press(MouseButton::Left) = event.kind
+            && let Some(idx) = self.board.tile_at_screen(event.x, event.y) {
                 self.cursor.tile_idx = Some(idx);
                 self.try_select(idx);
             }
-        }
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -1009,7 +1006,7 @@ impl Mahjong {
             let is_hint = self.show_hint
                 && self
                     .hint
-                    .map_or(false, |(a, b)| idx == a || idx == b);
+                    .is_some_and(|(a, b)| idx == a || idx == b);
 
             // Shadow (gives depth illusion for stacked layers)
             if tile.pos.layer > 0 {

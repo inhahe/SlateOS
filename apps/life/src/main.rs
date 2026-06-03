@@ -237,19 +237,17 @@ impl Grid {
     }
 
     fn set(&mut self, row: usize, col: usize, alive: bool) {
-        if row < self.height && col < self.width {
-            if let Some(cell) = self.cells.get_mut(row * self.width + col) {
+        if row < self.height && col < self.width
+            && let Some(cell) = self.cells.get_mut(row * self.width + col) {
                 *cell = alive;
             }
-        }
     }
 
     fn toggle(&mut self, row: usize, col: usize) {
-        if row < self.height && col < self.width {
-            if let Some(cell) = self.cells.get_mut(row * self.width + col) {
+        if row < self.height && col < self.width
+            && let Some(cell) = self.cells.get_mut(row * self.width + col) {
                 *cell = !*cell;
             }
-        }
     }
 
     fn clear(&mut self) {
@@ -420,8 +418,8 @@ impl LifeApp {
 
     fn handle_main_event(&mut self, event: &Event) {
         match event {
-            Event::Tick { elapsed_ms } => {
-                if self.running {
+            Event::Tick { elapsed_ms }
+                if self.running => {
                     self.tick_accum += elapsed_ms;
                     let interval = self.speed_ms();
                     while self.tick_accum >= interval {
@@ -429,7 +427,6 @@ impl LifeApp {
                         self.step();
                     }
                 }
-            }
             Event::Key(KeyEvent { key, modifiers, .. }) => {
                 if modifiers.ctrl {
                     return;
@@ -439,11 +436,10 @@ impl LifeApp {
                         self.running = !self.running;
                         self.tick_accum = 0;
                     }
-                    Key::S => {
-                        if !self.running {
+                    Key::S
+                        if !self.running => {
                             self.step();
                         }
-                    }
                     Key::C => {
                         self.grid.clear();
                         self.generation = 0;
@@ -521,31 +517,26 @@ impl LifeApp {
     }
 
     fn handle_pattern_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(KeyEvent { key, .. }) => match key {
-                Key::Up => {
-                    if self.selected_pattern > 0 {
-                        self.selected_pattern -= 1;
-                    }
+        if let Event::Key(KeyEvent { key, .. }) = event { match key {
+            Key::Up
+                if self.selected_pattern > 0 => {
+                    self.selected_pattern -= 1;
                 }
-                Key::Down => {
-                    if self.selected_pattern + 1 < Pattern::ALL.len() {
-                        self.selected_pattern += 1;
-                    }
+            Key::Down
+                if self.selected_pattern + 1 < Pattern::ALL.len() => {
+                    self.selected_pattern += 1;
                 }
-                Key::Enter => {
-                    let pat = Pattern::ALL[self.selected_pattern];
-                    self.grid
-                        .place_pattern(pat, self.cursor_row, self.cursor_col);
-                    self.view = View::Main;
-                }
-                Key::Escape => {
-                    self.view = View::Main;
-                }
-                _ => {}
-            },
+            Key::Enter => {
+                let pat = Pattern::ALL[self.selected_pattern];
+                self.grid
+                    .place_pattern(pat, self.cursor_row, self.cursor_col);
+                self.view = View::Main;
+            }
+            Key::Escape => {
+                self.view = View::Main;
+            }
             _ => {}
-        }
+        } }
     }
 
     fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {

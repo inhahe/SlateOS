@@ -19,7 +19,9 @@
 //! Uses an LCG pseudo-random number generator (no external rand crate).
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
+#[cfg(test)]
+use guitk::event::{KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 
@@ -204,16 +206,8 @@ impl Pos {
 
     /// Returns true if `other` is horizontally or vertically adjacent.
     fn is_adjacent(self, other: Pos) -> bool {
-        let dr = if self.row > other.row {
-            self.row - other.row
-        } else {
-            other.row - self.row
-        };
-        let dc = if self.col > other.col {
-            self.col - other.col
-        } else {
-            other.col - self.col
-        };
+        let dr = self.row.abs_diff(other.row);
+        let dc = self.col.abs_diff(other.col);
         (dr == 1 && dc == 0) || (dr == 0 && dc == 1)
     }
 }
@@ -391,21 +385,17 @@ impl Match3 {
                 GemType::from_index(self.rng.next_bounded(GEM_TYPE_COUNT as usize) as u8);
             let gem = Gem::new(gem_type);
             // Check horizontal: if two to the left are the same type, skip.
-            if col >= 2 {
-                if let (Some(a), Some(b)) = (self.board[row][col - 1], self.board[row][col - 2]) {
-                    if a.gem_type == gem_type && b.gem_type == gem_type {
+            if col >= 2
+                && let (Some(a), Some(b)) = (self.board[row][col - 1], self.board[row][col - 2])
+                    && a.gem_type == gem_type && b.gem_type == gem_type {
                         continue;
                     }
-                }
-            }
             // Check vertical: if two above are the same type, skip.
-            if row >= 2 {
-                if let (Some(a), Some(b)) = (self.board[row - 1][col], self.board[row - 2][col]) {
-                    if a.gem_type == gem_type && b.gem_type == gem_type {
+            if row >= 2
+                && let (Some(a), Some(b)) = (self.board[row - 1][col], self.board[row - 2][col])
+                    && a.gem_type == gem_type && b.gem_type == gem_type {
                         continue;
                     }
-                }
-            }
             return gem;
         }
     }
@@ -557,14 +547,13 @@ impl Match3 {
                             let target_type = gem.gem_type;
                             for r in 0..GRID_SIZE {
                                 for c in 0..GRID_SIZE {
-                                    if let Some(g) = self.board[r][c] {
-                                        if g.gem_type == target_type {
+                                    if let Some(g) = self.board[r][c]
+                                        && g.gem_type == target_type {
                                             let p = Pos::new(r, c);
                                             if !to_remove.contains(&p) {
                                                 to_remove.push(p);
                                             }
                                         }
-                                    }
                                 }
                             }
                         }
@@ -577,13 +566,12 @@ impl Match3 {
             }
 
             // Place special gem if one was determined.
-            if let Some((pos, special)) = special_pos {
-                if let Some(gem) = self.board[pos.row][pos.col] {
+            if let Some((pos, special)) = special_pos
+                && let Some(gem) = self.board[pos.row][pos.col] {
                     self.board[pos.row][pos.col] = Some(Gem::with_special(gem.gem_type, special));
                     // Remove this position from the removal list so the special gem survives.
                     to_remove.retain(|&p| p != pos);
                 }
-            }
         }
 
         // Remove matched gems.
@@ -818,11 +806,10 @@ impl Match3 {
                 self.board[a.row][a.col] = None;
                 for r in 0..GRID_SIZE {
                     for c in 0..GRID_SIZE {
-                        if let Some(g) = self.board[r][c] {
-                            if g.gem_type == target {
+                        if let Some(g) = self.board[r][c]
+                            && g.gem_type == target {
                                 self.board[r][c] = None;
                             }
-                        }
                     }
                 }
                 let scored = SCORE_5 * 2;
@@ -838,11 +825,10 @@ impl Match3 {
                 self.board[b.row][b.col] = None;
                 for r in 0..GRID_SIZE {
                     for c in 0..GRID_SIZE {
-                        if let Some(g) = self.board[r][c] {
-                            if g.gem_type == target {
+                        if let Some(g) = self.board[r][c]
+                            && g.gem_type == target {
                                 self.board[r][c] = None;
                             }
-                        }
                     }
                 }
                 let scored = SCORE_5 * 2;
@@ -1363,11 +1349,10 @@ impl Match3 {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Key(ke) => {
-                if ke.pressed {
+            Event::Key(ke)
+                if ke.pressed => {
                     self.handle_key(ke.key);
                 }
-            }
             Event::Mouse(me) => self.handle_mouse(me),
             Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
             _ => {}
@@ -1409,26 +1394,22 @@ impl Match3 {
         }
 
         match key {
-            Key::Left => {
-                if self.cursor.col > 0 {
+            Key::Left
+                if self.cursor.col > 0 => {
                     self.cursor.col -= 1;
                 }
-            }
-            Key::Right => {
-                if self.cursor.col < GRID_SIZE - 1 {
+            Key::Right
+                if self.cursor.col < GRID_SIZE - 1 => {
                     self.cursor.col += 1;
                 }
-            }
-            Key::Up => {
-                if self.cursor.row > 0 {
+            Key::Up
+                if self.cursor.row > 0 => {
                     self.cursor.row -= 1;
                 }
-            }
-            Key::Down => {
-                if self.cursor.row < GRID_SIZE - 1 {
+            Key::Down
+                if self.cursor.row < GRID_SIZE - 1 => {
                     self.cursor.row += 1;
                 }
-            }
             Key::Enter | Key::Space => {
                 self.select_or_swap(self.cursor);
             }

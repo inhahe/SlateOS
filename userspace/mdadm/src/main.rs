@@ -8,6 +8,15 @@
 //! 6 (dual parity), and 10 (striped mirror). Uses v1.2 superblock format.
 
 #![deny(clippy::all)]
+// The full v1.2 MD-superblock data model — ArrayState::{Stopped,Inactive},
+// RaidLevel::{has_mirror, parity_disks}, MdSuperblock::{validate, from_str},
+// the bitmap helpers (set_dirty/clean, dirty_count, set_all_*), the bitmap
+// `bits` / `chunk_count` fields, the per-device dev_number/size/data_offset/
+// events/uuid/errors fields, and the array-table stop_array/remove_stopped
+// methods — is declared up-front because it encodes the on-disk v1.2 layout
+// (Linux md/raid.c) the real implementation must speak. They are kept as
+// documentation for the eventual block-device integration.
+#![allow(dead_code)]
 
 use std::env;
 use std::io::Write;

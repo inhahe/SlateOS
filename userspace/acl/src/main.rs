@@ -186,15 +186,23 @@ fn format_acl_tag(tag: &AclTag) -> String {
     }
 }
 
+/// Compute the path getfacl prints in the `# file:` header.
+///
+/// getfacl strips a single leading '/' from the displayed path so that
+/// absolute paths render relative, unless `--absolute-names` was given (in
+/// which case the path is shown verbatim). Paths without a leading '/' are
+/// returned unchanged in both modes.
+fn display_acl_path(path: &str, absolute: bool) -> &str {
+    if absolute {
+        path
+    } else {
+        path.strip_prefix('/').unwrap_or(path)
+    }
+}
+
 fn print_file_acl(out: &mut io::StdoutLock<'_>, acl: &FileAcl, omit_header: bool, absolute: bool, tabular: bool) {
     if !omit_header {
-        // getfacl strips a single leading '/' from the displayed path unless
-        // --absolute-names was given.
-        let display_path = if absolute {
-            acl.path.as_str()
-        } else {
-            acl.path.strip_prefix('/').unwrap_or(acl.path.as_str())
-        };
+        let display_path = display_acl_path(acl.path.as_str(), absolute);
         let _ = writeln!(out, "# file: {display_path}");
         let _ = writeln!(out, "# owner: {}", acl.owner);
         let _ = writeln!(out, "# group: {}", acl.group);
@@ -616,5 +624,33 @@ mod tests {
         };
         let c = entry.clone();
         assert_eq!(c.tag, AclTag::User("test".to_string()));
+    }
+
+    #[test]
+    fn test_display_acl_path_strips_leading_slash() {
+        // Default getfacl behavior: a single leading '/' is stripped.
+        assert_eq!(display_acl_path("/etc/passwd", false), "etc/passwd");
+        assert_eq!(display_acl_path("/", false), "");
+    }
+
+    #[test]
+    fn test_display_acl_path_absolute_keeps_slash() {
+        // --absolute-names: path shown verbatim.
+        assert_eq!(display_acl_path("/etc/passwd", true), "/etc/passwd");
+        assert_eq!(display_acl_path("/", true), "/");
+    }
+
+    #[test]
+    fn test_display_acl_path_relative_unchanged() {
+        // No leading '/': unchanged in both modes.
+        assert_eq!(display_acl_path("etc/passwd", false), "etc/passwd");
+        assert_eq!(display_acl_path("etc/passwd", true), "etc/passwd");
+    }
+
+    #[test]
+    fn test_display_acl_path_strips_only_one_slash() {
+        // Only the first leading '/' is removed (matches getfacl).
+        assert_eq!(display_acl_path("//srv", false), "/srv");
+        assert_eq!(display_acl_path("//srv", true), "//srv");
     }
 }

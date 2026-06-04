@@ -5883,3 +5883,48 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      we have a real fd table with driver routing, this becomes a
 ##      per-fd dispatch — the driver decides whether to handle the
 ##      request and we fall back to ENOTTY only if nobody does.
+##  16. PRCTL — DONE for the libc-startup option set.  sys_prctl
+##      accepts and returns sensible values for the PR_* options
+##      that real Linux startup code hits, and EINVAL for everything
+##      else (Linux's documented behaviour for unknown options):
+##        - PR_SET_NAME / PR_GET_NAME — accept (drop the name) /
+##          zero the user buf.  No per-thread comm storage yet.
+##        - PR_SET_PDEATHSIG — accept silently (we don't track
+##          parent-death notifications; systemd accepts SET failure
+##          but accepting keeps the log quiet).
+##        - PR_SET_DUMPABLE / PR_GET_DUMPABLE — SET accepts any
+##          value; GET returns 0 (not dumpable — we don't produce
+##          core dumps).
+##        - PR_SET_KEEPCAPS / PR_GET_KEEPCAPS — accept SET; GET
+##          returns 0.  No uid model, so capability preservation
+##          across uid change is vacuously satisfied.
+##        - PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS — accept SET;
+##          GET returns 1 (the paranoid answer — we don't honour
+##          setuid bits so "no new privs" is true by construction).
+##        - PR_CAPBSET_READ — return 1 ("cap is in bset") for any
+##          capability, since we don't have POSIX-style cap bits.
+##          Lets systemd's PR_CAPBSET_DROP loop run without
+##          spuriously thinking a cap doesn't exist.
+##        - PR_CAPBSET_DROP — silent success.
+##      Limitation: PR_SET_NAME / PR_GET_NAME are no-ops; debuggers
+##      that inspect /proc/<pid>/comm for thread identification see
+##      empty names.  Tracked as needing per-thread name storage on
+##      the TCB and a procfs string field.
+##  17. PERSONALITY — DONE as static PER_LINUX.  sys_personality
+##      returns 0 (PER_LINUX) regardless of input.  Programs query
+##      with personality(0xffff_ffff) to verify "are we Linux?";
+##      systemd / glibc init paths check this at startup.  Accepts
+##      sets without honouring them (Linux ignores most bits anyway).
+##  18. GETRESUID / GETRESGID — DONE returning all zeros.  We have
+##      no uid model; everything runs as the implicit "root-
+##      equivalent" owner of all kernel objects via the capability
+##      system.  Reporting ruid==euid==suid==0 lets pre-existing
+##      Linux code's geteuid()==0 privilege checks fire the way the
+##      program expects.  Validates each non-NULL pointer for
+##      writability (4 bytes per uid_t on Linux x86_64) and writes
+##      zeros.  NULL pointers are skipped per POSIX.
+##      Limitation: any program that drops privileges via setresuid
+##      and then verifies the drop by reading back via getresuid
+##      will see "uid 0" returned and may refuse to continue.  No
+##      such programs are in our early bring-up corpus; future work
+##      tracked alongside a real uid model.

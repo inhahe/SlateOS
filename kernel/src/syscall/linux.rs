@@ -382,6 +382,10 @@ pub mod nr {
     pub const TGKILL: u64 = 234;
     pub const UMASK: u64 = 95;
     pub const SIGALTSTACK: u64 = 131;
+    pub const GETRESUID: u64 = 118;
+    pub const GETRESGID: u64 = 120;
+    pub const PERSONALITY: u64 = 135;
+    pub const PRCTL: u64 = 157;
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,6 +1178,10 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::UMASK => sys_umask(args),
         nr::SIGALTSTACK => sys_sigaltstack(args),
         nr::IOCTL => sys_ioctl(args),
+        nr::PRCTL => sys_prctl(args),
+        nr::PERSONALITY => sys_personality(args),
+        nr::GETRESUID => sys_getresuid(args),
+        nr::GETRESGID => sys_getresgid(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -2788,6 +2796,163 @@ fn sys_sigaltstack(args: &SyscallArgs) -> SyscallResult {
 /// to ENOTTY if nobody does.
 fn sys_ioctl(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOTTY)
+}
+
+/// `prctl(option, arg2, arg3, arg4, arg5)` — Linux's "process control"
+/// catch-all for per-process state that doesn't justify a dedicated
+/// syscall.
+///
+/// We accept the small set of `PR_*` options that real Linux startup
+/// code (musl/glibc/systemd) hits, and return `-EINVAL` for everything
+/// else — Linux's documented response for "unrecognised option".
+///
+/// Accepted as silent success (returning 0):
+///   - `PR_SET_NAME` (15): set the comm name visible in `/proc/<pid>/comm`
+///     and `prctl(PR_GET_NAME)`.  We don't carry per-thread names yet,
+///     so the requested name is dropped, but the call succeeds so the
+///     program can continue.
+///   - `PR_GET_NAME` (16): the symmetric query.  We zero the user buf
+///     (16 bytes) if non-NULL, which reports "thread has no name".
+///   - `PR_SET_DUMPABLE` (4) / `PR_GET_DUMPABLE` (3): we don't produce
+///     core dumps; SET accepts any value, GET returns 0 (not dumpable).
+///   - `PR_SET_PDEATHSIG` (1): "send sig when parent dies" — we don't
+///     have parent-death tracking but most callers (systemd, init
+///     systems) handle SET failing only by logging.  Accepting it
+///     keeps them quiet.
+///   - `PR_SET_NO_NEW_PRIVS` (38) / `PR_GET_NO_NEW_PRIVS` (39): sandbox
+///     bit.  SET accepts; GET returns 1 (the most paranoid answer
+///     since we don't honour set*id setuid bits anyway).
+///   - `PR_SET_KEEPCAPS` (8) / `PR_GET_KEEPCAPS` (7): capability
+///     preservation across uid change.  We don't have uids; accept SET
+///     and return 0 for GET.
+///   - `PR_CAPBSET_READ` (23) / `PR_CAPBSET_DROP` (24): capability
+///     bounding set.  We have a capability system but not Linux-style
+///     POSIX capability bits; accept READ as "yes, that cap exists"
+///     (return 1) and DROP as silent success.  This is the friendliest
+///     answer for systemd, which calls PR_CAPBSET_DROP for every
+///     capability it wants to drop and gates on the result.
+///
+/// Everything else: `-EINVAL`.
+///
+/// Limitation: PR_SET_NAME / PR_GET_NAME are no-ops — programs that
+/// inspect /proc/<pid>/comm to find their own threads (some debugger
+/// integration) will see empty names.  Tracked in todo.txt as needing
+/// per-thread name storage on the TCB plus a procfs string field.
+fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
+    let option = args.arg0;
+    match option {
+        // PR_SET_PDEATHSIG, PR_SET_DUMPABLE, PR_SET_KEEPCAPS,
+        // PR_SET_NAME — accept silently.
+        1 | 4 | 8 | 15 => SyscallResult::ok(0),
+        // PR_GET_DUMPABLE — not dumpable.
+        3 => SyscallResult::ok(0),
+        // PR_GET_KEEPCAPS — we don't track it.
+        7 => SyscallResult::ok(0),
+        // PR_GET_NAME — copy 16 zero bytes to the user buffer if
+        // non-NULL.  Linux's comm is exactly 16 bytes (15 chars + NUL).
+        16 => {
+            let user_buf = args.arg1;
+            if user_buf != 0 {
+                if let Err(e) = crate::mm::user::validate_user_write(user_buf, 16) {
+                    return linux_err(linux_errno_for(e));
+                }
+                let zero = [0u8; 16];
+                // SAFETY: validate_user_write above confirmed a 16-byte
+                // writable user range; we copy 16 zero bytes.
+                let r = unsafe {
+                    crate::mm::user::copy_to_user(zero.as_ptr(), user_buf, 16)
+                };
+                if let Err(e) = r {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_CAPBSET_READ — Linux returns 1 if the cap is in the
+        // bounding set, 0 if not.  We don't track POSIX caps; report
+        // "in set" so systemd doesn't refuse to start because it
+        // thinks a capability it wants to drop isn't available.
+        23 => SyscallResult::ok(1),
+        // PR_CAPBSET_DROP — silent success.
+        24 => SyscallResult::ok(0),
+        // PR_SET_NO_NEW_PRIVS — silent success.
+        38 => SyscallResult::ok(0),
+        // PR_GET_NO_NEW_PRIVS — return 1 (the paranoid answer; we
+        // don't honour setuid bits so "no new privs" is true by
+        // construction).
+        39 => SyscallResult::ok(1),
+        _ => linux_err(errno::EINVAL),
+    }
+}
+
+/// `personality(persona)` — get/set the execution personality (Linux,
+/// BSD, SVR4, etc.).
+///
+/// The argument `persona == 0xffff_ffff` is the canonical "query
+/// current personality" call; libc startup uses this to verify we're
+/// PER_LINUX before doing anything Linux-ABI-specific.  Any other value
+/// is "set to this personality"; we accept and ignore (Linux ignores
+/// most personality bits anyway).
+///
+/// Returns the previous personality, which is always 0 (PER_LINUX) for
+/// us.
+fn sys_personality(_args: &SyscallArgs) -> SyscallResult {
+    // PER_LINUX == 0; we never had any other personality so the
+    // "previous" value is also 0.
+    SyscallResult::ok(0)
+}
+
+/// `getresuid(ruid, euid, suid)` — fetch real/effective/saved user IDs.
+///
+/// We have no uid model yet (everything runs as the implicit root-
+/// equivalent owner of all kernel objects via the capability system),
+/// so we report uid 0 for all three fields.  This matches what a
+/// process started by `init` on a Linux system would see and lets
+/// `geteuid()==0` privilege checks in pre-existing Linux code fire
+/// the way the program expects.
+///
+/// Errors:
+///   - `-EFAULT` on a bad user pointer.
+fn sys_getresuid(args: &SyscallArgs) -> SyscallResult {
+    let ruid_ptr = args.arg0;
+    let euid_ptr = args.arg1;
+    let suid_ptr = args.arg2;
+    write_uid32_triple(ruid_ptr, euid_ptr, suid_ptr)
+}
+
+/// `getresgid(rgid, egid, sgid)` — fetch real/effective/saved group IDs.
+///
+/// Same model and contract as [`sys_getresuid`]; reports 0 for all
+/// three.
+fn sys_getresgid(args: &SyscallArgs) -> SyscallResult {
+    let rgid_ptr = args.arg0;
+    let egid_ptr = args.arg1;
+    let sgid_ptr = args.arg2;
+    write_uid32_triple(rgid_ptr, egid_ptr, sgid_ptr)
+}
+
+/// Helper shared by [`sys_getresuid`] / [`sys_getresgid`]: write three
+/// `uid_t` (Linux x86_64: 32-bit unsigned) zeros to the three user
+/// pointers if non-NULL.  NULL pointers are skipped (POSIX permits any
+/// of the three fields to be discarded).  Returns 0 on success, the
+/// translated errno on a faulting pointer.
+fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
+    let zero = [0u8; 4];
+    for &p in &[a, b, c] {
+        if p == 0 {
+            continue;
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(p, 4) {
+            return linux_err(linux_errno_for(e));
+        }
+        // SAFETY: validate_user_write above confirmed a 4-byte
+        // writable user range; we copy exactly 4 zero bytes.
+        let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), p, 4) };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    SyscallResult::ok(0)
 }
 
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
@@ -4749,6 +4914,98 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   FAIL: ioctl(arbitrary) not ENOTTY"
             );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // prctl dispatch validation.
+    //   - Recognised options return 0 (or their documented value).
+    //   - Unknown options return EINVAL.
+    {
+        // PR_SET_NAME (15) — accept.
+        let a = SyscallArgs { arg0: 15, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_NAME) not 0 ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // PR_GET_NAME (16) with NULL buf — accept (skip the copy).
+        let a = SyscallArgs { arg0: 16, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: prctl(PR_GET_NAME, NULL) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // PR_CAPBSET_READ (23) — return 1 (cap "is in" the bset).
+        let a = SyscallArgs { arg0: 23, arg1: 1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ) not 1 ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // PR_GET_NO_NEW_PRIVS (39) — return 1.
+        let a = SyscallArgs { arg0: 39, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_GET_NO_NEW_PRIVS) not 1"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Unknown option (999) -> EINVAL.
+        let a = SyscallArgs { arg0: 999, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(999) not EINVAL ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // personality dispatch validation.
+    //   - Always returns 0 (PER_LINUX is the only personality we know).
+    {
+        let a = SyscallArgs { arg0: 0xffff_ffff, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PERSONALITY, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: personality(query) not 0 ({})",
+                dispatch_linux(nr::PERSONALITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PERSONALITY, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: personality(0) not 0");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // getresuid / getresgid dispatch validation.
+    //   - All three NULL pointers -> 0 (nothing to write).
+    //   - Any non-NULL pointer would trigger validate_user_write; with
+    //     the kernel-context bypass this also succeeds, so we can't
+    //     observe EFAULT here.  The write-zero path is covered by the
+    //     "all NULL" success — the function returns 0 in both modes
+    //     so the dispatch self-test only proves "routed correctly".
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETRESUID, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: getresuid(NULL,NULL,NULL) not 0");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::GETRESGID, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: getresgid(NULL,NULL,NULL) not 0");
             return Err(KernelError::InternalError);
         }
     }

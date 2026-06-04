@@ -31,15 +31,26 @@
 //!
 //! | Linux nr | Name              | Notes                              |
 //! |----------|-------------------|------------------------------------|
-//! | 1        | write             | only for fds 0,1,2 → console      |
+//! | 0        | read              | via per-process Linux fd table     |
+//! | 1        | write             | via per-process Linux fd table     |
+//! | 2        | open              | wraps `openat(AT_FDCWD, ...)`      |
+//! | 3        | close             | via per-process Linux fd table     |
+//! | 8        | lseek             | only for File handles              |
 //! | 9        | mmap              | anonymous private map only         |
 //! | 10       | mprotect          | no-op success (perms not tracked)  |
 //! | 11       | munmap            | passes through to native           |
 //! | 12       | brk               | always returns current brk (NYI)   |
 //! | 13       | rt_sigaction      | maps to SYS_SIGNAL_REGISTER       |
 //! | 14       | rt_sigprocmask    | maps to SYS_SIGNAL_MASK           |
-//! | 20       | writev            | only for fds 0,1,2 → console      |
+//! | 19       | readv             | via per-process Linux fd table     |
+//! | 20       | writev            | via per-process Linux fd table     |
 //! | 24       | sched_yield       | direct                             |
+//! | 32       | dup               | via per-process Linux fd table     |
+//! | 33       | dup2              | via per-process Linux fd table     |
+//! | 72       | fcntl             | F_DUPFD / F_GETFD / F_SETFD /      |
+//! |          |                   | F_GETFL / F_SETFL / F_DUPFD_CLOEXEC|
+//! | 257      | openat            | only AT_FDCWD; routes to VFS open  |
+//! | 292      | dup3              | via per-process Linux fd table     |
 //! | 35       | nanosleep         | reads timespec, calls SYS_SLEEP    |
 //! | 39       | getpid            | direct                             |
 //! | 60       | exit              | direct                             |
@@ -68,11 +79,8 @@
 //!
 //! # What's deferred
 //!
-//! - **read/write/close on real fds (not stdio)**, **open/openat**,
-//!   **socket family**, **dup/dup2**, **pipe**, **poll/epoll**: these
-//!   all need a kernel-side POSIX fd table that maps small integer fds
-//!   to kernel handles.  Today that table lives in userspace
-//!   (`posix/src/fdtable.rs`).  See `todo.txt` for the design sketch.
+//! - **socket family**, **pipe/pipe2**, **poll/epoll**, **eventfd**:
+//!   require additional kernel-side machinery beyond the fd table.
 //! - **execve / fork / vfork / clone / sigreturn**: these modify the
 //!   syscall frame (RIP/RSP).  They have to live in `entry.rs`
 //!   alongside the existing native-ABI frame-modifying paths; the
@@ -178,9 +186,50 @@ pub mod nr {
     pub const SET_ROBUST_LIST: u64 = 273;
     pub const EVENTFD: u64 = 290;
     pub const EVENTFD2: u64 = 290; // alias; modern kernels use 290 only
+    pub const DUP3: u64 = 292;
+    pub const PIPE2: u64 = 293;
     pub const GETRANDOM: u64 = 318;
     pub const STATX: u64 = 332;
 }
+
+// ---------------------------------------------------------------------------
+// Linux open-flag constants (used by open / openat / fcntl translation).
+//
+// Source of truth: `include/uapi/asm-generic/fcntl.h`.  Only the bits the
+// translator interprets explicitly are listed.
+// ---------------------------------------------------------------------------
+
+/// Linux `O_*` flag bits (subset interpreted by this layer).
+pub mod oflags {
+    pub const O_ACCMODE: u32 = 0o0003;
+    pub const O_RDONLY: u32 = 0o0000;
+    pub const O_WRONLY: u32 = 0o0001;
+    pub const O_RDWR: u32 = 0o0002;
+    pub const O_CREAT: u32 = 0o100;
+    pub const O_EXCL: u32 = 0o200;
+    pub const O_TRUNC: u32 = 0o1000;
+    pub const O_APPEND: u32 = 0o2000;
+    pub const O_NONBLOCK: u32 = 0o4000;
+    pub const O_DIRECTORY: u32 = 0o200_000;
+    pub const O_CLOEXEC: u32 = 0o2_000_000;
+}
+
+/// Linux `fcntl` command numbers (subset).
+pub mod fcntl_cmd {
+    pub const F_DUPFD: u32 = 0;
+    pub const F_GETFD: u32 = 1;
+    pub const F_SETFD: u32 = 2;
+    pub const F_GETFL: u32 = 3;
+    pub const F_SETFL: u32 = 4;
+    pub const F_DUPFD_CLOEXEC: u32 = 1030;
+}
+
+/// Linux `AT_FDCWD` — special "current working directory" base fd for
+/// the `*at` family of syscalls.  Our VFS resolves paths against the
+/// caller's cwd unconditionally, so AT_FDCWD is the only `dirfd` value
+/// we accept; any other `dirfd` returns -ENOSYS until we support
+/// directory file descriptors.
+pub const AT_FDCWD: i32 = -100;
 
 // ---------------------------------------------------------------------------
 // Linux errno values.
@@ -379,8 +428,18 @@ pub const fn linux_err(errno_val: i32) -> SyscallResult {
 #[must_use]
 pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
     match nr {
+        nr::READ => sys_read(args),
         nr::WRITE => sys_write(args),
+        nr::OPEN => sys_open(args),
+        nr::CLOSE => sys_close(args),
+        nr::LSEEK => sys_lseek(args),
+        nr::READV => sys_readv(args),
         nr::WRITEV => sys_writev(args),
+        nr::DUP => sys_dup(args),
+        nr::DUP2 => sys_dup2(args),
+        nr::DUP3 => sys_dup3(args),
+        nr::FCNTL => sys_fcntl(args),
+        nr::OPENAT => sys_openat(args),
         nr::MMAP => sys_mmap(args),
         nr::MPROTECT => sys_mprotect(args),
         nr::MUNMAP => sys_munmap(args),
@@ -494,55 +553,154 @@ fn write_timespec(user_ptr: u64, ts: LinuxTimespec) -> Result<(), KernelError> {
 // Per-syscall translations
 // ---------------------------------------------------------------------------
 
-/// `write(fd, buf, count)` — only for stdio fds (0, 1, 2).
-///
-/// Linux maps all of stdin/stdout/stderr to the controlling terminal.
-/// We don't have a controlling-terminal abstraction in the Linux ABI
-/// layer yet, so we route 1/2 to the kernel console.  Writes to fd 0
-/// (stdin) succeed silently (return count) to match what TTY drivers do
-/// when stdin happens to be writable.  Other fds return -EBADF until
-/// the kernel-side fd table lands.
+// ---------------------------------------------------------------------------
+// Linux fd-table dispatch helpers
+// ---------------------------------------------------------------------------
+
+use crate::proc::linux_fd::{FdEntry, HandleKind};
+
+/// Look up `fd` in the caller's Linux fd table.  Returns -EBADF (as a
+/// `SyscallResult`) if the caller has no Linux fd table or `fd` is
+/// not open.
+fn lookup_caller_fd(fd: i32) -> Result<FdEntry, SyscallResult> {
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return Err(linux_err(errno::EBADF)),
+    };
+    pcb::linux_fd_lookup(pid, fd).ok_or(linux_err(errno::EBADF))
+}
+
+/// Issue the kernel-side close appropriate to `entry.kind`.  No-op for
+/// `Console` handles (no kernel resource).
+fn close_handle(entry: FdEntry) -> SyscallResult {
+    match entry.kind {
+        HandleKind::Console => SyscallResult::ok(0),
+        HandleKind::File => {
+            let a = SyscallArgs {
+                arg0: entry.raw_handle,
+                arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_fs_close(&a))
+        }
+        HandleKind::Pipe => {
+            let a = SyscallArgs {
+                arg0: entry.raw_handle,
+                arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_pipe_close(&a))
+        }
+    }
+}
+
+/// Dispatch a `write(buf, len)` against an fd entry.  Routes by handle
+/// kind to the appropriate native handler.
+fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
+    match entry.kind {
+        HandleKind::Console => {
+            // The kernel console doesn't distinguish stdin / stdout /
+            // stderr — writes to "fd 0" silently succeed (matching
+            // TTY behaviour when stdin happens to be writable).
+            if entry.status_flags & oflags::O_ACCMODE == oflags::O_RDONLY {
+                #[allow(clippy::cast_possible_wrap)]
+                return SyscallResult::ok(len as i64);
+            }
+            let a = SyscallArgs {
+                arg0: buf, arg1: len, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_console_write(&a))
+        }
+        HandleKind::File => {
+            let a = SyscallArgs {
+                arg0: entry.raw_handle, arg1: buf, arg2: len,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_fs_write(&a))
+        }
+        HandleKind::Pipe => {
+            let a = SyscallArgs {
+                arg0: entry.raw_handle, arg1: buf, arg2: len,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_pipe_write(&a))
+        }
+    }
+}
+
+/// Dispatch a `read(buf, cap)` against an fd entry.
+fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    match entry.kind {
+        HandleKind::Console => {
+            // We approximate Linux TTY read with the line-oriented
+            // single-character read — enough for the typical "read
+            // one keystroke" pattern.  Multi-byte requests are
+            // capped at one byte; libc will retry as needed.
+            if cap == 0 {
+                return SyscallResult::ok(0);
+            }
+            let a = SyscallArgs {
+                arg0: buf, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_console_read_char(&a))
+        }
+        HandleKind::File => {
+            let a = SyscallArgs {
+                arg0: entry.raw_handle, arg1: buf, arg2: cap,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_fs_read(&a))
+        }
+        HandleKind::Pipe => {
+            let a = SyscallArgs {
+                arg0: entry.raw_handle, arg1: buf, arg2: cap,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_pipe_read(&a))
+        }
+    }
+}
+
+/// `write(fd, buf, count)` — consults the per-process Linux fd table.
 fn sys_write(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let buf = args.arg1;
     let count = args.arg2;
 
-    if !(0..=2).contains(&fd) {
-        return linux_err(errno::EBADF);
-    }
-
-    if fd == 0 {
-        // Pretend the write succeeded — no-op stdout-to-stdin.
-        return SyscallResult::ok(count as i64);
-    }
-
-    // Route to SYS_CONSOLE_WRITE; same arg layout (ptr, len).
-    let console_args = SyscallArgs {
-        arg0: buf,
-        arg1: count,
-        arg2: 0,
-        arg3: 0,
-        arg4: 0,
-        arg5: 0,
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
     };
-    linux_from_native(handlers::sys_console_write(&console_args))
+    dispatch_write(entry, buf, count)
 }
 
-/// `writev(fd, iov, iovcnt)` — only for stdio fds.
+/// `read(fd, buf, count)` — consults the per-process Linux fd table.
+fn sys_read(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let buf = args.arg1;
+    let count = args.arg2;
+
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    dispatch_read(entry, buf, count)
+}
+
+/// `writev(fd, iov, iovcnt)` — vectored write via the fd table.
 fn sys_writev(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let iov_ptr = args.arg1;
     let iovcnt = args.arg2 as i32;
 
-    if !(0..=2).contains(&fd) {
-        return linux_err(errno::EBADF);
-    }
     if iovcnt < 0 || iovcnt > 1024 {
         return linux_err(errno::EINVAL);
     }
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
 
     // Linux `struct iovec { void *iov_base; size_t iov_len; }` — 16 bytes on
-    // x86_64.  Read each entry, route to console_write.
+    // x86_64.
     #[repr(C)]
     struct Iovec {
         base: u64,
@@ -567,29 +725,373 @@ fn sys_writev(args: &SyscallArgs) -> SyscallResult {
         if iov.len == 0 {
             continue;
         }
-        if fd == 0 {
-            total = total.saturating_add(iov.len as i64);
-            continue;
-        }
-        let console_args = SyscallArgs {
-            arg0: iov.base,
-            arg1: iov.len,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let r = handlers::sys_console_write(&console_args);
+        let r = dispatch_write(entry, iov.base, iov.len);
         if r.value < 0 {
-            // Short writes already reported; surface error if nothing went out.
             if total == 0 {
-                return linux_from_native(r);
+                return r;
             }
             return SyscallResult::ok(total);
         }
         total = total.saturating_add(r.value);
     }
     SyscallResult::ok(total)
+}
+
+/// `readv(fd, iov, iovcnt)` — vectored read via the fd table.
+fn sys_readv(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let iov_ptr = args.arg1;
+    let iovcnt = args.arg2 as i32;
+
+    if iovcnt < 0 || iovcnt > 1024 {
+        return linux_err(errno::EINVAL);
+    }
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+
+    #[repr(C)]
+    struct Iovec {
+        base: u64,
+        len: u64,
+    }
+
+    let mut total: i64 = 0;
+    for i in 0..iovcnt {
+        let entry_ptr = iov_ptr.wrapping_add((i as u64) * 16);
+        let mut iov = Iovec { base: 0, len: 0 };
+        // SAFETY: copy_from_user validates the user range.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                entry_ptr,
+                (&raw mut iov).cast::<u8>(),
+                core::mem::size_of::<Iovec>(),
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        if iov.len == 0 {
+            continue;
+        }
+        let r = dispatch_read(entry, iov.base, iov.len);
+        if r.value < 0 {
+            if total == 0 {
+                return r;
+            }
+            return SyscallResult::ok(total);
+        }
+        if r.value == 0 {
+            // EOF — short return is well-defined for readv.
+            break;
+        }
+        total = total.saturating_add(r.value);
+    }
+    SyscallResult::ok(total)
+}
+
+/// `close(fd)` — remove `fd` from the per-process Linux fd table and,
+/// if no other fd still references the same handle, release the
+/// underlying kernel resource.
+fn sys_close(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    let entry = match pcb::linux_fd_take(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    if entry.kind.needs_kernel_close()
+        && !pcb::linux_fd_is_handle_referenced(pid, entry.kind, entry.raw_handle, -1)
+    {
+        // No other fd still references this handle — release it.
+        let _ = close_handle(entry);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `dup(oldfd)` — duplicate `oldfd` onto the lowest free slot.
+fn sys_dup(args: &SyscallArgs) -> SyscallResult {
+    let oldfd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    match pcb::linux_fd_dup(pid, oldfd, 0) {
+        Ok(newfd) => SyscallResult::ok(i64::from(newfd)),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// Shared back-end for `dup2` / `dup3`.
+fn sys_dup2_impl(oldfd: i32, newfd: i32, cloexec: bool) -> SyscallResult {
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    if newfd < 0 {
+        return linux_err(errno::EBADF);
+    }
+    let (returned_fd, prev) = match pcb::linux_fd_dup2(pid, oldfd, newfd) {
+        Ok(t) => t,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    // If the duplicate displaced an entry, close it (refcount-aware).
+    if let Some(prev_entry) = prev
+        && prev_entry.kind.needs_kernel_close()
+        && !pcb::linux_fd_is_handle_referenced(
+            pid,
+            prev_entry.kind,
+            prev_entry.raw_handle,
+            -1,
+        )
+    {
+        let _ = close_handle(prev_entry);
+    }
+    if cloexec {
+        // dup3 honours O_CLOEXEC on the destination fd.
+        let _ = pcb::linux_fd_set_fd_flags(
+            pid,
+            returned_fd,
+            crate::proc::linux_fd::FD_CLOEXEC,
+        );
+    }
+    SyscallResult::ok(i64::from(returned_fd))
+}
+
+/// `dup2(oldfd, newfd)` — duplicate onto a specific fd.  POSIX: if
+/// `oldfd == newfd` and `oldfd` is valid, returns `newfd` without
+/// closing anything.
+fn sys_dup2(args: &SyscallArgs) -> SyscallResult {
+    sys_dup2_impl(args.arg0 as i32, args.arg1 as i32, false)
+}
+
+/// `dup3(oldfd, newfd, flags)` — like dup2 but `flags & O_CLOEXEC`
+/// sets FD_CLOEXEC on the new fd.  Unlike dup2, `oldfd == newfd` is
+/// an error (Linux returns EINVAL).
+fn sys_dup3(args: &SyscallArgs) -> SyscallResult {
+    let oldfd = args.arg0 as i32;
+    let newfd = args.arg1 as i32;
+    let flags = args.arg2 as u32;
+    if oldfd == newfd {
+        return linux_err(errno::EINVAL);
+    }
+    sys_dup2_impl(oldfd, newfd, flags & oflags::O_CLOEXEC != 0)
+}
+
+/// `fcntl(fd, cmd, arg)` — subset relevant to fd-table state.
+fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let cmd = args.arg1 as u32;
+    let arg = args.arg2;
+
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+
+    match cmd {
+        fcntl_cmd::F_DUPFD | fcntl_cmd::F_DUPFD_CLOEXEC => {
+            let min_fd = arg as i32;
+            if min_fd < 0 {
+                return linux_err(errno::EINVAL);
+            }
+            match pcb::linux_fd_dup(pid, fd, min_fd) {
+                Ok(newfd) => {
+                    if cmd == fcntl_cmd::F_DUPFD_CLOEXEC {
+                        let _ = pcb::linux_fd_set_fd_flags(
+                            pid,
+                            newfd,
+                            crate::proc::linux_fd::FD_CLOEXEC,
+                        );
+                    }
+                    SyscallResult::ok(i64::from(newfd))
+                }
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        fcntl_cmd::F_GETFD => match pcb::linux_fd_lookup(pid, fd) {
+            Some(e) => SyscallResult::ok(i64::from(e.fd_flags)),
+            None => linux_err(errno::EBADF),
+        },
+        fcntl_cmd::F_SETFD => {
+            let new_flags = arg as u32;
+            match pcb::linux_fd_set_fd_flags(pid, fd, new_flags) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        fcntl_cmd::F_GETFL => match pcb::linux_fd_lookup(pid, fd) {
+            Some(e) => SyscallResult::ok(i64::from(e.status_flags)),
+            None => linux_err(errno::EBADF),
+        },
+        fcntl_cmd::F_SETFL => {
+            let new_flags = arg as u32;
+            match pcb::linux_fd_set_status_flags(pid, fd, new_flags) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        _ => linux_err(errno::ENOSYS),
+    }
+}
+
+/// `lseek(fd, offset, whence)` — only meaningful for `File` handles.
+fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    match entry.kind {
+        HandleKind::File => {
+            let a = SyscallArgs {
+                arg0: entry.raw_handle,
+                arg1: args.arg1,
+                arg2: args.arg2,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_fs_seek(&a))
+        }
+        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+    }
+}
+
+/// Translate Linux `O_*` flag bits to the kernel's `OpenFlags`.
+fn translate_open_flags(linux_flags: u32) -> u32 {
+    use crate::fs::handle::OpenFlags;
+    let access = linux_flags & oflags::O_ACCMODE;
+    let mut bits: u32 = 0;
+    match access {
+        oflags::O_RDONLY => bits |= OpenFlags::READ.bits(),
+        oflags::O_WRONLY => bits |= OpenFlags::WRITE.bits(),
+        oflags::O_RDWR => bits |= OpenFlags::READ.bits() | OpenFlags::WRITE.bits(),
+        _ => bits |= OpenFlags::READ.bits(),
+    }
+    if linux_flags & oflags::O_CREAT != 0 {
+        bits |= OpenFlags::CREATE.bits();
+    }
+    if linux_flags & oflags::O_TRUNC != 0 {
+        bits |= OpenFlags::TRUNCATE.bits();
+    }
+    if linux_flags & oflags::O_APPEND != 0 {
+        bits |= OpenFlags::APPEND.bits();
+    }
+    bits
+}
+
+/// Shared backend for `open` / `openat`.
+fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
+    if path_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+
+    // Linux paths are NUL-terminated.  Scan up to a sane cap (matching
+    // sys_fs_open's internal 256-byte cap) to locate the terminator
+    // without trusting the caller-provided length.  We validate one
+    // page at a time to keep SMAP windows tight.
+    const MAX_PATH: usize = 256;
+    let mut tmp = [0u8; MAX_PATH];
+    let mut len = 0usize;
+    while len < MAX_PATH {
+        // SAFETY: copy_from_user validates each one-byte read.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                path_ptr.wrapping_add(len as u64),
+                tmp.as_mut_ptr().wrapping_add(len),
+                1,
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        if tmp[len] == 0 {
+            break;
+        }
+        len += 1;
+    }
+    if len == 0 || len >= MAX_PATH {
+        // Empty path or no terminator within MAX_PATH.
+        return linux_err(if len == 0 { errno::ENOENT } else { errno::ENAMETOOLONG });
+    }
+    // Honour caller's explicit length when provided.  sys_fs_open
+    // re-reads the path itself from userspace; we forward the user
+    // pointer and length.
+    let user_len = if path_len_hint == 0 || path_len_hint > len as u64 {
+        len as u64
+    } else {
+        path_len_hint
+    };
+
+    let kernel_flags = translate_open_flags(flags);
+    let open_args = SyscallArgs {
+        arg0: path_ptr,
+        arg1: user_len,
+        arg2: u64::from(kernel_flags),
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = handlers::sys_fs_open(&open_args);
+    if r.value < 0 {
+        return linux_from_native(r);
+    }
+    let raw_handle = r.value as u64;
+
+    // Build the FdEntry status flags from the Linux flags so future
+    // F_GETFL returns something coherent.
+    let mut status_flags = flags & (oflags::O_ACCMODE | oflags::O_APPEND | oflags::O_NONBLOCK);
+    if flags & oflags::O_CLOEXEC == 0 {
+        // No-op: status_flags doesn't track FD_CLOEXEC (that's fd_flags).
+    }
+    // Normalise the access bits — translate_open_flags coerced an
+    // unknown access mode to O_RDONLY, so do the same here.
+    if status_flags & oflags::O_ACCMODE > oflags::O_RDWR {
+        status_flags = (status_flags & !oflags::O_ACCMODE) | oflags::O_RDONLY;
+    }
+    let mut entry = FdEntry::file(raw_handle, status_flags);
+    if flags & oflags::O_CLOEXEC != 0 {
+        entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
+    }
+
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => {
+            // Caller is a kernel task — close the file we just opened
+            // (it has nowhere to live) and return EBADF.
+            let _ = handlers::sys_fs_close(&SyscallArgs {
+                arg0: raw_handle, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            });
+            return linux_err(errno::EBADF);
+        }
+    };
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            // Roll the file open back on table failure.
+            let _ = handlers::sys_fs_close(&SyscallArgs {
+                arg0: raw_handle, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            });
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// `open(path, flags, mode)` — equivalent to `openat(AT_FDCWD, path, flags, mode)`.
+fn sys_open(args: &SyscallArgs) -> SyscallResult {
+    open_common(args.arg0, 0, args.arg1 as u32)
+}
+
+/// `openat(dirfd, path, flags, mode)` — only `AT_FDCWD` is honoured.
+fn sys_openat(args: &SyscallArgs) -> SyscallResult {
+    let dirfd = args.arg0 as i32;
+    if dirfd != AT_FDCWD {
+        // Directory-fd-relative opens require an `OpenFlags::DIRECTORY`
+        // VFS handle we don't have yet.
+        return linux_err(errno::ENOSYS);
+    }
+    open_common(args.arg1, 0, args.arg2 as u32)
 }
 
 /// `mmap(addr, length, prot, flags, fd, offset)` — anonymous private only.
@@ -1285,6 +1787,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   FAIL: writev(iovcnt=-1) → {} (expected -EINVAL)", r.value
         );
         return Err(KernelError::InternalError);
+    }
+
+    // (7a) The kernel self-test runs from a kernel task with no Linux fd
+    // table, so every fd-table-backed syscall must surface -EBADF rather
+    // than panicking.  Exercise read / close / dup / fcntl(F_GETFD) /
+    // openat(non-AT_FDCWD).
+    let any_fd = SyscallArgs { arg0: 5, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    for (which, syscall) in [
+        ("read", nr::READ),
+        ("close", nr::CLOSE),
+        ("dup", nr::DUP),
+        ("fcntl", nr::FCNTL),
+        ("lseek", nr::LSEEK),
+    ] {
+        let r = dispatch_linux(syscall, &any_fd);
+        if r.value != -(errno::EBADF as i64) {
+            serial_println!(
+                "[syscall/linux]   FAIL: {}(fd=5) on a process w/o fd table → {} (expected -EBADF)",
+                which, r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (7b) dup3(0, 0, 0) — same fd is EINVAL even before fd-table lookup.
+    let dup3_same = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::DUP3, &dup3_same);
+    if r.value != -(errno::EINVAL as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: dup3(0,0,0) → {} (expected -EINVAL)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7c) openat with a non-AT_FDCWD dirfd → -ENOSYS.
+    let openat_bad = SyscallArgs {
+        arg0: 7, arg1: 0x1000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::OPENAT, &openat_bad);
+    if r.value != -(errno::ENOSYS as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: openat(dirfd=7) → {} (expected -ENOSYS)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7d) translate_open_flags exhaustive cases.
+    {
+        use crate::fs::handle::OpenFlags;
+        let f = translate_open_flags(oflags::O_RDONLY);
+        if f & OpenFlags::READ.bits() == 0 || f & OpenFlags::WRITE.bits() != 0 {
+            serial_println!("[syscall/linux]   FAIL: O_RDONLY → {:#x}", f);
+            return Err(KernelError::InternalError);
+        }
+        let f = translate_open_flags(oflags::O_WRONLY | oflags::O_CREAT | oflags::O_TRUNC);
+        if f & OpenFlags::WRITE.bits() == 0
+            || f & OpenFlags::CREATE.bits() == 0
+            || f & OpenFlags::TRUNCATE.bits() == 0
+        {
+            serial_println!("[syscall/linux]   FAIL: O_WRONLY|O_CREAT|O_TRUNC → {:#x}", f);
+            return Err(KernelError::InternalError);
+        }
+        let f = translate_open_flags(oflags::O_RDWR | oflags::O_APPEND);
+        if f & OpenFlags::READ.bits() == 0
+            || f & OpenFlags::WRITE.bits() == 0
+            || f & OpenFlags::APPEND.bits() == 0
+        {
+            serial_println!("[syscall/linux]   FAIL: O_RDWR|O_APPEND → {:#x}", f);
+            return Err(KernelError::InternalError);
+        }
     }
 
     // (8) clock_gettime with bad clockid → -EINVAL.

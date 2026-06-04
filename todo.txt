@@ -5388,18 +5388,39 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ## DEFERRED (require follow-on work, currently return -ENOSYS or are
 ## stubbed with documented limitations):
-##   1. POSIX FD TABLE.  The bulk of Linux syscalls take fds.  Our
-##      POSIX fd table currently lives in userspace
-##      (posix/src/fdtable.rs).  To translate read/write/close/openat/
-##      dup/pipe/socket etc. we need either:
-##        (a) Move a minimal kernel-side fd table into the kernel
-##            (similar to Linux's task_struct->files), OR
-##        (b) Have the Linux-ABI process talk to the userspace POSIX
-##            daemon via channel IPC under the hood.
-##      Option (a) is simpler for compatibility; option (b) is more
-##      architecturally consistent with our microkernel design.
-##      DECISION DEFERRED until the ELF loader is ready to actually
-##      load a Linux binary and we have a concrete test case.
+##   1. POSIX FD TABLE — DONE for the basics, follow-ups remain.
+##      RESOLUTION: chose option (a) — kernel-side per-PCB fd table for
+##      Linux-ABI processes only.  See kernel/src/proc/linux_fd.rs
+##      (KernelFdTable / HandleKind / FdEntry) and the pcb::linux_fd_*
+##      accessors.  Native processes are unaffected.  The Linux
+##      translator (kernel/src/syscall/linux.rs) routes
+##      read/write/close/lseek/dup/dup2/dup3/fcntl/open/openat/readv/
+##      writev through it.
+##
+##      FOLLOW-UPS still owed:
+##        (i)  Fork inheritance currently clones the fd table structurally
+##             but does NOT bump refcounts on File or Pipe handles.  Safe
+##             today because only Console handles are ever populated by
+##             stdio installation, but must be fixed in lockstep with
+##             pipe() or dup-across-fork landing on a File/Pipe.  Search
+##             for "fd-table follow-ups" in pcb::fork_create.
+##        (ii) FD_CLOEXEC is stored per-entry but exec_process() does NOT
+##             walk the table and close cloexec entries.  It rebuilds a
+##             fresh stdio-only table instead, which is correct for the
+##             post-exec view but loses any non-cloexec File handles the
+##             caller wanted to keep open.  Real fix: walk old table,
+##             close cloexec entries, carry the rest into the new image.
+##       (iii) Console reads collapse any byte-count to a single
+##             keystroke (one-char read).  Multi-byte reads will need a
+##             line-buffered TTY abstraction.
+##       (iv)  pipe(2) / pipe2(2) / socket family / poll / epoll / eventfd
+##             are still -ENOSYS in dispatch_linux.  Pipe is the easiest
+##             next step: SYS_PIPE_CREATE exists in handlers.rs; the
+##             translator just needs to install the two endpoints into
+##             the fd table.
+##       (v)   openat() only accepts AT_FDCWD; directory file
+##             descriptors (the dirfd argument) require a kernel-side
+##             open-dir handle, which the VFS does not currently expose.
 ##   2. FRAME-MODIFYING PATHS: execve, fork, vfork, clone, sigreturn,
 ##      rt_sigreturn need to live alongside the existing native
 ##      frame-modifying handlers in entry.rs (the ones that call
@@ -5447,20 +5468,32 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     LinuxTimespec rejects negative tv_sec and tv_nsec >= 1e9;
 ##     kernel_error_from_code inverse of code() for all mapped variants;
 ##     direct dispatch_linux invocation for getpid, gettid, getuid,
-##     getgid.  All checks must pass or kernel halts before reaching
-##     init.
+##     getgid.  Fd-table-backed syscalls (read/close/dup/fcntl/lseek)
+##     correctly return -EBADF when the caller has no fd table; dup3
+##     with oldfd==newfd returns -EINVAL; openat with a non-AT_FDCWD
+##     dirfd returns -ENOSYS; translate_open_flags maps O_RDONLY,
+##     O_WRONLY|O_CREAT|O_TRUNC, and O_RDWR|O_APPEND correctly.
+##   - linux_fd::self_test() at boot exercises: empty / with_stdio
+##     construction; install_lowest after stdio gives 3,4,5;
+##     install_lowest_from(10, ...) honours the min_fd; lookup OOB
+##     returns None; is_handle_referenced semantics; dup_lowest clones
+##     entry and clears FD_CLOEXEC; dup2 closes prior occupant and
+##     returns it; dup2(fd,fd) is a no-op; take removes entry;
+##     set_fd_flags / set_status_flags preserve O_ACCMODE.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
-##     test hits.  The Linux path will get end-to-end coverage when
-##     the ELF loader gets its Linux-binary detection in (next task).
+##     test hits.  The Linux path will get end-to-end coverage when an
+##     actual Linux binary can be loaded.
 ##
 ## NEXT STEPS (in priority order):
-##   1. ELF loader: detect Linux binaries (PT_GNU_PROPERTY /
-##      INTERP=/lib64/ld-linux-x86-64.so.2 / e_osabi==3) and call
-##      `pcb::set_abi_mode(new_pid, AbiMode::Linux)` before scheduling.
-##   2. Decide on fd-table architecture (kernel-side minimal vs IPC to
-##      userspace POSIX daemon); implement.
-##   3. Add Linux execve/fork/clone in a parallel
-##      dispatch_linux_with_frame path.
-##   4. Replace xorshift64 with kernel CSPRNG when one exists.
-##   5. Honour mprotect / brk / sigaction properly.
+##   1. Linux pipe / pipe2 translation: SYS_PIPE_CREATE already exists
+##      in handlers.rs and the FdEntry::pipe() / HandleKind::Pipe
+##      machinery is in place — just wire it into dispatch_linux.
+##   2. Add Linux execve/fork/clone in a parallel
+##      dispatch_linux_with_frame path; clone() is what pthread_create
+##      uses so this is the next blocker for multi-threaded glibc.
+##   3. Wire exec_process() to walk the fd table and honour FD_CLOEXEC
+##      (currently rebuilds a fresh stdio-only table).
+##   4. Refcount File / Pipe handles on fork (fd-table follow-up i).
+##   5. Replace xorshift64 with kernel CSPRNG when one exists.
+##   6. Honour mprotect / brk / sigaction properly.

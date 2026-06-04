@@ -3095,6 +3095,65 @@ Remaining net improvements (diminishing returns):
   tar, true.
   Continue in batches.
 
+  PROGRESS 2026-06-04 (batch 14): added 78 unit tests across 4 more
+  binaries (pwd, nohup, sed, tar).
+    * pwd.rs: extracted `print_cwd(result: io::Result<PathBuf>, out,
+      err) -> i32` so success/failure can be tested with in-memory
+      writers.  5 tests covering ok-with-path, err-writes-stderr-and-
+      returns-1, path-with-spaces, relative path, empty path still
+      newline-terminated.
+    * nohup.rs: extracted `parse_args(args) -> Result<NohupArgs { cmd,
+      cmd_args }>` (errors only on missing command; everything after
+      the command name passes through verbatim, so child flags like
+      `-la` aren't consumed by nohup).  6 tests covering empty
+      errors, single command, command+args, multi-args, dash-args
+      forwarded to child, absolute path commands.
+    * sed.rs: extracted `parse_args(args) -> Result<SedArgs {
+      suppress, in_place, scripts, files }>` (handles -n/-i/-e,
+      missing -e value errors, first bare arg is script).  Hardened
+      all the parsing helpers (parse_address, parse_action,
+      split_delim, regex_inner, find_match, substitute) to use
+      `.get()` and `.saturating_*` instead of direct indexing and
+      `+=`.  Fixed potential infinite loop in `substitute` global
+      branch when find_match returns a position <= i (zero-width
+      match now emits one char and advances).  Added test-only
+      derives on Address/Action/SedCommand.  39 tests covering
+      parse_args (8), parse_script/parse_command (9 incl. line addr,
+      regex addr, range addr, garbage), split_delim (3 incl. escape),
+      simple_regex_match (7: literal, ^foo, bar$, ^foo$, a.c, ab*c,
+      .*), substitute (4: first/global/no-match/empty),
+      process_line (5: substitute, delete, quit, suppress vs p,
+      line-number address), process_text (3: substitute-each-line,
+      quit-stops, suppress-then-p).
+    * tar.rs: lifted parse_args, TarHeader, extract_string,
+      parse_octal, and a new pure `list_archive(input, out)` out of
+      cfg(unix) so they run on every host.  Create mode stays
+      unix-only (it needs MetadataExt for mode/uid/gid/mtime); on
+      non-unix `-c` prints a clear error.  Hardened do_extract to
+      use `.get()` and `saturating_*` arithmetic; the SAFETY comment
+      on TarHeader::compute_checksum / as_bytes now explains why the
+      pointer cast to `[u8; BLOCK_SIZE]` is sound (#[repr(C)] byte
+      fields tile to exactly BLOCK_SIZE).  Replaced unwrap_or_else +
+      copy_from_slice with checked slice writes.  Collapsed the
+      nested `if let Some(dir) = ... { if let Err(e) = ... }` into
+      `let-else`.  Built a `make_header` test helper that synthesises
+      ustar blocks so `list_archive` can be tested end-to-end with a
+      Vec<u8> reader.  28 tests covering parse_args (9 incl.
+      clustered -cvf, -tf, missing -f/-C, unknown flag),
+      extract_string (3), parse_octal (4 incl. space-padded and
+      garbage->0), TarHeader::set_octal (4 incl. empty field is
+      noop, round-trip), checksum stability/sensitivity (2),
+      list_archive (6: empty archive, zero-byte file, file with
+      data, multiple files, truncated input doesn't panic, short
+      header stops cleanly).
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
+
+  RUNNING TOTAL: 1224 tests across 77 binaries (whoami + batches 1-14).
+  ~8 binaries still pending.
+
+  REMAINING: awk, bc, ed, false, fetch, patch, sh, true.
+  Continue in batches.
+
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to
   link on the host target (x86_64-pc-windows-gnu) with "undefined
   reference to `geteuid'".  RESOLVED 2026-06-04.  Gated the `geteuid`

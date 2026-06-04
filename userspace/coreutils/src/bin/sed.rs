@@ -18,56 +18,74 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process;
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut suppress = false;
-    let mut in_place = false;
-    let mut scripts: Vec<String> = Vec::new();
-    let mut files: Vec<String> = Vec::new();
-    let mut i = 0;
-    let mut saw_script = false;
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct SedArgs {
+    suppress: bool,
+    in_place: bool,
+    scripts: Vec<String>,
+    files: Vec<String>,
+}
 
-    while i < args.len() {
-        match args[i].as_str() {
-            "-n" => suppress = true,
-            "-i" => in_place = true,
+/// Parse sed's argv.  Recognises `-n`, `-i`, and `-e SCRIPT`.  The first
+/// bare argument (not a flag and not the value of `-e`) is treated as
+/// the script; any subsequent bare arguments are files.  Missing `-e`
+/// value is reported as an error.
+fn parse_args(args: &[String]) -> Result<SedArgs, String> {
+    let mut out = SedArgs::default();
+    let mut saw_script = false;
+    let mut i: usize = 0;
+
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "-n" => out.suppress = true,
+            "-i" => out.in_place = true,
             "-e" => {
-                i += 1;
-                if i < args.len() {
-                    scripts.push(args[i].clone());
-                    saw_script = true;
-                }
+                i = i.saturating_add(1);
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| "option -e requires an argument".to_string())?;
+                out.scripts.push(v.clone());
+                saw_script = true;
             }
-            arg => {
-                if !saw_script && scripts.is_empty() {
-                    // First non-option argument is the script
-                    scripts.push(arg.to_string());
+            other => {
+                if !saw_script && out.scripts.is_empty() {
+                    out.scripts.push(other.to_string());
                     saw_script = true;
                 } else {
-                    files.push(arg.to_string());
+                    out.files.push(other.to_string());
                 }
             }
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 
-    if scripts.is_empty() {
+    Ok(out)
+}
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let mut parsed = match parse_args(&args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("sed: {e}");
+            process::exit(1);
+        }
+    };
+
+    if parsed.scripts.is_empty() {
         eprintln!("sed: no script specified");
         process::exit(1);
     }
 
-    let commands: Vec<SedCommand> = scripts
-        .iter()
-        .flat_map(|s| parse_script(s))
-        .collect();
+    let commands: Vec<SedCommand> = parsed.scripts.iter().flat_map(|s| parse_script(s)).collect();
 
-    if files.is_empty() {
-        files.push("-".to_string());
+    if parsed.files.is_empty() {
+        parsed.files.push("-".to_string());
     }
 
-    for path in &files {
-        if in_place && path != "-" {
-            // Read file, process, write back
+    for path in &parsed.files {
+        if parsed.in_place && path != "-" {
             let content = match fs::read_to_string(path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -75,7 +93,7 @@ fn main() {
                     continue;
                 }
             };
-            let result = process_text(&content, &commands, suppress);
+            let result = process_text(&content, &commands, parsed.suppress);
             if let Err(e) = fs::write(path, &result) {
                 eprintln!("sed: {path}: {e}");
             }
@@ -102,9 +120,10 @@ fn main() {
                     Ok(l) => l,
                     Err(_) => break,
                 };
-                line_num += 1;
+                line_num = line_num.saturating_add(1);
 
-                let (output, should_quit) = process_line(&line, &commands, suppress, line_num);
+                let (output, should_quit) =
+                    process_line(&line, &commands, parsed.suppress, line_num);
                 if let Some(text) = output {
                     let _ = writeln!(out, "{text}");
                 }
@@ -116,10 +135,13 @@ fn main() {
     }
 }
 
+/// Run `commands` against `content` as a single string and return the
+/// resulting text.  Used by `-i` (in-place) mode and unit tests.
 fn process_text(content: &str, commands: &[SedCommand], suppress: bool) -> String {
     let mut result = String::new();
     for (i, line) in content.lines().enumerate() {
-        let (output, should_quit) = process_line(line, commands, suppress, i + 1);
+        let (output, should_quit) =
+            process_line(line, commands, suppress, i.saturating_add(1));
         if let Some(text) = output {
             result.push_str(&text);
             result.push('\n');
@@ -131,6 +153,9 @@ fn process_text(content: &str, commands: &[SedCommand], suppress: bool) -> Strin
     result
 }
 
+/// Apply each command in sequence to one input line.  Returns the
+/// possibly-modified line to emit (or None if the line was deleted /
+/// `-n` suppressed printing) and a quit flag.
 fn process_line(
     line: &str,
     commands: &[SedCommand],
@@ -181,7 +206,7 @@ fn process_line(
     (output, quit)
 }
 
-#[derive(Debug)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum Address {
     None,
     Line(usize),
@@ -189,7 +214,7 @@ enum Address {
     Range(Box<Address>, Box<Address>),
 }
 
-#[derive(Debug)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum Action {
     Substitute {
         pattern: String,
@@ -201,7 +226,7 @@ enum Action {
     Quit,
 }
 
-#[derive(Debug)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct SedCommand {
     address: Address,
     action: Action,
@@ -216,7 +241,6 @@ fn parse_script(script: &str) -> Vec<SedCommand> {
         if part.is_empty() {
             continue;
         }
-
         if let Some(cmd) = parse_command(part) {
             commands.push(cmd);
         }
@@ -233,50 +257,53 @@ fn parse_command(s: &str) -> Option<SedCommand> {
     let (address, new_pos) = parse_address(s, pos);
     pos = new_pos;
 
-    // Skip comma for ranges
-    if pos < bytes.len() && bytes[pos] == b',' {
-        pos += 1;
+    // Range: ADDR1,ADDR2 ACTION
+    if bytes.get(pos).copied() == Some(b',') {
+        pos = pos.saturating_add(1);
         let (addr2, new_pos2) = parse_address(s, pos);
         pos = new_pos2;
         let address = Address::Range(Box::new(address), Box::new(addr2));
-        let action = parse_action(&s[pos..])?;
+        let action = parse_action(s.get(pos..).unwrap_or(""))?;
         return Some(SedCommand { address, action });
     }
 
-    let action = parse_action(&s[pos..])?;
+    let action = parse_action(s.get(pos..).unwrap_or(""))?;
     Some(SedCommand { address, action })
 }
 
 fn parse_address(s: &str, mut pos: usize) -> (Address, usize) {
     let bytes = s.as_bytes();
 
-    if pos >= bytes.len() {
+    let Some(&first) = bytes.get(pos) else {
         return (Address::None, pos);
-    }
+    };
 
     // Line number address
-    if bytes[pos].is_ascii_digit() {
+    if first.is_ascii_digit() {
         let start = pos;
-        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
-            pos += 1;
+        while bytes.get(pos).is_some_and(u8::is_ascii_digit) {
+            pos = pos.saturating_add(1);
         }
-        let n: usize = s[start..pos].parse().unwrap_or(0);
+        let n: usize = s.get(start..pos).and_then(|x| x.parse().ok()).unwrap_or(0);
         return (Address::Line(n), pos);
     }
 
     // Pattern address /regex/
-    if bytes[pos] == b'/' {
-        pos += 1;
+    if first == b'/' {
+        pos = pos.saturating_add(1);
         let start = pos;
-        while pos < bytes.len() && bytes[pos] != b'/' {
-            if bytes[pos] == b'\\' && pos + 1 < bytes.len() {
-                pos += 1; // skip escaped char
+        while let Some(&b) = bytes.get(pos) {
+            if b == b'/' {
+                break;
             }
-            pos += 1;
+            if b == b'\\' && bytes.get(pos.saturating_add(1)).is_some() {
+                pos = pos.saturating_add(1);
+            }
+            pos = pos.saturating_add(1);
         }
-        let pattern = s[start..pos].to_string();
-        if pos < bytes.len() {
-            pos += 1; // skip closing /
+        let pattern = s.get(start..pos).unwrap_or("").to_string();
+        if bytes.get(pos).is_some() {
+            pos = pos.saturating_add(1); // skip closing /
         }
         return (Address::Pattern(pattern), pos);
     }
@@ -286,27 +313,22 @@ fn parse_address(s: &str, mut pos: usize) -> (Address, usize) {
 
 fn parse_action(s: &str) -> Option<Action> {
     let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-
-    let first = s.as_bytes()[0];
+    let first = *s.as_bytes().first()?;
     match first {
         b's' => {
             // s/pattern/replacement/[flags]
-            if s.len() < 2 {
-                return None;
-            }
-            let delim = s.as_bytes()[1];
-            let rest = &s[2..];
+            let delim = *s.as_bytes().get(1)?;
+            let rest = s.get(2..).unwrap_or("");
             let parts: Vec<&str> = split_delim(rest, delim as char);
             if parts.len() < 2 {
                 return None;
             }
+            let pat = parts.first().copied().unwrap_or("").to_string();
+            let repl = parts.get(1).copied().unwrap_or("").to_string();
             let global = parts.get(2).is_some_and(|flags| flags.contains('g'));
             Some(Action::Substitute {
-                pattern: parts[0].to_string(),
-                replacement: parts[1].to_string(),
+                pattern: pat,
+                replacement: repl,
                 global,
             })
         }
@@ -324,18 +346,22 @@ fn split_delim(s: &str, delim: char) -> Vec<&str> {
     let delim_byte = delim as u8;
     let mut i = 0;
 
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            i += 2;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'\\' && bytes.get(i.saturating_add(1)).is_some() {
+            i = i.saturating_add(2);
             continue;
         }
-        if bytes[i] == delim_byte {
-            parts.push(&s[start..i]);
-            start = i + 1;
+        if b == delim_byte {
+            if let Some(piece) = s.get(start..i) {
+                parts.push(piece);
+            }
+            start = i.saturating_add(1);
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
-    parts.push(&s[start..]);
+    if let Some(piece) = s.get(start..) {
+        parts.push(piece);
+    }
     parts
 }
 
@@ -345,22 +371,20 @@ fn address_matches(addr: &Address, line_num: usize, line: &str) -> bool {
         Address::Line(n) => line_num == *n,
         Address::Pattern(pat) => simple_regex_match(pat, line),
         Address::Range(start, end) => {
-            address_matches(start, line_num, line) || address_matches(end, line_num, line)
             // Note: proper range tracking requires state across lines.
             // This simplified version matches lines that match either endpoint.
+            address_matches(start, line_num, line) || address_matches(end, line_num, line)
         }
     }
 }
 
 /// Simple regex match — supports literal chars, `.` (any), `*` (zero or more),
-/// `^` (start), `$` (end), `[...]` (char class).
+/// `^` (start), `$` (end).
 fn simple_regex_match(pattern: &str, text: &str) -> bool {
     if let Some(rest) = pattern.strip_prefix('^') {
         return regex_match_at(rest, text, 0);
     }
-
-    // Try matching at every position
-    for i in 0..=text.len() {
+    for i in 0..=text.chars().count() {
         if regex_match_at(pattern, text, i) {
             return true;
         }
@@ -376,35 +400,41 @@ fn regex_match_at(pattern: &str, text: &str, start: usize) -> bool {
 
 fn regex_inner(pat: &[char], txt: &[char], pi: usize, ti: usize) -> bool {
     if pi == pat.len() {
-        return true; // pattern exhausted = match
+        return true;
     }
 
-    if pat[pi] == '$' && pi + 1 == pat.len() {
+    let p = match pat.get(pi) {
+        Some(&c) => c,
+        None => return true,
+    };
+
+    if p == '$' && pi.saturating_add(1) == pat.len() {
         return ti == txt.len();
     }
 
-    // Check for * quantifier
-    if pi + 1 < pat.len() && pat[pi + 1] == '*' {
-        // Match zero or more of pat[pi]
+    // Check for * quantifier following pat[pi]
+    if pat.get(pi.saturating_add(1)).copied() == Some('*') {
         let mut t = ti;
         loop {
-            if regex_inner(pat, txt, pi + 2, t) {
+            if regex_inner(pat, txt, pi.saturating_add(2), t) {
                 return true;
             }
-            if t >= txt.len() || !char_matches(pat[pi], txt[t]) {
+            let Some(&tc) = txt.get(t) else {
+                break;
+            };
+            if !char_matches(p, tc) {
                 break;
             }
-            t += 1;
+            t = t.saturating_add(1);
         }
         return false;
     }
 
-    if ti >= txt.len() {
+    let Some(&tc) = txt.get(ti) else {
         return false;
-    }
-
-    if char_matches(pat[pi], txt[ti]) {
-        regex_inner(pat, txt, pi + 1, ti + 1)
+    };
+    if char_matches(p, tc) {
+        regex_inner(pat, txt, pi.saturating_add(1), ti.saturating_add(1))
     } else {
         false
     }
@@ -417,7 +447,6 @@ fn char_matches(pat_char: char, text_char: char) -> bool {
 /// Perform substitution using simple regex.
 fn substitute(text: &str, pattern: &str, replacement: &str, global: bool) -> String {
     if global {
-        // Replace all occurrences
         let mut result = String::new();
         let chars: Vec<char> = text.chars().collect();
         let mut i = 0;
@@ -425,25 +454,31 @@ fn substitute(text: &str, pattern: &str, replacement: &str, global: bool) -> Str
         while i < chars.len() {
             if let Some(end) = find_match(pattern, text, i) {
                 result.push_str(replacement);
-                i = end;
-                if i == 0 {
-                    break; // prevent infinite loop on zero-length match
+                if end <= i {
+                    // Zero-width match: emit one char and advance to avoid infinite loop.
+                    if let Some(&c) = chars.get(i) {
+                        result.push(c);
+                    }
+                    i = i.saturating_add(1);
+                } else {
+                    i = end;
                 }
             } else {
-                result.push(chars[i]);
-                i += 1;
+                if let Some(&c) = chars.get(i) {
+                    result.push(c);
+                }
+                i = i.saturating_add(1);
             }
         }
         result
     } else {
-        // Replace first occurrence
         let chars: Vec<char> = text.chars().collect();
         for i in 0..=chars.len() {
             if let Some(end) = find_match(pattern, text, i) {
                 let mut result = String::new();
-                result.push_str(&text[..byte_index(text, i)]);
+                result.push_str(text.get(..byte_index(text, i)).unwrap_or(""));
                 result.push_str(replacement);
-                result.push_str(&text[byte_index(text, end)..]);
+                result.push_str(text.get(byte_index(text, end)..).unwrap_or(""));
                 return result;
             }
         }
@@ -453,10 +488,8 @@ fn substitute(text: &str, pattern: &str, replacement: &str, global: bool) -> Str
 
 fn find_match(pattern: &str, text: &str, start: usize) -> Option<usize> {
     let txt: Vec<char> = text.chars().collect();
-
-    // Try to find the end of the match
     for end in start..=txt.len() {
-        let substr: String = txt[start..end].iter().collect();
+        let substr: String = txt.get(start..end)?.iter().collect();
         if simple_regex_match(&format!("^{pattern}$"), &substr) {
             return Some(end);
         }
@@ -468,4 +501,302 @@ fn byte_index(s: &str, char_index: usize) -> usize {
     s.char_indices()
         .nth(char_index)
         .map_or(s.len(), |(idx, _)| idx)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    // ---------------- parse_args ----------------
+
+    #[test]
+    fn parse_empty_args() {
+        let a = parse_args(&s(&[])).unwrap();
+        assert_eq!(a, SedArgs::default());
+    }
+
+    #[test]
+    fn parse_script_only() {
+        let a = parse_args(&s(&["s/a/b/"])).unwrap();
+        assert_eq!(a.scripts, vec!["s/a/b/"]);
+        assert!(a.files.is_empty());
+    }
+
+    #[test]
+    fn parse_script_and_file() {
+        let a = parse_args(&s(&["s/a/b/", "input.txt"])).unwrap();
+        assert_eq!(a.scripts, vec!["s/a/b/"]);
+        assert_eq!(a.files, vec!["input.txt"]);
+    }
+
+    #[test]
+    fn parse_dash_n_suppresses() {
+        let a = parse_args(&s(&["-n", "p"])).unwrap();
+        assert!(a.suppress);
+        assert_eq!(a.scripts, vec!["p"]);
+    }
+
+    #[test]
+    fn parse_dash_i_in_place() {
+        let a = parse_args(&s(&["-i", "s/a/b/", "file"])).unwrap();
+        assert!(a.in_place);
+        assert_eq!(a.scripts, vec!["s/a/b/"]);
+        assert_eq!(a.files, vec!["file"]);
+    }
+
+    #[test]
+    fn parse_dash_e_consumes_next_arg() {
+        let a = parse_args(&s(&["-e", "s/a/b/", "-e", "p", "file"])).unwrap();
+        assert_eq!(a.scripts, vec!["s/a/b/", "p"]);
+        assert_eq!(a.files, vec!["file"]);
+    }
+
+    #[test]
+    fn parse_dash_e_missing_value_errors() {
+        let err = parse_args(&s(&["-e"])).unwrap_err();
+        assert!(err.contains("-e requires"));
+    }
+
+    #[test]
+    fn parse_multiple_files() {
+        let a = parse_args(&s(&["p", "a.txt", "b.txt", "c.txt"])).unwrap();
+        assert_eq!(a.files, vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    // ---------------- parse_script / parse_command ----------------
+
+    #[test]
+    fn parse_script_single_substitute() {
+        let cmds = parse_script("s/foo/bar/");
+        assert_eq!(cmds.len(), 1);
+        if let Action::Substitute { pattern, replacement, global } = &cmds[0].action {
+            assert_eq!(pattern, "foo");
+            assert_eq!(replacement, "bar");
+            assert!(!global);
+        } else {
+            panic!("expected substitute, got {:?}", cmds[0].action);
+        }
+    }
+
+    #[test]
+    fn parse_script_global_substitute() {
+        let cmds = parse_script("s/x/y/g");
+        if let Action::Substitute { global, .. } = &cmds[0].action {
+            assert!(*global);
+        } else {
+            panic!("expected substitute");
+        }
+    }
+
+    #[test]
+    fn parse_script_delete() {
+        let cmds = parse_script("d");
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].action, Action::Delete);
+    }
+
+    #[test]
+    fn parse_script_print_quit() {
+        let cmds = parse_script("p");
+        assert_eq!(cmds[0].action, Action::Print);
+        let cmds = parse_script("q");
+        assert_eq!(cmds[0].action, Action::Quit);
+    }
+
+    #[test]
+    fn parse_script_multiple_commands_semicolon() {
+        let cmds = parse_script("p;d");
+        assert_eq!(cmds.len(), 2);
+    }
+
+    #[test]
+    fn parse_script_line_address() {
+        let cmds = parse_script("3d");
+        assert_eq!(cmds[0].address, Address::Line(3));
+        assert_eq!(cmds[0].action, Action::Delete);
+    }
+
+    #[test]
+    fn parse_script_regex_address() {
+        let cmds = parse_script("/foo/d");
+        assert_eq!(cmds[0].address, Address::Pattern("foo".to_string()));
+    }
+
+    #[test]
+    fn parse_script_range_address() {
+        let cmds = parse_script("1,5d");
+        if let Address::Range(start, end) = &cmds[0].address {
+            assert_eq!(**start, Address::Line(1));
+            assert_eq!(**end, Address::Line(5));
+        } else {
+            panic!("expected range");
+        }
+    }
+
+    #[test]
+    fn parse_script_garbage_ignored() {
+        let cmds = parse_script("Z");
+        assert!(cmds.is_empty());
+    }
+
+    // ---------------- split_delim ----------------
+
+    #[test]
+    fn split_delim_basic() {
+        assert_eq!(split_delim("a/b/c", '/'), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn split_delim_empty_parts() {
+        assert_eq!(split_delim("//", '/'), vec!["", "", ""]);
+    }
+
+    #[test]
+    fn split_delim_escaped() {
+        // Backslash escapes the delimiter so it doesn't split.
+        let parts = split_delim(r"a\/b/c", '/');
+        assert_eq!(parts, vec![r"a\/b", "c"]);
+    }
+
+    // ---------------- simple_regex_match ----------------
+
+    #[test]
+    fn regex_literal_match() {
+        assert!(simple_regex_match("foo", "foobar"));
+        assert!(!simple_regex_match("foo", "bar"));
+    }
+
+    #[test]
+    fn regex_anchored_start() {
+        assert!(simple_regex_match("^foo", "foobar"));
+        assert!(!simple_regex_match("^foo", "barfoo"));
+    }
+
+    #[test]
+    fn regex_anchored_end() {
+        assert!(simple_regex_match("bar$", "foobar"));
+        assert!(!simple_regex_match("bar$", "barfoo"));
+    }
+
+    #[test]
+    fn regex_anchored_both() {
+        assert!(simple_regex_match("^foo$", "foo"));
+        assert!(!simple_regex_match("^foo$", "foobar"));
+    }
+
+    #[test]
+    fn regex_dot_any_char() {
+        assert!(simple_regex_match("a.c", "abc"));
+        assert!(simple_regex_match("a.c", "axc"));
+    }
+
+    #[test]
+    fn regex_star_zero_or_more() {
+        assert!(simple_regex_match("ab*c", "ac"));
+        assert!(simple_regex_match("ab*c", "abc"));
+        assert!(simple_regex_match("ab*c", "abbbbc"));
+    }
+
+    #[test]
+    fn regex_dot_star() {
+        assert!(simple_regex_match(".*", ""));
+        assert!(simple_regex_match(".*", "anything"));
+    }
+
+    // ---------------- substitute ----------------
+
+    #[test]
+    fn substitute_first_only() {
+        assert_eq!(substitute("foo foo foo", "foo", "bar", false), "bar foo foo");
+    }
+
+    #[test]
+    fn substitute_global() {
+        assert_eq!(substitute("foo foo foo", "foo", "bar", true), "bar bar bar");
+    }
+
+    #[test]
+    fn substitute_no_match() {
+        assert_eq!(substitute("hello", "xyz", "abc", true), "hello");
+    }
+
+    #[test]
+    fn substitute_empty_text() {
+        assert_eq!(substitute("", "foo", "bar", false), "");
+    }
+
+    // ---------------- process_line / process_text ----------------
+
+    #[test]
+    fn process_line_substitute_default_prints() {
+        let cmds = parse_script("s/a/b/");
+        let (out, quit) = process_line("ax", &cmds, false, 1);
+        assert_eq!(out, Some("bx".to_string()));
+        assert!(!quit);
+    }
+
+    #[test]
+    fn process_line_delete_returns_none() {
+        let cmds = parse_script("d");
+        let (out, quit) = process_line("anything", &cmds, false, 1);
+        assert_eq!(out, None);
+        assert!(!quit);
+    }
+
+    #[test]
+    fn process_line_quit_sets_flag() {
+        let cmds = parse_script("q");
+        let (_, quit) = process_line("x", &cmds, false, 1);
+        assert!(quit);
+    }
+
+    #[test]
+    fn process_line_suppress_only_prints_after_p() {
+        let cmds = parse_script("p");
+        let (out, _) = process_line("hi", &cmds, true, 1);
+        assert_eq!(out, Some("hi".to_string()));
+
+        let cmds = parse_script("s/a/b/");
+        let (out, _) = process_line("apple", &cmds, true, 1);
+        // -n suppresses default print; substitute doesn't toggle p.
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn process_line_address_line_number() {
+        let cmds = parse_script("2d");
+        let (out1, _) = process_line("a", &cmds, false, 1);
+        let (out2, _) = process_line("b", &cmds, false, 2);
+        let (out3, _) = process_line("c", &cmds, false, 3);
+        assert_eq!(out1, Some("a".to_string()));
+        assert_eq!(out2, None);
+        assert_eq!(out3, Some("c".to_string()));
+    }
+
+    #[test]
+    fn process_text_substitute_each_line() {
+        let cmds = parse_script("s/o/0/g");
+        let out = process_text("foo\nbar\nfoo\n", &cmds, false);
+        assert_eq!(out, "f00\nbar\nf00\n");
+    }
+
+    #[test]
+    fn process_text_quit_stops_processing() {
+        let cmds = parse_script("2q");
+        let out = process_text("a\nb\nc\nd\n", &cmds, false);
+        // Line 1 prints, line 2 prints then quit fires before line 3.
+        assert_eq!(out, "a\nb\n");
+    }
+
+    #[test]
+    fn process_text_suppress_then_p_prints_pattern() {
+        let cmds = parse_script("p");
+        let out = process_text("x\ny\n", &cmds, true);
+        assert_eq!(out, "x\ny\n");
+    }
 }

@@ -441,6 +441,10 @@ pub mod nr {
     pub const CHROOT: u64 = 161;
     pub const MKNOD: u64 = 133;
     pub const MKNODAT: u64 = 259;
+    pub const GETITIMER: u64 = 36;
+    pub const SETITIMER: u64 = 38;
+    pub const ALARM: u64 = 37;
+    pub const PAUSE: u64 = 34;
 }
 
 // ---------------------------------------------------------------------------
@@ -1293,6 +1297,10 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::CHROOT => sys_chroot(args),
         nr::MKNOD => sys_mknod(args),
         nr::MKNODAT => sys_mknodat(args),
+        nr::GETITIMER => sys_getitimer(args),
+        nr::SETITIMER => sys_setitimer(args),
+        nr::ALARM => sys_alarm(args),
+        nr::PAUSE => sys_pause(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -4428,6 +4436,137 @@ fn sys_mknodat(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
+// ---------------------------------------------------------------------------
+// Interval timers (getitimer, setitimer) and the legacy alarm() / pause()
+//
+// Linux delivers ITIMER_REAL via SIGALRM, ITIMER_VIRTUAL via SIGVTALRM,
+// ITIMER_PROF via SIGPROF.  We have no signal-driven interval-timer
+// infrastructure yet, so:
+//
+//   - getitimer always reports "no timer pending" (a zeroed
+//     struct itimerval).  This is a truthful answer when no timer
+//     is armed.
+//
+//   - setitimer accepts cancellation (it_value == 0) silently.
+//     Arming a non-zero timer would require us to deliver a signal at
+//     some future time, which we cannot, so we return -ENOSYS.
+//     Programs that rely on setitimer have a documented fallback path.
+//
+//   - alarm() is a deprecated wrapper around setitimer(ITIMER_REAL,...).
+//     The Linux ABI does not provide an error return; the only return
+//     is the unsigned seconds remaining of the previous alarm.  We
+//     always return 0 (no previous alarm pending) and document the
+//     missing fire as a known limitation.
+//
+//   - pause() blocks until a signal is delivered, then returns -EINTR.
+//     Without signal-driven wakeup we cannot honour this; returning
+//     -ENOSYS lets userspace fall back rather than hang forever.
+//
+// struct itimerval layout (x86_64): two struct timevals back-to-back =
+// 4 longs = 32 bytes.
+// ---------------------------------------------------------------------------
+
+const ITIMERVAL_SIZE: usize = 32;
+
+/// `getitimer(which, value)` — write a zeroed itimerval (no timer pending).
+fn sys_getitimer(args: &SyscallArgs) -> SyscallResult {
+    let which = args.arg0;
+    let value = args.arg1;
+
+    if which > 2 {
+        return linux_err(errno::EINVAL);
+    }
+    if value == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(value, ITIMERVAL_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let buf = [0u8; ITIMERVAL_SIZE];
+    // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range above.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(buf.as_ptr(), value, ITIMERVAL_SIZE)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `setitimer(which, new_value, old_value)` — accept cancellation;
+/// refuse arming with ENOSYS.
+fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
+    let which = args.arg0;
+    let new_value = args.arg1;
+    let old_value = args.arg2;
+
+    if which > 2 {
+        return linux_err(errno::EINVAL);
+    }
+    if new_value == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(new_value, ITIMERVAL_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Copy the new itimerval in to inspect whether this is a cancel
+    // (all-zero) or an arm (any field non-zero).
+    let mut new_buf = [0u8; ITIMERVAL_SIZE];
+    // SAFETY: validated above as a readable user range.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(new_value, new_buf.as_mut_ptr(), ITIMERVAL_SIZE)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let is_cancel = new_buf.iter().all(|&b| b == 0);
+
+    if !is_cancel {
+        // We cannot arm a timer that will fire a signal later.  Refuse
+        // honestly so the caller knows to fall back.
+        return linux_err(errno::ENOSYS);
+    }
+
+    // Cancel path: report previous timer as zero (we hold no timer state)
+    // into old_value if it was provided.
+    if old_value != 0 {
+        if let Err(e) =
+            crate::mm::user::validate_user_write(old_value, ITIMERVAL_SIZE)
+        {
+            return linux_err(linux_errno_for(e));
+        }
+        let old_buf = [0u8; ITIMERVAL_SIZE];
+        // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(old_buf.as_ptr(), old_value, ITIMERVAL_SIZE)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `alarm(seconds)` — legacy wrapper.  Returns 0 (no previous alarm).
+fn sys_alarm(_args: &SyscallArgs) -> SyscallResult {
+    // alarm() has no error return — it just reports "seconds remaining
+    // of the previous alarm".  We never have a previous alarm, so 0 is
+    // correct.  We do not fire the new alarm either; that is the
+    // documented limitation tracked in todo.txt.
+    SyscallResult::ok(0)
+}
+
+/// `pause()` — refuse with ENOSYS; we have no signal-driven wakeup yet.
+fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
+    // Linux pause() returns -1 with errno=EINTR after a signal is
+    // delivered.  Without that machinery we cannot fulfil the contract;
+    // returning -ENOSYS lets userspace fall back gracefully rather than
+    // hanging forever in a kernel that will never wake it.
+    linux_err(errno::ENOSYS)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -7153,6 +7292,71 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::MKNODAT, &a_mknodat).value
             != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: mknodat not EPERM");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // getitimer / setitimer / alarm / pause — input validation.
+    {
+        // getitimer(which=3, _) -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETITIMER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getitimer(which=3) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // getitimer(0, NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETITIMER, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getitimer(0,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setitimer(which=99, _, _) -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETITIMER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setitimer(which=99) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setitimer(0, NULL, _) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETITIMER, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setitimer(0,NULL,_) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // alarm(N) -> 0 for any N.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ALARM, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: alarm(0) not 0");
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 5, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ALARM, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: alarm(5) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // pause() -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PAUSE, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: pause not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

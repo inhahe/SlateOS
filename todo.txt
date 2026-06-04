@@ -6102,3 +6102,28 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      and a device-node registry land, these must route
 ##      through real FS operations and a capability check
 ##      rather than a blanket refusal.
+##  37. GETITIMER / SETITIMER / ALARM / PAUSE — DONE as
+##      principled stubs.  Interval timers need signal-driven
+##      delivery which we do not yet have.
+##         - getitimer validates which (0..=2) and the output
+##           pointer (32-byte itimerval), then writes zeros
+##           (truthful: no timer is pending).
+##         - setitimer validates which and the input pointer.
+##           If the new itimerval is all-zero (a cancel) it
+##           writes a zero old-value if requested and returns 0.
+##           Arming a non-zero timer returns -ENOSYS so the
+##           caller knows the operation cannot succeed.
+##         - alarm(N) always returns 0 ("no previous alarm
+##           pending"), which is truthful when N == 0 and is a
+##           known lie when N > 0.  alarm() has no error return
+##           in its ABI, so this is the least-bad answer; it is
+##           tracked here so the eventual real implementation is
+##           obvious.
+##         - pause() returns -ENOSYS because the contract
+##           ("block until any signal") cannot be honoured
+##           without signal-driven wakeup; returning ENOSYS lets
+##           userspace fall back rather than hang.
+##      Limitation: when SIGALRM / SIGVTALRM / SIGPROF delivery
+##      lands, these must route through it; until then, programs
+##      that rely on alarm() to interrupt blocking calls will
+##      not be interrupted.

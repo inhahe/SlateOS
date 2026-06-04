@@ -5511,9 +5511,18 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   8. GETEUID == GETUID, GETEGID == GETGID.  Our credential model
 ##      doesn't track effective IDs separately.  Documented; will need
 ##      a follow-up if/when we add setuid binary support.
-##   9. KILL only honours SIGTERM and SIGKILL.  Other signal numbers
-##      return -EINVAL.  Full signal mapping is part of the SIGACTION
-##      follow-up (item 5).
+##   9. KILL accepts every signal in 1..=NSIG (=64).  sys_kill
+##      delegates to handlers::sys_signal_send, which calls
+##      signal::classify_post(target, sig) — that function knows the
+##      POSIX default-action table (Terminate / Drop / Stop / Continue /
+##      Deliver-to-handler) and routes accordingly.  sig=0 and
+##      sig>NSIG return -EINVAL.  Limitation: job-control signals
+##      (SIGSTOP / SIGCONT / SIGTSTP / SIGTTIN / SIGTTOU) are silently
+##      dropped — we don't have job control / process stopping, so
+##      classify_post resolves them as PostDecision::Drop.  Real Linux
+##      programs that block on SIGSTOP/SIGCONT for foreground/
+##      background terminal control won't behave correctly, but most
+##      non-shell programs are unaffected.
 ##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError
@@ -5589,6 +5598,12 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     test task) — proves CLONE_VFORK is no longer rejected at the
 ##     flag check.  clone(SIGCHLD | CLONE_PARENT/CLONE_NEWNS/
 ##     CLONE_PTRACE) each still return -ENOSYS.
+##   - kill signal-number gate via dispatch_linux: sig=0 (existence
+##     probe) MUST NOT return -EINVAL (expects ESRCH for a probe pid
+##     that doesn't exist); sig=65 and sig=u64::MAX each return
+##     -EINVAL; sig in {9, 15, 17, 64} each progress past the gate
+##     (i.e. don't return -EINVAL, proving the linux ABI accepts the
+##     full 1..=NSIG range and not just SIGKILL/SIGTERM).
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an

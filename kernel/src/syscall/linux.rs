@@ -2384,8 +2384,73 @@ fn sys_exit_group(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `kill(pid, sig)` — send a signal.
+///
+/// Linux semantics:
+///   - `sig == 0`: existence/permission probe.  Returns 0 if the target
+///     process exists and the caller could send a signal to it, -ESRCH
+///     if it doesn't exist, -EPERM on permission failure.  Critically,
+///     `sig == 0` is NEVER `-EINVAL`; programs use it to test whether
+///     a child is still alive without actually disturbing it.
+///   - `sig in 1..=NSIG`: send the signal via the native signal_send
+///     path which already knows the POSIX default-action table
+///     (Terminate / Drop / Stop / Continue / Deliver-to-handler).
+///   - `sig > NSIG` or `sig` not representable in u32: -EINVAL.
+///   - `pid == 0` / `pid < 0` (process-group targeting): not yet
+///     supported; we return -EINVAL the same way the native handler
+///     does (process groups are a job-control feature we lack).
 fn sys_kill(args: &SyscallArgs) -> SyscallResult {
-    // Native SYS_SIGNAL_SEND: arg0 = target pid, arg1 = signum.
+    let sig = args.arg1;
+    // sig=0 is the existence probe.  Route it through a no-op send
+    // that still performs the existence + authority checks so the
+    // caller gets a truthful 0 / -ESRCH / -EPERM answer.  We rewrite
+    // sig to 1 (SIGHUP) for the inner check — classify_post treats
+    // SIGHUP exactly the way the existence-probe path needs (it
+    // either Drops or Delivers depending on disposition, both of
+    // which we'll discard).  Then short-circuit a 0 return on
+    // success.  On error, propagate the errno.
+    if sig == 0 {
+        let probe_args = SyscallArgs {
+            arg0: args.arg0,
+            arg1: 1, // SIGHUP — valid, won't fail signal-number gate
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        // We can't actually let SIGHUP be delivered as a probe (the
+        // wake target might catch it).  Instead, hand-roll the same
+        // existence + authority checks the native handler performs.
+        use crate::proc::{pcb, thread};
+        let target = args.arg0;
+        if target == 0 {
+            return linux_err(errno::EINVAL);
+        }
+        let task_id = crate::sched::current_task_id();
+        let caller = thread::owner_process(task_id).unwrap_or(0);
+        if target != caller {
+            let target_parent = match pcb::parent(target) {
+                Some(p) => p,
+                None => return linux_err(errno::ESRCH),
+            };
+            let has_parent_auth = caller == 0 || caller == target_parent;
+            let has_cap_auth = pcb::has_capability_for(
+                caller,
+                crate::cap::ResourceType::Process,
+                target,
+                crate::cap::Rights::DELETE,
+            );
+            if !has_parent_auth && !has_cap_auth {
+                return linux_err(errno::EPERM);
+            }
+        }
+        match pcb::state(target) {
+            Some(pcb::ProcessState::Zombie) | None => return linux_err(errno::ESRCH),
+            _ => {}
+        }
+        // Existence probe succeeds — suppress the unused-warning on the
+        // probe_args placeholder so it documents the intent.
+        let _ = probe_args;
+        return SyscallResult::ok(0);
+    }
+    // Real signal: delegate to native.  Native SYS_SIGNAL_SEND:
+    // arg0 = target pid, arg1 = signum.
     linux_from_native(handlers::sys_signal_send(args))
 }
 
@@ -3262,6 +3327,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     return Err(KernelError::InternalError);
                 }
+            }
+        }
+    }
+
+    // kill(target, sig) signal-number gate validation:
+    //   - target == 0 is "process group" targeting in Linux which we
+    //     don't support; we use target=0xDEAD_BEEF instead, a pid
+    //     that almost-certainly doesn't exist so the call bails at
+    //     the existence check (ESRCH).  What we assert is that the
+    //     signal-number gate either accepts (-> ESRCH) or rejects
+    //     (-> EINVAL) the *signal number* — never the wrong way.
+    //   - sig == 0 (existence probe): MUST NOT be EINVAL.
+    //   - sig == NSIG (64): valid; bypasses gate.
+    //   - sig == NSIG + 1 (65): EINVAL.
+    //   - sig == u64::MAX: EINVAL.
+    //   - sig == 9 (SIGKILL), 15 (SIGTERM), 17 (SIGCHLD): all valid;
+    //     the linux ABI must NOT collapse to "SIGKILL/SIGTERM only".
+    {
+        const PROBE_PID: u64 = 0xDEAD_BEEF;
+        // sig=0 (existence probe): not EINVAL (expect ESRCH).
+        let a = SyscallArgs { arg0: PROBE_PID, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: kill sig=0 -> EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // sig=65 (NSIG+1): EINVAL.
+        let a = SyscallArgs { arg0: PROBE_PID, arg1: 65,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KILL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: kill sig=65");
+            return Err(KernelError::InternalError);
+        }
+        // sig=u64::MAX: EINVAL.
+        let a = SyscallArgs { arg0: PROBE_PID, arg1: u64::MAX,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KILL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: kill sig=u64::MAX");
+            return Err(KernelError::InternalError);
+        }
+        // sig=9 (SIGKILL), 15 (SIGTERM), 17 (SIGCHLD), 64 (NSIG):
+        // none should be rejected by the signal-number gate.
+        for sig in [9u64, 15, 17, 64] {
+            let a = SyscallArgs { arg0: PROBE_PID, arg1: sig,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::KILL, &a).value;
+            if v == -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: kill sig={} rejected as EINVAL",
+                    sig
+                );
+                return Err(KernelError::InternalError);
             }
         }
     }

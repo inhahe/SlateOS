@@ -316,6 +316,25 @@ pub struct Process {
     /// table implementation and [`crate::syscall::linux`] for the
     /// callers.
     pub linux_fd_table: Option<alloc::boxed::Box<super::linux_fd::KernelFdTable>>,
+    /// Current working directory, stored as a canonical absolute path.
+    ///
+    /// Invariants maintained by [`set_cwd`]:
+    /// - Starts with `b'/'`.
+    /// - Never contains `..`, `.`, empty components, or duplicate `/`.
+    /// - Has no trailing `/` except the root itself (which is exactly
+    ///   `b"/"`).
+    /// - No interior NULs.
+    /// - Length ≤ `PATH_MAX` (4096) **including** the trailing NUL the
+    ///   `getcwd` syscall writes (so the stored slice is ≤ 4095 bytes).
+    ///
+    /// Set by `chdir` / `fchdir`.  Inherited by `fork`.  Used by every
+    /// `*at(AT_FDCWD, …)` resolution path (future) and by `getcwd`.
+    ///
+    /// We store the cwd on every process (not just Linux-ABI ones).
+    /// Native processes don't currently expose it via a syscall, but
+    /// the field is cheap (one heap allocation per process) and keeps
+    /// fork's structural invariant simple: every child inherits.
+    pub cwd: Vec<u8>,
 }
 
 impl Process {
@@ -342,6 +361,9 @@ impl Process {
             initial_envp: Vec::new(),
             abi_mode: AbiMode::Native,
             linux_fd_table: None,
+            // Every process starts at the filesystem root.  `chdir`
+            // changes this; `fork_create` clones the parent's value.
+            cwd: alloc::vec![b'/'],
         }
     }
 }
@@ -441,7 +463,7 @@ pub fn fork_create(
     // path, this keeps the refcount at exactly "one per process that
     // holds at least one fd referencing the handle", which is what
     // fork's `dup_one` per-process bump preserves.
-    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table) = {
+    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
             let mut copy = super::linux_fd::KernelFdTable::new();
@@ -459,6 +481,7 @@ pub fn fork_create(
             parent.vmas.clone(),
             parent.abi_mode,
             cloned_fd_table,
+            parent.cwd.clone(),
         )
     };
 
@@ -488,6 +511,10 @@ pub fn fork_create(
         // forked child speaks the same ABI as its parent.
         abi_mode,
         linux_fd_table,
+        // POSIX: the child inherits the parent's cwd at the moment
+        // of fork.  Subsequent chdirs in either process do not affect
+        // the other (each owns its own Vec).
+        cwd,
     };
 
     table.insert(pid, child);
@@ -727,6 +754,66 @@ pub fn insert_caps(
     }
 
     Ok(new_handles)
+}
+
+// ---------------------------------------------------------------------------
+// Per-process current working directory
+// ---------------------------------------------------------------------------
+
+/// Maximum length (in bytes, **excluding** the trailing NUL) of a
+/// stored canonical cwd path.  Matches Linux's `PATH_MAX = 4096`: the
+/// `getcwd` syscall must return the path plus a NUL inside a single
+/// `PATH_MAX` buffer, so the stored slice itself is at most
+/// `PATH_MAX - 1 = 4095` bytes.
+pub const CWD_MAX_LEN: usize = 4095;
+
+/// Read the current working directory of a process.
+///
+/// Returns a cloned `Vec<u8>` because the cwd lives inside the
+/// PROCESS_TABLE-locked PCB; callers that want to inspect/copy out the
+/// path must own the bytes.  Returns `None` if `pid` is not in the
+/// table.
+///
+/// The returned path satisfies the invariants documented on
+/// [`Process::cwd`].
+#[must_use]
+pub fn get_cwd(pid: ProcessId) -> Option<Vec<u8>> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.cwd.clone())
+}
+
+/// Replace the current working directory of a process.
+///
+/// The caller is responsible for ensuring `new_cwd` already satisfies
+/// the canonical-path invariants on [`Process::cwd`] (starts with `/`,
+/// no `.`/`..`/empty components, no trailing `/` except root, no
+/// interior NULs, length ≤ [`CWD_MAX_LEN`]).  This accessor performs
+/// a defensive sanity check (start-with-`/`, length, interior NUL)
+/// and rejects malformed input with `KernelError::InvalidArgument`;
+/// the heavier component-level normalization is the syscall layer's
+/// job and happens before we get here.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` is not in the table.
+/// - [`KernelError::InvalidArgument`] if `new_cwd` violates the
+///   shallow invariants above.
+pub fn set_cwd(pid: ProcessId, new_cwd: Vec<u8>) -> KernelResult<()> {
+    if new_cwd.is_empty() || new_cwd[0] != b'/' {
+        return Err(KernelError::InvalidArgument);
+    }
+    if new_cwd.len() > CWD_MAX_LEN {
+        return Err(KernelError::InvalidArgument);
+    }
+    if new_cwd.iter().any(|&b| b == 0) {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+    proc.cwd = new_cwd;
+    Ok(())
 }
 
 /// Set the exit code for a process.

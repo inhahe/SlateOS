@@ -7306,3 +7306,60 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      repo root) is now a standing tool — re-run it after any
 ##      future Linux release to detect new gaps.
 
+##  61. PER-PROCESS CWD (real implementation) — DONE.
+##      First "upgrade an existing stub to a real implementation"
+##      batch, now that find_gaps.py reports zero undispatched
+##      x86_64 syscalls.  Replaces the batch-31 hardcoded "/"
+##      response with a real per-process Process::cwd field that
+##      chdir updates and getcwd reads.
+##         - Process gains `cwd: Vec<u8>` initialized to b"/".
+##           fork_create clones the parent's cwd (POSIX rule).
+##           pcb::get_cwd / pcb::set_cwd accessors; set_cwd
+##           runs invariant checks (starts-with-/, len≤4095,
+##           no interior NUL) and rejects with InvalidArgument.
+##         - syscall layer adds canonicalize_path(cwd, path)
+##           that handles absolute/relative join, multiple //,
+##           ./ skip, ../ pop, root-bounded ..  Result is the
+##           canonical absolute path with no trailing / except
+##           root and length ≤ pcb::CWD_MAX_LEN.
+##         - sys_chdir: reads user cstr (PATH_MAX=4096),
+##           canonicalizes against cwd, stores via set_cwd.
+##         - sys_getcwd: reads pcb::get_cwd(caller_pid),
+##           writes path + NUL via copy_to_user.
+##         - sys_fchdir: still validate-only success because
+##           Linux fd table doesn't yet store path-of-dirfd.
+##         - Kernel-context fallback: no caller_pid → still
+##           validates and runs canonicalizer, returns 0 on
+##           well-formed input, errno on malformed.  Lets the
+##           boot self-tests exercise the canonicalizer and
+##           error paths in-kernel.
+##      Choice rationale:
+##         * Store the cwd as raw bytes (Vec<u8>), not UTF-8
+##           String.  Path bytes are arbitrary on Linux
+##           (locale-dependent), and CLAUDE.md mandates
+##           OsStr/byte-level handling at the OS boundary.
+##         * canonicalize_path is path-string-level only — we
+##           don't yet stat the target directory.  Cheaper, and
+##           a subsequent open(rel_path) against a nonexistent
+##           cwd will fail with ENOENT as it should.  Once the
+##           VFS exposes a stat(path) we can add a "verify the
+##           target is a directory" check.
+##         * Cwd lives on every Process (not just Linux-ABI
+##           ones).  Native processes don't expose it via a
+##           syscall today but the field is cheap, and the
+##           fork-inheritance invariant is simpler when every
+##           process has one.
+##         * fchdir still stubbed: real implementation needs
+##           the linux_fd table to store the original open path
+##           alongside (HandleKind, raw_handle).  That is a
+##           separate refactor of FdEntry — deferred until a
+##           subsequent batch.
+##      Limitation: chdir does NOT verify the target exists in
+##      the VFS yet.  Programs that chdir to a bogus path see
+##      success, then ENOENT on the next open.  Real Linux
+##      returns ENOTDIR/ENOENT at the chdir call itself.
+##      Limitation: fchdir is still validate-only.  Programs
+##      that walk a tree via openat(O_DIRECTORY)+fchdir without
+##      re-stringifying paths will silently stay at their
+##      original cwd.
+

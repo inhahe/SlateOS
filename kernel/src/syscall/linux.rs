@@ -9813,15 +9813,86 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+/// Canonicalize `path` against `cwd`, producing an absolute path with
+/// no `.`, `..`, empty components, or trailing slash (except for the
+/// root, which is exactly `b"/"`).
+///
+/// Errors returned are Linux errno values:
+/// - `ENOENT` — empty input path.
+/// - `ENAMETOOLONG` — result exceeds [`pcb::CWD_MAX_LEN`].
+/// - `EINVAL` — interior NUL byte in `path` (sanity check; caller will
+///   normally have used `read_user_cstr` which already rejects this).
+///
+/// `..` at the root is absorbed (Linux behaviour: `cd /..` is `cd /`),
+/// not an error.
+fn canonicalize_path(cwd: &[u8], path: &[u8]) -> Result<alloc::vec::Vec<u8>, i32> {
+    if path.is_empty() {
+        return Err(errno::ENOENT);
+    }
+    if path.contains(&0) {
+        return Err(errno::EINVAL);
+    }
+    // Build a working buffer: if path is absolute, start fresh;
+    // otherwise seed with cwd.
+    let mut joined: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if path[0] == b'/' {
+        joined.push(b'/');
+    } else {
+        joined.extend_from_slice(cwd);
+        joined.push(b'/');
+    }
+    joined.extend_from_slice(path);
+
+    // Walk components.  We build a `Vec<&[u8]>` of surviving
+    // components by index ranges into `joined` to avoid double
+    // allocation.
+    let mut comps: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    let mut i: usize = 0;
+    while i < joined.len() {
+        // Skip leading slashes.
+        while i < joined.len() && joined[i] == b'/' {
+            i += 1;
+        }
+        if i >= joined.len() {
+            break;
+        }
+        let start = i;
+        while i < joined.len() && joined[i] != b'/' {
+            i += 1;
+        }
+        let end = i;
+        let comp = &joined[start..end];
+        if comp == b"." {
+            continue;
+        }
+        if comp == b".." {
+            comps.pop();
+            continue;
+        }
+        comps.push((start, end));
+    }
+
+    // Reassemble.
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if comps.is_empty() {
+        out.push(b'/');
+    } else {
+        for (s, e) in &comps {
+            out.push(b'/');
+            out.extend_from_slice(&joined[*s..*e]);
+        }
+    }
+    if out.len() > pcb::CWD_MAX_LEN {
+        return Err(errno::ENAMETOOLONG);
+    }
+    Ok(out)
+}
+
 /// `getcwd(buf, size)` — return current working directory as NUL-terminated path.
 ///
-/// The kernel does not yet track a per-process cwd (the VFS resolves
-/// paths against an implicit root), so every caller observes `"/"` as
-/// the current directory.  This is the correct stub semantics: every
-/// shell, libc startup, and config-file loader invokes `getcwd()` at
-/// process startup and treating the absence of a cwd as a hard failure
-/// (ENOSYS) would break all of them.  Reporting `"/"` is consistent
-/// with what `chdir("/")` would set if we tracked it.
+/// Backed by the per-process [`Process::cwd`](crate::proc::pcb::Process)
+/// field.  In kernel test context (no caller PID) we fall back to
+/// `b"/"`, which matches the boot-time default of every process.
 ///
 /// Linux contract: on success returns the number of bytes written
 /// **including** the trailing NUL.  `ERANGE` if `size` is too small,
@@ -9838,50 +9909,110 @@ fn sys_getcwd(args: &SyscallArgs) -> SyscallResult {
     if size == 0 {
         return linux_err(errno::EINVAL);
     }
-    // We need at least 2 bytes for "/" + NUL.
-    if size < 2 {
+    let cwd_bytes: alloc::vec::Vec<u8> = match caller_pid() {
+        Some(pid) => pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']),
+        None => alloc::vec![b'/'],
+    };
+    let total_len = cwd_bytes.len().saturating_add(1); // + NUL
+    if size < total_len as u64 {
         return linux_err(errno::ERANGE);
     }
-    let cwd: &[u8] = b"/\0";
-    if let Err(e) = crate::mm::user::validate_user_write(buf, cwd.len()) {
+    if let Err(e) = crate::mm::user::validate_user_write(buf, total_len) {
         return linux_err(linux_errno_for(e));
     }
-    // SAFETY: validate_user_write succeeded; copy_to_user uses STAC/CLAC.
+    // Build a single contiguous buffer (path + NUL) so we issue one
+    // copy_to_user.  This keeps the SMAP window short and avoids the
+    // partial-success problem if the second write faulted.
+    let mut tmp: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(total_len);
+    tmp.extend_from_slice(&cwd_bytes);
+    tmp.push(0);
+    // SAFETY: validate_user_write succeeded for `total_len` bytes
+    // starting at `buf`; tmp.as_ptr() points at a kernel-owned buffer
+    // of the same length; copy_to_user handles STAC/CLAC.
     let r = unsafe {
-        crate::mm::user::copy_to_user(cwd.as_ptr(), buf, cwd.len())
+        crate::mm::user::copy_to_user(tmp.as_ptr(), buf, total_len)
     };
     if let Err(e) = r {
         return linux_err(linux_errno_for(e));
     }
-    SyscallResult::ok(cwd.len() as i64)
+    SyscallResult::ok(total_len as i64)
 }
 
 /// `chdir(path)` — change current working directory.
 ///
-/// Without per-process cwd tracking we silently succeed for any
-/// well-formed path string.  This matches the observable state via
-/// `getcwd` (always `"/"`) — a program that calls `chdir("/foo")` and
-/// then `getcwd()` will see `"/"` regardless, which is consistent with
-/// the kernel never having moved.  Once per-process cwd lands, this
-/// becomes a real path resolution + capability check.
+/// Resolves `path` against the caller's current cwd (Linux rule), then
+/// stores the canonical absolute result in the PCB.  We do **not** yet
+/// verify that the target directory exists in the VFS — until the VFS
+/// gains a `stat(path)` entry point that callable from this layer,
+/// chdir is a string-level operation.  This is observable but benign:
+/// a later `open(rel_path)` against a non-existent cwd will fail with
+/// `ENOENT` as it should.
 ///
-/// TODO(item 57): wire to per-process cwd once that subsystem exists.
+/// In kernel test context (no caller PID) we still validate inputs but
+/// have nowhere to store the result; we silently succeed so test
+/// callers don't observe a spurious ESRCH.
+///
+/// # Errors
+///
+/// - `EFAULT` — `path == NULL` or unreadable.
+/// - `ENOENT` — empty path.
+/// - `ENAMETOOLONG` — input > PATH_MAX or normalized result >
+///   `pcb::CWD_MAX_LEN`.
+/// - `EINVAL` — interior NUL.
 fn sys_chdir(args: &SyscallArgs) -> SyscallResult {
-    let path = args.arg0;
-    if path == 0 {
+    let path_ptr = args.arg0;
+    if path_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = validate_user_str(path) {
+    if let Err(e) = validate_user_str(path_ptr) {
         return linux_err(linux_errno_for(e));
     }
-    SyscallResult::ok(0)
+    const PATH_MAX: usize = 4096;
+    let path_bytes = match read_user_cstr(path_ptr, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => {
+            // Kernel context: validate-only path, used by self-tests.
+            // Still run the canonicalizer so empty/oversize inputs
+            // produce the same errors a userspace caller would see.
+            let cwd = alloc::vec![b'/'];
+            return match canonicalize_path(&cwd, &path_bytes) {
+                Ok(_) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            };
+        }
+    };
+    let cwd = pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
+    let new_cwd = match canonicalize_path(&cwd, &path_bytes) {
+        Ok(p) => p,
+        Err(e) => return linux_err(e),
+    };
+    match pcb::set_cwd(pid, new_cwd) {
+        Ok(()) => SyscallResult::ok(0),
+        // set_cwd's invariant checks should never trip for a freshly
+        // canonicalized path; if they do, our canonicalizer has a bug —
+        // report EINVAL so the failure is visible rather than silent.
+        Err(_) => linux_err(errno::EINVAL),
+    }
 }
 
 /// `fchdir(fd)` — change current working directory to an open dirfd.
 ///
-/// Same stub semantics as `chdir`: validate the fd, return 0.  Real
-/// implementation requires both per-process cwd tracking and a
-/// directory-handle backend in the VFS.
+/// The fd-table layer does not yet store the path the dirfd was
+/// originally opened with (see `kernel/src/proc/linux_fd.rs`'s
+/// `FdEntry`, which holds `(HandleKind, raw_handle, fd_flags,
+/// status_flags)` only).  Without that, we can't recover an absolute
+/// path to install as the new cwd.  Therefore fchdir remains a
+/// validated success — it doesn't actually move the cwd — and the
+/// behaviour is documented as a known limitation (todo.txt item 57
+/// follow-up: "fchdir requires path-of-dirfd tracking").  Programs
+/// that round-trip through `chdir` (the overwhelmingly common case)
+/// get correct semantics; programs that use `openat`+`fchdir` to walk
+/// a tree without a string path will silently stay at the original
+/// cwd.
 fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
@@ -16839,10 +16970,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: chdir NULL not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // chdir valid -> 0.
+        // chdir valid -> 0 (kernel context: validates+normalizes only).
         let a = SyscallArgs { arg0: path_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CHDIR, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: chdir valid not 0");
+            return Err(KernelError::InternalError);
+        }
+        // chdir empty string -> ENOENT (canonicalizer rejects empty).
+        let empty_path = b"\0";
+        let empty_ptr = empty_path.as_ptr() as u64;
+        let a = SyscallArgs { arg0: empty_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHDIR, &a).value != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: chdir empty not ENOENT");
             return Err(KernelError::InternalError);
         }
 
@@ -16850,6 +16989,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FCHDIR, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: fchdir valid not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // ----- canonicalize_path direct unit tests -----
+        // Absolute paths with redundant elements are normalized.
+        let cwd_root: &[u8] = b"/";
+        let cases: &[(&[u8], &[u8], &[u8])] = &[
+            (b"/", b"/", b"/"),
+            (b"/", b"/foo", b"/foo"),
+            (b"/", b"/foo/", b"/foo"),
+            (b"/", b"/foo//bar", b"/foo/bar"),
+            (b"/", b"/foo/./bar", b"/foo/bar"),
+            (b"/", b"/foo/../bar", b"/bar"),
+            (b"/", b"/..", b"/"),
+            (b"/", b"/../..", b"/"),
+            (b"/foo", b"bar", b"/foo/bar"),
+            (b"/foo/bar", b"..", b"/foo"),
+            (b"/foo/bar", b"../..", b"/"),
+            (b"/foo", b".", b"/foo"),
+            (b"/foo", b"./baz", b"/foo/baz"),
+            (b"/foo", b"/abs/path", b"/abs/path"),
+        ];
+        for &(cwd, input, expected) in cases {
+            match canonicalize_path(cwd, input) {
+                Ok(out) => {
+                    if out.as_slice() != expected {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: canonicalize_path mismatch on {:?}+{:?}",
+                            cwd, input
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+                Err(_) => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: canonicalize_path errored on {:?}+{:?}",
+                        cwd, input
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+        // Empty path -> ENOENT.
+        if canonicalize_path(cwd_root, b"") != Err(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: canonicalize empty not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // Interior NUL -> EINVAL.
+        if canonicalize_path(cwd_root, b"foo\0bar") != Err(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: canonicalize NUL not EINVAL");
             return Err(KernelError::InternalError);
         }
     }

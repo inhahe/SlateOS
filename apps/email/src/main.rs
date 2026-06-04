@@ -2690,6 +2690,12 @@ fn create_sample_messages(account_id: u32) -> Vec<MessageSummary> {
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

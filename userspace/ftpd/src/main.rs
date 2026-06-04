@@ -23,6 +23,7 @@
 //! HELP, SIZE, MDTM, FEAT, OPTS, REST
 
 #![cfg_attr(not(test), no_main)]
+#![cfg_attr(test, allow(dead_code))]
 #![deny(clippy::all)]
 #![allow(clippy::manual_range_contains)]
 

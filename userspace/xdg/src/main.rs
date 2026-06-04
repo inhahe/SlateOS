@@ -1092,8 +1092,7 @@ fn run_xdg_open(args: &[String]) -> i32 {
     let mut verbose = false;
     let mut target: Option<&str> = None;
 
-    let mut iter = args.iter();
-    for arg in iter {
+    for arg in args {
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
             "-h" | "--help" => {

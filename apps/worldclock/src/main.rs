@@ -4,6 +4,7 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_lossless)]
+#![allow(clippy::too_many_arguments)]
 
 //! OurOS World Clock — multi-timezone clock display with analog/digital views.
 //!

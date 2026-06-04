@@ -1044,9 +1044,7 @@ fn cells_between(sr: usize, sc: usize, er: usize, ec: usize) -> Option<Vec<(usiz
     // Must be horizontal, vertical, or exactly 45-degree diagonal.
     let steps = if abs_dr == 0 {
         abs_dc
-    } else if abs_dc == 0 {
-        abs_dr
-    } else if abs_dr == abs_dc {
+    } else if abs_dc == 0 || abs_dr == abs_dc {
         abs_dr
     } else {
         return None;

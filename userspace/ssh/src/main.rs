@@ -1551,6 +1551,9 @@ struct Config {
     command: Option<String>,
     verbose: bool,
     strict_host_key: StrictHostKey,
+    // Parsed from -o ConnectTimeout=N; consumed by the future socket
+    // connect path that wires a real timeout into the TCP handshake.
+    #[allow(dead_code)]
     connect_timeout: u32,
 }
 

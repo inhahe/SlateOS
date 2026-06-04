@@ -411,9 +411,8 @@ fn count_t_front_corners(field: &[Option<Color>], row: i8, col: i8, rotation: u8
     for (dr, dc) in front_corners {
         let r = row + dr;
         let c = col + dc;
-        if r < 0 || r >= TOTAL_ROWS as i8 || c < 0 || c >= FIELD_COLS as i8 {
-            count += 1;
-        } else if field[r as usize * FIELD_COLS + c as usize].is_some() {
+        let oob = r < 0 || r >= TOTAL_ROWS as i8 || c < 0 || c >= FIELD_COLS as i8;
+        if oob || field[r as usize * FIELD_COLS + c as usize].is_some() {
             count += 1;
         }
     }

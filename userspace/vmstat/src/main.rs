@@ -496,12 +496,9 @@ fn current_epoch_secs() -> u64 {
 fn print_header(config: &Config) {
     let w = if config.wide { WIDE_WIDTH } else { NARROW_WIDTH };
 
-    // Top grouping line.
-    if config.wide {
-        print!("procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----");
-    } else {
-        print!("procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----");
-    }
+    // Top grouping line. (Currently identical for wide/narrow — wide
+    // adds extra columns to the per-row format, not the grouping bar.)
+    print!("procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----");
     if config.timestamp {
         print!("  ---timestamp---");
     }

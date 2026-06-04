@@ -741,16 +741,11 @@ fn run_split(config: &Config) -> io::Result<()> {
 /// Count how many output files exist by probing sequential suffix indices.
 fn count_existing_outputs(config: &Config) -> u64 {
     let mut idx: u64 = 0;
-    loop {
-        match output_name(config, idx) {
-            Some(name) => {
-                if fs::metadata(&name).is_err() {
-                    break;
-                }
-                idx += 1;
-            }
-            None => break,
+    while let Some(name) = output_name(config, idx) {
+        if fs::metadata(&name).is_err() {
+            break;
         }
+        idx += 1;
     }
     idx
 }

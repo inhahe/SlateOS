@@ -549,7 +549,15 @@ impl VpnManager {
             search_query: String::new(),
         }
     }
+}
 
+impl Default for VpnManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VpnManager {
     /// Add a new profile. Returns the ID assigned.
     pub fn add_profile(&mut self, mut profile: VpnProfile) -> Result<u32, String> {
         profile.validate()?;

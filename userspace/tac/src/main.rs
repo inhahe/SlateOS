@@ -338,18 +338,10 @@ fn split_by_separator(content: &str, separator: &str, before: bool, regex: bool)
                     if remaining.is_empty() {
                         break;
                     }
-                    // Move past this separator in next iteration
-                    let _sep_text = &remaining[..end - start];
-                    let _rest = &remaining[end - start..];
-                    if segments.is_empty() || segments.last().is_some_and(|s| !s.is_empty()) {
-                        // Separator attaches to next segment
-                    }
-                    remaining = remaining[end - start..].to_string();
-                    if let Some(_last) = segments.last_mut() {
-                        // Separator was before, already pushed segment before it
-                    }
-                    // Re-approach: simpler split
-                    break; // Fall through to simple approach for regex
+                    // Regex separator branch is unfinished — fall through to
+                    // the simple split below. (The dead branch left here as
+                    // a marker for the future regex-aware separator support.)
+                    break;
                 } else {
                     segments.push(remaining[..end].to_string());
                     remaining = remaining[end..].to_string();

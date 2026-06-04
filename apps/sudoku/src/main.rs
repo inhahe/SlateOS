@@ -383,10 +383,8 @@ fn find_conflicts(grid: &[u8; TOTAL_CELLS], row: usize, col: usize) -> Vec<(usiz
 
 /// Check whether the grid is completely filled and valid.
 fn is_grid_complete(grid: &[u8; TOTAL_CELLS]) -> bool {
-    for i in 0..TOTAL_CELLS {
-        if grid[i] == 0 {
-            return false;
-        }
+    if grid.contains(&0) {
+        return false;
     }
     // Verify no conflicts
     for r in 0..GRID_SIZE {

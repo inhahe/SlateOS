@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, clippy::too_many_arguments)]
 //! OurOS System Tray — notification area and quick settings
 //!
 //! Provides the system tray (notification area) for the OurOS taskbar.

@@ -6295,3 +6295,39 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      through them.  Inotify in particular needs FS metadata
 ##      change events bubbled up from the VFS layer, so it is
 ##      blocked on real VFS more than on its own kernel object.
+##  44. SENDFILE / SPLICE / TEE / VMSPLICE / COPY_FILE_RANGE /
+##      AIO (io_setup family) / IO_URING family — DONE as
+##      input-validated principled-errno stubs.
+##         - sendfile / splice / tee / vmsplice / copy_file_range
+##           validate flag bits (splice/tee/vmsplice:
+##           SPLICE_F_MOVE | NONBLOCK | MORE | GIFT;
+##           copy_file_range: must be 0), fds (via
+##           linux_fd_lookup outside kernel context), and
+##           offset / iov pointers, then return -EINVAL.
+##           EINVAL is the right choice here because POSIX
+##           callers and glibc already handle "this fd shape
+##           isn't compatible with the zero-copy syscall" by
+##           falling back to a read/write loop; ENOSYS would
+##           suggest the call doesn't exist at all and could
+##           pick a worse code path.
+##         - io_setup / io_destroy / io_submit / io_cancel /
+##           io_getevents (POSIX AIO): io_setup validates
+##           nr_events != 0, validates the ctx_idp output
+##           pointer (8B aio_context_t), then -ENOSYS so glibc
+##           falls back to thread-pool AIO.  The other AIO
+##           syscalls return -EINVAL because no context handle
+##           is ever valid.
+##         - io_uring_setup / io_uring_enter / io_uring_register:
+##           io_uring_setup validates entries != 0 and the
+##           120-byte struct io_uring_params output pointer,
+##           then -ENOSYS so io_uring-aware callers fall back
+##           to epoll.  enter / register are unconditional
+##           -ENOSYS.
+##      Limitation: real implementations need page-cache
+##      page transfer for sendfile, pipe-internal page move
+##      for splice/tee, gather-write for vmsplice, an iouring
+##      submission queue / completion queue, and an AIO
+##      thread-pool or async runtime.  All of these are
+##      blocked on the kernel growing real async-I/O
+##      infrastructure (already partly in place via the
+##      kernel-side io_uring shim, but not Linux-shaped).

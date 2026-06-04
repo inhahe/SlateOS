@@ -482,6 +482,19 @@ pub mod nr {
     pub const INOTIFY_RM_WATCH: u64 = 255;
     pub const FANOTIFY_INIT: u64 = 300;
     pub const FANOTIFY_MARK: u64 = 301;
+    pub const SENDFILE: u64 = 40;
+    pub const SPLICE: u64 = 275;
+    pub const TEE: u64 = 276;
+    pub const VMSPLICE: u64 = 278;
+    pub const COPY_FILE_RANGE: u64 = 326;
+    pub const IO_SETUP: u64 = 206;
+    pub const IO_DESTROY: u64 = 207;
+    pub const IO_SUBMIT: u64 = 209;
+    pub const IO_CANCEL: u64 = 210;
+    pub const IO_GETEVENTS: u64 = 208;
+    pub const IO_URING_SETUP: u64 = 425;
+    pub const IO_URING_ENTER: u64 = 426;
+    pub const IO_URING_REGISTER: u64 = 427;
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,6 +1396,19 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::INOTIFY_RM_WATCH => sys_inotify_rm_watch(args),
         nr::FANOTIFY_INIT => sys_fanotify_init(args),
         nr::FANOTIFY_MARK => sys_fanotify_mark(args),
+        nr::SENDFILE => sys_sendfile(args),
+        nr::SPLICE => sys_splice(args),
+        nr::TEE => sys_tee(args),
+        nr::VMSPLICE => sys_vmsplice(args),
+        nr::COPY_FILE_RANGE => sys_copy_file_range(args),
+        nr::IO_SETUP => sys_io_setup(args),
+        nr::IO_DESTROY => sys_io_destroy(args),
+        nr::IO_SUBMIT => sys_io_submit(args),
+        nr::IO_CANCEL => sys_io_cancel(args),
+        nr::IO_GETEVENTS => sys_io_getevents(args),
+        nr::IO_URING_SETUP => sys_io_uring_setup(args),
+        nr::IO_URING_ENTER => sys_io_uring_enter(args),
+        nr::IO_URING_REGISTER => sys_io_uring_register(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -5805,6 +5831,246 @@ fn sys_fanotify_mark(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+// ---------------------------------------------------------------------------
+// sendfile / splice / tee / vmsplice / copy_file_range
+//
+// Zero-copy / batch I/O syscalls.  We don't have a page-cache or
+// pipe-to-pipe page transfer plumbing yet, so the right answer is
+// EINVAL (Linux: "fds are not the right kinds for this operation")
+// after validating the fds and offset pointers.  EINVAL — not ENOSYS —
+// because userspace already handles EINVAL on these by falling back to
+// a read/write loop, while ENOSYS would suggest the syscall doesn't
+// exist at all and might force a different code path.
+//
+// The exception is io_uring and the AIO syscalls (io_setup family),
+// which return ENOSYS so io_uring-aware callers fall back to epoll
+// and AIO-aware callers fall back to threads.
+// ---------------------------------------------------------------------------
+
+/// Validate a Linux-shaped fd in kernel context: returns Ok if the
+/// caller is the kernel (no pid), otherwise looks the fd up.
+fn validate_linux_fd(fd: i32) -> Result<(), SyscallResult> {
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    match pcb::linux_fd_lookup(pid, fd) {
+        Some(_) => Ok(()),
+        None => Err(linux_err(errno::EBADF)),
+    }
+}
+
+/// `sendfile(out_fd, in_fd, offset, count)`.
+fn sys_sendfile(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let out_fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let in_fd = args.arg1 as i32;
+    if let Err(r) = validate_linux_fd(out_fd) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(in_fd) {
+        return r;
+    }
+    // offset is `off_t *` (8 bytes) if non-NULL.
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `splice(fd_in, off_in, fd_out, off_out, len, flags)`.
+fn sys_splice(args: &SyscallArgs) -> SyscallResult {
+    // SPLICE_F_MOVE=1, NONBLOCK=2, MORE=4, GIFT=8.
+    const VALID_FLAGS: u64 = 1 | 2 | 4 | 8;
+    if args.arg5 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd_in = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd_out = args.arg2 as i32;
+    if let Err(r) = validate_linux_fd(fd_in) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd_out) {
+        return r;
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `tee(fd_in, fd_out, len, flags)`.
+fn sys_tee(args: &SyscallArgs) -> SyscallResult {
+    const VALID_FLAGS: u64 = 1 | 2 | 4 | 8;
+    if args.arg3 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd_in = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd_out = args.arg1 as i32;
+    if let Err(r) = validate_linux_fd(fd_in) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd_out) {
+        return r;
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `vmsplice(fd, iov, nr_segs, flags)`.
+fn sys_vmsplice(args: &SyscallArgs) -> SyscallResult {
+    const VALID_FLAGS: u64 = 1 | 2 | 4 | 8;
+    if args.arg3 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // iov NULL with nr_segs > 0 -> EFAULT.
+    let nr_segs = args.arg2 as usize;
+    if nr_segs > 0 && args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // Linux: IOV_MAX = 1024.
+    if nr_segs > 1024 {
+        return linux_err(errno::EINVAL);
+    }
+    if nr_segs > 0 {
+        // Each iovec is 16 bytes (ptr + len).
+        let total = nr_segs.saturating_mul(16);
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `copy_file_range(fd_in, off_in, fd_out, off_out, len, flags)`.
+fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
+    // Per man-page: flags must be 0.
+    if args.arg5 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd_in = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd_out = args.arg2 as i32;
+    if let Err(r) = validate_linux_fd(fd_in) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd_out) {
+        return r;
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+// ---------------------------------------------------------------------------
+// AIO (io_setup family) — ENOSYS-after-validate
+// ---------------------------------------------------------------------------
+
+/// `io_setup(nr_events, ctx_idp)`.
+fn sys_io_setup(args: &SyscallArgs) -> SyscallResult {
+    // nr_events == 0 -> EINVAL per man-page.
+    if args.arg0 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // ctx_idp is an aio_context_t * (8 bytes).
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `io_destroy(ctx_id)`.
+fn sys_io_destroy(_args: &SyscallArgs) -> SyscallResult {
+    // No contexts ever exist, so any handle is invalid.
+    linux_err(errno::EINVAL)
+}
+
+/// `io_submit(ctx_id, nr, iocbpp)`.
+fn sys_io_submit(args: &SyscallArgs) -> SyscallResult {
+    let nr = args.arg1 as i64;
+    if nr < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if nr > 0 && args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `io_cancel(ctx_id, iocb, result)`.
+fn sys_io_cancel(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::EINVAL)
+}
+
+/// `io_getevents(ctx_id, min_nr, nr, events, timeout)`.
+fn sys_io_getevents(args: &SyscallArgs) -> SyscallResult {
+    let min_nr = args.arg1 as i64;
+    let nr = args.arg2 as i64;
+    if min_nr < 0 || nr < 0 || min_nr > nr {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::EINVAL)
+}
+
+// ---------------------------------------------------------------------------
+// io_uring — ENOSYS so callers fall back to epoll
+// ---------------------------------------------------------------------------
+
+/// `io_uring_setup(entries, params)`.
+fn sys_io_uring_setup(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct io_uring_params is 120 bytes on x86_64.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 120) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `io_uring_enter(fd, to_submit, min_complete, flags, sig, sigsz)`.
+fn sys_io_uring_enter(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `io_uring_register(fd, opcode, arg, nr_args)`.
+fn sys_io_uring_register(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -9390,6 +9656,162 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: fanotify_mark not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // sendfile / splice / tee / vmsplice / copy_file_range / AIO /
+    // io_uring — input validation plus principled errno.
+    {
+        // sendfile in kernel context (fds skip validation) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 16,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDFILE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sendfile not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // splice with bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 16, arg5: 0x8000_0000 };
+        if dispatch_linux(nr::SPLICE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: splice(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // splice with valid flags -> EINVAL (no real pipe).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 16, arg5: 1 };
+        if dispatch_linux(nr::SPLICE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: splice not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // tee bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 16,
+            arg3: 0x8000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TEE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: tee(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // vmsplice with nr_segs > 0 and NULL iov -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 4, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::VMSPLICE, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: vmsplice(NULL iov) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // vmsplice with nr_segs > IOV_MAX (1024) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 2048,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::VMSPLICE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: vmsplice(huge nr_segs) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // copy_file_range with non-zero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 16, arg5: 1 };
+        if dispatch_linux(nr::COPY_FILE_RANGE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: copy_file_range(flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // io_setup(0,_) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_setup(0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // io_setup(8, NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 8, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_SETUP, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: io_setup(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // io_setup(8, ctx) in kernel context -> ENOSYS.
+        let mut ctx = [0u8; 8];
+        let a = SyscallArgs {
+            arg0: 8,
+            arg1: ctx.as_mut_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_SETUP, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: io_setup not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // io_destroy(_) -> EINVAL.
+        let a = SyscallArgs { arg0: 0xdeadbeef, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_DESTROY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_destroy not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // io_submit(_, -1, _) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0x1000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_SUBMIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_submit(-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // io_getevents with min_nr > nr -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 10, arg2: 5, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_GETEVENTS, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_getevents(min>nr) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // io_uring_setup(0,_) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_setup(0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // io_uring_setup(8, NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 8, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_setup(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // io_uring_setup(8, params) in kernel context -> ENOSYS.
+        let mut params = [0u8; 120];
+        let a = SyscallArgs {
+            arg0: 8,
+            arg1: params.as_mut_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_setup not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // io_uring_enter / register -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_enter not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_register not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

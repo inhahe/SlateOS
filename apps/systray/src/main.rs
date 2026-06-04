@@ -1546,11 +1546,11 @@ mod tests {
         tray.set_badge(id, true);
         let icon = tray.icons.iter().find(|i| i.id == id);
         assert!(icon.is_some());
-        assert!(icon.map_or(false, |i| i.has_notification_badge));
+        assert!(icon.is_some_and(|i| i.has_notification_badge));
 
         tray.set_badge(id, false);
         let icon = tray.icons.iter().find(|i| i.id == id);
-        assert!(icon.map_or(false, |i| !i.has_notification_badge));
+        assert!(icon.is_some_and(|i| !i.has_notification_badge));
     }
 
     #[test]
@@ -1740,9 +1740,11 @@ mod tests {
 
     #[test]
     fn test_days_in_month_leap_year() {
-        let mut dt = DateTime::default();
-        dt.year = 2024;
-        dt.month = 2;
+        let mut dt = DateTime {
+            year: 2024,
+            month: 2,
+            ..DateTime::default()
+        };
         assert_eq!(dt.days_in_month(), 29);
 
         dt.year = 2023;
@@ -1757,9 +1759,11 @@ mod tests {
 
     #[test]
     fn test_days_in_month_all_months() {
-        let mut dt = DateTime::default();
+        let mut dt = DateTime {
+            year: 2025, // non-leap year
+            ..DateTime::default()
+        };
         let expected = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        dt.year = 2025; // non-leap year
         for (i, &expected_days) in expected.iter().enumerate() {
             dt.month = (i + 1) as u8;
             assert_eq!(dt.days_in_month(), expected_days, "month {}", i + 1);

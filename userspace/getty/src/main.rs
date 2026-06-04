@@ -22,6 +22,7 @@
 // preserved for the future driver-attached implementation.
 #![allow(dead_code)]
 
+#[cfg(not(test))]
 use std::env;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -1059,16 +1060,20 @@ mod tests {
 
     #[test]
     fn test_setup_terminal_custom_baud() {
-        let mut cfg = Config::default();
-        cfg.baud_rates = vec![115200, 9600];
+        let cfg = Config {
+            baud_rates: vec![115200, 9600],
+            ..Config::default()
+        };
         let term = setup_terminal(&cfg);
         assert_eq!(term.baud_rate, 115200);
     }
 
     #[test]
     fn test_setup_terminal_custom_erase() {
-        let mut cfg = Config::default();
-        cfg.erase_char = Some('#');
+        let cfg = Config {
+            erase_char: Some('#'),
+            ..Config::default()
+        };
         let term = setup_terminal(&cfg);
         assert_eq!(term.erase_char, '#');
     }

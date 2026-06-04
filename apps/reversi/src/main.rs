@@ -1853,7 +1853,7 @@ mod tests {
             text: None,
         });
         // After human places, AI should also have moved
-        assert!(app.move_history.len() >= 1);
+        assert!(!app.move_history.is_empty());
         assert_eq!(app.move_history[0].pos, Pos::new(2, 3));
         assert_eq!(app.move_history[0].color, Cell::Black);
     }
@@ -1922,7 +1922,7 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         });
-        assert!(app.move_history.len() >= 1);
+        assert!(!app.move_history.is_empty());
     }
 
     #[test]
@@ -2189,7 +2189,7 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: None,
         });
-        assert!(app.move_history.len() >= 1);
+        assert!(!app.move_history.is_empty());
         assert_eq!(app.move_history[0].pos, Pos::new(2, 3));
     }
 

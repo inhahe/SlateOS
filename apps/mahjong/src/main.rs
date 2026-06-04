@@ -1425,7 +1425,7 @@ mod tests {
     fn board_new_has_tiles() {
         let mut rng = Rng::new(42);
         let board = Board::new(&mut rng);
-        assert!(board.tiles.len() > 0);
+        assert!(!board.tiles.is_empty());
         assert!(board.remaining() > 0);
     }
 
@@ -2019,8 +2019,8 @@ mod tests {
         app.handle_key(&make_key(Key::Left));
         app.handle_key(&make_key(Key::Up));
         app.handle_key(&make_key(Key::Down));
-        // No crash is success.
-        assert!(true);
+        // No crash is success. (No assertion needed; reaching this line
+        // means the four key events handled cleanly.)
     }
 
     #[test]
@@ -2036,12 +2036,12 @@ mod tests {
         let mut app = Mahjong::with_seed(42);
         // Click at a position that might hit a tile.
         let free = app.board.free_tiles();
-        if !free.is_empty() {
-            if let Some((tx, ty)) = app.board.tile_screen_pos(free[0]) {
-                app.handle_event(&Event::Mouse(make_mouse(tx + 5.0, ty + 5.0)));
-                // Should have selected the tile.
-                assert_eq!(app.selected, Some(free[0]));
-            }
+        if !free.is_empty()
+            && let Some((tx, ty)) = app.board.tile_screen_pos(free[0])
+        {
+            app.handle_event(&Event::Mouse(make_mouse(tx + 5.0, ty + 5.0)));
+            // Should have selected the tile.
+            assert_eq!(app.selected, Some(free[0]));
         }
     }
 

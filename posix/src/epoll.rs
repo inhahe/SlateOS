@@ -60,10 +60,12 @@
 
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
+#[cfg(target_os = "none")]
 use crate::syscall::{
-    SYS_CLOCK_MONOTONIC, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ,
-    SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_SLEEP, syscall0, syscall1, syscall2, syscall3,
+    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ,
+    SYS_EVENTFD_WRITE, syscall2,
 };
+use crate::syscall::{SYS_CLOCK_MONOTONIC, SYS_SLEEP, syscall0, syscall1, syscall3};
 
 /// Events for `epoll_ctl`.
 pub const EPOLLIN: u32 = 0x001;
@@ -692,6 +694,196 @@ pub const EFD_NONBLOCK: i32 = 0o4000;
 /// Semaphore-mode flag.
 pub const EFD_SEMAPHORE: i32 = 1;
 
+// ---------------------------------------------------------------------------
+// Host-side eventfd simulation
+// ---------------------------------------------------------------------------
+//
+// On the OS target the `eventfd_kernel_*` helpers below invoke the real
+// kernel syscalls (SYS_EVENTFD_CREATE/READ/WRITE/CLOSE).  Host builds
+// cannot issue those syscalls (raw `SYSCALL` is gated to return -ENOSYS
+// in `syscall.rs` to avoid hitting NT services on Windows), so the
+// helpers route through this small in-process simulator instead.  This
+// preserves end-to-end behaviour of `eventfd()` / `eventfd_read()` /
+// `eventfd_write()` / `close()` for host unit tests without the tests
+// depending on undefined behaviour of the raw `SYSCALL` instruction.
+//
+// The simulator is a `Mutex`-protected `Vec<HostEventfdEntry>`.  Handles
+// are dense u64 ids starting at a high constant so they don't collide
+// with anything the kernel build would issue.  Counter semantics match
+// the Linux/our-kernel eventfd contract:
+//   * non-semaphore read: drain to 0, return previous value
+//   * semaphore read: decrement by 1, return 1
+//   * write: saturating add, but the result is clamped to `u64::MAX - 1`
+//     (the kernel's "max counter value" invariant)
+//   * read on zero counter: returns -EAGAIN regardless of non-blocking
+//     (the simulator never blocks because tests must complete).
+
+#[cfg(not(target_os = "none"))]
+mod host_eventfd_sim {
+    extern crate std;
+    use std::sync::Mutex;
+    use std::vec::Vec;
+
+    pub struct Entry {
+        pub handle: u64,
+        pub counter: u64,
+        pub semaphore: bool,
+    }
+
+    static SIM: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+    static NEXT_HANDLE: Mutex<u64> = Mutex::new(0x4000_0000);
+
+    /// Allocate a new simulated eventfd.  Returns the handle.
+    pub fn create(initval: u64, semaphore: bool) -> u64 {
+        let h = {
+            let mut next = NEXT_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
+            let h = *next;
+            *next = next.wrapping_add(1);
+            h
+        };
+        let mut sim = SIM.lock().unwrap_or_else(|e| e.into_inner());
+        sim.push(Entry {
+            handle: h,
+            counter: initval,
+            semaphore,
+        });
+        h
+    }
+
+    /// Read the simulated counter.  Returns
+    ///   * `i64 >= 0` — counter value to deliver to userspace
+    ///   * native kernel error code (e.g. `native::BAD_HANDLE`,
+    ///     `native::WOULD_BLOCK`) on error.  The wrapper layer maps
+    ///     these to POSIX errno via `errno::translate`.
+    ///
+    /// Linux returns EAGAIN when the counter is 0 and the fd is
+    /// non-blocking.  The simulator returns WOULD_BLOCK for *all*
+    /// zero-counter reads (blocking included) because the host has
+    /// no scheduler to actually block on; tests that rely on a
+    /// blocking read are expected to seed the counter first.
+    pub fn read(handle: u64) -> i64 {
+        use crate::errno::native;
+        let mut sim = SIM.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(e) = sim.iter_mut().find(|e| e.handle == handle) else {
+            return native::BAD_HANDLE;
+        };
+        if e.counter == 0 {
+            return native::WOULD_BLOCK;
+        }
+        if e.semaphore {
+            e.counter -= 1;
+            1
+        } else {
+            let v = e.counter;
+            e.counter = 0;
+            // i64 cast: counter is at most u64::MAX - 1 (see `write`),
+            // which fits in i64 only up to i64::MAX.  We clamp.
+            i64::try_from(v).unwrap_or(i64::MAX)
+        }
+    }
+
+    /// Write (add) `val` to the simulated counter.  Returns 0 on
+    /// success or native kernel error code on error.
+    ///
+    /// `val == u64::MAX` is rejected at the wrapper layer (matches
+    /// Linux); the simulator just sees `0..u64::MAX-1` here.
+    pub fn write(handle: u64, val: u64) -> i64 {
+        use crate::errno::native;
+        let mut sim = SIM.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(e) = sim.iter_mut().find(|e| e.handle == handle) else {
+            return native::BAD_HANDLE;
+        };
+        let new = e.counter.saturating_add(val);
+        e.counter = if new == u64::MAX { u64::MAX - 1 } else { new };
+        0
+    }
+
+    /// Free the simulated eventfd.  Returns 0 if it existed, native
+    /// BAD_HANDLE otherwise (so close() can propagate the error
+    /// sensibly).
+    pub fn close(handle: u64) -> i64 {
+        use crate::errno::native;
+        let mut sim = SIM.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(idx) = sim.iter().position(|e| e.handle == handle) {
+            sim.remove(idx);
+            0
+        } else {
+            native::BAD_HANDLE
+        }
+    }
+}
+
+/// Create a kernel eventfd (or simulated one on host).  Returns the
+/// kernel handle (non-negative) on success, or a negative `errno`
+/// value on failure.
+#[inline]
+fn eventfd_kernel_create(initval: u64, kernel_flags: u64) -> i64 {
+    #[cfg(target_os = "none")]
+    {
+        syscall2(SYS_EVENTFD_CREATE, initval, kernel_flags)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let semaphore = (kernel_flags & 1) != 0;
+        let h = host_eventfd_sim::create(initval, semaphore);
+        // Handle is u64; cast to i64 is safe for our chosen id range
+        // (starts at 0x4000_0000, well below i64::MAX).
+        #[allow(clippy::cast_possible_wrap)]
+        let r = h as i64;
+        r
+    }
+}
+
+/// Read from a kernel eventfd handle (or its host simulation).
+/// `nonblocking` selects between the blocking and try-read syscall
+/// numbers on the OS target; on host the simulator never blocks, so
+/// the flag is informational.
+#[inline]
+pub(crate) fn eventfd_kernel_read(handle: u64, nonblocking: bool) -> i64 {
+    #[cfg(target_os = "none")]
+    {
+        let nr = if nonblocking {
+            SYS_EVENTFD_TRY_READ
+        } else {
+            SYS_EVENTFD_READ
+        };
+        syscall1(nr, handle)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = nonblocking;
+        host_eventfd_sim::read(handle)
+    }
+}
+
+/// Write to a kernel eventfd handle (or its host simulation).
+#[inline]
+pub(crate) fn eventfd_kernel_write(handle: u64, value: u64) -> i64 {
+    #[cfg(target_os = "none")]
+    {
+        syscall2(SYS_EVENTFD_WRITE, handle, value)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_eventfd_sim::write(handle, value)
+    }
+}
+
+/// Close a kernel eventfd handle (or its host simulation).
+/// Exposed `pub(crate)` so `file::close` can call it without going
+/// through the raw syscall (which is gated to -ENOSYS on host).
+#[inline]
+pub(crate) fn eventfd_kernel_close(handle: u64) -> i64 {
+    #[cfg(target_os = "none")]
+    {
+        syscall1(SYS_EVENTFD_CLOSE, handle)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_eventfd_sim::close(handle)
+    }
+}
+
 /// Create an eventfd file descriptor.
 ///
 /// `initval` seeds the kernel counter.  Supported flags:
@@ -723,7 +915,7 @@ pub extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
     } else {
         0
     };
-    let handle_ret = syscall2(SYS_EVENTFD_CREATE, u64::from(initval), kernel_flags);
+    let handle_ret = eventfd_kernel_create(u64::from(initval), kernel_flags);
     if handle_ret < 0 {
         return errno::translate(handle_ret) as i32;
     }
@@ -739,7 +931,7 @@ pub extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
 
     let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::Eventfd, handle, status) else {
         // Table full — clean up the kernel handle.
-        let _ = syscall1(SYS_EVENTFD_CLOSE, handle);
+        let _ = eventfd_kernel_close(handle);
         errno::set_errno(errno::EMFILE);
         return -1;
     };
@@ -787,12 +979,7 @@ pub extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
     }
 
     let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-    let nr = if is_nb {
-        SYS_EVENTFD_TRY_READ
-    } else {
-        SYS_EVENTFD_READ
-    };
-    let r = syscall1(nr, entry.handle);
+    let r = eventfd_kernel_read(entry.handle, is_nb);
     if r < 0 {
         let _ = errno::translate(r);
         return -1;
@@ -843,7 +1030,7 @@ pub extern "C" fn eventfd_write(fd: i32, value: u64) -> i32 {
         return -1;
     }
 
-    let r = syscall2(SYS_EVENTFD_WRITE, entry.handle, value);
+    let r = eventfd_kernel_write(entry.handle, value);
     if r < 0 {
         let _ = errno::translate(r);
         return -1;

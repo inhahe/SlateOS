@@ -187,7 +187,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
             } // Unbound socket, nothing to close.
             syscall1(SYS_UDP_CLOSE, entry.handle)
         }
-        HandleKind::Eventfd => syscall1(SYS_EVENTFD_CLOSE, entry.handle),
+        HandleKind::Eventfd => crate::epoll::eventfd_kernel_close(entry.handle),
         HandleKind::Epoll => {
             // Userspace-managed: free the instance slot.  No kernel
             // resource to release.
@@ -367,12 +367,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                 return -1;
             }
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let nr = if is_nb {
-                SYS_EVENTFD_TRY_READ
-            } else {
-                SYS_EVENTFD_READ
-            };
-            let r = syscall1(nr, entry.handle);
+            let r = crate::epoll::eventfd_kernel_read(entry.handle, is_nb);
             if r < 0 {
                 return errno::translate(r) as SsizeT;
             }
@@ -580,7 +575,7 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 errno::set_errno(errno::EINVAL);
                 return -1;
             }
-            let r = syscall2(SYS_EVENTFD_WRITE, entry.handle, val);
+            let r = crate::epoll::eventfd_kernel_write(entry.handle, val);
             if r < 0 {
                 return errno::translate(r) as SsizeT;
             }
@@ -1993,7 +1988,7 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
         HandleKind::TcpStream => syscall1(SYS_TCP_CLOSE, handle),
         HandleKind::TcpListener => syscall1(SYS_TCP_CLOSE_LISTENER, handle),
         HandleKind::UdpSocket => syscall1(SYS_UDP_CLOSE, handle),
-        HandleKind::Eventfd => syscall1(SYS_EVENTFD_CLOSE, handle),
+        HandleKind::Eventfd => crate::epoll::eventfd_kernel_close(handle),
         HandleKind::Epoll => {
             // Userspace-managed: no kernel handle to close.
             crate::epoll::epoll_instance_close(handle);

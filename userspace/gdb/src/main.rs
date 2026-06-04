@@ -3569,6 +3569,12 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

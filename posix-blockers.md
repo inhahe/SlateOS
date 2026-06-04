@@ -1,157 +1,127 @@
-# Posix Zone — Blocked Work Items
+// Posix Zone — Blocked Work Items (historical)
 
-The posix zone is fully audited and tested (2755 tests, all pass).
-All remaining implementation work is blocked on kernel features
-built by other zones. Here's exactly what's needed:
+This document used to enumerate the kernel features that the posix
+zone was blocked on.  All four items have since been delivered.  Kept
+in the tree as a record of how the zone reached its current state,
+and pointers to the roadmap entries where the completed work lives.
 
----
-
-## 1. Signal Handling Shim (kernel-ipc zone)
-
-**What posix needs:** Real signal delivery to userspace processes.
-
-**Current state:** The posix layer has signal constants, sigaction
-storage, sigset operations, and signal/raise/kill stubs. `raise()`
-works for SIGABRT (calls abort). Everything else is a no-op or
-returns ENOSYS.
-
-**What kernel-ipc must provide:**
-- A mechanism for the kernel to deliver an asynchronous notification
-  to a userspace thread (analogous to Unix signal delivery: save
-  registers, redirect execution to a handler, restore on return).
-- A syscall for one process to send a signal to another (kill).
-- Integration with the scheduler: SIGSTOP/SIGCONT, SIGCHLD on
-  child exit, etc.
-- Alternatively: if the design uses IPC messages instead of classic
-  signals (per design.txt — "No Unix signals for process control"),
-  provide the IPC-based equivalent that posix can translate to/from
-  POSIX signal semantics.
-
-**Posix roadmap entry:** `roadmap.md` line 1177, 1325.
+For the *current* state of the posix layer, read the `### 2.5 POSIX
+compatibility layer` section of `roadmap.md` (the per-feature `[x]`
+list around lines 1183–1430).  For ongoing test/limitation tracking,
+read `todo.txt`.
 
 ---
 
-## 2. epoll (kernel-ipc zone)
+## 1. Signal Handling Shim — DONE
 
-**What posix needs:** Kernel-side event notification for file
-descriptors.
+**Original ask:** Real signal delivery to userspace processes.
 
-**Current state:** `epoll.rs` has `epoll_create`, `epoll_ctl`,
-`epoll_wait` stubs that return ENOSYS with errno set.
+**Status:** Delivered by the kernel signal shim
+(`kernel/src/proc/signal.rs` + `posix/src/signal.rs`).  The kernel
+holds per-process pending / blocked / trampoline state and delivers
+asynchronously at syscall-return by redirecting RIP to a userspace
+trampoline (SEH-style).  Cross-process `kill()` routes through
+`SYS_SIGNAL_SEND`; the target process's own disposition table
+decides terminate / ignore / handle.  `sigprocmask` mirrors the
+low-64 blocked mask to the kernel; `sigpending` queries the kernel.
 
-**What kernel-ipc must provide:**
-- A kernel object that monitors a set of file descriptors for
-  readiness (readable, writable, error, hangup).
-- Syscalls: create epoll instance, add/modify/remove fd watches,
-  wait for events with timeout.
-- Integration with pipes, sockets, and other I/O objects so they
-  can wake epoll waiters.
+Syscalls: `SYS_SIGNAL_REGISTER=522`, `SYS_SIGNAL_SEND=523`,
+`SYS_SIGNAL_RETURN=524`, `SYS_SIGNAL_MASK=525`,
+`SYS_SIGNAL_PENDING=526`.
 
-**Alternative:** If the OS design uses io_uring or IOCP-style
-completion instead of epoll, provide that and posix will translate
-epoll calls into the native mechanism.
+Roadmap: `roadmap.md` lines 1225–1227.
 
-**Posix roadmap entry:** `roadmap.md` line ~1141 (implicit under
-POSIX compatibility).
-
----
-
-## 3. popen/pclose (kernel-process zone)
-
-**What posix needs:** fd inheritance during process spawn.
-
-**Current state:** `popen` stub returns NULL with ENOSYS. The
-`posix_spawn_file_actions` infrastructure is built (addclose,
-adddup2, addopen with 16-action storage), but the actions are
-recorded and never applied because the kernel spawn syscall
-doesn't support fd manipulation.
-
-**What kernel-process must provide:**
-- Extend `SYS_PROCESS_SPAWN` (or equivalent) to accept a list of
-  fd operations to perform in the child before exec:
-  - close(fd)
-  - dup2(oldfd, newfd)
-  - open(path, flags, mode) → fd
-- This enables posix to create a pipe, spawn `sh -c <command>` with
-  one end of the pipe as the child's stdin/stdout, and return the
-  other end to the caller.
-
-**Posix roadmap entry:** `roadmap.md` line 1273 ("actions recorded
-but not yet applied — blocked on kernel fd inheritance").
+Documented limitations (in `todo.txt` under *Judgment Calls*): only
+64 signals deliverable asynchronously; the signal being delivered is
+not auto-masked during its handler; `sigaltstack` is accepted but
+ignored; the host test harness cannot exercise the syscall-issuing
+delivery path (only the pure router / mapper logic).
 
 ---
 
-## 4. /proc and /sys equivalents (kernel-core or new zone)
+## 2. epoll — DONE
 
-**What posix needs:** A way for userspace to query kernel state
-(process info, memory stats, CPU info, etc.) through a filesystem
-interface.
+**Original ask:** Kernel-side event notification for file descriptors.
 
-**Current state:** No /proc or /sys implementation exists in the
-posix layer. Some information is available via sysconf() (page size,
-CLK_TCK, etc.) but programs like `ps`, `top`, `free` need /proc.
+**Status:** Delivered as a userspace implementation in
+`posix/src/epoll.rs` on top of `check_readiness`, with full coverage
+of `epoll_create` / `epoll_create1` / `epoll_ctl ADD/MOD/DEL` /
+`epoll_wait` / `epoll_pwait` / `epoll_pwait2`.  Level-triggered,
+`EPOLLONESHOT` supported, 16 instances × 128 entries, ABI-compatible
+12-byte `EpollEvent`.  `HandleKind::Epoll` is integrated across
+fdtable / file / fcntl / poll / spawn.
 
-**What kernel must provide:**
-- Either a procfs/sysfs virtual filesystem, or
-- Syscalls that expose the equivalent information (process list,
-  memory usage, per-process status, etc.) that posix can surface
-  through a /proc emulation layer.
+The implementation polls readiness on `epoll_wait` rather than being
+event-driven from the kernel.  This matches the design tradeoff:
+write the correct version first, optimise later.  A kernel-side
+wakeup-on-ready epoll object is still possible (the kernel already
+has the per-handle readiness queries epoll needs), but not blocking
+any program.
 
-**Posix roadmap entry:** `roadmap.md` line ~1141.
+Companions also delivered: `timerfd` (`timerfd_create` /
+`timerfd_settime` / `timerfd_gettime`), `inotify` (event-driven on
+the native kernel watch API `SYS_FS_WATCH_*`), `signalfd`,
+`eventfd` (with `EFD_SEMAPHORE` and ref-counted dup across spawn).
 
----
-
-## Priority Order (suggested)
-
-1. **popen/fd inheritance** — Relatively contained change to the
-   spawn syscall. Unblocks popen, system() improvements, and
-   shell pipe infrastructure.
-
-2. **Signal handling** — Large but fundamental. Needed for bash,
-   Python, and virtually every Unix program. The design decision
-   about signals-vs-IPC-messages needs to be resolved first.
-
-3. **epoll** — Needed for any event-driven server (nginx, node.js)
-   and for the shell's job control. Can be deferred if io_uring
-   is prioritized instead.
-
-4. **/proc /sys** — Needed for system utilities but not for basic
-   program compilation/execution. Can be deferred longest.
+Roadmap: `roadmap.md` lines 1222–1224.
 
 ---
 
-## What the posix session accomplished (for context)
+## 3. popen / pclose / fd inheritance — DONE
 
-- 2744 tests (all pass), up from ~2200 at start
-- Fixed lgamma_r sign inversion bug
-- Improved atan accuracy from 2% to 1e-15 relative error
-- Exhaustive audit of all 58 source files
-- Stress tests for regex, printf, fnmatch, qsort, bsearch, strstr
-- Full coverage of wchar classification, FORTIFY wrappers, syslog,
-  pwd/grp enumeration, clock_getres
-- Cleaned up all actionable compiler warnings
-- Implemented `fchdir()` via fd-path tracking (no kernel changes needed)
-- Implemented full `*at()` dirfd support (`openat`, `fstatat`,
-  `unlinkat`, `renameat`, `mkdirat`, `readlinkat`, `symlinkat`,
-  `linkat`, `fchmodat`, `fchownat`, `faccessat`) — relative paths
-  resolved against stored dirfd path
-- Implemented `fdopendir()` via fd-path tracking, `dirfd()` returns
-  owned fd, `closedir()` closes owned fd
-- Implemented `setdomainname()`/`getdomainname()` with mutable buffer
-- Implemented `umask()` with proper state tracking (stores mask,
-  returns previous value, masks to low 9 bits)
-- Fixed `sched_get_priority_min()` to return 1 for FIFO/RR (matching
-  Linux)
-- Eliminated all hardcoded constant drift: `OPEN_MAX`, `RLIMIT_NOFILE`,
-  `HOST_NAME_MAX`, `DEFAULT_NAMEMAX`, pathconf values all reference
-  their source definitions (`fdtable::MAX_FDS`, `limits::*`)
-- Added 6 `CLOCK_*` constants (`CLOCK_PROCESS_CPUTIME_ID`,
-  `CLOCK_THREAD_CPUTIME_ID`, `CLOCK_MONOTONIC_RAW`,
-  `CLOCK_REALTIME_COARSE`, `CLOCK_MONOTONIC_COARSE`, `CLOCK_BOOTTIME`)
-  accepted by clock_gettime/clock_getres/clock_nanosleep
-- Added `MAP_ANON`, `MAP_GROWSDOWN`, `MAP_POPULATE`, `MAP_NORESERVE`,
-  `MAP_NONBLOCK`, `MAP_FIXED_NOREPLACE`, `MCL_CURRENT`/`MCL_FUTURE`/
-  `MCL_ONFAULT` memory management constants
-- Added 6 `_SC_*` sysconf constants (`GETPW_R_SIZE_MAX`,
-  `GETGR_R_SIZE_MAX`, `SYMLOOP_MAX`, `STREAM_MAX`, `TTY_NAME_MAX`,
-  `RE_DUP_MAX`) with proper return values
+**Original ask:** Extend `SYS_PROCESS_SPAWN` to accept a list of
+close/dup2/open file actions to perform in the child before exec.
+
+**Status:** Delivered.  `posix/src/spawn.rs` implements the full
+`posix_spawn_file_actions` surface (`addclose`, `adddup2`,
+`addopen`, `addchdir_np`, `addclosefrom_np`) with 16-action storage.
+The kernel spawn syscall accepts the action list and applies it in
+the child.  `popen()` (`posix/src/stdio.rs`) is a real
+implementation: it creates a pipe, builds a file-actions list that
+duplicates the appropriate pipe end onto stdin / stdout, calls
+`posix_spawnp` with `sh -c <command>`, and returns the other end
+wrapped in a `FILE*`.  `pclose()` waits on the recorded child pid
+and returns its exit status.
+
+Roadmap: `roadmap.md` line 1201 (posix_spawn / posix_spawnp) and
+line 1202 (execvp via SYS_PROCESS_EXEC).
+
+---
+
+## 4. /proc and /sys — DONE
+
+**Original ask:** A way for userspace to query kernel state through
+a filesystem interface.
+
+**Status:** Delivered.  `procfs` mounted at `/proc`: 10K+ lines,
+70+ root files (`version`, `uptime`, `meminfo`, `cpuinfo`, `stat`,
+`vmstat`, `buddyinfo`, `net/*`, etc.) plus per-PID directories
+(`status`, `cmdline`, `stat`, `maps`, `caps`).  `sysfs` mounted at
+`/sys`: kernel info, hostname (r/w), sysctl params (r/w), PCI
+devices, fs cache stats.
+
+Roadmap: `roadmap.md` lines 1432–1433.
+
+---
+
+## Current State of the Posix Zone
+
+- ~20,000 host tests pass (`cargo test -p posix --target x86_64-pc-windows-gnu --lib`)
+- Bare-metal staticlib build (`x86_64-unknown-none`) clean
+- All four 2025-era kernel blockers cleared during 2026-Q1/Q2 work
+- Open known limitations / judgment calls are tracked in `todo.txt`:
+  - Host-side raw `syscall` instruction — gating attempted, reverted,
+    deferred with documented path forward (todo.txt L4628+).
+  - `socketpair()` SOCK_DGRAM / SOCK_SEQPACKET / SCM_RIGHTS — easy
+    to add when first user appears (todo.txt L4723+).
+  - Signal-handling residuals: 64-signal cap, no sigaltstack, no host
+    end-to-end coverage (todo.txt L4750+).
+  - `eventfd` / `inotify` inheritance and event-mask completeness
+    notes (resolved entries; tracked for context).
+  - `getdents64` snapshot cache and several scoped flaky tests
+    (resolved by per-test mutexes in 2026-06-03 / 2026-06-04 work).
+
+No item in `posix-blockers.md`'s original list is still blocking
+forward progress.  This file is retained as historical context; the
+current source of truth is `roadmap.md` (state) and `todo.txt`
+(limitations and follow-ups).

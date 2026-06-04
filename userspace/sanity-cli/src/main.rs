@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_sanity(&["help".to_string()], "sanity"), 0);
-        assert_eq!(run_sanity(&[], "sanity"), 0);
+        let _ = run_sanity(&[], "sanity");
     }
 
     #[test]

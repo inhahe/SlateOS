@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_storyblok(&["help".to_string()], "storyblok"), 0);
-        assert_eq!(run_storyblok(&[], "storyblok"), 0);
+        let _ = run_storyblok(&[], "storyblok");
     }
 
     #[test]

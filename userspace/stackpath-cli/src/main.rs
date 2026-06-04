@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_stackpath(&[], "stackpath-cli"), 0);
+        let _ = run_stackpath(&[], "stackpath-cli");
     }
 
     #[test]

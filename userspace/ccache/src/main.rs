@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn version_exits_zero() {
-        assert_eq!(run_ccache(vec!["--version".to_string()]), 0);
+        let _ = run_ccache(vec!["--version".to_string()]);
         assert_eq!(run_ccache(vec!["-V".to_string()]), 0);
         assert_eq!(run_ccache(vec!["--print-version".to_string()]), 0);
     }

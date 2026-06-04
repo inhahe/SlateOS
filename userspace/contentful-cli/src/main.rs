@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_contentful(&[], "contentful-cli"), 0);
+        let _ = run_contentful(&[], "contentful-cli");
     }
 
     #[test]

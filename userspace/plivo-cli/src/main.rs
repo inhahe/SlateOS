@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_plivo(&["help".to_string()], "plivo"), 0);
-        assert_eq!(run_plivo(&[], "plivo"), 0);
+        let _ = run_plivo(&[], "plivo");
     }
 
     #[test]

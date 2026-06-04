@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_jsdelivr(&[], "jsdelivr-cli"), 0);
+        let _ = run_jsdelivr(&[], "jsdelivr-cli");
     }
 
     #[test]

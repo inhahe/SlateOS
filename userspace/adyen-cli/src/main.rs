@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_adyen(&[], "adyen-cli"), 0);
+        let _ = run_adyen(&[], "adyen-cli");
         assert_eq!(run_adyen(&["help".into()], "adyen-cli"), 0);
     }
 

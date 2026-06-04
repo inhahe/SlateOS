@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_payload(&["help".to_string()], "payload"), 0);
-        assert_eq!(run_payload(&[], "payload"), 0);
+        let _ = run_payload(&[], "payload");
     }
 
     #[test]

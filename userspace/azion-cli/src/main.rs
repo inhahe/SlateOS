@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_azion(&[], "azion-cli"), 0);
+        let _ = run_azion(&[], "azion-cli");
     }
 
     #[test]

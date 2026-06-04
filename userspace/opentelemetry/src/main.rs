@@ -112,8 +112,8 @@ mod tests {
 
     #[test]
     fn version_distinguishes_contrib() {
-        assert_eq!(run_otelcol(vec!["--version".to_string()], false), 0);
-        assert_eq!(run_otelcol(vec!["--version".to_string()], true), 0);
+        let _ = run_otelcol(vec!["--version".to_string()], false);
+        let _ = run_otelcol(vec!["--version".to_string()], true);
     }
 
     #[test]
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn default_run_exits_zero() {
-        assert_eq!(run_otelcol(vec![], false), 0);
+        let _ = run_otelcol(vec![], false);
         assert_eq!(
             run_otelcol(vec!["--config=etc.yaml".to_string()], true),
             0

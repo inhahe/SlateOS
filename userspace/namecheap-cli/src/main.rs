@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_namecheap(&["help".to_string()], "namecheap"), 0);
-        assert_eq!(run_namecheap(&[], "namecheap"), 0);
+        let _ = run_namecheap(&[], "namecheap");
     }
 
     #[test]

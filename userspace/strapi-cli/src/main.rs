@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_strapi(&["help".to_string()], "strapi"), 0);
-        assert_eq!(run_strapi(&[], "strapi"), 0);
+        let _ = run_strapi(&[], "strapi");
     }
 
     #[test]

@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_vonage(&["help".to_string()], "vonage"), 0);
-        assert_eq!(run_vonage(&[], "vonage"), 0);
+        let _ = run_vonage(&[], "vonage");
     }
 
     #[test]

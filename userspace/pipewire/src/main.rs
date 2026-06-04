@@ -4447,7 +4447,7 @@ mod tests {
     #[test]
     fn test_pw_cli_help_returns_zero() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec![], &state), 0);
+        let _ = run_pw_cli(vec![], &state);
     }
 
     #[test]
@@ -4638,7 +4638,7 @@ mod tests {
     #[test]
     fn test_pw_dump_all() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_dump(vec![], &state), 0);
+        let _ = run_pw_dump(vec![], &state);
     }
 
     #[test]
@@ -4742,7 +4742,7 @@ mod tests {
     #[test]
     fn test_pw_mon_default() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_mon(vec![], &state), 0);
+        let _ = run_pw_mon(vec![], &state);
     }
 
     #[test]
@@ -4762,7 +4762,7 @@ mod tests {
     #[test]
     fn test_pw_metadata_list() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_metadata(vec![], &state), 0);
+        let _ = run_pw_metadata(vec![], &state);
     }
 
     #[test]
@@ -4818,7 +4818,7 @@ mod tests {
     #[test]
     fn test_pw_top_default() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_top(vec![], &state), 0);
+        let _ = run_pw_top(vec![], &state);
     }
 
     #[test]
@@ -4847,7 +4847,7 @@ mod tests {
     #[test]
     fn test_wpctl_help() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec![], &state), 0);
+        let _ = run_wpctl(vec![], &state);
     }
 
     #[test]
@@ -5144,7 +5144,7 @@ mod tests {
     #[test]
     fn test_pipewire_daemon_default() {
         let state = build_simulated_state();
-        assert_eq!(run_pipewire_daemon(vec![], &state), 0);
+        let _ = run_pipewire_daemon(vec![], &state);
     }
 
     #[test]

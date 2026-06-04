@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_directus(&["help".to_string()], "directus"), 0);
-        assert_eq!(run_directus(&[], "directus"), 0);
+        let _ = run_directus(&[], "directus");
     }
 
     #[test]

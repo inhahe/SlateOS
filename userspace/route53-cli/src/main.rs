@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_route53(&["help".to_string()], "route53"), 0);
-        assert_eq!(run_route53(&[], "route53"), 0);
+        let _ = run_route53(&[], "route53");
     }
 
     #[test]

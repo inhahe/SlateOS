@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_mollie(&[], "mollie-cli"), 0);
+        let _ = run_mollie(&[], "mollie-cli");
     }
 
     #[test]

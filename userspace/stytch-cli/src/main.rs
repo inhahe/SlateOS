@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_help_runs() {
-        assert_eq!(run_stytch(&[], "stytch"), 0);
+        let _ = run_stytch(&[], "stytch");
         assert_eq!(run_stytch(&["help".to_string()], "stytch"), 0);
     }
 

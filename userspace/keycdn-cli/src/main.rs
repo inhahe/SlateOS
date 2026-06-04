@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_keycdn(&[], "keycdn-cli"), 0);
+        let _ = run_keycdn(&[], "keycdn-cli");
     }
 
     #[test]

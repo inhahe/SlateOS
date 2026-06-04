@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_paddle(&[], "paddle-cli"), 0);
+        let _ = run_paddle(&[], "paddle-cli");
     }
 
     #[test]

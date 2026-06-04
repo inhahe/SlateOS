@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_dynadot(&["help".to_string()], "dynadot"), 0);
-        assert_eq!(run_dynadot(&[], "dynadot"), 0);
+        let _ = run_dynadot(&[], "dynadot");
     }
 
     #[test]

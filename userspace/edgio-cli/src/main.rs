@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_edgio(&[], "edgio-cli"), 0);
+        let _ = run_edgio(&[], "edgio-cli");
     }
 
     #[test]

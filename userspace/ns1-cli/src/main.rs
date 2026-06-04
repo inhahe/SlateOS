@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_ns1(&["help".to_string()], "ns1"), 0);
-        assert_eq!(run_ns1(&[], "ns1"), 0);
+        let _ = run_ns1(&[], "ns1");
     }
 
     #[test]

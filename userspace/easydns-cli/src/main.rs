@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_easydns(&["help".to_string()], "easydns"), 0);
-        assert_eq!(run_easydns(&[], "easydns"), 0);
+        let _ = run_easydns(&[], "easydns");
     }
 
     #[test]

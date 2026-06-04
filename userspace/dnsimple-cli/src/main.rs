@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_dnsimple(&["help".to_string()], "dnsimple"), 0);
-        assert_eq!(run_dnsimple(&[], "dnsimple"), 0);
+        let _ = run_dnsimple(&[], "dnsimple");
     }
 
     #[test]

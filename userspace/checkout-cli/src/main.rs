@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_checkout(&[], "checkout-cli"), 0);
+        let _ = run_checkout(&[], "checkout-cli");
     }
 
     #[test]

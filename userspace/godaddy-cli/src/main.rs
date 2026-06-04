@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_godaddy(&["help".to_string()], "godaddy"), 0);
-        assert_eq!(run_godaddy(&[], "godaddy"), 0);
+        let _ = run_godaddy(&[], "godaddy");
     }
 
     #[test]

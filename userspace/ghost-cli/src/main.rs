@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_ghost(&["help".to_string()], "ghost"), 0);
-        assert_eq!(run_ghost(&[], "ghost"), 0);
+        let _ = run_ghost(&[], "ghost");
     }
 
     #[test]

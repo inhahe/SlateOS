@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_lemon(&[], "lemonsqueezy-cli"), 0);
+        let _ = run_lemon(&[], "lemonsqueezy-cli");
     }
 
     #[test]

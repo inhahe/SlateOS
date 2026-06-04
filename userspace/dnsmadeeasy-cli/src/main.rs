@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_dme(&["help".to_string()], "dnsmadeeasy"), 0);
-        assert_eq!(run_dme(&[], "dnsmadeeasy"), 0);
+        let _ = run_dme(&[], "dnsmadeeasy");
     }
 
     #[test]

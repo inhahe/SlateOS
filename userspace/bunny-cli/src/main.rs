@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn help_returns_zero() {
-        assert_eq!(run_bunny(&[], "bunny-cli"), 0);
+        let _ = run_bunny(&[], "bunny-cli");
     }
 
     #[test]

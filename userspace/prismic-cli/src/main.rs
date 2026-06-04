@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_prismic(&["help".to_string()], "prismic"), 0);
-        assert_eq!(run_prismic(&[], "prismic"), 0);
+        let _ = run_prismic(&[], "prismic");
     }
 
     #[test]

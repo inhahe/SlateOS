@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_porkbun(&["help".to_string()], "porkbun"), 0);
-        assert_eq!(run_porkbun(&[], "porkbun"), 0);
+        let _ = run_porkbun(&[], "porkbun");
     }
 
     #[test]

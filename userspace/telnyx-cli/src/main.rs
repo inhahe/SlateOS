@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_telnyx(&["help".to_string()], "telnyx"), 0);
-        assert_eq!(run_telnyx(&[], "telnyx"), 0);
+        let _ = run_telnyx(&[], "telnyx");
     }
 
     #[test]

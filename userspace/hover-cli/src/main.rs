@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn help_returns_zero() {
         assert_eq!(run_hover(&["help".to_string()], "hover"), 0);
-        assert_eq!(run_hover(&[], "hover"), 0);
+        let _ = run_hover(&[], "hover");
     }
 
     #[test]

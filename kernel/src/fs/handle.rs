@@ -49,6 +49,13 @@ impl OpenFlags {
     pub const TRUNCATE: Self = Self(1 << 3);
     /// All writes go to the end of the file regardless of seek position.
     pub const APPEND: Self = Self(1 << 4);
+    /// Require the path to refer to a directory.
+    ///
+    /// When set, `open()` will allocate a directory handle (suitable for
+    /// `getdents64(2)`) if the path resolves to a directory, or return
+    /// `NotADirectory` if it resolves to anything else.  When not set,
+    /// directories are rejected with `IsADirectory` as before.
+    pub const DIRECTORY: Self = Self(1 << 5);
 
     /// Create from raw bits (for syscall argument parsing).
     #[must_use]
@@ -137,6 +144,13 @@ struct OpenFile {
     /// forked child shares the parent's open file description (and its
     /// offset), not an independent copy.
     refcount: u32,
+    /// `true` if this is a directory handle (opened with `OpenFlags::DIRECTORY`).
+    ///
+    /// Directory handles support `read_dir_at` / `set_dir_cursor` but
+    /// reject byte-oriented operations (read/write/seek/read_at/write_at)
+    /// with `IsADirectory`.  The `offset` field doubles as the directory
+    /// cursor (entry index) for these handles.
+    is_directory: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +248,28 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
         Ok(entry) => {
             // File exists.
             if entry.entry_type == crate::fs::EntryType::Directory {
-                return Err(KernelError::IsADirectory);
+                // Directory: only allowed if the caller asked for one.
+                if !flags.contains(OpenFlags::DIRECTORY) {
+                    return Err(KernelError::IsADirectory);
+                }
+                // O_DIRECTORY combined with anything that would mutate a
+                // file makes no sense — TRUNCATE / CREATE / APPEND only
+                // apply to regular files.  Reject early so we don't
+                // silently ignore the flag.
+                if flags.contains(OpenFlags::TRUNCATE)
+                    || flags.contains(OpenFlags::CREATE)
+                    || flags.contains(OpenFlags::APPEND)
+                    || flags.is_writable()
+                {
+                    return Err(KernelError::IsADirectory);
+                }
+                return allocate_dir_handle(norm, flags);
+            }
+
+            // Regular file.
+            if flags.contains(OpenFlags::DIRECTORY) {
+                // Caller demanded a directory but found something else.
+                return Err(KernelError::NotADirectory);
             }
 
             let mut size = entry.size;
@@ -258,6 +293,12 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
         }
         Err(KernelError::NotFound) => {
             // File doesn't exist — create if CREATE is set.
+            // O_DIRECTORY|O_CREAT is nonsensical: directories are created
+            // by mkdir, not open.  Mirror Linux which simply fails the
+            // lookup with ENOENT in that combination.
+            if flags.contains(OpenFlags::DIRECTORY) {
+                return Err(KernelError::NotFound);
+            }
             if !flags.contains(OpenFlags::CREATE) {
                 return Err(KernelError::NotFound);
             }
@@ -322,6 +363,10 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
     let mut table = OPEN_FILES.lock();
     let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
 
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
+
     if !file.flags.is_readable() {
         return Err(KernelError::PermissionDenied);
     }
@@ -355,6 +400,10 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
 pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
     let mut table = OPEN_FILES.lock();
     let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
 
     if !file.flags.is_writable() {
         return Err(KernelError::PermissionDenied);
@@ -404,6 +453,9 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
 pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
     let table = OPEN_FILES.lock();
     let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
     if !file.flags.is_readable() {
         return Err(KernelError::PermissionDenied);
     }
@@ -441,6 +493,9 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
 pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
     let mut table = OPEN_FILES.lock();
     let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
     if !file.flags.is_writable() {
         return Err(KernelError::PermissionDenied);
     }
@@ -456,12 +511,75 @@ pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
     Ok(written)
 }
 
+/// Read a page of directory entries starting at the handle's current
+/// cursor, **without** advancing the cursor.
+///
+/// Returns `(start_cursor, entries)` where `start_cursor` is the cursor
+/// value that was in effect when the read began (so the caller can
+/// compute the next cursor by adding the number of entries consumed
+/// and then invoke [`set_dir_cursor`]).
+///
+/// Directory handles store the cursor in the same `offset` field used
+/// by file handles for byte position — interpreted here as an entry
+/// index into the underlying VFS listing.  The split between "read
+/// page" and "advance cursor" matches the `getdents64(2)` contract:
+/// the caller may consume only a prefix of the returned entries when
+/// the userspace buffer fills up mid-page, and must then advance the
+/// cursor by exactly that prefix length, not by the full page.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
+/// - [`KernelError::NotADirectory`] — `handle` refers to a file.
+/// - VFS errors propagated unchanged.
+pub fn read_dir_at(
+    handle: u64,
+    max_entries: usize,
+) -> KernelResult<(u64, alloc::vec::Vec<crate::fs::DirEntry>)> {
+    let (path, cursor) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if !file.is_directory {
+            return Err(KernelError::NotADirectory);
+        }
+        (file.path.clone(), file.offset)
+    };
+
+    let start = usize::try_from(cursor).map_err(|_| KernelError::InvalidArgument)?;
+    let (entries, _total) = crate::fs::Vfs::readdir_at(&path, start, max_entries)?;
+    Ok((cursor, entries))
+}
+
+/// Advance (or rewind) a directory handle's cursor.
+///
+/// `cursor` is an entry index — typically the previous cursor plus the
+/// number of entries actually consumed by userspace.  Passing 0 rewinds
+/// the iteration to the start, mirroring `rewinddir(3)`.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
+/// - [`KernelError::NotADirectory`] — `handle` refers to a file.
+pub fn set_dir_cursor(handle: u64, cursor: u64) -> KernelResult<()> {
+    let mut table = OPEN_FILES.lock();
+    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    if !file.is_directory {
+        return Err(KernelError::NotADirectory);
+    }
+    file.offset = cursor;
+    Ok(())
+}
+
 /// Seek to a new position in the file.
 ///
 /// Returns the new absolute offset after seeking.
 pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
     let mut table = OPEN_FILES.lock();
     let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
 
     let new_offset = match from {
         SeekFrom::Start(pos) => pos,
@@ -534,6 +652,10 @@ pub fn ftruncate(handle: u64, size: u64) -> KernelResult<()> {
     let mut table = OPEN_FILES.lock();
     let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
 
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
+
     if !file.flags.is_writable() {
         return Err(KernelError::PermissionDenied);
     }
@@ -561,12 +683,23 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
     let offset = file.offset;
     let size = file.size;
     let flags = file.flags;
+    let is_directory = file.is_directory;
 
     // Need to drop the lock before calling allocate_handle (it
     // acquires the same lock).
     drop(table);
 
-    allocate_handle(path, offset, size, flags)
+    if is_directory {
+        // Preserve the cursor on the duplicate so callers iterating a
+        // directory through a dup'd handle see the same position.
+        let id = allocate_dir_handle(path, flags)?;
+        // set_dir_cursor takes the same lock; safe now that allocate
+        // already released it.
+        set_dir_cursor(id, offset)?;
+        Ok(id)
+    } else {
+        allocate_handle(path, offset, size, flags)
+    }
 }
 
 /// Duplicate a file handle by sharing the *same* open file description.
@@ -669,6 +802,39 @@ fn allocate_handle(
             size,
             flags,
             refcount: 1,
+            is_directory: false,
+        },
+    );
+
+    Ok(id)
+}
+
+/// Allocate a directory handle in the global table.
+///
+/// Directory handles use `offset` as an entry cursor and `size = 0`
+/// (the underlying VFS doesn't track a stable entry count cheaply, so
+/// we don't cache one — `read_dir_at` queries the VFS each time).
+fn allocate_dir_handle(
+    path: alloc::string::String,
+    flags: OpenFlags,
+) -> KernelResult<u64> {
+    let mut table = OPEN_FILES.lock();
+
+    if table.len() >= MAX_OPEN_FILES {
+        return Err(KernelError::OutOfMemory);
+    }
+
+    let id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+
+    table.insert(
+        id,
+        OpenFile {
+            path,
+            offset: 0,
+            size: 0,
+            flags,
+            refcount: 1,
+            is_directory: true,
         },
     );
 
@@ -945,6 +1111,153 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     crate::serial_println!("[fs::handle]   lock-on-close: auto-released OK");
+
+    // 15. Directory-handle self-test.
+    //
+    // Create a small directory, populate it with two files, then exercise
+    // open(DIRECTORY) / read_dir_at / set_dir_cursor and the rejection
+    // paths (open without DIRECTORY → IsADirectory; open(file, DIRECTORY)
+    // → NotADirectory; read/write on dir handle → IsADirectory).
+    let dir_path = "/handle_dir_test";
+    let file_a = "/handle_dir_test/a.txt";
+    let file_b = "/handle_dir_test/b.txt";
+    let file_outside = "/handle_outside.txt";
+
+    // Cleanup any leftovers from a prior run.
+    crate::fs::Vfs::remove(file_a).ok();
+    crate::fs::Vfs::remove(file_b).ok();
+    crate::fs::Vfs::remove(dir_path).ok();
+    crate::fs::Vfs::remove(file_outside).ok();
+
+    if crate::fs::Vfs::mkdir(dir_path).is_ok() {
+        crate::fs::Vfs::write_file(file_a, b"a")?;
+        crate::fs::Vfs::write_file(file_b, b"b")?;
+        crate::fs::Vfs::write_file(file_outside, b"o")?;
+
+        // (a) open(dir, READ) without DIRECTORY → IsADirectory.
+        match open(dir_path, OpenFlags::READ) {
+            Err(KernelError::IsADirectory) => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: open(dir, READ) not IsADirectory: {:?}", other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (b) open(file, READ|DIRECTORY) → NotADirectory.
+        match open(file_outside, OpenFlags::READ.union(OpenFlags::DIRECTORY)) {
+            Err(KernelError::NotADirectory) => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: open(file, DIRECTORY) not NotADirectory: {:?}", other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (c) open(dir, READ|DIRECTORY) → ok.
+        let hd = open(dir_path, OpenFlags::READ.union(OpenFlags::DIRECTORY))?;
+
+        // (d) byte-oriented ops on dir handle → IsADirectory.
+        if read(hd, &mut buf) != Err(KernelError::IsADirectory) {
+            crate::serial_println!("[fs::handle]   FAIL: read(dir-handle) not IsADirectory");
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+        if write(hd, b"x") != Err(KernelError::IsADirectory) {
+            crate::serial_println!("[fs::handle]   FAIL: write(dir-handle) not IsADirectory");
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+        if read_at(hd, 0, &mut buf) != Err(KernelError::IsADirectory) {
+            crate::serial_println!("[fs::handle]   FAIL: read_at(dir-handle) not IsADirectory");
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+        if seek(hd, SeekFrom::Start(0)) != Err(KernelError::IsADirectory) {
+            crate::serial_println!("[fs::handle]   FAIL: seek(dir-handle) not IsADirectory");
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+
+        // (e) read_dir_at returns the two files (order is FS-defined; just
+        //     verify both names appear).
+        let (start, entries) = read_dir_at(hd, 16)?;
+        if start != 0 {
+            crate::serial_println!("[fs::handle]   FAIL: initial cursor not 0: {}", start);
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+        let mut saw_a = false;
+        let mut saw_b = false;
+        for e in &entries {
+            if e.name == "a.txt" { saw_a = true; }
+            if e.name == "b.txt" { saw_b = true; }
+        }
+        if !(saw_a && saw_b) {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: dir listing missing entries (saw_a={}, saw_b={})",
+                saw_a, saw_b
+            );
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+
+        // (f) advance cursor past the entries, next read_dir_at returns empty.
+        set_dir_cursor(hd, entries.len() as u64)?;
+        let (_, page2) = read_dir_at(hd, 16)?;
+        if !page2.is_empty() {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: dir listing after exhaustion not empty ({} entries)",
+                page2.len()
+            );
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+
+        // (g) rewind via set_dir_cursor(0).
+        set_dir_cursor(hd, 0)?;
+        let (_, page3) = read_dir_at(hd, 16)?;
+        if page3.len() != entries.len() {
+            crate::serial_println!(
+                "[fs::handle]   FAIL: rewind+read mismatch ({} vs {})",
+                page3.len(), entries.len()
+            );
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+
+        // (h) read_dir_at on a file handle → NotADirectory.
+        let hf = open(file_outside, OpenFlags::READ)?;
+        if let Err(e) = read_dir_at(hf, 16) {
+            if e != KernelError::NotADirectory {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: read_dir_at(file-handle) wrong err: {:?}", e
+                );
+                close(hf).ok();
+                close(hd).ok();
+                return Err(KernelError::InternalError);
+            }
+        } else {
+            crate::serial_println!("[fs::handle]   FAIL: read_dir_at(file-handle) not Err");
+            close(hf).ok();
+            close(hd).ok();
+            return Err(KernelError::InternalError);
+        }
+        close(hf)?;
+        close(hd)?;
+
+        // Cleanup.
+        crate::fs::Vfs::remove(file_a).ok();
+        crate::fs::Vfs::remove(file_b).ok();
+        crate::fs::Vfs::remove(dir_path).ok();
+        crate::fs::Vfs::remove(file_outside).ok();
+
+        crate::serial_println!("[fs::handle]   directory handle ops: OK");
+    } else {
+        crate::serial_println!("[fs::handle]   directory handle test SKIPPED (mkdir failed)");
+    }
 
     // Cleanup test files.
     crate::fs::Vfs::remove(lock_path).ok();

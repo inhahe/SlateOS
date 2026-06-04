@@ -2323,6 +2323,9 @@ fn translate_open_flags(linux_flags: u32) -> u32 {
     if linux_flags & oflags::O_APPEND != 0 {
         bits |= OpenFlags::APPEND.bits();
     }
+    if linux_flags & oflags::O_DIRECTORY != 0 {
+        bits |= OpenFlags::DIRECTORY.bits();
+    }
     bits
 }
 
@@ -10155,17 +10158,26 @@ fn sys_getdents(args: &SyscallArgs) -> SyscallResult {
 
 /// `getdents64(fd, dirp, count)` — read directory entries.
 ///
-/// The current Linux fd backend does not yet expose directory
-/// iteration.  Return ENOSYS after argument validation; glibc's
-/// `readdir()` will surface this as `NULL` + errno=ENOSYS, which
-/// callers treat as "this kernel cannot list directories" rather than
-/// "empty directory" (the latter would be the case if we returned 0).
-/// ENOSYS is the truthful answer and keeps callers from drawing wrong
-/// conclusions about empty directories.
+/// Iterates the directory referred to by `fd` (which must have been
+/// opened with `O_DIRECTORY`), encoding entries as `struct linux_dirent64`
+/// records into the user buffer until either the buffer fills or the
+/// directory is exhausted.  Advances the directory handle's cursor by
+/// the number of entries actually consumed (a partial page is handled
+/// correctly so the next call resumes mid-directory).
 ///
-/// TODO: once the VFS exposes per-dirfd iteration, this becomes a real
-/// implementation that calls into the open-directory cursor and emits
-/// `struct linux_dirent64` records.
+/// Return value contract (matches Linux):
+/// - `> 0` — bytes written; one or more entries fit.
+/// - `0`   — end-of-directory; the buffer was non-zero.
+/// - `EINVAL` — buffer too small to hold the next entry.
+/// - `ENOTDIR` — fd refers to a regular file, not a directory.
+/// - `EBADF` — fd is not open in the caller's process.
+///
+/// `d_ino` is synthesized via FNV-1a over `path/name` because our VFS
+/// doesn't surface stable inode numbers yet — readers that only treat
+/// `d_ino` as an opaque non-zero identifier (which is what POSIX
+/// permits for `readdir`) will work correctly.  `d_off` is the
+/// directory cursor immediately after this entry, suitable for
+/// `lseek(dirfd, d_off, SEEK_SET)` semantics if/when we add that.
 fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let dirp = args.arg1;
@@ -10176,14 +10188,156 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
     if count == 0 {
         return SyscallResult::ok(0);
     }
-    let len = match usize::try_from(count) {
+    let buf_cap = match usize::try_from(count) {
         Ok(v) => v,
         Err(_) => return linux_err(errno::EINVAL),
     };
-    if let Err(e) = crate::mm::user::validate_user_write(dirp, len) {
+    if let Err(e) = crate::mm::user::validate_user_write(dirp, buf_cap) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::ENOSYS)
+
+    // Resolve fd → kernel handle.  Must be a File-kind fd (directories
+    // are represented as file handles tagged is_directory by the
+    // underlying fs::handle layer).
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    if entry.kind != HandleKind::File {
+        return linux_err(errno::ENOTDIR);
+    }
+    let handle = entry.raw_handle;
+
+    // Read a page of entries without advancing the cursor — we may not
+    // consume all of them if the user buffer fills up first.
+    const PAGE_HINT: usize = 256;
+    let (start_cursor, entries) = match crate::fs::handle::read_dir_at(handle, PAGE_HINT) {
+        Ok(v) => v,
+        Err(KernelError::NotADirectory) => return linux_err(errno::ENOTDIR),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    if entries.is_empty() {
+        // Exhausted directory.
+        return SyscallResult::ok(0);
+    }
+
+    // Encode records into a kernel-side scratch buffer of exactly the
+    // user-requested capacity.  Linux header is 19 bytes:
+    //   u64 d_ino + s64 d_off + u16 d_reclen + u8 d_type
+    // followed by NUL-terminated name, padded to 8-byte alignment.
+    const HDR: usize = 19;
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(buf_cap);
+    let mut written: usize = 0;
+    let mut consumed: usize = 0;
+
+    for (idx, ent) in entries.iter().enumerate() {
+        // Refuse to emit entries with NUL or '/' in the name — those
+        // would corrupt the userspace parser.  Our VFS rejects them at
+        // ingest, but defence in depth.
+        if ent.name.as_bytes().iter().any(|&b| b == 0 || b == b'/') {
+            // Skip the entry but still advance — better than aborting
+            // the whole read.
+            consumed = consumed.saturating_add(1);
+            continue;
+        }
+        let name_len = ent.name.as_bytes().len();
+        let raw = HDR.saturating_add(name_len).saturating_add(1); // +1 for NUL
+        // Pad to 8.
+        let reclen = (raw + 7) & !7usize;
+        if reclen > u16::MAX as usize {
+            // Pathological name; skip rather than truncate.
+            consumed = consumed.saturating_add(1);
+            continue;
+        }
+        if written.saturating_add(reclen) > buf_cap {
+            // Doesn't fit in remaining buffer.
+            if idx == 0 && consumed == 0 {
+                // Caller's buffer can't hold even the first entry.
+                return linux_err(errno::EINVAL);
+            }
+            break;
+        }
+
+        // d_ino: FNV-1a over path + "/" + name.
+        let d_ino = synth_inode(&entry_path_for_handle(handle), &ent.name);
+        // d_off: cursor immediately after this entry.
+        let after_cursor = start_cursor.saturating_add(consumed as u64).saturating_add(1);
+        let d_type: u8 = match ent.entry_type {
+            crate::fs::EntryType::File => 8,        // DT_REG
+            crate::fs::EntryType::Directory => 4,   // DT_DIR
+            crate::fs::EntryType::Symlink => 10,    // DT_LNK
+            crate::fs::EntryType::VolumeLabel => 0, // DT_UNKNOWN
+        };
+
+        out.extend_from_slice(&d_ino.to_le_bytes());
+        out.extend_from_slice(&(after_cursor as i64).to_le_bytes());
+        out.extend_from_slice(&(reclen as u16).to_le_bytes());
+        out.push(d_type);
+        out.extend_from_slice(ent.name.as_bytes());
+        out.push(0);
+        // Pad with zeros to reclen.
+        let pad = reclen - raw;
+        for _ in 0..pad {
+            out.push(0);
+        }
+
+        written = written.saturating_add(reclen);
+        consumed = consumed.saturating_add(1);
+    }
+
+    if written == 0 {
+        // Every candidate entry was skipped or filtered out; advance
+        // the cursor so the next call doesn't re-process the same set,
+        // then report 0 to signal end-of-iteration for the current page.
+        if consumed > 0 {
+            let new_cursor = start_cursor.saturating_add(consumed as u64);
+            let _ = crate::fs::handle::set_dir_cursor(handle, new_cursor);
+        }
+        return SyscallResult::ok(0);
+    }
+
+    // Commit the kernel-side buffer to userspace.
+    // SAFETY: validate_user_write above checked the entire `count` range,
+    // and `written <= buf_cap == count`.
+    let r = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), dirp, written) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Advance the cursor by the entries we actually emitted (or skipped).
+    let new_cursor = start_cursor.saturating_add(consumed as u64);
+    let _ = crate::fs::handle::set_dir_cursor(handle, new_cursor);
+
+    SyscallResult::ok(written as i64)
+}
+
+/// Look up the path backing a directory handle, for d_ino synthesis.
+///
+/// Returns an empty string on failure — the hash will still be
+/// well-defined (just keyed off the name alone), keeping the syscall
+/// from failing on a transient race.
+fn entry_path_for_handle(handle: u64) -> alloc::string::String {
+    crate::fs::handle::handle_path(handle).unwrap_or_default()
+}
+
+/// Stable-ish synthetic inode number for `(dir_path, entry_name)`.
+///
+/// Uses FNV-1a over the concatenation `dir_path + "/" + name`.  The
+/// result is non-zero (we OR in 1 if it lands on zero) so userspace
+/// loops that treat 0 as "deleted" don't drop entries.
+fn synth_inode(dir_path: &str, name: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in dir_path.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h ^= u64::from(b'/');
+    h = h.wrapping_mul(0x100_0000_01b3);
+    for b in name.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    if h == 0 { 1 } else { h }
 }
 
 /// `waitid(idtype, id, infop, options, rusage)` — wait for child state change.
@@ -17332,10 +17486,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: getdents64 count=0 not 0");
             return Err(KernelError::InternalError);
         }
-        // getdents64 valid -> ENOSYS.
+        // getdents64 valid (kernel context: no fd table) -> EBADF.
+        // After batch 37 this is a real fd lookup, so an unknown fd
+        // returns EBADF instead of the old blanket ENOSYS stub.
         let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 256, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETDENTS64, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: getdents64 valid not ENOSYS");
+        if dispatch_linux(nr::GETDENTS64, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getdents64 valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // Encoder shape sanity: synth_inode is deterministic and non-zero.
+        let ino_a = synth_inode("/tmp", "foo");
+        let ino_b = synth_inode("/tmp", "foo");
+        if ino_a != ino_b || ino_a == 0 {
+            serial_println!("[syscall/linux]   FAIL: synth_inode not stable/non-zero");
+            return Err(KernelError::InternalError);
+        }
+        // Different name -> different ino (with overwhelming probability).
+        if synth_inode("/tmp", "foo") == synth_inode("/tmp", "bar") {
+            serial_println!("[syscall/linux]   FAIL: synth_inode collision foo/bar");
+            return Err(KernelError::InternalError);
+        }
+        // translate_open_flags maps O_DIRECTORY through.
+        let f = translate_open_flags(oflags::O_RDONLY | oflags::O_DIRECTORY);
+        if (f & crate::fs::handle::OpenFlags::DIRECTORY.bits()) == 0 {
+            serial_println!("[syscall/linux]   FAIL: O_DIRECTORY not translated");
             return Err(KernelError::InternalError);
         }
 

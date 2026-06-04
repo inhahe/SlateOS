@@ -7417,3 +7417,104 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      regular files, so this matches.  On pipes Linux behaves
 ##      differently — but we ESPIPE there anyway.
 
+##  63. GETDENTS64 (real implementation, was ENOSYS) — DONE.
+##      Third "upgrade a stub" batch.  Replaces the batch-31
+##      ENOSYS placeholder with a real directory iterator backed
+##      by fs::handle directory handles + Vfs::readdir_at, so
+##      `ls`, glibc readdir(), and any program that needs to
+##      enumerate a directory through the Linux ABI now sees real
+##      entries instead of "kernel can't list dirs".
+##         - fs::handle::OpenFlags gains `DIRECTORY = 1 << 5`.
+##         - OpenFile gains `is_directory: bool`.  Directory
+##           handles reuse the `offset` field as an entry cursor
+##           (entry index into the VFS listing).
+##         - fs::handle::open() now honours DIRECTORY:
+##             dir + DIRECTORY     → allocate_dir_handle
+##             dir + no DIRECTORY  → IsADirectory (existing)
+##             file + DIRECTORY    → NotADirectory
+##             file + no DIRECTORY → existing
+##           DIRECTORY combined with TRUNCATE/CREATE/APPEND/
+##           WRITE is rejected with IsADirectory (matches Linux
+##           rejecting nonsensical combos rather than silently
+##           ignoring flags).  O_DIRECTORY|O_CREAT on a missing
+##           path returns ENOENT (mkdir is the way to create
+##           directories, not open).
+##         - Byte-oriented ops on a dir handle (read / write /
+##           seek / read_at / write_at / ftruncate) all fail with
+##           IsADirectory.
+##         - New `read_dir_at(handle, max)` returns
+##           (start_cursor, Vec<DirEntry>) without advancing the
+##           cursor.  New `set_dir_cursor(handle, cursor)`
+##           advances/rewinds.  Split is deliberate: getdents64
+##           may consume only a prefix of a page when the user
+##           buffer fills, and must then commit exactly the
+##           consumed count back as the new cursor.
+##         - dup() preserves is_directory and the cursor across
+##           the duplicate.
+##         - syscall layer: translate_open_flags maps
+##           O_DIRECTORY → OpenFlags::DIRECTORY so plain Linux
+##           open(O_RDONLY|O_DIRECTORY) now returns a proper dir
+##           fd that getdents64 can consume.
+##         - sys_getdents64 implementation:
+##             * Validate fd, count, user buffer.
+##             * lookup_caller_fd → must be HandleKind::File
+##               (dir handles are file-kind underneath).
+##             * read_dir_at(handle, 256) for a page.
+##             * Encode each entry as `struct linux_dirent64`:
+##               u64 d_ino + s64 d_off + u16 d_reclen + u8 d_type
+##               + NUL-terminated name, padded to 8-byte align.
+##             * d_ino synthesized via FNV-1a hash over
+##               dir_path + "/" + name (forced non-zero).
+##             * d_type maps EntryType → DT_REG/DT_DIR/DT_LNK/
+##               DT_UNKNOWN.
+##             * Stops when the next record won't fit; advances
+##               cursor by entries actually consumed.
+##             * Return values match Linux: >0 bytes written,
+##               0 at EOD, EINVAL if buf can't hold first entry,
+##               ENOTDIR for file-fd, EBADF for unknown fd.
+##      Choice rationale:
+##         * Reuse fs::handle's offset field as the cursor
+##           rather than adding a separate dir_cursor field.
+##           OpenFile is already two words (offset+size) of
+##           position state; teaching it about "this u64 means
+##           entry index when is_directory" is cheaper than
+##           growing the struct and keeps dup/dup_shared trivial.
+##         * Synthesizing d_ino from a hash of path+name rather
+##           than threading inode numbers up from the FS layer.
+##           POSIX explicitly allows readdir to return any
+##           non-zero value for d_ino if the FS doesn't expose
+##           stable inodes (FAT is the canonical example), and
+##           our ext4 port hasn't propagated real inodes yet.
+##           When it does, the hash falls away.
+##         * d_off = cursor_after_entry rather than entry_index.
+##           That way `lseek(dirfd, d_off, SEEK_SET)` can resume
+##           iteration at the right place if/when we wire dir
+##           seek (currently dir-handle seek is IsADirectory; a
+##           future patch will make Start(cursor) work).
+##         * Encoding entirely in a kernel-side scratch buffer
+##           and copy_to_user only once at the end keeps the
+##           SMAP window tight and avoids partial writes that
+##           a SIGSEGV mid-encode would otherwise leave behind.
+##         * Filter out entries whose name contains '/' or NUL
+##           defensively.  Our VFS already rejects them at
+##           ingest, but a corrupted on-disk FS could surface
+##           them and would corrupt the userspace parser if we
+##           passed them through.  Skip-and-advance is the right
+##           call: don't drop the iteration just because one
+##           entry is malformed.
+##      Limitation: d_ino is not stable across kernel boots
+##      (depends on the canonical path string).  Programs that
+##      cache inode numbers across reboots to detect "same file"
+##      will lose that.  Fixes itself once the FS exposes real
+##      inodes.
+##      Limitation: dir handle seek (lseek on a dir fd) still
+##      returns IsADirectory.  glibc rewinddir uses lseek(0)
+##      under the hood and currently fails — programs should use
+##      a fresh openat instead until we add the seek path.  d_off
+##      values are already cursor-compatible so the patch is
+##      mechanical when it lands.
+##      Limitation: getdents (legacy 32-bit dirent) is still
+##      ENOSYS.  glibc has used getdents64 exclusively since 2.x,
+##      so this only affects static binaries from the early-2000s
+##      era and the upgrade isn't worth the layout duplication.
+

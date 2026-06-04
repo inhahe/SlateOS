@@ -258,6 +258,86 @@ pub fn has_capability(cap: u32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-module cap-state test serialisation
+// ---------------------------------------------------------------------------
+//
+// The effective/permitted/inheritable cap sets above are process-global
+// `AtomicU32`s. Cargo runs `posix`'s test suite multi-threaded, so any
+// test that mutates the cap state (e.g. drops `CAP_SYS_ADMIN` to verify
+// an unprivileged code path) races against every other test in every
+// other module that does the same — or that merely reads/assumes a
+// specific cap layout. The races manifest as ~150 spurious test
+// failures per run, all with errno mismatches (EPERM vs ENOSYS, etc.)
+// where a concurrent test had reset the caps mid-run.
+//
+// The fix: every test-only `CapGuard` in the crate acquires this
+// global mutex before snapshotting/mutating the cap set and holds it
+// until Drop restores. Cap-mutating tests therefore serialise across
+// modules, and tests that only read the cap state but rely on it
+// staying stable get the same protection by also holding the guard.
+//
+// Only compiled on host builds (`std::sync::Mutex` is unavailable in
+// the no_std `target_os = "none"` build). The lock is intentionally
+// `pub` so every module's CapGuard can name it.
+#[cfg(not(target_os = "none"))]
+pub static CAP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// `std::sync::Mutex` is not reentrant: a thread that locks it twice
+// deadlocks itself. Some tests nest `CapGuard`s on purpose — typically
+// an outer snapshot for the whole test plus an inner one for a scoped
+// modification (e.g. `test_ioprio_set_phase191_recovery_after_eperm`).
+// To make those work under the global lock, we wrap acquisition in a
+// thread-local depth counter: only the outermost guard actually owns
+// the `MutexGuard`; nested guards are no-ops for the lock but still
+// snapshot/restore caps independently.
+#[cfg(not(target_os = "none"))]
+std::thread_local! {
+    static CAP_TEST_LOCK_DEPTH: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
+/// RAII handle returned by [`CapTestLockGuard::acquire`]. Holds the
+/// crate-global cap-state mutex on the outermost call per thread and is
+/// a no-op for nested calls on the same thread. Drop decrements the
+/// depth counter and releases the lock when depth returns to zero.
+#[cfg(not(target_os = "none"))]
+pub struct CapTestLockGuard {
+    // `Some` on the outermost acquire; `None` for re-entrant acquires
+    // that piggy-back on an existing hold.
+    _inner: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+#[cfg(not(target_os = "none"))]
+impl CapTestLockGuard {
+    /// Acquire the cap-state test lock with re-entrant semantics.
+    /// Poisoned locks are recovered (a prior panicking test holding the
+    /// guard would otherwise wedge every subsequent test in the run).
+    #[must_use]
+    pub fn acquire() -> Self {
+        let depth = CAP_TEST_LOCK_DEPTH.with(core::cell::Cell::get);
+        CAP_TEST_LOCK_DEPTH.with(|d| d.set(depth.saturating_add(1)));
+        let inner = if depth == 0 {
+            Some(
+                CAP_TEST_LOCK
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        } else {
+            None
+        };
+        Self { _inner: inner }
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+impl Drop for CapTestLockGuard {
+    fn drop(&mut self) {
+        CAP_TEST_LOCK_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        // `_inner` (the real MutexGuard) drops here on the outermost
+        // guard, releasing the mutex.
+    }
+}
+
+// ---------------------------------------------------------------------------
 // capget / capset
 // ---------------------------------------------------------------------------
 

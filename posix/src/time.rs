@@ -8342,25 +8342,23 @@ mod tests {
     /// by default (one thread per core), so without serialisation two tests
     /// can race: T1 drops `CAP_SYS_TIME`, T2 reads the dropped state and
     /// fails its "cap held" assertion, T1's `Drop` restores. To prevent
-    /// that we hold a process-global mutex for the lifetime of the guard —
-    /// only one cap-mutating test runs at a time.
-    static CAP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// that we hold the crate-global `CAP_TEST_LOCK` for the lifetime of
+    /// the guard — only one cap-mutating test (anywhere in the crate)
+    /// runs at a time.
     struct CapGuard {
         lo: u32,
         hi: u32,
         // Held for the lifetime of the guard. Dropped after `Drop` restores
         // the caps so the next waiter sees a consistent state.
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::sys_capability::CapTestLockGuard,
     }
     impl CapGuard {
         fn snapshot() -> Self {
-            // Poisoned lock = a prior test panicked while holding it. The
-            // cap state may already be wrong, but we still want subsequent
-            // tests to make progress, so we accept the poisoned guard.
-            let lock = CAP_TEST_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Re-entrant lock guard: outermost acquire on the thread takes
+            // the global mutex; nested acquires (some tests stack a scoped
+            // CapGuard inside an outer one) are no-ops for the lock but
+            // still snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
             let (lo, hi) = crate::sys_capability::current_caps_effective();
             Self { lo, hi, _lock: lock }
         }

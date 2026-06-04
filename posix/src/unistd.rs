@@ -4919,11 +4919,20 @@ mod tests {
         struct CapGuard {
             lo: u32,
             hi: u32,
+            // Held for the lifetime of the guard. See
+            // `sys_capability::CAP_TEST_LOCK` for why.
+            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -5568,11 +5577,20 @@ mod tests {
         struct CapGuard {
             lo: u32,
             hi: u32,
+            // Held for the lifetime of the guard. See
+            // `sys_capability::CAP_TEST_LOCK` for why.
+            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -5936,11 +5954,20 @@ mod tests {
         struct CapGuard {
             lo: u32,
             hi: u32,
+            // Held for the lifetime of the guard. See
+            // `sys_capability::CAP_TEST_LOCK` for why.
+            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -6294,13 +6321,28 @@ mod tests {
         use super::*;
 
         struct CapGuard {
+
             lo: u32,
+
             hi: u32,
+
+            // Held for the lifetime of the guard. See
+
+            // `sys_capability::CAP_TEST_LOCK` for why.
+
+            _lock: crate::sys_capability::CapTestLockGuard,
+
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -6628,13 +6670,28 @@ mod tests {
         use super::*;
 
         struct CapGuard {
+
             lo: u32,
+
             hi: u32,
+
+            // Held for the lifetime of the guard. See
+
+            // `sys_capability::CAP_TEST_LOCK` for why.
+
+            _lock: crate::sys_capability::CapTestLockGuard,
+
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -6999,13 +7056,28 @@ mod tests {
         use super::*;
 
         struct CapGuard {
+
             lo: u32,
+
             hi: u32,
+
+            // Held for the lifetime of the guard. See
+
+            // `sys_capability::CAP_TEST_LOCK` for why.
+
+            _lock: crate::sys_capability::CapTestLockGuard,
+
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -8224,11 +8296,20 @@ mod tests {
         struct CapGuard {
             lo: u32,
             hi: u32,
+            // Held for the lifetime of the guard. See
+            // `sys_capability::CAP_TEST_LOCK` for why.
+            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -8749,11 +8830,20 @@ mod tests {
         struct CapGuard {
             lo: u32,
             hi: u32,
+            // Held for the lifetime of the guard. See
+            // `sys_capability::CAP_TEST_LOCK` for why.
+            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -9971,11 +10061,19 @@ mod tests {
         pub(super) struct CapGuard {
             lo: u32,
             hi: u32,
+            // Held for the lifetime of the guard. See
+            // `sys_capability::CAP_TEST_LOCK` for why.
+            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
+                // Re-entrant lock guard: outermost acquire on the
+                // thread takes the global mutex; nested acquires are
+                // no-ops for the lock but still snapshot/restore caps
+                // independently.
+                let lock = crate::sys_capability::CapTestLockGuard::acquire();
                 let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+                Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {
@@ -10278,11 +10376,20 @@ mod tests {
         struct CapGuard {
             lo: u32,
             hi: u32,
+            // Held for the lifetime of the guard. See
+            // `sys_capability::CAP_TEST_LOCK` for why.
+            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi }
+            // Re-entrant lock guard: outermost acquire on the
+            // thread takes the global mutex; nested acquires
+            // (some tests stack a scoped CapGuard inside an
+            // outer one) are no-ops for the lock but still
+            // snapshot/restore caps independently.
+            let lock = crate::sys_capability::CapTestLockGuard::acquire();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi, _lock: lock }
             }
         }
         impl Drop for CapGuard {

@@ -5344,3 +5344,123 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ## translation layer (the prerequisite for Linuxulator/WINE-style
 ## binary compatibility), which lives entirely in this repo and
 ## builds on freshly-loaded kernel + POSIX context.
+
+## PROGRESS (2026-06-04): Linux x86_64 syscall ABI translation layer — FOUNDATION LANDED.
+##
+## Implemented an in-kernel Linux x86_64 syscall ABI translator so a
+## prebuilt Linux ELF (eventually loaded via the future
+## PT_GNU_PROPERTY / `INTERP = /lib64/ld-linux-x86-64.so.2` detection
+## path in the ELF loader) can issue raw `syscall` instructions and
+## have the kernel speak Linux ABI back to it.  Roadmap line 5089.
+##
+## ARCHITECTURE:
+##   - kernel/src/proc/pcb.rs: added `AbiMode { Native, Linux }` enum
+##     and `Process::abi_mode` field (default Native, inherited across
+##     fork).  Public accessors `pcb::get_abi_mode` /
+##     `pcb::set_abi_mode`.
+##   - kernel/src/syscall/linux.rs: new module (~800 lines) containing
+##     Linux x86_64 syscall number constants, errno constants, full
+##     KernelError -> Linux errno mapping, `dispatch_linux(nr, args)`,
+##     ~25 per-syscall translators, and a 12-section boot-time
+##     `self_test()`.
+##   - kernel/src/syscall/entry.rs: `syscall_handler_inner` now reads
+##     the calling process's `abi_mode` and routes to either
+##     `dispatch::dispatch` (native) or `linux::dispatch_linux`.
+##   - kernel/src/main.rs: invokes `syscall::linux::self_test()` at
+##     boot right after the existing dispatch self-test; halts on
+##     failure.
+##
+## TRANSLATED SYSCALLS (first pass, stateless / no-fd):
+##   read, write (stdio only -> SYS_CONSOLE_WRITE), writev (stdio
+##   only), mmap (anonymous only), mprotect (no-op pending kernel
+##   support), munmap, brk (returns input pending heap impl),
+##   rt_sigaction (handler ptr only; sa_mask/sa_flags ignored),
+##   rt_sigprocmask (no-op), sched_yield, nanosleep, getpid, exit,
+##   exit_group, kill (SIGTERM mapping only), uname (fills 6×65-byte
+##   utsname), gettimeofday, getuid, getgid, geteuid (aliased to uid),
+##   getegid (aliased to gid), getppid, gettid, time, futex
+##   (FUTEX_WAIT/FUTEX_WAKE only — masks for PRIVATE_FLAG and
+##   CLOCK_REALTIME stripped), set_tid_address (returns tid only;
+##   pointer ignored), set_robust_list (no-op), arch_prctl
+##   (ARCH_SET_FS / ARCH_GET_FS via IA32_FS_BASE MSR), clock_gettime,
+##   clock_getres, clock_nanosleep, getrandom (xorshift64 seeded from
+##   rdtsc — NOT a CSPRNG).
+##
+## DEFERRED (require follow-on work, currently return -ENOSYS or are
+## stubbed with documented limitations):
+##   1. POSIX FD TABLE.  The bulk of Linux syscalls take fds.  Our
+##      POSIX fd table currently lives in userspace
+##      (posix/src/fdtable.rs).  To translate read/write/close/openat/
+##      dup/pipe/socket etc. we need either:
+##        (a) Move a minimal kernel-side fd table into the kernel
+##            (similar to Linux's task_struct->files), OR
+##        (b) Have the Linux-ABI process talk to the userspace POSIX
+##            daemon via channel IPC under the hood.
+##      Option (a) is simpler for compatibility; option (b) is more
+##      architecturally consistent with our microkernel design.
+##      DECISION DEFERRED until the ELF loader is ready to actually
+##      load a Linux binary and we have a concrete test case.
+##   2. FRAME-MODIFYING PATHS: execve, fork, vfork, clone, sigreturn,
+##      rt_sigreturn need to live alongside the existing native
+##      frame-modifying handlers in entry.rs (the ones that call
+##      `_with_frame` variants).  Currently they hit the ENOSYS
+##      fallthrough in `dispatch_linux`.  Add a parallel
+##      `dispatch_linux_with_frame` path when we wire these up.
+##   3. FILE-BACKED MMAP.  `mmap(MAP_PRIVATE | MAP_FILE)` returns
+##      -ENOSYS today.  Anonymous mmap works.  File-backed needs the
+##      fd table first (item 1).
+##   4. REAL CSPRNG.  `getrandom` uses xorshift64 seeded from rdtsc.
+##      This is sufficient for the Linux ABI semantic (it returns
+##      bytes that look random to a stub caller) but is NOT
+##      cryptographically secure.  When a kernel CSPRNG exists, swap
+##      it in.
+##   5. SIGACTION SA_MASK / SA_FLAGS.  Only the handler pointer is
+##      recorded.  Linux semantics for sa_mask (blocked-signal set
+##      during handler) and sa_flags (SA_RESTART, SA_SIGINFO, etc.)
+##      are ignored.  Most CRT startup code installs trivial handlers
+##      so this is acceptable as a first pass but must be fixed before
+##      we run anything that actually relies on signal delivery
+##      semantics.
+##   6. MPROTECT NO-OP.  We currently return success without changing
+##      page permissions.  Many Linux programs mprotect data segments
+##      to RW after init (or text to RX); without enforcement this is
+##      a security hole when Linux processes run alongside trusted
+##      native code.  Add real page-table mutation when the VMM gains
+##      a per-process mprotect entrypoint.
+##   7. BRK NO-OP.  We return the input address unchanged, which is
+##      enough to make glibc's malloc fall back to mmap.  Real brk
+##      requires a per-process heap region in the VMM.  Acceptable
+##      because glibc/musl prefer mmap-backed malloc anyway.
+##   8. GETEUID == GETUID, GETEGID == GETGID.  Our credential model
+##      doesn't track effective IDs separately.  Documented; will need
+##      a follow-up if/when we add setuid binary support.
+##   9. KILL only honours SIGTERM and SIGKILL.  Other signal numbers
+##      return -EINVAL.  Full signal mapping is part of the SIGACTION
+##      follow-up (item 5).
+##
+## TESTING:
+##   - linux::self_test() at boot exercises: errno mapping (16 KernelError
+##     variants); linux_from_native round-trip; unknown nr -> -ENOSYS;
+##     sched_yield; write to bad fd -> -EBADF; writev bad iovcnt ->
+##     -EINVAL; clock_gettime bad clk -> -EINVAL; arch_prctl bad code
+##     -> -EINVAL; LinuxTimespec to_nanos / from_nanos roundtrip;
+##     LinuxTimespec rejects negative tv_sec and tv_nsec >= 1e9;
+##     kernel_error_from_code inverse of code() for all mapped variants;
+##     direct dispatch_linux invocation for getpid, gettid, getuid,
+##     getgid.  All checks must pass or kernel halts before reaching
+##     init.
+##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
+##     by the AbiMode default-Native path that every existing native
+##     test hits.  The Linux path will get end-to-end coverage when
+##     the ELF loader gets its Linux-binary detection in (next task).
+##
+## NEXT STEPS (in priority order):
+##   1. ELF loader: detect Linux binaries (PT_GNU_PROPERTY /
+##      INTERP=/lib64/ld-linux-x86-64.so.2 / e_osabi==3) and call
+##      `pcb::set_abi_mode(new_pid, AbiMode::Linux)` before scheduling.
+##   2. Decide on fd-table architecture (kernel-side minimal vs IPC to
+##      userspace POSIX daemon); implement.
+##   3. Add Linux execve/fork/clone in a parallel
+##      dispatch_linux_with_frame path.
+##   4. Replace xorshift64 with kernel CSPRNG when one exists.
+##   5. Honour mprotect / brk / sigaction properly.

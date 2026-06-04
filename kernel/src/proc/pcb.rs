@@ -116,6 +116,37 @@ pub enum ProcessState {
 }
 
 // ---------------------------------------------------------------------------
+// Syscall ABI mode — selects which syscall table interprets the process's
+// `syscall` instructions.
+// ---------------------------------------------------------------------------
+
+/// The syscall ABI that a process targets.
+///
+/// All processes default to [`AbiMode::Native`] — they invoke the kernel
+/// using our native syscall numbers (see `crate::syscall::number`).
+/// Processes spawned with the Linux ABI flag use [`AbiMode::Linux`], which
+/// routes their `syscall` instructions through
+/// [`crate::syscall::linux::dispatch_linux`].  The translation layer
+/// remaps Linux x86_64 syscall numbers and argument semantics onto native
+/// kernel operations and returns Linux-style errno values (negated) in
+/// `rax`.
+///
+/// This is the foundation for Linuxulator/WINE-style binary
+/// compatibility: a prebuilt Linux ELF can run on this kernel by being
+/// loaded into a process with `abi_mode = Linux`.  ELF auto-detection
+/// (PT_GNU_PROPERTY, `e_osabi`, `INTERP = /lib64/ld-linux-x86-64.so.2`)
+/// lives in the loader and stamps this field when it recognises a Linux
+/// binary; tests and tooling can also set it explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AbiMode {
+    /// Our native kernel ABI (default).
+    #[default]
+    Native,
+    /// Linux x86_64 ABI — dispatched through the translation layer.
+    Linux,
+}
+
+// ---------------------------------------------------------------------------
 // Crash information — details about how a process died
 // ---------------------------------------------------------------------------
 
@@ -258,6 +289,16 @@ pub struct Process {
     /// Same format as `initial_argv` — each element is one `KEY=value`
     /// byte string.
     pub initial_envp: Vec<Vec<u8>>,
+    /// Syscall ABI the process speaks.
+    ///
+    /// [`AbiMode::Native`] (the default) routes `syscall` instructions
+    /// through the native dispatch table.  [`AbiMode::Linux`] routes
+    /// them through [`crate::syscall::linux::dispatch_linux`], which
+    /// translates Linux x86_64 syscall numbers and semantics onto our
+    /// native kernel operations.  Stamped by the ELF loader (when it
+    /// detects a Linux binary) or set explicitly via
+    /// [`set_abi_mode`].  Inherited across `fork`.
+    pub abi_mode: AbiMode,
 }
 
 impl Process {
@@ -282,6 +323,7 @@ impl Process {
             initial_fds: Vec::new(),
             initial_argv: Vec::new(),
             initial_envp: Vec::new(),
+            abi_mode: AbiMode::Native,
         }
     }
 }
@@ -361,13 +403,14 @@ pub fn fork_create(
 
     // Clone the parent-derived state while holding only an immutable
     // borrow, then release it before inserting the child.
-    let (name, cap_table, credentials, vmas) = {
+    let (name, cap_table, credentials, vmas, abi_mode) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         (
             parent.name.clone(),
             parent.cap_table.clone(),
             parent.credentials.clone(),
             parent.vmas.clone(),
+            parent.abi_mode,
         )
     };
 
@@ -393,6 +436,9 @@ pub fn fork_create(
         // vector already lives in its copy-on-write userspace memory.
         initial_argv: Vec::new(),
         initial_envp: Vec::new(),
+        // Linux/native ABI is a property of the loaded binary, so a
+        // forked child speaks the same ABI as its parent.
+        abi_mode,
     };
 
     table.insert(pid, child);
@@ -1488,6 +1534,35 @@ pub fn take_initial_args(pid: ProcessId) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
 pub fn get_pml4(pid: ProcessId) -> Option<u64> {
     let table = PROCESS_TABLE.lock();
     table.get(&pid).map(|p| p.pml4_phys)
+}
+
+/// Get the syscall ABI mode for a process.
+///
+/// Returns `None` if the process does not exist (already reaped,
+/// never created, or PID 0 for kernel tasks).  A returned
+/// [`AbiMode::Linux`] means the syscall dispatcher must route the
+/// process's `syscall` instructions through
+/// [`crate::syscall::linux::dispatch_linux`].
+pub fn get_abi_mode(pid: ProcessId) -> Option<AbiMode> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.abi_mode)
+}
+
+/// Set the syscall ABI mode for a process.
+///
+/// Called by the ELF loader when it detects a Linux binary (so that
+/// the first userspace `syscall` is already routed correctly), and by
+/// tests/tooling that want to flip ABI mode explicitly.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
+///   live process.
+pub fn set_abi_mode(pid: ProcessId, mode: AbiMode) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.abi_mode = mode;
+    Ok(())
 }
 
 /// Check if a process holds a capability for a specific resource

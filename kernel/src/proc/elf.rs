@@ -58,12 +58,24 @@ const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const EI_CLASS: usize = 4;
 const EI_DATA: usize = 5;
 const EI_VERSION: usize = 6;
+const EI_OSABI: usize = 7;
+#[allow(dead_code)] const EI_ABIVERSION: usize = 8;
 
 // EI_CLASS values.
 const ELFCLASS64: u8 = 2;
 
 // EI_DATA values (byte order).
 const ELFDATA2LSB: u8 = 1; // Little-endian.
+
+// EI_OSABI values relevant to Linux-binary detection.
+//
+// Most Linux toolchains emit `ELFOSABI_SYSV` (0) regardless of target —
+// the OSABI byte is a weak signal.  But when it IS set to LINUX/GNU,
+// it's an unambiguous indicator.
+const ELFOSABI_SYSV: u8 = 0;
+const ELFOSABI_GNU: u8 = 3;
+// ELFOSABI_LINUX is an alias for ELFOSABI_GNU (same value, 3).  glibc
+// historically used the name "GNU"; many references say "LINUX".
 
 // e_type values.
 const ET_EXEC: u16 = 2; // Executable file.
@@ -76,13 +88,17 @@ const EM_X86_64: u16 = 62;
 #[allow(dead_code)] const PT_NULL: u32 = 0;
 const PT_LOAD: u32 = 1;
 #[allow(dead_code)] const PT_DYNAMIC: u32 = 2;
-#[allow(dead_code)] const PT_INTERP: u32 = 3;
+const PT_INTERP: u32 = 3;
 #[allow(dead_code)] const PT_NOTE: u32 = 4;
 #[allow(dead_code)] const PT_PHDR: u32 = 6;
 #[allow(dead_code)] const PT_TLS: u32 = 7;
 #[allow(dead_code)] const PT_GNU_EH_FRAME: u32 = 0x6474_E550;
 #[allow(dead_code)] const PT_GNU_STACK: u32 = 0x6474_E551;
 #[allow(dead_code)] const PT_GNU_RELRO: u32 = 0x6474_E552;
+/// GNU property note — a strong Linux indicator emitted by binutils/gcc.
+/// Defined in the Linux Foundation gABI proposal.  Not used by FreeBSD/
+/// OpenBSD/NetBSD as of writing.
+const PT_GNU_PROPERTY: u32 = 0x6474_E553;
 
 // Segment permission flags (p_flags).
 const PF_X: u32 = 0x1; // Execute.
@@ -106,6 +122,12 @@ const EV_CURRENT: u8 = 1;
 /// All values are already in native byte order (little-endian on x86_64).
 #[derive(Debug, Clone, Copy)]
 pub struct Elf64Ehdr {
+    /// `e_ident[EI_OSABI]` — operating-system / ABI identifier.
+    ///
+    /// Most toolchains emit `ELFOSABI_SYSV` (0) regardless of target.
+    /// A non-zero value such as `ELFOSABI_GNU` (3) is an unambiguous
+    /// Linux-binary indicator.  See [`detect_linux_abi`].
+    pub e_ident_osabi: u8,
     /// Object file type (`ET_EXEC`, `ET_DYN`, etc.).
     pub e_type: u16,
     /// Architecture (`EM_X86_64`).
@@ -243,6 +265,7 @@ impl<'a> ElfFile<'a> {
 
         // Parse the header fields (all little-endian).
         let header = Elf64Ehdr {
+            e_ident_osabi: data[EI_OSABI],
             e_type: read_u16(data, 16),
             e_machine: read_u16(data, 18),
             e_version: read_u32(data, 20),
@@ -354,6 +377,107 @@ impl<'a> ElfFile<'a> {
             p_memsz: read_u64(self.data, offset + 40),
             p_align: read_u64(self.data, offset + 48),
         })
+    }
+
+    /// Read the bytes of a program header's file image as a slice.
+    ///
+    /// Returns the raw `[p_offset .. p_offset + p_filesz]` slice, or
+    /// `None` if the range is out of bounds.  Useful for inspecting
+    /// `PT_INTERP` / `PT_NOTE` segment contents during ABI detection.
+    #[must_use]
+    pub fn raw_segment_bytes(&self, phdr: &Elf64Phdr) -> Option<&'a [u8]> {
+        let start = phdr.p_offset as usize;
+        let end = start.checked_add(phdr.p_filesz as usize)?;
+        self.data.get(start..end)
+    }
+
+    /// Detect whether this ELF binary speaks the Linux x86_64 syscall ABI.
+    ///
+    /// Returns `true` when the binary should run with
+    /// [`crate::proc::pcb::AbiMode::Linux`] so its raw `syscall`
+    /// instructions are routed through the Linux translation layer in
+    /// `kernel::syscall::linux`.
+    ///
+    /// ## Signals (in order of reliability)
+    ///
+    /// 1. **`e_ident[EI_OSABI]`** set to `ELFOSABI_GNU` (3, alias for
+    ///    `ELFOSABI_LINUX`).  Unambiguous when present.  glibc-linked
+    ///    binaries that use `STT_GNU_IFUNC` or other GNU extensions
+    ///    almost always set this; static-pie musl binaries may also set
+    ///    it.  Most Linux toolchains, however, leave it as `ELFOSABI_SYSV`
+    ///    (0), so absence is not a refutation.
+    ///
+    /// 2. **`PT_INTERP` pointing at a known Linux dynamic loader.**
+    ///    Dynamic Linux binaries always have a `PT_INTERP` segment with
+    ///    a NUL-terminated path string.  We match the substring
+    ///    `ld-linux-x86-64` (glibc) or `ld-musl-x86_64` (musl) — both
+    ///    are Linux-specific.  This catches the vast majority of
+    ///    dynamically-linked Linux binaries regardless of `EI_OSABI`.
+    ///
+    /// 3. **`PT_GNU_PROPERTY` segment present.**  This segment carries
+    ///    GNU-specific property notes (Intel CET endbr64 markers,
+    ///    `GNU_PROPERTY_X86_FEATURE_1_AND`, etc.) emitted by binutils
+    ///    and gcc since 2018.  As of this writing it is not used by
+    ///    FreeBSD/OpenBSD/NetBSD toolchains, so its presence on an
+    ///    x86_64 ELF is a strong Linux indicator.  This catches static
+    ///    GNU/Linux binaries built with recent toolchains.
+    ///
+    /// ## Deliberate non-signals
+    ///
+    /// - `PT_GNU_STACK` / `PT_GNU_RELRO` alone are NOT used as signals
+    ///   even though both originate in GNU/Linux; FreeBSD's clang now
+    ///   emits them too and they would generate false positives on
+    ///   FreeBSD binaries.
+    /// - `NT_GNU_ABI_TAG` notes inside `PT_NOTE` segments would be a
+    ///   reliable signal but require walking the note table; punt to
+    ///   a follow-up if false-negative rates turn out to matter.
+    /// - `e_machine` is already validated as `EM_X86_64` by
+    ///   [`ElfFile::parse`] — that check happens unconditionally.
+    ///
+    /// ## False-positive / false-negative profile
+    ///
+    /// False positives (returning `true` for a non-Linux binary) are
+    /// the dangerous direction: a Native binary mis-detected as Linux
+    /// would have its `syscall`s routed through the wrong dispatch
+    /// table, almost certainly resulting in `-ENOSYS` or wildly wrong
+    /// semantics.  The signals above are chosen so that false positives
+    /// require a binary that intentionally mimics Linux markers — not
+    /// something the host toolchain produces by accident.
+    ///
+    /// False negatives (returning `false` for a real Linux binary)
+    /// degrade to running the Linux binary under our native ABI, which
+    /// will produce wrong syscall results — but this is no worse than
+    /// having no Linux ABI support at all, and the binary can be
+    /// flagged manually via [`crate::proc::pcb::set_abi_mode`] or a
+    /// future explicit-runtime syscall.
+    #[must_use]
+    pub fn detect_linux_abi(&self) -> bool {
+        // Signal 1: EI_OSABI explicit Linux/GNU tag.
+        if self.header.e_ident_osabi == ELFOSABI_GNU {
+            return true;
+        }
+
+        // Signal 2 + 3: walk program headers once, checking for
+        // PT_INTERP with a Linux loader path and PT_GNU_PROPERTY.
+        for i in 0..self.program_header_count() {
+            let Some(phdr) = self.program_header(i) else { continue };
+
+            match phdr.p_type {
+                PT_INTERP => {
+                    if let Some(bytes) = self.raw_segment_bytes(&phdr)
+                        && is_linux_interp(bytes)
+                    {
+                        return true;
+                    }
+                }
+                PT_GNU_PROPERTY => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        false
     }
 
     /// Iterate over all `PT_LOAD` segments as [`LoadableSegment`]s.
@@ -697,6 +821,50 @@ fn copy_segment_data_to_frame(
 fn read_u16(data: &[u8], off: usize) -> u16 {
     let bytes: [u8; 2] = [data[off], data[off + 1]];
     u16::from_le_bytes(bytes)
+}
+
+/// Return `true` if `bytes` (a NUL-terminated `PT_INTERP` path image)
+/// names a known Linux dynamic loader.
+///
+/// The check is substring-based on the path before the NUL terminator,
+/// matching both `/lib64/ld-linux-x86-64.so.2` (glibc, the
+/// near-universal Linux dynamic linker) and
+/// `/lib/ld-musl-x86_64.so.1` (musl).  Both substrings are
+/// Linux-specific — no other extant x86_64 OS ships a loader named
+/// `ld-linux-x86-64` or `ld-musl-x86_64`.
+#[inline]
+fn is_linux_interp(bytes: &[u8]) -> bool {
+    // Trim trailing NULs / NUL-terminate.  A well-formed PT_INTERP
+    // image is a C string with `p_filesz` bytes; the terminator may
+    // be at the end of the slice or somewhere in the middle.
+    let path = match bytes.iter().position(|&b| b == 0) {
+        Some(nul_pos) => bytes.get(..nul_pos).unwrap_or(&[]),
+        None => bytes,
+    };
+
+    contains_subslice(path, b"ld-linux-x86-64")
+        || contains_subslice(path, b"ld-musl-x86_64")
+}
+
+/// Returns `true` if `haystack` contains `needle` as a contiguous
+/// subsequence.  Naive O(n*m) scan — adequate for the very short
+/// strings used here.
+#[inline]
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return needle.is_empty();
+    }
+    let last = haystack.len() - needle.len();
+    let mut i = 0;
+    while i <= last {
+        if let Some(window) = haystack.get(i..i + needle.len())
+            && window == needle
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Read a little-endian `u32` from `data` at byte offset `off`.
@@ -1631,6 +1799,13 @@ pub fn self_test() -> KernelResult<()> {
     test_segment_flags()?;
     test_entry_point()?;
     test_zero_phentsize()?;
+    test_detect_linux_abi_sysv_is_native()?;
+    test_detect_linux_abi_osabi_gnu()?;
+    test_detect_linux_abi_interp_glibc()?;
+    test_detect_linux_abi_interp_musl()?;
+    test_detect_linux_abi_interp_unrelated()?;
+    test_detect_linux_abi_gnu_property()?;
+    test_is_linux_interp_helper()?;
 
     Ok(())
 }
@@ -1891,5 +2066,270 @@ fn test_zero_phentsize() -> KernelResult<()> {
     }
 
     serial_println!("[elf]   Reject zero e_phentsize: OK");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Linux ABI detection self-tests
+// ---------------------------------------------------------------------------
+
+/// Build an ELF whose only program header is `PT_INTERP` containing
+/// `interp_path` (NUL-terminated).  Used by the detection tests.
+///
+/// The header is structured so that `ElfFile::parse` accepts it:
+/// - Valid ELF64 magic / class / data / version / machine / type.
+/// - One program header (e_phnum = 1).
+/// - The PT_INTERP segment points at a region of the buffer that
+///   contains the NUL-terminated path.
+///
+/// `osabi` is written into `e_ident[EI_OSABI]`.  Pass `ELFOSABI_SYSV`
+/// for "no OSABI hint" or `ELFOSABI_GNU` to explicitly tag as Linux.
+fn build_interp_elf(osabi: u8, interp_path: &[u8]) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let interp_offset: u64 = 64 + ELF64_PHDR_SIZE as u64; // 120
+    // The PT_INTERP image is just the NUL-terminated path.
+    let interp_size: u64 = interp_path.len() as u64;
+    let total: u64 = interp_offset + interp_size;
+
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut buf = vec![0u8; total as usize];
+
+    // ELF header.
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = osabi;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry — must be non-zero for ET_EXEC.
+    write_u64(&mut buf, 32, phdr_offset);
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0); // e_shnum
+    write_u16(&mut buf, 62, 0); // e_shstrndx
+
+    // Program header: PT_INTERP.
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_INTERP);
+    write_u32(&mut buf, ph + 4, PF_R);
+    write_u64(&mut buf, ph + 8, interp_offset); // p_offset
+    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr — arbitrary, not loaded.
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, interp_size); // p_filesz
+    write_u64(&mut buf, ph + 40, interp_size); // p_memsz
+    write_u64(&mut buf, ph + 48, 1); // p_align
+
+    // INTERP image data — the path bytes (caller supplies NUL terminator).
+    let interp_start = interp_offset as usize;
+    buf[interp_start..interp_start + interp_path.len()].copy_from_slice(interp_path);
+
+    buf
+}
+
+/// Build a tiny ELF with a single `PT_GNU_PROPERTY` program header and
+/// `EI_OSABI = ELFOSABI_SYSV` (no other Linux markers).  Used to verify
+/// that the property-segment signal alone trips detection.
+fn build_gnu_property_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let prop_offset: u64 = 64 + ELF64_PHDR_SIZE as u64;
+    // A minimal but non-zero PT_GNU_PROPERTY body — the detector only
+    // inspects p_type, so any byte content suffices.
+    let prop_size: u64 = 16;
+    let total: u64 = prop_offset + prop_size;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut buf = vec![0u8; total as usize];
+
+    // ELF header.
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_SYSV;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset);
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // Program header: PT_GNU_PROPERTY.
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_GNU_PROPERTY);
+    write_u32(&mut buf, ph + 4, PF_R);
+    write_u64(&mut buf, ph + 8, prop_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, prop_size);
+    write_u64(&mut buf, ph + 40, prop_size);
+    write_u64(&mut buf, ph + 48, 8);
+
+    buf
+}
+
+/// Test 11: Default `build_test_elf` (`ELFOSABI_SYSV`, no PT_INTERP,
+/// no PT_GNU_PROPERTY) is NOT detected as Linux — must be Native.
+fn test_detect_linux_abi_sysv_is_native() -> KernelResult<()> {
+    let data = build_test_elf();
+    let elf = ElfFile::parse(&data)?;
+    // Sanity: the default test ELF should have e_ident_osabi == SYSV (0).
+    if elf.header.e_ident_osabi != ELFOSABI_SYSV {
+        serial_println!(
+            "[elf]   FAIL: default test ELF should have OSABI=SYSV, got {}",
+            elf.header.e_ident_osabi,
+        );
+        return Err(KernelError::InternalError);
+    }
+    if elf.detect_linux_abi() {
+        serial_println!(
+            "[elf]   FAIL: default SYSV/PT_LOAD-only ELF should NOT be detected as Linux",
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[elf]   Detect Linux ABI: default SYSV is Native: OK");
+    Ok(())
+}
+
+/// Test 12: `EI_OSABI = ELFOSABI_GNU` alone makes the ELF Linux.
+fn test_detect_linux_abi_osabi_gnu() -> KernelResult<()> {
+    // Take the default test ELF and just flip the OSABI byte.
+    let mut data = build_test_elf();
+    data[EI_OSABI] = ELFOSABI_GNU;
+    let elf = ElfFile::parse(&data)?;
+    if !elf.detect_linux_abi() {
+        serial_println!(
+            "[elf]   FAIL: ELFOSABI_GNU should be detected as Linux",
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[elf]   Detect Linux ABI: ELFOSABI_GNU: OK");
+    Ok(())
+}
+
+/// Test 13: PT_INTERP pointing at `/lib64/ld-linux-x86-64.so.2` (glibc)
+/// trips detection even with `EI_OSABI = ELFOSABI_SYSV`.
+fn test_detect_linux_abi_interp_glibc() -> KernelResult<()> {
+    let data = build_interp_elf(ELFOSABI_SYSV, b"/lib64/ld-linux-x86-64.so.2\0");
+    let elf = ElfFile::parse(&data)?;
+    if !elf.detect_linux_abi() {
+        serial_println!(
+            "[elf]   FAIL: PT_INTERP=/lib64/ld-linux-x86-64.so.2 should detect as Linux",
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[elf]   Detect Linux ABI: glibc PT_INTERP: OK");
+    Ok(())
+}
+
+/// Test 14: PT_INTERP pointing at a musl loader trips detection.
+fn test_detect_linux_abi_interp_musl() -> KernelResult<()> {
+    let data = build_interp_elf(ELFOSABI_SYSV, b"/lib/ld-musl-x86_64.so.1\0");
+    let elf = ElfFile::parse(&data)?;
+    if !elf.detect_linux_abi() {
+        serial_println!(
+            "[elf]   FAIL: PT_INTERP=/lib/ld-musl-x86_64.so.1 should detect as Linux",
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[elf]   Detect Linux ABI: musl PT_INTERP: OK");
+    Ok(())
+}
+
+/// Test 15: PT_INTERP pointing at an unrelated path (e.g. a custom
+/// loader) does NOT trip detection.  Guards against
+/// "any-PT_INTERP-means-Linux" false positives.
+fn test_detect_linux_abi_interp_unrelated() -> KernelResult<()> {
+    let data = build_interp_elf(ELFOSABI_SYSV, b"/system/loader\0");
+    let elf = ElfFile::parse(&data)?;
+    if elf.detect_linux_abi() {
+        serial_println!(
+            "[elf]   FAIL: PT_INTERP=/system/loader should NOT detect as Linux",
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[elf]   Detect Linux ABI: unrelated PT_INTERP stays Native: OK");
+    Ok(())
+}
+
+/// Test 16: PT_GNU_PROPERTY presence alone trips detection.
+fn test_detect_linux_abi_gnu_property() -> KernelResult<()> {
+    let data = build_gnu_property_elf();
+    let elf = ElfFile::parse(&data)?;
+    if !elf.detect_linux_abi() {
+        serial_println!(
+            "[elf]   FAIL: PT_GNU_PROPERTY should detect as Linux",
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[elf]   Detect Linux ABI: PT_GNU_PROPERTY: OK");
+    Ok(())
+}
+
+/// Test 17: `is_linux_interp` helper — direct unit test of the
+/// substring matcher.  Catches regressions in NUL handling and the
+/// glibc/musl substring choices.
+fn test_is_linux_interp_helper() -> KernelResult<()> {
+    // Positive cases.
+    let positives: &[&[u8]] = &[
+        b"/lib64/ld-linux-x86-64.so.2\0",
+        b"/lib/ld-linux-x86-64.so.2\0",
+        b"/lib/ld-musl-x86_64.so.1\0",
+        b"/usr/lib/ld-linux-x86-64.so.2\0",
+        // Even without trailing NUL.
+        b"/lib64/ld-linux-x86-64.so.2",
+    ];
+    for case in positives {
+        if !is_linux_interp(case) {
+            serial_println!(
+                "[elf]   FAIL: is_linux_interp should accept {:?}",
+                core::str::from_utf8(case).unwrap_or("<non-utf8>"),
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Negative cases.
+    let negatives: &[&[u8]] = &[
+        b"\0",
+        b"",
+        b"/system/loader\0",
+        b"/lib/ld-elf.so.1\0",     // FreeBSD's loader.
+        b"/libexec/ld.so\0",       // OpenBSD's loader.
+        // Substring after the NUL terminator must NOT count.
+        b"/system/loader\0/lib64/ld-linux-x86-64.so.2",
+    ];
+    for case in negatives {
+        if is_linux_interp(case) {
+            serial_println!(
+                "[elf]   FAIL: is_linux_interp should reject {:?}",
+                core::str::from_utf8(case).unwrap_or("<non-utf8>"),
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[elf]   is_linux_interp helper: OK");
     Ok(())
 }

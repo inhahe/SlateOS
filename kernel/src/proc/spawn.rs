@@ -394,10 +394,37 @@ pub fn spawn_process(
         segment_count, entry_point, elf_file.is_pie()
     );
 
+    // Detect whether this binary speaks the Linux x86_64 syscall ABI.
+    //
+    // We check before creating the PCB so the AbiMode can be stamped
+    // immediately afterwards — that way the very first userspace
+    // `syscall` (e.g. the dynamic loader's startup code) is already
+    // routed to the Linux translation layer.
+    let is_linux_abi = elf_file.detect_linux_abi();
+    if is_linux_abi {
+        serial_println!("[spawn] Detected Linux x86_64 ABI binary");
+    }
+
     // Step 2: Create the process (allocates a per-process PML4 with
     // kernel entries 256-511 cloned from the boot PML4).
     let pid = pcb::create(options.name, options.parent);
     serial_println!("[spawn] Created process {} (\"{}\")", pid, options.name);
+
+    // Stamp Linux ABI mode immediately after creation so any subsequent
+    // syscall this process makes (including its very first) is dispatched
+    // through `kernel::syscall::linux::dispatch_linux`.
+    if is_linux_abi {
+        if let Err(e) = pcb::set_abi_mode(pid, pcb::AbiMode::Linux) {
+            serial_println!(
+                "[spawn] WARNING: failed to stamp Linux ABI on process {}: {:?}",
+                pid, e
+            );
+            // Continue: the process still runs, just in native ABI mode.
+            // detect_linux_abi was a hint; the failure mode (process can't
+            // be found in the table immediately after create) shouldn't
+            // happen unless something else is very wrong.
+        }
+    }
 
     // Get the process's PML4 physical address.
     let pml4_phys = pcb::get_pml4(pid)
@@ -736,6 +763,18 @@ pub fn exec_process(
         segment_count, entry_point
     );
 
+    // Re-detect ABI mode for the new image.  exec replaces the process
+    // image entirely, so a Native parent can exec into a Linux binary
+    // (or vice-versa) and the syscall dispatcher must follow.
+    let new_abi_mode = if elf_file.detect_linux_abi() {
+        pcb::AbiMode::Linux
+    } else {
+        pcb::AbiMode::Native
+    };
+    if new_abi_mode == pcb::AbiMode::Linux {
+        serial_println!("[exec] Detected Linux x86_64 ABI binary for new image");
+    }
+
     // Step 2: Get the process's PML4.
     let pml4_phys = pcb::get_pml4(pid)
         .filter(|&p| p != 0)
@@ -801,6 +840,27 @@ pub fn exec_process(
             return Err(e);
         }
     };
+
+    // Step 5b: Update the process's ABI mode to match the new image.
+    //
+    // exec replaces the process image entirely; a Native process that
+    // execs into a Linux binary must from this point onwards have its
+    // `syscall`s routed through the Linux translation layer, and vice
+    // versa.  The actual switch takes effect on the next syscall from
+    // ring 3 because `syscall_handler_inner` re-reads the abi_mode on
+    // every entry.
+    if let Err(e) = pcb::set_abi_mode(pid, new_abi_mode) {
+        serial_println!(
+            "[exec] WARNING: failed to update ABI mode on process {}: {:?}",
+            pid, e
+        );
+        // Non-fatal — the process keeps its previous abi_mode, which
+        // will be wrong for the new image but matches the worst-case
+        // behaviour of running a Linux binary in Native mode (or
+        // vice-versa).  Caller has a destroyed-image process either
+        // way; this just makes its syscalls behave inconsistently
+        // rather than failing the exec.
+    }
 
     // Step 6: Store argv/envp in the PCB for the new process image.
     //

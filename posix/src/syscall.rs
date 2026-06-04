@@ -279,6 +279,46 @@ pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 #[cfg(not(target_os = "none"))]
 const HOST_ENOSYS: i64 = -38;
 
+// Host-only shim for the wall-clock / monotonic-clock syscalls.  These
+// are by far the most-called bare `syscall0` in the posix crate (>20
+// call sites in epoll/poll/socket/file/time/sys_times/unistd), and on
+// the host build the raw SYSCALL is gated off so they would otherwise
+// all return `HOST_ENOSYS` and silently break time-dependent tests.
+//
+// We back them with `std::time` here so any wrapper that calls
+// `clock_gettime` / reads SYS_CLOCK_MONOTONIC for a timeout deadline /
+// stamps a record with the realtime clock just works on host — no
+// per-call-site intercepts needed.  Same pattern as `host_eventfd_sim`
+// in `epoll.rs`.
+#[cfg(not(target_os = "none"))]
+mod host_clock {
+    extern crate std;
+    use std::sync::OnceLock;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    /// First call captures the "boot" instant; subsequent calls return
+    /// nanoseconds since then.  Monotonic, non-decreasing, no wall-clock
+    /// dependency — matches `SYS_CLOCK_MONOTONIC`'s contract.
+    static BOOT: OnceLock<Instant> = OnceLock::new();
+
+    pub fn monotonic_ns() -> i64 {
+        let boot = *BOOT.get_or_init(Instant::now);
+        let ns = Instant::now().saturating_duration_since(boot).as_nanos();
+        // Saturate to i64::MAX (~292 years from boot) rather than wrap.
+        i64::try_from(ns).unwrap_or(i64::MAX)
+    }
+
+    pub fn realtime_ns() -> i64 {
+        // `SystemTime` can predate UNIX_EPOCH on systems with broken
+        // clocks; clamp to 0 in that case (matches what an uninitialised
+        // RTC would return on the OS target).
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+            Err(_) => 0,
+        }
+    }
+}
+
 /// Issue a syscall with 0 arguments.
 #[inline(always)]
 #[must_use]
@@ -303,8 +343,14 @@ pub fn syscall0(nr: u64) -> i64 {
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = nr;
-        HOST_ENOSYS
+        // Host-side intercepts: the clock syscalls are routed to
+        // std::time so time-dependent code paths work in unit tests.
+        // Everything else returns the ENOSYS sentinel.
+        match nr {
+            SYS_CLOCK_MONOTONIC => host_clock::monotonic_ns(),
+            SYS_CLOCK_REALTIME => host_clock::realtime_ns(),
+            _ => HOST_ENOSYS,
+        }
     }
 }
 
@@ -1079,6 +1125,34 @@ mod tests {
     #[test]
     fn host_syscall0_returns_enosys() {
         assert_eq!(syscall0(SYS_EXIT), HOST_ENOSYS);
+    }
+
+    // The clock syscalls are special-cased inside `syscall0` so that
+    // time-dependent code paths (timeouts, timestamps) work in host
+    // tests.  Pin the contract: they must NOT return the ENOSYS
+    // sentinel and they must return non-negative, non-decreasing
+    // monotonic-ns / non-zero realtime-ns values.
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall0_clock_monotonic_returns_non_decreasing_nanos() {
+        let a = syscall0(SYS_CLOCK_MONOTONIC);
+        let b = syscall0(SYS_CLOCK_MONOTONIC);
+        assert!(a >= 0, "monotonic must be non-negative, got {a}");
+        assert!(b >= a, "monotonic must be non-decreasing ({a} -> {b})");
+        assert_ne!(a, HOST_ENOSYS);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall0_clock_realtime_returns_post_epoch_nanos() {
+        let ns = syscall0(SYS_CLOCK_REALTIME);
+        assert!(ns >= 0, "realtime must be non-negative, got {ns}");
+        assert_ne!(ns, HOST_ENOSYS);
+        // 2020-01-01 UTC was ~1577836800 s = 1.577e18 ns since epoch.
+        // Anything older than that on a host running these tests is
+        // a broken clock.  Lower bound chosen conservatively.
+        const YEAR_2020_NS: i64 = 1_577_836_800_000_000_000;
+        assert!(ns >= YEAR_2020_NS, "realtime clock looks unset: {ns}");
     }
 
     #[cfg(not(target_os = "none"))]

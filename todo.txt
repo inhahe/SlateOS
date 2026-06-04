@@ -4705,11 +4705,19 @@ Remaining net improvements (diminishing returns):
       blanket `target_os = "none"` gating — keeps host coverage.
     * `errno::native::*` constants are the contract between sim and
       `errno::translate`; return those, not POSIX errno values.
-    * `clock_gettime` is the most-called bare syscall0 in posix
-      (~30 sites).  If/when more time tests need it on host, gate
-      `SYS_CLOCK_MONOTONIC`/`SYS_CLOCK_REALTIME` themselves to
-      `std::time::Instant::now()` / `SystemTime::now()` in a host
-      helper module rather than fixing 30 call sites individually.
+    * `clock_gettime` was the most-called bare syscall0 in posix
+      (>20 sites in epoll/poll/socket/file/time/sys_times/unistd).
+      RESOLVED 2026-06-04 (same session): added `host_clock` module
+      to `posix/src/syscall.rs` and routed `SYS_CLOCK_MONOTONIC` and
+      `SYS_CLOCK_REALTIME` inside `syscall0` to
+      `std::time::Instant::now()` / `SystemTime::now()`.  Monotonic
+      uses a `OnceLock<Instant>` as the boot anchor.  This restored
+      `test_clock_nanosleep_timer_abstime_alone_passes_mask` to host
+      coverage (removed its `cfg(target_os="none")` gate) and made
+      every other timeout-/deadline-using wrapper safe on host
+      without per-call-site changes.  Net: 19971 host posix tests
+      pass (was 19968 with eventfd-sim only, +3 = 2 new clock-sim
+      pin tests + 1 unblocked clock_nanosleep test).
 
 - (2026-06-03) clipmanager: full feature surface (ClipEntry, ClipTemplate,
   ClipboardStore, AppState, render_entry_row, render_history_panel,

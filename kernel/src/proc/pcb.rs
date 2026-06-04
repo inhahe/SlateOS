@@ -1015,6 +1015,12 @@ pub fn set_rlimit(
 /// have to repeat the magic number.
 pub const RLIMIT_AS_INDEX: usize = 9;
 
+/// Index of `RLIMIT_FSIZE` (maximum file size a process may write) in
+/// [`Process::rlimits`].  Used by the Linux `pwrite` / `pwritev` /
+/// `pwritev2` / `ftruncate` / `truncate` translation layers to clip
+/// writes that would push a file past the per-process limit.
+pub const RLIMIT_FSIZE_INDEX: usize = 1;
+
 /// Charge `bytes` to the process's Linux address-space accounting and
 /// enforce [`RLIMIT_AS`] (resource index 9).
 ///

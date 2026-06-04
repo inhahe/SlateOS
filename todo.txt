@@ -7954,3 +7954,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      ENOSYS today, so AS only meaningfully counts private
 ##      anonymous mappings.  Will need updating when those land.
 
+##  71. Enforce RLIMIT_FSIZE in pwrite / pwritev / pwritev2 /
+##      ftruncate / truncate — DONE.
+##      Eleventh "upgrade a stub" batch.  Fourth storage→
+##      enforcement link from item 67's priority list.
+##      Positional writes and explicit truncates now honour
+##      `rlim_cur(RLIMIT_FSIZE)`, returning EFBIG (or clipping
+##      to a partial write) per Linux semantics.
+##         - pcb::RLIMIT_FSIZE_INDEX = 1 named constant added.
+##         - linux::rlimit_fsize_clip_with(soft, offset, len):
+##           pure decision routine.  RLIM_INFINITY -> Ok(len);
+##           offset >= soft -> Err(EFBIG); otherwise
+##           Ok(min(len, soft - offset)).
+##         - linux::rlimit_fsize_clip_for_caller(offset, len):
+##           thin wrapper that fetches the caller's pid +
+##           rlim_cur(RLIMIT_FSIZE) and delegates to _with.
+##           Kernel-context callers (pid == None) pass through
+##           unchecked.
+##         - linux::rlimit_fsize_check_size_with(soft, new_size)
+##           and ..._for_caller(new_size): exact-size variant
+##           for truncate paths.  new_size > soft -> Err(EFBIG)
+##           (equal allowed, unlike pwrite where offset == soft
+##           is EFBIG).
+##         - Wired into pwrite_file_from_user so all positional
+##           write paths (pwrite64, pwritev, pwritev2) clip
+##           uniformly.
+##         - sys_ftruncate and sys_truncate now check size
+##           before falling through to EROFS — Linux ordering
+##           (limit fires before the FS error).
+##      Coverage in the rlimit self-test block:
+##         - RLIM_INFINITY soft: pass-through clip / check at
+##           u64::MAX boundary.
+##         - Finite soft=1024: exact-fit, mid-file fit,
+##           straddling clip to soft - offset, oversized clip,
+##           offset==soft EFBIG, offset>soft EFBIG, MAX-offset
+##           EFBIG without overflow.
+##         - Zero-length write returns 0 even at boundary.
+##         - soft=0 rejects any non-zero write.
+##         - Truncate: size==soft allowed, size>soft EFBIG,
+##           size>0 with soft=0 EFBIG.
+##         - Kernel-context callers always pass through.
+##         - Dispatch-level: sys_ftruncate without a pid still
+##           returns EROFS via the no-pid fallthrough.
+##      Choice rationale:
+##         * Plugging the check into pwrite_file_from_user
+##           catches every positional write path through one
+##           gateway (DRY).  The non-positional write paths
+##           (write/writev) need the file's current offset,
+##           which requires a new fs::handle accessor — left
+##           to a follow-up batch since pwrite/pwritev/pwritev2
+##           cover the explicit-offset cases that matter for
+##           limit-aware programs.
+##         * Truncate uses a separate "exact size" check (not
+##           the clip variant) because the new file size is
+##           the argument, not bytes added to a current size.
+##         * Limit check fires *before* the EROFS / EBADF
+##           checks where possible, matching Linux's ordering
+##           and giving consistent EFBIG to programs that lower
+##           RLIMIT_FSIZE regardless of FS state.
+##         * Pure-helper / _for_caller split makes the
+##           self-tests deterministic — we exercise the
+##           decision table without needing to inject a fake
+##           caller_pid().
+##      Limitation: write/writev/writev2 (current-offset
+##      variants) are NOT yet clipped.  They need an fs::handle
+##      accessor that returns the effective next write offset
+##      (current pos, or size for O_APPEND).  Adding that
+##      accessor + clip is the natural next batch.
+##      Limitation: SIGXFSZ delivery is not yet implemented.
+##      Linux delivers SIGXFSZ alongside the EFBIG return so
+##      programs can install a handler to react to limit
+##      breaches.  Our EFBIG is correct; the signal will land
+##      when signal-delivery is finished.
+##      Limitation: ftruncate and truncate both still return
+##      EROFS after the RLIMIT_FSIZE check passes — the actual
+##      truncate path doesn't yet exist.  The new check is a
+##      no-op visibly for programs that don't lower
+##      RLIMIT_FSIZE, but it gives correct behaviour for
+##      programs that DO lower it (they see EFBIG instead of
+##      EROFS, matching what Linux would report).
+

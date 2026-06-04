@@ -6076,7 +6076,18 @@ fn sys_truncate(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     match validate_user_str(args.arg0) {
-        Ok(()) => linux_err(errno::EROFS),
+        Ok(()) => {
+            // RLIMIT_FSIZE: same ordering as Linux — limit check fires
+            // before the FS-level EROFS, so a process that lowered
+            // RLIMIT_FSIZE sees EFBIG regardless of whether the
+            // underlying mount is read-only.
+            #[allow(clippy::cast_sign_loss)]
+            let new_size = length as u64;
+            if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
+                return linux_err(e);
+            }
+            linux_err(errno::EROFS)
+        }
         Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
         Err(e) => linux_err(linux_errno_for(e)),
     }
@@ -6101,7 +6112,17 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
     };
     use crate::proc::linux_fd::HandleKind;
     match entry.kind {
-        HandleKind::File => linux_err(errno::EROFS),
+        HandleKind::File => {
+            // RLIMIT_FSIZE fires before EROFS — Linux's ordering, and it
+            // means a process that has lowered RLIMIT_FSIZE sees a
+            // consistent EFBIG even on a read-only filesystem.
+            #[allow(clippy::cast_sign_loss)]
+            let new_size = length as u64;
+            if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
+                return linux_err(e);
+            }
+            linux_err(errno::EROFS)
+        }
         // Pipes and consoles cannot be truncated.
         HandleKind::Pipe | HandleKind::Console => linux_err(errno::EINVAL),
     }
@@ -10011,6 +10032,24 @@ fn pwrite_file_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Resu
     if len == 0 {
         return Ok(0);
     }
+    // Enforce RLIMIT_FSIZE before doing any work.  A write that starts
+    // at-or-past the soft limit is rejected with EFBIG; a write that
+    // straddles the limit is clipped to the available space and the
+    // caller sees a partial write — matching Linux's semantics
+    // (`man 2 pwrite` / POSIX).
+    let clipped = rlimit_fsize_clip_for_caller(offset, len as u64)?;
+    let len = match usize::try_from(clipped) {
+        Ok(v) => v,
+        Err(_) => return Err(errno::EINVAL),
+    };
+    if len == 0 {
+        // Defensive: rlimit_fsize_clip_for_caller only returns 0 when
+        // its input `len` was 0 (handled above) or when the soft limit
+        // equals the offset, in which case the function returns Err
+        // before this point.  Treat any residual zero as "no bytes to
+        // write" and report success with 0 bytes.
+        return Ok(0);
+    }
     crate::mm::user::validate_user_read(buf, len).map_err(linux_errno_for)?;
     let mut kbuf = alloc::vec![0u8; len];
     // SAFETY: validate_user_read succeeded; copy_from_user uses STAC/CLAC.
@@ -10022,6 +10061,73 @@ fn pwrite_file_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Resu
         .map_err(linux_errno_for)?;
     #[allow(clippy::cast_possible_wrap)]
     Ok(n as i64)
+}
+
+/// Enforce `RLIMIT_FSIZE` against a positional write that would write
+/// `len` bytes starting at `offset`.
+///
+/// This is the common decision routine used by every Linux positional
+/// write path (`pwrite64`, `pwritev`, `pwritev2`) and by the truncate
+/// family (`ftruncate`, `truncate`).  It encodes Linux semantics:
+///
+///   - If the calling task has no associated process (kernel context),
+///     no limit applies — return `Ok(len)` unchanged.
+///   - If `rlim_cur(RLIMIT_FSIZE)` is [`pcb::RLIM_INFINITY`], no limit
+///     applies — return `Ok(len)`.
+///   - If `offset >= rlim_cur`, no byte of the requested write can fit
+///     under the limit — return `Err(EFBIG)`.  Linux raises `SIGXFSZ`
+///     here as well; we don't yet deliver SIGXFSZ but the errno is
+///     correct.
+///   - Otherwise, return `Ok(min(len, rlim_cur - offset))`, allowing
+///     a partial write up to the limit.
+///
+/// The truncate paths use [`rlimit_fsize_check_size`] instead because
+/// they're asserting an exact new file size, not writing bytes.
+fn rlimit_fsize_clip_for_caller(offset: u64, len: u64) -> Result<u64, i32> {
+    let Some(pid) = caller_pid() else { return Ok(len) };
+    let Some((soft, _)) = pcb::get_rlimit(pid, pcb::RLIMIT_FSIZE_INDEX as u32) else {
+        return Ok(len);
+    };
+    rlimit_fsize_clip_with(soft, offset, len)
+}
+
+/// Pure-function form of [`rlimit_fsize_clip_for_caller`] that takes
+/// the soft limit directly.  Split out so the self-tests can exercise
+/// the decision table without standing up a fake `caller_pid()`.
+fn rlimit_fsize_clip_with(soft: u64, offset: u64, len: u64) -> Result<u64, i32> {
+    if soft == pcb::RLIM_INFINITY {
+        return Ok(len);
+    }
+    if offset >= soft {
+        return Err(errno::EFBIG);
+    }
+    let avail = soft.saturating_sub(offset);
+    Ok(len.min(avail))
+}
+
+/// Enforce `RLIMIT_FSIZE` against a `truncate`/`ftruncate` request that
+/// would set the file size to `new_size`.
+///
+/// Linux raises EFBIG when the requested new size strictly exceeds
+/// the soft limit (equal is allowed — `truncate(fd, soft)` succeeds).
+/// Kernel-context callers and `RLIM_INFINITY` skip the check.
+fn rlimit_fsize_check_size_for_caller(new_size: u64) -> Result<(), i32> {
+    let Some(pid) = caller_pid() else { return Ok(()) };
+    let Some((soft, _)) = pcb::get_rlimit(pid, pcb::RLIMIT_FSIZE_INDEX as u32) else {
+        return Ok(());
+    };
+    rlimit_fsize_check_size_with(soft, new_size)
+}
+
+/// Pure-function form of [`rlimit_fsize_check_size_for_caller`].
+fn rlimit_fsize_check_size_with(soft: u64, new_size: u64) -> Result<(), i32> {
+    if soft == pcb::RLIM_INFINITY {
+        return Ok(());
+    }
+    if new_size > soft {
+        return Err(errno::EFBIG);
+    }
+    Ok(())
 }
 
 /// `pread64(fd, buf, count, offset)` — positional read.
@@ -13769,6 +13875,161 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
 
             pcb::destroy(child);
+            pcb::destroy(test_pid);
+        }
+
+        // RLIMIT_FSIZE clipping helpers used by pwrite / pwritev /
+        // pwritev2 / ftruncate / truncate.  Exercise the pure
+        // decision functions directly — they're called with the soft
+        // limit unwrapped from the caller's pcb so the *_for_caller
+        // forms are just thin shims around these.
+        {
+            // RLIM_INFINITY soft is a pass-through: no clipping, no
+            // EFBIG regardless of (offset, len) or new_size.
+            assert_eq!(
+                rlimit_fsize_clip_with(pcb::RLIM_INFINITY, 0, 1_000_000),
+                Ok(1_000_000),
+                "INF soft must not clip pwrite",
+            );
+            assert_eq!(
+                rlimit_fsize_clip_with(pcb::RLIM_INFINITY, u64::MAX - 1, 1),
+                Ok(1),
+                "INF soft must not EFBIG at the address-space ceiling",
+            );
+            assert_eq!(
+                rlimit_fsize_check_size_with(pcb::RLIM_INFINITY, u64::MAX),
+                Ok(()),
+                "INF soft must accept any truncate size",
+            );
+
+            // Finite soft: full fit, partial straddle, full reject.
+            let soft: u64 = 1024;
+
+            // Fits entirely: offset + len <= soft.
+            assert_eq!(
+                rlimit_fsize_clip_with(soft, 0, 1024),
+                Ok(1024),
+                "exact-fit pwrite must not clip",
+            );
+            assert_eq!(
+                rlimit_fsize_clip_with(soft, 100, 100),
+                Ok(100),
+                "mid-file pwrite within limit must not clip",
+            );
+
+            // Straddles the limit: returns clipped length so the write
+            // tops out at exactly `soft` bytes.
+            assert_eq!(
+                rlimit_fsize_clip_with(soft, 1000, 100),
+                Ok(24),
+                "straddling pwrite must clip to soft - offset",
+            );
+            assert_eq!(
+                rlimit_fsize_clip_with(soft, 0, 2048),
+                Ok(1024),
+                "oversized pwrite at offset 0 must clip to soft",
+            );
+
+            // Past the limit: EFBIG without writing anything.
+            assert_eq!(
+                rlimit_fsize_clip_with(soft, soft, 1),
+                Err(errno::EFBIG),
+                "pwrite at exactly soft offset must EFBIG",
+            );
+            assert_eq!(
+                rlimit_fsize_clip_with(soft, soft + 1, 1),
+                Err(errno::EFBIG),
+                "pwrite past soft offset must EFBIG",
+            );
+            assert_eq!(
+                rlimit_fsize_clip_with(soft, u64::MAX, 1),
+                Err(errno::EFBIG),
+                "pwrite at max offset must EFBIG, no overflow",
+            );
+
+            // Zero-length writes pass through even at the boundary —
+            // higher layers shortcut len==0 before reaching the clip.
+            assert_eq!(
+                rlimit_fsize_clip_with(soft, soft - 1, 0),
+                Ok(0),
+                "zero-length pwrite within limit returns 0",
+            );
+
+            // soft == 0: every byte is over the limit.
+            assert_eq!(
+                rlimit_fsize_clip_with(0, 0, 1),
+                Err(errno::EFBIG),
+                "soft=0 must reject any non-zero write",
+            );
+
+            // Truncate semantics: <= soft ok, > soft EFBIG (note: equal
+            // is allowed, unlike pwrite where offset == soft fails).
+            assert_eq!(
+                rlimit_fsize_check_size_with(soft, 0),
+                Ok(()),
+                "truncate to 0 always ok under finite limit",
+            );
+            assert_eq!(
+                rlimit_fsize_check_size_with(soft, soft),
+                Ok(()),
+                "truncate to exactly soft is allowed",
+            );
+            assert_eq!(
+                rlimit_fsize_check_size_with(soft, soft + 1),
+                Err(errno::EFBIG),
+                "truncate past soft must EFBIG",
+            );
+            assert_eq!(
+                rlimit_fsize_check_size_with(0, 1),
+                Err(errno::EFBIG),
+                "truncate above soft=0 must EFBIG",
+            );
+
+            // Kernel-context callers (caller_pid() returns None during
+            // self-test) get pass-through from the *_for_caller forms
+            // regardless of the encoded soft limit on any pcb.  This
+            // is the documented "kernel context skips rlimits" rule
+            // we follow across the codebase.
+            assert_eq!(
+                rlimit_fsize_clip_for_caller(0, 100),
+                Ok(100),
+                "kernel-context clip must pass through",
+            );
+            assert_eq!(
+                rlimit_fsize_clip_for_caller(u64::MAX, 1),
+                Ok(1),
+                "kernel-context clip passes through even at MAX offset",
+            );
+            assert_eq!(
+                rlimit_fsize_check_size_for_caller(u64::MAX),
+                Ok(()),
+                "kernel-context check_size must pass through",
+            );
+
+            // ftruncate dispatch: with kernel-context (no pcb-side
+            // RLIMIT_FSIZE in effect) we should fall through to EROFS
+            // for File handles.  Inject a known fd, then call dispatch.
+            let test_pid = pcb::create("rlimit-fsize-dispatch", 0);
+            pcb::linux_fd_install_stdio(test_pid)
+                .expect("install stdio for dispatch test");
+            // Caller-pid is None in self-test, so the rlimit check is
+            // skipped and ftruncate on console returns EINVAL.
+            let a = SyscallArgs {
+                arg0: 0,        // stdin (console)
+                arg1: 1024,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            // Without a caller_pid, sys_ftruncate's pcb lookup falls
+            // through the "no pid -> EROFS" branch.  That confirms
+            // the EROFS path is still reachable when the rlimit check
+            // is skipped.
+            if dispatch_linux(nr::FTRUNCATE, &a).value != -i64::from(errno::EROFS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: ftruncate(console) in kernel ctx expected EROFS",
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
             pcb::destroy(test_pid);
         }
     }

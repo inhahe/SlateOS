@@ -277,7 +277,7 @@ fn days_in_month(year: i64, month: u32) -> u32 {
 /// Day-of-week from epoch seconds (0=Thu for epoch, returns 0=Sun..6=Sat).
 fn day_of_week(epoch_secs: u64) -> u32 {
     // Jan 1, 1970 was a Thursday (index 4 if 0=Sun).
-    let days_since_epoch = (epoch_secs / 86400) as u64;
+    let days_since_epoch = (epoch_secs / 86400);
     // (days + 4) % 7 gives 0=Sun.
     ((days_since_epoch + 4) % 7) as u32
 }
@@ -603,14 +603,13 @@ fn resolve_login_entries(records: &[WtmpRecord], show_system: bool) -> Vec<Login
     // Process in reverse order to pair logouts with logins.
     for record in records.iter().rev() {
         match record.record_type {
-            DEAD_PROCESS => {
+            DEAD_PROCESS
                 // Record logout time for this terminal.
-                if !record.terminal.is_empty() {
+                if !record.terminal.is_empty() => {
                     // Remove any existing entry for this terminal, then add new one.
                     logout_times.retain(|(t, _)| t != &record.terminal);
                     logout_times.push((record.terminal.clone(), record.time_sec));
                 }
-            }
             USER_PROCESS => {
                 // Find matching logout.
                 let logout = find_and_remove_logout(&mut logout_times, &record.terminal);
@@ -855,11 +854,10 @@ fn resolve_usernames(records: &mut Vec<LastlogRecord>) {
     let mut uid_map: Vec<(u32, String)> = Vec::new();
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 3 {
-            if let Ok(uid) = fields[2].parse::<u32>() {
+        if fields.len() >= 3
+            && let Ok(uid) = fields[2].parse::<u32>() {
                 uid_map.push((uid, fields[0].to_string()));
             }
-        }
     }
 
     for record in records.iter_mut() {
@@ -888,17 +886,16 @@ fn print_lastlog(records: &[LastlogRecord], opts: &LastlogOptions) {
     let now = current_epoch_secs();
 
     println!(
-        "{:<16} {:<8} {:<16} {}",
-        "Username", "Port", "From", "Latest"
+        "{:<16} {:<8} {:<16} Latest",
+        "Username", "Port", "From"
     );
 
     for record in records {
         // Apply user filter.
-        if let Some(ref filter) = opts.user_filter {
-            if record.username != *filter {
+        if let Some(ref filter) = opts.user_filter
+            && record.username != *filter {
                 continue;
             }
-        }
 
         // Skip entries with no login time (never logged in).
         if record.time_sec == 0 {
@@ -913,16 +910,14 @@ fn print_lastlog(records: &[LastlogRecord], opts: &LastlogOptions) {
 
         // Apply before/time filters.
         let login_age_days = now.saturating_sub(record.time_sec as u64) / 86400;
-        if let Some(before) = opts.before_days {
-            if login_age_days < before {
+        if let Some(before) = opts.before_days
+            && login_age_days < before {
                 continue;
             }
-        }
-        if let Some(time) = opts.time_days {
-            if login_age_days > time {
+        if let Some(time) = opts.time_days
+            && login_age_days > time {
                 continue;
             }
-        }
 
         let time_str = format_full_time(record.time_sec);
         println!(
@@ -951,13 +946,12 @@ fn parse_last_args(args: &[String], personality: Personality) -> Result<LastOpti
         // Check for -NUM shorthand (e.g. -5).
         if arg.starts_with('-') && arg.len() > 1 {
             let maybe_num = &arg[1..];
-            if maybe_num.chars().all(|c| c.is_ascii_digit()) {
-                if let Ok(n) = maybe_num.parse::<usize>() {
+            if maybe_num.chars().all(|c| c.is_ascii_digit())
+                && let Ok(n) = maybe_num.parse::<usize>() {
                     opts.count = n;
                     i += 1;
                     continue;
                 }
-            }
         }
 
         match arg {

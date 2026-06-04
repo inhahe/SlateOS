@@ -608,6 +608,12 @@ pub struct RemoteDesktopApp {
     pub confirm_delete: Option<usize>,
 }
 
+impl Default for RemoteDesktopApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RemoteDesktopApp {
     pub fn new() -> Self {
         let mut app = Self {
@@ -834,11 +840,10 @@ impl RemoteDesktopApp {
             self.profiles.remove(index);
             if self.profiles.is_empty() {
                 self.selected_profile = None;
-            } else if let Some(sel) = self.selected_profile {
-                if sel >= self.profiles.len() {
+            } else if let Some(sel) = self.selected_profile
+                && sel >= self.profiles.len() {
                     self.selected_profile = Some(self.profiles.len().saturating_sub(1));
                 }
-            }
             true
         } else {
             false
@@ -956,15 +961,14 @@ impl RemoteDesktopApp {
     pub fn cleanup_sessions(&mut self) {
         self.sessions
             .retain(|s| s.state != SessionState::Disconnected);
-        if let Some(sel) = self.selected_session {
-            if sel >= self.sessions.len() {
+        if let Some(sel) = self.selected_session
+            && sel >= self.sessions.len() {
                 self.selected_session = if self.sessions.is_empty() {
                     None
                 } else {
                     Some(self.sessions.len().saturating_sub(1))
                 };
             }
-        }
     }
 
     // ========================================================================
@@ -993,12 +997,11 @@ impl RemoteDesktopApp {
 
     /// Cancel a transfer by index.
     pub fn cancel_transfer(&mut self, index: usize) -> bool {
-        if let Some(t) = self.transfers.get_mut(index) {
-            if t.state == TransferState::Queued || t.state == TransferState::InProgress {
+        if let Some(t) = self.transfers.get_mut(index)
+            && (t.state == TransferState::Queued || t.state == TransferState::InProgress) {
                 t.state = TransferState::Cancelled;
                 return true;
             }
-        }
         false
     }
 
@@ -1048,14 +1051,13 @@ impl RemoteDesktopApp {
     /// Apply a quality preset to the current display settings.
     pub fn apply_quality_preset(&mut self, preset: QualityPreset) {
         let (depth, rate, scaling) = preset.settings();
-        if let Some(idx) = self.selected_profile {
-            if let Some(profile) = self.profiles.get_mut(idx) {
+        if let Some(idx) = self.selected_profile
+            && let Some(profile) = self.profiles.get_mut(idx) {
                 profile.quality = preset;
                 profile.display.color_depth = depth;
                 profile.display.refresh_rate = rate;
                 profile.display.scaling = scaling;
             }
-        }
     }
 
     /// Set monitor mode.
@@ -1281,11 +1283,10 @@ impl RemoteDesktopApp {
             }
             // Navigate profiles up/down
             Key::Up if self.current_view == MainView::Connections => {
-                if let Some(sel) = self.selected_profile {
-                    if sel > 0 {
+                if let Some(sel) = self.selected_profile
+                    && sel > 0 {
                         self.selected_profile = Some(sel.saturating_sub(1));
                     }
-                }
                 EventResult::Consumed
             }
             Key::Down if self.current_view == MainView::Connections => {

@@ -494,7 +494,7 @@ impl SokobanApp {
 
     /// Check whether a position has a box.
     fn has_box(&self, pos: Pos) -> bool {
-        self.boxes.iter().any(|b| *b == pos)
+        self.boxes.contains(&pos)
     }
 
     /// Check whether a position is a target.
@@ -631,16 +631,14 @@ impl SokobanApp {
 
     fn handle_key_select(&mut self, event: &KeyEvent) {
         match event.key {
-            Key::Up => {
-                if self.select_cursor > 0 {
+            Key::Up
+                if self.select_cursor > 0 => {
                     self.select_cursor -= 1;
                 }
-            }
-            Key::Down => {
-                if self.select_cursor + 1 < self.level_count() {
+            Key::Down
+                if self.select_cursor + 1 < self.level_count() => {
                     self.select_cursor += 1;
                 }
-            }
             Key::Enter | Key::Space => {
                 self.start_level(self.select_cursor);
             }
@@ -705,10 +703,7 @@ impl SokobanApp {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke),
-            _ => {}
-        }
+        if let Event::Key(ke) = event { self.handle_key(ke) }
     }
 
     // -- Layout helpers -----------------------------------------------------

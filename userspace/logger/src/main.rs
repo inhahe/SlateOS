@@ -410,19 +410,17 @@ fn parse_args(args: &[String]) -> Options {
             }
             "--size" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(n) = args[i].parse::<usize>() {
+                if i < args.len()
+                    && let Ok(n) = args[i].parse::<usize>() {
                         opts.size_limit = Some(n);
                     }
-                }
             }
             "--pid" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(pid) = args[i].parse::<u32>() {
+                if i < args.len()
+                    && let Ok(pid) = args[i].parse::<u32>() {
                         opts.pid_override = Some(pid);
                     }
-                }
             }
             "-h" | "--help" => {
                 print_help();
@@ -560,13 +558,11 @@ fn get_username() -> String {
 
 fn get_pid() -> u32 {
     // Read /proc/self/stat for PID
-    if let Ok(stat) = fs::read_to_string("/proc/self/stat") {
-        if let Some(pid_str) = stat.split_whitespace().next() {
-            if let Ok(pid) = pid_str.parse::<u32>() {
+    if let Ok(stat) = fs::read_to_string("/proc/self/stat")
+        && let Some(pid_str) = stat.split_whitespace().next()
+            && let Ok(pid) = pid_str.parse::<u32>() {
                 return pid;
             }
-        }
-    }
     // Fallback
     0
 }

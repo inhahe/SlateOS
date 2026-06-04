@@ -121,11 +121,10 @@ fn parse_kb_value(s: &str) -> u64 {
 
 fn get_meminfo_value(content: &str, key: &str) -> u64 {
     for line in content.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim() == key {
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim() == key {
                 return parse_kb_value(v);
             }
-        }
     }
     0
 }
@@ -159,13 +158,11 @@ fn read_system_summary() -> SystemSummary {
     };
 
     // Uptime.
-    if let Some(uptime) = read_file("/proc/uptime") {
-        if let Some(secs_str) = uptime.split_whitespace().next() {
-            if let Ok(secs) = secs_str.parse::<f64>() {
+    if let Some(uptime) = read_file("/proc/uptime")
+        && let Some(secs_str) = uptime.split_whitespace().next()
+            && let Ok(secs) = secs_str.parse::<f64>() {
                 summary.uptime_secs = secs as u64;
             }
-        }
-    }
 
     // Load average.
     if let Some(loadavg) = read_file("/proc/loadavg") {
@@ -266,8 +263,7 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
         .and_then(|content| {
             for line in content.lines() {
                 if let Some(val) = line.strip_prefix("Uid:") {
-                    return val.trim()
-                        .split_whitespace()
+                    return val.split_whitespace()
                         .next()
                         .and_then(|s| s.parse().ok());
                 }
@@ -300,13 +296,11 @@ fn read_all_processes(mem_total_kb: u64) -> Vec<ProcessInfo> {
 
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(pid) = name.parse::<u32>() {
-                    if let Some(info) = read_process(pid, mem_total_kb) {
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(pid) = name.parse::<u32>()
+                    && let Some(info) = read_process(pid, mem_total_kb) {
                         procs.push(info);
                     }
-                }
-            }
         }
     }
 
@@ -606,11 +600,10 @@ fn run(config: &Config) {
         if config.once {
             break;
         }
-        if let Some(max) = config.iterations {
-            if iteration >= max {
+        if let Some(max) = config.iterations
+            && iteration >= max {
                 break;
             }
-        }
 
         // Sleep until next refresh.
         // Use a simple busy-wait with /proc/uptime polling if sleep syscall

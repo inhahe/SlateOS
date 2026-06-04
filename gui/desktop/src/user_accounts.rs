@@ -473,8 +473,8 @@ impl AccountManager {
         timestamp: u64,
     ) -> Result<(), &'static str> {
         // If demoting admin, check we have another admin
-        if let Some(acct) = self.get(uid) {
-            if acct.account_type == AccountType::Administrator
+        if let Some(acct) = self.get(uid)
+            && acct.account_type == AccountType::Administrator
                 && new_type != AccountType::Administrator
             {
                 let admin_count = self
@@ -486,7 +486,6 @@ impl AccountManager {
                     return Err("Cannot demote the last administrator");
                 }
             }
-        }
 
         if let Some(acct) = self.get_mut(uid) {
             acct.account_type = new_type;

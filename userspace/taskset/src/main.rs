@@ -82,7 +82,7 @@ struct CpuMask {
 
 impl CpuMask {
     fn new(num_cpus: usize) -> Self {
-        let words = (num_cpus + 63) / 64;
+        let words = num_cpus.div_ceil(64);
         CpuMask {
             bits: vec![0u64; words],
         }
@@ -618,7 +618,7 @@ fn policy_name(policy: u32) -> &'static [u8] {
     }
 }
 
-fn chrt_get(pid: u32, verbose: bool) -> i32 {
+fn chrt_get(pid: u32, _verbose: bool) -> i32 {
     // In real implementation: sched_getscheduler + sched_getparam
     let current_policy = SCHED_OTHER;
     let current_prio = 0;
@@ -813,12 +813,11 @@ fn cmd_ionice(args: &IonicArgs) -> i32 {
             let class = args.class.unwrap_or(IOPRIO_CLASS_BE);
             let data = args.classdata.unwrap_or(4);
 
-            if class == IOPRIO_CLASS_RT || class == IOPRIO_CLASS_BE {
-                if data >= IOPRIO_MAX_PRIO {
+            if (class == IOPRIO_CLASS_RT || class == IOPRIO_CLASS_BE)
+                && data >= IOPRIO_MAX_PRIO {
                     print_err(b"ionice: classdata must be 0-7\n");
                     return 1;
                 }
-            }
 
             print_out(b"Setting I/O scheduling for PID ");
             print_out(&format_u64(pid as u64));
@@ -960,7 +959,7 @@ fn cmd_renice(args: &ReniceArgs) -> i32 {
 
     let priority = match args.priority {
         Some(p) => {
-            if p < NICE_MIN || p > NICE_MAX {
+            if !(NICE_MIN..=NICE_MAX).contains(&p) {
                 print_err(b"renice: priority must be between -20 and 19\n");
                 return 1;
             }
@@ -977,7 +976,7 @@ fn cmd_renice(args: &ReniceArgs) -> i32 {
         return 1;
     }
 
-    let mut errors = 0;
+    let errors = 0;
 
     for &pid in &args.pids {
         // In real implementation: setpriority(PRIO_PROCESS, pid, priority)

@@ -462,12 +462,11 @@ impl Note {
 
     /// Toggle a checkbox line's checked state.
     pub fn toggle_checkbox(&mut self, line_index: usize) -> bool {
-        if let Some(line) = self.body.get_mut(line_index) {
-            if let LineKind::Checkbox { checked } = &mut line.kind {
+        if let Some(line) = self.body.get_mut(line_index)
+            && let LineKind::Checkbox { checked } = &mut line.kind {
                 *checked = !*checked;
                 return true;
             }
-        }
         false
     }
 
@@ -496,28 +495,25 @@ impl Note {
 
     /// Insert a character at a specific line/column position.
     pub fn insert_char(&mut self, line: usize, col: usize, ch: char) {
-        if let Some(rich_line) = self.body.get_mut(line) {
-            if let Some(span) = rich_line.spans.first_mut() {
+        if let Some(rich_line) = self.body.get_mut(line)
+            && let Some(span) = rich_line.spans.first_mut() {
                 let col = col.min(span.text.len());
                 span.text.insert(col, ch);
                 self.undo_history
                     .push(EditAction::InsertChar { line, col, ch });
             }
-        }
     }
 
     /// Delete a character at a specific line/column position.
     pub fn delete_char(&mut self, line: usize, col: usize) -> Option<char> {
-        if let Some(rich_line) = self.body.get_mut(line) {
-            if let Some(span) = rich_line.spans.first_mut() {
-                if col < span.text.len() {
+        if let Some(rich_line) = self.body.get_mut(line)
+            && let Some(span) = rich_line.spans.first_mut()
+                && col < span.text.len() {
                     let ch = span.text.remove(col);
                     self.undo_history
                         .push(EditAction::DeleteChar { line, col, ch });
                     return Some(ch);
                 }
-            }
-        }
         None
     }
 

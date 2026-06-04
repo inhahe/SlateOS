@@ -815,13 +815,12 @@ impl SpadesGame {
 
             for &i in legal {
                 let card = hand[i];
-                if !card.beats(winner_card, led_suit) {
-                    if best_losing.is_none() || card.rank > best_losing_rank {
+                if !card.beats(winner_card, led_suit)
+                    && (best_losing.is_none() || card.rank > best_losing_rank) {
                         // Play highest losing card to conserve low cards
                         best_losing = Some(i);
                         best_losing_rank = card.rank;
                     }
-                }
             }
 
             if let Some(idx) = best_losing {
@@ -1069,16 +1068,14 @@ impl SpadesGame {
             return;
         }
         match event.key {
-            Key::Up => {
-                if self.bid_selection < 13 {
+            Key::Up
+                if self.bid_selection < 13 => {
                     self.bid_selection += 1;
                 }
-            }
-            Key::Down => {
-                if self.bid_selection > 0 {
+            Key::Down
+                if self.bid_selection > 0 => {
                     self.bid_selection -= 1;
                 }
-            }
             Key::Enter | Key::Space => {
                 self.submit_human_bid();
             }
@@ -1094,11 +1091,10 @@ impl SpadesGame {
             return;
         }
         match event.key {
-            Key::Left => {
-                if self.selected_card > 0 {
+            Key::Left
+                if self.selected_card > 0 => {
                     self.selected_card -= 1;
                 }
-            }
             Key::Right => {
                 let max = self.hands[0].len().saturating_sub(1);
                 if self.selected_card < max {
@@ -1145,11 +1141,8 @@ impl SpadesGame {
     }
 
     fn handle_key_game_over(&mut self, event: &KeyEvent) {
-        match event.key {
-            Key::N => {
-                self.new_game();
-            }
-            _ => {}
+        if event.key == Key::N {
+            self.new_game();
         }
     }
 

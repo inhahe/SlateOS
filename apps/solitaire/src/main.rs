@@ -679,12 +679,11 @@ impl GameState {
         if col >= TABLEAU_COLS {
             return false;
         }
-        if let Some(top) = self.tableau[col].last_mut() {
-            if !top.face_up {
+        if let Some(top) = self.tableau[col].last_mut()
+            && !top.face_up {
                 top.face_up = true;
                 return true;
             }
-        }
         false
     }
 
@@ -736,13 +735,10 @@ impl GameState {
             } => {
                 // Un-flip if needed.
                 if flipped {
-                    match from {
-                        MoveSource::Tableau(col) => {
-                            if let Some(top) = self.tableau[col].last_mut() {
-                                top.face_up = false;
-                            }
+                    if let MoveSource::Tableau(col) = from {
+                        if let Some(top) = self.tableau[col].last_mut() {
+                            top.face_up = false;
                         }
-                        _ => {}
                     }
                 }
                 // Move cards back.
@@ -999,7 +995,7 @@ impl GameState {
                     self.focus = FocusArea::Stock;
                 } else if col == 1 {
                     self.focus = FocusArea::Waste;
-                } else if col >= 3 && col < 3 + FOUNDATION_COUNT {
+                } else if (3..3 + FOUNDATION_COUNT).contains(&col) {
                     self.focus = FocusArea::Foundation(col - 3);
                 } else {
                     self.focus = FocusArea::Stock;
@@ -1018,10 +1014,7 @@ impl GameState {
     /// Handle a key event.
     fn handle_key(&mut self, key: Key, modifiers: Modifiers) {
         if self.won {
-            match key {
-                Key::N => self.new_game(),
-                _ => {}
-            }
+            if key == Key::N { self.new_game() }
             return;
         }
 
@@ -1505,16 +1498,13 @@ impl SolitaireApp {
     }
 
     fn handle_event(&mut self, event: Event) {
-        match event {
-            Event::Key(KeyEvent {
+        if let Event::Key(KeyEvent {
                 key,
                 modifiers,
                 pressed: true,
                 ..
-            }) => {
-                self.state.handle_key(key, modifiers);
-            }
-            _ => {}
+            }) = event {
+            self.state.handle_key(key, modifiers);
         }
     }
 

@@ -213,8 +213,8 @@ fn read_utmp_entries() -> Vec<UtmpEntry> {
     }
 
     // If no utmp entries, try to show current user
-    if entries.is_empty() {
-        if let Ok(user) = env::var("USER") {
+    if entries.is_empty()
+        && let Ok(user) = env::var("USER") {
             entries.push(UtmpEntry {
                 user,
                 tty: "console".to_string(),
@@ -225,7 +225,6 @@ fn read_utmp_entries() -> Vec<UtmpEntry> {
                 what: "-".to_string(),
             });
         }
-    }
 
     entries
 }
@@ -314,9 +313,9 @@ fn get_user_info(username: &str) -> UserInfo {
 }
 
 fn get_uptime_str() -> String {
-    if let Ok(content) = std::fs::read_to_string("/proc/uptime") {
-        if let Some(secs_str) = content.split_whitespace().next() {
-            if let Ok(secs) = secs_str.parse::<f64>() {
+    if let Ok(content) = std::fs::read_to_string("/proc/uptime")
+        && let Some(secs_str) = content.split_whitespace().next()
+            && let Ok(secs) = secs_str.parse::<f64>() {
                 let total_secs = secs as u64;
                 let days = total_secs / 86400;
                 let hours = (total_secs % 86400) / 3600;
@@ -327,8 +326,6 @@ fn get_uptime_str() -> String {
                 }
                 return format!("up {hours:2}:{mins:02}");
             }
-        }
-    }
     "up  0:00".to_string()
 }
 
@@ -540,11 +537,10 @@ fn run_finger(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
 
             // Plan/project
             if !cfg.no_plan {
-                if !cfg.no_project {
-                    if let Some(ref project) = info.project {
+                if !cfg.no_project
+                    && let Some(ref project) = info.project {
                         writeln!(writer, "Project: {}", project.trim())?;
                     }
-                }
                 if let Some(ref plan) = info.plan {
                     writeln!(writer, "Plan:")?;
                     write!(writer, "{plan}")?;

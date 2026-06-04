@@ -431,15 +431,14 @@ fn cmd_del(username: &str) {
         print!("Remove home directory {}? [y/N] ", home);
         let _ = io::stdout().flush();
         let mut answer = String::new();
-        if io::stdin().read_line(&mut answer).is_ok() {
-            if answer.trim().to_lowercase() == "y" {
+        if io::stdin().read_line(&mut answer).is_ok()
+            && answer.trim().to_lowercase() == "y" {
                 if let Err(e) = fs::remove_dir_all(&home) {
                     eprintln!("warning: could not remove {home}: {e}");
                 } else {
                     println!("Removed {home}");
                 }
             }
-        }
     }
 
     println!("Deleted user '{}'", username);
@@ -503,10 +502,10 @@ fn cmd_list() {
         return;
     }
 
-    println!("{:<6} {:<16} {:<24} {:<16} {:<6} {}",
-        "UID", "Username", "Display Name", "Shell", "Admin", "Groups");
-    println!("{:<6} {:<16} {:<24} {:<16} {:<6} {}",
-        "---", "--------", "------------", "-----", "-----", "------");
+    println!("{:<6} {:<16} {:<24} {:<16} {:<6} Groups",
+        "UID", "Username", "Display Name", "Shell", "Admin");
+    println!("{:<6} {:<16} {:<24} {:<16} {:<6} ------",
+        "---", "--------", "------------", "-----", "-----");
 
     for user in &users {
         let admin = if user.admin { "yes" } else { "no" };

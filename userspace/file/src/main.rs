@@ -515,13 +515,12 @@ fn detect_image(buf: &[u8]) -> Option<FileType> {
         let mut desc = String::from("PNG image data");
         // IHDR chunk starts at offset 8 (4-byte length + 4-byte type), data
         // at offset 16: width(4) + height(4).
-        if buf.len() >= 24 && has_at(buf, 12, b"IHDR") {
-            if let (Some(w), Some(h)) =
+        if buf.len() >= 24 && has_at(buf, 12, b"IHDR")
+            && let (Some(w), Some(h)) =
                 (read_u32_be(buf, 16), read_u32_be(buf, 20))
             {
                 desc = format!("PNG image data, {w} x {h}");
             }
-        }
         return Some(FileType {
             description: desc,
             mime: "image/png".into(),
@@ -537,13 +536,12 @@ fn detect_image(buf: &[u8]) -> Option<FileType> {
     // GIF
     if starts_with(buf, b"GIF87a") || starts_with(buf, b"GIF89a") {
         let mut desc = String::from("GIF image data");
-        if buf.len() >= 10 {
-            if let (Some(w), Some(h)) =
+        if buf.len() >= 10
+            && let (Some(w), Some(h)) =
                 (read_u16_le(buf, 6), read_u16_le(buf, 8))
             {
                 desc = format!("GIF image data, {w} x {h}");
             }
-        }
         return Some(FileType {
             description: desc,
             mime: "image/gif".into(),
@@ -611,10 +609,9 @@ fn detect_document(buf: &[u8]) -> Option<FileType> {
     if starts_with(buf, b"%PDF") {
         let mut desc = String::from("PDF document");
         // Try to extract version from "%PDF-X.Y".
-        if buf.len() >= 8 {
-            if let Ok(header) = core::str::from_utf8(&buf[..buf.len().min(16)])
-            {
-                if let Some(ver) = header.strip_prefix("%PDF-") {
+        if buf.len() >= 8
+            && let Ok(header) = core::str::from_utf8(&buf[..buf.len().min(16)])
+                && let Some(ver) = header.strip_prefix("%PDF-") {
                     let ver_end = ver
                         .find(|c: char| !c.is_ascii_digit() && c != '.')
                         .unwrap_or(ver.len());
@@ -622,8 +619,6 @@ fn detect_document(buf: &[u8]) -> Option<FileType> {
                         desc = format!("PDF document, version {}", &ver[..ver_end]);
                     }
                 }
-            }
-        }
         return Some(FileType {
             description: desc,
             mime: "application/pdf".into(),

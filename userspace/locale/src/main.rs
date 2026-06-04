@@ -91,29 +91,24 @@ const LC_CATEGORIES: &[&str] = &[
 /// then `LANG`, then the built-in default `"POSIX"`.
 fn resolve_category(category: &str) -> String {
     // LC_ALL overrides all individual categories.
-    if category != "LC_ALL" && category != "LANG" {
-        if let Ok(val) = env::var("LC_ALL") {
-            if !val.is_empty() {
+    if category != "LC_ALL" && category != "LANG"
+        && let Ok(val) = env::var("LC_ALL")
+            && !val.is_empty() {
                 return val;
             }
-        }
-    }
 
     // The specific variable itself.
-    if let Ok(val) = env::var(category) {
-        if !val.is_empty() {
+    if let Ok(val) = env::var(category)
+        && !val.is_empty() {
             return val;
         }
-    }
 
     // Fall back to LANG (except when querying LANG or LC_ALL themselves).
-    if category != "LANG" && category != "LC_ALL" {
-        if let Ok(val) = env::var("LANG") {
-            if !val.is_empty() {
+    if category != "LANG" && category != "LC_ALL"
+        && let Ok(val) = env::var("LANG")
+            && !val.is_empty() {
                 return val;
             }
-        }
-    }
 
     String::from("POSIX")
 }

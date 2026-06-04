@@ -235,15 +235,14 @@ fn parse_env_args(args: &[String]) -> Action {
 
         // Check for NAME=VALUE assignment (must contain '=' and not start
         // with '=' to be a valid assignment).
-        if let Some(eq_pos) = arg.find('=') {
-            if eq_pos > 0 {
+        if let Some(eq_pos) = arg.find('=')
+            && eq_pos > 0 {
                 let name = arg[..eq_pos].to_string();
                 let value = arg[eq_pos + 1..].to_string();
                 config.modifications.push(EnvMod::Set { name, value });
                 i += 1;
                 continue;
             }
-        }
 
         // Not an option, not an assignment -- this is the start of the command.
         options_done = true;
@@ -408,12 +407,11 @@ fn exec_command(
     };
 
     // Change directory if requested.
-    if let Some(dir) = chdir {
-        if let Err(e) = env::set_current_dir(dir) {
+    if let Some(dir) = chdir
+        && let Err(e) = env::set_current_dir(dir) {
             eprintln!("env: cannot change directory to '{dir}': {e}");
             return 125;
         }
-    }
 
     let mut cmd = process::Command::new(program);
 
@@ -430,13 +428,7 @@ fn exec_command(
 
     match cmd.status() {
         Ok(status) => {
-            if let Some(code) = status.code() {
-                code
-            } else {
-                // Process terminated by signal -- use 128 + signal convention.
-                // Without platform-specific signal info, return 128.
-                128
-            }
+            status.code().unwrap_or(128)
         }
         Err(e) => {
             let kind = e.kind();

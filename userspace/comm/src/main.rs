@@ -422,16 +422,14 @@ fn merge_and_output(
 
             (Some(l1), None) => {
                 // Check sort order for file1.
-                if config.check_order {
-                    if let Some(ref p) = prev1 {
-                        if !is_sorted_pair(p, l1, config.case_insensitive) {
+                if config.check_order
+                    && let Some(ref p) = prev1
+                        && !is_sorted_pair(p, l1, config.case_insensitive) {
                             eprintln!(
                                 "comm: file 1 is not in sorted order"
                             );
                             exit_code = 1;
                         }
-                    }
-                }
                 if config.json {
                     json_entries.push(JsonEntry { column: 1, line: l1.clone() });
                 } else {
@@ -443,16 +441,14 @@ fn merge_and_output(
 
             (None, Some(l2)) => {
                 // Check sort order for file2.
-                if config.check_order {
-                    if let Some(ref p) = prev2 {
-                        if !is_sorted_pair(p, l2, config.case_insensitive) {
+                if config.check_order
+                    && let Some(ref p) = prev2
+                        && !is_sorted_pair(p, l2, config.case_insensitive) {
                             eprintln!(
                                 "comm: file 2 is not in sorted order"
                             );
                             exit_code = 1;
                         }
-                    }
-                }
                 if config.json {
                     json_entries.push(JsonEntry { column: 2, line: l2.clone() });
                 } else {
@@ -465,22 +461,20 @@ fn merge_and_output(
             (Some(l1), Some(l2)) => {
                 // Check sort order for both files.
                 if config.check_order {
-                    if let Some(ref p) = prev1 {
-                        if !is_sorted_pair(p, l1, config.case_insensitive) {
+                    if let Some(ref p) = prev1
+                        && !is_sorted_pair(p, l1, config.case_insensitive) {
                             eprintln!(
                                 "comm: file 1 is not in sorted order"
                             );
                             exit_code = 1;
                         }
-                    }
-                    if let Some(ref p) = prev2 {
-                        if !is_sorted_pair(p, l2, config.case_insensitive) {
+                    if let Some(ref p) = prev2
+                        && !is_sorted_pair(p, l2, config.case_insensitive) {
                             eprintln!(
                                 "comm: file 2 is not in sorted order"
                             );
                             exit_code = 1;
                         }
-                    }
                 }
 
                 match compare_lines(l1, l2, config.case_insensitive) {
@@ -695,12 +689,11 @@ fn run(config: &Config) -> i32 {
     };
 
     // Flush output.
-    if let Err(e) = out.flush() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    if let Err(e) = out.flush()
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("comm: write error: {e}");
             return 1;
         }
-    }
 
     exit_code
 }

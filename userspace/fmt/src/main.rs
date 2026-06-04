@@ -262,7 +262,7 @@ fn parse_args(args: &[String]) -> ParseResult {
     }
 
     let w = width.unwrap_or(DEFAULT_WIDTH);
-    let g = goal.unwrap_or_else(|| (w as f64 * GOAL_PERCENTAGE) as usize);
+    let g = goal.unwrap_or((w as f64 * GOAL_PERCENTAGE) as usize);
     // Goal must not exceed width.
     let g = if g > w { w } else { g };
 
@@ -296,8 +296,8 @@ fn is_sentence_end(ch: char) -> bool {
 /// Checks whether a word ends a sentence (ends with `.`, `!`, or `?`,
 /// optionally followed by a closing quote or parenthesis).
 fn word_ends_sentence(word: &str) -> bool {
-    let s = word.trim_end_matches(|c: char| matches!(c, '"' | '\'' | ')' | ']'));
-    s.chars().last().is_some_and(|c| is_sentence_end(c))
+    let s = word.trim_end_matches(['"', '\'', ')', ']']);
+    s.chars().last().is_some_and(is_sentence_end)
 }
 
 /// Checks whether a line is blank (empty or whitespace-only).

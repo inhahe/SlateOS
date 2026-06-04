@@ -138,11 +138,10 @@ fn path_to_name(path: &Path) -> String {
         if i > 0 {
             name.push('.');
         }
-        if let std::path::Component::Normal(os) = component {
-            if let Some(s) = os.to_str() {
+        if let std::path::Component::Normal(os) = component
+            && let Some(s) = os.to_str() {
                 name.push_str(s);
             }
-        }
     }
     name
 }
@@ -290,13 +289,12 @@ fn search_params(pattern: &str) {
         }
         for path in walk_params(root) {
             let name = path_to_name(&path);
-            if name.to_lowercase().contains(&pattern_lower) {
-                if let Ok(value) = read_param(&path) {
+            if name.to_lowercase().contains(&pattern_lower)
+                && let Ok(value) = read_param(&path) {
                     let display_val = collapse_value(&value);
                     println!("{name} = {display_val}");
                     found += 1;
                 }
-            }
         }
     }
 
@@ -448,14 +446,13 @@ fn parse_args(args: &[String]) -> Action {
 
             _ => {
                 // Check for inline assignment: name=value
-                if let Some((name, value)) = arg.split_once('=') {
-                    if !name.is_empty() {
+                if let Some((name, value)) = arg.split_once('=')
+                    && !name.is_empty() {
                         return Action::Write {
                             name: name.to_string(),
                             value: value.to_string(),
                         };
                     }
-                }
 
                 // Otherwise treat as a read request.
                 return Action::Read {

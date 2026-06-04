@@ -101,7 +101,7 @@ fn read_file(path: &str) -> Option<String> {
 /// total uptime seconds and total idle time seconds.
 fn read_uptime() -> Option<UptimeInfo> {
     let content = read_file("/proc/uptime")?;
-    let mut parts = content.trim().split_whitespace();
+    let mut parts = content.split_whitespace();
 
     let total_seconds: f64 = parts.next()?.parse().ok()?;
     let idle_seconds: f64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
@@ -121,7 +121,7 @@ fn read_uptime() -> Option<UptimeInfo> {
 /// (1min 5min 15min running/total last_pid)
 fn read_loadavg() -> Option<LoadAvg> {
     let content = read_file("/proc/loadavg")?;
-    let mut parts = content.trim().split_whitespace();
+    let mut parts = content.split_whitespace();
 
     let avg_1: f64 = parts.next()?.parse().ok()?;
     let avg_5: f64 = parts.next()?.parse().ok()?;

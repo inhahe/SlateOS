@@ -528,7 +528,7 @@ fn run_passwd(
     }
 
     // Interactive password change
-    let _ = write!(writer, "Changing password for {username}.\n");
+    let _ = writeln!(writer, "Changing password for {username}.");
     let _ = write!(writer, "New password: ");
     let _ = writer.flush();
 

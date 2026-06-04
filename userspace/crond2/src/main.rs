@@ -807,7 +807,7 @@ impl CronTab {
             }
 
             match parse_crontab_line(trimmed, true) {
-                Ok((expr, is_reboot, cmd)) => {
+                Ok((expr, is_reboot, _cmd)) => {
                     // For system crontab, the user field is the 6th token (index 5),
                     // and the command follows. We need to re-parse to extract the user.
                     let user_and_cmd = extract_user_from_system_line(trimmed);
@@ -1060,8 +1060,8 @@ fn read_anacron_timestamp(job_id: &str) -> u64 {
                 return secs;
             }
             // Try YYYYMMDD format.
-            if trimmed.len() == 8 {
-                if let (Ok(y), Ok(m), Ok(d)) = (
+            if trimmed.len() == 8
+                && let (Ok(y), Ok(m), Ok(d)) = (
                     trimmed[0..4].parse::<i64>(),
                     trimmed[4..6].parse::<u32>(),
                     trimmed[6..8].parse::<u32>(),
@@ -1077,7 +1077,6 @@ fn read_anacron_timestamp(job_id: &str) -> u64 {
                     };
                     return broken_to_unix(&bt);
                 }
-            }
             0
         }
         Err(_) => 0,
@@ -1179,17 +1178,15 @@ fn execute_command(command: &str, user: &str, env_vars: &HashMap<String, String>
     match cmd.output() {
         Ok(output) => {
             // If the command produced output, log it or send to mail.
-            if !output.stdout.is_empty() {
-                if let Ok(text) = String::from_utf8(output.stdout) {
+            if !output.stdout.is_empty()
+                && let Ok(text) = String::from_utf8(output.stdout) {
                     // Send to user's mail spool.
                     send_mail(user, command, &text);
                 }
-            }
-            if !output.stderr.is_empty() {
-                if let Ok(text) = String::from_utf8(output.stderr) {
+            if !output.stderr.is_empty()
+                && let Ok(text) = String::from_utf8(output.stderr) {
                     log_msg(1, &format!("({user}) STDERR: {text}"));
                 }
-            }
             if !output.status.success() {
                 let code = output.status.code().unwrap_or(-1);
                 log_msg(

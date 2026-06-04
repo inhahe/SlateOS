@@ -1194,8 +1194,8 @@ impl TetrisApp {
         }
 
         // Ghost piece
-        if self.status == GameStatus::Playing {
-            if let (Some(piece), Some(ghost_row)) = (&self.current_piece, self.ghost_row()) {
+        if self.status == GameStatus::Playing
+            && let (Some(piece), Some(ghost_row)) = (&self.current_piece, self.ghost_row()) {
                 // Only draw ghost if it's below the current piece
                 if ghost_row > piece.row {
                     let ghost = ActivePiece {
@@ -1224,11 +1224,10 @@ impl TetrisApp {
                     }
                 }
             }
-        }
 
         // Current piece
-        if self.status == GameStatus::Playing {
-            if let Some(piece) = &self.current_piece {
+        if self.status == GameStatus::Playing
+            && let Some(piece) = &self.current_piece {
                 let color = piece.kind.color();
                 for (r, c) in piece.absolute_cells() {
                     if r >= HIDDEN_ROWS as i8 && r < TOTAL_ROWS as i8 && c >= 0 && c < FIELD_COLS as i8 {
@@ -1239,7 +1238,6 @@ impl TetrisApp {
                     }
                 }
             }
-        }
     }
 
     /// Render a single filled block with a slight highlight/shadow.

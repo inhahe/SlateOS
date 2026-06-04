@@ -63,16 +63,16 @@ impl ColorTemperature {
         let r = if temp <= 66.0 {
             1.0
         } else {
-            let r_raw = 329.698727446 * (temp - 60.0).powf(-0.1332047592);
+            let r_raw = 329.698_73 * (temp - 60.0).powf(-0.133_204_76);
             (r_raw / 255.0).clamp(0.0, 1.0)
         };
 
         // Green channel
         let g = if temp <= 66.0 {
-            let g_raw = 99.4708025861 * temp.ln() - 161.1195681661;
+            let g_raw = 99.470_8 * temp.ln() - 161.119_57;
             (g_raw / 255.0).clamp(0.0, 1.0)
         } else {
-            let g_raw = 288.1221695283 * (temp - 60.0).powf(-0.0755148492);
+            let g_raw = 288.122_16 * (temp - 60.0).powf(-0.075_514_846);
             (g_raw / 255.0).clamp(0.0, 1.0)
         };
 
@@ -82,7 +82,7 @@ impl ColorTemperature {
         } else if temp <= 19.0 {
             0.0
         } else {
-            let b_raw = 138.5177312231 * (temp - 10.0).ln() - 305.0447927307;
+            let b_raw = 138.517_73 * (temp - 10.0).ln() - 305.044_8;
             (b_raw / 255.0).clamp(0.0, 1.0)
         };
 
@@ -135,7 +135,7 @@ impl NightLightSchedule {
             Self::AlwaysOn => true,
             Self::SunsetToSunrise => {
                 // Approximate: 7 PM to 7 AM
-                hour >= 19 || hour < 7
+                !(7..19).contains(&hour)
             }
             Self::Custom {
                 start_hour,

@@ -732,7 +732,7 @@ impl ClipboardViewer {
         // Bottom bar.
         let bottom_y = h - 30.0;
         cmds.push(RenderCommand::FillRect {
-            x: x,
+            x,
             y: bottom_y,
             width: w,
             height: 30.0,

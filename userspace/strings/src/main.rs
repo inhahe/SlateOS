@@ -304,7 +304,7 @@ fn is_printable(b: u8, include_all_ws: bool) -> bool {
     match b {
         0x20..=0x7E => true,  // space through tilde
         0x09 => true,         // horizontal tab
-        0x0A | 0x0B | 0x0C | 0x0D if include_all_ws => true,
+        0x0A..=0x0D if include_all_ws => true,
         _ => false,
     }
 }
@@ -350,11 +350,10 @@ fn emit_string(
     offset: u64,
     s: &str,
 ) -> io::Result<()> {
-    if opts.print_filename {
-        if let Some(name) = filename {
+    if opts.print_filename
+        && let Some(name) = filename {
             write!(out, "{name}: ")?;
         }
-    }
     if let Some(radix) = opts.radix {
         write_offset(out, offset, radix)?;
     }
@@ -371,13 +370,12 @@ fn emit_json(
 ) -> io::Result<()> {
     // Build a JSON line manually to avoid pulling in serde.
     write!(out, "{{\"offset\":{offset}")?;
-    if opts.print_filename {
-        if let Some(name) = filename {
+    if opts.print_filename
+        && let Some(name) = filename {
             write!(out, ",\"file\":\"")?;
             write_json_escaped(out, name)?;
             write!(out, "\"")?;
         }
-    }
     write!(out, ",\"string\":\"")?;
     write_json_escaped(out, s)?;
     writeln!(out, "\"}}")

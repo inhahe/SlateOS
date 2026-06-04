@@ -193,7 +193,7 @@ impl RuleActions {
     /// Merge another set of actions on top of this one (other's values
     /// take precedence where set).
     pub fn merge(&mut self, other: &Self) {
-        if other.position.is_some() { self.position = other.position.clone(); }
+        if other.position.is_some() { self.position = other.position; }
         if other.size.is_some() { self.size = other.size; }
         if other.desktop.is_some() { self.desktop = other.desktop; }
         if other.always_on_top.is_some() { self.always_on_top = other.always_on_top; }

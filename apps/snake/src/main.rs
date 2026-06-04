@@ -537,7 +537,7 @@ impl SnakeApp {
         let ate_bonus = self
             .bonus_food
             .as_ref()
-            .map_or(false, |b| new_head == b.pos);
+            .is_some_and(|b| new_head == b.pos);
 
         if ate_normal {
             self.eat_normal_food();

@@ -309,11 +309,10 @@ impl PrintSettings {
         if !caps.paper_sizes.contains(&self.paper_size) && self.paper_size != PaperSize::Custom {
             errors.push("Paper size not supported".to_string());
         }
-        if let Some((start, end)) = self.page_range {
-            if start == 0 || end < start {
+        if let Some((start, end)) = self.page_range
+            && (start == 0 || end < start) {
                 errors.push("Invalid page range".to_string());
             }
-        }
         if self.scale_percent == 0 || self.scale_percent > 400 {
             errors.push("Scale must be 1-400%".to_string());
         }
@@ -447,11 +446,10 @@ impl PrintManager {
         if self.printers.len() < before {
             if self.default_printer_id == Some(id) {
                 self.default_printer_id = self.printers.first().map(|p| p.id);
-                if let Some(def_id) = self.default_printer_id {
-                    if let Some(p) = self.printers.iter_mut().find(|p| p.id == def_id) {
+                if let Some(def_id) = self.default_printer_id
+                    && let Some(p) = self.printers.iter_mut().find(|p| p.id == def_id) {
                         p.is_default = true;
                     }
-                }
             }
             true
         } else {
@@ -541,23 +539,21 @@ impl PrintManager {
 
     /// Pause a job.
     pub fn pause_job(&mut self, job_id: u32) -> bool {
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id) {
-            if job.state == JobState::Printing || job.state == JobState::Queued {
+        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id)
+            && (job.state == JobState::Printing || job.state == JobState::Queued) {
                 job.state = JobState::Paused;
                 return true;
             }
-        }
         false
     }
 
     /// Resume a paused job.
     pub fn resume_job(&mut self, job_id: u32) -> bool {
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id) {
-            if job.state == JobState::Paused {
+        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id)
+            && job.state == JobState::Paused {
                 job.state = JobState::Queued;
                 return true;
             }
-        }
         false
     }
 

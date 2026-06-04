@@ -1503,15 +1503,14 @@ impl RecordingHistory {
         self.entries.retain(|e| e.id != id);
         if self.entries.len() < before {
             // Fix selected index
-            if let Some(sel) = self.selected {
-                if sel >= self.entries.len() {
+            if let Some(sel) = self.selected
+                && sel >= self.entries.len() {
                     self.selected = if self.entries.is_empty() {
                         None
                     } else {
                         Some(self.entries.len() - 1)
                     };
                 }
-            }
             true
         } else {
             false

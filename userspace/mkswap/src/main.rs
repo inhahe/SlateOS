@@ -165,11 +165,10 @@ fn parse_mkswap_args(args: &[Vec<u8>]) -> MkswapArgs {
             }
         } else if arg == b"-p" || arg == b"--pagesize" {
             i += 1;
-            if i < args.len() {
-                if let Some(ps) = parse_u64_bytes(&args[i]) {
+            if i < args.len()
+                && let Some(ps) = parse_u64_bytes(&args[i]) {
                     result.page_size = ps as u32;
                 }
-            }
         } else if arg == b"-f" || arg == b"--force" {
             result.force = true;
         } else if arg == b"-c" || arg == b"--check" {
@@ -211,11 +210,10 @@ fn parse_swapon_args(args: &[Vec<u8>]) -> SwaponArgs {
             result.all = true;
         } else if arg == b"-p" || arg == b"--priority" {
             i += 1;
-            if i < args.len() {
-                if let Some(p) = parse_i32_bytes(&args[i]) {
+            if i < args.len()
+                && let Some(p) = parse_i32_bytes(&args[i]) {
                     result.priority = Some(p);
                 }
-            }
         } else if arg == b"-d" || arg == b"--discard" {
             result.discard = true;
         } else if arg == b"-s" || arg == b"--summary" {
@@ -590,7 +588,7 @@ fn format_size(bytes: u64) -> Vec<u8> {
 fn format_size_kb(kb: u64, use_bytes: bool) -> Vec<u8> {
     if use_bytes {
         let bytes = kb.saturating_mul(1024);
-        return format_u64(bytes).into();
+        return format_u64(bytes);
     }
     format_size(kb.saturating_mul(1024))
 }
@@ -639,7 +637,7 @@ fn cmd_mkswap(args: &MkswapArgs) -> i32 {
     // 6. Sync to disk
 
     // Simulate getting device size (would use fstat/ioctl in real implementation)
-    let device_path = bytes_to_str_lossy(&args.device);
+    let _device_path = bytes_to_str_lossy(&args.device);
 
     if args.verbose {
         let mut msg = b"Setting up swapspace on ".to_vec();

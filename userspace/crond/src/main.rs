@@ -179,7 +179,7 @@ impl CronField {
                 if *step == 0 {
                     return value == *base;
                 }
-                value >= *base && (value - *base) % *step == 0
+                value >= *base && (value - *base).is_multiple_of(*step)
             }
         }
     }

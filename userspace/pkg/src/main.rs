@@ -603,7 +603,7 @@ fn parse_file_entry(value: &str) -> Option<PackageFile> {
     // src -> dst mode hash size
     let (src, rest) = value.split_once("->")?;
     let src = src.trim().to_string();
-    let parts: Vec<&str> = rest.trim().split_whitespace().collect();
+    let parts: Vec<&str> = rest.split_whitespace().collect();
     if parts.len() < 3 {
         return None;
     }
@@ -698,8 +698,8 @@ impl PkgConfig {
 
             if let Some(rest) = trimmed.strip_prefix("repo:") {
                 // Save previous repo
-                if let Some(ref name) = current_name {
-                    if !current_url.is_empty() {
+                if let Some(ref name) = current_name
+                    && !current_url.is_empty() {
                         repos.push(RepoConfig {
                             name: name.clone(),
                             url: current_url.clone(),
@@ -707,7 +707,6 @@ impl PkgConfig {
                             enabled: current_enabled,
                         });
                     }
-                }
                 current_name = Some(rest.trim().to_string());
                 current_url.clear();
                 current_priority = 500;
@@ -725,8 +724,8 @@ impl PkgConfig {
         }
 
         // Save last repo
-        if let Some(ref name) = current_name {
-            if !current_url.is_empty() {
+        if let Some(ref name) = current_name
+            && !current_url.is_empty() {
                 repos.push(RepoConfig {
                     name: name.clone(),
                     url: current_url,
@@ -734,7 +733,6 @@ impl PkgConfig {
                     enabled: current_enabled,
                 });
             }
-        }
 
         if repos.is_empty() {
             return None;
@@ -1029,8 +1027,8 @@ impl ContentStore {
             let dst = Path::new(&file.dst);
 
             // Check if this is a config file that might be user-modified
-            if conffile_set.contains(file.dst.as_str()) {
-                if let Some(&old_hash) = old_hashes.get(file.dst.as_str()) {
+            if conffile_set.contains(file.dst.as_str())
+                && let Some(&old_hash) = old_hashes.get(file.dst.as_str()) {
                     match ConfigFileTracker::deploy_config(self, &file.hash, dst, old_hash) {
                         Ok(replaced) => {
                             stats.deployed += 1;
@@ -1049,7 +1047,6 @@ impl ContentStore {
                     }
                     continue;
                 }
-            }
 
             // Normal file deployment
             match self.deploy_hardlink(&file.hash, dst) {
@@ -1391,11 +1388,10 @@ impl PackageDb {
         if let Ok(entries) = fs::read_dir(&self.gen_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if let Some(id_str) = name.strip_suffix(".gen") {
-                    if let Ok(id) = id_str.parse::<u64>() {
+                if let Some(id_str) = name.strip_suffix(".gen")
+                    && let Ok(id) = id_str.parse::<u64>() {
                         ids.push(id);
                     }
-                }
             }
         }
         ids.sort();
@@ -1676,11 +1672,10 @@ impl TransactionLog {
         let mut end = 0;
         let bytes = rest.as_bytes();
         while end < bytes.len() {
-            if bytes[end] == b'"' {
-                if end == 0 || bytes[end - 1] != b'\\' {
+            if bytes[end] == b'"'
+                && (end == 0 || bytes[end - 1] != b'\\') {
                     break;
                 }
-            }
             end += 1;
         }
         Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
@@ -2186,7 +2181,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
     let repo_index = db.load_repo_index().unwrap_or_default();
     let removing: HashSet<&str> = packages.iter().map(|s| s.as_str()).collect();
 
-    for (name, _pkg) in &current.packages {
+    for name in current.packages.keys() {
         if removing.contains(name.as_str()) {
             continue;
         }
@@ -2228,11 +2223,11 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
 
     for name in packages {
         // Run pre-remove hook if we can find the manifest in CAS
-        if let Some(pkg) = current.packages.get(name) {
-            if let Ok(manifest_data) = db.cas.get(&pkg.manifest_hash) {
-                if let Ok(text) = String::from_utf8(manifest_data) {
-                    if let Some(manifest) = PackageManifest::parse(&text) {
-                        if !manifest.hook_pre_remove.is_empty() {
+        if let Some(pkg) = current.packages.get(name)
+            && let Ok(manifest_data) = db.cas.get(&pkg.manifest_hash)
+                && let Ok(text) = String::from_utf8(manifest_data)
+                    && let Some(manifest) = PackageManifest::parse(&text)
+                        && !manifest.hook_pre_remove.is_empty() {
                             let ver_str = pkg.version.to_string();
                             match PackageHooks::run(&manifest.hook_pre_remove, name, &ver_str) {
                                 Ok(true) => println!("  pre-remove hook OK for {name}"),
@@ -2242,10 +2237,6 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
 
         // Undeploy files from the filesystem before removing from generation
         if let Some(pkg) = current.packages.get(name) {
@@ -2259,11 +2250,11 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         new_gen.packages.remove(name);
 
         // Run post-remove hook
-        if let Some(pkg) = current.packages.get(name) {
-            if let Ok(manifest_data) = db.cas.get(&pkg.manifest_hash) {
-                if let Ok(text) = String::from_utf8(manifest_data) {
-                    if let Some(manifest) = PackageManifest::parse(&text) {
-                        if !manifest.hook_post_remove.is_empty() {
+        if let Some(pkg) = current.packages.get(name)
+            && let Ok(manifest_data) = db.cas.get(&pkg.manifest_hash)
+                && let Ok(text) = String::from_utf8(manifest_data)
+                    && let Some(manifest) = PackageManifest::parse(&text)
+                        && !manifest.hook_post_remove.is_empty() {
                             let ver_str = pkg.version.to_string();
                             match PackageHooks::run(&manifest.hook_post_remove, name, &ver_str) {
                                 Ok(true) => println!("  post-remove hook OK for {name}"),
@@ -2273,10 +2264,6 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
     }
 
     match db.save_generation(&new_gen) {
@@ -2398,9 +2385,9 @@ fn cmd_info(db: &PackageDb, name: &str) {
         println!("Manifest:  {}", pkg.manifest_hash);
 
         // Try to get full manifest from CAS for more details
-        if let Ok(data) = db.cas.get(&pkg.manifest_hash) {
-            if let Ok(text) = String::from_utf8(data) {
-                if let Some(manifest) = PackageManifest::parse(&text) {
+        if let Ok(data) = db.cas.get(&pkg.manifest_hash)
+            && let Ok(text) = String::from_utf8(data)
+                && let Some(manifest) = PackageManifest::parse(&text) {
                     if !manifest.description.is_empty() {
                         println!("Desc:      {}", manifest.description);
                     }
@@ -2420,8 +2407,6 @@ fn cmd_info(db: &PackageDb, name: &str) {
                         }
                     }
                 }
-            }
-        }
         return;
     }
 
@@ -2479,8 +2464,8 @@ fn cmd_generations(db: &PackageDb) {
                 return;
             }
             println!(
-                "{:<6} {:<20} {:<8} {}",
-                "GEN", "DATE", "PKGS", "DESCRIPTION"
+                "{:<6} {:<20} {:<8} DESCRIPTION",
+                "GEN", "DATE", "PKGS"
             );
             for id in &ids {
                 if let Ok(g) = db.load_generation(*id) {
@@ -2792,9 +2777,9 @@ fn cmd_rdeps(db: &PackageDb, target: &str) {
             }
         } else {
             // Try to load manifest from CAS
-            if let Ok(data) = db.cas.get(&pkg.manifest_hash) {
-                if let Ok(text) = String::from_utf8(data) {
-                    if let Some(manifest) = PackageManifest::parse(&text) {
+            if let Ok(data) = db.cas.get(&pkg.manifest_hash)
+                && let Ok(text) = String::from_utf8(data)
+                    && let Some(manifest) = PackageManifest::parse(&text) {
                         for dep in &manifest.depends {
                             if dep.name == target {
                                 rdeps.push((name.as_str(), &pkg.version));
@@ -2802,8 +2787,6 @@ fn cmd_rdeps(db: &PackageDb, target: &str) {
                             }
                         }
                     }
-                }
-            }
         }
     }
 
@@ -2816,7 +2799,7 @@ fn cmd_rdeps(db: &PackageDb, target: &str) {
             let explicit = current
                 .packages
                 .get(*name)
-                .map_or(false, |p| p.explicit);
+                .is_some_and(|p| p.explicit);
             let marker = if explicit { "" } else { " (dependency)" };
             println!("  {name} {ver}{marker}");
         }
@@ -2846,8 +2829,8 @@ fn cmd_libs(db: &PackageDb) {
     libs.sort();
 
     println!(
-        "{:<50} {:<20} {}",
-        "LIBRARY", "PACKAGE", "VERSION"
+        "{:<50} {:<20} VERSION",
+        "LIBRARY", "PACKAGE"
     );
     for (path, pkg, ver) in &libs {
         println!("{:<50} {:<20} {ver}", path, pkg);
@@ -2858,13 +2841,11 @@ fn cmd_libs(db: &PackageDb) {
 /// Check if a file path looks like a shared library.
 fn is_shared_lib_path(path: &str) -> bool {
     // Match patterns like: libfoo.dso, libfoo.so, libfoo.so.1, libfoo.so.1.2.3
-    if let Some(filename) = path.rsplit('/').next() {
-        if filename.starts_with("lib") {
-            if filename.contains(".dso") || filename.contains(".so") {
+    if let Some(filename) = path.rsplit('/').next()
+        && filename.starts_with("lib")
+            && (filename.contains(".dso") || filename.contains(".so")) {
                 return true;
             }
-        }
-    }
     false
 }
 
@@ -2908,7 +2889,7 @@ fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
 
     // Find all reverse dependencies
     let mut affected: Vec<String> = Vec::new();
-    for (name, _pkg) in &current.packages {
+    for name in current.packages.keys() {
         if name == lib_name {
             continue;
         }
@@ -2993,11 +2974,9 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
             .iter()
             .filter(|p| p.name == **name)
             .max_by(|a, b| a.version.cmp(&b.version))
-        {
-            if latest.version > installed.version {
+            && latest.version > installed.version {
                 upgrades.push((name, &installed.version, &latest.version));
             }
-        }
     }
 
     if upgrades.is_empty() {
@@ -3083,7 +3062,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         let old_explicit = new_gen
             .packages
             .get(*name)
-            .map_or(true, |p| p.explicit);
+            .is_none_or(|p| p.explicit);
 
         // Get old file hashes for config-aware deployment
         let old_file_hashes: Vec<(String, String)> = current
@@ -3426,8 +3405,8 @@ fn cmd_repo_list() {
     }
 
     println!(
-        "{:<20} {:<8} {:<8} {}",
-        "REPOSITORY", "PRIO", "STATUS", "URL"
+        "{:<20} {:<8} {:<8} URL",
+        "REPOSITORY", "PRIO", "STATUS"
     );
     for repo in &config.repos {
         let status = if repo.enabled { "enabled" } else { "disabled" };
@@ -3471,8 +3450,8 @@ fn cmd_log(args: &[String]) {
     let shown = &transactions[start..];
 
     println!(
-        "{:<6} {:<20} {:<14} {:<6} {}",
-        "TX", "DATE", "OPERATION", "GEN", "PACKAGES"
+        "{:<6} {:<20} {:<14} {:<6} PACKAGES",
+        "TX", "DATE", "OPERATION", "GEN"
     );
 
     for tx in shown {
@@ -3539,8 +3518,8 @@ fn cmd_download(db: &PackageDb, name: &str, version: &str) -> Result<String, Str
                     .map_err(|e| format!("failed to store package in CAS: {e}"))?;
 
                 // Verify hash against the index manifest if we have an expected hash
-                if let Some(ref expected) = expected_hash {
-                    if !expected.is_empty() && hash != *expected {
+                if let Some(ref expected) = expected_hash
+                    && !expected.is_empty() && hash != *expected {
                         let _ = db.cas.remove(&hash);
                         // Don't give up — might be in another repo with the right content
                         last_error = format!(
@@ -3549,7 +3528,6 @@ fn cmd_download(db: &PackageDb, name: &str, version: &str) -> Result<String, Str
                         );
                         continue;
                     }
-                }
 
                 println!(
                     "Downloaded {name} {version}: {} (sha256: {:.12}...)",
@@ -3749,11 +3727,10 @@ fn response_is_complete(data: &[u8]) -> bool {
     // Check for Content-Length
     for line in header_str.lines() {
         let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("content-length:") {
-            if let Ok(len) = rest.trim().parse::<usize>() {
+        if let Some(rest) = lower.strip_prefix("content-length:")
+            && let Ok(len) = rest.trim().parse::<usize>() {
                 return data.len() >= body_start + len;
             }
-        }
     }
 
     // No Content-Length and not chunked — we can't tell, so assume complete
@@ -4603,12 +4580,11 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
 
     for entry in &entries {
         // If already at the right version, keep it
-        if let Some(curr) = current.packages.get(&entry.name) {
-            if curr.version == entry.version {
+        if let Some(curr) = current.packages.get(&entry.name)
+            && curr.version == entry.version {
                 // Keep the existing entry unchanged
                 continue;
             }
-        }
 
         // Find the package in the repo index
         let manifest = available

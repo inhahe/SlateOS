@@ -120,11 +120,10 @@ impl Board {
         ];
 
         for line in &LINES {
-            if let Some(mark) = self.cells[line[0]] {
-                if self.cells[line[1]] == Some(mark) && self.cells[line[2]] == Some(mark) {
+            if let Some(mark) = self.cells[line[0]]
+                && self.cells[line[1]] == Some(mark) && self.cells[line[2]] == Some(mark) {
                     return Some(mark);
                 }
-            }
         }
         None
     }
@@ -143,11 +142,10 @@ impl Board {
         ];
 
         for line in &LINES {
-            if let Some(mark) = self.cells[line[0]] {
-                if self.cells[line[1]] == Some(mark) && self.cells[line[2]] == Some(mark) {
+            if let Some(mark) = self.cells[line[0]]
+                && self.cells[line[1]] == Some(mark) && self.cells[line[2]] == Some(mark) {
                     return Some(*line);
                 }
-            }
         }
         None
     }
@@ -338,26 +336,22 @@ impl TicTacToeApp {
     fn event(&mut self, event: &Event) {
         match event {
             Event::Key(KeyEvent { key, .. }) => match key {
-                Key::Up => {
-                    if self.cursor_row > 0 {
+                Key::Up
+                    if self.cursor_row > 0 => {
                         self.cursor_row -= 1;
                     }
-                }
-                Key::Down => {
-                    if self.cursor_row < 2 {
+                Key::Down
+                    if self.cursor_row < 2 => {
                         self.cursor_row += 1;
                     }
-                }
-                Key::Left => {
-                    if self.cursor_col > 0 {
+                Key::Left
+                    if self.cursor_col > 0 => {
                         self.cursor_col -= 1;
                     }
-                }
-                Key::Right => {
-                    if self.cursor_col < 2 {
+                Key::Right
+                    if self.cursor_col < 2 => {
                         self.cursor_col += 1;
                     }
-                }
                 Key::Enter | Key::Space => {
                     if self.state == GameState::Playing {
                         self.place_mark(self.cursor_row, self.cursor_col);
@@ -380,7 +374,7 @@ impl TicTacToeApp {
                 let col = ((*x - grid_x) / cell_sz) as i32;
                 let row = ((*y - grid_y) / cell_sz) as i32;
 
-                if row >= 0 && row < 3 && col >= 0 && col < 3 {
+                if (0..3).contains(&row) && (0..3).contains(&col) {
                     self.cursor_row = row as usize;
                     self.cursor_col = col as usize;
                     if self.state == GameState::Playing {
@@ -459,7 +453,7 @@ impl TicTacToeApp {
                 let idx = row * 3 + col;
 
                 let is_cursor = row == self.cursor_row && col == self.cursor_col;
-                let is_win_cell = self.win_line.map_or(false, |line| line.contains(&idx));
+                let is_win_cell = self.win_line.is_some_and(|line| line.contains(&idx));
 
                 // Cell background
                 let bg = if is_win_cell {

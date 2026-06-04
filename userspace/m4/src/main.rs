@@ -32,6 +32,7 @@ const MAX_DIVERSIONS: usize = 256;
 
 /// Parsed command-line options.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 struct Options {
     /// `-D name=value` pre-definitions.
     defines: Vec<(String, String)>,
@@ -49,19 +50,6 @@ struct Options {
     input_files: Vec<String>,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            defines: Vec::new(),
-            undefines: Vec::new(),
-            include_dirs: Vec::new(),
-            sync_lines: false,
-            prefix_builtins: false,
-            quiet: false,
-            input_files: Vec::new(),
-        }
-    }
-}
 
 fn parse_args(args: &[String]) -> Options {
     let mut opts = Options::default();
@@ -761,15 +749,14 @@ impl Processor {
                     }
                 } else {
                     for arg in args {
-                        if let Ok(n) = arg.trim().parse::<usize>() {
-                            if n > 0
+                        if let Ok(n) = arg.trim().parse::<usize>()
+                            && n > 0
                                 && n < self.diversions.len()
                                 && n as i32 != self.current_diversion
                             {
                                 let text = std::mem::take(&mut self.diversions[n]);
                                 self.output(&text);
                             }
-                        }
                     }
                 }
             }
@@ -1027,11 +1014,10 @@ fn substitute_args(name: &str, body: &str, args: &[String]) -> String {
                 }
                 '1'..='9' => {
                     let idx = (next as usize) - ('0' as usize);
-                    if idx <= args.len() {
-                        if let Some(arg) = args.get(idx - 1) {
+                    if idx <= args.len()
+                        && let Some(arg) = args.get(idx - 1) {
                             result.push_str(arg);
                         }
-                    }
                     i += 2;
                 }
                 '#' => {
@@ -1621,7 +1607,7 @@ fn int_pow(mut base: i64, mut exp: i64) -> i64 {
 
 /// Format an integer in the given radix (2..36).
 fn format_radix(val: i64, radix: u32) -> String {
-    if radix < 2 || radix > 36 {
+    if !(2..=36).contains(&radix) {
         return val.to_string();
     }
     if radix == 10 {
@@ -1781,7 +1767,7 @@ fn format_with_width(s: &str, width: usize, left_align: bool, zero_pad: bool) ->
     if left_align {
         format!("{s}{}", " ".repeat(padding))
     } else {
-        let pad: String = std::iter::repeat(pad_char).take(padding).collect();
+        let pad: String = std::iter::repeat_n(pad_char, padding).collect();
         format!("{pad}{s}")
     }
 }
@@ -1929,11 +1915,10 @@ fn match_recursive(s: &[char], mut si: usize, p: &[char], mut pi: usize) -> bool
         if pi + 1 < p.len() && p[pi + 1] == '?' {
             let pat_char = p[pi];
             // Try with one match.
-            if si < s.len() && char_matches(s[si], pat_char) {
-                if match_recursive(s, si + 1, p, pi + 2) {
+            if si < s.len() && char_matches(s[si], pat_char)
+                && match_recursive(s, si + 1, p, pi + 2) {
                     return true;
                 }
-            }
             // Try with zero matches.
             return match_recursive(s, si, p, pi + 2);
         }
@@ -1991,8 +1976,8 @@ fn simple_regex_sub(string: &str, pattern: &str, replacement: &str) -> String {
     let mut did_replace = false;
 
     while pos <= slen {
-        if !did_replace || !anchored_start {
-            if let Some(match_len) = find_match_len(&string_chars, pos, pattern) {
+        if (!did_replace || !anchored_start)
+            && let Some(match_len) = find_match_len(&string_chars, pos, pattern) {
                 // Found a match at `pos` of length `match_len`.
                 let matched: String = string_chars[pos..pos + match_len].iter().collect();
                 // Build replacement, substituting `&` for matched text.
@@ -2015,7 +2000,6 @@ fn simple_regex_sub(string: &str, pattern: &str, replacement: &str) -> String {
                 }
                 continue;
             }
-        }
         if pos < slen {
             result.push(string_chars[pos]);
         }

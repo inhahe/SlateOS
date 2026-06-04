@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -134,11 +134,10 @@ fn lookup_passwd(username: &str) -> Option<PasswdEntry> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(entry) = parse_passwd_entry(line) {
-            if entry.username == username {
+        if let Some(entry) = parse_passwd_entry(line)
+            && entry.username == username {
                 return Some(entry);
             }
-        }
     }
     None
 }
@@ -150,11 +149,10 @@ fn lookup_shadow(username: &str) -> Option<ShadowEntry> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(entry) = parse_shadow_entry(line) {
-            if entry.username == username {
+        if let Some(entry) = parse_shadow_entry(line)
+            && entry.username == username {
                 return Some(entry);
             }
-        }
     }
     None
 }
@@ -187,7 +185,7 @@ fn verify_password(password: &str, hash: &str) -> bool {
     if hash.starts_with('$') {
         let parts: Vec<&str> = hash.splitn(4, '$').collect();
         if parts.len() >= 4 {
-            let algo = parts[1];
+            let _algo = parts[1];
             let salt = parts[2];
             let expected = parts[3];
 
@@ -368,11 +366,10 @@ fn build_environment(user: &PasswdEntry, preserve_env: bool) -> HashMap<String, 
 
 /// Display message of the day
 fn display_motd(writer: &mut dyn Write) -> io::Result<()> {
-    if let Ok(content) = std::fs::read_to_string(MOTD_FILE) {
-        if !content.is_empty() {
+    if let Ok(content) = std::fs::read_to_string(MOTD_FILE)
+        && !content.is_empty() {
             write!(writer, "{content}")?;
         }
-    }
     Ok(())
 }
 
@@ -423,6 +420,7 @@ fn record_faillog(username: &str, tty: &str) {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 struct Config {
     username: Option<String>,
     force_login: bool,       // -f: skip authentication
@@ -432,18 +430,6 @@ struct Config {
     show_version: bool,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            username: None,
-            force_login: false,
-            hostname: None,
-            preserve_env: false,
-            show_help: false,
-            show_version: false,
-        }
-    }
-}
 
 fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut cfg = Config::default();

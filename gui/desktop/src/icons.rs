@@ -756,11 +756,10 @@ impl DesktopIconLayer {
 
     /// Handle double-click at a position.
     pub fn handle_double_click(&mut self, x: f32, y: f32) -> IconEvent {
-        if let Some(id) = self.icon_at(x, y) {
-            if let Some(icon) = self.icons.iter().find(|i| i.id == id) {
+        if let Some(id) = self.icon_at(x, y)
+            && let Some(icon) = self.icons.iter().find(|i| i.id == id) {
                 return IconEvent::Activate(id, icon.action.clone());
             }
-        }
         IconEvent::None
     }
 
@@ -788,11 +787,10 @@ impl DesktopIconLayer {
             }
             DesktopKey::Enter => {
                 let selected = self.selected_ids();
-                if selected.len() == 1 {
-                    if let Some(icon) = self.icons.iter().find(|i| i.id == selected[0]) {
+                if selected.len() == 1
+                    && let Some(icon) = self.icons.iter().find(|i| i.id == selected[0]) {
                         return IconEvent::Activate(selected[0], icon.action.clone());
                     }
-                }
                 IconEvent::None
             }
             _ => IconEvent::None,

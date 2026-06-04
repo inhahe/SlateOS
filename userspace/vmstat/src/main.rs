@@ -175,15 +175,14 @@ fn read_file(path: &str) -> Option<String> {
 /// Returns 0 if the key is not found or cannot be parsed.
 fn get_kv_value(content: &str, key: &str) -> u64 {
     for line in content.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim() == key {
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim() == key {
                 let trimmed = v.trim()
                     .trim_end_matches(" kB")
                     .trim_end_matches(" KB")
                     .trim();
                 return trimmed.parse().unwrap_or(0);
             }
-        }
     }
     0
 }
@@ -193,13 +192,11 @@ fn get_kv_value(content: &str, key: &str) -> u64 {
 fn get_space_kv(content: &str, key: &str) -> u64 {
     for line in content.lines() {
         let mut parts = line.split_whitespace();
-        if let Some(k) = parts.next() {
-            if k == key {
-                if let Some(v) = parts.next() {
+        if let Some(k) = parts.next()
+            && k == key
+                && let Some(v) = parts.next() {
                     return v.parse().unwrap_or(0);
                 }
-            }
-        }
     }
     0
 }
@@ -458,7 +455,7 @@ fn format_timestamp_from_epoch(epoch_secs: u64) -> String {
 
 /// Check if a year is a leap year.
 fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// Read current time as seconds since epoch from /proc/stat btime + /proc/uptime,
@@ -690,11 +687,10 @@ fn run_default(config: &Config) -> i32 {
 
     loop {
         // Check count limit. count includes the first (boot-average) report.
-        if let Some(max) = config.count {
-            if reports >= max {
+        if let Some(max) = config.count
+            && reports >= max {
                 break;
             }
-        }
 
         std::thread::sleep(Duration::from_secs(interval));
 
@@ -707,7 +703,7 @@ fn run_default(config: &Config) -> i32 {
         };
 
         // Re-print header periodically unless --one-header.
-        if !config.one_header && reports % 20 == 0 {
+        if !config.one_header && reports.is_multiple_of(20) {
             print_header(config);
         }
 

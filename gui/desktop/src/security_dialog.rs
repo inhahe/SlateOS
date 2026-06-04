@@ -677,7 +677,7 @@ impl SecurityDialog {
 
         // Details toggle: small link below the reason text
         let details_y = self.details_link_y();
-        if x >= PADDING && x <= PADDING + 100.0
+        if (PADDING..=PADDING + 100.0).contains(&x)
             && y >= details_y && y <= details_y + 18.0
         {
             return Some(ButtonId::Details);
@@ -700,7 +700,7 @@ impl SecurityDialog {
     fn hit_test_remember(&self, x: f32, y: f32) -> bool {
         let h = self.dialog_height();
         let checkbox_y = h - PADDING - BUTTON_HEIGHT - 28.0;
-        x >= PADDING && x <= PADDING + 200.0
+        (PADDING..=PADDING + 200.0).contains(&x)
             && y >= checkbox_y && y <= checkbox_y + 20.0
     }
 

@@ -382,7 +382,7 @@ fn mime_from_magic(buf: &[u8]) -> Option<&'static str> {
     if buf.starts_with(&[0x7F, b'E', b'L', b'F']) {
         return Some("application/x-elf");
     }
-    if buf.starts_with(&[b'M', b'Z']) {
+    if buf.starts_with(b"MZ") {
         return Some("application/x-dosexec");
     }
     // Mach-O (32-bit, 64-bit, fat binary)
@@ -461,19 +461,17 @@ fn detect_mime_type(path: &str) -> String {
     // Try magic bytes from file contents.
     if let Ok(mut file) = File::open(path) {
         let mut buf = [0u8; MAGIC_BUF_LEN];
-        if let Ok(n) = file.read(&mut buf) {
-            if let Some(mime) = mime_from_magic(&buf[..n]) {
+        if let Ok(n) = file.read(&mut buf)
+            && let Some(mime) = mime_from_magic(&buf[..n]) {
                 return mime.to_string();
             }
-        }
     }
 
     // Fall back to extension lookup.
-    if let Some(ext) = extract_extension(path) {
-        if let Some(mime) = mime_from_extension(&ext) {
+    if let Some(ext) = extract_extension(path)
+        && let Some(mime) = mime_from_extension(&ext) {
             return mime.to_string();
         }
-    }
 
     "application/octet-stream".to_string()
 }
@@ -872,11 +870,10 @@ fn find_desktop_file(desktop_id: &str) -> Option<PathBuf> {
 /// mimeapps.list files.
 fn resolve_handler(mime: &str) -> Option<String> {
     for path in mimeapps_search_paths() {
-        if let Some(apps) = load_mimeapps(&path) {
-            if let Some(handler) = lookup_handler_in(&apps, mime) {
+        if let Some(apps) = load_mimeapps(&path)
+            && let Some(handler) = lookup_handler_in(&apps, mime) {
                 return Some(handler);
             }
-        }
     }
     None
 }
@@ -1047,8 +1044,8 @@ fn find_handlers_for_mime(mime: &str) -> Vec<(String, PathBuf)> {
                 if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
                     continue;
                 }
-                if let Some(de) = load_desktop_file(&path) {
-                    if de.mime_types.iter().any(|m| m == mime) {
+                if let Some(de) = load_desktop_file(&path)
+                    && de.mime_types.iter().any(|m| m == mime) {
                         let name = if de.name.is_empty() {
                             path.file_name()
                                 .and_then(|f| f.to_str())
@@ -1059,7 +1056,6 @@ fn find_handlers_for_mime(mime: &str) -> Vec<(String, PathBuf)> {
                         };
                         results.push((name, path));
                     }
-                }
             }
         }
     }
@@ -1080,11 +1076,10 @@ fn env_fallback_handler(mime: &str) -> Option<String> {
             return Some(visual);
         }
     }
-    if mime.starts_with("x-scheme-handler/http") || mime == "text/html" {
-        if let Ok(browser) = env::var("BROWSER") {
+    if (mime.starts_with("x-scheme-handler/http") || mime == "text/html")
+        && let Ok(browser) = env::var("BROWSER") {
             return Some(browser);
         }
-    }
     None
 }
 
@@ -1098,7 +1093,7 @@ fn run_xdg_open(args: &[String]) -> i32 {
     let mut target: Option<&str> = None;
 
     let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
+    for arg in iter {
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
             "-h" | "--help" => {
@@ -1184,11 +1179,7 @@ fn launch_for_mime(mime: &str, target: &str, verbose: bool) -> i32 {
 fn exec_command(program: &str, args: &[String]) -> i32 {
     match std::process::Command::new(program).args(args).status() {
         Ok(status) => {
-            if let Some(code) = status.code() {
-                code
-            } else {
-                1
-            }
+            status.code().unwrap_or(1)
         }
         Err(e) => {
             eprintln!("xdg-open: failed to execute '{}': {}", program, e);
@@ -1458,11 +1449,10 @@ fn interactive_open(file: &str, mime: &str, set_default: bool) -> i32 {
                 .and_then(|f| f.to_str())
                 .unwrap_or("");
 
-            if set_default {
-                if let Err(e) = set_default_handler(mime, desktop_id) {
+            if set_default
+                && let Err(e) = set_default_handler(mime, desktop_id) {
                     eprintln!("Warning: could not set default: {}", e);
                 }
-            }
 
             if let Some((program, args)) = build_command(desktop_id, file) {
                 return exec_command(&program, &args);

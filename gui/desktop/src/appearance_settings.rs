@@ -820,7 +820,7 @@ impl AppearanceSettingsUI {
             }
         }
 
-        let rows = (AccentColor::presets().len() + cols - 1) / cols;
+        let rows = AccentColor::presets().len().div_ceil(cols);
         cy += (rows as f32) * (swatch_size + swatch_gap) + 16.0;
 
         // Current accent display
@@ -859,7 +859,7 @@ impl AppearanceSettingsUI {
         cmds.push(RenderCommand::FillRect {
             x,
             y: cy,
-            width: width,
+            width,
             height: 40.0,
             color: Color::rgba(SURFACE0.r, SURFACE0.g, SURFACE0.b, alpha),
             corner_radii: CornerRadii::all(6.0),

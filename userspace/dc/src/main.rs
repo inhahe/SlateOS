@@ -341,14 +341,14 @@ fn execute(state: &mut DcState, input: &str, output: &mut dyn Write) -> Result<b
             // Parameters
             'i' => {
                 let base = state.pop_number()? as u32;
-                if base < 2 || base > 36 {
+                if !(2..=36).contains(&base) {
                     return Err(format!("input base must be 2-36, got {base}"));
                 }
                 state.ibase = base;
             }
             'o' => {
                 let base = state.pop_number()? as u32;
-                if base < 2 || base > 36 {
+                if !(2..=36).contains(&base) {
                     return Err(format!("output base must be 2-36, got {base}"));
                 }
                 state.obase = base;
@@ -446,16 +446,14 @@ fn execute(state: &mut DcState, input: &str, output: &mut dyn Write) -> Result<b
                     '=' => (a - b).abs() < f64::EPSILON,
                     _ => false,
                 };
-                if cond {
-                    if let Some(val) = state.registers[reg as usize].last().cloned() {
-                        if let Value::Str(s) = val {
+                if cond
+                    && let Some(val) = state.registers[reg as usize].last().cloned()
+                        && let Value::Str(s) = val {
                             let should_quit = execute(state, &s, output)?;
                             if should_quit {
                                 return Ok(true);
                             }
                         }
-                    }
-                }
             }
             '!' if i + 1 < chars.len()
                 && (chars[i + 1] == '>' || chars[i + 1] == '<' || chars[i + 1] == '=') =>
@@ -474,16 +472,14 @@ fn execute(state: &mut DcState, input: &str, output: &mut dyn Write) -> Result<b
                     '=' => (a - b).abs() >= f64::EPSILON,
                     _ => false,
                 };
-                if cond {
-                    if let Some(val) = state.registers[reg as usize].last().cloned() {
-                        if let Value::Str(s) = val {
+                if cond
+                    && let Some(val) = state.registers[reg as usize].last().cloned()
+                        && let Value::Str(s) = val {
                             let should_quit = execute(state, &s, output)?;
                             if should_quit {
                                 return Ok(true);
                             }
                         }
-                    }
-                }
             }
 
             // I/O

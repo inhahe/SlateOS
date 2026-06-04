@@ -114,16 +114,13 @@ const SECS_PER_DAY: u64 = 86400;
 
 /// Which day starts the week.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum FirstDayOfWeek {
+    #[default]
     Sunday,
     Monday,
 }
 
-impl Default for FirstDayOfWeek {
-    fn default() -> Self {
-        Self::Sunday
-    }
-}
 
 /// Calendar user preferences.
 #[derive(Clone, Debug)]
@@ -211,7 +208,7 @@ fn iso_week_number(year: i32, month: u32, day: u32) -> (i32, u32) {
         let prev_dec31_dow = day_of_week(year - 1, 12, 31);
         let prev_iso = if prev_dec31_dow == 0 { 7 } else { prev_dec31_dow };
         let prev_doy = 365 + if is_leap_year(year - 1) { 1 } else { 0 };
-        let prev_thursday = prev_doy as i32 + (4 - prev_iso as i32);
+        let prev_thursday = prev_doy + (4 - prev_iso as i32);
         let week = ((prev_thursday - 1) / 7 + 1) as u32;
         return (year - 1, week);
     }

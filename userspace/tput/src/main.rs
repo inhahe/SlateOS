@@ -22,7 +22,7 @@ enum Mode {
 
 fn detect_mode(argv0: &str) -> Mode {
     let name = argv0
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
@@ -203,11 +203,10 @@ impl TermCaps {
 
 fn get_terminal_cols() -> i32 {
     // Try COLUMNS env var first
-    if let Ok(val) = env::var("COLUMNS") {
-        if let Ok(n) = val.parse::<i32>() {
+    if let Ok(val) = env::var("COLUMNS")
+        && let Ok(n) = val.parse::<i32>() {
             return n;
         }
-    }
 
     // Try ioctl on OurOS
     #[cfg(target_os = "ouros")]
@@ -222,11 +221,10 @@ fn get_terminal_cols() -> i32 {
 
 fn get_terminal_lines() -> i32 {
     // Try LINES env var first
-    if let Ok(val) = env::var("LINES") {
-        if let Ok(n) = val.parse::<i32>() {
+    if let Ok(val) = env::var("LINES")
+        && let Ok(n) = val.parse::<i32>() {
             return n;
         }
-    }
 
     #[cfg(target_os = "ouros")]
     {
@@ -296,7 +294,7 @@ fn expand_params(template: &str, params: &[i32]) -> String {
                 }
                 'c' => {
                     let val = stack.pop().unwrap_or(0);
-                    if val >= 0 && val < 128 {
+                    if (0..128).contains(&val) {
                         out.push(val as u8 as char);
                     }
                     i += 2;
@@ -648,7 +646,7 @@ fn main() {
 
     if let Err(e) = result {
         let name = argv0
-            .rsplit(|c| c == '/' || c == '\\')
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(&argv0);
         eprintln!("{name}: {e}");

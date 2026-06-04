@@ -149,11 +149,10 @@ fn parse_keydef(spec: &str, global_mods: &SortModifiers) -> Result<KeyDef, Strin
     if start_field == 0 {
         return Err("field number must be positive".to_string());
     }
-    if let Some(ef) = end_field {
-        if ef == 0 {
+    if let Some(ef) = end_field
+        && ef == 0 {
             return Err("field number must be positive".to_string());
         }
-    }
 
     Ok(KeyDef {
         start_field,
@@ -513,7 +512,7 @@ fn read_all_lines(paths: &[String]) -> Vec<String> {
 /// With a separator character, fields are separated by exactly that character.
 /// Without a separator (whitespace mode), runs of whitespace delimit fields,
 /// and leading whitespace is skipped.
-fn split_fields<'a>(line: &'a str, sep: Option<char>) -> Vec<&'a str> {
+fn split_fields(line: &str, sep: Option<char>) -> Vec<&str> {
     match sep {
         Some(c) => line.split(c).collect(),
         None => line.split_whitespace().collect(),
@@ -1032,13 +1031,11 @@ fn write_output(
     let mut prev: Option<&String> = None;
 
     for line in lines {
-        if unique {
-            if let Some(p) = prev {
-                if compare_lines(p, line, keys, global_mods, sep, stable) == Ordering::Equal {
+        if unique
+            && let Some(p) = prev
+                && compare_lines(p, line, keys, global_mods, sep, stable) == Ordering::Equal {
                     continue;
                 }
-            }
-        }
         writeln!(out, "{line}")?;
         prev = Some(line);
     }
@@ -1153,12 +1150,11 @@ fn run(config: &Config) -> i32 {
             config.stable,
             config.unique,
             &mut *out,
-        ) {
-            if e.kind() != io::ErrorKind::BrokenPipe {
+        )
+            && e.kind() != io::ErrorKind::BrokenPipe {
                 eprintln!("sort: write error: {e}");
                 return 2;
             }
-        }
         return 0;
     }
 
@@ -1195,20 +1191,18 @@ fn run(config: &Config) -> i32 {
         sep,
         stable,
         &mut *out,
-    ) {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    )
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("sort: write error: {e}");
             return 2;
         }
-    }
 
     // Flush output.
-    if let Err(e) = out.flush() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    if let Err(e) = out.flush()
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("sort: write error: {e}");
             return 2;
         }
-    }
 
     0
 }

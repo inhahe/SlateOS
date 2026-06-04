@@ -374,11 +374,10 @@ fn collect_files(config: &Config) -> Vec<String> {
         if p.is_dir() && config.recurse {
             collect_dir(p, &config.exclude_patterns, &mut result);
         } else if p.is_file() {
-            if !is_excluded(f, &config.exclude_patterns) {
-                if detect_language(f).is_some() {
+            if !is_excluded(f, &config.exclude_patterns)
+                && detect_language(f).is_some() {
                     result.push(f.clone());
                 }
-            }
         } else if !p.exists() {
             eprintln!("ctags: cannot open '{}': No such file or directory", f);
         }
@@ -424,11 +423,10 @@ fn collect_dir(dir: &Path, excludes: &[String], out: &mut Vec<String>) {
                 continue;
             }
             collect_dir(&path, excludes, out);
-        } else if path.is_file() {
-            if detect_language(&path_str).is_some() {
+        } else if path.is_file()
+            && detect_language(&path_str).is_some() {
                 out.push(path_str);
             }
-        }
     }
 }
 
@@ -458,11 +456,10 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         // Also match against each path component (to catch directory names
         // like `node_modules` in `node_modules/foo.js`).
         for component in Path::new(text).components() {
-            if let Some(s) = component.as_os_str().to_str() {
-                if glob_match_impl(pattern.as_bytes(), s.as_bytes()) {
+            if let Some(s) = component.as_os_str().to_str()
+                && glob_match_impl(pattern.as_bytes(), s.as_bytes()) {
                     return true;
                 }
-            }
         }
         return false;
     }
@@ -566,8 +563,7 @@ fn skip_ws(chars: &[char], pos: usize) -> usize {
 /// returning the rest of the line after the prefix and any whitespace.
 fn line_after_keyword(line: &str, keyword: &str) -> Option<String> {
     let trimmed = line.trim_start();
-    if trimmed.starts_with(keyword) {
-        let rest = &trimmed[keyword.len()..];
+    if let Some(rest) = trimmed.strip_prefix(keyword) {
         // Must be followed by whitespace or certain punctuation.
         if rest.is_empty() {
             return Some(String::new());
@@ -623,8 +619,8 @@ fn extract_c_tags(content: &str, file: &str, language: Language) -> Vec<Tag> {
         }
 
         // #define MACRO
-        if trimmed.starts_with("#define") {
-            if let Some(rest) = line_after_keyword(trimmed, "#define") {
+        if trimmed.starts_with("#define")
+            && let Some(rest) = line_after_keyword(trimmed, "#define") {
                 let name = first_ident(&rest);
                 if !name.is_empty() {
                     tags.push(Tag {
@@ -638,7 +634,6 @@ fn extract_c_tags(content: &str, file: &str, language: Language) -> Vec<Tag> {
                     });
                 }
             }
-        }
 
         // typedef ... NAME;
         if trimmed.starts_with("typedef") {
@@ -722,8 +717,8 @@ fn extract_c_tags(content: &str, file: &str, language: Language) -> Vec<Tag> {
         // Heuristic: line contains `(`, identifier before `(`, and either `{`
         // on this line or the next, or `)` followed by `;` (declaration) is
         // excluded because we want definitions.
-        if let Some(paren) = trimmed.find('(') {
-            if paren > 0
+        if let Some(paren) = trimmed.find('(')
+            && paren > 0
                 && !trimmed.starts_with('#')
                 && !trimmed.starts_with("typedef")
                 && !trimmed.starts_with("//")
@@ -779,7 +774,6 @@ fn extract_c_tags(content: &str, file: &str, language: Language) -> Vec<Tag> {
                     }
                 }
             }
-        }
     }
 
     tags
@@ -937,8 +931,8 @@ fn extract_rust_tags(content: &str, file: &str) -> Vec<Tag> {
         }
 
         // static / const at module level (no indentation).
-        if line.len() == trimmed.len() || line.starts_with("pub") {
-            if let Some(rest) = line_after_keyword(stripped, "static") {
+        if (line.len() == trimmed.len() || line.starts_with("pub"))
+            && let Some(rest) = line_after_keyword(stripped, "static") {
                 let rest = rest.trim_start_matches("mut ");
                 let name = first_ident(rest);
                 if !name.is_empty() && name != "_" {
@@ -953,7 +947,6 @@ fn extract_rust_tags(content: &str, file: &str) -> Vec<Tag> {
                     });
                 }
             }
-        }
 
         // impl Name { ... } — track for method scope.
         if let Some(rest) = line_after_keyword(stripped, "impl") {
@@ -1002,7 +995,7 @@ fn extract_python_tags(content: &str, file: &str) -> Vec<Tag> {
         // class Name:  or  class Name(Base):
         if let Some(rest) = line_after_keyword(trimmed, "class") {
             let name_end = rest
-                .find(|c: char| c == '(' || c == ':' || c == ' ')
+                .find(['(', ':', ' '])
                 .unwrap_or(rest.len());
             let name = rest[..name_end].trim().to_string();
             if !name.is_empty() {
@@ -1023,11 +1016,7 @@ fn extract_python_tags(content: &str, file: &str) -> Vec<Tag> {
         let def_line = if let Some(rest) = line_after_keyword(trimmed, "def") {
             Some(rest)
         } else if let Some(rest) = line_after_keyword(trimmed, "async") {
-            if let Some(inner) = line_after_keyword(&rest, "def") {
-                Some(inner)
-            } else {
-                None
-            }
+            line_after_keyword(&rest, "def")
         } else {
             None
         };
@@ -1057,9 +1046,9 @@ fn extract_python_tags(content: &str, file: &str) -> Vec<Tag> {
         }
 
         // Module-level assignments: NAME = ...  (simple constant detection)
-        if indent == 0 && !trimmed.starts_with("def") && !trimmed.starts_with("class") {
-            if let Some(eq_pos) = trimmed.find('=') {
-                if eq_pos > 0
+        if indent == 0 && !trimmed.starts_with("def") && !trimmed.starts_with("class")
+            && let Some(eq_pos) = trimmed.find('=')
+                && eq_pos > 0
                     && !trimmed[..eq_pos].contains('(')
                     && !trimmed[..eq_pos].contains('[')
                     && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'!'
@@ -1068,7 +1057,7 @@ fn extract_python_tags(content: &str, file: &str) -> Vec<Tag> {
                     && trimmed
                         .as_bytes()
                         .get(eq_pos + 1)
-                        .map_or(true, |&b| b != b'=')
+                        .is_none_or(|&b| b != b'=')
                 {
                     let name = trimmed[..eq_pos].trim();
                     // Must look like a valid identifier (all caps or snake_case).
@@ -1077,7 +1066,7 @@ fn extract_python_tags(content: &str, file: &str) -> Vec<Tag> {
                             .chars()
                             .all(|c| c.is_alphanumeric() || c == '_');
                     if looks_like_ident
-                        && name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                        && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                     {
                         let kind = if name.chars().all(|c| c.is_uppercase() || c == '_') {
                             TagKind::Constant
@@ -1095,8 +1084,6 @@ fn extract_python_tags(content: &str, file: &str) -> Vec<Tag> {
                         });
                     }
                 }
-            }
-        }
 
         // Reset class scope on dedent to 0.
         if indent == 0
@@ -1194,8 +1181,8 @@ fn extract_java_tags(content: &str, file: &str) -> Vec<Tag> {
         }
 
         // Method: TYPE name(...)  inside a class
-        if let Some(paren) = stripped.find('(') {
-            if paren > 0
+        if let Some(paren) = stripped.find('(')
+            && paren > 0
                 && !stripped.starts_with("if")
                 && !stripped.starts_with("while")
                 && !stripped.starts_with("for")
@@ -1238,7 +1225,6 @@ fn extract_java_tags(content: &str, file: &str) -> Vec<Tag> {
                     }
                 }
             }
-        }
 
         // package declaration
         if let Some(rest) = line_after_keyword(trimmed, "package") {
@@ -1377,10 +1363,10 @@ fn extract_js_tags(content: &str, file: &str) -> Vec<Tag> {
 
         // const NAME = ... / let NAME = ... / var NAME = ...
         for kw in &["const", "let", "var"] {
-            if let Some(rest) = line_after_keyword(stripped, kw) {
-                if rest.contains('=') {
+            if let Some(rest) = line_after_keyword(stripped, kw)
+                && rest.contains('=') {
                     let name_end = rest
-                        .find(|c: char| c == '=' || c == ':' || c == ' ')
+                        .find(['=', ':', ' '])
                         .unwrap_or(rest.len());
                     let name = rest[..name_end].trim().to_string();
                     if !name.is_empty()
@@ -1399,7 +1385,6 @@ fn extract_js_tags(content: &str, file: &str) -> Vec<Tag> {
                         });
                     }
                 }
-            }
         }
 
         // Method: name( inside class body (indented, no `function` keyword).
@@ -1583,7 +1568,7 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
         // function name { ... }   or   function name() { ... }
         if let Some(rest) = line_after_keyword(trimmed, "function") {
             let name_end = rest
-                .find(|c: char| c == '(' || c == '{' || c == ' ')
+                .find(['(', '{', ' '])
                 .unwrap_or(rest.len());
             let name = rest[..name_end].trim().to_string();
             if !name.is_empty() {
@@ -1605,7 +1590,7 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
                 && candidate
                     .chars()
                     .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                && candidate.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                && candidate.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
             {
                 tags.push(Tag {
                     name: candidate.to_string(),
@@ -1620,8 +1605,8 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
         }
 
         // Variable: NAME=value (at top level, all caps for "constants").
-        if let Some(eq_pos) = trimmed.find('=') {
-            if eq_pos > 0
+        if let Some(eq_pos) = trimmed.find('=')
+            && eq_pos > 0
                 && !trimmed[..eq_pos].contains(' ')
                 && !trimmed.starts_with("if")
                 && !trimmed.starts_with("local")
@@ -1629,14 +1614,14 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
                 && trimmed
                     .as_bytes()
                     .get(eq_pos + 1)
-                    .map_or(true, |&b| b != b'=')
+                    .is_none_or(|&b| b != b'=')
                 && trimmed.as_bytes()[eq_pos.saturating_sub(1)] != b'!'
             {
                 let name = &trimmed[..eq_pos];
                 if name
                     .chars()
                     .all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
-                    && name.chars().next().map_or(false, |c| c.is_alphabetic())
+                    && name.chars().next().is_some_and(|c| c.is_alphabetic())
                 {
                     tags.push(Tag {
                         name: name.to_string(),
@@ -1649,7 +1634,6 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
                     });
                 }
             }
-        }
     }
 
     tags
@@ -1770,11 +1754,10 @@ fn write_ctags<W: Write>(
         if fields.contains('n') {
             ext_parts.push(format!("line:{}", tag.line_number));
         }
-        if fields.contains('s') || fields.contains('S') {
-            if let Some(ref scope) = tag.scope {
+        if (fields.contains('s') || fields.contains('S'))
+            && let Some(ref scope) = tag.scope {
                 ext_parts.push(format!("scope:{}", scope));
             }
-        }
 
         // Always write the kind in the compact `;" <TAB> kind:x` form.
         if ext_parts.is_empty() {
@@ -1785,8 +1768,8 @@ fn write_ctags<W: Write>(
         }
 
         // Qualified tag extra.
-        if extras.contains('q') {
-            if let Some(ref scope) = tag.scope {
+        if extras.contains('q')
+            && let Some(ref scope) = tag.scope {
                 // Emit extra qualified entry.
                 write!(
                     out,
@@ -1798,7 +1781,6 @@ fn write_ctags<W: Write>(
                     tag.kind.letter()
                 )?;
             }
-        }
 
         writeln!(out)?;
     }
@@ -1837,9 +1819,9 @@ fn write_etags<W: Write>(tags: &[Tag], out: &mut W) -> io::Result<()> {
                 .pattern
                 .trim_start_matches("/^")
                 .trim_end_matches("$/");
-            write!(
+            writeln!(
                 section,
-                "{}\x7f{}\x01{},0\n",
+                "{}\x7f{}\x01{},0",
                 def_text, tag.name, tag.line_number
             )?;
         }
@@ -1994,11 +1976,10 @@ fn run(config: &Config) -> i32 {
             .map(|f| f.as_str())
             .collect();
         for line in &existing_lines {
-            if let Some(tag) = parse_ctags_line(line) {
-                if !scanned_files.contains(tag.file.as_str()) {
+            if let Some(tag) = parse_ctags_line(line)
+                && !scanned_files.contains(tag.file.as_str()) {
                     all_tags.push(tag);
                 }
-            }
         }
     }
 
@@ -2041,12 +2022,11 @@ fn run(config: &Config) -> i32 {
                     }
                     OutputFormat::Etags => write_etags(&all_tags, &mut out),
                 };
-                if result.is_ok() {
-                    if let Err(e) = out.flush() {
+                if result.is_ok()
+                    && let Err(e) = out.flush() {
                         eprintln!("ctags: write error: {}", e);
                         return 1;
                     }
-                }
                 result
             }
             Err(e) => {

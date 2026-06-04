@@ -234,12 +234,11 @@ fn parse_args(args: &[String]) -> ParseResult {
         range_list: &mut Option<String>,
         list_val: &str,
     ) {
-        if let Some(prev) = *current {
-            if prev != new {
+        if let Some(prev) = *current
+            && prev != new {
                 eprintln!("cut: only one type of list may be specified");
                 process::exit(1);
             }
-        }
         *current = Some(new);
         *range_list = Some(list_val.to_string());
     }
@@ -273,21 +272,21 @@ fn parse_args(args: &[String]) -> ParseResult {
             } else if arg == "--json" {
                 json_output = true;
             } else if arg == "--bytes" || arg.starts_with("--bytes=") {
-                let val = long_opt_value(arg, "--bytes", &args, &mut i);
+                let val = long_opt_value(arg, "--bytes", args, &mut i);
                 set_mode(&mut mode, Mode::Bytes, &mut range_list, &val);
             } else if arg == "--characters" || arg.starts_with("--characters=") {
-                let val = long_opt_value(arg, "--characters", &args, &mut i);
+                let val = long_opt_value(arg, "--characters", args, &mut i);
                 set_mode(&mut mode, Mode::Characters, &mut range_list, &val);
             } else if arg == "--fields" || arg.starts_with("--fields=") {
-                let val = long_opt_value(arg, "--fields", &args, &mut i);
+                let val = long_opt_value(arg, "--fields", args, &mut i);
                 set_mode(&mut mode, Mode::Fields, &mut range_list, &val);
             } else if arg == "--delimiter" || arg.starts_with("--delimiter=") {
-                let val = long_opt_value(arg, "--delimiter", &args, &mut i);
+                let val = long_opt_value(arg, "--delimiter", args, &mut i);
                 delimiter = Some(parse_delimiter(&val));
             } else if arg == "--output-delimiter"
                 || arg.starts_with("--output-delimiter=")
             {
-                let val = long_opt_value(arg, "--output-delimiter", &args, &mut i);
+                let val = long_opt_value(arg, "--output-delimiter", args, &mut i);
                 output_delimiter = Some(val);
             } else {
                 eprintln!("cut: unrecognized option '{arg}'");
@@ -306,26 +305,26 @@ fn parse_args(args: &[String]) -> ParseResult {
         while j < chars.len() {
             match chars[j] {
                 'b' => {
-                    let val = short_opt_value(&chars, j, &args, &mut i);
+                    let val = short_opt_value(&chars, j, args, &mut i);
                     set_mode(&mut mode, Mode::Bytes, &mut range_list, &val);
                     // short_opt_value consumed the rest; break inner loop.
                     j = chars.len();
                     continue;
                 }
                 'c' => {
-                    let val = short_opt_value(&chars, j, &args, &mut i);
+                    let val = short_opt_value(&chars, j, args, &mut i);
                     set_mode(&mut mode, Mode::Characters, &mut range_list, &val);
                     j = chars.len();
                     continue;
                 }
                 'f' => {
-                    let val = short_opt_value(&chars, j, &args, &mut i);
+                    let val = short_opt_value(&chars, j, args, &mut i);
                     set_mode(&mut mode, Mode::Fields, &mut range_list, &val);
                     j = chars.len();
                     continue;
                 }
                 'd' => {
-                    let val = short_opt_value(&chars, j, &args, &mut i);
+                    let val = short_opt_value(&chars, j, args, &mut i);
                     delimiter = Some(parse_delimiter(&val));
                     j = chars.len();
                     continue;
@@ -658,7 +657,7 @@ fn process_input(
 
         // Strip trailing newline(s) for processing. We re-add a newline on
         // output.
-        let line = line_buf.trim_end_matches(|c| c == '\n' || c == '\r');
+        let line = line_buf.trim_end_matches(['\n', '\r']);
 
         out_buf.clear();
 
@@ -819,21 +818,19 @@ fn run(config: &Config) -> i32 {
             eprintln!("cut: write error: {e}");
             exit_code = 1;
         }
-        if let Err(e) = stdout_lock.write_all(b"\n") {
-            if e.kind() != io::ErrorKind::BrokenPipe {
+        if let Err(e) = stdout_lock.write_all(b"\n")
+            && e.kind() != io::ErrorKind::BrokenPipe {
                 eprintln!("cut: write error: {e}");
                 exit_code = 1;
             }
-        }
     }
 
     // Flush stdout.
-    if let Err(e) = stdout_lock.flush() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    if let Err(e) = stdout_lock.flush()
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("cut: write error: {e}");
             exit_code = 1;
         }
-    }
 
     exit_code
 }

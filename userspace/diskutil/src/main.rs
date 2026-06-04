@@ -313,64 +313,54 @@ fn read_fsinfo(dev_name: &str, parent_name: Option<&str>) -> (String, String, St
     let mut uuid = String::new();
 
     for base in &paths_to_try {
-        if fstype.is_empty() {
-            if let Some(ft) = read_file(&format!("{base}/fstype")) {
-                if !ft.is_empty() {
+        if fstype.is_empty()
+            && let Some(ft) = read_file(&format!("{base}/fstype"))
+                && !ft.is_empty() {
                     fstype = ft;
                 }
-            }
-        }
-        if label.is_empty() {
-            if let Some(lb) = read_file(&format!("{base}/label")) {
-                if !lb.is_empty() {
+        if label.is_empty()
+            && let Some(lb) = read_file(&format!("{base}/label"))
+                && !lb.is_empty() {
                     label = lb;
                 }
-            }
-        }
-        if uuid.is_empty() {
-            if let Some(id) = read_file(&format!("{base}/uuid")) {
-                if !id.is_empty() {
+        if uuid.is_empty()
+            && let Some(id) = read_file(&format!("{base}/uuid"))
+                && !id.is_empty() {
                     uuid = id;
                 }
-            }
-        }
     }
 
     // Fall back to /dev/disk/by-uuid and /dev/disk/by-label symlinks.
-    if uuid.is_empty() {
-        if let Ok(entries) = fs::read_dir("/dev/disk/by-uuid") {
+    if uuid.is_empty()
+        && let Ok(entries) = fs::read_dir("/dev/disk/by-uuid") {
             for entry in entries.flatten() {
                 if let Ok(target) = fs::read_link(entry.path()) {
                     let target_name = target
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    if target_name == dev_name {
-                        if let Some(u) = entry.file_name().to_str() {
+                    if target_name == dev_name
+                        && let Some(u) = entry.file_name().to_str() {
                             uuid = u.to_string();
                         }
-                    }
                 }
             }
         }
-    }
-    if label.is_empty() {
-        if let Ok(entries) = fs::read_dir("/dev/disk/by-label") {
+    if label.is_empty()
+        && let Ok(entries) = fs::read_dir("/dev/disk/by-label") {
             for entry in entries.flatten() {
                 if let Ok(target) = fs::read_link(entry.path()) {
                     let target_name = target
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    if target_name == dev_name {
-                        if let Some(l) = entry.file_name().to_str() {
+                    if target_name == dev_name
+                        && let Some(l) = entry.file_name().to_str() {
                             label = l.to_string();
                         }
-                    }
                 }
             }
         }
-    }
 
     (fstype, label, uuid)
 }
@@ -475,8 +465,8 @@ fn scan_partitions(
         let part_path = format!("{disk_path}/{part_name}");
 
         // Verify it is actually a partition directory.
-        let is_partition = fs::metadata(&format!("{part_path}/partition")).is_ok()
-            || fs::metadata(&format!("{part_path}/size")).is_ok();
+        let is_partition = fs::metadata(format!("{part_path}/partition")).is_ok()
+            || fs::metadata(format!("{part_path}/size")).is_ok();
         if !is_partition {
             continue;
         }
@@ -687,12 +677,12 @@ fn cmd_list() {
 
     // Header.
     println!(
-        "{:<12} {:>8} {:<6} {:<8} {:<6} {:<4} {}",
-        "DEVICE", "SIZE", "TYPE", "FSTYPE", "RO", "SSD", "MOUNTPOINT"
+        "{:<12} {:>8} {:<6} {:<8} {:<6} {:<4} MOUNTPOINT",
+        "DEVICE", "SIZE", "TYPE", "FSTYPE", "RO", "SSD"
     );
     println!(
-        "{:<12} {:>8} {:<6} {:<8} {:<6} {:<4} {}",
-        "------", "----", "----", "------", "--", "---", "----------"
+        "{:<12} {:>8} {:<6} {:<8} {:<6} {:<4} ----------",
+        "------", "----", "----", "------", "--", "---"
     );
 
     for dev in &devices {
@@ -796,18 +786,17 @@ fn print_device_info(dev: &BlockDevice) {
 
     // Show scheduler info if available.
     let sched_path = format!("/sys/block/{}/queue/scheduler", dev.name);
-    if let Some(sched) = read_file(&sched_path) {
-        if !sched.is_empty() {
+    if let Some(sched) = read_file(&sched_path)
+        && !sched.is_empty() {
             println!("  I/O scheduler:      {}", sched);
         }
-    }
 
     if !dev.children.is_empty() {
         println!();
         println!("  Partitions ({}):", dev.children.len());
         println!(
-            "    {:<14} {:>10} {:<8} {:<8} {}",
-            "NAME", "SIZE", "FSTYPE", "LABEL", "MOUNTPOINT"
+            "    {:<14} {:>10} {:<8} {:<8} MOUNTPOINT",
+            "NAME", "SIZE", "FSTYPE", "LABEL"
         );
         for child in &dev.children {
             println!(
@@ -1366,12 +1355,11 @@ fn cmd_smart(device_name: &str) {
 
     for (attr_path, label) in smart_attrs {
         let full_path = format!("{smart_base}/{attr_path}");
-        if let Some(val) = read_file(&full_path) {
-            if !val.is_empty() {
+        if let Some(val) = read_file(&full_path)
+            && !val.is_empty() {
                 println!("  {:<24} {}", format!("{}:", label), val);
                 any_found = true;
             }
-        }
     }
 
     if !any_found {
@@ -1484,12 +1472,12 @@ fn cmd_partitions(device_name: &str) {
     }
 
     println!(
-        "  {:<4} {:<14} {:>12} {:>12} {:>10} {:<8} {}",
-        "#", "NAME", "START", "END", "SIZE", "FSTYPE", "LABEL"
+        "  {:<4} {:<14} {:>12} {:>12} {:>10} {:<8} LABEL",
+        "#", "NAME", "START", "END", "SIZE", "FSTYPE"
     );
     println!(
-        "  {:<4} {:<14} {:>12} {:>12} {:>10} {:<8} {}",
-        "-", "----", "-----", "---", "----", "------", "-----"
+        "  {:<4} {:<14} {:>12} {:>12} {:>10} {:<8} -----",
+        "-", "----", "-----", "---", "----", "------"
     );
 
     for (idx, child) in dev.children.iter().enumerate() {
@@ -1517,12 +1505,11 @@ fn cmd_partitions(device_name: &str) {
     // Show disk GUID if GPT.
     if table_type == "GPT" {
         let guid_path = format!("/sys/block/{}/device/wwid", dev.name);
-        if let Some(guid) = read_file(&guid_path) {
-            if !guid.is_empty() {
+        if let Some(guid) = read_file(&guid_path)
+            && !guid.is_empty() {
                 println!();
                 println!("  Disk GUID: {}", guid);
             }
-        }
     }
 }
 
@@ -1559,11 +1546,10 @@ fn detect_partition_table_type(disk_name: &str) -> &'static str {
                 let suffix = &name_str[disk_name.len()..];
                 // NVMe partitions have a 'p' prefix before the number.
                 let suffix = suffix.strip_prefix('p').unwrap_or(suffix);
-                if let Ok(num) = suffix.parse::<u32>() {
-                    if num > 4 {
+                if let Ok(num) = suffix.parse::<u32>()
+                    && num > 4 {
                         return "GPT (inferred)";
                     }
-                }
             }
         }
     }

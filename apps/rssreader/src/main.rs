@@ -96,11 +96,10 @@ impl XmlElement {
     /// Find the first child element with the given tag name.
     pub fn find_child(&self, tag: &str) -> Option<&XmlElement> {
         for child in &self.children {
-            if let XmlNode::Element(elem) = child {
-                if elem.tag == tag {
+            if let XmlNode::Element(elem) = child
+                && elem.tag == tag {
                     return Some(elem);
                 }
-            }
         }
         None
     }
@@ -109,11 +108,10 @@ impl XmlElement {
     pub fn find_children(&self, tag: &str) -> Vec<&XmlElement> {
         let mut result = Vec::new();
         for child in &self.children {
-            if let XmlNode::Element(elem) = child {
-                if elem.tag == tag {
+            if let XmlNode::Element(elem) = child
+                && elem.tag == tag {
                     result.push(elem);
                 }
-            }
         }
         result
     }
@@ -619,6 +617,12 @@ pub struct FeedHealth {
     pub last_error: Option<String>,
 }
 
+impl Default for FeedHealth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FeedHealth {
     pub fn new() -> Self {
         Self {
@@ -819,7 +823,7 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 
 /// Check if a year is a leap year.
 fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// Parse a simple date string into a Unix timestamp.
@@ -1352,8 +1356,8 @@ pub fn discover_feeds(html: &str) -> Vec<DiscoveredFeed> {
 
         // Check if it's a feed link
         for &(mime_type, label) in &feed_types {
-            if tag_content.to_lowercase().contains(mime_type) {
-                if let Some(href) = extract_attribute(tag_content, "href") {
+            if tag_content.to_lowercase().contains(mime_type)
+                && let Some(href) = extract_attribute(tag_content, "href") {
                     let title = extract_attribute(tag_content, "title")
                         .unwrap_or_else(|| label.to_string());
                     results.push(DiscoveredFeed {
@@ -1362,7 +1366,6 @@ pub fn discover_feeds(html: &str) -> Vec<DiscoveredFeed> {
                         feed_type: label.to_string(),
                     });
                 }
-            }
         }
 
         pos = tag_end;
@@ -1380,12 +1383,10 @@ fn extract_attribute(tag: &str, attr_name: &str) -> Option<String> {
     let rest = &tag[value_start..];
 
     let rest_trimmed = rest.trim_start();
-    if rest_trimmed.starts_with('"') {
-        let inner = &rest_trimmed[1..];
+    if let Some(inner) = rest_trimmed.strip_prefix('"') {
         let end = inner.find('"')?;
         Some(inner[..end].to_string())
-    } else if rest_trimmed.starts_with('\'') {
-        let inner = &rest_trimmed[1..];
+    } else if let Some(inner) = rest_trimmed.strip_prefix('\'') {
         let end = inner.find('\'')?;
         Some(inner[..end].to_string())
     } else {
@@ -1699,11 +1700,10 @@ impl OfflineCache {
             .min_by_key(|(_, e)| e.cached_at)
             .map(|(id, _)| *id);
 
-        if let Some(id) = oldest_id {
-            if let Some(entry) = self.entries.remove(&id) {
+        if let Some(id) = oldest_id
+            && let Some(entry) = self.entries.remove(&id) {
                 self.current_size = self.current_size.saturating_sub(entry.size_bytes);
             }
-        }
     }
 
     /// Check if an article is cached.
@@ -1759,7 +1759,7 @@ pub fn search_articles(articles: &[Article], query: &str) -> Vec<SearchResult> {
 
         if title_match || content_match || author_match {
             let snippet = if content_match {
-                extract_snippet(&article.display_content(), &query_lower, 80)
+                extract_snippet(article.display_content(), &query_lower, 80)
             } else if title_match {
                 article.title.clone()
             } else {
@@ -1967,21 +1967,19 @@ impl RssReaderApp {
     /// Toggle read state for the selected article.
     pub fn toggle_read(&mut self) {
         let filtered = self.filtered_article_indices();
-        if let Some(&idx) = filtered.get(self.selected_article_index) {
-            if let Some(article) = self.articles.get_mut(idx) {
+        if let Some(&idx) = filtered.get(self.selected_article_index)
+            && let Some(article) = self.articles.get_mut(idx) {
                 article.is_read = !article.is_read;
             }
-        }
     }
 
     /// Toggle star state for the selected article.
     pub fn toggle_star(&mut self) {
         let filtered = self.filtered_article_indices();
-        if let Some(&idx) = filtered.get(self.selected_article_index) {
-            if let Some(article) = self.articles.get_mut(idx) {
+        if let Some(&idx) = filtered.get(self.selected_article_index)
+            && let Some(article) = self.articles.get_mut(idx) {
                 article.is_starred = !article.is_starred;
             }
-        }
     }
 
     /// Mark all visible articles as read.
@@ -2148,11 +2146,10 @@ impl RssReaderApp {
         if let Some(ref url) = outline.xml_url {
             // This is a feed
             let feed_id = self.add_feed(&outline.text, url, parent_folder);
-            if let Some(ref html_url) = outline.html_url {
-                if let Some(feed) = self.feeds.iter_mut().find(|f| f.id == feed_id) {
+            if let Some(ref html_url) = outline.html_url
+                && let Some(feed) = self.feeds.iter_mut().find(|f| f.id == feed_id) {
                     feed.link = html_url.clone();
                 }
-            }
             count += 1;
         } else if !outline.children.is_empty() {
             // This is a folder

@@ -307,7 +307,7 @@ pub fn compute_grid_layout(
     let count = thumbnails.len();
     let max_cols = (config.max_columns.max(1)) as usize;
     let cols = count.min(max_cols);
-    let rows = (count + cols - 1) / cols; // ceil division
+    let rows = count.div_ceil(cols); // ceil division
 
     let pad = config.thumbnail_padding;
     let cell_w = (bw - pad * (cols as f32 + 1.0)) / cols as f32;
@@ -974,11 +974,10 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
         (Some(i), _) => Some(i),
     };
 
-    if let Some(idx) = new_idx {
-        if let Some(t) = all.get(idx) {
+    if let Some(idx) = new_idx
+        && let Some(t) = all.get(idx) {
             state.hovered_window = Some(t.window_id);
         }
-    }
 }
 
 /// Collect the thumbnails relevant to the current mode.

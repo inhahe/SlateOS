@@ -581,7 +581,7 @@ fn hostname_set_chassis(chassis: &[u8]) -> i32 {
         b"container",
     ];
 
-    let is_valid = valid.iter().any(|v| *v == chassis);
+    let is_valid = valid.contains(&chassis);
     if !is_valid {
         print_err(b"hostnamectl: invalid chassis type: ");
         print_err(chassis);
@@ -771,7 +771,7 @@ fn locale_set(locales: &[Vec<u8>]) -> i32 {
                 b"LC_ALL",
             ];
 
-            if !valid_vars.iter().any(|v| *v == var) {
+            if !valid_vars.contains(&var) {
                 print_err(b"localectl: unknown locale variable: ");
                 print_err(var);
                 print_err(b"\n");
@@ -974,7 +974,7 @@ fn locale_list_x11_layouts() -> i32 {
 
 fn locale_list_x11_variants(values: &[Vec<u8>]) -> i32 {
     // If a layout is specified, list variants for that layout
-    let layout = values.get(1).or(values.first());
+    let _layout = values.get(1).or(values.first());
 
     // Show common variants
     let variants: &[&[u8]] = &[

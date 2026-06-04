@@ -269,11 +269,10 @@ impl<'a> GrammarLexer<'a> {
                     // character literal
                     if let Some(c) = self.advance() {
                         buf.push(c as char);
-                        if c == b'\\' {
-                            if let Some(c2) = self.advance() {
+                        if c == b'\\'
+                            && let Some(c2) = self.advance() {
                                 buf.push(c2 as char);
                             }
-                        }
                     }
                     // closing quote
                     if let Some(b'\'') = self.peek() {
@@ -415,7 +414,8 @@ impl<'a> GrammarLexer<'a> {
             self.pos += 1;
             let ch = if self.pos < self.src.len() && self.src[self.pos] == b'\\' {
                 self.pos += 1;
-                let escaped = if self.pos < self.src.len() {
+                
+                if self.pos < self.src.len() {
                     let e = self.src[self.pos];
                     self.pos += 1;
                     match e {
@@ -428,8 +428,7 @@ impl<'a> GrammarLexer<'a> {
                     }
                 } else {
                     return Err(format!("line {}: unterminated char literal", self.line));
-                };
-                escaped
+                }
             } else if self.pos < self.src.len() {
                 let c = self.src[self.pos] as char;
                 self.pos += 1;
@@ -603,11 +602,10 @@ fn parse_grammar(src: &[u8]) -> Result<Grammar, String> {
                         }
                     }
                 }
-                if let Some(ref tag_val) = tag {
-                    if !names.is_empty() {
+                if let Some(ref tag_val) = tag
+                    && !names.is_empty() {
                         type_decls.push((tag_val.clone(), names));
                     }
-                }
             }
             GrammarToken::DeclLeft
             | GrammarToken::DeclRight
@@ -1344,9 +1342,9 @@ fn closure(items: &BTreeSet<Item>, grammar: &Grammar) -> BTreeSet<Item> {
 
     while let Some(item) = worklist.pop_front() {
         let prod = &grammar.productions[item.prod];
-        if item.dot < prod.rhs.len() {
-            if let Symbol::NonTerminal(ref nt) = prod.rhs[item.dot] {
-                if let Some(prods) = grammar.nonterminal_prods.get(nt) {
+        if item.dot < prod.rhs.len()
+            && let Symbol::NonTerminal(ref nt) = prod.rhs[item.dot]
+                && let Some(prods) = grammar.nonterminal_prods.get(nt) {
                     for &pi in prods {
                         let new_item = Item { prod: pi, dot: 0 };
                         if result.insert(new_item) {
@@ -1354,8 +1352,6 @@ fn closure(items: &BTreeSet<Item>, grammar: &Grammar) -> BTreeSet<Item> {
                         }
                     }
                 }
-            }
-        }
     }
     result
 }

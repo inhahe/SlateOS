@@ -161,11 +161,10 @@ fn parse_args(args: &[String]) -> (Options, Vec<(String, String)>) {
             opts.question_mode = true;
         } else if arg == "-j" {
             i += 1;
-            if i < args.len() {
-                if let Ok(n) = args[i].parse::<usize>() {
+            if i < args.len()
+                && let Ok(n) = args[i].parse::<usize>() {
                     opts.jobs = n;
                 }
-            }
         } else if arg == "-C" {
             i += 1;
             if i < args.len() {
@@ -529,8 +528,8 @@ fn parse_lines(
         }
 
         // --- rule line ---
-        if !is_recipe {
-            if let Some(colon_pos) = find_rule_colon(stripped) {
+        if !is_recipe
+            && let Some(colon_pos) = find_rule_colon(stripped) {
                 let target_part = stripped[..colon_pos].trim();
                 let prereq_part = stripped[colon_pos + 1..].trim();
 
@@ -606,7 +605,6 @@ fn parse_lines(
                 }
                 continue;
             }
-        }
 
         idx += 1;
     }
@@ -716,11 +714,10 @@ fn apply_variable(
     }
 
     // Don't override a higher-priority binding (e.g. command-line beats file).
-    if let Some(existing) = db.variables.get(raw_name) {
-        if existing.origin > origin {
+    if let Some(existing) = db.variables.get(raw_name)
+        && existing.origin > origin {
             return;
         }
-    }
 
     // For simple assignment, expand immediately.
     let final_val = if flavour == VarFlavour::Simple {
@@ -758,12 +755,11 @@ fn find_rule_colon(line: &str) -> Option<usize> {
             return Some(i);
         }
         // Skip `$(...)`
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
-            if let Some(close) = find_matching_close(bytes, i + 2, b')') {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'('
+            && let Some(close) = find_matching_close(bytes, i + 2, b')') {
                 i = close + 1;
                 continue;
             }
-        }
         i += 1;
     }
     None
@@ -771,8 +767,7 @@ fn find_rule_colon(line: &str) -> Option<usize> {
 
 /// Try to strip a conditional directive keyword from the beginning of a line.
 fn try_strip_directive<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
-    if line.starts_with(keyword) {
-        let rest = &line[keyword.len()..];
+    if let Some(rest) = line.strip_prefix(keyword) {
         if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') || rest.starts_with('(') {
             return Some(rest.trim_start());
         }
@@ -860,11 +855,10 @@ fn is_up_to_date(target: &str, prereqs: &[String], phony: bool) -> bool {
         None => return false, // target doesn't exist → must build
     };
     for p in prereqs {
-        if let Some(p_mtime) = file_mtime(p) {
-            if p_mtime > target_mtime {
+        if let Some(p_mtime) = file_mtime(p)
+            && p_mtime > target_mtime {
                 return false;
             }
-        }
         // If the prereq doesn't exist as a file, we still consider it; the
         // build for it may create it.
     }
@@ -878,9 +872,9 @@ fn file_mtime(path: &str) -> Option<SystemTime> {
 
 /// Find the rule (or synthesise one via pattern rules) that can build
 /// `target`.  Returns `(prerequisites, recipe, is_phony)`.
-fn find_rule_for<'a>(
+fn find_rule_for(
     target: &str,
-    db: &'a MakeDb,
+    db: &MakeDb,
 ) -> Option<(Vec<String>, Vec<String>, bool)> {
     // Concrete rules first.
     for rule in &db.rules {
@@ -1211,16 +1205,11 @@ fn populate_defaults(db: &mut MakeDb) {
 
     // Import environment variables (lower priority than file assignments).
     for (key, val) in env::vars() {
-        if !db.variables.contains_key(&key) {
-            db.variables.insert(
-                key,
-                Variable {
+        db.variables.entry(key).or_insert(Variable {
                     value: val,
                     flavour: VarFlavour::Recursive,
                     origin: VarOrigin::Environment,
-                },
-            );
-        }
+                });
     }
 
     // Built-in pattern rules.
@@ -1262,12 +1251,11 @@ fn main() {
     let (opts, overrides) = parse_args(&all_args[1..]);
 
     // Change directory if requested.
-    if let Some(ref dir) = opts.directory {
-        if let Err(e) = env::set_current_dir(dir) {
+    if let Some(ref dir) = opts.directory
+        && let Err(e) = env::set_current_dir(dir) {
             eprintln!("make: *** {}: {}.  Stop.", dir, e);
             process::exit(2);
         }
-    }
 
     let mf_path = match find_makefile(&opts) {
         Some(p) => p,

@@ -196,7 +196,7 @@ fn is_leap_year(year: i64) -> bool {
 fn days_in_month(year: i64, month: u32) -> u32 {
     if month == 2 && is_leap_year(year) {
         29
-    } else if month >= 1 && month <= 12 {
+    } else if (1..=12).contains(&month) {
         DAYS_IN_MONTH[month as usize]
     } else {
         0
@@ -205,7 +205,7 @@ fn days_in_month(year: i64, month: u32) -> u32 {
 
 /// Day of year (1-366) for the given date.
 fn day_of_year(year: i64, month: u32, day: u32) -> u32 {
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return 0;
     }
     let mut doy = DAYS_BEFORE_MONTH[month as usize] + day;
@@ -393,14 +393,14 @@ fn format_datetime(dt: &DateTime, epoch_sec: i64, fmt: &str) -> String {
                 // Abbreviated month name.
                 'b' | 'h' => {
                     let m = dt.month as usize;
-                    if m >= 1 && m <= 12 {
+                    if (1..=12).contains(&m) {
                         result.push_str(MONTH_ABBR[m]);
                     }
                 }
                 // Full month name.
                 'B' => {
                     let m = dt.month as usize;
-                    if m >= 1 && m <= 12 {
+                    if (1..=12).contains(&m) {
                         result.push_str(MONTH_FULL[m]);
                     }
                 }
@@ -463,7 +463,7 @@ fn format_datetime(dt: &DateTime, epoch_sec: i64, fmt: &str) -> String {
                         "???"
                     };
                     let m = dt.month as usize;
-                    let mon = if m >= 1 && m <= 12 {
+                    let mon = if (1..=12).contains(&m) {
                         MONTH_ABBR[m]
                     } else {
                         "???"
@@ -764,12 +764,12 @@ fn format_json(dt: &DateTime, epoch_sec: i64) -> String {
         "???"
     };
     let m = dt.month as usize;
-    let mon_abbr = if m >= 1 && m <= 12 {
+    let mon_abbr = if (1..=12).contains(&m) {
         MONTH_ABBR[m]
     } else {
         "???"
     };
-    let mon_full = if m >= 1 && m <= 12 {
+    let mon_full = if (1..=12).contains(&m) {
         MONTH_FULL[m]
     } else {
         "???"
@@ -1005,11 +1005,7 @@ fn parse_args(args: &[String]) -> Options {
                 });
             }
             _ if arg.starts_with("--iso-8601") => {
-                let precision = if let Some(rest) = arg.strip_prefix("--iso-8601=") {
-                    rest
-                } else {
-                    "date"
-                };
+                let precision = arg.strip_prefix("--iso-8601=").unwrap_or("date");
                 action = Some(Action::Iso8601 {
                     precision: precision.to_string(),
                 });
@@ -1056,10 +1052,7 @@ fn parse_args(args: &[String]) -> Options {
 /// Tries the kernel syscall first, falls back to std::time::SystemTime.
 fn get_current_time() -> Result<(i64, i64), String> {
     // Try the direct syscall for OurOS.
-    match clock_gettime(CLOCK_REALTIME) {
-        Ok(time) => return Ok(time),
-        Err(_) => {}
-    }
+    if let Ok(time) = clock_gettime(CLOCK_REALTIME) { return Ok(time) }
 
     // Fallback: std::time::SystemTime (may work if the runtime is functional).
     match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {

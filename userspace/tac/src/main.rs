@@ -133,11 +133,10 @@ fn regex_find(pattern: &str, text: &str) -> Option<(usize, usize)> {
 
     // Try matching at each position
     for start in 0..=text.len() {
-        if let Some(end) = regex_match_at(&pat_chars, 0, text, start) {
-            if end > start || pat_chars.is_empty() {
+        if let Some(end) = regex_match_at(&pat_chars, 0, text, start)
+            && (end > start || pat_chars.is_empty()) {
                 return Some((start, end));
             }
-        }
     }
     None
 }
@@ -323,7 +322,7 @@ fn split_by_separator(content: &str, separator: &str, before: bool, regex: bool)
                 if end == start {
                     // Empty match — avoid infinite loop
                     if start < remaining.len() {
-                        let mut seg = remaining[..start + 1].to_string();
+                        let seg = remaining[..start + 1].to_string();
                         if !before {
                             // separator stays with previous
                         }
@@ -340,13 +339,13 @@ fn split_by_separator(content: &str, separator: &str, before: bool, regex: bool)
                         break;
                     }
                     // Move past this separator in next iteration
-                    let sep_text = &remaining[..end - start];
-                    let rest = &remaining[end - start..];
-                    if segments.is_empty() || segments.last().map_or(false, |s| !s.is_empty()) {
+                    let _sep_text = &remaining[..end - start];
+                    let _rest = &remaining[end - start..];
+                    if segments.is_empty() || segments.last().is_some_and(|s| !s.is_empty()) {
                         // Separator attaches to next segment
                     }
                     remaining = remaining[end - start..].to_string();
-                    if let Some(last) = segments.last_mut() {
+                    if let Some(_last) = segments.last_mut() {
                         // Separator was before, already pushed segment before it
                     }
                     // Re-approach: simpler split

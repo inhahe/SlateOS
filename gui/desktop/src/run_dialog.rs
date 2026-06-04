@@ -167,7 +167,7 @@ impl TextInput {
     }
 
     fn has_selection(&self) -> bool {
-        self.selection_anchor.map_or(false, |a| a != self.cursor)
+        self.selection_anchor.is_some_and(|a| a != self.cursor)
     }
 
     fn selected_text(&self) -> &str {
@@ -519,11 +519,10 @@ impl RunDialog {
             Key::Up => {
                 if self.show_autocomplete && self.suggestion_index.is_some() {
                     // Navigate autocomplete up
-                    if let Some(idx) = self.suggestion_index {
-                        if idx > 0 {
+                    if let Some(idx) = self.suggestion_index
+                        && idx > 0 {
                             self.suggestion_index = Some(idx - 1);
                         }
-                    }
                 } else {
                     self.history_prev();
                 }
@@ -532,11 +531,10 @@ impl RunDialog {
             Key::Down => {
                 if self.show_autocomplete && self.suggestion_index.is_some() {
                     // Navigate autocomplete down
-                    if let Some(idx) = self.suggestion_index {
-                        if idx + 1 < self.suggestions.len() {
+                    if let Some(idx) = self.suggestion_index
+                        && idx + 1 < self.suggestions.len() {
                             self.suggestion_index = Some(idx + 1);
                         }
-                    }
                 } else {
                     self.history_next();
                 }
@@ -1167,17 +1165,16 @@ fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
             let at_boundary = ti == 0
                 || target_lower
                     .get(ti.saturating_sub(1))
-                    .map_or(false, |&prev| prev == ' ' || prev == '-' || prev == '_');
+                    .is_some_and(|&prev| prev == ' ' || prev == '-' || prev == '_');
             if at_boundary {
                 score = score.saturating_add(10);
             }
 
             // Bonus for consecutive matches.
-            if let Some(prev) = prev_match_idx {
-                if ti == prev + 1 {
+            if let Some(prev) = prev_match_idx
+                && ti == prev + 1 {
                     score = score.saturating_add(5);
                 }
-            }
 
             prev_match_idx = Some(ti);
             qi += 1;

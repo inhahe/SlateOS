@@ -476,11 +476,10 @@ fn find_pids_by_name(target: &str) -> Vec<u64> {
             Err(_) => continue,
         };
 
-        if let Some(proc_name) = read_process_name(pid) {
-            if proc_name == target {
+        if let Some(proc_name) = read_process_name(pid)
+            && proc_name == target {
                 pids.push(pid);
             }
-        }
     }
 
     pids.sort_unstable();
@@ -875,8 +874,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         }
 
         // Signal specification: -<number> or -<NAME>
-        if let Some(stripped) = arg.strip_prefix('-') {
-            if !stripped.is_empty() && !explicit_signal {
+        if let Some(stripped) = arg.strip_prefix('-')
+            && !stripped.is_empty() && !explicit_signal {
                 // Try as a number first.
                 if let Ok(num) = stripped.parse::<u32>() {
                     if let Some(entry) = signal_by_number(num) {
@@ -898,7 +897,6 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 
                 return Err(format!("unknown signal: {stripped}"));
             }
-        }
 
         // Remaining arguments are PIDs or process names.
         if opts.killall_mode {
@@ -934,8 +932,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 fn print_signal_list() {
     println!("Available signal names (OurOS compatibility mapping):");
     println!();
-    println!(" {:>3}  {:<6}  {}", "Num", "Name", "Description");
-    println!(" {:>3}  {:<6}  {}", "---", "------", "-----------");
+    println!(" {:>3}  {:<6}  Description", "Num", "Name");
+    println!(" {:>3}  {:<6}  -----------", "---", "------");
     for entry in SIGNAL_TABLE {
         println!(
             " {:>3}  {:<6}  {}",

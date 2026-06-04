@@ -403,8 +403,8 @@ impl TypingTutorApp {
     }
 
     fn finish_lesson(&mut self) {
-        if let Some(ref session) = self.session {
-            if session.finished {
+        if let Some(ref session) = self.session
+            && session.finished {
                 let wpm = session.wpm(self.current_time_ms);
                 let acc = session.accuracy();
                 let dur = session.elapsed_ms(self.current_time_ms);
@@ -421,7 +421,6 @@ impl TypingTutorApp {
                 });
                 self.view = AppView::Results;
             }
-        }
     }
 
     fn cycle_category_filter(&mut self) {
@@ -481,16 +480,14 @@ impl TypingTutorApp {
     fn handle_lesson_select(&mut self, event: &KeyEvent) {
         let filtered = self.filtered_lessons();
         match event.key {
-            Key::Up => {
-                if self.selected_lesson > 0 {
+            Key::Up
+                if self.selected_lesson > 0 => {
                     self.selected_lesson -= 1;
                 }
-            }
-            Key::Down => {
-                if self.selected_lesson + 1 < filtered.len() {
+            Key::Down
+                if self.selected_lesson + 1 < filtered.len() => {
                     self.selected_lesson += 1;
                 }
-            }
             Key::Enter => {
                 if let Some(&idx) = filtered.get(self.selected_lesson) {
                     self.start_lesson(idx);
@@ -524,14 +521,13 @@ impl TypingTutorApp {
         }
 
         // Type the character
-        if let Some(ch) = event.text {
-            if let Some(ref mut session) = self.session {
+        if let Some(ch) = event.text
+            && let Some(ref mut session) = self.session {
                 session.type_char(ch, self.current_time_ms);
                 if session.finished {
                     self.finish_lesson();
                 }
             }
-        }
     }
 
     fn handle_results(&mut self, event: &KeyEvent) {

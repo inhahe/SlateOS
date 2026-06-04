@@ -211,7 +211,7 @@ impl Rng {
 fn face_counts(dice: &[u8; NUM_DICE]) -> [u8; 7] {
     let mut counts = [0u8; 7];
     for &d in dice {
-        if d >= 1 && d <= 6 {
+        if (1..=6).contains(&d) {
             counts[d as usize] += 1;
         }
     }
@@ -261,8 +261,8 @@ fn score_four_of_a_kind(dice: &[u8; NUM_DICE]) -> u16 {
 /// full house unless the Joker rule applies.
 fn score_full_house(dice: &[u8; NUM_DICE]) -> u16 {
     let counts = face_counts(dice);
-    let has_three = counts[1..].iter().any(|&c| c == 3);
-    let has_two = counts[1..].iter().any(|&c| c == 2);
+    let has_three = counts[1..].contains(&3);
+    let has_two = counts[1..].contains(&2);
     if has_three && has_two {
         FULL_HOUSE_SCORE
     } else {
@@ -428,7 +428,7 @@ impl Yahtzee {
     /// a non-zero value.
     fn yahtzee_already_scored_nonzero(&self) -> bool {
         self.scores[Category::Yahtzee.index()]
-            .map_or(false, |s| s > 0)
+            .is_some_and(|s| s > 0)
     }
 
     /// Check and award Yahtzee bonus: if the player already scored a Yahtzee
@@ -567,11 +567,10 @@ impl Yahtzee {
         }
 
         match key {
-            Key::R => {
-                if self.phase != GamePhase::GameOver {
+            Key::R
+                if self.phase != GamePhase::GameOver => {
                     self.roll();
                 }
-            }
             Key::N => {
                 self.new_game();
             }
@@ -582,28 +581,24 @@ impl Yahtzee {
                     FocusRegion::Scorecard => FocusRegion::Dice,
                 };
             }
-            Key::Left => {
-                if self.focus == FocusRegion::Dice && self.selected_die > 0 {
+            Key::Left
+                if self.focus == FocusRegion::Dice && self.selected_die > 0 => {
                     self.selected_die -= 1;
                 }
-            }
-            Key::Right => {
-                if self.focus == FocusRegion::Dice && self.selected_die < NUM_DICE - 1 {
+            Key::Right
+                if self.focus == FocusRegion::Dice && self.selected_die < NUM_DICE - 1 => {
                     self.selected_die += 1;
                 }
-            }
-            Key::Up => {
-                if self.focus == FocusRegion::Scorecard && self.selected_category > 0 {
+            Key::Up
+                if self.focus == FocusRegion::Scorecard && self.selected_category > 0 => {
                     self.selected_category -= 1;
                 }
-            }
-            Key::Down => {
+            Key::Down
                 if self.focus == FocusRegion::Scorecard
                     && self.selected_category < NUM_CATEGORIES - 1
-                {
+                => {
                     self.selected_category += 1;
                 }
-            }
             Key::Space | Key::Enter => match self.focus {
                 FocusRegion::Dice => {
                     self.toggle_hold(self.selected_die);
@@ -1126,7 +1121,7 @@ impl Yahtzee {
         // Row background.
         let bg_color = if is_selected {
             SURFACE1
-        } else if cat_index % 2 == 0 {
+        } else if cat_index.is_multiple_of(2) {
             CRUST
         } else {
             MANTLE

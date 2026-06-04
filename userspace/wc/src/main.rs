@@ -70,6 +70,7 @@ impl Counts {
 /// Which columns to display. When no flags are given, lines+words+bytes is the
 /// default (matching GNU wc).
 #[derive(Clone, Copy)]
+#[derive(Default)]
 struct DisplayFlags {
     lines: bool,
     words: bool,
@@ -93,17 +94,6 @@ impl DisplayFlags {
     }
 }
 
-impl Default for DisplayFlags {
-    fn default() -> Self {
-        Self {
-            lines: false,
-            words: false,
-            bytes: false,
-            chars: false,
-            max_line_len: false,
-        }
-    }
-}
 
 // ============================================================================
 // Parsed configuration
@@ -332,8 +322,8 @@ fn count_reader<R: Read>(reader: &mut R, display: &DisplayFlags) -> io::Result<C
             // does not match the continuation pattern 10xxxxxx. Invalid bytes
             // (bare continuations) each count as one character, matching the
             // behavior of counting "replacement characters."
-            if need_chars {
-                if (byte & 0xC0) != 0x80 {
+            if need_chars
+                && (byte & 0xC0) != 0x80 {
                     counts.chars += 1;
                     if need_max_line {
                         cur_line_chars += 1;
@@ -341,7 +331,6 @@ fn count_reader<R: Read>(reader: &mut R, display: &DisplayFlags) -> io::Result<C
                 }
                 // Continuation bytes: part of a multi-byte char, don't
                 // increment char count or line-char-length.
-            }
         }
     }
 
@@ -392,12 +381,12 @@ fn column_width(total: &Counts, display: &DisplayFlags) -> usize {
     let vals = selected_values(total, display);
     let max_val = vals.iter().copied().max().unwrap_or(0);
     // Number of digits in the largest value, minimum 1.
-    let digits = if max_val == 0 {
+    
+    if max_val == 0 {
         1
     } else {
         (max_val as f64).log10().floor() as usize + 1
-    };
-    digits
+    }
 }
 
 /// Print one row of output (columnar, not JSON).
@@ -592,12 +581,11 @@ fn run(config: &Config) -> i32 {
             }
         }
 
-        if results.len() > 1 {
-            if let Err(e) = print_row(&mut out, &total, &config.display, width, "total") {
+        if results.len() > 1
+            && let Err(e) = print_row(&mut out, &total, &config.display, width, "total") {
                 eprintln!("wc: write error: {e}");
                 return 1;
             }
-        }
     }
 
     if had_error { 1 } else { 0 }

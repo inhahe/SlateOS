@@ -190,7 +190,7 @@ fn parse_spec(input: &str) -> Result<LexSpec, String> {
             && !line.starts_with("%%")
         {
             // Find the separator: one or more whitespace chars.
-            if let Some(pos) = line.find(|c: char| c == ' ' || c == '\t') {
+            if let Some(pos) = line.find([' ', '\t']) {
                 let name = line[..pos].to_string();
                 let expansion = line[pos..].trim().to_string();
                 definitions.push(Definition { name, expansion });

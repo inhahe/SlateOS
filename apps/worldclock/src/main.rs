@@ -370,15 +370,15 @@ impl WorldClockApp {
     }
 
     fn is_daytime(h: u32) -> bool {
-        h >= 6 && h < 18
+        (6..18).contains(&h)
     }
 
     fn day_night_color(h: u32) -> Color {
-        if h >= 6 && h < 18 { YELLOW } else { LAVENDER }
+        if (6..18).contains(&h) { YELLOW } else { LAVENDER }
     }
 
     fn day_night_icon(h: u32) -> &'static str {
-        if h >= 6 && h < 18 {
+        if (6..18).contains(&h) {
             "\u{2600}"
         } else {
             "\u{263D}"
@@ -485,16 +485,14 @@ impl WorldClockApp {
             return;
         }
         match key {
-            "Left" | "h" => {
-                if self.selected_clock > 0 {
+            "Left" | "h"
+                if self.selected_clock > 0 => {
                     self.selected_clock -= 1;
                 }
-            }
-            "Right" | "l" => {
-                if self.selected_clock + 1 < self.clocks.len() {
+            "Right" | "l"
+                if self.selected_clock + 1 < self.clocks.len() => {
                     self.selected_clock += 1;
                 }
-            }
             "Space" => self.advance_time(60),
             "n" => {
                 self.show_picker = true;

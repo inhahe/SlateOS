@@ -300,8 +300,8 @@ impl DragDropManager {
                 self.session = None;
                 return None;
             }
-            if let Some(target_id) = session.hover_target {
-                if session.current_effect != DropEffect::None {
+            if let Some(target_id) = session.hover_target
+                && session.current_effect != DropEffect::None {
                     let data = session.data.clone();
                     let effect = session.current_effect;
                     session.phase = DragPhase::Completed;
@@ -309,7 +309,6 @@ impl DragDropManager {
                     self.session = None;
                     return result;
                 }
-            }
             session.phase = DragPhase::Cancelled;
             self.session = None;
         }

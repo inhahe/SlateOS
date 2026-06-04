@@ -363,13 +363,12 @@ impl Shape {
         match &self.kind {
             ShapeKind::Freehand { points } => {
                 for window in points.windows(2) {
-                    if let (Some(a), Some(b)) = (window.get(0), window.get(1)) {
-                        if point_to_segment_distance(px, py, a.x, a.y, b.x, b.y)
+                    if let (Some(a), Some(b)) = (window.first(), window.get(1))
+                        && point_to_segment_distance(px, py, a.x, a.y, b.x, b.y)
                             <= threshold
                         {
                             return true;
                         }
-                    }
                 }
                 false
             }
@@ -1128,8 +1127,8 @@ impl WhiteboardApp {
 
     pub fn move_layer_up(&mut self, layer_id: LayerId) {
         let page = self.current_page_mut();
-        if let Some(idx) = page.find_layer_index(layer_id) {
-            if idx + 1 < page.layers.len() {
+        if let Some(idx) = page.find_layer_index(layer_id)
+            && idx + 1 < page.layers.len() {
                 let old_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
                 page.layers.swap(idx, idx + 1);
                 let new_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
@@ -1138,13 +1137,12 @@ impl WhiteboardApp {
                     new_order,
                 });
             }
-        }
     }
 
     pub fn move_layer_down(&mut self, layer_id: LayerId) {
         let page = self.current_page_mut();
-        if let Some(idx) = page.find_layer_index(layer_id) {
-            if idx > 0 {
+        if let Some(idx) = page.find_layer_index(layer_id)
+            && idx > 0 {
                 let old_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
                 page.layers.swap(idx, idx - 1);
                 let new_order: Vec<LayerId> = page.layers.iter().map(|l| l.id).collect();
@@ -1153,7 +1151,6 @@ impl WhiteboardApp {
                     new_order,
                 });
             }
-        }
     }
 
     /// Check if the active layer is locked.
@@ -2199,7 +2196,7 @@ impl WhiteboardApp {
         match &shape.kind {
             ShapeKind::Freehand { points } => {
                 for window in points.windows(2) {
-                    if let (Some(a), Some(b)) = (window.get(0), window.get(1)) {
+                    if let (Some(a), Some(b)) = (window.first(), window.get(1)) {
                         cmds.push(RenderCommand::Line {
                             x1: a.x * self.zoom,
                             y1: a.y * self.zoom,
@@ -2365,7 +2362,7 @@ impl WhiteboardApp {
         match &self.drag {
             DragState::DrawingFreehand { points } => {
                 for window in points.windows(2) {
-                    if let (Some(a), Some(b)) = (window.get(0), window.get(1)) {
+                    if let (Some(a), Some(b)) = (window.first(), window.get(1)) {
                         cmds.push(RenderCommand::Line {
                             x1: a.x * self.zoom,
                             y1: a.y * self.zoom,

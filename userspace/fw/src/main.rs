@@ -680,8 +680,8 @@ fn cmd_list(fw: &Firewall, json: bool) {
         return;
     }
 
-    println!("{:<5} {:<6} {:<4} {:<5} {:<16} {:<6} {:<16} {:<6}  {}",
-             "#", "Action", "Dir", "Proto", "Src IP", "SPort", "Dst IP", "DPort", "Description");
+    println!("{:<5} {:<6} {:<4} {:<5} {:<16} {:<6} {:<16} {:<6}  Description",
+             "#", "Action", "Dir", "Proto", "Src IP", "SPort", "Dst IP", "DPort");
     println!("{}", "-".repeat(82));
 
     for (i, rule) in fw.rules.iter().enumerate() {
@@ -1025,7 +1025,7 @@ fn main() {
 
         "allow" => {
             let mut fw = Firewall::load();
-            cmd_allow_deny(&mut fw, Action::Allow, &cmd_args[1..].to_vec());
+            cmd_allow_deny(&mut fw, Action::Allow, &cmd_args[1..]);
             if let Err(e) = fw.save_to_file() {
                 eprintln!("Warning: could not auto-save rules: {e}");
             }
@@ -1033,7 +1033,7 @@ fn main() {
 
         "deny" => {
             let mut fw = Firewall::load();
-            cmd_allow_deny(&mut fw, Action::Deny, &cmd_args[1..].to_vec());
+            cmd_allow_deny(&mut fw, Action::Deny, &cmd_args[1..]);
             if let Err(e) = fw.save_to_file() {
                 eprintln!("Warning: could not auto-save rules: {e}");
             }

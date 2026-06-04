@@ -382,13 +382,13 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'n' => {
                     // The rest of this arg (if any) is the value; otherwise
                     // consume the next argument.
-                    let val_str = rest_or_next_arg(&chars, ci, &args, &mut i, tool_name, 'n');
+                    let val_str = rest_or_next_arg(&chars, ci, args, &mut i, tool_name, 'n');
                     count_mode = CountMode::Lines;
                     count_value = Some(parse_count_value(tool, &val_str, tool_name));
                     ci = chars.len(); // consumed the rest
                 }
                 'c' => {
-                    let val_str = rest_or_next_arg(&chars, ci, &args, &mut i, tool_name, 'c');
+                    let val_str = rest_or_next_arg(&chars, ci, args, &mut i, tool_name, 'c');
                     count_mode = CountMode::Bytes;
                     count_value = Some(parse_count_value(tool, &val_str, tool_name));
                     ci = chars.len();
@@ -415,7 +415,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                         eprintln!("{tool_name}: invalid option -- 's'");
                         process::exit(1);
                     }
-                    let val_str = rest_or_next_arg(&chars, ci, &args, &mut i, tool_name, 's');
+                    let val_str = rest_or_next_arg(&chars, ci, args, &mut i, tool_name, 's');
                     match val_str.parse::<f64>() {
                         Ok(secs) if secs >= 0.0 => follow_sleep = secs,
                         _ => {
@@ -979,15 +979,14 @@ fn run(config: &Config) -> i32 {
     let mut exit_code = 0;
 
     for (idx, path) in sources.iter().enumerate() {
-        if show_headers {
-            if let Err(e) = print_header(&mut out, display_name(path), idx == 0) {
+        if show_headers
+            && let Err(e) = print_header(&mut out, display_name(path), idx == 0) {
                 if is_broken_pipe(&e) {
                     return 0;
                 }
                 eprintln!("{tool_name}: write error: {e}");
                 return 1;
             }
-        }
 
         if let Err(e) = process_source(config, path, &mut out) {
             if is_broken_pipe(&e) {
@@ -1008,9 +1007,9 @@ fn run(config: &Config) -> i32 {
     }
 
     // Follow mode (tail only). Only follows the last file.
-    if config.follow != FollowMode::None && config.tool == Tool::Tail {
-        if let Some(last_path) = sources.last() {
-            if let Err(e) = follow_file(
+    if config.follow != FollowMode::None && config.tool == Tool::Tail
+        && let Some(last_path) = sources.last()
+            && let Err(e) = follow_file(
                 last_path,
                 &mut out,
                 config.follow_sleep,
@@ -1023,8 +1022,6 @@ fn run(config: &Config) -> i32 {
                 eprintln!("{tool_name}: {e}");
                 return 1;
             }
-        }
-    }
 
     exit_code
 }

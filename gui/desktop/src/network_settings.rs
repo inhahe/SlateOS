@@ -213,11 +213,10 @@ impl Ipv4Config {
                 return Err("Static configuration requires a subnet mask");
             }
         }
-        if let Some(ref addr) = self.address {
-            if addr.is_loopback() {
+        if let Some(ref addr) = self.address
+            && addr.is_loopback() {
                 return Err("Cannot assign loopback address to interface");
             }
-        }
         Ok(())
     }
 
@@ -562,7 +561,7 @@ impl ProxyConfig {
             return Ok(());
         }
         if self.proxy_type == ProxyType::Auto {
-            if self.pac_url.as_ref().map_or(true, |u| u.is_empty()) {
+            if self.pac_url.as_ref().is_none_or(|u| u.is_empty()) {
                 return Err("Auto-detect proxy requires a PAC URL");
             }
             return Ok(());
@@ -1454,8 +1453,7 @@ impl NetworkSettingsUI {
             for net in &networks {
                 let is_selected = self
                     .selected_wifi
-                    .as_ref()
-                    .map_or(false, |s| s == &net.ssid);
+                    .as_ref() == Some(&net.ssid);
 
                 let bg = if is_selected { SURFACE1 } else { SURFACE0 };
                 let row_h = if is_selected { 64.0 } else { 44.0 };

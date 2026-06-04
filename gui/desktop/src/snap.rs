@@ -899,7 +899,7 @@ impl SnapManager {
         let presets = SnapLayoutPreset::all();
         let per_row = self.picker_items_per_row();
 
-        let rows = (presets.len() + per_row - 1) / per_row;
+        let rows = presets.len().div_ceil(per_row);
         let picker_h = PICKER_PADDING * 2.0
             + 24.0
             + rows as f32 * (THUMB_SIZE + THUMB_GAP)

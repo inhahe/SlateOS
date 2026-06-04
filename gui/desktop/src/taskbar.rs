@@ -408,11 +408,10 @@ impl TaskbarState {
     /// Coordinates should be relative to the taskbar's top-left corner.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> EventResult {
         // If context menu is visible, handle it first.
-        if let Some(ref menu) = self.context_menu.clone() {
-            if menu.visible {
+        if let Some(ref menu) = self.context_menu.clone()
+            && menu.visible {
                 return self.handle_context_menu_event(event);
             }
-        }
 
         match &event.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_left_press(event.x, event.y),
@@ -631,11 +630,10 @@ impl TaskbarState {
         }
 
         // Context menu rendering.
-        if let Some(ref menu) = self.context_menu {
-            if menu.visible {
+        if let Some(ref menu) = self.context_menu
+            && menu.visible {
                 self.render_context_menu(&mut cmds, menu.button_index, menu.x, menu.y);
             }
-        }
 
         cmds
     }
@@ -721,11 +719,10 @@ impl TaskbarState {
         if windows.is_empty() {
             return ButtonState::Idle;
         }
-        if let Some(focused) = self.focused_window {
-            if windows.contains(&focused) {
+        if let Some(focused) = self.focused_window
+            && windows.contains(&focused) {
                 return ButtonState::Focused;
             }
-        }
         ButtonState::Running
     }
 

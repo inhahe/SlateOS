@@ -231,11 +231,10 @@ fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
 
         // Try matching rest against every suffix of text starting at path boundaries
         for i in 0..=text.len() {
-            if i == 0 || (i > 0 && text[i - 1] == b'/') {
-                if glob_match_recursive(rest, &text[i..]) {
+            if (i == 0 || (i > 0 && text[i - 1] == b'/'))
+                && glob_match_recursive(rest, &text[i..]) {
                     return true;
                 }
-            }
         }
         // Also try without consuming any leading slash
         return glob_match_recursive(rest, text);
@@ -295,11 +294,10 @@ fn is_excluded(path: &str, patterns: &[String]) -> bool {
             return true;
         }
         // Also check just the filename component
-        if let Some(name) = path.rsplit('/').next() {
-            if glob_matches(pattern, name) {
+        if let Some(name) = path.rsplit('/').next()
+            && glob_matches(pattern, name) {
                 return true;
             }
-        }
     }
     false
 }
@@ -1244,7 +1242,7 @@ fn scan_dir_recursive(
             progress.current_file = rel.clone();
 
             // Report progress every 100 files
-            if progress.processed_files % 100 == 0 {
+            if progress.processed_files.is_multiple_of(100) {
                 progress.report();
             }
 
@@ -1355,11 +1353,10 @@ fn detect_changes(current: &[FileEntry], previous: &Manifest) -> DiffResult {
     // Rebuild modified properly as tuples
     let mut modified_tuples = Vec::new();
     for entry in current {
-        if let Some(prev_entry) = prev_map.get(entry.path.as_str()) {
-            if entry.hash != prev_entry.hash {
+        if let Some(prev_entry) = prev_map.get(entry.path.as_str())
+            && entry.hash != prev_entry.hash {
                 modified_tuples.push(((*prev_entry).clone(), entry.clone()));
             }
-        }
     }
 
     // Find deleted files
@@ -1977,7 +1974,7 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
         let content = fs::read_to_string(&sched_path)?;
         if let Ok(val) = json_parse(&content) {
             if let Some(arr) = val.as_array() {
-                arr.iter().filter_map(|v| ScheduleEntry::from_json(v)).collect()
+                arr.iter().filter_map(ScheduleEntry::from_json).collect()
             } else {
                 Vec::new()
             }

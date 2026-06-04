@@ -59,7 +59,7 @@ impl fmt::Display for DateTime {
 
 /// Returns `true` if `year` is a leap year under the Gregorian calendar.
 fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// Number of days in a given month (1-based) for a given year.
@@ -246,7 +246,7 @@ fn parse_tz_offset_hours(tz: &str) -> Result<i32, String> {
 fn parse_datetime(s: &str) -> Result<DateTime, String> {
     // Accept "YYYY-MM-DD HH:MM:SS" with flexible whitespace.
     let s = s.trim();
-    let parts: Vec<&str> = s.splitn(2, |c: char| c == ' ' || c == 'T').collect();
+    let parts: Vec<&str> = s.splitn(2, [' ', 'T']).collect();
     if parts.len() != 2 {
         return Err(format!("expected 'YYYY-MM-DD HH:MM:SS', got: {s}"));
     }
@@ -296,10 +296,10 @@ fn read_rtc_proc() -> Result<DateTime, String> {
     for line in content.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("rtc_time") {
-            let rest = rest.trim_start_matches(|c: char| c == ' ' || c == ':' || c == '\t');
+            let rest = rest.trim_start_matches([' ', ':', '\t']);
             time_str = Some(rest.trim());
         } else if let Some(rest) = line.strip_prefix("rtc_date") {
-            let rest = rest.trim_start_matches(|c: char| c == ' ' || c == ':' || c == '\t');
+            let rest = rest.trim_start_matches([' ', ':', '\t']);
             date_str = Some(rest.trim());
         }
     }

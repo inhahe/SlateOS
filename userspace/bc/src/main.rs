@@ -403,7 +403,7 @@ impl BigInt {
             let mut limbs = Vec::new();
             let mut i = bytes.len();
             while i > 0 {
-                let start = if i >= LIMB_DIGITS { i - LIMB_DIGITS } else { 0 };
+                let start = i.saturating_sub(LIMB_DIGITS);
                 let chunk = &bytes[start..i];
                 let mut val: u32 = 0;
                 for &b in chunk {
@@ -536,7 +536,7 @@ impl BigInt {
                 }
                 d.max(1)
             });
-        let half_digits = (digit_count + 1) / 2;
+        let half_digits = digit_count.div_ceil(2);
         // Start with 10^half_digits as initial guess.
         let mut guess = Self::one().shift_left_decimal(half_digits);
 
@@ -762,7 +762,7 @@ impl BcNum {
         let isqrt = scaled.digits.isqrt();
         let r = Self {
             digits: isqrt,
-            scale: (scaled.scale + 1) / 2,
+            scale: scaled.scale.div_ceil(2),
         };
         r.rescale(result_scale)
     }
@@ -1045,7 +1045,7 @@ impl<'a> Lexer<'a> {
         // Numbers: digits, leading dot-digit, or uppercase A-F (hex digit
         // values 10-15 in bc's number syntax).
         if b.is_ascii_digit()
-            || (b >= b'A' && b <= b'F')
+            || (b'A'..=b'F').contains(&b)
             || (b == b'.'
                 && self.pos + 1 < self.input.len()
                 && self.input[self.pos + 1].is_ascii_hexdigit())
@@ -1185,7 +1185,7 @@ impl<'a> Lexer<'a> {
         // and at most one decimal point.
         let mut has_dot = false;
         while let Some(b) = self.peek_byte() {
-            if b.is_ascii_digit() || (b >= b'A' && b <= b'F') {
+            if b.is_ascii_digit() || (b'A'..=b'F').contains(&b) {
                 self.advance();
             } else if b == b'.' && !has_dot {
                 has_dot = true;
@@ -1970,7 +1970,7 @@ impl Interpreter {
                 let v = val.rescale(0);
                 let s = v.digits.to_string_base10();
                 let b = s.trim_start_matches('-').parse::<u32>().unwrap_or(10);
-                if b >= 2 && b <= 16 {
+                if (2..=16).contains(&b) {
                     self.ibase = b;
                 }
             }
@@ -1978,7 +1978,7 @@ impl Interpreter {
                 let v = val.rescale(0);
                 let s = v.digits.to_string_base10();
                 let b = s.trim_start_matches('-').parse::<u32>().unwrap_or(10);
-                if b >= 2 && b <= 16 {
+                if (2..=16).contains(&b) {
                     self.obase = b;
                 }
             }
@@ -1999,7 +1999,7 @@ impl Interpreter {
     fn set_array(&mut self, name: &str, idx: &str, val: BcNum) {
         self.arrays
             .entry(name.to_string())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(idx.to_string(), val);
     }
 
@@ -2688,8 +2688,8 @@ impl Interpreter {
         }
         // x mod 2pi.
         let q = x.div(&two_pi, 0).rescale(0);
-        let remainder = x.sub(&q.mul(&two_pi, scale));
-        remainder
+        
+        x.sub(&q.mul(&two_pi, scale))
     }
 }
 

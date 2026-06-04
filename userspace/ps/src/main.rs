@@ -261,20 +261,17 @@ fn read_process(pid: u32) -> Option<ProcessInfo> {
     if let Some(status_content) = read_file(&format!("/proc/{pid}/status")) {
         for line in status_content.lines() {
             if let Some(val) = line.strip_prefix("Uid:") {
-                uid = val.trim()
-                    .split_whitespace()
+                uid = val.split_whitespace()
                     .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             } else if let Some(val) = line.strip_prefix("Gid:") {
-                gid = val.trim()
-                    .split_whitespace()
+                gid = val.split_whitespace()
                     .next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             } else if let Some(val) = line.strip_prefix("Groups:") {
-                groups = val.trim()
-                    .split_whitespace()
+                groups = val.split_whitespace()
                     .filter_map(|s| s.parse().ok())
                     .collect();
             } else if line.starts_with("VmSize:") {
@@ -316,11 +313,10 @@ fn enumerate_pids() -> Vec<u32> {
 
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(pid) = name.parse::<u32>() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(pid) = name.parse::<u32>() {
                     pids.push(pid);
                 }
-            }
         }
     }
 
@@ -432,7 +428,7 @@ fn sort_processes(procs: &mut [ProcessInfo], field: SortField, reverse: bool,
 
 fn print_default(procs: &[ProcessInfo], no_header: bool) {
     if !no_header {
-        println!("{:>7}  {:<8}  {:<5}  {:>10}  {}", "PID", "TTY", "STATE", "TIME", "CMD");
+        println!("{:>7}  {:<8}  {:<5}  {:>10}  CMD", "PID", "TTY", "STATE", "TIME");
     }
     for p in procs {
         println!(
@@ -453,8 +449,8 @@ fn print_default(procs: &[ProcessInfo], no_header: bool) {
 fn print_full(procs: &[ProcessInfo], no_header: bool, uptime_ticks: u64) {
     if !no_header {
         println!(
-            "{:>7}  {:>7}  {:>7}  {:>3}  {:>10}  {:<8}  {:>10}  {}",
-            "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"
+            "{:>7}  {:>7}  {:>7}  {:>3}  {:>10}  {:<8}  {:>10}  CMD",
+            "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME"
         );
     }
     for p in procs {
@@ -489,8 +485,8 @@ fn format_start_time(starttime_ticks: u64) -> String {
 fn print_long(procs: &[ProcessInfo], no_header: bool, uptime_ticks: u64) {
     if !no_header {
         println!(
-            "{:>2}  {:<1}  {:>7}  {:>7}  {:>7}  {:>3}  {:>4}  {:>4}  {:>9}  {:>9}  {:<8}  {:<8}  {:>10}  {}",
-            "F", "S", "UID", "PID", "PPID", "C", "PRI", "NI", "SZ", "RSS", "WCHAN", "TTY", "TIME", "CMD"
+            "{:>2}  {:<1}  {:>7}  {:>7}  {:>7}  {:>3}  {:>4}  {:>4}  {:>9}  {:>9}  {:<8}  {:<8}  {:>10}  CMD",
+            "F", "S", "UID", "PID", "PPID", "C", "PRI", "NI", "SZ", "RSS", "WCHAN", "TTY", "TIME"
         );
     }
     for p in procs {
@@ -525,8 +521,8 @@ fn print_user(procs: &[ProcessInfo], no_header: bool, uptime_ticks: u64,
               mem_total_kb: u64) {
     if !no_header {
         println!(
-            "{:>7}  {:>7}  {:>5}  {:>5}  {:>9}  {:>9}  {:<8}  {:<5}  {:>10}  {}",
-            "UID", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "TIME", "COMMAND"
+            "{:>7}  {:>7}  {:>5}  {:>5}  {:>9}  {:>9}  {:<8}  {:<5}  {:>10}  COMMAND",
+            "UID", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "TIME"
         );
     }
     for p in procs {
@@ -673,7 +669,7 @@ fn print_custom(procs: &[ProcessInfo], columns: &[Column], no_header: bool,
 /// Build and print a process tree showing parent-child relationships.
 fn print_tree(procs: &[ProcessInfo], no_header: bool) {
     if !no_header {
-        println!("{:>7}  {:<5}  {:>10}  {}", "PID", "STATE", "TIME", "CMD");
+        println!("{:>7}  {:<5}  {:>10}  CMD", "PID", "STATE", "TIME");
     }
 
     // Build a children map: ppid -> list of indices into procs.
@@ -914,13 +910,12 @@ fn main() {
                 config.format = OutputFormat::User;
                 // Optional UID argument: if the next arg is a number, treat
                 // it as a UID filter.
-                if i + 1 < args.len() {
-                    if let Ok(uid) = args[i + 1].parse::<u32>() {
+                if i + 1 < args.len()
+                    && let Ok(uid) = args[i + 1].parse::<u32>() {
                         config.filter_uid = Some(uid);
                         i += 2;
                         continue;
                     }
-                }
                 i += 1;
             }
             "-p" => {

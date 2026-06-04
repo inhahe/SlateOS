@@ -386,12 +386,11 @@ fn cmd_daemon() {
 
     loop {
         // Periodic maintenance: check file size, rotate if needed.
-        if let Ok(meta) = fs::metadata(log_file_path()) {
-            if meta.len() > MAX_LOG_SIZE {
+        if let Ok(meta) = fs::metadata(log_file_path())
+            && meta.len() > MAX_LOG_SIZE {
                 println!("syslogd: rotating logs (size {})", meta.len());
                 rotate_logs();
             }
-        }
 
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
@@ -442,15 +441,14 @@ fn cmd_query(filters: &QueryFilters) {
 
     let mut matches = 0usize;
     for line in content.lines() {
-        if let Some(entry) = LogEntry::from_json(line) {
-            if filters.matches(&entry) {
+        if let Some(entry) = LogEntry::from_json(line)
+            && filters.matches(&entry) {
                 println!("{}", entry.display_short());
                 matches += 1;
                 if matches >= filters.limit {
                     break;
                 }
             }
-        }
     }
 
     if matches == 0 {
@@ -614,17 +612,15 @@ impl QueryFilters {
     }
 
     fn matches(&self, entry: &LogEntry) -> bool {
-        if let Some(ref level) = self.level {
-            if entry.level != *level {
+        if let Some(ref level) = self.level
+            && entry.level != *level {
                 return false;
             }
-        }
 
-        if let Some(ref svc) = self.service {
-            if !entry.service.contains(svc.as_str()) {
+        if let Some(ref svc) = self.service
+            && !entry.service.contains(svc.as_str()) {
                 return false;
             }
-        }
 
         if let Some(ref substr) = self.message_contains {
             let msg_lower = entry.message.to_lowercase();
@@ -634,17 +630,15 @@ impl QueryFilters {
             }
         }
 
-        if let Some(since) = self.since {
-            if entry.timestamp < since {
+        if let Some(since) = self.since
+            && entry.timestamp < since {
                 return false;
             }
-        }
 
-        if let Some(until) = self.until {
-            if entry.timestamp > until {
+        if let Some(until) = self.until
+            && entry.timestamp > until {
                 return false;
             }
-        }
 
         true
     }
@@ -655,49 +649,34 @@ impl QueryFilters {
 
         while i < args.len() {
             match args[i].as_str() {
-                "--level" | "-l" => {
-                    if i + 1 < args.len() {
+                "--level" | "-l"
+                    if i + 1 < args.len() => {
                         filters.level = Some(args[i + 1].to_lowercase());
                         i += 2;
-                    } else {
-                        i += 1;
                     }
-                }
-                "--service" | "-s" => {
-                    if i + 1 < args.len() {
+                "--service" | "-s"
+                    if i + 1 < args.len() => {
                         filters.service = Some(args[i + 1].clone());
                         i += 2;
-                    } else {
-                        i += 1;
                     }
-                }
-                "--msg" | "-m" => {
-                    if i + 1 < args.len() {
+                "--msg" | "-m"
+                    if i + 1 < args.len() => {
                         filters.message_contains = Some(args[i + 1].clone());
                         i += 2;
-                    } else {
-                        i += 1;
                     }
-                }
-                "--since" => {
-                    if i + 1 < args.len() {
+                "--since"
+                    if i + 1 < args.len() => {
                         // Parse as hours ago.
                         if let Ok(hours) = args[i + 1].parse::<u64>() {
                             filters.since = Some(now_secs().saturating_sub(hours * 3600));
                         }
                         i += 2;
-                    } else {
-                        i += 1;
                     }
-                }
-                "--limit" | "-n" => {
-                    if i + 1 < args.len() {
+                "--limit" | "-n"
+                    if i + 1 < args.len() => {
                         filters.limit = args[i + 1].parse().unwrap_or(100);
                         i += 2;
-                    } else {
-                        i += 1;
                     }
-                }
                 _ => { i += 1; }
             }
         }

@@ -25,7 +25,7 @@ enum Mode {
 
 fn detect_mode(argv0: &str) -> Mode {
     let name = argv0
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
@@ -47,7 +47,7 @@ const B64_URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 fn b64_encode(data: &[u8], alphabet: &[u8; 64], wrap: usize, pad: bool) -> String {
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4 + data.len() / 57 + 2);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4 + data.len() / 57 + 2);
     let mut col = 0usize;
 
     let mut i = 0;
@@ -141,7 +141,7 @@ const B32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const B32_HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
 fn b32_encode(data: &[u8], alphabet: &[u8; 32], wrap: usize, pad: bool) -> String {
-    let mut out = String::with_capacity((data.len() + 4) / 5 * 8 + data.len() / 40 + 2);
+    let mut out = String::with_capacity(data.len().div_ceil(5) * 8 + data.len() / 40 + 2);
     let mut col = 0usize;
 
     // Process 5 bytes at a time -> 8 base32 chars
@@ -662,7 +662,7 @@ fn main() {
     if let Err(e) = run() {
         let prog = env::args().next().unwrap_or_else(|| "base64".to_string());
         let name = prog
-            .rsplit(|c| c == '/' || c == '\\')
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(&prog);
         eprintln!("{name}: {e}");

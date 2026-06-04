@@ -347,7 +347,7 @@ impl VpnProfile {
     /// Export profile to a simple text representation.
     pub fn export_text(&self) -> String {
         let mut lines = Vec::new();
-        lines.push(format!("[VpnProfile]"));
+        lines.push("[VpnProfile]".to_string());
         lines.push(format!("name={}", self.name));
         lines.push(format!("server={}", self.server_address));
         lines.push(format!("port={}", self.port));
@@ -574,11 +574,10 @@ impl VpnManager {
         // Fix selection
         if self.profiles.is_empty() {
             self.selected_profile = None;
-        } else if let Some(sel) = self.selected_profile {
-            if sel >= self.profiles.len() {
+        } else if let Some(sel) = self.selected_profile
+            && sel >= self.profiles.len() {
                 self.selected_profile = Some(self.profiles.len().saturating_sub(1));
             }
-        }
         Some(profile)
     }
 
@@ -885,14 +884,13 @@ impl VpnManager {
             if !profile.enabled {
                 // Disconnect if disabling
                 let pid = profile.id;
-                if let Some(conn) = self.connections.iter_mut().find(|c| c.profile_id == pid) {
-                    if conn.status.is_active() || conn.status == ConnectionStatus::Connecting {
+                if let Some(conn) = self.connections.iter_mut().find(|c| c.profile_id == pid)
+                    && (conn.status.is_active() || conn.status == ConnectionStatus::Connecting) {
                         conn.status = ConnectionStatus::Disconnected;
                         conn.local_ip.clear();
                         conn.latency_ms = 0;
                         conn.connected_since = None;
                     }
-                }
             }
         }
     }
@@ -1013,13 +1011,12 @@ impl VpnManager {
 
     /// Simulate connection data changing (for UI testing).
     pub fn simulate_traffic(&mut self, profile_id: u32, sent: u64, received: u64) {
-        if let Some(conn) = self.connection_for_mut(profile_id) {
-            if conn.status == ConnectionStatus::Connected {
+        if let Some(conn) = self.connection_for_mut(profile_id)
+            && conn.status == ConnectionStatus::Connected {
                 conn.bytes_sent = conn.bytes_sent.saturating_add(sent);
                 conn.bytes_received = conn.bytes_received.saturating_add(received);
                 conn.uptime_secs = conn.uptime_secs.saturating_add(1);
             }
-        }
     }
 }
 
@@ -1877,8 +1874,8 @@ fn render_tab_overview(
     }
 
     // Connection summary
-    if let Some(c) = conn {
-        if c.status == ConnectionStatus::Connected {
+    if let Some(c) = conn
+        && c.status == ConnectionStatus::Connected {
             let summary_y = py + SECTION_PADDING;
             let summary_x = px + pw - 180.0;
 
@@ -1928,7 +1925,6 @@ fn render_tab_overview(
                 max_width: None,
             });
         }
-    }
 }
 
 fn render_tab_connection(
@@ -2414,8 +2410,8 @@ fn render_tab_stats(
     y += 16.0;
 
     // Current session stats
-    if let Some(conn) = app.connection_for(profile.id) {
-        if conn.status == ConnectionStatus::Connected {
+    if let Some(conn) = app.connection_for(profile.id)
+        && conn.status == ConnectionStatus::Connected {
             y = render_section_title(tree, "Current Session", px + SECTION_PADDING, y);
             y = render_field_row(
                 tree,
@@ -2450,7 +2446,6 @@ fn render_tab_stats(
                 pw,
             );
         }
-    }
 
     y += 16.0;
 

@@ -40,13 +40,11 @@ fn get_username() -> String {
 
 fn get_tty() -> String {
     // Read from /proc/self/fd/0 symlink or /dev/tty
-    if let Ok(link) = fs::read_link("/proc/self/fd/0") {
-        if let Some(path) = link.to_str() {
-            if path.starts_with("/dev/") {
+    if let Ok(link) = fs::read_link("/proc/self/fd/0")
+        && let Some(path) = link.to_str()
+            && path.starts_with("/dev/") {
                 return path[5..].to_string();
             }
-        }
-    }
     "console".to_string()
 }
 
@@ -109,13 +107,12 @@ fn get_logged_in_terminals() -> Vec<(String, String)> {
     // Also scan /dev/pts/
     if let Ok(entries) = fs::read_dir("/dev/pts") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.chars().all(|c| c.is_ascii_digit()) {
+            if let Some(name) = entry.file_name().to_str()
+                && name.chars().all(|c| c.is_ascii_digit()) {
                     let tty = format!("pts/{}", name);
                     // Check if someone is using this terminal
                     terminals.push(("unknown".to_string(), tty));
                 }
-            }
         }
     }
 
@@ -254,11 +251,10 @@ fn run_wall(args: &[String]) -> i32 {
             continue;
         }
 
-        if let Ok(mut f) = OpenOptions::new().write(true).open(&dev_path) {
-            if f.write_all(full_message.as_bytes()).is_ok() {
+        if let Ok(mut f) = OpenOptions::new().write(true).open(&dev_path)
+            && f.write_all(full_message.as_bytes()).is_ok() {
                 sent += 1;
             }
-        }
     }
 
     let _ = sent;
@@ -303,7 +299,7 @@ fn run_write(args: &[String]) -> i32 {
     let dev_path = format!("/dev/{}", target_terminal);
 
     // Check if the terminal exists and is writable
-    if !fs::metadata(&dev_path).is_ok() {
+    if fs::metadata(&dev_path).is_err() {
         eprintln!("write: {}: No such terminal", target_terminal);
         return 1;
     }

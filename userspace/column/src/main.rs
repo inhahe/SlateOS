@@ -184,7 +184,7 @@ fn parse_column_indices(s: &str) -> Result<Vec<usize>, String> {
             continue;
         }
         match trimmed.parse::<usize>() {
-            Ok(0) => return Err(format!("column index must be >= 1, got '0'")),
+            Ok(0) => return Err("column index must be >= 1, got '0'".to_string()),
             Ok(n) => indices.push(n.saturating_sub(1)),
             Err(_) => return Err(format!("invalid column index: '{trimmed}'")),
         }
@@ -561,7 +561,7 @@ fn fill_columns(words: &[String], term_width: usize, output_sep: &str) -> Vec<St
 
     // Try increasing number of columns until it doesn't fit.
     for ncols in 2..=max_cols {
-        let nrows = (words.len() + ncols - 1) / ncols;
+        let nrows = words.len().div_ceil(ncols);
         let mut col_widths = vec![0usize; ncols];
 
         // Determine each column's width.
@@ -588,7 +588,7 @@ fn fill_columns(words: &[String], term_width: usize, output_sep: &str) -> Vec<St
     }
 
     let ncols = best_ncols;
-    let nrows = (words.len() + ncols - 1) / ncols;
+    let nrows = words.len().div_ceil(ncols);
 
     // Compute column widths for the chosen layout.
     let mut col_widths = vec![0usize; ncols];
@@ -648,7 +648,7 @@ fn fill_rows(words: &[String], term_width: usize, output_sep: &str) -> Vec<Strin
     let mut best_ncols = 1usize;
 
     for ncols in 2..=max_cols {
-        let nrows = (words.len() + ncols - 1) / ncols;
+        let nrows = words.len().div_ceil(ncols);
         let mut col_widths = vec![0usize; ncols];
 
         // With fill-rows, word at position idx goes to row = idx / ncols,
@@ -676,7 +676,7 @@ fn fill_rows(words: &[String], term_width: usize, output_sep: &str) -> Vec<Strin
     }
 
     let ncols = best_ncols;
-    let nrows = (words.len() + ncols - 1) / ncols;
+    let nrows = words.len().div_ceil(ncols);
 
     // Compute column widths for the chosen layout.
     let mut col_widths = vec![0usize; ncols];
@@ -829,7 +829,7 @@ fn pad_field(field: &str, target_width: usize, right_align: bool) -> String {
         return field.to_string();
     }
     let padding = target_width - current_width;
-    let pad_str: String = std::iter::repeat(' ').take(padding).collect();
+    let pad_str: String = std::iter::repeat_n(' ', padding).collect();
     if right_align {
         let mut result = pad_str;
         result.push_str(field);

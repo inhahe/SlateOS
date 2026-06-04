@@ -623,13 +623,13 @@ impl OutputSettings {
         let date_str = format!("{:04}{:02}{:02}", year, month, day);
         let time_str = format!("{:02}{:02}{:02}", hour, min, sec);
 
-        let name = self
+        
+
+        self
             .filename_template
             .replace("{date}", &date_str)
             .replace("{time}", &time_str)
-            .replace("{n}", &format!("{:04}", self.auto_increment));
-
-        name
+            .replace("{n}", &format!("{:04}", self.auto_increment))
     }
 
     /// Generate the full output path including directory and extension.

@@ -371,7 +371,7 @@ fn format_manpage(source: &str, width: usize) -> Vec<String> {
             let directive_end = line.find(' ').unwrap_or(line.len());
             let directive = &line[1..directive_end];
             // Only skip if it looks like a real directive (uppercase or known).
-            if directive.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+            if directive.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
                 continue;
             }
         }
@@ -478,7 +478,7 @@ fn split_troff_args(text: &str) -> Vec<String> {
     let mut in_quotes = false;
     let mut chars = text.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         if ch == '"' {
             in_quotes = !in_quotes;
         } else if ch == ' ' && !in_quotes {
@@ -738,9 +738,9 @@ fn builtin_pager(lines: &[String]) {
         match buf[0] {
             b'q' | b'Q' => break,
             b' ' => { /* next page -- continue loop */ }
-            b'\n' | b'\r' => {
+            b'\n' | b'\r'
                 // Scroll one line from the current position.
-                if offset < lines.len() {
+                if offset < lines.len() => {
                     let one_end = std::cmp::min(offset + 1, lines.len());
                     for line in &lines[offset..one_end] {
                         let _ = writeln!(stdout, "{line}");
@@ -752,7 +752,6 @@ fn builtin_pager(lines: &[String]) {
                     }
                     continue;
                 }
-            }
             _ => { /* treat anything else as next page */ }
         }
     }
@@ -934,25 +933,22 @@ fn cmd_whatis(name: &str) {
     let mut found = false;
 
     for page in EMBEDDED_PAGES {
-        if page.name.eq_ignore_ascii_case(name) {
-            if let Some(desc) = extract_name_line(page.source) {
+        if page.name.eq_ignore_ascii_case(name)
+            && let Some(desc) = extract_name_line(page.source) {
                 println!("{}({}) - {desc}", page.name, page.section);
                 found = true;
             }
-        }
     }
 
     // Also check filesystem pages.
     let pages = find_pages(name, None);
     for (sec, source) in &pages {
-        if let PageSource::File(path) = source {
-            if let Ok(content) = fs::read_to_string(path) {
-                if let Some(desc) = extract_name_line(&content) {
+        if let PageSource::File(path) = source
+            && let Ok(content) = fs::read_to_string(path)
+                && let Some(desc) = extract_name_line(&content) {
                     println!("{name}({sec}) - {desc}");
                     found = true;
                 }
-            }
-        }
     }
 
     if !found {
@@ -972,7 +968,7 @@ fn cmd_apropos(keyword: &str) {
 
         // Check description match.
         let desc_match = extract_name_line(page.source)
-            .map_or(false, |d| d.to_lowercase().contains(&kw_lower));
+            .is_some_and(|d| d.to_lowercase().contains(&kw_lower));
 
         // Check full-text match.
         let text_match = page.source.to_lowercase().contains(&kw_lower);

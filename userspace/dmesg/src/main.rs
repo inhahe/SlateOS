@@ -464,11 +464,10 @@ fn main() {
     }
 
     // Limit to last N.
-    if let Some(count) = config.count {
-        if messages.len() > count {
+    if let Some(count) = config.count
+        && messages.len() > count {
             messages = messages.split_off(messages.len() - count);
         }
-    }
 
     // Display.
     for msg in &messages {
@@ -495,11 +494,10 @@ fn main() {
             if new_messages.len() > last_count {
                 for msg in new_messages.iter().skip(last_count) {
                     // Apply filters.
-                    if let Some(min_level) = config.level_filter {
-                        if (msg.level as u8) > (min_level as u8) {
+                    if let Some(min_level) = config.level_filter
+                        && (msg.level as u8) > (min_level as u8) {
                             continue;
                         }
-                    }
                     if let Some(ref search) = config.search {
                         let search_lower = search.to_lowercase();
                         if !msg.message.to_lowercase().contains(&search_lower)

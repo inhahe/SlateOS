@@ -648,12 +648,11 @@ impl RadioApp {
                     self.search_results.clear();
                     self.screen = Screen::Browse;
                 }
-                "Return" | "Enter" => {
-                    if !self.search_results.is_empty() {
+                "Return" | "Enter"
+                    if !self.search_results.is_empty() => {
                         self.screen = Screen::Search;
                         self.search_active = false;
                     }
-                }
                 "BackSpace" => {
                     self.search_query.pop();
                     self.perform_search();
@@ -700,8 +699,8 @@ impl RadioApp {
             }
 
             // Genre filter
-            "Left" => {
-                if self.screen == Screen::Browse {
+            "Left"
+                if self.screen == Screen::Browse => {
                     // Cycle genre filter backward
                     self.genre_filter = match self.genre_filter {
                         None => Some(Genre::World),
@@ -714,9 +713,8 @@ impl RadioApp {
                     let label = self.genre_filter.map(|g| g.label()).unwrap_or("All");
                     self.status_message = format!("Genre: {label}");
                 }
-            }
-            "Right" => {
-                if self.screen == Screen::Browse {
+            "Right"
+                if self.screen == Screen::Browse => {
                     self.genre_filter = match self.genre_filter {
                         None => Some(Genre::Rock),
                         Some(g) => {
@@ -729,7 +727,6 @@ impl RadioApp {
                     let label = self.genre_filter.map(|g| g.label()).unwrap_or("All");
                     self.status_message = format!("Genre: {label}");
                 }
-            }
 
             // Favorite
             "f" if !ctrl => self.toggle_favorite(),

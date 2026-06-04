@@ -534,7 +534,7 @@ fn run_pv(args: &[String]) -> Result<(), String> {
                 cfg.name.as_deref(),
             );
             if cfg.cursor {
-                let _ = write!(stderr, "\x1b[s\x1b[999;1H{bar}\x1b[u\n");
+                let _ = writeln!(stderr, "\x1b[s\x1b[999;1H{bar}\x1b[u");
             } else {
                 let _ = writeln!(stderr, "\r{bar}");
             }
@@ -840,7 +840,7 @@ impl XorShift64 {
 ///
 /// The `seed` should incorporate pass number and file identity.
 fn generate_shred_pattern(buf: &mut [u8], pass: u32, seed: u64) {
-    if pass % 2 == 0 {
+    if pass.is_multiple_of(2) {
         // Random pass
         let mut rng = XorShift64::new(seed.wrapping_add(pass as u64));
         rng.fill_bytes(buf);
@@ -859,14 +859,13 @@ fn run_shred(args: &[String]) -> Result<(), String> {
 
     for path in &cfg.files {
         // If force, try to make the file writable.
-        if cfg.force {
-            if let Ok(meta) = fs::metadata(path) {
+        if cfg.force
+            && let Ok(meta) = fs::metadata(path) {
                 let mut perms = meta.permissions();
                 #[allow(clippy::permissions_set_readonly_false)]
                 perms.set_readonly(false);
                 let _ = fs::set_permissions(path, perms);
             }
-        }
 
         let file_size = fs::metadata(path)
             .map_err(|e| format!("cannot stat '{path}': {e}"))?
@@ -1249,8 +1248,8 @@ fn find_file_users(target: &str) -> Vec<ProcessUse> {
                     Err(_) => continue,
                 };
 
-                if let Some(link_target) = parse_proc_fd_link(pid, fd_num) {
-                    if link_target == canonical {
+                if let Some(link_target) = parse_proc_fd_link(pid, fd_num)
+                    && link_target == canonical {
                         results.push(ProcessUse {
                             pid,
                             user: read_proc_user(pid),
@@ -1259,14 +1258,13 @@ fn find_file_users(target: &str) -> Vec<ProcessUse> {
                         });
                         break; // One entry per PID
                     }
-                }
             }
         }
 
         // Check /proc/<pid>/cwd
         let cwd_path = format!("/proc/{pid}/cwd");
-        if let Ok(link) = fs::read_link(&cwd_path) {
-            if link.to_string_lossy() == canonical {
+        if let Ok(link) = fs::read_link(&cwd_path)
+            && link.to_string_lossy() == canonical {
                 // Only add if not already found via fd
                 if !results.iter().any(|r| r.pid == pid) {
                     results.push(ProcessUse {
@@ -1277,13 +1275,12 @@ fn find_file_users(target: &str) -> Vec<ProcessUse> {
                     });
                 }
             }
-        }
 
         // Check /proc/<pid>/exe
         let exe_path = format!("/proc/{pid}/exe");
-        if let Ok(link) = fs::read_link(&exe_path) {
-            if link.to_string_lossy() == canonical {
-                if !results.iter().any(|r| r.pid == pid) {
+        if let Ok(link) = fs::read_link(&exe_path)
+            && link.to_string_lossy() == canonical
+                && !results.iter().any(|r| r.pid == pid) {
                     results.push(ProcessUse {
                         pid,
                         user: read_proc_user(pid),
@@ -1291,8 +1288,6 @@ fn find_file_users(target: &str) -> Vec<ProcessUse> {
                         command: read_proc_comm(pid),
                     });
                 }
-            }
-        }
     }
 
     results
@@ -1319,16 +1314,14 @@ fn find_net_users(port_str: &str, proto: &str) -> Result<Vec<ProcessUse>, String
 
         // Field 1 is local_address as hex_ip:hex_port
         let local_addr = fields[1];
-        if let Some(port_hex) = local_addr.split(':').nth(1) {
-            if let Ok(p) = u16::from_str_radix(port_hex, 16) {
-                if p == port {
+        if let Some(port_hex) = local_addr.split(':').nth(1)
+            && let Ok(p) = u16::from_str_radix(port_hex, 16)
+                && p == port {
                     // Field 9 is the inode
                     if let Ok(inode) = fields[9].parse::<u64>() {
                         inodes.push(inode);
                     }
                 }
-            }
-        }
     }
 
     if inodes.is_empty() {
@@ -1362,10 +1355,10 @@ fn find_net_users(port_str: &str, proto: &str) -> Result<Vec<ProcessUse>, String
                         .unwrap_or(0),
                 ) {
                     // Socket inodes appear as "socket:[12345]"
-                    if let Some(rest) = link_target.strip_prefix("socket:[") {
-                        if let Some(inode_str) = rest.strip_suffix(']') {
-                            if let Ok(inode) = inode_str.parse::<u64>() {
-                                if inodes.contains(&inode) {
+                    if let Some(rest) = link_target.strip_prefix("socket:[")
+                        && let Some(inode_str) = rest.strip_suffix(']')
+                            && let Ok(inode) = inode_str.parse::<u64>()
+                                && inodes.contains(&inode) {
                                     results.push(ProcessUse {
                                         pid,
                                         user: read_proc_user(pid),
@@ -1374,9 +1367,6 @@ fn find_net_users(port_str: &str, proto: &str) -> Result<Vec<ProcessUse>, String
                                     });
                                     break;
                                 }
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -1434,8 +1424,8 @@ fn run_fuser(args: &[String]) -> Result<(), String> {
 
         if cfg.verbose {
             eprintln!(
-                "{:<25} {:>6} {:>6} {:>6} {}",
-                "FILE", "USER", "PID", "ACCESS", "COMMAND"
+                "{:<25} {:>6} {:>6} {:>6} COMMAND",
+                "FILE", "USER", "PID", "ACCESS"
             );
             for u in &users {
                 eprintln!(

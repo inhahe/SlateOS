@@ -238,7 +238,7 @@ const WEIGHT_UNITS: &[UnitDef] = &[
 // value_in_kelvin = value * factor + offset
 const TEMPERATURE_UNITS: &[UnitDef] = &[
     UnitDef::affine("\u{00B0}C", "Celsius", 1.0, 273.15),
-    UnitDef::affine("\u{00B0}F", "Fahrenheit", 5.0 / 9.0, 255.372_222_222_222_22),
+    UnitDef::affine("\u{00B0}F", "Fahrenheit", 5.0 / 9.0, 255.372_222_222_222_2),
     UnitDef::affine("K", "Kelvin", 1.0, 0.0),
     UnitDef::affine("\u{00B0}R", "Rankine", 5.0 / 9.0, 0.0),
 ];
@@ -432,7 +432,7 @@ pub fn format_number(val: f64) -> String {
 
     let abs = val.abs();
 
-    if abs >= 1e15 || abs < 1e-6 {
+    if !(1e-6..1e15).contains(&abs) {
         // Scientific notation.
         let mut buf = String::new();
         let _ = write!(buf, "{val:.6e}");
@@ -605,9 +605,7 @@ impl UnitConverterApp {
 
     /// Swap from and to units.
     pub fn swap_units(&mut self) {
-        let tmp = self.from_unit_idx;
-        self.from_unit_idx = self.to_unit_idx;
-        self.to_unit_idx = tmp;
+        std::mem::swap(&mut self.from_unit_idx, &mut self.to_unit_idx);
 
         // If there was a valid result, use it as the new input.
         if let Ok(val) = self.to_display.parse::<f64>() {
@@ -762,14 +760,13 @@ impl UnitConverterApp {
                 }
                 _ => {
                     // Type a character.
-                    if let Some(ch) = key.text {
-                        if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == 'e' || ch == 'E' {
+                    if let Some(ch) = key.text
+                        && (ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == 'e' || ch == 'E') {
                             self.from_input.insert(self.from_cursor, ch);
                             self.from_cursor += 1;
                             self.do_convert();
                             return true;
                         }
-                    }
                 }
             }
         }

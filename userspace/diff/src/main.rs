@@ -258,25 +258,23 @@ fn parse_args(args: &[String]) -> ParseResult {
                     format = Format::Unified;
                     // Check for optional inline number: `-u3`
                     let rest: String = chars[j + 1..].iter().collect();
-                    if !rest.is_empty() {
-                        if let Ok(n) = rest.parse::<usize>() {
+                    if !rest.is_empty()
+                        && let Ok(n) = rest.parse::<usize>() {
                             context_lines = Some(n);
                             // Consumed rest of this arg group.
                             j = chars.len();
                             continue;
                         }
-                    }
                 }
                 'c' => {
                     format = Format::Context;
                     let rest: String = chars[j + 1..].iter().collect();
-                    if !rest.is_empty() {
-                        if let Ok(n) = rest.parse::<usize>() {
+                    if !rest.is_empty()
+                        && let Ok(n) = rest.parse::<usize>() {
                             context_lines = Some(n);
                             j = chars.len();
                             continue;
                         }
-                    }
                 }
                 'y' => format = Format::SideBySide,
                 'W' => {
@@ -761,7 +759,7 @@ fn build_hunks(ops: &[(Op, String)], context: usize) -> Vec<Hunk> {
     let mut hunks = Vec::new();
 
     for (gs, ge) in groups {
-        let hunk_start = if gs > context { gs - context } else { 0 };
+        let hunk_start = gs.saturating_sub(context);
         let hunk_end = (ge + context + 1).min(ops.len());
 
         let hunk_ops = &ops[hunk_start..hunk_end];

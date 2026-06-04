@@ -24,7 +24,7 @@ enum Mode {
 
 fn detect_mode(argv0: &str) -> Mode {
     let name = argv0
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
@@ -350,7 +350,7 @@ fn factorize(mut n: u64) -> Vec<u64> {
     }
 
     // Trial division by 2
-    while n % 2 == 0 {
+    while n.is_multiple_of(2) {
         factors.push(2);
         n /= 2;
     }
@@ -358,7 +358,7 @@ fn factorize(mut n: u64) -> Vec<u64> {
     // Trial division by odd numbers
     let mut d = 3u64;
     while d.saturating_mul(d) <= n {
-        while n % d == 0 {
+        while n.is_multiple_of(d) {
             factors.push(d);
             n /= d;
         }
@@ -718,7 +718,7 @@ fn apply_format(value: f64, fmt: &str) -> String {
         // Extract precision
         if let Some(start) = fmt.find("%.") {
             let rest = &fmt[start + 2..];
-            let end = rest.find(|c: char| c == 'f' || c == 'g' || c == 'e').unwrap_or(rest.len());
+            let end = rest.find(['f', 'g', 'e']).unwrap_or(rest.len());
             if let Ok(prec) = rest[..end].parse::<usize>() {
                 let spec = if end < rest.len() { rest.as_bytes()[end] } else { b'f' };
                 let formatted = match spec {
@@ -798,7 +798,7 @@ fn main() {
     if let Err(e) = run() {
         let prog = env::args().next().unwrap_or_else(|| "shuf".to_string());
         let name = prog
-            .rsplit(|c| c == '/' || c == '\\')
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(&prog);
         eprintln!("{name}: {e}");

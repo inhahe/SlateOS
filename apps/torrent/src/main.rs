@@ -2643,18 +2643,18 @@ impl TorrentApp {
 
         match self.active_tab {
             Tab::Transfers => {
-                self.render_transfers(&mut cmds, content_x, content_y, content_w, content_h)
+                self.render_transfers(&mut cmds, content_x, content_y, content_w, content_h);
             }
             Tab::Details => {
-                self.render_details(&mut cmds, content_x, content_y, content_w, content_h)
+                self.render_details(&mut cmds, content_x, content_y, content_w, content_h);
             }
             Tab::Peers => self.render_peers(&mut cmds, content_x, content_y, content_w, content_h),
             Tab::Files => self.render_files(&mut cmds, content_x, content_y, content_w, content_h),
             Tab::Trackers => {
-                self.render_trackers(&mut cmds, content_x, content_y, content_w, content_h)
+                self.render_trackers(&mut cmds, content_x, content_y, content_w, content_h);
             }
             Tab::Settings => {
-                self.render_settings(&mut cmds, content_x, content_y, content_w, content_h)
+                self.render_settings(&mut cmds, content_x, content_y, content_w, content_h);
             }
         }
 

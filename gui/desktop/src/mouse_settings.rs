@@ -239,19 +239,12 @@ impl MouseConfig {
 
 /// Combined mouse + keyboard input settings.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct InputSettings {
     pub mouse: MouseConfig,
     pub keyboard: KeyboardRepeatConfig,
 }
 
-impl Default for InputSettings {
-    fn default() -> Self {
-        Self {
-            mouse: MouseConfig::default(),
-            keyboard: KeyboardRepeatConfig::default(),
-        }
-    }
-}
 
 impl InputSettings {
     pub fn new() -> Self {

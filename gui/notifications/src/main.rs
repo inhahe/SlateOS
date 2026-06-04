@@ -638,12 +638,11 @@ impl NotificationDaemon {
                 if notif.persistent {
                     continue;
                 }
-                if let Some(timeout) = notif.priority.timeout_ms() {
-                    if toast.age_ms >= timeout {
+                if let Some(timeout) = notif.priority.timeout_ms()
+                    && toast.age_ms >= timeout {
                         toast.dismissing = true;
                         toast.dismiss_age_ms = 0;
                     }
-                }
             }
         }
 
@@ -703,12 +702,11 @@ impl NotificationDaemon {
             return None;
         }
         // Ctrl+Shift+N toggles notification center.
-        if key.modifiers.ctrl && key.modifiers.shift {
-            if key.key == guitk::event::Key::N {
+        if key.modifiers.ctrl && key.modifiers.shift
+            && key.key == guitk::event::Key::N {
                 self.toggle_center();
                 return Some(DaemonAction::CenterToggled(self.center.visible));
             }
-        }
         // Escape closes notification center.
         if key.key == guitk::event::Key::Escape && self.center.visible {
             self.center.visible = false;

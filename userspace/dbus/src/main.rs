@@ -1122,8 +1122,8 @@ impl DbusMessage {
         let body_start = header_total + ((8 - (header_total % 8)) % 8);
 
         // Parse body if there's a signature
-        if let Some(ref sig) = msg.signature {
-            if !sig.is_empty() && body_start < data.len() {
+        if let Some(ref sig) = msg.signature
+            && !sig.is_empty() && body_start < data.len() {
                 let body_data = &data[body_start..];
                 let mut body_cursor = UnmarshalCursor::new(body_data, endian);
                 let mut sig_bytes = sig.as_bytes();
@@ -1133,7 +1133,6 @@ impl DbusMessage {
                     msg.body.push(val);
                 }
             }
-        }
 
         Ok(msg)
     }
@@ -1458,31 +1457,26 @@ impl MatchRule {
 
     /// Check if a message matches this rule.
     pub fn matches(&self, msg: &DbusMessage) -> bool {
-        if let Some(t) = self.msg_type {
-            if msg.message_type != t {
+        if let Some(t) = self.msg_type
+            && msg.message_type != t {
                 return false;
             }
-        }
-        if let Some(ref s) = self.sender {
-            if msg.sender.as_deref() != Some(s.as_str()) {
+        if let Some(ref s) = self.sender
+            && msg.sender.as_deref() != Some(s.as_str()) {
                 return false;
             }
-        }
-        if let Some(ref i) = self.interface {
-            if msg.interface.as_deref() != Some(i.as_str()) {
+        if let Some(ref i) = self.interface
+            && msg.interface.as_deref() != Some(i.as_str()) {
                 return false;
             }
-        }
-        if let Some(ref m) = self.member {
-            if msg.member.as_deref() != Some(m.as_str()) {
+        if let Some(ref m) = self.member
+            && msg.member.as_deref() != Some(m.as_str()) {
                 return false;
             }
-        }
-        if let Some(ref p) = self.path {
-            if msg.path.as_deref() != Some(p.as_str()) {
+        if let Some(ref p) = self.path
+            && msg.path.as_deref() != Some(p.as_str()) {
                 return false;
             }
-        }
         if let Some(ref ns) = self.path_namespace {
             match &msg.path {
                 Some(p) => {
@@ -1493,11 +1487,10 @@ impl MatchRule {
                 None => return false,
             }
         }
-        if let Some(ref d) = self.destination {
-            if msg.destination.as_deref() != Some(d.as_str()) {
+        if let Some(ref d) = self.destination
+            && msg.destination.as_deref() != Some(d.as_str()) {
                 return false;
             }
-        }
         if let Some(ref a0) = self.arg0 {
             // Match first string argument in body
             let first_str = msg.body.first().and_then(|v| {
@@ -1573,6 +1566,12 @@ pub struct NameRegistry {
     names: HashMap<String, NameEntry>,
     /// Unique connection name counter.
     next_unique_id: u64,
+}
+
+impl Default for NameRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NameRegistry {
@@ -2418,11 +2417,10 @@ impl BusDaemon {
             }
 
             // Resolve well-known name to unique name
-            if let Some(owner) = self.names.get_name_owner(dest) {
-                if !destinations.contains(&owner.to_string()) {
+            if let Some(owner) = self.names.get_name_owner(dest)
+                && !destinations.contains(&owner.to_string()) {
                     destinations.push(owner.to_string());
                 }
-            }
         }
 
         // For signals, also check match rules
@@ -2664,26 +2662,23 @@ impl BusConfig {
                 }
             } else if line.contains("<limit name=\"max_incoming_bytes\">") {
                 // Parse limits
-                if let Some(val) = extract_xml_text(line, "limit") {
-                    if let Ok(n) = val.parse::<u32>() {
+                if let Some(val) = extract_xml_text(line, "limit")
+                    && let Ok(n) = val.parse::<u32>() {
                         config.max_message_size = n;
                     }
-                }
             } else if line.contains("<limit name=\"max_connections\">") {
-                if let Some(val) = extract_xml_text(line, "limit") {
-                    if let Ok(n) = val.parse::<usize>() {
+                if let Some(val) = extract_xml_text(line, "limit")
+                    && let Ok(n) = val.parse::<usize>() {
                         config.max_connections = n;
                     }
-                }
             } else if line.contains("<allow") {
                 if let Some(rule) = parse_policy_rule(line, true) {
                     config.policies.push(rule);
                 }
-            } else if line.contains("<deny") {
-                if let Some(rule) = parse_policy_rule(line, false) {
+            } else if line.contains("<deny")
+                && let Some(rule) = parse_policy_rule(line, false) {
                     config.policies.push(rule);
                 }
-            }
         }
 
         Ok(config)
@@ -2693,11 +2688,10 @@ impl BusConfig {
     pub fn check_own_policy(&self, name: &str) -> bool {
         let mut allowed = true; // default: allow
         for rule in &self.policies {
-            if let Some(ref own_name) = rule.own {
-                if own_name == "*" || own_name == name {
+            if let Some(ref own_name) = rule.own
+                && (own_name == "*" || own_name == name) {
                     allowed = rule.allow;
                 }
-            }
         }
         allowed
     }
@@ -2712,30 +2706,25 @@ impl BusConfig {
         let mut allowed = true;
         for rule in &self.policies {
             let mut matches = true;
-            if let Some(ref dest) = rule.send_destination {
-                if destination != Some(dest.as_str()) && dest != "*" {
+            if let Some(ref dest) = rule.send_destination
+                && destination != Some(dest.as_str()) && dest != "*" {
                     matches = false;
                 }
-            }
-            if let Some(ref iface) = rule.send_interface {
-                if interface != Some(iface.as_str()) && iface != "*" {
+            if let Some(ref iface) = rule.send_interface
+                && interface != Some(iface.as_str()) && iface != "*" {
                     matches = false;
                 }
-            }
-            if let Some(ref mem) = rule.send_member {
-                if member != Some(mem.as_str()) && mem != "*" {
+            if let Some(ref mem) = rule.send_member
+                && member != Some(mem.as_str()) && mem != "*" {
                     matches = false;
                 }
-            }
             // Only apply if there was at least one send_* constraint
-            if rule.send_destination.is_some()
+            if (rule.send_destination.is_some()
                 || rule.send_interface.is_some()
-                || rule.send_member.is_some()
-            {
-                if matches {
+                || rule.send_member.is_some())
+                && matches {
                     allowed = rule.allow;
                 }
-            }
         }
         allowed
     }

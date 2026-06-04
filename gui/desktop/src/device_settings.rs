@@ -880,8 +880,7 @@ impl DeviceSettingsUI {
                 for device in &cat_devices {
                     let is_selected = self
                         .selected_device
-                        .as_ref()
-                        .map_or(false, |id| id == &device.id);
+                        .as_ref() == Some(&device.id);
 
                     cmds.push(RenderCommand::FillRect {
                         x: x + 8.0,

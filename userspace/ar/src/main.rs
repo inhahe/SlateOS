@@ -1150,7 +1150,7 @@ fn parse_ar_args(args: &[String]) -> Result<(ArOptions, String, Vec<String>), St
 
     // First arg is the flags string (like "rv" or "rcs")
     let flags = &args[0];
-    let mut chars = flags.chars().peekable();
+    let chars = flags.chars().peekable();
 
     for ch in chars {
         match ch {

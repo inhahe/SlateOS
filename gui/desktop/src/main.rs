@@ -312,22 +312,20 @@ impl DesktopShell {
                 .visible_windows()
                 .last()
                 .map(|w| w.id);
-            if let Some(fid) = self.focused_window {
-                if let Some(w) = self.windows.get_mut(&fid) {
+            if let Some(fid) = self.focused_window
+                && let Some(w) = self.windows.get_mut(&fid) {
                     w.focused = true;
                 }
-            }
         }
     }
 
     /// Focus a window (bring to front).
     pub fn focus_window(&mut self, id: WindowId) {
         // Unfocus previous
-        if let Some(prev) = self.focused_window {
-            if let Some(w) = self.windows.get_mut(&prev) {
+        if let Some(prev) = self.focused_window
+            && let Some(w) = self.windows.get_mut(&prev) {
                 w.focused = false;
             }
-        }
 
         if let Some(w) = self.windows.get_mut(&id) {
             w.focused = true;
@@ -443,11 +441,10 @@ impl DesktopShell {
     }
 
     pub fn move_window_to_desktop(&mut self, id: WindowId, desktop: u32) {
-        if desktop < self.num_desktops {
-            if let Some(w) = self.windows.get_mut(&id) {
+        if desktop < self.num_desktops
+            && let Some(w) = self.windows.get_mut(&id) {
                 w.desktop = desktop;
             }
-        }
     }
 
     // ======================================================================
@@ -493,12 +490,11 @@ impl DesktopShell {
     pub fn handle_hotkey(&mut self, key: &KeyEvent) -> bool {
         if !key.pressed {
             // Key release — check for Alt+Tab completion
-            if key.key == Key::LeftAlt || key.key == Key::RightAlt {
-                if self.alt_tab_active {
+            if (key.key == Key::LeftAlt || key.key == Key::RightAlt)
+                && self.alt_tab_active {
                     self.finish_alt_tab();
                     return true;
                 }
-            }
             return false;
         }
 
@@ -564,15 +560,14 @@ impl DesktopShell {
 
         // Super+Down: restore/minimize
         if key.modifiers.super_key && key.key == Key::Down {
-            if let Some(id) = self.focused_window {
-                if let Some(w) = self.windows.get(&id) {
+            if let Some(id) = self.focused_window
+                && let Some(w) = self.windows.get(&id) {
                     if w.state == WindowState::Maximized {
                         self.restore_window(id);
                     } else {
                         self.minimize_window(id);
                     }
                 }
-            }
             return true;
         }
 

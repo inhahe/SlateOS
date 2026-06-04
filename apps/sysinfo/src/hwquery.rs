@@ -711,6 +711,12 @@ impl HardwareProvider for SyscallProvider {
 /// Used for development, testing, and as a fallback when live queries fail.
 pub struct StubProvider;
 
+impl Default for StubProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StubProvider {
     pub fn new() -> Self {
         Self
@@ -955,6 +961,12 @@ pub struct FallbackProvider {
     stub: StubProvider,
 }
 
+impl Default for FallbackProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FallbackProvider {
     pub fn new() -> Self {
         Self {
@@ -1158,11 +1170,10 @@ impl RefreshManager {
     /// Get CPU info (cached with TTL).
     pub fn cpu(&mut self) -> CpuInfo {
         let now = Self::now();
-        if let Some(ref entry) = self.cpu_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.cpu_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_cpu() {
             Ok(info) => {
@@ -1185,11 +1196,10 @@ impl RefreshManager {
     /// Get memory info (cached with TTL).
     pub fn memory(&mut self) -> MemoryInfo {
         let now = Self::now();
-        if let Some(ref entry) = self.memory_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.memory_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_memory() {
             Ok(info) => {
@@ -1208,11 +1218,10 @@ impl RefreshManager {
     /// Get storage info (cached with TTL).
     pub fn storage(&mut self) -> Vec<DiskInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.storage_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.storage_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_storage() {
             Ok(info) => {
@@ -1226,11 +1235,10 @@ impl RefreshManager {
     /// Get network adapter info (cached with TTL).
     pub fn network(&mut self) -> Vec<NetworkAdapterInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.network_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.network_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_network() {
             Ok(info) => {
@@ -1244,11 +1252,10 @@ impl RefreshManager {
     /// Get display info (cached with TTL).
     pub fn display(&mut self) -> DisplayInfo {
         let now = Self::now();
-        if let Some(ref entry) = self.display_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.display_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_display() {
             Ok(info) => {
@@ -1268,11 +1275,10 @@ impl RefreshManager {
     /// Get PCI devices (cached with TTL).
     pub fn pci(&mut self) -> Vec<PciDeviceInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.pci_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.pci_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_pci() {
             Ok(info) => {
@@ -1286,11 +1292,10 @@ impl RefreshManager {
     /// Get USB devices (cached with TTL).
     pub fn usb(&mut self) -> Vec<UsbDeviceInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.usb_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.usb_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_usb() {
             Ok(info) => {
@@ -1304,11 +1309,10 @@ impl RefreshManager {
     /// Get sound devices (cached with TTL).
     pub fn sound(&mut self) -> Vec<SoundInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.sound_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.sound_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_sound() {
             Ok(info) => {
@@ -1322,11 +1326,10 @@ impl RefreshManager {
     /// Get IRQs (cached with TTL).
     pub fn irqs(&mut self) -> Vec<IrqInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.irq_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.irq_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_irqs() {
             Ok(info) => {
@@ -1340,11 +1343,10 @@ impl RefreshManager {
     /// Get I/O ports (cached with TTL).
     pub fn io_ports(&mut self) -> Vec<IoPortInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.ioport_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.ioport_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_io_ports() {
             Ok(info) => {
@@ -1358,11 +1360,10 @@ impl RefreshManager {
     /// Get memory map (cached with TTL).
     pub fn memory_map(&mut self) -> Vec<MemoryMapEntry> {
         let now = Self::now();
-        if let Some(ref entry) = self.memmap_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.memmap_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_memory_map() {
             Ok(info) => {
@@ -1376,11 +1377,10 @@ impl RefreshManager {
     /// Get DMA channels (cached with TTL).
     pub fn dma(&mut self) -> Vec<DmaInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.dma_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.dma_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_dma() {
             Ok(info) => {
@@ -1394,11 +1394,10 @@ impl RefreshManager {
     /// Get services (cached with TTL).
     pub fn services(&mut self) -> Vec<ServiceInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.service_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.service_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_services() {
             Ok(info) => {
@@ -1412,11 +1411,10 @@ impl RefreshManager {
     /// Get processes (cached with TTL).
     pub fn processes(&mut self) -> Vec<ProcessEntry> {
         let now = Self::now();
-        if let Some(ref entry) = self.process_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.process_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_processes() {
             Ok(info) => {
@@ -1430,11 +1428,10 @@ impl RefreshManager {
     /// Get drivers (cached with TTL).
     pub fn drivers(&mut self) -> Vec<DriverInfo> {
         let now = Self::now();
-        if let Some(ref entry) = self.driver_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.driver_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_drivers() {
             Ok(info) => {
@@ -1448,11 +1445,10 @@ impl RefreshManager {
     /// Get environment variables (cached with TTL).
     pub fn env_vars(&mut self) -> Vec<(String, String)> {
         let now = Self::now();
-        if let Some(ref entry) = self.env_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.env_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_env_vars() {
             Ok(info) => {
@@ -1466,11 +1462,10 @@ impl RefreshManager {
     /// Get startup programs (cached with TTL).
     pub fn startup(&mut self) -> Vec<StartupEntry> {
         let now = Self::now();
-        if let Some(ref entry) = self.startup_cache {
-            if !entry.is_stale(now) {
+        if let Some(ref entry) = self.startup_cache
+            && !entry.is_stale(now) {
                 return entry.data.clone();
             }
-        }
         self.refresh_count = self.refresh_count.saturating_add(1);
         match self.provider.query_startup() {
             Ok(info) => {

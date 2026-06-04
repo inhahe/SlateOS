@@ -136,7 +136,7 @@ const WIN1252_MAP: [u32; 32] = [
 ];
 
 fn windows1252_to_unicode(byte: u8) -> u32 {
-    if byte >= 0x80 && byte <= 0x9F {
+    if (0x80..=0x9F).contains(&byte) {
         WIN1252_MAP[(byte - 0x80) as usize]
     } else {
         u32::from(byte)
@@ -148,7 +148,7 @@ fn unicode_to_windows1252(cp: u32) -> Option<u8> {
     if cp < 0x80 {
         return Some(cp as u8);
     }
-    if cp >= 0xA0 && cp <= 0xFF {
+    if (0xA0..=0xFF).contains(&cp) {
         return Some(cp as u8);
     }
     // Search the 0x80..0x9F mapping.

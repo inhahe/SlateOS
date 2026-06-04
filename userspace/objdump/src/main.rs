@@ -1588,10 +1588,8 @@ fn parse_nm_args() -> NmOpts {
                                     opts.radix = c;
                                 }
                             }
-                        } else {
-                            if let Some(c) = rest_str.chars().next() {
-                                opts.radix = c;
-                            }
+                        } else if let Some(c) = rest_str.chars().next() {
+                            opts.radix = c;
                         }
                         j = chars.len();
                         continue;

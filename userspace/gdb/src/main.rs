@@ -1820,7 +1820,7 @@ fn gdb_packet(data: &[u8], buf: &mut [u8]) -> usize {
         return 0;
     }
     buf[0] = b'$';
-    buf[1..1 + data.len()].copy_from_slice(data);
+    buf[1..=data.len()].copy_from_slice(data);
     let csum = gdb_checksum(data);
     buf[1 + data.len()] = b'#';
     let hex_chars = b"0123456789abcdef";

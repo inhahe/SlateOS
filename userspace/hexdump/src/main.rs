@@ -229,13 +229,13 @@ fn parse_args_hexdump(args: &[String]) -> Result<Options, String> {
                 'c' => opts.mode = DisplayMode::CharDisplay,
                 'v' => opts.no_squeeze = true,
                 'n' => {
-                    let val = get_option_value(&chars, j, &args, &mut i)?;
+                    let val = get_option_value(&chars, j, args, &mut i)?;
                     opts.length = Some(parse_number(&val)?);
                     j = chars.len();
                     continue;
                 }
                 's' => {
-                    let val = get_option_value(&chars, j, &args, &mut i)?;
+                    let val = get_option_value(&chars, j, args, &mut i)?;
                     opts.skip = parse_number(&val)?;
                     j = chars.len();
                     continue;
@@ -292,19 +292,19 @@ fn parse_args_xxd(args: &[String]) -> Result<Options, String> {
                 'i' => opts.mode = DisplayMode::XxdCInclude,
                 'p' => opts.mode = DisplayMode::XxdPlainHex,
                 'l' => {
-                    let val = get_option_value(&chars, j, &args, &mut i)?;
+                    let val = get_option_value(&chars, j, args, &mut i)?;
                     opts.length = Some(parse_number(&val)?);
                     j = chars.len();
                     continue;
                 }
                 's' => {
-                    let val = get_option_value(&chars, j, &args, &mut i)?;
+                    let val = get_option_value(&chars, j, args, &mut i)?;
                     opts.skip = parse_number(&val)?;
                     j = chars.len();
                     continue;
                 }
                 'c' => {
-                    let val = get_option_value(&chars, j, &args, &mut i)?;
+                    let val = get_option_value(&chars, j, args, &mut i)?;
                     let n = parse_number(&val)?;
                     if n == 0 || n > 256 {
                         return Err(format!("invalid column count: {n}"));
@@ -314,7 +314,7 @@ fn parse_args_xxd(args: &[String]) -> Result<Options, String> {
                     continue;
                 }
                 'g' => {
-                    let val = get_option_value(&chars, j, &args, &mut i)?;
+                    let val = get_option_value(&chars, j, args, &mut i)?;
                     let n = parse_number(&val)?;
                     if n > 256 {
                         return Err(format!("invalid group size: {n}"));
@@ -339,7 +339,7 @@ fn parse_args_xxd(args: &[String]) -> Result<Options, String> {
 fn is_xxd_invocation() -> bool {
     let argv0 = env::args().next().unwrap_or_default();
     let basename = argv0
-        .rsplit(|c: char| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(&argv0);
     // Strip .exe suffix on Windows-like platforms.
@@ -461,7 +461,7 @@ fn write_canonical_line(
     // ASCII sidebar.
     write!(out, " |")?;
     for &b in data {
-        let ch = if b >= 0x20 && b <= 0x7E {
+        let ch = if (0x20..=0x7E).contains(&b) {
             b as char
         } else {
             '.'
@@ -508,9 +508,9 @@ fn dump_canonical(
 
             if line_len == DEFAULT_LINE_WIDTH {
                 // Check for duplicate line squeezing.
-                if !no_squeeze {
-                    if let Some(ref prev) = prev_line {
-                        if prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
+                if !no_squeeze
+                    && let Some(ref prev) = prev_line
+                        && prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
                             if !squeezed {
                                 writeln!(out, "*")?;
                                 squeezed = true;
@@ -519,8 +519,6 @@ fn dump_canonical(
                             line_len = 0;
                             continue;
                         }
-                    }
-                }
 
                 write_canonical_line(out, offset, &line_buf)?;
                 squeezed = false;
@@ -607,7 +605,7 @@ fn dump_two_byte_generic(
         if n == 0 {
             if line_len > 0 {
                 write!(out, "{offset:07x}")?;
-                let pairs = (line_len + 1) / 2;
+                let pairs = line_len.div_ceil(2);
                 for i in 0..pairs {
                     let lo = line_buf[i * 2];
                     let hi = if i * 2 + 1 < line_len {
@@ -632,9 +630,9 @@ fn dump_two_byte_generic(
             pos += copy_len;
 
             if line_len == DEFAULT_LINE_WIDTH {
-                if !no_squeeze {
-                    if let Some(ref prev) = prev_line {
-                        if prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
+                if !no_squeeze
+                    && let Some(ref prev) = prev_line
+                        && prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
                             if !squeezed {
                                 writeln!(out, "*")?;
                                 squeezed = true;
@@ -643,8 +641,6 @@ fn dump_two_byte_generic(
                             line_len = 0;
                             continue;
                         }
-                    }
-                }
 
                 write!(out, "{offset:07x}")?;
                 for i in 0..8 {
@@ -746,9 +742,9 @@ fn dump_one_byte_generic(
             pos += copy_len;
 
             if line_len == DEFAULT_LINE_WIDTH {
-                if !no_squeeze {
-                    if let Some(ref prev) = prev_line {
-                        if prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
+                if !no_squeeze
+                    && let Some(ref prev) = prev_line
+                        && prev_line_len == DEFAULT_LINE_WIDTH && &line_buf == prev {
                             if !squeezed {
                                 writeln!(out, "*")?;
                                 squeezed = true;
@@ -757,8 +753,6 @@ fn dump_one_byte_generic(
                             line_len = 0;
                             continue;
                         }
-                    }
-                }
 
                 write!(out, "{offset:07x}")?;
                 for i in 0..DEFAULT_LINE_WIDTH {
@@ -931,7 +925,7 @@ fn write_xxd_line(
     // ASCII portion.
     write!(out, "  ")?;
     for &b in data {
-        let ch = if b >= 0x20 && b <= 0x7E {
+        let ch = if (0x20..=0x7E).contains(&b) {
             b as char
         } else {
             '.'
@@ -988,7 +982,7 @@ fn dump_xxd_c_include(
 /// Convert a filename to a valid C identifier.
 fn make_c_identifier(name: &str) -> String {
     let basename = name
-        .rsplit(|c: char| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(name);
     let mut result = String::with_capacity(basename.len());

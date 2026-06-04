@@ -541,7 +541,7 @@ impl SimonApp {
             }
             Key::Right => {
                 self.show_selection = true;
-                if self.selected_button % 2 == 0 {
+                if self.selected_button.is_multiple_of(2) {
                     self.selected_button += 1;
                 }
             }
@@ -549,11 +549,10 @@ impl SimonApp {
             Key::Enter | Key::Space => {
                 if self.state == GameState::GameOver {
                     self.start_new_game();
-                } else if self.state == GameState::PlayerInput {
-                    if let Some(color) = SimonColor::from_index(self.selected_button) {
+                } else if self.state == GameState::PlayerInput
+                    && let Some(color) = SimonColor::from_index(self.selected_button) {
                         self.player_press(color);
                     }
-                }
             }
             // Number keys 1-4 directly press a button.
             Key::Num1 => {
@@ -573,17 +572,15 @@ impl SimonApp {
                 self.speed = self.speed.next();
             }
             // R restarts (only on game over).
-            Key::R => {
-                if self.state == GameState::GameOver {
+            Key::R
+                if self.state == GameState::GameOver => {
                     self.start_new_game();
                 }
-            }
             // Escape restarts on game over.
-            Key::Escape => {
-                if self.state == GameState::GameOver {
+            Key::Escape
+                if self.state == GameState::GameOver => {
                     self.start_new_game();
                 }
-            }
             _ => {}
         }
     }
@@ -596,11 +593,10 @@ impl SimonApp {
         }
         self.selected_button = idx;
         self.show_selection = true;
-        if self.state == GameState::PlayerInput {
-            if let Some(color) = SimonColor::from_index(idx) {
+        if self.state == GameState::PlayerInput
+            && let Some(color) = SimonColor::from_index(idx) {
                 self.player_press(color);
             }
-        }
     }
 
     /// Handle incoming events (called by the framework).

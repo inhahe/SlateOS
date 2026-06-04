@@ -25,7 +25,7 @@ enum Mode {
 
 fn detect_mode(argv0: &str) -> Mode {
     let name = argv0
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
@@ -572,7 +572,7 @@ fn main() {
     if let Err(e) = run() {
         let prog = env::args().next().unwrap_or_else(|| "getopt".to_string());
         let name = prog
-            .rsplit(|c| c == '/' || c == '\\')
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(&prog);
         eprintln!("{name}: {e}");

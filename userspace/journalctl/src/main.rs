@@ -315,11 +315,10 @@ impl JournalEntry {
             ));
         }
         // Remove trailing comma from last field line.
-        if let Some(last) = lines.last_mut() {
-            if last.ends_with(',') {
+        if let Some(last) = lines.last_mut()
+            && last.ends_with(',') {
                 last.pop();
             }
-        }
         lines.push("}".to_string());
         lines.join("\n")
     }
@@ -439,11 +438,10 @@ fn parse_json_string_value(s: &str, pos: &mut usize) -> Option<String> {
                     // \uXXXX — parse 4 hex digits.
                     if *pos + 5 < bytes.len() {
                         let hex = &s[*pos + 2..*pos + 6];
-                        if let Ok(code) = u32::from_str_radix(hex, 16) {
-                            if let Some(ch) = char::from_u32(code) {
+                        if let Ok(code) = u32::from_str_radix(hex, 16)
+                            && let Some(ch) = char::from_u32(code) {
                                 result.push(ch);
                             }
-                        }
                         *pos += 6;
                     } else {
                         *pos += 2;
@@ -625,7 +623,7 @@ fn parse_datetime(s: &str) -> Option<u64> {
     let month: u32 = date_fields[1].parse().ok()?;
     let day: u32 = date_fields[2].parse().ok()?;
 
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 
@@ -1096,34 +1094,30 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
             }
 
             // Priority filter: show entries at this level or more severe.
-            if let Some(max_prio) = cfg.priority_filter {
-                if (e.priority as u8) > (max_prio as u8) {
+            if let Some(max_prio) = cfg.priority_filter
+                && (e.priority as u8) > (max_prio as u8) {
                     return false;
                 }
-            }
 
             // Since filter.
-            if let Some(since) = cfg.since {
-                if e.timestamp < since {
+            if let Some(since) = cfg.since
+                && e.timestamp < since {
                     return false;
                 }
-            }
 
             // Until filter.
-            if let Some(until) = cfg.until {
-                if e.timestamp > until {
+            if let Some(until) = cfg.until
+                && e.timestamp > until {
                     return false;
                 }
-            }
 
             // Boot filter.
-            if let Some(ref boot) = cfg.boot_filter {
-                if !boot.is_empty() && e.boot_id != *boot {
+            if let Some(ref boot) = cfg.boot_filter
+                && !boot.is_empty() && e.boot_id != *boot {
                     return false;
                 }
                 // Empty boot_filter means "current boot" -- handled after
                 // collecting entries (we pick the most recent boot_id).
-            }
 
             // Dmesg: only kernel messages.
             if cfg.dmesg {
@@ -1134,11 +1128,10 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
             }
 
             // Grep filter.
-            if let Some(ref pattern) = cfg.grep_pattern {
-                if !pattern_matches(&e.message, pattern) {
+            if let Some(ref pattern) = cfg.grep_pattern
+                && !pattern_matches(&e.message, pattern) {
                     return false;
                 }
-            }
 
             true
         })
@@ -1146,14 +1139,13 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
         .collect();
 
     // Handle empty boot_filter (current boot = most recent boot_id).
-    if let Some(ref boot) = cfg.boot_filter {
-        if boot.is_empty() {
+    if let Some(ref boot) = cfg.boot_filter
+        && boot.is_empty() {
             // Find the most recent boot_id.
             if let Some(latest_boot) = find_latest_boot_id(&result) {
                 result.retain(|e| e.boot_id == latest_boot);
             }
         }
-    }
 
     // Reverse if requested.
     if cfg.reverse {
@@ -1161,8 +1153,8 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
     }
 
     // Limit number of entries.
-    if let Some(n) = cfg.num_entries {
-        if result.len() > n {
+    if let Some(n) = cfg.num_entries
+        && result.len() > n {
             if cfg.reverse {
                 // Already reversed: take the first n.
                 result.truncate(n);
@@ -1172,7 +1164,6 @@ fn apply_filters(entries: &[JournalEntry], cfg: &Config) -> Vec<JournalEntry> {
                 result = result.split_off(start);
             }
         }
-    }
 
     result
 }
@@ -1499,32 +1490,28 @@ fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
             return false;
         }
     }
-    if let Some(max_prio) = cfg.priority_filter {
-        if (entry.priority as u8) > (max_prio as u8) {
+    if let Some(max_prio) = cfg.priority_filter
+        && (entry.priority as u8) > (max_prio as u8) {
             return false;
         }
-    }
-    if let Some(since) = cfg.since {
-        if entry.timestamp < since {
+    if let Some(since) = cfg.since
+        && entry.timestamp < since {
             return false;
         }
-    }
-    if let Some(until) = cfg.until {
-        if entry.timestamp > until {
+    if let Some(until) = cfg.until
+        && entry.timestamp > until {
             return false;
         }
-    }
     if cfg.dmesg {
         let u = entry.unit.to_ascii_lowercase();
         if u != "kernel" && u != "kern" && u != "dmesg" {
             return false;
         }
     }
-    if let Some(ref pattern) = cfg.grep_pattern {
-        if !pattern_matches(&entry.message, pattern) {
+    if let Some(ref pattern) = cfg.grep_pattern
+        && !pattern_matches(&entry.message, pattern) {
             return false;
         }
-    }
     true
 }
 

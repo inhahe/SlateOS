@@ -635,11 +635,10 @@ pub fn build_context_menu(
         let mut ext_entries: Vec<ContextMenuEntry> = Vec::new();
 
         for ext in &matches {
-            if let Some(prev) = prev_position {
-                if ext.position != prev {
+            if let Some(prev) = prev_position
+                && ext.position != prev {
                     ext_entries.push(ContextMenuEntry::Separator);
                 }
-            }
             ext_entries.push(ContextMenuEntry::Extension {
                 id: ext.id,
                 label: ext.label.clone(),
@@ -911,11 +910,10 @@ impl ExtensionSettingsUI {
         self.extensions_snapshot
             .iter()
             .filter(|e| {
-                if let Some(app) = &self.app_filter {
-                    if e.app_name != *app {
+                if let Some(app) = &self.app_filter
+                    && e.app_name != *app {
                         return false;
                     }
-                }
                 if !self.search_text.is_empty() {
                     let lower = self.search_text.to_lowercase();
                     if !e.label.to_lowercase().contains(&lower)

@@ -213,7 +213,7 @@ impl Board {
         let mut c = pos.col + dc;
 
         // Walk in the direction, collecting opponent pieces
-        while r >= 0 && r < 8 && c >= 0 && c < 8 {
+        while (0..8).contains(&r) && (0..8).contains(&c) {
             let current = self.cells[r as usize][c as usize];
             if current == opponent {
                 flipped.push(Pos::new(r, c));
@@ -547,26 +547,22 @@ impl ReversiApp {
         }
 
         match event.key {
-            Key::Up => {
-                if self.cursor_row > 0 {
+            Key::Up
+                if self.cursor_row > 0 => {
                     self.cursor_row -= 1;
                 }
-            }
-            Key::Down => {
-                if self.cursor_row < 7 {
+            Key::Down
+                if self.cursor_row < 7 => {
                     self.cursor_row += 1;
                 }
-            }
-            Key::Left => {
-                if self.cursor_col > 0 {
+            Key::Left
+                if self.cursor_col > 0 => {
                     self.cursor_col -= 1;
                 }
-            }
-            Key::Right => {
-                if self.cursor_col < 7 {
+            Key::Right
+                if self.cursor_col < 7 => {
                     self.cursor_col += 1;
                 }
-            }
             Key::Enter | Key::Space => {
                 self.try_place_piece();
             }
@@ -726,7 +722,7 @@ impl ReversiApp {
             if bx >= 0.0 && by >= 0.0 {
                 let col = (bx / CELL_SIZE) as i32;
                 let row = (by / CELL_SIZE) as i32;
-                if col >= 0 && col < 8 && row >= 0 && row < 8 {
+                if (0..8).contains(&col) && (0..8).contains(&row) {
                     self.cursor_row = row;
                     self.cursor_col = col;
                     self.try_place_piece();

@@ -94,7 +94,7 @@ impl TowersOfHanoi {
     }
 
     fn set_disks(&mut self, n: usize) {
-        if n >= 3 && n <= MAX_DISKS {
+        if (3..=MAX_DISKS).contains(&n) {
             self.num_disks = n;
             self.reset_pegs();
         }
@@ -164,12 +164,11 @@ impl TowersOfHanoi {
         if self.state != GameState::Playing || self.held_disk.is_some() {
             return;
         }
-        if let Some((from_peg, to_peg)) = self.undo_stack.pop() {
-            if let Some(disk) = self.pegs[to_peg].pop() {
+        if let Some((from_peg, to_peg)) = self.undo_stack.pop()
+            && let Some(disk) = self.pegs[to_peg].pop() {
                 self.pegs[from_peg].push(disk);
                 self.moves = self.moves.saturating_sub(1);
             }
-        }
     }
 
     fn check_win(&mut self) {
@@ -191,19 +190,17 @@ impl TowersOfHanoi {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. }) => {
-                if *modifiers == Modifiers::NONE {
+            Event::Key(KeyEvent { key, modifiers, .. })
+                if *modifiers == Modifiers::NONE => {
                     match key {
-                        Key::Left => {
-                            if self.selected_peg > 0 {
+                        Key::Left
+                            if self.selected_peg > 0 => {
                                 self.selected_peg -= 1;
                             }
-                        }
-                        Key::Right => {
-                            if self.selected_peg < NUM_PEGS - 1 {
+                        Key::Right
+                            if self.selected_peg < NUM_PEGS - 1 => {
                                 self.selected_peg += 1;
                             }
-                        }
                         Key::Num1 => self.selected_peg = 0,
                         Key::Num2 => self.selected_peg = 1,
                         Key::Num3 => self.selected_peg = 2,
@@ -218,24 +215,21 @@ impl TowersOfHanoi {
                         Key::Z => self.undo(),
                         Key::N => self.reset_pegs(),
                         Key::H => self.show_help = !self.show_help,
-                        Key::Up => {
-                            if self.num_disks < MAX_DISKS && self.state != GameState::Playing
-                                || (self.moves == 0 && self.held_disk.is_none())
-                            {
+                        Key::Up
+                            if (self.num_disks < MAX_DISKS && self.state != GameState::Playing
+                                || (self.moves == 0 && self.held_disk.is_none()))
+                            => {
                                 self.set_disks(self.num_disks + 1);
                             }
-                        }
-                        Key::Down => {
-                            if self.num_disks > 3 && self.state != GameState::Playing
-                                || (self.moves == 0 && self.held_disk.is_none())
-                            {
+                        Key::Down
+                            if (self.num_disks > 3 && self.state != GameState::Playing
+                                || (self.moves == 0 && self.held_disk.is_none()))
+                            => {
                                 self.set_disks(self.num_disks - 1);
                             }
-                        }
                         _ => {}
                     }
                 }
-            }
             Event::Mouse(MouseEvent { x, kind, .. }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     // Determine which peg was clicked

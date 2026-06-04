@@ -156,8 +156,8 @@ fn read_interfaces() -> Vec<InterfaceInfo> {
     }
 
     // Fallback: parse /proc/net/dev.
-    if interfaces.is_empty() {
-        if let Some(content) = read_file("/proc/net/dev") {
+    if interfaces.is_empty()
+        && let Some(content) = read_file("/proc/net/dev") {
             let mut skip_header = 2;
             for line in content.lines() {
                 if skip_header > 0 {
@@ -191,7 +191,6 @@ fn read_interfaces() -> Vec<InterfaceInfo> {
                 }
             }
         }
-    }
 
     interfaces.sort_by(|a, b| a.name.cmp(&b.name));
     interfaces
@@ -251,8 +250,8 @@ fn read_routes() -> Vec<RouteEntry> {
     }
 
     // Also try our kernel's route format: /proc/net/routes.
-    if routes.is_empty() {
-        if let Some(content) = read_file("/proc/net/routes") {
+    if routes.is_empty()
+        && let Some(content) = read_file("/proc/net/routes") {
             for line in content.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') {
@@ -293,7 +292,6 @@ fn read_routes() -> Vec<RouteEntry> {
                 }
             }
         }
-    }
 
     routes
 }
@@ -432,11 +430,10 @@ fn cmd_addr_show(filter: Option<&str>) {
     let interfaces = read_interfaces();
 
     for (idx, iface) in interfaces.iter().enumerate() {
-        if let Some(f) = filter {
-            if iface.name != f {
+        if let Some(f) = filter
+            && iface.name != f {
                 continue;
             }
-        }
 
         println!(
             "{}: {}: <{}> mtu {}",
@@ -495,8 +492,8 @@ fn cmd_neigh_show() {
         return;
     }
 
-    println!("{:<18} {:<20} {:<10} {}", "Address", "HW Address", "Iface", "State");
-    println!("{:<18} {:<20} {:<10} {}", "-------", "----------", "-----", "-----");
+    println!("{:<18} {:<20} {:<10} State", "Address", "HW Address", "Iface");
+    println!("{:<18} {:<20} {:<10} -----", "-------", "----------", "-----");
 
     for e in &entries {
         println!("{:<18} {:<20} {:<10} {}", e.ip, e.mac, e.iface, e.state);
@@ -747,7 +744,7 @@ fn main() {
         "route" | "r" => {
             if args.len() >= 3 {
                 match args[2].as_str() {
-                    "add" => cmd_route_add(&args[3..].to_vec()),
+                    "add" => cmd_route_add(&args[3..]),
                     "del" | "delete" => {
                         if args.len() < 4 {
                             eprintln!("usage: ip route del <destination>");

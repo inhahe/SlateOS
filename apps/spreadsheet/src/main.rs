@@ -115,7 +115,7 @@ impl CellAddr {
             return None;
         }
         let col_char = bytes[0];
-        if col_char < b'A' || col_char > b'Z' {
+        if !(b'A'..=b'Z').contains(&col_char) {
             return None;
         }
         let col = (col_char - b'A') as usize;
@@ -137,8 +137,10 @@ impl CellAddr {
 
 /// The type of data stored in a cell.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum CellValue {
     /// No data.
+    #[default]
     Empty,
     /// Plain text string.
     Text(String),
@@ -178,11 +180,6 @@ impl CellValue {
     }
 }
 
-impl Default for CellValue {
-    fn default() -> Self {
-        Self::Empty
-    }
-}
 
 /// Cell error types.
 #[derive(Clone, Debug, PartialEq)]
@@ -215,8 +212,10 @@ impl CellError {
 
 /// How to format numeric values in a cell.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum NumberFormat {
     /// General — display as-is.
+    #[default]
     General,
     /// Fixed decimal places.
     Decimal(u8),
@@ -254,11 +253,6 @@ impl NumberFormat {
     }
 }
 
-impl Default for NumberFormat {
-    fn default() -> Self {
-        Self::General
-    }
-}
 
 // ============================================================================
 // Text alignment
@@ -512,11 +506,10 @@ impl Selection {
         let mut vals = Vec::new();
         for range in &self.ranges {
             for addr in range.iter() {
-                if let Some(cell) = sheet.cells.get(&addr) {
-                    if let Some(n) = cell.value.as_number() {
+                if let Some(cell) = sheet.cells.get(&addr)
+                    && let Some(n) = cell.value.as_number() {
                         vals.push(n);
                     }
-                }
             }
         }
         vals
@@ -813,7 +806,7 @@ impl Sheet {
         // Apply sorted data
         for (dest_offset, row_data) in all_row_data.iter().enumerate() {
             let dest_row = start_row + dest_offset;
-            for &(_, ref src_cell) in row_data {
+            for (_, src_cell) in row_data {
                 let col_idx = row_data.iter().position(|(_, c)| std::ptr::eq(c, src_cell)).unwrap_or(0);
                 let dest_addr = CellAddr::new(col_idx, dest_row);
                 let old = self.get_cell(dest_addr);
@@ -1302,7 +1295,8 @@ impl<'a> FormulaEvaluator<'a> {
     /// Parse and evaluate a function call.
     fn parse_function_call(&mut self, name: &str) -> Result<CellValue, CellError> {
         self.expect_token(&FormulaToken::LeftParen)?;
-        let result = match name {
+        
+        match name {
             "SUM" => self.eval_aggregate_func(|nums| nums.iter().sum()),
             "AVG" | "AVERAGE" => self.eval_aggregate_func(|nums| {
                 if nums.is_empty() { 0.0 } else { nums.iter().sum::<f64>() / nums.len() as f64 }
@@ -1355,8 +1349,7 @@ impl<'a> FormulaEvaluator<'a> {
                 return Ok(CellValue::Text(s.to_lowercase()));
             }
             _ => return Err(CellError::NameError),
-        };
-        result
+        }
     }
 
     /// Evaluate an aggregate function (SUM, AVG, MIN, MAX) that collects numbers.
@@ -2446,15 +2439,14 @@ impl SpreadsheetApp {
             }
             _ => {
                 // Start editing if a printable character is typed
-                if let Some(ch) = event.text {
-                    if !ch.is_control() {
+                if let Some(ch) = event.text
+                    && !ch.is_control() {
                         self.mode = InteractionMode::Editing {
                             text: String::from(ch),
                             cursor_pos: 1,
                         };
                         return EventResult::Consumed;
                     }
-                }
                 EventResult::Ignored
             }
         }
@@ -2485,11 +2477,10 @@ impl SpreadsheetApp {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = event.text {
-                    if !ch.is_control() {
+                if let Some(ch) = event.text
+                    && !ch.is_control() {
                         self.find_replace.search_text.push(ch);
                     }
-                }
                 EventResult::Consumed
             }
         }
@@ -3841,8 +3832,8 @@ fn handle_editing_key(text: &mut String, cursor_pos: &mut usize, event: &KeyEven
             EventResult::Consumed
         }
         _ => {
-            if let Some(ch) = event.text {
-                if !ch.is_control() {
+            if let Some(ch) = event.text
+                && !ch.is_control() {
                     let byte_pos = text.char_indices()
                         .nth(*cursor_pos)
                         .map(|(i, _)| i)
@@ -3851,7 +3842,6 @@ fn handle_editing_key(text: &mut String, cursor_pos: &mut usize, event: &KeyEven
                     *cursor_pos += 1;
                     return EventResult::Consumed;
                 }
-            }
             EventResult::Ignored
         }
     }

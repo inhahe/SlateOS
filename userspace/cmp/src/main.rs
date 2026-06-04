@@ -443,7 +443,7 @@ fn read_full(reader: &mut dyn Read, buf: &mut [u8]) -> io::Result<usize> {
 /// Format a byte as a printable character for `-b` mode.
 /// Non-printable bytes are shown as escaped sequences or as-is if printable ASCII.
 fn byte_display(b: u8) -> String {
-    if b >= 0x20 && b < 0x7f {
+    if (0x20..0x7f).contains(&b) {
         let c = b as char;
         format!("{c}")
     } else {
@@ -636,22 +636,20 @@ fn run_cmp(config: &Config) -> i32 {
     };
 
     // Skip initial bytes if requested.
-    if config.skip1 > 0 {
-        if let Err(msg) = skip_bytes(r1.as_mut(), config.skip1) {
+    if config.skip1 > 0
+        && let Err(msg) = skip_bytes(r1.as_mut(), config.skip1) {
             if !config.silent {
                 eprintln!("cmp: {}: {msg}", config.path1);
             }
             return 2;
         }
-    }
-    if config.skip2 > 0 {
-        if let Err(msg) = skip_bytes(r2.as_mut(), config.skip2) {
+    if config.skip2 > 0
+        && let Err(msg) = skip_bytes(r2.as_mut(), config.skip2) {
             if !config.silent {
                 eprintln!("cmp: {}: {msg}", config.path2);
             }
             return 2;
         }
-    }
 
     // Run the comparison.
     let result = match compare(r1.as_mut(), r2.as_mut(), config.verbose, config.max_bytes) {
@@ -747,8 +745,8 @@ fn run_cmp(config: &Config) -> i32 {
                 // Print any differences found before EOF.
                 if config.verbose && !diffs.is_empty() {
                     print_verbose(diffs, config.print_bytes);
-                } else if !config.verbose {
-                    if let Some(first) = diffs.first() {
+                } else if !config.verbose
+                    && let Some(first) = diffs.first() {
                         if config.print_bytes {
                             let out = io::stdout();
                             let mut w = out.lock();
@@ -768,7 +766,6 @@ fn run_cmp(config: &Config) -> i32 {
                             print_default(first, &config.path1, &config.path2);
                         }
                     }
-                }
                 eprintln!(
                     "cmp: EOF on {shorter_name} after byte {}, in line {}",
                     byte_number.saturating_sub(1),

@@ -174,9 +174,8 @@ fn parse_args(args: &[String]) -> Option<Config> {
             "--json" => cfg.json = true,
             _ => {
                 // First non-option argument starts the command.
-                if arg.starts_with('-') {
+                if let Some(flags) = arg.strip_prefix('-') {
                     // Might be combined short flags like -de.
-                    let flags = &arg[1..];
                     let mut recognized = true;
                     for ch in flags.chars() {
                         match ch {
@@ -317,7 +316,7 @@ fn format_current_time() -> String {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
         "Nov", "Dec",
     ];
-    let month_idx = if month >= 1 && month <= 12 {
+    let month_idx = if (1..=12).contains(&month) {
         (month - 1) as usize
     } else {
         0
@@ -427,8 +426,8 @@ fn strip_ansi(s: &str) -> String {
         if ch == '\x1b' {
             // Skip the escape sequence: ESC followed by '[' then parameters
             // ending with an alphabetic character.
-            if let Some(next) = chars.next() {
-                if next == '[' {
+            if let Some(next) = chars.next()
+                && next == '[' {
                     // CSI sequence: consume until we hit a letter.
                     for c in chars.by_ref() {
                         if c.is_ascii_alphabetic() {
@@ -437,7 +436,6 @@ fn strip_ansi(s: &str) -> String {
                     }
                 }
                 // OSC or other sequences: skip one character and continue.
-            }
         } else {
             out.push(ch);
         }
@@ -633,8 +631,8 @@ fn run_watch(cfg: &Config) -> i32 {
         }
 
         // Check for output changes (for --chgexit).
-        if cfg.chgexit {
-            if let Some(ref prev) = prev_output {
+        if cfg.chgexit
+            && let Some(ref prev) = prev_output {
                 // Compare stripped versions to ignore ANSI differences.
                 let prev_stripped = strip_ansi(prev);
                 let curr_stripped = strip_ansi(&result.output);
@@ -651,7 +649,6 @@ fn run_watch(cfg: &Config) -> i32 {
                     return 0;
                 }
             }
-        }
 
         // Display or emit output.
         if cfg.json {
@@ -666,11 +663,10 @@ fn run_watch(cfg: &Config) -> i32 {
         let elapsed = start.elapsed();
         if cfg.precise {
             // Precise mode: subtract execution time from the interval.
-            if let Some(remaining) = interval.checked_sub(elapsed) {
-                if !remaining.is_zero() {
+            if let Some(remaining) = interval.checked_sub(elapsed)
+                && !remaining.is_zero() {
                     std::thread::sleep(remaining);
                 }
-            }
             // If execution took longer than the interval, run again immediately.
         } else {
             std::thread::sleep(interval);

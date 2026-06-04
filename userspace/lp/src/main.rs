@@ -322,7 +322,7 @@ fn read_printers() -> Vec<PrinterInfo> {
                 name: name.clone(),
                 description: desc,
                 location: String::new(),
-                uri: format!("file:///dev/null"),
+                uri: "file:///dev/null".to_string(),
                 is_default: printers.is_empty(),
                 accepting: true,
                 enabled: true,
@@ -357,13 +357,11 @@ fn read_jobs() -> Vec<PrintJob> {
     if let Ok(entries) = std::fs::read_dir(spool_path) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("job") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Some(job) = parse_job_file(&content) {
+            if path.extension().and_then(|e| e.to_str()) == Some("job")
+                && let Ok(content) = std::fs::read_to_string(&path)
+                    && let Some(job) = parse_job_file(&content) {
                         jobs.push(job);
                     }
-                }
-            }
         }
     }
 

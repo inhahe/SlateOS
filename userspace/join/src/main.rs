@@ -295,16 +295,14 @@ fn parse_args(args: &[String]) -> ParseResult {
             "-i" => ignore_case = true,
             _ => {
                 // Handle -j1 and -j2 as combined flags.
-                if arg.starts_with("-j1") {
-                    let rest = &arg[3..];
+                if let Some(rest) = arg.strip_prefix("-j1") {
                     if rest.is_empty() {
                         let val = next_arg(args, &mut i, "-j1");
                         field1 = parse_field(val, "-j1");
                     } else {
                         field1 = parse_field(rest, "-j1");
                     }
-                } else if arg.starts_with("-j2") {
-                    let rest = &arg[3..];
+                } else if let Some(rest) = arg.strip_prefix("-j2") {
                     if rest.is_empty() {
                         let val = next_arg(args, &mut i, "-j2");
                         field2 = parse_field(val, "-j2");
@@ -361,7 +359,7 @@ fn parse_args(args: &[String]) -> ParseResult {
 /// Split a line into fields according to the separator. With `None`
 /// (whitespace mode), leading/trailing whitespace is ignored and runs of
 /// whitespace delimit fields.
-fn split_fields<'a>(line: &'a str, sep: Option<char>) -> Vec<&'a str> {
+fn split_fields(line: &str, sep: Option<char>) -> Vec<&str> {
     match sep {
         Some(c) => line.split(c).collect(),
         None => line.split_whitespace().collect(),
@@ -710,12 +708,11 @@ fn run_join(config: &Config) -> i32 {
         run_join_text(config, &lines1, &lines2, &mut out)
     };
 
-    if let Err(e) = out.flush() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    if let Err(e) = out.flush()
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("join: write error: {e}");
             return 1;
         }
-    }
 
     exit_code
 }
@@ -779,28 +776,26 @@ fn run_join_text(
 
         // Check sort order.
         if config.check_order {
-            if let Some(ref pk) = prev_key1 {
-                if let Some(msg) =
+            if let Some(ref pk) = prev_key1
+                && let Some(msg) =
                     check_sort_order(pk, key1, "file 1", config.ignore_case)
                 {
                     eprintln!("{msg}");
                     exit_code = 1;
                 }
-            }
-            if let Some(ref pk) = prev_key2 {
-                if let Some(msg) =
+            if let Some(ref pk) = prev_key2
+                && let Some(msg) =
                     check_sort_order(pk, key2, "file 2", config.ignore_case)
                 {
                     eprintln!("{msg}");
                     exit_code = 1;
                 }
-            }
         }
 
         match compare_keys(key1, key2, config.ignore_case) {
             Ordering::Less => {
-                if config.print_unpaired1 {
-                    if let Err(e) = write_unpaired_line(
+                if config.print_unpaired1
+                    && let Err(e) = write_unpaired_line(
                         out,
                         config,
                         &fields1,
@@ -812,13 +807,12 @@ fn run_join_text(
                         }
                         return 1;
                     }
-                }
                 prev_key1 = Some(key1.to_string());
                 i += 1;
             }
             Ordering::Greater => {
-                if config.print_unpaired2 {
-                    if let Err(e) = write_unpaired_line(
+                if config.print_unpaired2
+                    && let Err(e) = write_unpaired_line(
                         out,
                         config,
                         &fields2,
@@ -830,7 +824,6 @@ fn run_join_text(
                         }
                         return 1;
                     }
-                }
                 prev_key2 = Some(key2.to_string());
                 j += 1;
             }
@@ -896,9 +889,9 @@ fn run_join_text(
         if config.print_unpaired1 {
             let fields1 = split_fields(&lines1[i], config.separator);
             let key1 = get_field(&fields1, config.field1);
-            if config.check_order {
-                if let Some(ref pk) = prev_key1 {
-                    if let Some(msg) = check_sort_order(
+            if config.check_order
+                && let Some(ref pk) = prev_key1
+                    && let Some(msg) = check_sort_order(
                         pk,
                         key1,
                         "file 1",
@@ -907,8 +900,6 @@ fn run_join_text(
                         eprintln!("{msg}");
                         exit_code = 1;
                     }
-                }
-            }
             if let Err(e) =
                 write_unpaired_line(out, config, &fields1, 1, config.field1)
             {
@@ -927,9 +918,9 @@ fn run_join_text(
         if config.print_unpaired2 {
             let fields2 = split_fields(&lines2[j], config.separator);
             let key2 = get_field(&fields2, config.field2);
-            if config.check_order {
-                if let Some(ref pk) = prev_key2 {
-                    if let Some(msg) = check_sort_order(
+            if config.check_order
+                && let Some(ref pk) = prev_key2
+                    && let Some(msg) = check_sort_order(
                         pk,
                         key2,
                         "file 2",
@@ -938,8 +929,6 @@ fn run_join_text(
                         eprintln!("{msg}");
                         exit_code = 1;
                     }
-                }
-            }
             if let Err(e) =
                 write_unpaired_line(out, config, &fields2, 2, config.field2)
             {
@@ -993,22 +982,20 @@ fn run_join_json(
         let key2 = get_field(&fields2, config.field2);
 
         if config.check_order {
-            if let Some(ref pk) = prev_key1 {
-                if let Some(msg) =
+            if let Some(ref pk) = prev_key1
+                && let Some(msg) =
                     check_sort_order(pk, key1, "file 1", config.ignore_case)
                 {
                     eprintln!("{msg}");
                     exit_code = 1;
                 }
-            }
-            if let Some(ref pk) = prev_key2 {
-                if let Some(msg) =
+            if let Some(ref pk) = prev_key2
+                && let Some(msg) =
                     check_sort_order(pk, key2, "file 2", config.ignore_case)
                 {
                     eprintln!("{msg}");
                     exit_code = 1;
                 }
-            }
         }
 
         match compare_keys(key1, key2, config.ignore_case) {
@@ -1096,9 +1083,9 @@ fn run_join_json(
         if config.print_unpaired1 {
             let fields1 = split_fields(&lines1[i], config.separator);
             let key1 = get_field(&fields1, config.field1);
-            if config.check_order {
-                if let Some(ref pk) = prev_key1 {
-                    if let Some(msg) = check_sort_order(
+            if config.check_order
+                && let Some(ref pk) = prev_key1
+                    && let Some(msg) = check_sort_order(
                         pk,
                         key1,
                         "file 1",
@@ -1107,8 +1094,6 @@ fn run_join_json(
                         eprintln!("{msg}");
                         exit_code = 1;
                     }
-                }
-            }
             entries.push(JsonEntry::Unpaired {
                 file_num: 1,
                 fields: fields1.iter().map(|s| s.to_string()).collect(),
@@ -1122,9 +1107,9 @@ fn run_join_json(
         if config.print_unpaired2 {
             let fields2 = split_fields(&lines2[j], config.separator);
             let key2 = get_field(&fields2, config.field2);
-            if config.check_order {
-                if let Some(ref pk) = prev_key2 {
-                    if let Some(msg) = check_sort_order(
+            if config.check_order
+                && let Some(ref pk) = prev_key2
+                    && let Some(msg) = check_sort_order(
                         pk,
                         key2,
                         "file 2",
@@ -1133,8 +1118,6 @@ fn run_join_json(
                         eprintln!("{msg}");
                         exit_code = 1;
                     }
-                }
-            }
             entries.push(JsonEntry::Unpaired {
                 file_num: 2,
                 fields: fields2.iter().map(|s| s.to_string()).collect(),

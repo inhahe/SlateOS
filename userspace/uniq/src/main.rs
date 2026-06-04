@@ -420,18 +420,18 @@ fn parse_group_method(s: &str) -> GroupMethod {
 
 /// Given a line, return the comparison slice after applying skip-fields,
 /// skip-chars, and check-chars transformations.
-fn comparison_key<'a>(
-    line: &'a str,
+fn comparison_key(
+    line: &str,
     skip_fields: usize,
     skip_chars: usize,
     check_chars: Option<usize>,
-) -> &'a str {
+) -> &str {
     let mut s = line;
 
     // Skip N whitespace-delimited fields.
     for _ in 0..skip_fields {
         // Skip leading whitespace before the field.
-        s = s.trim_start_matches(|c: char| c == ' ' || c == '\t');
+        s = s.trim_start_matches([' ', '\t']);
         // Skip the non-whitespace field content.
         s = s.trim_start_matches(|c: char| c != ' ' && c != '\t');
     }
@@ -862,20 +862,18 @@ fn run(config: &Config) -> i32 {
     };
 
     // Process and write output.
-    if let Err(e) = process(config, lines, &mut *out) {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    if let Err(e) = process(config, lines, &mut *out)
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("uniq: write error: {e}");
             return 1;
         }
-    }
 
     // Flush output.
-    if let Err(e) = out.flush() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    if let Err(e) = out.flush()
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("uniq: write error: {e}");
             return 1;
         }
-    }
 
     0
 }

@@ -246,10 +246,8 @@ fn process_directory(dir: &Path, config: &Config, stats: &mut Stats) {
 
     // Collect entries first (to avoid rename-while-iterating issues).
     let mut paths: Vec<PathBuf> = Vec::new();
-    for entry in entries {
-        if let Ok(e) = entry {
-            paths.push(e.path());
-        }
+    for e in entries.flatten() {
+        paths.push(e.path());
     }
 
     // Process children first (depth-first so renames don't break parent paths).
@@ -317,34 +315,31 @@ fn process_single(path: &Path, config: &Config, stats: &mut Stats) {
 
         println!("  rename: {file_name} → {}", final_path.file_name().unwrap_or_default().to_string_lossy());
 
-        if !config.dry_run {
-            if let Err(e) = fs::rename(path, &final_path) {
+        if !config.dry_run
+            && let Err(e) = fs::rename(path, &final_path) {
                 eprintln!("    error: {e}");
                 stats.errors += 1;
                 return;
             }
-        }
     } else {
         println!("  rename: {file_name} → {sanitized}");
 
-        if !config.dry_run {
-            if let Err(e) = fs::rename(path, &new_path) {
+        if !config.dry_run
+            && let Err(e) = fs::rename(path, &new_path) {
                 eprintln!("    error: {e}");
                 stats.errors += 1;
                 return;
             }
-        }
     }
 
     stats.renamed += 1;
 }
 
 fn split_name_ext(name: &str) -> (String, String) {
-    if let Some(dot_pos) = name.rfind('.') {
-        if dot_pos > 0 {
+    if let Some(dot_pos) = name.rfind('.')
+        && dot_pos > 0 {
             return (name[..dot_pos].to_string(), name[dot_pos + 1..].to_string());
         }
-    }
     (name.to_string(), String::new())
 }
 

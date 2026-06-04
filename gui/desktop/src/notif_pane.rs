@@ -1418,11 +1418,10 @@ impl NotificationPane {
         if idx < self.notifications.len() {
             self.notifications.remove(idx);
             // Adjust hover if needed.
-            if let Some(h) = self.hovered_notif {
-                if h >= self.notifications.len() {
+            if let Some(h) = self.hovered_notif
+                && h >= self.notifications.len() {
                     self.hovered_notif = None;
                 }
-            }
         }
     }
 

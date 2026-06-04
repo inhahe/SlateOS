@@ -376,16 +376,14 @@ impl StorageSettings {
                     StorageCategory::Trash | StorageCategory::Temporary => {
                         total = total.saturating_add(cat.bytes);
                     }
-                    StorageCategory::PackageCache => {
-                        if self.sense.clean_package_cache {
+                    StorageCategory::PackageCache
+                        if self.sense.clean_package_cache => {
                             total = total.saturating_add(cat.bytes / 2);
                         }
-                    }
-                    StorageCategory::Logs => {
-                        if self.sense.clean_logs {
+                    StorageCategory::Logs
+                        if self.sense.clean_logs => {
                             total = total.saturating_add(cat.bytes);
                         }
-                    }
                     _ => {}
                 }
             }

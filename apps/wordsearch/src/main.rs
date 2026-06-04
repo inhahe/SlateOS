@@ -590,11 +590,10 @@ impl WordSearchApp {
     // ── Input handling ──────────────────────────────────────────────
 
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(key_event) = event {
-            if key_event.pressed {
+        if let Event::Key(key_event) = event
+            && key_event.pressed {
                 self.handle_key(key_event);
             }
-        }
     }
 
     fn handle_key(&mut self, key: &KeyEvent) {
@@ -620,26 +619,22 @@ impl WordSearchApp {
         // Non-modifier keys
         if key.modifiers == Modifiers::NONE {
             match key.key {
-                Key::Up => {
-                    if self.cursor_row > 0 {
+                Key::Up
+                    if self.cursor_row > 0 => {
                         self.cursor_row -= 1;
                     }
-                }
-                Key::Down => {
-                    if self.cursor_row + 1 < self.grid_size {
+                Key::Down
+                    if self.cursor_row + 1 < self.grid_size => {
                         self.cursor_row += 1;
                     }
-                }
-                Key::Left => {
-                    if self.cursor_col > 0 {
+                Key::Left
+                    if self.cursor_col > 0 => {
                         self.cursor_col -= 1;
                     }
-                }
-                Key::Right => {
-                    if self.cursor_col + 1 < self.grid_size {
+                Key::Right
+                    if self.cursor_col + 1 < self.grid_size => {
                         self.cursor_col += 1;
                     }
-                }
                 Key::Enter => {
                     self.handle_enter();
                 }

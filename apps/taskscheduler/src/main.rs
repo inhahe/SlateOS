@@ -167,7 +167,7 @@ impl CronField {
                 if val < *base {
                     return false;
                 }
-                (val - *base) % *step == 0
+                (val - *base).is_multiple_of(*step)
             }
         }
     }
@@ -973,7 +973,7 @@ fn decompose_timestamp(ts: u64) -> DecomposedTime {
     let hour = ((secs % 86400) / 3600) as u8;
 
     // Days since epoch (1970-01-01, which was a Thursday = weekday 4).
-    let days = (secs / 86400) as u64;
+    let days = (secs / 86400);
     let weekday = ((days + 4) % 7) as u8; // 0 = Sunday
 
     // Compute year, month, day from days since epoch.
@@ -1025,7 +1025,7 @@ impl TaskSchedulerConfig {
     pub fn serialize(scheduler: &TaskScheduler) -> String {
         let mut lines = Vec::new();
         lines.push(String::from("# OurOS Task Scheduler Config"));
-        lines.push(format!("VERSION|1"));
+        lines.push("VERSION|1".to_string());
 
         for task in scheduler.tasks.values() {
             let freq_str = serialize_frequency(&task.frequency);
@@ -1467,15 +1467,14 @@ impl SchedulerUI {
 
     /// Toggle enabled/disabled on the selected task.
     pub fn toggle_selected_task(&mut self) {
-        if let Some(id) = self.selected_task_id {
-            if let Some(task) = self.scheduler.get_task(id) {
+        if let Some(id) = self.selected_task_id
+            && let Some(task) = self.scheduler.get_task(id) {
                 if task.enabled {
                     self.scheduler.disable_task(id);
                 } else {
                     self.scheduler.enable_task(id);
                 }
             }
-        }
     }
 
     // -- rendering ------------------------------------------------------------

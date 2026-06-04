@@ -28,7 +28,7 @@ fn run_hey(args: &[String]) -> i32 {
         println!("  -o FORMAT    Output format (csv)");
         return 0;
     }
-    let url = args.iter().rfind(|a| !a.starts_with('-'))
+    let _url = args.iter().rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("http://localhost:8080");
     let num = args.windows(2).find(|w| w[0] == "-n")

@@ -212,11 +212,10 @@ impl Board {
             loop {
                 let idx = rng.next_range(4);
                 let dir = dirs[idx];
-                if let Some(last) = last_dir {
-                    if dir == last.opposite() {
+                if let Some(last) = last_dir
+                    && dir == last.opposite() {
                         continue;
                     }
-                }
                 if self.slide(dir) {
                     last_dir = Some(dir);
                     break;
@@ -280,7 +279,7 @@ impl SlidingPuzzle {
     }
 
     fn set_size(&mut self, size: usize) {
-        if size >= 3 && size <= 5 {
+        if (3..=5).contains(&size) {
             self.size = size;
             self.new_game();
         }
@@ -336,8 +335,8 @@ impl SlidingPuzzle {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. }) => {
-                if *modifiers == Modifiers::NONE {
+            Event::Key(KeyEvent { key, modifiers, .. })
+                if *modifiers == Modifiers::NONE => {
                     match key {
                         Key::Up => self.handle_move(Direction::Up),
                         Key::Down => self.handle_move(Direction::Down),
@@ -352,7 +351,6 @@ impl SlidingPuzzle {
                         _ => {}
                     }
                 }
-            }
             Event::Mouse(MouseEvent { x, y, kind }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     self.handle_mouse_click(*x, *y);

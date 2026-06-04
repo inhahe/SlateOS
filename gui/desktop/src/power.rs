@@ -889,7 +889,7 @@ impl ScreenSaver {
         self.columns.clear();
         let col_count = self.width / 14; // ~14px per character column
         for i in 0..col_count {
-            let len = (self.next_random_u32() % 20 + 5) as u32;
+            let len = (self.next_random_u32() % 20 + 5);
             let mut chars = Vec::with_capacity(len as usize);
             for _ in 0..len {
                 chars.push((self.next_random_u32() % 94 + 33) as u8); // printable ASCII

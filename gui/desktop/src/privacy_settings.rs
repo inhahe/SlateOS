@@ -245,7 +245,7 @@ impl PrivacySettings {
         self.global_toggles
             .iter()
             .find(|(k, _)| *k == kind)
-            .map_or(true, |(_, e)| *e)
+            .is_none_or(|(_, e)| *e)
     }
 
     pub fn set_globally_enabled(&mut self, kind: PermissionKind, enabled: bool) {

@@ -728,13 +728,12 @@ fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
                 }
                 b'[' => {
                     // Character class.
-                    if let Some((matched, end)) = match_char_class(&pattern[pi..], text[ti]) {
-                        if matched {
+                    if let Some((matched, end)) = match_char_class(&pattern[pi..], text[ti])
+                        && matched {
                             pi += end;
                             ti += 1;
                             continue;
                         }
-                    }
                     // Fall through to star backtrack.
                 }
                 ch => {
@@ -828,7 +827,7 @@ fn levenshtein_bounded(a: &str, b: &str, max: u32) -> u32 {
     let n = b_bytes.len();
 
     // Quick length check.
-    let len_diff = if m > n { m - n } else { n - m };
+    let len_diff = m.abs_diff(n);
     if len_diff as u32 > max {
         return max;
     }
@@ -985,15 +984,14 @@ fn scan_directory(
                 }
 
                 // Check include extensions (if set).
-                if let Some(ref includes) = config.include_extensions {
-                    if !includes
+                if let Some(ref includes) = config.include_extensions
+                    && !includes
                         .iter()
                         .any(|e| e.to_ascii_lowercase() == ext_lower)
                     {
                         stats.files_skipped += 1;
                         continue;
                     }
-                }
             } else if config.include_extensions.is_some() {
                 // No extension and include filter is set — skip.
                 stats.files_skipped += 1;
@@ -1088,11 +1086,10 @@ fn scan_directory_incremental(
         // Still recurse to check subdirectories.
         if let Ok(rd) = fs::read_dir(dir) {
             for entry in rd.flatten() {
-                if let Ok(m) = entry.metadata() {
-                    if m.is_dir() {
+                if let Ok(m) = entry.metadata()
+                    && m.is_dir() {
                         scan_directory_incremental(&entry.path(), config, index, stats);
                     }
-                }
             }
         }
         return;

@@ -355,12 +355,11 @@ impl BluetoothManager {
 
     /// Pair with a device.
     pub fn pair(&mut self, address: &str) -> bool {
-        if let Some(d) = self.devices.iter_mut().find(|d| d.address == address) {
-            if d.state == ConnectionState::Disconnected {
+        if let Some(d) = self.devices.iter_mut().find(|d| d.address == address)
+            && d.state == ConnectionState::Disconnected {
                 d.state = ConnectionState::Connecting;
                 return true;
             }
-        }
         false
     }
 
@@ -378,12 +377,11 @@ impl BluetoothManager {
 
     /// Connect to a paired device.
     pub fn connect(&mut self, address: &str) -> bool {
-        if let Some(d) = self.devices.iter_mut().find(|d| d.address == address) {
-            if matches!(d.state, ConnectionState::Paired | ConnectionState::PairedNotConnected) {
+        if let Some(d) = self.devices.iter_mut().find(|d| d.address == address)
+            && matches!(d.state, ConnectionState::Paired | ConnectionState::PairedNotConnected) {
                 d.state = ConnectionState::Connecting;
                 return true;
             }
-        }
         false
     }
 
@@ -400,12 +398,11 @@ impl BluetoothManager {
 
     /// Disconnect a device.
     pub fn disconnect(&mut self, address: &str) -> bool {
-        if let Some(d) = self.devices.iter_mut().find(|d| d.address == address) {
-            if d.state.is_connected() {
+        if let Some(d) = self.devices.iter_mut().find(|d| d.address == address)
+            && d.state.is_connected() {
                 d.state = ConnectionState::PairedNotConnected;
                 return true;
             }
-        }
         false
     }
 

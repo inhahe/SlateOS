@@ -433,12 +433,11 @@ fn pad_left_num(val: u64, buf: &mut [u8], width: usize) -> usize {
         }
     }
     for j in 0..n {
-        if pos < buf.len() {
-            if let Some(c) = tmp.get(j) {
+        if pos < buf.len()
+            && let Some(c) = tmp.get(j) {
                 buf[pos] = *c;
                 pos += 1;
             }
-        }
     }
     pos
 }
@@ -1222,15 +1221,14 @@ fn cmd_modprobe(opts: &ModprobeOpts) -> i32 {
             }
         }
 
-        if !dep_loaded {
-            if opts.verbose || opts.dry_run {
+        if !dep_loaded
+            && (opts.verbose || opts.dry_run) {
                 print_out(b"insmod ");
                 print_out(MODULES_DIR);
                 print_out(b"/0.1.0/kernel/");
                 print_out(deps[i].as_bytes());
                 print_out(b".ko\n");
             }
-        }
     }
 
     // Load the main module
@@ -1310,13 +1308,12 @@ fn cmd_modprobe_remove(opts: &ModprobeOpts) -> i32 {
             }
         }
         // Would be unused after removing our module
-        if dep_refcount <= 1 {
-            if opts.verbose || opts.dry_run {
+        if dep_refcount <= 1
+            && (opts.verbose || opts.dry_run) {
                 print_out(b"rmmod ");
                 print_out(dep_name);
                 print_out(b"\n");
             }
-        }
     }
 
     0
@@ -1504,7 +1501,7 @@ fn cmd_depmod(opts: &ModprobeOpts) -> i32 {
             print_out(b"kernel/");
             print_out(name);
             print_out(b".ko:");
-            for (i, dep) in deps.iter().enumerate() {
+            for (_i, dep) in deps.iter().enumerate() {
                 print_out(b" kernel/");
                 print_out(dep);
                 print_out(b".ko");
@@ -1513,8 +1510,8 @@ fn cmd_depmod(opts: &ModprobeOpts) -> i32 {
         }
     }
 
-    if !opts.dry_run {
-        if opts.verbose {
+    if !opts.dry_run
+        && opts.verbose {
             print_out(b"depmod: Writing ");
             print_out(MODULES_DIR);
             print_out(b"/0.1.0/modules.dep\n");
@@ -1525,7 +1522,6 @@ fn cmd_depmod(opts: &ModprobeOpts) -> i32 {
             print_out(MODULES_DIR);
             print_out(b"/0.1.0/modules.symbols\n");
         }
-    }
 
     0
 }

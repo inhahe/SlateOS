@@ -424,11 +424,11 @@ fn split_by_lines(config: &Config, reader: &mut dyn BufRead) -> io::Result<()> {
         }
 
         // Start a new output file every `chunk_lines` lines.
-        if line_count % chunk_lines == 0 {
+        if line_count.is_multiple_of(chunk_lines) {
             // Flush previous file (drop closes it).
             drop(out.take());
             let name = output_name(config, file_idx).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Other, "output file suffixes exhausted")
+                io::Error::other("output file suffixes exhausted")
             })?;
             out = Some(open_output(&name, config.verbose)?);
             file_idx += 1;
@@ -466,7 +466,7 @@ fn split_by_bytes(config: &Config, reader: &mut dyn Read) -> io::Result<()> {
             // Open a new file if needed.
             if out.is_none() {
                 let name = output_name(config, file_idx).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::Other, "output file suffixes exhausted")
+                    io::Error::other("output file suffixes exhausted")
                 })?;
                 out = Some(open_output(&name, config.verbose)?);
                 file_idx += 1;
@@ -525,7 +525,7 @@ fn split_by_line_bytes(config: &Config, reader: &mut dyn BufRead) -> io::Result<
         // Open a new file if needed.
         if out.is_none() {
             let name = output_name(config, file_idx).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Other, "output file suffixes exhausted")
+                io::Error::other("output file suffixes exhausted")
             })?;
             out = Some(open_output(&name, config.verbose)?);
             file_idx += 1;
@@ -565,7 +565,7 @@ fn split_by_number(config: &Config, reader: &mut dyn Read) -> io::Result<()> {
 
     let total = data.len() as u64;
     // Size of each chunk (last one may be smaller).
-    let chunk_size = if total == 0 { 0 } else { (total + num_files - 1) / num_files };
+    let chunk_size = if total == 0 { 0 } else { total.div_ceil(num_files) };
 
     let mut offset: u64 = 0;
     for idx in 0..num_files {
@@ -579,7 +579,7 @@ fn split_by_number(config: &Config, reader: &mut dyn Read) -> io::Result<()> {
         }
 
         let name = output_name(config, idx).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "output file suffixes exhausted")
+            io::Error::other("output file suffixes exhausted")
         })?;
         let mut f = open_output(&name, config.verbose)?;
         f.write_all(piece)?;
@@ -595,13 +595,11 @@ fn split_by_number(config: &Config, reader: &mut dyn Read) -> io::Result<()> {
 /// (which handles elision inline).
 fn elide_empty_files(config: &Config, count: u64) {
     for idx in 0..count {
-        if let Some(name) = output_name(config, idx) {
-            if let Ok(meta) = fs::metadata(&name) {
-                if meta.len() == 0 {
+        if let Some(name) = output_name(config, idx)
+            && let Ok(meta) = fs::metadata(&name)
+                && meta.len() == 0 {
                     let _ = fs::remove_file(&name);
                 }
-            }
-        }
     }
 }
 

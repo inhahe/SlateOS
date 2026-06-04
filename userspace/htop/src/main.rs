@@ -357,13 +357,12 @@ fn terminal_size() -> (usize, usize) {
         }
     }
     let s = String::from_utf8_lossy(&resp);
-    if let Some(coords) = s.strip_prefix("\x1b[") {
-        if let Some((r, c)) = coords.split_once(';') {
+    if let Some(coords) = s.strip_prefix("\x1b[")
+        && let Some((r, c)) = coords.split_once(';') {
             let rows_parsed = r.parse::<usize>().unwrap_or(24);
             let cols_parsed = c.parse::<usize>().unwrap_or(80);
             return (rows_parsed, cols_parsed);
         }
-    }
 
     (24, 80)
 }
@@ -677,11 +676,10 @@ fn parse_kb_value(s: &str) -> u64 {
 
 fn get_meminfo_value(content: &str, key: &str) -> u64 {
     for line in content.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim() == key {
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim() == key {
                 return parse_kb_value(v);
             }
-        }
     }
     0
 }
@@ -728,8 +726,8 @@ fn read_cpu_stats() -> Vec<CpuStat> {
         }
     }
     // If no per-CPU lines found, try the aggregate line as a single CPU.
-    if cpus.is_empty() {
-        if let Some(stat) = read_file("/proc/stat") {
+    if cpus.is_empty()
+        && let Some(stat) = read_file("/proc/stat") {
             for line in stat.lines() {
                 if let Some(rest) = line.strip_prefix("cpu ") {
                     let parts: Vec<u64> = rest
@@ -751,7 +749,6 @@ fn read_cpu_stats() -> Vec<CpuStat> {
                 }
             }
         }
-    }
     cpus
 }
 
@@ -786,13 +783,11 @@ fn uid_to_user(uid: u32) -> String {
     if let Some(passwd) = read_file("/etc/passwd") {
         for line in passwd.lines() {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 3 {
-                if let Ok(entry_uid) = fields[2].parse::<u32>() {
-                    if entry_uid == uid {
+            if fields.len() >= 3
+                && let Ok(entry_uid) = fields[2].parse::<u32>()
+                    && entry_uid == uid {
                         return fields[0].to_string();
                     }
-                }
-            }
         }
     }
     uid.to_string()
@@ -854,7 +849,6 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
             for line in content.lines() {
                 if let Some(val) = line.strip_prefix("Uid:") {
                     return val
-                        .trim()
                         .split_whitespace()
                         .next()
                         .and_then(|s| s.parse().ok());
@@ -908,13 +902,11 @@ fn read_all_processes(mem_total_kb: u64) -> Vec<ProcessInfo> {
     let mut procs = Vec::new();
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            if let Some(fname) = entry.file_name().to_str() {
-                if let Ok(pid) = fname.parse::<u32>() {
-                    if let Some(info) = read_process(pid, mem_total_kb) {
+            if let Some(fname) = entry.file_name().to_str()
+                && let Ok(pid) = fname.parse::<u32>()
+                    && let Some(info) = read_process(pid, mem_total_kb) {
                         procs.push(info);
                     }
-                }
-            }
         }
     }
     procs
@@ -1861,16 +1853,14 @@ impl App {
             Key::F(9) | Key::Char('k') => {
                 self.overlay = Overlay::KillConfirm;
             }
-            Key::Up => {
-                if self.cursor > 0 {
+            Key::Up
+                if self.cursor > 0 => {
                     self.cursor -= 1;
                 }
-            }
-            Key::Down => {
-                if self.cursor + 1 < list_len {
+            Key::Down
+                if self.cursor + 1 < list_len => {
                     self.cursor += 1;
                 }
-            }
             Key::PageUp => {
                 let page = self.list_rows();
                 self.cursor = self.cursor.saturating_sub(page);
@@ -1920,16 +1910,14 @@ impl App {
     fn handle_sort_picker_key(&mut self, key: Key) {
         let fields = SortField::all();
         match key {
-            Key::Up => {
-                if self.sort_cursor > 0 {
+            Key::Up
+                if self.sort_cursor > 0 => {
                     self.sort_cursor -= 1;
                 }
-            }
-            Key::Down => {
-                if self.sort_cursor + 1 < fields.len() {
+            Key::Down
+                if self.sort_cursor + 1 < fields.len() => {
                     self.sort_cursor += 1;
                 }
-            }
             Key::Enter => {
                 if self.sort_cursor < fields.len() {
                     self.config.sort_field = fields[self.sort_cursor];

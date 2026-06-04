@@ -638,17 +638,15 @@ fn maybe_print_timestamp(config: &Config) {
     }
     // Read system time from /proc/uptime and format it, or use a fallback.
     // On a real system we would use clock_gettime; here we approximate.
-    if let Some(uptime) = read_file("/proc/uptime") {
-        if let Some(secs_str) = uptime.split_whitespace().next() {
-            if let Ok(secs) = secs_str.parse::<f64>() {
+    if let Some(uptime) = read_file("/proc/uptime")
+        && let Some(secs_str) = uptime.split_whitespace().next()
+            && let Ok(secs) = secs_str.parse::<f64>() {
                 let s = secs as u64;
                 let h = (s / 3600) % 24;
                 let m = (s % 3600) / 60;
                 let sec = s % 60;
                 println!("Timestamp: {:02}:{:02}:{:02} (uptime)", h, m, sec);
             }
-        }
-    }
 }
 
 // ============================================================================
@@ -665,13 +663,11 @@ fn print_json_report(
     print!("{{");
 
     // Timestamp (uptime seconds).
-    if config.show_timestamp {
-        if let Some(uptime) = read_file("/proc/uptime") {
-            if let Some(secs_str) = uptime.split_whitespace().next() {
+    if config.show_timestamp
+        && let Some(uptime) = read_file("/proc/uptime")
+            && let Some(secs_str) = uptime.split_whitespace().next() {
                 print!("\"timestamp\":{secs_str},");
             }
-        }
-    }
 
     // CPU section.
     if let Some(c) = cpu_pct {
@@ -876,11 +872,10 @@ fn run(config: &Config) {
 
     loop {
         // Check count limit before sleeping.
-        if let Some(max) = config.count {
-            if iteration >= max {
+        if let Some(max) = config.count
+            && iteration >= max {
                 break;
             }
-        }
 
         std::thread::sleep(std::time::Duration::from_secs_f64(interval));
 

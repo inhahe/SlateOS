@@ -193,14 +193,14 @@ impl Cell {
     }
 
     fn toggle_note(&mut self, digit: u8) {
-        if digit >= 1 && digit <= 9 {
+        if (1..=9).contains(&digit) {
             let idx = (digit - 1) as usize;
             self.notes[idx] = !self.notes[idx];
         }
     }
 
     fn has_note(&self, digit: u8) -> bool {
-        if digit >= 1 && digit <= 9 {
+        if (1..=9).contains(&digit) {
             self.notes[(digit - 1) as usize]
         } else {
             false
@@ -443,7 +443,7 @@ fn candidates(grid: &[u8; TOTAL_CELLS], row: usize, col: usize) -> u16 {
     // Eliminate row
     for c in 0..GRID_SIZE {
         let v = grid[idx(row, c)];
-        if v >= 1 && v <= 9 {
+        if (1..=9).contains(&v) {
             mask &= !(1 << (v - 1));
         }
     }
@@ -451,7 +451,7 @@ fn candidates(grid: &[u8; TOTAL_CELLS], row: usize, col: usize) -> u16 {
     // Eliminate column
     for r in 0..GRID_SIZE {
         let v = grid[idx(r, col)];
-        if v >= 1 && v <= 9 {
+        if (1..=9).contains(&v) {
             mask &= !(1 << (v - 1));
         }
     }
@@ -461,7 +461,7 @@ fn candidates(grid: &[u8; TOTAL_CELLS], row: usize, col: usize) -> u16 {
     for r in br..br + BOX_SIZE {
         for c in bc..bc + BOX_SIZE {
             let v = grid[idx(r, c)];
-            if v >= 1 && v <= 9 {
+            if (1..=9).contains(&v) {
                 mask &= !(1 << (v - 1));
             }
         }
@@ -744,26 +744,22 @@ impl SudokuApp {
 
         match key_event.key {
             // Navigation
-            Key::Up => {
-                if self.selected_row > 0 {
+            Key::Up
+                if self.selected_row > 0 => {
                     self.selected_row -= 1;
                 }
-            }
-            Key::Down => {
-                if self.selected_row < GRID_SIZE - 1 {
+            Key::Down
+                if self.selected_row < GRID_SIZE - 1 => {
                     self.selected_row += 1;
                 }
-            }
-            Key::Left => {
-                if self.selected_col > 0 {
+            Key::Left
+                if self.selected_col > 0 => {
                     self.selected_col -= 1;
                 }
-            }
-            Key::Right => {
-                if self.selected_col < GRID_SIZE - 1 {
+            Key::Right
+                if self.selected_col < GRID_SIZE - 1 => {
                     self.selected_col += 1;
                 }
-            }
 
             // Undo / Redo (before number input so Ctrl combos match first)
             Key::Z if key_event.modifiers.ctrl => self.undo(),
@@ -1067,11 +1063,10 @@ impl SudokuApp {
 
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                if vals[idx(r, c)] != 0 && has_conflict(&vals, r, c, vals[idx(r, c)]) {
-                    if !result.contains(&(r, c)) {
+                if vals[idx(r, c)] != 0 && has_conflict(&vals, r, c, vals[idx(r, c)])
+                    && !result.contains(&(r, c)) {
                         result.push((r, c));
                     }
-                }
             }
         }
 

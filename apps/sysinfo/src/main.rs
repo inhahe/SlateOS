@@ -1429,27 +1429,23 @@ impl SysInfoState {
     /// Select the next visible tree row.
     pub fn select_next(&mut self) {
         let rows = self.visible_tree_rows();
-        if let Some(pos) = rows.iter().position(|c| *c == self.selected_category) {
-            if pos + 1 < rows.len() {
-                if let Some(&next) = rows.get(pos + 1) {
+        if let Some(pos) = rows.iter().position(|c| *c == self.selected_category)
+            && pos + 1 < rows.len()
+                && let Some(&next) = rows.get(pos + 1) {
                     self.selected_category = next;
                     self.detail_scroll = 0.0;
                 }
-            }
-        }
     }
 
     /// Select the previous visible tree row.
     pub fn select_prev(&mut self) {
         let rows = self.visible_tree_rows();
-        if let Some(pos) = rows.iter().position(|c| *c == self.selected_category) {
-            if pos > 0 {
-                if let Some(&prev) = rows.get(pos - 1) {
+        if let Some(pos) = rows.iter().position(|c| *c == self.selected_category)
+            && pos > 0
+                && let Some(&prev) = rows.get(pos - 1) {
                     self.selected_category = prev;
                     self.detail_scroll = 0.0;
                 }
-            }
-        }
     }
 
     /// Expand the selected node (or select first child if already expanded).
@@ -1705,11 +1701,10 @@ impl SysInfoState {
                 if let Some((cat, _)) = results.first() {
                     self.selected_category = *cat;
                     // Expand parent if needed.
-                    if let Some(parent) = cat.parent() {
-                        if !self.expanded.contains(&parent) {
+                    if let Some(parent) = cat.parent()
+                        && !self.expanded.contains(&parent) {
                             self.expanded.push(parent);
                         }
-                    }
                     self.detail_scroll = 0.0;
                     self.status_message = format!("{} results found", results.len());
                 } else {
@@ -1722,11 +1717,10 @@ impl SysInfoState {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text {
-                    if !ch.is_control() {
+                if let Some(ch) = key.text
+                    && !ch.is_control() {
                         self.search_text.push(ch);
                     }
-                }
                 EventResult::Consumed
             }
         }
@@ -1734,9 +1728,9 @@ impl SysInfoState {
 
     fn handle_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
         match &mouse.kind {
-            MouseEventKind::Press(MouseButton::Left) => {
+            MouseEventKind::Press(MouseButton::Left)
                 // Check if click is in the sidebar.
-                if mouse.x < SIDEBAR_WIDTH && mouse.y > TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT {
+                if mouse.x < SIDEBAR_WIDTH && mouse.y > TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT => {
                     let row_y = mouse.y - TITLE_BAR_HEIGHT - TOOLBAR_HEIGHT + self.tree_scroll;
                     let row_idx = (row_y / TREE_ROW_HEIGHT) as usize;
                     let rows = self.visible_tree_rows();
@@ -1749,7 +1743,6 @@ impl SysInfoState {
                     }
                     return EventResult::Consumed;
                 }
-            }
             MouseEventKind::Scroll { dy, .. } => {
                 if mouse.x < SIDEBAR_WIDTH {
                     self.tree_scroll = (self.tree_scroll - dy * 20.0).max(0.0);

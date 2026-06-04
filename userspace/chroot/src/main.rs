@@ -247,22 +247,19 @@ fn get_caller_uid(users: &[UserEntry]) -> u32 {
     // Try /proc/self/status for the real UID.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(uid_str) = rest.trim().split_whitespace().next() {
-                    if let Ok(uid) = uid_str.parse::<u32>() {
+            if let Some(rest) = line.strip_prefix("Uid:")
+                && let Some(uid_str) = rest.split_whitespace().next()
+                    && let Ok(uid) = uid_str.parse::<u32>() {
                         return uid;
                     }
-                }
-            }
         }
     }
 
     // Fallback: resolve USER env var against the database.
-    if let Ok(name) = env::var("USER") {
-        if let Some(user) = users.iter().find(|u| u.username == name) {
+    if let Ok(name) = env::var("USER")
+        && let Some(user) = users.iter().find(|u| u.username == name) {
             return user.uid;
         }
-    }
 
     // Unknown caller.
     u32::MAX
@@ -593,37 +590,33 @@ fn main() {
     }
 
     // Step 2: Change working directory to / (unless --skip-chdir).
-    if !opts.skip_chdir {
-        if let Err(e) = do_chdir("/") {
+    if !opts.skip_chdir
+        && let Err(e) = do_chdir("/") {
             eprintln!("chroot: cannot change directory to '/': {e}");
             process::exit(125);
         }
-    }
 
     // Step 3: Set supplementary groups (before dropping to non-root).
-    if !opts.supplementary_gids.is_empty() {
-        if let Err(e) = do_setgroups(&opts.supplementary_gids) {
+    if !opts.supplementary_gids.is_empty()
+        && let Err(e) = do_setgroups(&opts.supplementary_gids) {
             eprintln!("chroot: failed to set supplementary groups: {e}");
             process::exit(125);
         }
-    }
 
     // Step 4: Set group ID (before user ID -- setgid may fail after setuid
     // drops root privileges).
-    if let Some(gid) = opts.userspec_gid {
-        if let Err(e) = do_setgid(gid) {
+    if let Some(gid) = opts.userspec_gid
+        && let Err(e) = do_setgid(gid) {
             eprintln!("chroot: failed to set group ID to {gid}: {e}");
             process::exit(125);
         }
-    }
 
     // Step 5: Set user ID (last, since this drops root).
-    if let Some(uid) = opts.userspec_uid {
-        if let Err(e) = do_setuid(uid) {
+    if let Some(uid) = opts.userspec_uid
+        && let Err(e) = do_setuid(uid) {
             eprintln!("chroot: failed to set user ID to {uid}: {e}");
             process::exit(125);
         }
-    }
 
     // Step 6: Execute the command.
     let mut cmd = process::Command::new(&opts.command);

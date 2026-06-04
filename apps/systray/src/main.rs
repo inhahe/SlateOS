@@ -338,7 +338,7 @@ impl DateTime {
             4 | 6 | 9 | 11 => 30,
             2 => {
                 let y = self.year as u32;
-                if (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) {
+                if (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400) {
                     29
                 } else {
                     28

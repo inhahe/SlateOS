@@ -857,7 +857,7 @@ impl PeekManager {
         let same_app = self
             .hovered_app
             .as_ref()
-            .map_or(false, |a| a == app_id);
+            .is_some_and(|a| a == app_id);
 
         if same_app && self.popup.is_active() {
             // Already showing or waiting for this app

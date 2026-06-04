@@ -518,11 +518,10 @@ fn regex_match_here(pattern: &str, text: &str) -> bool {
             let atom_pat = &pattern[..atom_len];
             let rest_pat = &pattern[atom_len + 1..]; // skip the `?`
             // Try matching the atom (one occurrence), then try zero.
-            if let Some(consumed) = match_atom(atom_pat, text) {
-                if regex_match_here(rest_pat, &text[consumed..]) {
+            if let Some(consumed) = match_atom(atom_pat, text)
+                && regex_match_here(rest_pat, &text[consumed..]) {
                     return true;
                 }
-            }
             regex_match_here(rest_pat, text)
         }
     }
@@ -803,7 +802,7 @@ fn process_lines<R: BufRead>(
         }
 
         // Strip trailing newline / carriage-return.
-        let line = raw_line.trim_end_matches(|c: char| c == '\n' || c == '\r');
+        let line = raw_line.trim_end_matches(['\n', '\r']);
 
         // Check for section delimiter.
         if let Some(new_section) = detect_section(line, &delims) {
@@ -948,19 +947,17 @@ fn run(config: &Config) -> i32 {
         write_text(&mut out, &all_lines, config)
     };
 
-    if let Err(e) = write_result {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    if let Err(e) = write_result
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("nl: write error: {e}");
             return 1;
         }
-    }
 
-    if let Err(e) = out.flush() {
-        if e.kind() != io::ErrorKind::BrokenPipe {
+    if let Err(e) = out.flush()
+        && e.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("nl: write error: {e}");
             return 1;
         }
-    }
 
     if had_error { 1 } else { 0 }
 }

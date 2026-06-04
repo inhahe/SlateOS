@@ -76,15 +76,14 @@ fn read_file(path: &str) -> Option<String> {
 /// Returns 0 if the key is not found or the value cannot be parsed.
 fn get_meminfo_value(content: &str, key: &str) -> u64 {
     for line in content.lines() {
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim() == key {
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim() == key {
                 let trimmed = v.trim()
                     .trim_end_matches(" kB")
                     .trim_end_matches(" KB")
                     .trim();
                 return trimmed.parse().unwrap_or(0);
             }
-        }
     }
     0
 }
@@ -411,11 +410,10 @@ fn run(config: &Config) -> i32 {
         iterations = iterations.saturating_add(1);
 
         // Check count limit.
-        if let Some(max) = config.repeat_count {
-            if iterations >= max {
+        if let Some(max) = config.repeat_count
+            && iterations >= max {
                 break;
             }
-        }
 
         // If no repeat interval, run once.
         let secs = match config.repeat_secs {

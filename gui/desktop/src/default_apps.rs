@@ -540,14 +540,13 @@ impl DefaultAppsSettings {
         // Reset category defaults that pointed to this app
         let builtin = builtin_apps();
         for entry in &mut self.category_defaults {
-            if entry.1 == app_id {
-                if let Some(fallback) = builtin
+            if entry.1 == app_id
+                && let Some(fallback) = builtin
                     .iter()
                     .find(|a| a.handles_category(entry.0))
                 {
                     entry.1 = fallback.id.clone();
                 }
-            }
         }
     }
 
@@ -831,7 +830,7 @@ impl DefaultAppsUI {
                 let alt_y = row_y + 56.0;
 
                 for app in &alternatives {
-                    let is_current = default_app.map_or(false, |d| d.id == app.id);
+                    let is_current = default_app.is_some_and(|d| d.id == app.id);
                     let chip_w = app.name.len() as f32 * 7.0 + 24.0;
 
                     cmds.push(RenderCommand::FillRect {
@@ -934,7 +933,7 @@ impl DefaultAppsUI {
             } else {
                 extensions
                     .iter()
-                    .filter(|e| e.contains(&search.as_str()))
+                    .filter(|e| e.contains(search.as_str()))
                     .collect()
             };
 

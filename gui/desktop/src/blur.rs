@@ -274,15 +274,15 @@ impl BlurRenderer {
         let tint_argb = Self::color_to_argb(tint);
         let ta = tint.a as u32;
         let inv_ta = 255u32.saturating_sub(ta);
-        let tr = ((tint_argb >> 16) & 0xFF) as u32;
-        let tg = ((tint_argb >> 8) & 0xFF) as u32;
-        let tb = (tint_argb & 0xFF) as u32;
+        let tr = ((tint_argb >> 16) & 0xFF);
+        let tg = ((tint_argb >> 8) & 0xFF);
+        let tb = (tint_argb & 0xFF);
 
         let mut out = Vec::with_capacity(len);
         for &bg_px in background.iter().take(len) {
-            let br = ((bg_px >> 16) & 0xFF) as u32;
-            let bg_g = ((bg_px >> 8) & 0xFF) as u32;
-            let bb = (bg_px & 0xFF) as u32;
+            let br = ((bg_px >> 16) & 0xFF);
+            let bg_g = ((bg_px >> 8) & 0xFF);
+            let bb = (bg_px & 0xFF);
 
             let r = (tr * ta + br * inv_ta) / 255;
             let g = (tg * ta + bg_g * inv_ta) / 255;
@@ -449,7 +449,7 @@ impl BlurRenderer {
 
                 // Advance the sliding window.
                 let add_idx = (col + r + 1).min(w - 1);
-                let rem_idx = if col >= r { col - r } else { 0 };
+                let rem_idx = col.saturating_sub(r);
 
                 let add = Self::unpack(src[row_start + add_idx]);
                 let rem = Self::unpack(src[row_start + rem_idx]);
@@ -495,7 +495,7 @@ impl BlurRenderer {
                 dst[row * w + col] = Self::pack_with_inv(sr, sg, sb, inv);
 
                 let add_idx = (row + r + 1).min(h - 1);
-                let rem_idx = if row >= r { row - r } else { 0 };
+                let rem_idx = row.saturating_sub(r);
 
                 let add = Self::unpack(src[add_idx * w + col]);
                 let rem = Self::unpack(src[rem_idx * w + col]);
@@ -710,17 +710,15 @@ impl BlurManager {
             let is_dirty = self.dirty.get(&id).copied().unwrap_or(true);
 
             // Use cache if not dirty and cache exists.
-            if !is_dirty {
-                if let Some(cached) = self.cache.get(&id) {
-                    if let Some(region) = self.regions.get(&id) {
-                        if region.enabled {
+            if !is_dirty
+                && let Some(cached) = self.cache.get(&id) {
+                    if let Some(region) = self.regions.get(&id)
+                        && region.enabled {
                             let (rx, ry, rw, rh) = region.pixel_bounds(fb_width, fb_height);
                             Self::blit_cached(buffer, fb_width, cached, rx, ry, rw, rh);
                         }
-                    }
                     continue;
                 }
-            }
 
             // Need to recompute.
             if let Some(region) = self.regions.get(&id) {

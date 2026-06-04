@@ -483,14 +483,14 @@ struct UserProcessInfo {
 /// Read uptime from /proc/uptime.
 fn read_uptime() -> Option<UptimeInfo> {
     let content = fs::read_to_string("/proc/uptime").ok()?;
-    let total_seconds: f64 = content.trim().split_whitespace().next()?.parse().ok()?;
+    let total_seconds: f64 = content.split_whitespace().next()?.parse().ok()?;
     Some(UptimeInfo { total_seconds })
 }
 
 /// Read load averages from /proc/loadavg.
 fn read_loadavg() -> Option<LoadAvgInfo> {
     let content = fs::read_to_string("/proc/loadavg").ok()?;
-    let mut parts = content.trim().split_whitespace();
+    let mut parts = content.split_whitespace();
     let avg_1: f64 = parts.next()?.parse().ok()?;
     let avg_5: f64 = parts.next()?.parse().ok()?;
     let avg_15: f64 = parts.next()?.parse().ok()?;
@@ -596,13 +596,12 @@ fn get_user_process_info(tty: &str, pid: i32, now: u64) -> UserProcessInfo {
     // /proc/<pid>/stat contains the tty.
 
     // If we have a specific PID from utmp, read its info directly.
-    if pid > 0 {
-        if let Some((cpu_time, cmd)) = read_proc_stat_brief(pid as u32) {
+    if pid > 0
+        && let Some((cpu_time, cmd)) = read_proc_stat_brief(pid as u32) {
             pcpu = cpu_time;
             jcpu = cpu_time;
             what = cmd;
         }
-    }
 
     // Try to scan /proc for all processes on this tty to get total JCPU.
     // This is best-effort; if /proc is not available, we use the single-process info.
@@ -620,14 +619,12 @@ fn get_user_process_info(tty: &str, pid: i32, now: u64) -> UserProcessInfo {
             };
 
             // Check if this process is on the same tty.
-            if let Some(proc_tty) = read_proc_tty(proc_pid) {
-                if proc_tty == tty {
-                    if let Some((cpu_time, _cmd)) = read_proc_stat_brief(proc_pid) {
+            if let Some(proc_tty) = read_proc_tty(proc_pid)
+                && proc_tty == tty
+                    && let Some((cpu_time, _cmd)) = read_proc_stat_brief(proc_pid) {
                         total_cpu = total_cpu.saturating_add(cpu_time);
                         found_any = true;
                     }
-                }
-            }
         }
 
         if found_any {
@@ -724,21 +721,19 @@ fn filter_records<'a>(records: &'a [SessionRecord], opts: &Options) -> Vec<&'a S
 fn get_current_user() -> String {
     // Try USER env var, then LOGNAME, then read /proc/self/status for uid
     // and resolve via /etc/passwd.
-    if let Ok(user) = env::var("USER") {
-        if !user.is_empty() {
+    if let Ok(user) = env::var("USER")
+        && !user.is_empty() {
             return user;
         }
-    }
-    if let Ok(user) = env::var("LOGNAME") {
-        if !user.is_empty() {
+    if let Ok(user) = env::var("LOGNAME")
+        && !user.is_empty() {
             return user;
         }
-    }
     // Try to read UID from /proc/self/status and map to username.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("Uid:") {
-                let uid_str = rest.trim().split_whitespace().next().unwrap_or("0");
+                let uid_str = rest.split_whitespace().next().unwrap_or("0");
                 let uid: u32 = uid_str.parse().unwrap_or(0);
                 return uid_to_name(uid);
             }
@@ -752,13 +747,11 @@ fn uid_to_name(uid: u32) -> String {
     if let Ok(content) = fs::read_to_string("/etc/passwd") {
         for line in content.lines() {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 3 {
-                if let Ok(line_uid) = fields[2].parse::<u32>() {
-                    if line_uid == uid {
+            if fields.len() >= 3
+                && let Ok(line_uid) = fields[2].parse::<u32>()
+                    && line_uid == uid {
                         return fields[0].to_string();
                     }
-                }
-            }
         }
     }
     format!("{uid}")
@@ -787,21 +780,21 @@ fn print_who(records: &[&SessionRecord], opts: &Options) {
     if opts.show_heading {
         if opts.show_mesg {
             println!(
-                "{:<12} M {:<12} {:<16} {:>8}   {}",
-                "NAME", "LINE", "TIME", "IDLE", "COMMENT"
+                "{:<12} M {:<12} {:<16} {:>8}   COMMENT",
+                "NAME", "LINE", "TIME", "IDLE"
             );
         } else if opts.show_idle {
             println!(
-                "{:<12} {:<12} {:<16} {:>8}   {}",
-                "NAME", "LINE", "TIME", "IDLE", "COMMENT"
+                "{:<12} {:<12} {:<16} {:>8}   COMMENT",
+                "NAME", "LINE", "TIME", "IDLE"
             );
         } else if opts.show_all {
             println!(
-                "{:<12} {:<9} {:<12} {:<4} {:<16} {:>6}   {}",
-                "NAME", "TYPE", "LINE", "ID", "TIME", "PID", "COMMENT"
+                "{:<12} {:<9} {:<12} {:<4} {:<16} {:>6}   COMMENT",
+                "NAME", "TYPE", "LINE", "ID", "TIME", "PID"
             );
         } else {
-            println!("{:<12} {:<12} {}", "NAME", "LINE", "TIME");
+            println!("{:<12} {:<12} TIME", "NAME", "LINE");
         }
     }
 
@@ -929,8 +922,8 @@ fn print_w(records: &[&SessionRecord]) {
 
     // Column headings.
     println!(
-        "{:<8} {:<8} {:<16} {:<8} {:>6} {:>6} {:>6} {}",
-        "USER", "TTY", "FROM", "LOGIN@", "IDLE", "JCPU", "PCPU", "WHAT"
+        "{:<8} {:<8} {:<16} {:<8} {:>6} {:>6} {:>6} WHAT",
+        "USER", "TTY", "FROM", "LOGIN@", "IDLE", "JCPU", "PCPU"
     );
 
     // Per-user rows.

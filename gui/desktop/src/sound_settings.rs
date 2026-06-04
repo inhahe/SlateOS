@@ -504,7 +504,7 @@ impl SoundSettings {
         self.system_sounds
             .iter()
             .find(|s| s.event == event)
-            .map_or(false, |s| s.enabled)
+            .is_some_and(|s| s.enabled)
     }
 
     pub fn system_sounds_list(&self) -> &[SystemSoundConfig] {

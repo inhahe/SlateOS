@@ -349,11 +349,9 @@ impl InputMethodManager {
             .iter()
             .find(|(id, _)| id == app_id)
             .map(|(_, idx)| *idx)
-        {
-            if idx < self.layouts.len() {
+            && idx < self.layouts.len() {
                 self.active_index = idx;
             }
-        }
     }
 
     /// Remember the current layout for an application.
@@ -520,11 +518,10 @@ impl InputMethodManager {
                         self.per_app_layout = val.trim() == "true";
                     }
                     "active" => {
-                        if let Ok(idx) = val.trim().parse::<usize>() {
-                            if idx < self.layouts.len() {
+                        if let Ok(idx) = val.trim().parse::<usize>()
+                            && idx < self.layouts.len() {
                                 self.active_index = idx;
                             }
-                        }
                     }
                     _ => {}
                 }

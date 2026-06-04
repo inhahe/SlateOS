@@ -257,8 +257,8 @@ fn fold_line_columns<W: Write>(
         let new_col = match ch {
             '\t' => {
                 // Advance to the next tab stop.
-                let next = (col / TAB_STOP + 1) * TAB_STOP;
-                next
+                
+                (col / TAB_STOP + 1) * TAB_STOP
             }
             '\x08' => {
                 // Backspace: decrement column, but not below zero.
@@ -269,8 +269,8 @@ fn fold_line_columns<W: Write>(
 
         if new_col > width {
             // This character would push us past the width limit.
-            if spaces {
-                if let Some(sp_end) = last_space_buf_end {
+            if spaces
+                && let Some(sp_end) = last_space_buf_end {
                     // Break at the last space: emit up to (and including)
                     // the space, then carry over the remainder.
                     out.write_all(buf[..sp_end].as_bytes())?;
@@ -304,7 +304,6 @@ fn fold_line_columns<W: Write>(
                     }
                     continue;
                 }
-            }
 
             // No space break available (or -s not active): hard break now.
             out.write_all(buf.as_bytes())?;

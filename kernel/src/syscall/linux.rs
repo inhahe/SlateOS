@@ -605,6 +605,28 @@ pub mod nr {
     pub const TIMER_SETTIME: u64 = 223;
     pub const TIMER_GETTIME: u64 = 224;
     pub const TIMER_GETOVERRUN: u64 = 225;
+    // BSD-socket family (x86_64 Linux numbers).  All operate on socket file
+    // descriptors which our kernel can't currently create; the family is
+    // wired in for ABI coverage so callers get the canonical errno instead
+    // of bare ENOSYS surprises.
+    pub const SOCKET: u64 = 41;
+    pub const CONNECT: u64 = 42;
+    pub const ACCEPT: u64 = 43;
+    pub const SENDTO: u64 = 44;
+    pub const RECVFROM: u64 = 45;
+    pub const SENDMSG: u64 = 46;
+    pub const RECVMSG: u64 = 47;
+    pub const SHUTDOWN: u64 = 48;
+    pub const BIND: u64 = 49;
+    pub const LISTEN: u64 = 50;
+    pub const GETSOCKNAME: u64 = 51;
+    pub const GETPEERNAME: u64 = 52;
+    pub const SOCKETPAIR: u64 = 53;
+    pub const SETSOCKOPT: u64 = 54;
+    pub const GETSOCKOPT: u64 = 55;
+    pub const ACCEPT4: u64 = 288;
+    pub const RECVMMSG: u64 = 299;
+    pub const SENDMMSG: u64 = 307;
 }
 
 // ---------------------------------------------------------------------------
@@ -1629,6 +1651,24 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::TIMER_SETTIME => sys_timer_settime(args),
         nr::TIMER_GETTIME => sys_timer_gettime(args),
         nr::TIMER_GETOVERRUN => sys_timer_getoverrun(args),
+        nr::SOCKET => sys_socket(args),
+        nr::SOCKETPAIR => sys_socketpair(args),
+        nr::BIND => sys_bind(args),
+        nr::LISTEN => sys_listen(args),
+        nr::ACCEPT => sys_accept(args),
+        nr::ACCEPT4 => sys_accept4(args),
+        nr::CONNECT => sys_connect(args),
+        nr::GETSOCKNAME => sys_getsockname(args),
+        nr::GETPEERNAME => sys_getpeername(args),
+        nr::SENDTO => sys_sendto(args),
+        nr::RECVFROM => sys_recvfrom(args),
+        nr::SENDMSG => sys_sendmsg(args),
+        nr::RECVMSG => sys_recvmsg(args),
+        nr::SENDMMSG => sys_sendmmsg(args),
+        nr::RECVMMSG => sys_recvmmsg(args),
+        nr::SETSOCKOPT => sys_setsockopt(args),
+        nr::GETSOCKOPT => sys_getsockopt(args),
+        nr::SHUTDOWN => sys_shutdown(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -8490,6 +8530,468 @@ fn sys_timer_getoverrun(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EINVAL)
 }
 
+// ---------------------------------------------------------------------------
+// BSD-socket family (socket / bind / listen / accept{,4} / connect /
+// getsockname / getpeername / sendto / recvfrom / sendmsg / recvmsg /
+// sendmmsg / recvmmsg / setsockopt / getsockopt / shutdown / socketpair).
+//
+// This kernel has no networking stack and no AF_UNIX socket support
+// yet; sockets cannot be created at all.  The family is wired in for
+// ABI coverage so that:
+//
+//   * `socket` / `socketpair` validate their arguments and return
+//     ENOSYS — the canonical "this kernel can't make sockets" answer,
+//     which is what userspace probes (musl's getaddrinfo, OpenSSL's
+//     network self-test, etc.) expect when there's no network support.
+//   * All the other syscalls operate on a socket fd; since none can
+//     exist, they validate their pointer/length arguments and then
+//     return EBADF.  This is exactly the answer a real Linux would
+//     give if userspace passed a non-socket fd.
+//
+// When real socket support lands these stubs will be replaced with the
+// dispatcher into the network subsystem.  The errno choices preserve
+// the "no socket exists" worldview that callers see today, so changing
+// behaviour later is a pure addition (zero existing call site relies
+// on a different errno).
+// ---------------------------------------------------------------------------
+
+/// Validate that `addr_ptr/addr_len` look plausible for one of the
+/// known address families.  Returns Ok if the kernel-context check
+/// passes (callers that pass NULL for an optional sockaddr should
+/// guard before calling this).
+fn validate_sockaddr_in(addr_ptr: u64, addr_len: u32) -> Result<(), SyscallResult> {
+    if addr_ptr == 0 {
+        return Err(linux_err(errno::EFAULT));
+    }
+    if addr_len < 2 {
+        // Need at least sa_family (u16).
+        return Err(linux_err(errno::EINVAL));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(addr_ptr, addr_len as usize) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    Ok(())
+}
+
+/// Validate an output sockaddr+addrlen pair (used by accept /
+/// getsockname / getpeername / recvfrom).  Both pointers are optional
+/// individually but if one is non-NULL the other must be too.
+fn validate_sockaddr_out(addr_ptr: u64, addrlen_ptr: u64) -> Result<(), SyscallResult> {
+    if addr_ptr == 0 && addrlen_ptr == 0 {
+        return Ok(());
+    }
+    if addr_ptr == 0 || addrlen_ptr == 0 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    // addrlen is socklen_t, 4 bytes; it's read-modify-write so validate
+    // for both read and write.
+    if let Err(e) = crate::mm::user::validate_user_read(addrlen_ptr, 4) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(addrlen_ptr, 4) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    // We can't actually read *addrlen here (no user-context fault path),
+    // so we validate at least 2 bytes of the sockaddr region itself —
+    // enough to hold sa_family.
+    if let Err(e) = crate::mm::user::validate_user_write(addr_ptr, 2) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    Ok(())
+}
+
+/// `socket(domain, type, protocol)`.
+fn sys_socket(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let domain = args.arg0 as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let typ = args.arg1 as u32;
+    // Known address families: AF_UNIX=1, AF_INET=2, AF_INET6=10,
+    // AF_NETLINK=16, AF_PACKET=17.  Anything else is EAFNOSUPPORT (97)
+    // on Linux; we collapse to EINVAL which is the closest portable
+    // answer when we don't have errno 97 defined.
+    match domain {
+        1 | 2 | 10 | 16 | 17 => {}
+        _ => return linux_err(errno::EINVAL),
+    }
+    // type low 4 bits = SOCK_STREAM(1) / SOCK_DGRAM(2) / SOCK_RAW(3) /
+    // SOCK_RDM(4) / SOCK_SEQPACKET(5).  Upper bits: SOCK_CLOEXEC
+    // (0o2_000_000) and SOCK_NONBLOCK (0o4000).
+    let sock_type = typ & 0xf;
+    let sock_flags = typ & !0xf;
+    if !(1..=5).contains(&sock_type) {
+        return linux_err(errno::EINVAL);
+    }
+    if sock_flags & !(0o2_000_000 | 0o4000) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // protocol is opaque and family-specific; 0 = "default for type" is
+    // always legal, anything else we can't validate without a stack so
+    // we accept it.  No networking yet → ENOSYS.
+    linux_err(errno::ENOSYS)
+}
+
+/// `socketpair(domain, type, protocol, sv[2])`.
+fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let domain = args.arg0 as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let typ = args.arg1 as u32;
+    // Only AF_UNIX supports socketpair on Linux.
+    if domain != 1 {
+        return linux_err(errno::EINVAL);
+    }
+    let sock_type = typ & 0xf;
+    let sock_flags = typ & !0xf;
+    if !(1..=5).contains(&sock_type) {
+        return linux_err(errno::EINVAL);
+    }
+    if sock_flags & !(0o2_000_000 | 0o4000) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg3 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // sv is int[2] = 8 bytes.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `bind(sockfd, addr*, addrlen)`.
+fn sys_bind(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let addr_len = args.arg2 as u32;
+    if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `listen(sockfd, backlog)`.
+fn sys_listen(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let backlog = args.arg1 as i32;
+    if backlog < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `accept(sockfd, addr*, addrlen*)`.
+fn sys_accept(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `accept4(sockfd, addr*, addrlen*, flags)`.
+fn sys_accept4(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    // SOCK_CLOEXEC (0o2_000_000) and SOCK_NONBLOCK (0o4000) are the
+    // only defined flag bits.
+    if flags & !(0o2_000_000 | 0o4000) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `connect(sockfd, addr*, addrlen)`.
+fn sys_connect(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let addr_len = args.arg2 as u32;
+    if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `getsockname(sockfd, addr*, addrlen*)`.
+fn sys_getsockname(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    // getsockname always writes — addr and addrlen are both mandatory.
+    if args.arg1 == 0 || args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `getpeername(sockfd, addr*, addrlen*)`.
+fn sys_getpeername(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if args.arg1 == 0 || args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `sendto(sockfd, buf*, len, flags, dest_addr*, addrlen)`.
+fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let buf = args.arg1;
+    let len = args.arg2 as usize;
+    if len > 0 {
+        if buf == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(buf, len) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg4 != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let addr_len = args.arg5 as u32;
+        if let Err(r) = validate_sockaddr_in(args.arg4, addr_len) {
+            return r;
+        }
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `recvfrom(sockfd, buf*, len, flags, src_addr*, addrlen*)`.
+fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let buf = args.arg1;
+    let len = args.arg2 as usize;
+    if len > 0 {
+        if buf == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(buf, len) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if let Err(r) = validate_sockaddr_out(args.arg4, args.arg5) {
+        return r;
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `sendmsg(sockfd, msghdr*, flags)`.
+fn sys_sendmsg(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct msghdr on x86_64 is 56 bytes (msg_name*, msg_namelen,
+    // msg_iov*, msg_iovlen, msg_control*, msg_controllen, msg_flags +
+    // padding).
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 56) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `recvmsg(sockfd, msghdr*, flags)`.
+fn sys_recvmsg(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // msghdr is read-modify-write for recvmsg (msg_flags gets updated).
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 56) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 56) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `sendmmsg(sockfd, msgvec*, vlen, flags)`.
+fn sys_sendmmsg(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let vlen = args.arg2 as u32;
+    if vlen == 0 {
+        // Linux returns 0 (number of messages sent) for vlen==0, but we
+        // still want to surface "no socket" — go straight to EBADF.
+        if let Err(r) = validate_linux_fd(fd) {
+            return r;
+        }
+        return linux_err(errno::EBADF);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // mmsghdr = msghdr (56) + msg_len (4) + 4 pad = 64 bytes per entry.
+    let total = (vlen as usize).saturating_mul(64);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, total) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `recvmmsg(sockfd, msgvec*, vlen, flags, timeout*)`.
+fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let vlen = args.arg2 as u32;
+    if args.arg4 != 0 {
+        // struct timespec is 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if vlen == 0 {
+        if let Err(r) = validate_linux_fd(fd) {
+            return r;
+        }
+        return linux_err(errno::EBADF);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let total = (vlen as usize).saturating_mul(64);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, total) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `setsockopt(sockfd, level, optname, optval*, optlen)`.
+fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let level = args.arg1 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let optlen = args.arg4 as i32;
+    if level < 0 || optlen < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if optlen > 0 {
+        if args.arg3 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, optlen as usize) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `getsockopt(sockfd, level, optname, optval*, optlen*)`.
+fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let level = args.arg1 as i32;
+    if level < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg4 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // optlen is socklen_t* — 4 bytes read-modify-write.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg4, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    // optval is optional (we'd need to read *optlen to know how much
+    // to validate — skip the buffer check in kernel context).
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `shutdown(sockfd, how)`.
+fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let how = args.arg1 as i32;
+    // SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2.
+    if !(0..=2).contains(&how) {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
     // type 0..=10 are defined in Linux.
@@ -13783,6 +14285,272 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMER_GETOVERRUN, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: timer_getoverrun not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // BSD-socket family
+    // -----------------------------------------------------------------
+    {
+        let sockaddr_buf = [0u8; 28]; // big enough for AF_INET6
+        let sockaddr_ptr = sockaddr_buf.as_ptr() as u64;
+        let socklen_buf = [16u8, 0, 0, 0];
+        let socklen_ptr = socklen_buf.as_ptr() as u64;
+        let sv_buf = [0u8; 8];
+        let sv_ptr = sv_buf.as_ptr() as u64;
+        let msghdr_buf = [0u8; 56];
+        let msghdr_ptr = msghdr_buf.as_ptr() as u64;
+        let mmsg_buf = [0u8; 128]; // 2 mmsghdr entries
+        let mmsg_ptr = mmsg_buf.as_ptr() as u64;
+        let iobuf = [0u8; 64];
+        let iobuf_ptr = iobuf.as_ptr() as u64;
+        let optval_buf = [0u8; 4];
+        let optval_ptr = optval_buf.as_ptr() as u64;
+        let optlen_buf = [4u8, 0, 0, 0];
+        let optlen_ptr = optlen_buf.as_ptr() as u64;
+        let timeout_buf = [0u8; 16];
+        let timeout_ptr = timeout_buf.as_ptr() as u64;
+
+        // socket bad domain -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: socket bad domain not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // socket bad type -> EINVAL.
+        let a = SyscallArgs { arg0: 2, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: socket bad type not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // socket bad flag bit -> EINVAL.
+        let a = SyscallArgs { arg0: 2, arg1: 0x1_0000 | 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: socket bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // socket AF_INET SOCK_STREAM -> ENOSYS.
+        let a = SyscallArgs { arg0: 2, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: socket valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // socketpair non-AF_UNIX -> EINVAL.
+        let a = SyscallArgs { arg0: 2, arg1: 1, arg2: 0, arg3: sv_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: socketpair non-unix not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // socketpair NULL sv -> EFAULT.
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: socketpair NULL sv not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // socketpair valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 0, arg3: sv_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: socketpair valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // bind NULL addr -> EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: bind NULL addr not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // bind short addr -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: bind short addr not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // bind valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: bind valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // listen negative backlog -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: listen negative backlog not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // listen valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 5, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: listen valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // accept addr without addrlen -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: accept partial out not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // accept NULL/NULL -> EBADF (valid: ignore peer).
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: accept NULL/NULL not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // accept valid out -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: accept valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // accept4 bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0x1_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: accept4 bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // accept4 valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0o4000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: accept4 valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // connect NULL addr -> EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: connect NULL addr not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // connect valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: connect valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // getsockname NULL pointers -> EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETSOCKNAME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: getsockname NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // getsockname valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETSOCKNAME, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getsockname valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // getpeername valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPEERNAME, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getpeername valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // sendto with buf but NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: sendto NULL buf not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // sendto valid no dest -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: sendto valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // sendto with dest -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 16, arg3: 0, arg4: sockaddr_ptr, arg5: 16 };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: sendto with dest not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // recvfrom valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 16, arg3: 0, arg4: sockaddr_ptr, arg5: socklen_ptr };
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: recvfrom valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // sendmsg NULL msghdr -> EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMSG, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: sendmsg NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // sendmsg valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: msghdr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: sendmsg valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // recvmsg valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: msghdr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RECVMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: recvmsg valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // sendmmsg NULL vec with vlen>0 -> EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMMSG, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: sendmmsg NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // sendmmsg valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: mmsg_ptr, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: sendmmsg valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // recvmmsg valid with timeout -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: mmsg_ptr, arg2: 2, arg3: 0, arg4: timeout_ptr, arg5: 0 };
+        if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: recvmmsg valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // setsockopt negative level -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 1, arg3: optval_ptr, arg4: 4, arg5: 0 };
+        if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: setsockopt bad level not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // setsockopt valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 1, arg2: 1, arg3: optval_ptr, arg4: 4, arg5: 0 };
+        if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: setsockopt valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // getsockopt NULL optlen -> EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 1, arg2: 1, arg3: optval_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: getsockopt NULL optlen not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // getsockopt valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 1, arg2: 1, arg3: optval_ptr, arg4: optlen_ptr, arg5: 0 };
+        if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getsockopt valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // shutdown bad how -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 9, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: shutdown bad how not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // shutdown valid -> EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: shutdown valid not EBADF");
             return Err(KernelError::InternalError);
         }
     }

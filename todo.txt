@@ -6804,4 +6804,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      return path and has a frame-level implementation
 ##      elsewhere; it is NOT dispatched through
 ##      dispatch_linux().
+##  53. BSD-socket family (SOCKET / SOCKETPAIR / BIND / LISTEN /
+##      ACCEPT / ACCEPT4 / CONNECT / GETSOCKNAME / GETPEERNAME /
+##      SENDTO / RECVFROM / SENDMSG / RECVMSG / SENDMMSG /
+##      RECVMMSG / SETSOCKOPT / GETSOCKOPT / SHUTDOWN) — 18
+##      syscalls DONE as input-validated principled-errno stubs.
+##         - socket: validate domain ∈ {AF_UNIX, AF_INET,
+##           AF_INET6, AF_NETLINK, AF_PACKET} + type low 4 bits
+##           ∈ 1..=5 + only SOCK_CLOEXEC|SOCK_NONBLOCK flag bits;
+##           return ENOSYS.  This is the canonical "no networking
+##           in this kernel" answer that userspace probes (musl
+##           getaddrinfo, OpenSSL self-tests, etc.) handle
+##           gracefully.
+##         - socketpair: validate domain == AF_UNIX + same type
+##           rules + 8B sv[2] writable; return ENOSYS.
+##         - bind / listen / accept / accept4 / connect /
+##           getsockname / getpeername / sendto / recvfrom /
+##           sendmsg / recvmsg / sendmmsg / recvmmsg / setsockopt
+##           / getsockopt / shutdown: validate sockaddr lens (>=
+##           2B for sa_family read; addrlen* 4B read+write), iov
+##           pointers, msghdr (56B), mmsghdr (64B per entry),
+##           flag bits where defined; then return EBADF.  This
+##           matches what real Linux would say if userspace
+##           passed a non-socket fd, because in our kernel no
+##           socket fd can possibly exist (socket() returns
+##           ENOSYS).  Selecting EBADF over EOPNOTSUPP keeps the
+##           "any fd you pass is wrong" worldview consistent and
+##           lets callers fall back to non-socket I/O.
+##      Choice rationale:
+##         * ENOSYS for socket/socketpair is exactly the signal
+##           the C library's getaddrinfo / resolver path uses to
+##           switch to local-only resolution.  EAFNOSUPPORT (97)
+##           would also be defensible but requires a new errno
+##           constant and most lookup code only special-cases
+##           ENOSYS.
+##         * EBADF for the operate-on-existing-socket calls is
+##           the correct answer for "you passed an fd to an open
+##           file but it isn't a socket" — userspace SSL/HTTP
+##           libraries check for EBADF before reading errors.
+##         * shutdown validates how ∈ {SHUT_RD=0, SHUT_WR=1,
+##           SHUT_RDWR=2} so callers that probe with bogus
+##           values still get a useful answer.
+##         * setsockopt/getsockopt level == -1 (i.e. socklen_t
+##           interpreted as i32) is EINVAL because real Linux
+##           rejects negative level values; we use this to gate
+##           the validation cheaply.
+##      Limitation: when the network stack lands these stubs are
+##      replaced by direct dispatch into the AF_INET / AF_INET6 /
+##      AF_UNIX subsystems.  The errno choices preserve the
+##      current "no socket exists" worldview, so every existing
+##      call site continues to work — adding real sockets is a
+##      pure addition.  Highest-priority follow-up is AF_UNIX
+##      socketpair() for libc helper threads (pthread cancellation
+##      pipes) and gRPC unix sockets.  AF_INET/INET6 come later
+##      with the TCP/IP stack.  Also: setsockopt/getsockopt only
+##      validate buffer reachability — not (level, optname)
+##      combinations — because the latter requires a real socket
+##      table; this is fine since we always return EBADF before
+##      any option-specific path runs.
 

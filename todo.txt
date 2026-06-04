@@ -2486,7 +2486,41 @@ Remaining net improvements (diminishing returns):
   USERNAME, and the Windows UID-0 fallback.  Builds + clippy clean +
   6/6 tests pass on x86_64-pc-windows-gnu.
 
-- (NOTED 2026-06-03) userspace/hostname has no unit tests.
+- (RESOLVED 2026-06-04) userspace/hostname has no unit tests. Added a
+  58-test #[cfg(test)] mod tests at the end of
+  userspace/hostname/src/main.rs covering:
+    * validate_hostname: simple/dotted/max-length happy paths; rejects
+      empty, too-long (>253), too-long label (>63), empty labels (leading
+      dot, trailing dot, double dot), leading/trailing hyphen,
+      hyphen-in-label edge cases, invalid characters (underscore, space,
+      symbol), non-ASCII.
+    * parse_args (hostname mode): no-args -> Show; -h/--help/help -> Help;
+      -V/--version -> Version; -f/--fqdn/--long -> ShowFqdn; -d/--domain
+      -> ShowDomain; -s/--short -> ShowShort; -i/--ip-address -> ShowIp;
+      -I/--all-ip-addresses -> ShowAllIp; bare name -> Set; -F/--file
+      <path> -> SetFromFile; -F without argument -> Err; -b/--boot <name>
+      -> BootSet; -b without name -> Err; unknown short and long options
+      -> Err; first-action-wins precedence.
+    * parse_args (domainname mode): no-args -> DomainMode{None}; bare arg
+      -> DomainMode{Some}; -V/--version -> Version; -h/--help -> Help.
+    * parse_resolv_conf (newly extracted as pure helper): empty input;
+      comments-only (# and ;); domain directive; search directive picks
+      first entry; domain beats search even when search comes first;
+      first domain wins; whitespace trimming; empty "domain" directive
+      falls through to search fallback.
+    * pick_first_meaningful_line (newly extracted as pure helper): basic
+      one-line; skips blank; skips # comments; trims whitespace; first
+      meaningful line wins; empty/all-comments -> None.
+    * parse_proc_if_inet: empty input; skips loopback (127.0.0.1, ::1,
+      and 127.x.x.x); extracts non-loopback; handles multiple
+      interfaces; skips comments and blank lines; skips lines without an
+      address column.
+  Also refactored parse_args to return Result<Action,String> instead of
+  calling process::exit on parse errors, so tests can exercise error
+  paths without terminating the test runner. main() now handles the
+  Result and prints/exits. Action enum gained
+  #[cfg_attr(test, derive(Debug, PartialEq, Eq))] for assert_eq! support.
+  All 58 tests pass and clippy is clean on x86_64-pc-windows-gnu.
 
 - (NOTED 2026-06-03) userspace/lsusb, userspace/strace, userspace/lsblk,
   userspace/mkfs, userspace/fsck have no unit tests at all (`cargo test`

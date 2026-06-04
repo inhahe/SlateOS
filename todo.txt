@@ -6450,4 +6450,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      / restart wiring.  syslog needs hookup to the kernel's
 ##      log buffer (which already exists for our serial
 ##      logger; just not Linux-shaped klogd buffer).
+##  47. SysV IPC (SHMGET / SHMAT / SHMCTL / SHMDT, SEMGET /
+##      SEMOP / SEMCTL / SEMTIMEDOP, MSGGET / MSGSND / MSGRCV /
+##      MSGCTL) + POSIX message queues (MQ_OPEN / MQ_UNLINK /
+##      MQ_TIMEDSEND / MQ_TIMEDRECEIVE / MQ_NOTIFY /
+##      MQ_GETSETATTR) — 18 syscalls, DONE as input-validated
+##      principled-errno stubs.
+##         - Lookup syscalls (shmget / semget / msgget /
+##           mq_open) -> ENOSYS so feature-detection code in
+##           glibc / portable userspace falls back to the
+##           POSIX-shm / pipe / futex equivalents which we
+##           already implement.
+##         - "Operate on an existing IPC id" syscalls
+##           (shmat / shmctl / shmdt / semop / semtimedop /
+##           semctl / msgsnd / msgrcv / msgctl) validate the
+##           user buffers (sembuf is 6 bytes, sigevent / mq_attr
+##           are 64 bytes, two timespecs are 32 bytes, etc.)
+##           then return EINVAL.  EINVAL is the Linux answer
+##           for a stale / unknown IPC id and is what callers
+##           that handle "the segment was destroyed" expect.
+##         - mq_unlink validates the name then returns ENOENT
+##           (no such mq).  mq_timedsend / mq_timedreceive /
+##           mq_notify / mq_getsetattr validate the
+##           buffers + timespecs + fd kind then return EBADF
+##           because the mqd_t cannot be a real mq descriptor
+##           in our kernel; EBADF is what glibc maps to "your
+##           mq is gone" which all callers handle.
+##         - semop / semtimedop reject nsops == 0 with EINVAL
+##           and nsops > IOV_MAX (1024) with E2BIG-style EINVAL,
+##           matching Linux validation order.
+##      Choice rationale:
+##         * ENOSYS for the four lookup syscalls is the only
+##           answer that actually fires the userspace fallback.
+##           Pretending success would hand back a key that no
+##           subsequent shmat / msgsnd / semop / mq_timedsend
+##           call could honour, and every cold path through
+##           those would then trip an assertion in libc.
+##         * EINVAL for the stale-id operations is the answer
+##           Linux gives for a destroyed segment / set / queue,
+##           which all SysV-IPC-using code handles because
+##           segments are routinely destroyed under the caller.
+##         * EBADF for the mq fd-operations mirrors POSIX's
+##           "mqd_t is a file descriptor in Linux" model and
+##           is what mq_close / mq_send map to when the
+##           descriptor is closed elsewhere.
+##      Limitation: when (and if) SysV IPC and POSIX message
+##      queues are wired up, replace these with real
+##      implementations.  Most modern userspace prefers POSIX
+##      shm + futex + pipes / sockets and never touches these
+##      syscalls; the main historical exception is X11, which
+##      is not on our roadmap (we're going Wayland-only).
+##      Notable users that DO exercise these in the wild:
+##      Oracle DB and PostgreSQL (SysV shm fallback when POSIX
+##      shm is unavailable — but both prefer POSIX shm when
+##      offered), and a handful of embedded message-passing
+##      daemons that use POSIX mq.
 

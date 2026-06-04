@@ -535,6 +535,24 @@ pub mod nr {
     pub const SWAPOFF: u64 = 168;
     pub const REBOOT: u64 = 169;
     pub const SYSLOG: u64 = 103;
+    pub const SHMGET: u64 = 29;
+    pub const SHMAT: u64 = 30;
+    pub const SHMCTL: u64 = 31;
+    pub const SHMDT: u64 = 67;
+    pub const SEMGET: u64 = 64;
+    pub const SEMOP: u64 = 65;
+    pub const SEMCTL: u64 = 66;
+    pub const SEMTIMEDOP: u64 = 220;
+    pub const MSGGET: u64 = 68;
+    pub const MSGSND: u64 = 69;
+    pub const MSGRCV: u64 = 70;
+    pub const MSGCTL: u64 = 71;
+    pub const MQ_OPEN: u64 = 240;
+    pub const MQ_UNLINK: u64 = 241;
+    pub const MQ_TIMEDSEND: u64 = 242;
+    pub const MQ_TIMEDRECEIVE: u64 = 243;
+    pub const MQ_NOTIFY: u64 = 244;
+    pub const MQ_GETSETATTR: u64 = 245;
 }
 
 // ---------------------------------------------------------------------------
@@ -1490,6 +1508,24 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::SWAPOFF => sys_swapoff(args),
         nr::REBOOT => sys_reboot(args),
         nr::SYSLOG => sys_syslog(args),
+        nr::SHMGET => sys_shmget(args),
+        nr::SHMAT => sys_shmat(args),
+        nr::SHMCTL => sys_shmctl(args),
+        nr::SHMDT => sys_shmdt(args),
+        nr::SEMGET => sys_semget(args),
+        nr::SEMOP => sys_semop(args),
+        nr::SEMCTL => sys_semctl(args),
+        nr::SEMTIMEDOP => sys_semtimedop(args),
+        nr::MSGGET => sys_msgget(args),
+        nr::MSGSND => sys_msgsnd(args),
+        nr::MSGRCV => sys_msgrcv(args),
+        nr::MSGCTL => sys_msgctl(args),
+        nr::MQ_OPEN => sys_mq_open(args),
+        nr::MQ_UNLINK => sys_mq_unlink(args),
+        nr::MQ_TIMEDSEND => sys_mq_timedsend(args),
+        nr::MQ_TIMEDRECEIVE => sys_mq_timedreceive(args),
+        nr::MQ_NOTIFY => sys_mq_notify(args),
+        nr::MQ_GETSETATTR => sys_mq_getsetattr(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -6765,6 +6801,262 @@ fn sys_reboot(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
+// ---------------------------------------------------------------------------
+// SysV IPC (shm / sem / msg) and POSIX message queues (mq_*)
+//
+// We don't implement either form.  POSIX mq is more common than SysV
+// in modern code, but both are infrequently used by desktop apps; both
+// have well-documented errno fallback paths.
+//
+// For lookups (shmget / semget / msgget / mq_open) we return -ENOSYS
+// after validating flags / mode / pointers — feature-detection code
+// recognises this and falls back to shm_open() or pipes.  For
+// operations referencing a non-existent id (shmat, shmctl, shmdt, sem*,
+// msg*) we return -EINVAL ("invalid identifier"), which is Linux's
+// answer for a stale id and what portable code handles.
+// ---------------------------------------------------------------------------
+
+/// `shmget(key, size, shmflg)` — create / get SysV shared memory.
+fn sys_shmget(args: &SyscallArgs) -> SyscallResult {
+    // IPC_CREAT=0o1000, IPC_EXCL=0o2000, plus permission bits + huge
+    // page bits.  We accept anything for now.
+    let _flags = args.arg2;
+    // size must be > 0 unless looking up an existing segment.
+    let size = args.arg1 as usize;
+    if size == 0 && (args.arg2 & 0o1000) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `shmat(shmid, shmaddr, shmflg)`.
+fn sys_shmat(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::EINVAL)
+}
+
+/// `shmctl(shmid, cmd, buf)`.
+fn sys_shmctl(args: &SyscallArgs) -> SyscallResult {
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `shmdt(shmaddr)`.
+fn sys_shmdt(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::EINVAL)
+}
+
+/// `semget(key, nsems, semflg)`.
+fn sys_semget(args: &SyscallArgs) -> SyscallResult {
+    let nsems = args.arg1 as i32;
+    if nsems < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // SEMMSL upper-bound check (Linux default 32000) would belong here.
+    linux_err(errno::ENOSYS)
+}
+
+/// `semop(semid, sops, nsops)`.
+fn sys_semop(args: &SyscallArgs) -> SyscallResult {
+    let nsops = args.arg2 as usize;
+    if nsops == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct sembuf = 6 bytes; round up validate.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, nsops.saturating_mul(6)) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `semctl(semid, semnum, cmd, arg)`.
+fn sys_semctl(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::EINVAL)
+}
+
+/// `semtimedop(semid, sops, nsops, timeout)`.
+fn sys_semtimedop(args: &SyscallArgs) -> SyscallResult {
+    let nsops = args.arg2 as usize;
+    if nsops == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, nsops.saturating_mul(6)) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg3 != 0 {
+        // timespec = 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `msgget(key, msgflg)`.
+fn sys_msgget(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `msgsnd(msqid, msgp, msgsz, msgflg)`.
+fn sys_msgsnd(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let sz = args.arg2 as usize;
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, sz.saturating_add(8)) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `msgrcv(msqid, msgp, msgsz, msgtyp, msgflg)`.
+fn sys_msgrcv(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let sz = args.arg2 as usize;
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, sz.saturating_add(8)) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `msgctl(msqid, cmd, buf)`.
+fn sys_msgctl(args: &SyscallArgs) -> SyscallResult {
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `mq_open(name, oflag, mode, attr)`.
+fn sys_mq_open(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    // attr is struct mq_attr = 8 * 8 bytes = 64 bytes when non-NULL.
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 64) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `mq_unlink(name)`.
+fn sys_mq_unlink(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOENT)
+}
+
+/// `mq_timedsend(mqd, msg, len, prio, abs_timeout)`.
+fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let len = args.arg2 as usize;
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg4 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `mq_timedreceive(mqd, msg, len, prio_ptr, abs_timeout)`.
+fn sys_mq_timedreceive(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let len = args.arg2 as usize;
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 4) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg4 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `mq_notify(mqd, sevp)`.
+fn sys_mq_notify(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 != 0 {
+        // struct sigevent = 64 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 64) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `mq_getsetattr(mqd, newattr, oldattr)`.
+fn sys_mq_getsetattr(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 64) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 64) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EBADF)
+}
+
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
     // type 0..=10 are defined in Linux.
@@ -11011,6 +11303,190 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::SYSLOG, &a).value
             != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: syslog(0) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // SysV IPC and POSIX message queues — input validation plus
+    // principled errno.
+    {
+        // shmget with IPC_CREAT and size=0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0o1000, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMGET, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: shmget(create,size=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // shmget(_, 4096, 0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMGET, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: shmget not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // shmat / shmctl / shmdt -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: shmat not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: shmctl not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SHMDT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: shmdt not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // semget with negative nsems -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: semget(-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // semget(_, 4, 0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 4, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: semget not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // semop(nsops=0) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMOP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: semop(0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // semop(NULL,_,1) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMOP, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: semop(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // semctl -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: semctl not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // semtimedop(NULL,_,1,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMTIMEDOP, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: semtimedop(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+
+        // msgget -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGGET, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: msgget not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // msgsnd(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGSND, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: msgsnd(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // msgrcv(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGRCV, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: msgrcv(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // msgctl(_,_,NULL) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: msgctl not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // mq_open(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_OPEN, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mq_open(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // mq_open(name) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_OPEN, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: mq_open not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // mq_unlink(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_UNLINK, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mq_unlink(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // mq_unlink(name) -> ENOENT.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_UNLINK, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: mq_unlink not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // mq_timedsend(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mq_timedsend(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // mq_timedreceive(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDRECEIVE, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mq_timedreceive(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // mq_notify in kernel context (fd validation skipped) -> EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_NOTIFY, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: mq_notify not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // mq_getsetattr in kernel context -> EBADF.
+        if dispatch_linux(nr::MQ_GETSETATTR, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: mq_getsetattr not EBADF");
             return Err(KernelError::InternalError);
         }
     }

@@ -6153,3 +6153,14 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Limitation: synthetic data is per-handle-type only; when
 ##      a real VFS lands, stat must report real inode numbers,
 ##      sizes, link counts, ownership, and timestamps.
+##  40. STATX — DONE following the same pattern as stat/fstat.
+##      Validates the 256-byte statxbuf and the AT_* flag bits
+##      (AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, AT_NO_AUTOMOUNT,
+##      AT_STATX_SYNC_AS_STAT, AT_STATX_FORCE_SYNC,
+##      AT_STATX_DONT_SYNC).  AT_EMPTY_PATH routes to a
+##      synthesised statx for the given fd; path lookups return
+##      ENOENT.  stx_mask advertises STATX_BASIC_STATS so callers
+##      know which fields are filled.  Modern glibc routes most
+##      stat-family calls through statx, so this is the critical
+##      one for ld.so and friends to behave.
+##      Limitation: same as item 39 (no real VFS data).

@@ -376,6 +376,7 @@ pub mod nr {
     pub const PIPE2: u64 = 293;
     pub const GETRANDOM: u64 = 318;
     pub const STATX: u64 = 332;
+    // Note: STATX was previously declared in this block but not dispatched.
     pub const PRLIMIT64: u64 = 302;
     pub const RT_SIGPENDING: u64 = 127;
     pub const TKILL: u64 = 200;
@@ -1311,6 +1312,7 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::LSTAT => sys_lstat(args),
         nr::FSTAT => sys_fstat(args),
         nr::NEWFSTATAT => sys_newfstatat(args),
+        nr::STATX => sys_statx(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -4875,6 +4877,193 @@ fn sys_newfstatat(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOENT)
 }
 
+// ---------------------------------------------------------------------------
+// statx — extended file metadata (Linux 4.11+)
+//
+// Modern glibc uses statx as the underlying implementation for stat/fstat.
+// We give it the same treatment as stat: ENOENT for path lookups, a
+// synthetic struct statx for fd lookups with the correct file-type bits.
+//
+// struct statx layout (x86_64 Linux, 256 bytes):
+//   u32 stx_mask, stx_blksize;
+//   u64 stx_attributes;
+//   u32 stx_nlink, stx_uid, stx_gid;
+//   u16 stx_mode; u16 __spare0[1];
+//   u64 stx_ino, stx_size, stx_blocks, stx_attributes_mask;
+//   statx_timestamp stx_atime, stx_btime, stx_ctime, stx_mtime; (16 each)
+//   u32 stx_rdev_major, stx_rdev_minor;
+//   u32 stx_dev_major, stx_dev_minor;
+//   u64 stx_mnt_id;
+//   u32 stx_dio_mem_align, stx_dio_offset_align;
+//   u64 stx_subvol;
+//   u32 stx_atomic_write_unit_min, stx_atomic_write_unit_max;
+//   u32 stx_atomic_write_segments_max, __spare1[1];
+//   u64 __spare3[9];
+// ---------------------------------------------------------------------------
+
+const STATX_SIZE: usize = 256;
+
+/// Subset of STATX_* mask bits we always advertise as "filled in".
+/// Matches what fill_statx_for_fd actually writes.
+const STATX_TYPE: u32 = 0x0001;
+const STATX_MODE: u32 = 0x0002;
+const STATX_NLINK: u32 = 0x0004;
+const STATX_UID: u32 = 0x0008;
+const STATX_GID: u32 = 0x0010;
+const STATX_ATIME: u32 = 0x0020;
+const STATX_MTIME: u32 = 0x0040;
+const STATX_CTIME: u32 = 0x0080;
+const STATX_INO: u32 = 0x0100;
+const STATX_BASIC_STATS: u32 = STATX_TYPE
+    | STATX_MODE
+    | STATX_NLINK
+    | STATX_UID
+    | STATX_GID
+    | STATX_ATIME
+    | STATX_MTIME
+    | STATX_CTIME
+    | STATX_INO;
+
+/// Fill a 256-byte struct statx for the given fd-table entry.
+fn fill_statx_for_fd(
+    buf: &mut [u8; STATX_SIZE],
+    entry: &crate::proc::linux_fd::FdEntry,
+) {
+    use crate::proc::linux_fd::HandleKind;
+
+    let (mode_u16, blksize): (u16, u32) = match entry.kind {
+        HandleKind::Console => ((S_IFCHR | 0o620) as u16, 1024),
+        HandleKind::Pipe => ((S_IFIFO | 0o600) as u16, 4096),
+        HandleKind::File => ((S_IFREG | 0o644) as u16, 16 * 1024),
+    };
+    let st_ino: u64 = entry.raw_handle;
+    let now_ns = crate::timekeeping::clock_realtime();
+    #[allow(clippy::cast_possible_wrap)]
+    let now_sec = (now_ns / 1_000_000_000) as i64;
+    let now_nsec = (now_ns % 1_000_000_000) as u32;
+
+    fn put_u32(buf: &mut [u8; STATX_SIZE], off: usize, v: u32) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing)]
+        for j in 0..4 {
+            buf[off + j] = bytes[j];
+        }
+    }
+    fn put_u64(buf: &mut [u8; STATX_SIZE], off: usize, v: u64) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing)]
+        for j in 0..8 {
+            buf[off + j] = bytes[j];
+        }
+    }
+    fn put_u16(buf: &mut [u8; STATX_SIZE], off: usize, v: u16) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing)]
+        for j in 0..2 {
+            buf[off + j] = bytes[j];
+        }
+    }
+    fn put_i64(buf: &mut [u8; STATX_SIZE], off: usize, v: i64) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing)]
+        for j in 0..8 {
+            buf[off + j] = bytes[j];
+        }
+    }
+
+    put_u32(buf, 0,  STATX_BASIC_STATS);   // stx_mask
+    put_u32(buf, 4,  blksize);             // stx_blksize
+    put_u64(buf, 8,  0);                   // stx_attributes
+    put_u32(buf, 16, 1);                   // stx_nlink
+    put_u32(buf, 20, 0);                   // stx_uid
+    put_u32(buf, 24, 0);                   // stx_gid
+    put_u16(buf, 28, mode_u16);            // stx_mode
+    // 30..32: __spare0 (already 0)
+    put_u64(buf, 32, st_ino);              // stx_ino
+    put_u64(buf, 40, 0);                   // stx_size
+    put_u64(buf, 48, 0);                   // stx_blocks
+    put_u64(buf, 56, 0);                   // stx_attributes_mask
+    // Timestamps (statx_timestamp = i64 tv_sec + u32 tv_nsec + u32 pad).
+    // stx_atime at offset 64, stx_btime 80, stx_ctime 96, stx_mtime 112.
+    put_i64(buf, 64,  now_sec);
+    put_u32(buf, 72,  now_nsec);
+    put_i64(buf, 80,  now_sec);
+    put_u32(buf, 88,  now_nsec);
+    put_i64(buf, 96,  now_sec);
+    put_u32(buf, 104, now_nsec);
+    put_i64(buf, 112, now_sec);
+    put_u32(buf, 120, now_nsec);
+    // Remaining fields (rdev/dev/mnt_id/dio/subvol/atomic/spare3)
+    // stay zero — we have no device-major/minor or mount table.
+}
+
+/// `statx(dirfd, path, flags, mask, statxbuf)`.
+fn sys_statx(args: &SyscallArgs) -> SyscallResult {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
+    const AT_STATX_SYNC_AS_STAT: u64 = 0x0000;
+    const AT_STATX_FORCE_SYNC: u64 = 0x2000;
+    const AT_STATX_DONT_SYNC: u64 = 0x4000;
+    const VALID_FLAGS: u64 = AT_EMPTY_PATH
+        | AT_SYMLINK_NOFOLLOW
+        | AT_NO_AUTOMOUNT
+        | AT_STATX_SYNC_AS_STAT
+        | AT_STATX_FORCE_SYNC
+        | AT_STATX_DONT_SYNC;
+
+    let dirfd = args.arg0 as i32;
+    let path = args.arg1;
+    let flags = args.arg2;
+    let _mask = args.arg3;
+    let statxbuf = args.arg4;
+
+    if flags & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if statxbuf == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(statxbuf, STATX_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // AT_EMPTY_PATH lets the caller stat the dirfd itself.
+    if flags & AT_EMPTY_PATH != 0 {
+        let entry = match caller_pid() {
+            Some(pid) => match pcb::linux_fd_lookup(pid, dirfd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            },
+            None => crate::proc::linux_fd::FdEntry {
+                kind: crate::proc::linux_fd::HandleKind::Console,
+                raw_handle: 0,
+                fd_flags: 0,
+                status_flags: 0,
+            },
+        };
+        let mut buf = [0u8; STATX_SIZE];
+        fill_statx_for_fd(&mut buf, &entry);
+        // SAFETY: validated as a writable STATX_SIZE-byte range above.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(buf.as_ptr(), statxbuf, STATX_SIZE)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        return SyscallResult::ok(0);
+    }
+
+    // Path lookup: cannot find any file.
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOENT)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -7801,6 +7990,69 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   FAIL: newfstatat(bad flag) not EINVAL"
             );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // statx — input validation and AT_EMPTY_PATH success.
+    {
+        // Bogus flag bit -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0x800_0000,
+            arg3: 0, arg4: 0x2000, arg5: 0 };
+        if dispatch_linux(nr::STATX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx(bad flag) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // NULL statxbuf -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATX, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx(NULL out) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // AT_EMPTY_PATH with kernel-synthesised Console fd -> 0, stx_mode
+        // reports S_IFCHR.
+        let mut xbuf = [0u8; 256];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1000,
+            arg3: 0,
+            arg4: xbuf.as_mut_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx(AT_EMPTY_PATH) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let stx_mode = u16::from_ne_bytes([xbuf[28], xbuf[29]]);
+        if (u32::from(stx_mode) & 0o170000) != 0o020000 {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx reported mode {:#o} not S_IFCHR",
+                stx_mode
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Path lookup with no AT_EMPTY_PATH -> ENOENT.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0,
+            arg4: xbuf.as_mut_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: statx path not ENOENT");
             return Err(KernelError::InternalError);
         }
     }

@@ -2863,13 +2863,71 @@ Remaining net improvements (diminishing returns):
       formatting.
   All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  RUNNING TOTAL: 814 tests across 54 binaries (whoami + batches 1-9).
-  ~31 binaries still pending.
+  PROGRESS 2026-06-04 (batch 10): added 88 unit tests across 5 more
+  binaries (renice, who, join, time_cmd, mkfifo):
+    * renice.rs: gated `unsafe extern "C" { getpriority, setpriority }`
+      on `cfg(target_os = "linux")` (whoami pattern). Extracted
+      `parse_args(args) -> Result<ReniceArgs>` with fields
+      `{ increment, absolute, pids, user }`; supports BSD-style
+      absolute first arg, `-n INCREMENT`, `-p PID`, `-u USER`, bare
+      numeric PIDs. Added `clamp_priority(p) -> i32` (clamp to
+      [-20, 19]) and `target_label(which, who) -> String` (PRIO_PROCESS
+      "PID N", PRIO_PGRP "PGRP N", PRIO_USER "user N", unknown "target
+      N"). Tagged `clamp_priority`, `target_label`, and `PRIO_PGRP`
+      with `#[cfg_attr(not(target_os = "linux"), allow(dead_code))]`
+      since `renice_target` on non-linux is the stub. 20 tests:
+      parse_args (empty errors, missing target errors, BSD-absolute,
+      -n positive/negative/invalid/missing-value, -p multiple/invalid,
+      -u user, bare PID, bare non-numeric errors, mixed flags),
+      clamp (within range, above, below, i32 extremes), target_label
+      (process, pgrp, user, unknown).
+    * who.rs: extracted `parse_utmp_records(data: &[u8]) -> Vec<(user,
+      line, host)>` from the disk-reading `try_read_utmp` so the
+      binary-format parser is unit-testable. Extracted
+      `format_who_line(user, line, time, host)` (omits trailing
+      "()" when host empty). 17 tests: extract_string (empty, no-null,
+      truncates at null, invalid UTF-8 lossy), is_leap basics,
+      days_to_date (epoch, one year, leap day 2000), format_who_line
+      (with/without host, long user not truncated), parse_utmp_records
+      (empty, one USER_PROCESS, skips non-USER_PROCESS types
+      RUN_LVL/BOOT_TIME, skips USER_PROCESS with empty user, multiple
+      records, ignores trailing partial record). Test helper
+      `build_record(ut_type, user, line, host)` constructs synthetic
+      384-byte utmp records.
+    * join.rs: added unconditional `#[derive(Default)]` on `Options`
+      (main calls `::default()`). Extracted `parse_args(args) ->
+      Result<(Options, Vec<String>)>`. 28 tests covering split_fields
+      (default whitespace, custom separator, empty), get_field
+      (in-range, out-of-range), parse_output_spec (single,
+      multi, invalid file/field), parse_args (all flags `-1 -2 -j -t
+      -a -e -o -i --header`, error paths), output_line (default,
+      separator, output_spec with empty fills), output_unpaired
+      (default, with spec). Test helper `capture_line` writes into
+      `Vec<u8>` and decodes to String. Used struct update syntax
+      `Options { separator: Some(','), ..Options::default() }` for
+      clippy::field_reassign_with_default.
+    * time_cmd.rs: extracted `format_real_line(total_secs: f64) ->
+      String` clamping NaN/Infinity/negative to zero seconds before
+      computing minutes/seconds. 11 tests: zero, negative, NaN,
+      infinity, one second, fractional, exactly one minute, one
+      minute plus change, many minutes, just-under-minute, rounding
+      to thousandths.
+    * mkfifo.rs: gated `unsafe extern "C" fn mkfifo` on
+      `cfg(target_os = "linux")`. Extracted `parse_args(args) ->
+      MkfifoArgs { mode: u32, names: Vec<String> }` (default mode
+      0o666, invalid octal falls back to default) and
+      `to_cstring_bytes(name) -> Vec<u8>`. 12 tests: parse defaults
+      (empty/names-only/-m sets mode/-m 700/invalid falls back/-m at
+      end treated as name/multiple -m uses last/leading zero octal),
+      cstring (basic, empty, unicode passthrough, path with slashes).
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
+
+  RUNNING TOTAL: 902 tests across 59 binaries (whoami + batches 1-10).
+  ~26 binaries still pending.
 
   REMAINING: awk, bc, chmod, chown, cp, ed, false, fetch, find, grep,
-  hostname, id, join, ls, mkfifo, mv, nohup, patch, ps, pwd,
-  realpath, renice, sed, sh, tar, test, time_cmd, touch, true, tty,
-  who.
+  hostname, id, ls, mv, nohup, patch, ps, pwd, realpath, sed, sh,
+  tar, test, touch, true, tty.
   Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to

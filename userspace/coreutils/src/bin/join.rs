@@ -20,6 +20,8 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process;
 
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Options {
     field1: usize,       // 0-indexed join field for FILE1
     field2: usize,       // 0-indexed join field for FILE2
@@ -162,107 +164,81 @@ fn open_input(path: &str) -> Box<dyn Read> {
     }
 }
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut opts = Options {
-        field1: 0,
-        field2: 0,
-        separator: None,
-        unpair1: false,
-        unpair2: false,
-        output_spec: None,
-        empty: String::new(),
-    };
+/// Parse join's argv into `(Options, files)`.  Returns an error string
+/// suitable for `eprintln!("join: {e}")`.  This is pure; it does no I/O.
+fn parse_args(args: &[String]) -> Result<(Options, Vec<String>), String> {
+    let mut opts = Options::default();
     let mut files: Vec<String> = Vec::new();
-    let mut i = 0;
+    let mut i: usize = 0;
 
     while i < args.len() {
-        match args[i].as_str() {
+        let Some(arg) = args.get(i) else { break };
+        match arg.as_str() {
             "-1" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("join: option -1 requires an argument");
-                    process::exit(1);
+                i = i.saturating_add(1);
+                let v = args.get(i).ok_or_else(|| "option -1 requires an argument".to_string())?;
+                let n = v.parse::<usize>().map_err(|_| format!("invalid field number: {v}"))?;
+                if n == 0 {
+                    return Err(format!("invalid field number: {v}"));
                 }
-                match args[i].parse::<usize>() {
-                    Ok(n) if n >= 1 => opts.field1 = n - 1,
-                    _ => {
-                        eprintln!("join: invalid field number: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
+                opts.field1 = n.saturating_sub(1);
             }
             "-2" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("join: option -2 requires an argument");
-                    process::exit(1);
+                i = i.saturating_add(1);
+                let v = args.get(i).ok_or_else(|| "option -2 requires an argument".to_string())?;
+                let n = v.parse::<usize>().map_err(|_| format!("invalid field number: {v}"))?;
+                if n == 0 {
+                    return Err(format!("invalid field number: {v}"));
                 }
-                match args[i].parse::<usize>() {
-                    Ok(n) if n >= 1 => opts.field2 = n - 1,
-                    _ => {
-                        eprintln!("join: invalid field number: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
+                opts.field2 = n.saturating_sub(1);
             }
             "-t" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("join: option -t requires an argument");
-                    process::exit(1);
-                }
-                opts.separator = args[i].chars().next();
+                i = i.saturating_add(1);
+                let v = args.get(i).ok_or_else(|| "option -t requires an argument".to_string())?;
+                opts.separator = v.chars().next();
             }
             "-a" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("join: option -a requires an argument");
-                    process::exit(1);
-                }
-                match args[i].as_str() {
+                i = i.saturating_add(1);
+                let v = args.get(i).ok_or_else(|| "option -a requires an argument".to_string())?;
+                match v.as_str() {
                     "1" => opts.unpair1 = true,
                     "2" => opts.unpair2 = true,
-                    _ => {
-                        eprintln!("join: invalid file number for -a: {}", args[i]);
-                        process::exit(1);
-                    }
+                    other => return Err(format!("invalid file number for -a: {other}")),
                 }
             }
             "-o" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("join: option -o requires an argument");
-                    process::exit(1);
-                }
-                if args[i] != "auto" {
-                    match parse_output_spec(&args[i]) {
-                        Some(spec) => opts.output_spec = Some(spec),
-                        None => {
-                            eprintln!("join: invalid output format: {}", args[i]);
-                            process::exit(1);
-                        }
-                    }
+                i = i.saturating_add(1);
+                let v = args.get(i).ok_or_else(|| "option -o requires an argument".to_string())?;
+                if v != "auto" {
+                    let spec = parse_output_spec(v).ok_or_else(|| format!("invalid output format: {v}"))?;
+                    opts.output_spec = Some(spec);
                 }
             }
             "-e" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("join: option -e requires an argument");
-                    process::exit(1);
-                }
-                opts.empty = args[i].clone();
+                i = i.saturating_add(1);
+                let v = args.get(i).ok_or_else(|| "option -e requires an argument".to_string())?;
+                opts.empty = v.clone();
             }
-            arg if arg.starts_with('-') && arg.len() > 1 => {
-                eprintln!("join: unknown option: {arg}");
-                process::exit(1);
+            other if other.starts_with('-') && other.len() > 1 => {
+                return Err(format!("unknown option: {other}"));
             }
-            _ => {
-                files.push(args[i].clone());
-            }
+            other => files.push(other.to_string()),
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
+
+    Ok((opts, files))
+}
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let (opts, files) = match parse_args(&args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("join: {e}");
+            process::exit(1);
+        }
+    };
 
     if files.len() != 2 {
         eprintln!("join: exactly two files required");
@@ -345,5 +321,229 @@ fn main() {
             output_unpaired(&f2, 2, &opts, &mut out);
             idx2 += 1;
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    // ---------------- split_fields ----------------
+
+    #[test]
+    fn split_whitespace_default() {
+        let fields = split_fields("a b  c\td", None);
+        assert_eq!(fields, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn split_explicit_separator() {
+        let fields = split_fields("a,b,,c", Some(','));
+        assert_eq!(fields, vec!["a", "b", "", "c"]);
+    }
+
+    #[test]
+    fn split_empty_line() {
+        assert!(split_fields("", None).is_empty());
+        assert_eq!(split_fields("", Some(',')), vec![""]);
+    }
+
+    // ---------------- get_field ----------------
+
+    #[test]
+    fn get_field_in_range() {
+        let fields = vec!["a", "b", "c"];
+        assert_eq!(get_field(&fields, 0, "X"), "a");
+        assert_eq!(get_field(&fields, 2, "X"), "c");
+    }
+
+    #[test]
+    fn get_field_out_of_range_uses_empty() {
+        let fields = vec!["a", "b"];
+        assert_eq!(get_field(&fields, 5, "MISSING"), "MISSING");
+    }
+
+    // ---------------- parse_output_spec ----------------
+
+    #[test]
+    fn output_spec_single() {
+        assert_eq!(parse_output_spec("1.1"), Some(vec![(1, 0)]));
+    }
+
+    #[test]
+    fn output_spec_multiple() {
+        assert_eq!(
+            parse_output_spec("1.1,2.2,1.3"),
+            Some(vec![(1, 0), (2, 1), (1, 2)])
+        );
+    }
+
+    #[test]
+    fn output_spec_invalid_no_dot() {
+        assert_eq!(parse_output_spec("11"), None);
+    }
+
+    #[test]
+    fn output_spec_invalid_file_num() {
+        assert_eq!(parse_output_spec("3.1"), None);
+        assert_eq!(parse_output_spec("0.1"), None);
+    }
+
+    #[test]
+    fn output_spec_invalid_field_zero() {
+        assert_eq!(parse_output_spec("1.0"), None);
+    }
+
+    #[test]
+    fn output_spec_with_spaces() {
+        assert_eq!(parse_output_spec(" 1.1 , 2.2 "), Some(vec![(1, 0), (2, 1)]));
+    }
+
+    // ---------------- parse_args ----------------
+
+    #[test]
+    fn args_defaults_when_empty() {
+        let (opts, files) = parse_args(&s(&[])).unwrap();
+        assert_eq!(opts, Options::default());
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn args_files_only() {
+        let (opts, files) = parse_args(&s(&["a.txt", "b.txt"])).unwrap();
+        assert_eq!(opts.field1, 0);
+        assert_eq!(files, vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn args_field_numbers() {
+        let (opts, _) = parse_args(&s(&["-1", "2", "-2", "3", "a", "b"])).unwrap();
+        assert_eq!(opts.field1, 1);
+        assert_eq!(opts.field2, 2);
+    }
+
+    #[test]
+    fn args_separator() {
+        let (opts, _) = parse_args(&s(&["-t", ",", "a", "b"])).unwrap();
+        assert_eq!(opts.separator, Some(','));
+    }
+
+    #[test]
+    fn args_unpair_one_and_two() {
+        let (opts, _) = parse_args(&s(&["-a", "1", "-a", "2", "a", "b"])).unwrap();
+        assert!(opts.unpair1 && opts.unpair2);
+    }
+
+    #[test]
+    fn args_unpair_invalid() {
+        let err = parse_args(&s(&["-a", "3", "a", "b"])).unwrap_err();
+        assert!(err.contains("invalid file number"));
+    }
+
+    #[test]
+    fn args_output_spec() {
+        let (opts, _) = parse_args(&s(&["-o", "1.1,2.2", "a", "b"])).unwrap();
+        assert_eq!(opts.output_spec, Some(vec![(1, 0), (2, 1)]));
+    }
+
+    #[test]
+    fn args_output_spec_auto_keeps_default() {
+        let (opts, _) = parse_args(&s(&["-o", "auto", "a", "b"])).unwrap();
+        assert_eq!(opts.output_spec, None);
+    }
+
+    #[test]
+    fn args_empty_string() {
+        let (opts, _) = parse_args(&s(&["-e", "NULL", "a", "b"])).unwrap();
+        assert_eq!(opts.empty, "NULL");
+    }
+
+    #[test]
+    fn args_missing_value_errors() {
+        for flag in ["-1", "-2", "-t", "-a", "-o", "-e"] {
+            let err = parse_args(&s(&[flag])).unwrap_err();
+            assert!(err.contains(flag) || err.contains("requires"));
+        }
+    }
+
+    #[test]
+    fn args_invalid_field_zero_errors() {
+        let err = parse_args(&s(&["-1", "0", "a", "b"])).unwrap_err();
+        assert!(err.contains("invalid field number"));
+    }
+
+    #[test]
+    fn args_unknown_option_errors() {
+        let err = parse_args(&s(&["-z", "a", "b"])).unwrap_err();
+        assert!(err.contains("unknown option"));
+    }
+
+    // ---------------- output_line ----------------
+
+    fn capture_line(fields1: &[&str], fields2: &[&str], opts: &Options) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        output_line(fields1, fields2, opts, &mut buf);
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn capture_unpaired(fields: &[&str], file_num: usize, opts: &Options) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        output_unpaired(fields, file_num, opts, &mut buf);
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn output_line_default_format() {
+        // join field is field1, then other fields of FILE1, then FILE2.
+        let opts = Options::default();
+        let line = capture_line(&["k", "v1"], &["k", "v2"], &opts);
+        assert_eq!(line, "k v1 v2\n");
+    }
+
+    #[test]
+    fn output_line_with_separator() {
+        let opts = Options {
+            separator: Some(','),
+            ..Options::default()
+        };
+        let line = capture_line(&["k", "v1"], &["k", "v2"], &opts);
+        assert_eq!(line, "k,v1,v2\n");
+    }
+
+    #[test]
+    fn output_line_with_output_spec() {
+        let opts = Options {
+            separator: Some(','),
+            output_spec: Some(vec![(2, 1), (1, 0)]),
+            ..Options::default()
+        };
+        let line = capture_line(&["k", "v1"], &["k", "v2"], &opts);
+        // Spec: file2 field 1 (= "v2"), file1 field 0 (= "k").
+        assert_eq!(line, "v2,k\n");
+    }
+
+    #[test]
+    fn output_unpaired_default() {
+        let opts = Options::default();
+        let line = capture_unpaired(&["k", "v1", "extra"], 1, &opts);
+        assert_eq!(line, "k v1 extra\n");
+    }
+
+    #[test]
+    fn output_unpaired_with_spec_fills_empty_for_other_file() {
+        let opts = Options {
+            separator: Some(','),
+            empty: "NULL".to_string(),
+            output_spec: Some(vec![(1, 0), (2, 1), (1, 1)]),
+            ..Options::default()
+        };
+        let line = capture_unpaired(&["k", "v1"], 1, &opts);
+        // File 1 fields available; for (2, 1) it falls back to empty.
+        assert_eq!(line, "k,NULL,v1\n");
     }
 }

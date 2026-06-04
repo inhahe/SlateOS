@@ -269,11 +269,17 @@ impl FieldBitset {
     }
 
     /// True if no bits are set and not a wildcard.
+    // Held-for-future API: part of the coherent FieldBitset interface; useful
+    // for validating that a parsed cron field actually matches something.
+    #[allow(dead_code)]
     fn is_empty(self) -> bool {
         !self.wildcard && self.bits == 0
     }
 
     /// Smallest value >= `from` that is set, or None.
+    // Held-for-future API: needed by an alternate next-match algorithm that
+    // walks fields directly instead of probing minute-by-minute.
+    #[allow(dead_code)]
     fn next_set_from(self, from: u32, max: u32) -> Option<u32> {
         if self.wildcard {
             if from <= max {
@@ -281,15 +287,12 @@ impl FieldBitset {
             }
             return None;
         }
-        for v in from..=max {
-            if v < 64 && (self.bits >> v) & 1 == 1 {
-                return Some(v);
-            }
-        }
-        None
+        (from..=max).find(|&v| v < 64 && (self.bits >> v) & 1 == 1)
     }
 
     /// Smallest value that is set, or None.
+    // Held-for-future API: companion to next_set_from for the same algorithm.
+    #[allow(dead_code)]
     fn first_set(self, min: u32, max: u32) -> Option<u32> {
         self.next_set_from(min, max)
     }
@@ -511,6 +514,9 @@ impl CronExpr {
     /// Calculate the next time (as Unix seconds) at or after `from` when this
     /// expression matches. Returns `None` if no match is found within a
     /// reasonable horizon (4 years).
+    // Held-for-future API: scheduling currently uses per-tick matches() probing;
+    // this helper enables a future "sleep until next match" optimisation.
+    #[allow(dead_code)]
     fn next_match_after(&self, from: u64) -> Option<u64> {
         let mut bt = unix_to_broken(from);
         // Start at the beginning of the current minute.  If `from` is not
@@ -673,6 +679,11 @@ impl CronExpr {
 // ============================================================================
 
 /// Sentinel for `@reboot` jobs (no time expression).
+// Held-for-future use: @reboot jobs are currently tracked via the explicit
+// `is_reboot: bool` field on CronJob; this sentinel is reserved for a future
+// representation that stores reboot jobs in the same "next-fire" priority
+// queue as scheduled jobs.
+#[allow(dead_code)]
 const REBOOT_SENTINEL: u64 = u64::MAX;
 
 /// Parse `@keyword` into either a `CronExpr` or the reboot sentinel.

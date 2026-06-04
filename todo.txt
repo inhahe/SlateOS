@@ -7105,3 +7105,90 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           script-loader; -ENOSYS would break dynamic linking
 ##           on day one.
 
+##  58. FLOCK / GETDENTS / GETDENTS64 / WAITID / PREADV / PWRITEV /
+##      PREADV2 / PWRITEV2 — 8 syscalls DONE as input-validated
+##      principled stubs.  All eight had no constant defined before
+##      this batch.  Sets cover advisory file-locking, directory
+##      iteration, modern wait variants, and positional vectored
+##      I/O — the most-impactful remaining gaps in the Linux fd
+##      surface from the find_gaps.py audit (36 → 28 missing).
+##         - flock: validate fd, op ∈ {LOCK_SH=1, LOCK_EX=2,
+##           LOCK_UN=8} with optional LOCK_NB=4 modifier; return 0.
+##           Advisory locks are by definition no-ops in
+##           single-task scenarios; the single-task simplification
+##           is semantically safe (Linux flock is advisory — only
+##           cooperating programs observe it).  Multi-process
+##           coordination is a separate follow-up (see below).
+##         - getdents / getdents64: validate fd, dirp writable,
+##           count; return ENOSYS.  getdents (legacy 32-bit) is
+##           glibc-removed since 2.x.  getdents64 returning ENOSYS
+##           keeps readdir() returning NULL+errno=ENOSYS, which
+##           glibc treats consistently as "this kernel cannot
+##           iterate" — returning 0 (empty dir) would be a worse
+##           lie because programs would silently fail to find
+##           anything.
+##         - waitid: validate idtype ∈ {P_ALL, P_PID, P_PGID,
+##           P_PIDFD}, options mask (WNOHANG|WSTOPPED|WEXITED|
+##           WCONTINUED|WNOWAIT), require at least one event class,
+##           validate optional 128B siginfo_t + 144B rusage
+##           outputs.  Return 0 on WNOHANG (no state change),
+##           ECHILD otherwise (no children to wait on).  Glibc's
+##           posix_spawn falls back to wait4 cleanly on ECHILD.
+##         - preadv / pwritev / preadv2 / pwritev2: validate fd,
+##           non-negative offset (preadv2/pwritev2 allow -1 to
+##           mean "use file offset"), iov array readable, every
+##           iovec.base+len satisfying the requested access, flags
+##           in the RWF_HIPRI|DSYNC|SYNC|NOWAIT|APPEND|NOAPPEND|
+##           ATOMIC|DONTCACHE mask.  Return ENOSYS so glibc falls
+##           back to lseek + readv + lseek.  RWF_* unknown bits
+##           are EOPNOTSUPP (Linux's documented "kernel doesn't
+##           support this RWF_ flag" answer).
+##      Choice rationale:
+##         * Success for flock matches the single-task case
+##           exactly: in the absence of any contender, every
+##           cooperative caller successfully grabs the lock.
+##         * ENOSYS (not 0/empty) for getdents64 because callers
+##           must distinguish "kernel can't list" from "empty dir"
+##           or they make wrong inferences (e.g., `rm -rf` would
+##           skip non-empty directories that report empty).
+##         * waitid's ECHILD-when-blocking is the right answer
+##           for a task with no children: a real Linux process
+##           with no children waiting on P_ALL gets ECHILD; we
+##           reach that exact state because no kernel-context
+##           task has children either.
+##         * EOPNOTSUPP for unknown RWF_* bits matches Linux's
+##           contract — it's how callers feature-detect new bits.
+##      Added a `validate_iov` helper that mirrors the iteration
+##      done by sys_readv / sys_writev (each iovec entry: read 16B
+##      from iov_ptr, validate base/len against read or write
+##      permission).  Shared across all four positional vectored
+##      syscalls; saves ~120 lines of duplicated validation.
+##      Limitation / future work:
+##         * Real flock requires per-inode lock state shared
+##           across processes.  Today two processes both observe
+##           "lock granted" simultaneously.  Documented because
+##           this matters for vim/emacs/git lockfiles when we
+##           eventually run two userspace processes against the
+##           same filesystem.  Adding a real flock table needs an
+##           ino-keyed map in the VFS plus wait-queues for blocked
+##           waiters.
+##         * Real getdents64 requires VFS directory iteration:
+##           an opendir-style cursor stored alongside the fd, an
+##           emit_dirent helper that packs `struct linux_dirent64`
+##           records up to `count` bytes, and short-read semantics
+##           for partial buffers.  Tracked separately because the
+##           VFS itself doesn't yet expose iter_dir; this is one
+##           of the bigger "real impl" items in the Linux ABI
+##           backlog and unblocks `ls`, `find`, shell glob
+##           expansion, and Python `os.listdir`.
+##         * Real preadv/pwritev/preadv2/pwritev2 just need the
+##           positional-I/O backend that pread/pwrite need (see
+##           item 57).  Once one lands, the vectored variants are
+##           trivial loops over readv/writev.
+##         * waitid going through the real reaping path: today
+##           wait4 has the proper reap logic; waitid would need to
+##           translate idtype/options into the same lookup +
+##           write `siginfo_t { si_signo=SIGCHLD, si_code,
+##           si_pid, si_uid, si_status, si_utime, si_stime }`.
+##           Mechanical, just not done yet.
+

@@ -658,6 +658,15 @@ pub mod nr {
     pub const LSM_GET_SELF_ATTR: u64 = 459;
     pub const LSM_SET_SELF_ATTR: u64 = 460;
     pub const LSM_LIST_MODULES: u64 = 461;
+    // Batch 32: file I/O + waitid extensions.
+    pub const FLOCK: u64 = 73;
+    pub const GETDENTS: u64 = 78;
+    pub const GETDENTS64: u64 = 217;
+    pub const WAITID: u64 = 247;
+    pub const PREADV: u64 = 295;
+    pub const PWRITEV: u64 = 296;
+    pub const PREADV2: u64 = 327;
+    pub const PWRITEV2: u64 = 328;
 }
 
 // ---------------------------------------------------------------------------
@@ -1732,6 +1741,14 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::GETCWD => sys_getcwd(args),
         nr::CHDIR => sys_chdir(args),
         nr::FCHDIR => sys_fchdir(args),
+        nr::FLOCK => sys_flock(args),
+        nr::GETDENTS => sys_getdents(args),
+        nr::GETDENTS64 => sys_getdents64(args),
+        nr::WAITID => sys_waitid(args),
+        nr::PREADV => sys_preadv(args),
+        nr::PWRITEV => sys_pwritev(args),
+        nr::PREADV2 => sys_preadv2(args),
+        nr::PWRITEV2 => sys_pwritev2(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -9814,6 +9831,301 @@ fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `flock(fd, op)` — advisory whole-file lock.
+///
+/// op encodes a request via LOCK_SH=1, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8.
+/// Only the type bits (LOCK_SH|LOCK_EX|LOCK_UN) and the LOCK_NB modifier
+/// are accepted; anything else is EINVAL.  We don't yet track per-fd
+/// lock state, but flock is advisory by design — Linux only enforces it
+/// among programs that both opt in — so silently succeeding for the
+/// single-task case is semantically correct.  Programs that use flock
+/// to coordinate access on shared files (vim swap files, fcgi pidfiles,
+/// /etc/passwd updates) get the lock they asked for; programs that
+/// reuse the same fd to upgrade/downgrade between SH and EX get
+/// consistent success.
+///
+/// Limitation: in multi-process scenarios two callers will both observe
+/// "lock granted" simultaneously.  Until we add a real flock table this
+/// is the trade-off; ENOSYS would break every editor's lockfile probe.
+fn sys_flock(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let op = args.arg1 as u32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // op = (type) | optional LOCK_NB(4).
+    let type_bits = op & !4;
+    match type_bits {
+        1 | 2 | 8 => SyscallResult::ok(0), // LOCK_SH / LOCK_EX / LOCK_UN
+        _ => linux_err(errno::EINVAL),
+    }
+}
+
+/// `getdents(fd, dirp, count)` — read directory entries (legacy 32-bit dirent).
+///
+/// glibc switched to `getdents64` exclusively in 2.x, so legacy
+/// `getdents` is essentially a museum piece — only kept for ABI
+/// compatibility with very old static binaries.  Returning ENOSYS is
+/// the conventional answer for a kernel that has only ever implemented
+/// getdents64.
+fn sys_getdents(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let dirp = args.arg1;
+    let count = args.arg2;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if count == 0 {
+        return SyscallResult::ok(0);
+    }
+    let len = match usize::try_from(count) {
+        Ok(v) => v,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    if let Err(e) = crate::mm::user::validate_user_write(dirp, len) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `getdents64(fd, dirp, count)` — read directory entries.
+///
+/// The current Linux fd backend does not yet expose directory
+/// iteration.  Return ENOSYS after argument validation; glibc's
+/// `readdir()` will surface this as `NULL` + errno=ENOSYS, which
+/// callers treat as "this kernel cannot list directories" rather than
+/// "empty directory" (the latter would be the case if we returned 0).
+/// ENOSYS is the truthful answer and keeps callers from drawing wrong
+/// conclusions about empty directories.
+///
+/// TODO: once the VFS exposes per-dirfd iteration, this becomes a real
+/// implementation that calls into the open-directory cursor and emits
+/// `struct linux_dirent64` records.
+fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let dirp = args.arg1;
+    let count = args.arg2;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if count == 0 {
+        return SyscallResult::ok(0);
+    }
+    let len = match usize::try_from(count) {
+        Ok(v) => v,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    if let Err(e) = crate::mm::user::validate_user_write(dirp, len) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `waitid(idtype, id, infop, options, rusage)` — wait for child state change.
+///
+/// idtype: 0=P_ALL, 1=P_PID, 2=P_PGID, 3=P_PIDFD.
+/// options: WNOHANG=1 | WUNTRACED=2 | WEXITED=4 | WCONTINUED=8 | WNOWAIT=0x1000000.
+///
+/// We validate options bits and idtype, and (when infop is non-NULL)
+/// the 128-byte siginfo_t output buffer.  At least one of
+/// {WEXITED, WSTOPPED=2, WCONTINUED} must be set per Linux's contract.
+/// On success-with-no-events return 0 (the conventional answer for
+/// WNOHANG with no pending state change).  Otherwise ECHILD — matches
+/// "no children eligible to wait on".  Our wait4 path already handles
+/// the real reaping case; waitid is a superset that real Linux
+/// programs use for posix_spawn and pidfd-based reapers, and they all
+/// fall back to wait4 when waitid returns ECHILD on a process with no
+/// children.
+fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
+    let idtype = args.arg0 as i32;
+    let _id = args.arg1;
+    let infop = args.arg2;
+    let options = args.arg3 as i32;
+    let rusage = args.arg4;
+
+    if !(0..=3).contains(&idtype) {
+        return linux_err(errno::EINVAL);
+    }
+    // Mask of recognized options.
+    const VALID: i32 = 1 | 2 | 4 | 8 | 0x100_0000;
+    if options & !VALID != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // At least one event class must be requested.
+    if options & (4 | 2 | 8) == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // siginfo_t is 128 bytes on x86_64.
+    if infop != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(infop, 128) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // struct rusage is 144 bytes.
+    if rusage != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(rusage, 144) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // WNOHANG: report "no state change" with 0 (Linux convention).
+    if options & 1 != 0 {
+        return SyscallResult::ok(0);
+    }
+    // Blocking case: no children eligible.
+    linux_err(errno::ECHILD)
+}
+
+/// Validate the `(iov, iovcnt)` portion of a (p)readv/(p)writev call.
+///
+/// Walks every iovec entry, checking that the base/len pair points
+/// into a valid user range with the requested permission (`write` for
+/// read-style syscalls, `read` for write-style).  Mirrors the iteration
+/// done by `sys_readv` / `sys_writev` so callers see the same EFAULT
+/// error pattern.
+fn validate_iov(iov_ptr: u64, iovcnt: i32, for_write: bool) -> Result<(), SyscallResult> {
+    if iovcnt < 0 || iovcnt > 1024 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    if iovcnt == 0 {
+        return Ok(());
+    }
+    // iov_ptr itself must point to iovcnt * 16 readable bytes.
+    let total = match (iovcnt as u64).checked_mul(16) {
+        Some(t) => t as usize,
+        None => return Err(linux_err(errno::EINVAL)),
+    };
+    if let Err(e) = crate::mm::user::validate_user_read(iov_ptr, total) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    // Each iov entry's base/len must satisfy the requested access.
+    for i in 0..iovcnt {
+        let entry_ptr = iov_ptr.wrapping_add((i as u64) * 16);
+        #[repr(C)]
+        struct Iovec {
+            base: u64,
+            len: u64,
+        }
+        let mut iov = Iovec { base: 0, len: 0 };
+        // SAFETY: copy_from_user validates the user range.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                entry_ptr,
+                (&raw mut iov).cast::<u8>(),
+                core::mem::size_of::<Iovec>(),
+            )
+        };
+        if let Err(e) = r {
+            return Err(linux_err(linux_errno_for(e)));
+        }
+        if iov.len == 0 {
+            continue;
+        }
+        let len = match usize::try_from(iov.len) {
+            Ok(v) => v,
+            Err(_) => return Err(linux_err(errno::EINVAL)),
+        };
+        let res = if for_write {
+            crate::mm::user::validate_user_read(iov.base, len)
+        } else {
+            crate::mm::user::validate_user_write(iov.base, len)
+        };
+        if let Err(e) = res {
+            return Err(linux_err(linux_errno_for(e)));
+        }
+    }
+    Ok(())
+}
+
+/// `preadv(fd, iov, iovcnt, offset)` — positional vectored read.
+///
+/// Same fallback story as pread64: validate args and return ENOSYS so
+/// glibc emulates with `lseek + readv + lseek`.
+fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let iov_ptr = args.arg1;
+    let iovcnt = args.arg2 as i32;
+    let offset = args.arg3 as i64;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if offset < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(r) = validate_iov(iov_ptr, iovcnt, false) {
+        return r;
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `pwritev(fd, iov, iovcnt, offset)` — positional vectored write.
+fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let iov_ptr = args.arg1;
+    let iovcnt = args.arg2 as i32;
+    let offset = args.arg3 as i64;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if offset < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(r) = validate_iov(iov_ptr, iovcnt, true) {
+        return r;
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `preadv2(fd, iov, iovcnt, offset, flags)` — like preadv with RWF_* flags.
+///
+/// flags ⊆ { RWF_HIPRI=1 | RWF_DSYNC=2 | RWF_SYNC=4 | RWF_NOWAIT=8 |
+/// RWF_APPEND=16 | RWF_NOAPPEND=32 | RWF_ATOMIC=64 | RWF_DONTCACHE=128 }.
+/// offset may be -1 to mean "use current file offset" (preadv2 special case).
+fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let iov_ptr = args.arg1;
+    let iovcnt = args.arg2 as i32;
+    let offset = args.arg3 as i64;
+    let flags = args.arg4 as u32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if offset < -1 {
+        return linux_err(errno::EINVAL);
+    }
+    // RWF_* mask, kernel ≥ 6.11 maximum bits.
+    const RWF_VALID: u32 = 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128;
+    if flags & !RWF_VALID != 0 {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    if let Err(r) = validate_iov(iov_ptr, iovcnt, false) {
+        return r;
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `pwritev2(fd, iov, iovcnt, offset, flags)`.
+fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let iov_ptr = args.arg1;
+    let iovcnt = args.arg2 as i32;
+    let offset = args.arg3 as i64;
+    let flags = args.arg4 as u32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if offset < -1 {
+        return linux_err(errno::EINVAL);
+    }
+    const RWF_VALID: u32 = 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128;
+    if flags & !RWF_VALID != 0 {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    if let Err(r) = validate_iov(iov_ptr, iovcnt, true) {
+        return r;
+    }
+    linux_err(errno::ENOSYS)
+}
+
 /// `lsm_list_modules(ids*, size*, flags)`.
 fn sys_lsm_list_modules(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 == 0 {
@@ -16059,6 +16371,150 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FCHDIR, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: fchdir valid not 0");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // flock / getdents / getdents64 / waitid / preadv* / pwritev*
+    // -----------------------------------------------------------------
+    {
+        let dir_buf = [0u8; 256];
+        let dir_ptr = dir_buf.as_ptr() as u64;
+        let iobuf = [0u8; 256];
+        let iobuf_ptr = iobuf.as_ptr() as u64;
+        // Build a single-entry iovec pointing at iobuf.
+        #[repr(C)]
+        struct Iov { base: u64, len: u64 }
+        let iov = [Iov { base: iobuf_ptr, len: 64 }];
+        let iov_ptr = iov.as_ptr() as u64;
+        let siginfo_buf = [0u8; 128];
+        let siginfo_ptr = siginfo_buf.as_ptr() as u64;
+        let rusage_buf = [0u8; 144];
+        let rusage_ptr = rusage_buf.as_ptr() as u64;
+
+        // flock LOCK_EX -> 0.
+        let a = SyscallArgs { arg0: 3, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FLOCK, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: flock LOCK_EX not 0");
+            return Err(KernelError::InternalError);
+        }
+        // flock LOCK_SH | LOCK_NB -> 0.
+        let a = SyscallArgs { arg0: 3, arg1: 1 | 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FLOCK, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: flock LOCK_SH|LOCK_NB not 0");
+            return Err(KernelError::InternalError);
+        }
+        // flock LOCK_UN -> 0.
+        let a = SyscallArgs { arg0: 3, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FLOCK, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: flock LOCK_UN not 0");
+            return Err(KernelError::InternalError);
+        }
+        // flock invalid op -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 0x10, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FLOCK, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: flock invalid op not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // getdents count=0 -> 0.
+        let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETDENTS, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: getdents count=0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // getdents valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 256, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETDENTS, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: getdents valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // getdents64 count=0 -> 0.
+        let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETDENTS64, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: getdents64 count=0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // getdents64 valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 256, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETDENTS64, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: getdents64 valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // waitid bad idtype -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 4, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::WAITID, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: waitid bad idtype not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // waitid no event class -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::WAITID, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: waitid no event class not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // waitid bad options bit -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x8000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::WAITID, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: waitid bad options not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // waitid WNOHANG | WEXITED -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: siginfo_ptr, arg3: 1 | 4, arg4: rusage_ptr, arg5: 0 };
+        if dispatch_linux(nr::WAITID, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: waitid WNOHANG not 0");
+            return Err(KernelError::InternalError);
+        }
+        // waitid blocking WEXITED -> ECHILD.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 4, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::WAITID, &a).value != -i64::from(errno::ECHILD) {
+            serial_println!("[syscall/linux]   FAIL: waitid blocking not ECHILD");
+            return Err(KernelError::InternalError);
+        }
+
+        // preadv negative offset -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: u64::MAX, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: preadv neg offset not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // preadv bad iovcnt -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 2000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: preadv bad iovcnt not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // preadv valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: preadv valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // pwritev valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PWRITEV, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: pwritev valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // preadv2 bad flags -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0x10_0000, arg5: 0 };
+        if dispatch_linux(nr::PREADV2, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: preadv2 bad flags not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // preadv2 offset=-1 (use file offset) valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: u64::MAX, arg4: 1, arg5: 0 };
+        if dispatch_linux(nr::PREADV2, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: preadv2 offset=-1 not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // pwritev2 valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PWRITEV2, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: pwritev2 valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

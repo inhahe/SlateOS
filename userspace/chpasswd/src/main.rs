@@ -337,10 +337,11 @@ fn show_password_status(
         .find(|e| e.username == username)
         .ok_or_else(|| format!("user '{username}' not found"))?;
 
-    let status = if entry.password_hash.starts_with('!') {
-        "L" // locked
-    } else if entry.password_hash == "*" || entry.password_hash == "!!" {
-        "L" // locked/no password
+    let status = if entry.password_hash.starts_with('!')
+        || entry.password_hash == "*"
+        || entry.password_hash == "!!"
+    {
+        "L" // locked / no password (! prefix or sentinel)
     } else if entry.password_hash.is_empty() {
         "NP" // no password
     } else {

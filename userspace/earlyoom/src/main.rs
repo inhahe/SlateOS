@@ -30,6 +30,8 @@ struct EarlyOomConfig {
     dryrun: bool,
     _use_sigkill: bool,
     _use_sigterm: bool,
+    // Held for the future scoring path; the current selection uses RSS only.
+    #[allow(dead_code)]
     priority: KillPriority,
     report_interval: u64,
 }

@@ -352,7 +352,7 @@ fn compare(
     loop {
         // Determine how many bytes to read this iteration.
         let want = match bytes_left {
-            Some(left) if left == 0 => break,
+            Some(0) => break,
             Some(left) => (left as usize).min(CHUNK_SIZE),
             None => CHUNK_SIZE,
         };

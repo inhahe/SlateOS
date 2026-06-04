@@ -466,11 +466,10 @@ fn run_numfmt() -> Result<(), String> {
                 delimiter = argv[i].chars().next();
             }
             _ if arg.starts_with("--delimiter=") || arg.starts_with("-d") => {
-                let val = if arg.starts_with("--delimiter=") {
-                    &arg["--delimiter=".len()..]
-                } else {
-                    &arg[2..]
-                };
+                let val = arg
+                    .strip_prefix("--delimiter=")
+                    .or_else(|| arg.strip_prefix("-d"))
+                    .unwrap_or("");
                 delimiter = val.chars().next();
             }
             _ if arg == "--header" => {

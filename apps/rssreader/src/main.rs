@@ -21,7 +21,7 @@
 //! All data is simulated locally (no network required).
 //! Uses the guitk library for rendering.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::too_many_arguments)]
 
 use std::collections::HashMap;
 

@@ -476,9 +476,8 @@ fn split_troff_args(text: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = text.chars().peekable();
 
-    for ch in chars {
+    for ch in text.chars() {
         if ch == '"' {
             in_quotes = !in_quotes;
         } else if ch == ' ' && !in_quotes {

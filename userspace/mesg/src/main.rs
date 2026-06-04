@@ -146,7 +146,10 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 // Mesg implementation
 // ---------------------------------------------------------------------------
 
-/// Get the current terminal device path
+/// Get the current terminal device path. Kept for the future code path
+/// that will switch the state file to a per-tty location; the current
+/// implementation uses a single shared state file.
+#[allow(dead_code)]
 fn get_tty() -> Option<PathBuf> {
     // Try standard env var first
     if let Ok(tty) = env::var("TTY") {

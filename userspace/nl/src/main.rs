@@ -87,6 +87,10 @@ fn parse_style(s: &str, flag_name: &str) -> NumberingStyle {
 // ============================================================================
 
 /// How the line number is formatted within its field.
+///
+/// The shared `Zero` suffix mirrors the BSD/GNU `nl` short-codes (`ln`/`rn`/`rz`),
+/// so we keep the names rather than renaming for clippy's `enum_variant_names`.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NumberFormat {
     /// Left-justified, no leading zeros.

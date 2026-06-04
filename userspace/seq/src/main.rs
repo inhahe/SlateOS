@@ -234,8 +234,8 @@ fn run_seq(args: &[String]) -> i32 {
         let formatted = format_number(*num);
         let output = if equal_width && formatted.len() < max_width {
             let padding = max_width - formatted.len();
-            if formatted.starts_with('-') {
-                format!("-{}{}", "0".repeat(padding), &formatted[1..])
+            if let Some(rest) = formatted.strip_prefix('-') {
+                format!("-{}{}", "0".repeat(padding), rest)
             } else {
                 format!("{}{}", "0".repeat(padding), formatted)
             }

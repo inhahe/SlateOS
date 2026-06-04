@@ -498,11 +498,10 @@ fn paste_serial(config: &Config) -> io::Result<i32> {
         let mut line_buf = String::new();
         let mut fields: Vec<String> = Vec::new();
 
-        loop {
-            match source.read_line(&mut line_buf, config.zero_terminated, &mut stdin_lock)? {
-                Some(line) => fields.push(line),
-                None => break,
-            }
+        while let Some(line) =
+            source.read_line(&mut line_buf, config.zero_terminated, &mut stdin_lock)?
+        {
+            fields.push(line);
         }
 
         if config.json {

@@ -252,6 +252,9 @@ impl SandboxConfig {
 /// Parsed profile configuration from a .profile file.
 #[derive(Clone, Debug, Default)]
 struct ProfileConfig {
+    // Used in tests for round-trip parsing; the sandbox runtime
+    // references SandboxConfig.name instead.
+    #[allow(dead_code)]
     name: String,
     private_home: bool,
     private_tmp: bool,

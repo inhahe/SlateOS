@@ -126,6 +126,9 @@ impl LimitValue {
     }
 }
 
+// Authoritative resource list — used by the verbose listing path that
+// iterates every limit when no specific resource is requested.
+#[allow(dead_code)]
 const ALL_RESOURCES: &[Resource] = &[
     Resource::AddressSpace,
     Resource::CoreSize,

@@ -18,7 +18,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::too_many_arguments)]
 
 #[allow(unused_imports)]
 use guitk::color::Color;

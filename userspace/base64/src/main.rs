@@ -173,9 +173,7 @@ fn b32_encode(data: &[u8], alphabet: &[u8; 32], wrap: usize, pad: bool) -> Strin
     if rem > 0 {
         // Pad remaining bytes to 5 with zeros
         let mut block = [0u8; 5];
-        for j in 0..rem {
-            block[j] = data[i + j];
-        }
+        block[..rem].copy_from_slice(&data[i..i + rem]);
         let b0 = block[0] as u64;
         let b1 = block[1] as u64;
         let b2 = block[2] as u64;

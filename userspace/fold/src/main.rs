@@ -273,7 +273,7 @@ fn fold_line_columns<W: Write>(
                 && let Some(sp_end) = last_space_buf_end {
                     // Break at the last space: emit up to (and including)
                     // the space, then carry over the remainder.
-                    out.write_all(buf[..sp_end].as_bytes())?;
+                    out.write_all(&buf.as_bytes()[..sp_end])?;
                     out.write_all(b"\n")?;
 
                     let leftover = buf[sp_end..].to_string();

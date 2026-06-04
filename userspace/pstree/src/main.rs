@@ -45,6 +45,9 @@ struct ProcessInfo {
     name: String,
     uid: u32,
     threads: u32,
+    // Parsed from /proc/<pid>/stat; consumed by the future -S option
+    // that suffixes process names with their state letter.
+    #[allow(dead_code)]
     state: char,
     username: String,
 }

@@ -50,7 +50,9 @@ struct Options {
     no_header: bool,
     /// Show specific columns.
     columns: Vec<String>,
-    /// Show only user-owned namespaces.
+    /// Show only user-owned namespaces. Wired through CLI parsing; the
+    /// filter pass that consumes it is still TODO, so allow dead_code.
+    #[allow(dead_code)]
     owned_only: bool,
 }
 

@@ -917,6 +917,9 @@ fn check_sorted(
 // Merge mode
 // ============================================================================
 
+/// (path, line iterator) for a single input source in merge mode.
+type MergeReader = (String, io::Lines<BufReader<Box<dyn Read>>>);
+
 /// Merge already-sorted files by reading one line at a time from each and
 /// outputting the smallest.
 fn merge_files(
@@ -929,7 +932,7 @@ fn merge_files(
     out: &mut dyn Write,
 ) -> io::Result<()> {
     // Open readers for all input files.
-    let mut readers: Vec<(String, io::Lines<BufReader<Box<dyn Read>>>)> = Vec::new();
+    let mut readers: Vec<MergeReader> = Vec::new();
 
     for path in paths {
         let reader: Box<dyn Read> = if path == "-" {

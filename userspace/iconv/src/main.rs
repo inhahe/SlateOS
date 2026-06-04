@@ -291,8 +291,7 @@ fn decode_utf8(buf: &[u8]) -> DecodeResult {
         return DecodeResult::Incomplete { needed: expected_len - buf.len() };
     }
 
-    for i in 1..expected_len {
-        let b = buf[i];
+    for &b in &buf[1..expected_len] {
         if b & 0xC0 != 0x80 {
             return DecodeResult::Invalid { bad_byte: b0, consumed: 1 };
         }

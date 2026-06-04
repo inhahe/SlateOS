@@ -1123,3 +1123,275 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- usb_class_name ----------------------------------------------------
+
+    #[test]
+    fn usb_class_name_known_codes() {
+        assert_eq!(usb_class_name(0x03), "HID (Human Interface Device)");
+        assert_eq!(usb_class_name(0x08), "Mass Storage");
+        assert_eq!(usb_class_name(0x09), "Hub");
+        assert_eq!(usb_class_name(0xFF), "Vendor Specific");
+    }
+
+    #[test]
+    fn usb_class_name_unknown_codes_return_unknown() {
+        // 0x99 is not in the class table.
+        assert_eq!(usb_class_name(0x99), "Unknown");
+    }
+
+    // ---- parse_class_filter ------------------------------------------------
+
+    #[test]
+    fn parse_class_filter_accepts_plain_hex() {
+        assert_eq!(parse_class_filter("09"), Some(0x09));
+        assert_eq!(parse_class_filter("ff"), Some(0xFF));
+    }
+
+    #[test]
+    fn parse_class_filter_accepts_0x_prefix() {
+        assert_eq!(parse_class_filter("0x09"), Some(0x09));
+        assert_eq!(parse_class_filter("0X0E"), Some(0x0E));
+    }
+
+    #[test]
+    fn parse_class_filter_accepts_partial_names() {
+        assert_eq!(parse_class_filter("hub"), Some(0x09));
+        assert_eq!(parse_class_filter("HID"), Some(0x03));
+        assert_eq!(parse_class_filter("mass storage"), Some(0x08));
+    }
+
+    #[test]
+    fn parse_class_filter_prefers_av_over_audio_substring() {
+        // "audio/video" must match before bare "audio" because of ordering
+        // in the table — the substring search short-circuits on first hit.
+        assert_eq!(parse_class_filter("audio/video"), Some(0x10));
+    }
+
+    #[test]
+    fn parse_class_filter_returns_none_for_unknown_name() {
+        assert_eq!(parse_class_filter("definitely-not-a-class"), None);
+    }
+
+    // ---- vendor_name / device_name -----------------------------------------
+
+    #[test]
+    fn vendor_name_known_vendors() {
+        assert_eq!(vendor_name(0x046D), "Logitech, Inc.");
+        assert_eq!(vendor_name(0x8086), "Intel Corp.");
+        assert_eq!(vendor_name(0x1D6B), "Linux Foundation");
+    }
+
+    #[test]
+    fn vendor_name_unknown_returns_empty() {
+        assert_eq!(vendor_name(0xDEAD), "");
+    }
+
+    #[test]
+    fn device_name_known_combo() {
+        assert_eq!(device_name(0x1D6B, 0x0002), "2.0 Root Hub");
+        assert_eq!(device_name(0x046D, 0xC52B), "Unifying Receiver");
+    }
+
+    #[test]
+    fn device_name_unknown_combo_returns_empty() {
+        // Known vendor, unknown product.
+        assert_eq!(device_name(0x046D, 0xBEEF), "");
+        // Totally unknown.
+        assert_eq!(device_name(0xDEAD, 0xBEEF), "");
+    }
+
+    // ---- parent_sysfs_name -------------------------------------------------
+
+    #[test]
+    fn parent_sysfs_name_root_hubs_have_no_parent() {
+        assert_eq!(parent_sysfs_name("usb1"), "");
+        assert_eq!(parent_sysfs_name("usb2"), "");
+    }
+
+    #[test]
+    fn parent_sysfs_name_strips_last_dotted_port() {
+        assert_eq!(parent_sysfs_name("1-2.3"), "1-2");
+        assert_eq!(parent_sysfs_name("1-2.3.4"), "1-2.3");
+    }
+
+    #[test]
+    fn parent_sysfs_name_top_level_port_maps_to_root_hub() {
+        assert_eq!(parent_sysfs_name("1-2"), "usb1");
+        assert_eq!(parent_sysfs_name("2-1"), "usb2");
+    }
+
+    #[test]
+    fn parent_sysfs_name_unrecognised_string_returns_empty() {
+        assert_eq!(parent_sysfs_name("garbage"), "");
+    }
+
+    // ---- speed_label -------------------------------------------------------
+
+    #[test]
+    fn speed_label_known_speeds() {
+        assert_eq!(speed_label("480"), "480Mbps (High Speed)");
+        assert_eq!(speed_label("5000"), "5000Mbps (Super Speed)");
+        assert_eq!(speed_label("1.5"), "1.5Mbps (Low Speed)");
+    }
+
+    #[test]
+    fn speed_label_unknown_passes_through() {
+        // Unknown speeds get returned unchanged so the user still sees them.
+        assert_eq!(speed_label("123456"), "123456");
+        assert_eq!(speed_label(""), "");
+    }
+
+    // ---- json_escape -------------------------------------------------------
+
+    #[test]
+    fn json_escape_passes_plain_ascii() {
+        assert_eq!(json_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn json_escape_escapes_quotes_and_backslashes() {
+        assert_eq!(json_escape(r#"he said "hi""#), r#"he said \"hi\""#);
+        assert_eq!(json_escape(r"C:\path"), r"C:\\path");
+    }
+
+    #[test]
+    fn json_escape_escapes_control_chars() {
+        assert_eq!(json_escape("a\nb"), "a\\nb");
+        assert_eq!(json_escape("a\tb"), "a\\tb");
+        assert_eq!(json_escape("a\rb"), "a\\rb");
+    }
+
+    #[test]
+    fn json_escape_unicode_control_uses_u_escape() {
+        // \x01 is below \x20 and not one of the explicit escapes, so it falls
+        // through to the \u00XX path.
+        assert_eq!(json_escape("\x01"), "\\u0001");
+    }
+
+    #[test]
+    fn json_escape_unicode_passthrough_for_printable() {
+        // Non-ASCII printable characters pass through untouched (consumer
+        // can re-encode if it wants \u-form, but lsusb's UTF-8 output is
+        // also valid JSON).
+        assert_eq!(json_escape("Realtek™"), "Realtek™");
+    }
+
+    // ---- parse_bus_dev -----------------------------------------------------
+
+    #[test]
+    fn parse_bus_dev_normal_case() {
+        assert_eq!(parse_bus_dev("1:2"), Ok((1, 2)));
+        assert_eq!(parse_bus_dev("003:045"), Ok((3, 45)));
+    }
+
+    #[test]
+    fn parse_bus_dev_missing_colon_is_error() {
+        assert!(parse_bus_dev("12").is_err());
+    }
+
+    #[test]
+    fn parse_bus_dev_non_numeric_is_error() {
+        assert!(parse_bus_dev("a:b").is_err());
+        assert!(parse_bus_dev("1:x").is_err());
+        assert!(parse_bus_dev("x:1").is_err());
+    }
+
+    // ---- parse_vendor_product ----------------------------------------------
+
+    #[test]
+    fn parse_vendor_product_both_sides_set() {
+        assert_eq!(
+            parse_vendor_product("046d:c52b"),
+            Ok((Some(0x046D), Some(0xC52B))),
+        );
+    }
+
+    #[test]
+    fn parse_vendor_product_vendor_wildcard() {
+        assert_eq!(
+            parse_vendor_product(":c52b"),
+            Ok((None, Some(0xC52B))),
+        );
+    }
+
+    #[test]
+    fn parse_vendor_product_product_wildcard() {
+        assert_eq!(
+            parse_vendor_product("046d:"),
+            Ok((Some(0x046D), None)),
+        );
+    }
+
+    #[test]
+    fn parse_vendor_product_both_wildcards() {
+        assert_eq!(parse_vendor_product(":"), Ok((None, None)));
+    }
+
+    #[test]
+    fn parse_vendor_product_invalid_hex_is_error() {
+        assert!(parse_vendor_product("zz:c52b").is_err());
+        assert!(parse_vendor_product("046d:zz").is_err());
+    }
+
+    #[test]
+    fn parse_vendor_product_missing_colon_is_error() {
+        assert!(parse_vendor_product("046dc52b").is_err());
+    }
+
+    // ---- device_description ------------------------------------------------
+
+    fn make_dev(vendor: u16, product: u16, mfr: &str, prod: &str) -> UsbDevice {
+        UsbDevice {
+            bus: 1,
+            devnum: 1,
+            vendor_id: vendor,
+            product_id: product,
+            manufacturer: mfr.to_string(),
+            product: prod.to_string(),
+            serial: String::new(),
+            device_class: 0,
+            device_subclass: 0,
+            device_protocol: 0,
+            usb_version: String::new(),
+            speed: String::new(),
+            num_configurations: 0,
+            num_interfaces: 0,
+            max_power: String::new(),
+            sysfs_name: String::new(),
+            parent_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn device_description_prefers_sysfs_strings_over_db() {
+        // Sysfs says "Acme Co." and "Widget" — db has different names, but
+        // the device's own strings win.
+        let dev = make_dev(0x046D, 0xC52B, "Acme Co.", "Widget");
+        let (mfr, prod) = device_description(&dev);
+        assert_eq!(mfr, "Acme Co.");
+        assert_eq!(prod, "Widget");
+    }
+
+    #[test]
+    fn device_description_falls_back_to_db_when_sysfs_empty() {
+        // Known vendor/product, but sysfs strings are empty.
+        let dev = make_dev(0x046D, 0xC52B, "", "");
+        let (mfr, prod) = device_description(&dev);
+        assert_eq!(mfr, "Logitech, Inc.");
+        assert_eq!(prod, "Unifying Receiver");
+    }
+
+    #[test]
+    fn device_description_empty_when_unknown_and_no_sysfs() {
+        // Unknown vendor/product and no sysfs strings -> both empty.
+        let dev = make_dev(0xDEAD, 0xBEEF, "", "");
+        let (mfr, prod) = device_description(&dev);
+        assert_eq!(mfr, "");
+        assert_eq!(prod, "");
+    }
+}

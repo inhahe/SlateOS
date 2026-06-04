@@ -1229,3 +1229,301 @@ fn main() {
         print_summary(&summary);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- syscall_error_msg -------------------------------------------------
+
+    #[test]
+    fn syscall_error_msg_known_codes() {
+        assert_eq!(syscall_error_msg(-2), "no such file or directory (ENOENT)");
+        assert_eq!(syscall_error_msg(-13), "permission denied (EACCES)");
+        assert_eq!(syscall_error_msg(-22), "invalid argument (EINVAL)");
+        assert_eq!(syscall_error_msg(-28), "no space left on device (ENOSPC)");
+        assert_eq!(syscall_error_msg(-38), "function not implemented (ENOSYS)");
+    }
+
+    #[test]
+    fn syscall_error_msg_unknown_returns_unknown_error() {
+        assert_eq!(syscall_error_msg(-999), "unknown error");
+        assert_eq!(syscall_error_msg(0), "unknown error");
+    }
+
+    // ---- normalize_fs_type -------------------------------------------------
+
+    #[test]
+    fn normalize_fs_type_known_names() {
+        assert_eq!(normalize_fs_type("ext4"), "ext4");
+        assert_eq!(normalize_fs_type("EXT4"), "ext4");
+        assert_eq!(normalize_fs_type("Ext4"), "ext4");
+    }
+
+    #[test]
+    fn normalize_fs_type_fat_aliases_to_fat32() {
+        assert_eq!(normalize_fs_type("fat32"), "fat32");
+        assert_eq!(normalize_fs_type("vfat"), "fat32");
+        assert_eq!(normalize_fs_type("fat"), "fat32");
+        assert_eq!(normalize_fs_type("VFAT"), "fat32");
+    }
+
+    #[test]
+    fn normalize_fs_type_tmpfs() {
+        assert_eq!(normalize_fs_type("tmpfs"), "tmpfs");
+        assert_eq!(normalize_fs_type("TMPFS"), "tmpfs");
+    }
+
+    #[test]
+    fn normalize_fs_type_unknown_returns_empty() {
+        assert_eq!(normalize_fs_type("zfs"), "");
+        assert_eq!(normalize_fs_type(""), "");
+        assert_eq!(normalize_fs_type("ntfs"), "");
+    }
+
+    // ---- detect_type_from_argv0 --------------------------------------------
+
+    #[test]
+    fn detect_type_from_argv0_with_dot_suffix() {
+        assert_eq!(detect_type_from_argv0("mkfs.ext4"), Some("ext4".to_string()));
+        assert_eq!(detect_type_from_argv0("mkfs.fat32"), Some("fat32".to_string()));
+        // Through alias normalization.
+        assert_eq!(detect_type_from_argv0("mkfs.vfat"), Some("fat32".to_string()));
+        assert_eq!(detect_type_from_argv0("mkfs.tmpfs"), Some("tmpfs".to_string()));
+    }
+
+    #[test]
+    fn detect_type_from_argv0_strips_directory_prefix() {
+        assert_eq!(
+            detect_type_from_argv0("/usr/sbin/mkfs.ext4"),
+            Some("ext4".to_string()),
+        );
+    }
+
+    #[test]
+    fn detect_type_from_argv0_plain_mkfs_returns_none() {
+        // Bare "mkfs" with no suffix means caller must use -t.
+        assert_eq!(detect_type_from_argv0("mkfs"), None);
+        assert_eq!(detect_type_from_argv0("/bin/mkfs"), None);
+    }
+
+    #[test]
+    fn detect_type_from_argv0_unknown_suffix_returns_none() {
+        // mkfs.zfs isn't supported -> normalize_fs_type returns "" -> None.
+        assert_eq!(detect_type_from_argv0("mkfs.zfs"), None);
+    }
+
+    #[test]
+    fn detect_type_from_argv0_unrelated_program_returns_none() {
+        assert_eq!(detect_type_from_argv0("ls"), None);
+        assert_eq!(detect_type_from_argv0("fsck.ext4"), None);
+    }
+
+    // ---- fs_type_to_id -----------------------------------------------------
+
+    #[test]
+    fn fs_type_to_id_known_types() {
+        assert_eq!(fs_type_to_id("ext4"), Some(FS_TYPE_EXT4));
+        assert_eq!(fs_type_to_id("fat32"), Some(FS_TYPE_FAT32));
+        assert_eq!(fs_type_to_id("tmpfs"), Some(FS_TYPE_TMPFS));
+    }
+
+    #[test]
+    fn fs_type_to_id_unknown_returns_none() {
+        assert_eq!(fs_type_to_id("zfs"), None);
+        assert_eq!(fs_type_to_id(""), None);
+    }
+
+    // ---- normalize_device --------------------------------------------------
+
+    #[test]
+    fn normalize_device_strips_dev_prefix_for_sysfs_name() {
+        let (path, name) = normalize_device("/dev/sda1");
+        assert_eq!(path, "/dev/sda1");
+        assert_eq!(name, "sda1");
+    }
+
+    #[test]
+    fn normalize_device_bare_name_prepends_dev() {
+        let (path, name) = normalize_device("sda1");
+        assert_eq!(path, "/dev/sda1");
+        assert_eq!(name, "sda1");
+    }
+
+    #[test]
+    fn normalize_device_image_file_uses_basename() {
+        let (path, name) = normalize_device("./images/disk.img");
+        assert_eq!(path, "./images/disk.img");
+        assert_eq!(name, "disk.img");
+    }
+
+    #[test]
+    fn normalize_device_absolute_path_outside_dev() {
+        let (path, name) = normalize_device("/tmp/loopback");
+        // Has '/' prefix so treated as absolute; name is the basename.
+        assert_eq!(path, "/tmp/loopback");
+        assert_eq!(name, "loopback");
+    }
+
+    // ---- format_size -------------------------------------------------------
+
+    #[test]
+    fn format_size_below_kib_is_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_size_kib_range() {
+        assert_eq!(format_size(1024), "1 KiB");
+        assert_eq!(format_size(1024 + 512), "1.5 KiB");
+    }
+
+    #[test]
+    fn format_size_mib_gib_tib() {
+        assert_eq!(format_size(1024 * 1024), "1 MiB");
+        assert_eq!(format_size(1024_u64.pow(3)), "1 GiB");
+        assert_eq!(format_size(1024_u64.pow(4)), "1 TiB");
+    }
+
+    // ---- json_escape -------------------------------------------------------
+
+    #[test]
+    fn json_escape_basics() {
+        assert_eq!(json_escape("plain"), "plain");
+        assert_eq!(json_escape(r#"has "quotes""#), r#"has \"quotes\""#);
+        assert_eq!(json_escape(r"a\b"), r"a\\b");
+        assert_eq!(json_escape("a\nb\tc"), "a\\nb\\tc");
+    }
+
+    #[test]
+    fn json_escape_control_chars_get_u_escaped() {
+        assert_eq!(json_escape("\x01"), "\\u0001");
+        assert_eq!(json_escape("\x1f"), "\\u001f");
+    }
+
+    // ---- auto_fat_cluster_size ---------------------------------------------
+
+    #[test]
+    fn auto_fat_cluster_size_zero_returns_safe_default() {
+        // Size unknown -> default 8 sectors/cluster.
+        assert_eq!(auto_fat_cluster_size(0, 512), 8);
+    }
+
+    #[test]
+    fn auto_fat_cluster_size_small_devices_use_small_clusters() {
+        // <= 64 MiB -> 1 spc.
+        assert_eq!(auto_fat_cluster_size(32 * 1024 * 1024, 512), 1);
+        // 64 < x <= 128 MiB -> 2.
+        assert_eq!(auto_fat_cluster_size(100 * 1024 * 1024, 512), 2);
+        // 128 < x <= 256 MiB -> 4.
+        assert_eq!(auto_fat_cluster_size(200 * 1024 * 1024, 512), 4);
+    }
+
+    #[test]
+    fn auto_fat_cluster_size_medium_device_uses_8_spc() {
+        // 1 GiB -> 8 spc.
+        assert_eq!(auto_fat_cluster_size(1024_u64.pow(3), 512), 8);
+    }
+
+    #[test]
+    fn auto_fat_cluster_size_large_devices_increase_spc() {
+        // 12 GiB -> 16 spc.
+        assert_eq!(auto_fat_cluster_size(12 * 1024_u64.pow(3), 512), 16);
+        // 24 GiB -> 32 spc.
+        assert_eq!(auto_fat_cluster_size(24 * 1024_u64.pow(3), 512), 32);
+        // 64 GiB -> 64 spc.
+        assert_eq!(auto_fat_cluster_size(64 * 1024_u64.pow(3), 512), 64);
+    }
+
+    #[test]
+    fn auto_fat_cluster_size_clamps_cluster_to_32k_max() {
+        // With sector_size=4096 and spc=64 we'd get 256 KiB clusters,
+        // way over the 32 KiB FAT limit; spc must be clamped to 8 (4096*8=32K).
+        assert_eq!(auto_fat_cluster_size(64 * 1024_u64.pow(3), 4096), 8);
+    }
+
+    #[test]
+    fn auto_fat_cluster_size_handles_huge_sector_size_floor_to_1() {
+        // A 64 KiB sector can't host even one cluster within 32 KiB; the
+        // function falls back to 1 to keep some progress.
+        assert_eq!(auto_fat_cluster_size(64 * 1024_u64.pow(3), 65536), 1);
+    }
+
+    // ---- compute_summary ---------------------------------------------------
+
+    fn opts_for(fs_type: &str) -> MkfsOptions {
+        let mut o = MkfsOptions::new();
+        o.fs_type = fs_type.to_string();
+        o.device = "/tmp/test.img".to_string();
+        o
+    }
+
+    #[test]
+    fn compute_summary_ext4_picks_explicit_inodes_when_set() {
+        let mut o = opts_for("ext4");
+        o.ext4_num_inodes = 4096;
+        // dev_name pointing to nothing -> total_size 0; we should still get
+        // the explicit inode count since it doesn't depend on device size.
+        let s = compute_summary(&o, "nonexistent-device");
+        assert_eq!(s.num_inodes, 4096);
+        assert_eq!(s.block_size, 4096);  // default
+        assert_eq!(s.fs_type, "ext4");
+    }
+
+    #[test]
+    fn compute_summary_ext4_uses_journal_default_128_when_size_unknown() {
+        let o = opts_for("ext4");
+        let s = compute_summary(&o, "nonexistent-device");
+        assert_eq!(s.journal_size_mib, 128);
+    }
+
+    #[test]
+    fn compute_summary_ext4_respects_user_journal_size() {
+        let mut o = opts_for("ext4");
+        o.ext4_journal_size_mib = 64;
+        let s = compute_summary(&o, "nonexistent-device");
+        assert_eq!(s.journal_size_mib, 64);
+    }
+
+    #[test]
+    fn compute_summary_ext4_copies_features_and_label() {
+        let mut o = opts_for("ext4");
+        o.ext4_features = "dir_index,extent".to_string();
+        o.label = "rootfs".to_string();
+        let s = compute_summary(&o, "nonexistent-device");
+        assert_eq!(s.features, "dir_index,extent");
+        assert_eq!(s.label, "rootfs");
+    }
+
+    #[test]
+    fn compute_summary_fat32_block_size_is_sector_times_spc() {
+        let mut o = opts_for("fat32");
+        o.fat_sector_size = 512;
+        o.fat_sectors_per_cluster = 8;
+        let s = compute_summary(&o, "nonexistent-device");
+        assert_eq!(s.sector_size, 512);
+        assert_eq!(s.sectors_per_cluster, 8);
+        assert_eq!(s.block_size, 4096);
+        assert_eq!(s.fat_type, 32);
+    }
+
+    #[test]
+    fn compute_summary_tmpfs_has_4k_block_no_inodes() {
+        let o = opts_for("tmpfs");
+        let s = compute_summary(&o, "nonexistent-device");
+        assert_eq!(s.fs_type, "tmpfs");
+        assert_eq!(s.block_size, 4096);
+        assert_eq!(s.num_inodes, 0);
+        assert_eq!(s.journal_size_mib, 0);
+    }
+
+    #[test]
+    fn compute_summary_unknown_type_zeroes_everything() {
+        let o = opts_for("zfs"); // not in the match arms
+        let s = compute_summary(&o, "nonexistent-device");
+        assert_eq!(s.block_size, 0);
+        assert_eq!(s.total_size, 0);
+        assert_eq!(s.fs_type, "zfs"); // type is copied through
+    }
+}

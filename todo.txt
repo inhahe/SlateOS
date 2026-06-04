@@ -2475,11 +2475,16 @@ Remaining net improvements (diminishing returns):
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to
   link on the host target (x86_64-pc-windows-gnu) with "undefined
-  reference to `geteuid'". Uses a libc symbol unavailable in the
-  mingw-w64 toolchain. Fix: wire the host-target stub to GetUserName
-  (Win32) or feature-gate on cfg(target_os = "linux"/ouros) so the
-  POSIX path only compiles on those targets. Discovered while
-  surveying clippy warnings.
+  reference to `geteuid'".  RESOLVED 2026-06-04.  Gated the `geteuid`
+  extern and its callsite on `#[cfg(target_os = "linux")]` (the custom
+  `x86_64-ouros` target reports `target_os = "linux"`, so production
+  targets still get the real syscall).  On Windows hosts the lookup
+  uses USERNAME env var, falling back to numeric `0` when no name is
+  available.  Pulled the env lookup and UID fallback into
+  `user_from_env()`/`current_uid()` helpers and added 6 unit tests
+  covering preference order, empty-value handling, Windows-only
+  USERNAME, and the Windows UID-0 fallback.  Builds + clippy clean +
+  6/6 tests pass on x86_64-pc-windows-gnu.
 
 - (NOTED 2026-06-03) userspace/hostname has no unit tests.
 
@@ -2492,6 +2497,44 @@ Remaining net improvements (diminishing returns):
   Found while sweeping clippy warnings; not blocking but should be
   filled in to maintain the "every binary gets tests" rule from
   CLAUDE.md.
+  RESOLVED 2026-06-04: all five tools now have unit tests; clippy clean.
+    * userspace/fsck: 37 tests. parse_args refactored into
+      parse_args_from(args) -> Result<Options, ParseTerminal> so it's
+      testable without process::exit. Covers fstype_from_argv0,
+      parse_args_from, build_flags, normalise_device, json_escape,
+      exit_code_for, and errno_msg.
+    * userspace/lsusb: 34 tests. Covers usb_class_name,
+      parse_class_filter (hex / partial-name lookup), vendor_name,
+      device_name, parent_sysfs_name (root hubs, dotted-port walk),
+      speed_label, json_escape, parse_bus_dev, parse_vendor_product
+      (incl. wildcards), and device_description db-fallback ordering.
+    * userspace/strace: 39 tests. Covers TRACE_ENTRY_SIZE wire-format
+      pin (56 bytes), TraceEntry::zeroed, build_syscall_table lookups,
+      syscall_group (file/network/ipc/process/memory and aliases),
+      parse_filter (name / group / dedup), format_ptr_as_string,
+      format_args_into for every ArgFormat, format_trace_line (success /
+      error / exit / unknown / duration / follow-forks), format_trace_json
+      with/without -T, Config::show_trace state matrix, and a
+      print_summary smoke test writing into a Vec<u8>.
+    * userspace/lsblk: 38 tests. Covers Column::from_str (canonical /
+      aliases / case / unknown), Column::header & default_width
+      invariants, parse_columns (with whitespace and empty parts),
+      format_size at every magnitude boundary, BlockDevice::size_bytes
+      including saturating overflow, column_value (incl. tree prefix and
+      bytes_mode), display_width on box-drawing chars, pad_to_width
+      (pad/no-truncate/unicode), build_rows in tree and list modes,
+      compute_widths fallback, json_escape, and DEFAULT_COLUMNS /
+      FS_COLUMNS invariants.
+    * userspace/mkfs: 35 tests. Covers syscall_error_msg known/unknown
+      codes, normalize_fs_type (incl. fat/vfat/fat32 aliases),
+      detect_type_from_argv0 (suffix, dir-prefix strip, unknown),
+      fs_type_to_id, normalize_device (dev-prefix / bare / image /
+      absolute), format_size, json_escape (incl. control chars),
+      auto_fat_cluster_size for every size bucket plus the 32 KiB
+      cluster-cap clamp and the 1-spc floor for huge sector sizes, and
+      compute_summary across ext4/fat32/tmpfs/unknown types.
+  Total: 183 new tests across the five binaries. All pass; clippy clean
+  on the host (x86_64-pc-windows-gnu) toolchain.
 
 - (FIXED) Workqueue worker stack overflow (#DF): Task 61 ("kworker") double-
   faulted during workqueue::self_test() with RSP 0x180 bytes below stack

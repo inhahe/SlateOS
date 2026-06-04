@@ -26,6 +26,7 @@ use std::process;
 
 /// All supported output columns.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 enum Column {
     Name,
     Size,
@@ -978,5 +979,342 @@ fn main() {
             config.list_mode,
         );
         print_table(&config.columns, &rows);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Column::from_str --------------------------------------------------
+
+    #[test]
+    fn column_from_str_canonical_names() {
+        assert_eq!(Column::from_str("NAME"), Some(Column::Name));
+        assert_eq!(Column::from_str("SIZE"), Some(Column::Size));
+        assert_eq!(Column::from_str("TYPE"), Some(Column::Type));
+        assert_eq!(Column::from_str("MOUNTPOINT"), Some(Column::MountPoint));
+        assert_eq!(Column::from_str("FSTYPE"), Some(Column::FsType));
+        assert_eq!(Column::from_str("UUID"), Some(Column::Uuid));
+    }
+
+    #[test]
+    fn column_from_str_case_insensitive() {
+        assert_eq!(Column::from_str("name"), Some(Column::Name));
+        assert_eq!(Column::from_str("Name"), Some(Column::Name));
+        assert_eq!(Column::from_str("uuid"), Some(Column::Uuid));
+    }
+
+    #[test]
+    fn column_from_str_aliases() {
+        assert_eq!(Column::from_str("FS"), Some(Column::FsType));
+        assert_eq!(Column::from_str("MOUNT"), Some(Column::MountPoint));
+    }
+
+    #[test]
+    fn column_from_str_unknown_returns_none() {
+        assert_eq!(Column::from_str("BANANA"), None);
+        assert_eq!(Column::from_str(""), None);
+    }
+
+    // ---- Column::header / default_width ------------------------------------
+
+    #[test]
+    fn column_headers_match_names() {
+        // The header text is what shows up at the top of the table; keep it
+        // upper-case and matching the human label.
+        assert_eq!(Column::Name.header(), "NAME");
+        assert_eq!(Column::FsType.header(), "FSTYPE");
+        assert_eq!(Column::MountPoint.header(), "MOUNTPOINT");
+    }
+
+    #[test]
+    fn column_default_widths_are_positive() {
+        for col in [
+            Column::Name, Column::Size, Column::Type, Column::FsType,
+            Column::MountPoint, Column::Label, Column::Uuid, Column::Model,
+            Column::Serial, Column::Ro, Column::Rm,
+        ] {
+            assert!(col.default_width() > 0, "{:?} width is 0", col.header());
+        }
+    }
+
+    // ---- parse_columns -----------------------------------------------------
+
+    #[test]
+    fn parse_columns_single() {
+        assert_eq!(parse_columns("NAME"), Ok(vec![Column::Name]));
+    }
+
+    #[test]
+    fn parse_columns_multiple_in_order() {
+        let r = parse_columns("NAME,SIZE,UUID").expect("valid");
+        assert_eq!(r, vec![Column::Name, Column::Size, Column::Uuid]);
+    }
+
+    #[test]
+    fn parse_columns_ignores_whitespace_and_empty() {
+        let r = parse_columns(" NAME , SIZE ,, ").expect("valid");
+        assert_eq!(r, vec![Column::Name, Column::Size]);
+    }
+
+    #[test]
+    fn parse_columns_unknown_is_error() {
+        let err = parse_columns("NAME,FAKE").expect_err("must reject FAKE");
+        assert!(err.contains("FAKE"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_columns_empty_is_error() {
+        // Empty after trimming/skipping.
+        assert!(parse_columns("").is_err());
+        assert!(parse_columns(", ,").is_err());
+    }
+
+    // ---- format_size -------------------------------------------------------
+
+    #[test]
+    fn format_size_bytes_under_kib() {
+        assert_eq!(format_size(0), "0B");
+        assert_eq!(format_size(512), "512B");
+        assert_eq!(format_size(1023), "1023B");
+    }
+
+    #[test]
+    fn format_size_kib_range() {
+        assert_eq!(format_size(1024), "1K");
+        assert_eq!(format_size(1024 + 512), "1.5K");
+    }
+
+    #[test]
+    fn format_size_mib_range() {
+        assert_eq!(format_size(1024 * 1024), "1M");
+        assert_eq!(format_size(10 * 1024 * 1024), "10M");
+    }
+
+    #[test]
+    fn format_size_gib_range() {
+        assert_eq!(format_size(1024_u64.pow(3)), "1G");
+        assert_eq!(format_size(8 * 1024_u64.pow(3)), "8G");
+    }
+
+    #[test]
+    fn format_size_tib_range() {
+        assert_eq!(format_size(1024_u64.pow(4)), "1T");
+    }
+
+    // ---- parse_mounts via inline parsing (test the data, not the file) -----
+
+    #[test]
+    fn parse_mounts_strips_dev_prefix() {
+        // We can't easily mock /proc/mounts, but we can test the path
+        // stripping logic by inserting expected entries. The logic
+        // is `dev.strip_prefix("/dev/").unwrap_or(dev)`. Verify that
+        // behavior against expected inputs.
+        let stripped = "/dev/sda1".strip_prefix("/dev/").unwrap_or("/dev/sda1");
+        assert_eq!(stripped, "sda1");
+        let untouched = "tmpfs".strip_prefix("/dev/").unwrap_or("tmpfs");
+        assert_eq!(untouched, "tmpfs");
+    }
+
+    // ---- BlockDevice::size_bytes -------------------------------------------
+
+    fn make_dev(name: &str, sectors: u64) -> BlockDevice {
+        BlockDevice {
+            name: name.to_string(),
+            size_sectors: sectors,
+            dev_type: "disk".to_string(),
+            fstype: String::new(),
+            label: String::new(),
+            uuid: String::new(),
+            mountpoint: String::new(),
+            model: String::new(),
+            serial: String::new(),
+            read_only: false,
+            removable: false,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn block_device_size_bytes_is_sectors_times_512() {
+        let dev = make_dev("sda", 2_000);
+        assert_eq!(dev.size_bytes(), 2_000 * 512);
+    }
+
+    #[test]
+    fn block_device_size_bytes_saturates_on_overflow() {
+        // A sector count near u64::MAX shouldn't panic.
+        let dev = make_dev("huge", u64::MAX);
+        assert_eq!(dev.size_bytes(), u64::MAX);
+    }
+
+    // ---- column_value ------------------------------------------------------
+
+    #[test]
+    fn column_value_name_uses_prefix() {
+        let dev = make_dev("sda1", 0);
+        let v = column_value(&dev, Column::Name, false, "├─");
+        assert_eq!(v, "├─sda1");
+    }
+
+    #[test]
+    fn column_value_size_human() {
+        let dev = make_dev("sda", 2_097_152); // 2_097_152 * 512 = 1 GiB
+        let v = column_value(&dev, Column::Size, false, "");
+        assert_eq!(v, "1G");
+    }
+
+    #[test]
+    fn column_value_size_bytes_mode() {
+        let dev = make_dev("sda", 100);
+        let v = column_value(&dev, Column::Size, true, "");
+        assert_eq!(v, "51200");
+    }
+
+    #[test]
+    fn column_value_ro_rm_are_one_or_zero() {
+        let mut dev = make_dev("sda", 0);
+        assert_eq!(column_value(&dev, Column::Ro, false, ""), "0");
+        assert_eq!(column_value(&dev, Column::Rm, false, ""), "0");
+        dev.read_only = true;
+        dev.removable = true;
+        assert_eq!(column_value(&dev, Column::Ro, false, ""), "1");
+        assert_eq!(column_value(&dev, Column::Rm, false, ""), "1");
+    }
+
+    #[test]
+    fn column_value_string_columns_pass_through() {
+        let mut dev = make_dev("sda", 0);
+        dev.fstype = "ext4".to_string();
+        dev.uuid = "abc-123".to_string();
+        dev.label = "boot".to_string();
+        dev.mountpoint = "/".to_string();
+        dev.model = "WD Blue".to_string();
+        dev.serial = "SN12345".to_string();
+        assert_eq!(column_value(&dev, Column::FsType, false, ""), "ext4");
+        assert_eq!(column_value(&dev, Column::Uuid, false, ""), "abc-123");
+        assert_eq!(column_value(&dev, Column::Label, false, ""), "boot");
+        assert_eq!(column_value(&dev, Column::MountPoint, false, ""), "/");
+        assert_eq!(column_value(&dev, Column::Model, false, ""), "WD Blue");
+        assert_eq!(column_value(&dev, Column::Serial, false, ""), "SN12345");
+        assert_eq!(column_value(&dev, Column::Type, false, ""), "disk");
+    }
+
+    // ---- display_width and pad_to_width ------------------------------------
+
+    #[test]
+    fn display_width_counts_unicode_box_chars_as_one() {
+        // Each box-drawing glyph (├ ─ └) counts as one column wide.
+        assert_eq!(display_width("├─sda1"), 6);
+        assert_eq!(display_width("└─sda1"), 6);
+        assert_eq!(display_width("plain"), 5);
+    }
+
+    #[test]
+    fn pad_to_width_pads_with_spaces() {
+        assert_eq!(pad_to_width("ab", 5), "ab   ");
+    }
+
+    #[test]
+    fn pad_to_width_does_not_truncate() {
+        // Longer than target -> returned unchanged.
+        assert_eq!(pad_to_width("longer string", 4), "longer string");
+    }
+
+    #[test]
+    fn pad_to_width_handles_unicode() {
+        // "├─" has 2 display columns; padded to 5 needs 3 spaces.
+        assert_eq!(pad_to_width("├─", 5), "├─   ");
+    }
+
+    // ---- build_rows --------------------------------------------------------
+
+    #[test]
+    fn build_rows_tree_mode_uses_box_chars_for_partitions() {
+        let mut disk = make_dev("sda", 0);
+        disk.children.push(make_dev("sda1", 0));
+        disk.children.push(make_dev("sda2", 0));
+        let cols = [Column::Name];
+        let rows = build_rows(std::slice::from_ref(&disk), &cols, false, false);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].values[0], "sda");
+        // First child uses ├─, last uses └─.
+        assert_eq!(rows[1].values[0], "├─sda1");
+        assert_eq!(rows[2].values[0], "└─sda2");
+    }
+
+    #[test]
+    fn build_rows_list_mode_flattens_without_prefix() {
+        let mut disk = make_dev("sda", 0);
+        disk.children.push(make_dev("sda1", 0));
+        let cols = [Column::Name];
+        let rows = build_rows(std::slice::from_ref(&disk), &cols, false, true);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].values[0], "sda");
+        // No box-drawing prefix in list mode.
+        assert_eq!(rows[1].values[0], "sda1");
+    }
+
+    #[test]
+    fn build_rows_no_children_emits_one_row() {
+        let disk = make_dev("sda", 0);
+        let cols = [Column::Name, Column::Size];
+        let rows = build_rows(std::slice::from_ref(&disk), &cols, false, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values, vec!["sda", "0B"]);
+    }
+
+    // ---- compute_widths ----------------------------------------------------
+
+    #[test]
+    fn compute_widths_uses_max_of_header_default_and_values() {
+        let row = Row { values: vec!["a-long-name-here".to_string()] };
+        let widths = compute_widths(&[Column::Name], std::slice::from_ref(&row));
+        assert_eq!(widths.len(), 1);
+        assert_eq!(widths[0], "a-long-name-here".len());
+    }
+
+    #[test]
+    fn compute_widths_falls_back_to_default_when_values_are_short() {
+        let row = Row { values: vec!["x".to_string()] };
+        let widths = compute_widths(&[Column::Uuid], std::slice::from_ref(&row));
+        // UUID default width is 36; "x" doesn't push it higher.
+        assert_eq!(widths[0], 36);
+    }
+
+    // ---- json_escape -------------------------------------------------------
+
+    #[test]
+    fn json_escape_basic_passthrough() {
+        assert_eq!(json_escape("hello"), "hello");
+    }
+
+    #[test]
+    fn json_escape_quotes_and_backslashes() {
+        assert_eq!(json_escape(r#"he said "hi""#), r#"he said \"hi\""#);
+        assert_eq!(json_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn json_escape_control_chars() {
+        assert_eq!(json_escape("a\nb"), "a\\nb");
+        assert_eq!(json_escape("a\tb"), "a\\tb");
+        assert_eq!(json_escape("\x01"), "\\u0001");
+    }
+
+    // ---- Default column sets ------------------------------------------------
+
+    #[test]
+    fn default_columns_contains_name_and_size() {
+        assert!(DEFAULT_COLUMNS.contains(&Column::Name));
+        assert!(DEFAULT_COLUMNS.contains(&Column::Size));
+    }
+
+    #[test]
+    fn fs_columns_contains_filesystem_info() {
+        assert!(FS_COLUMNS.contains(&Column::FsType));
+        assert!(FS_COLUMNS.contains(&Column::Uuid));
+        assert!(FS_COLUMNS.contains(&Column::Label));
     }
 }

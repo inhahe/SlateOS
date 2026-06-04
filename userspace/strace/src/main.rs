@@ -1264,3 +1264,404 @@ fn main() {
     let config = parse_args();
     run_trace(&config);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- TraceEntry --------------------------------------------------------
+
+    #[test]
+    fn trace_entry_size_is_stable() {
+        // Layout is wire-format with the kernel; if this size changes, the
+        // kernel side must be updated in lockstep.  8 u64-equivalent fields
+        // = 64 bytes on a target with natural alignment.
+        // timestamp_ns u64 (8) + syscall_nr u32 + pid u32 (8) +
+        // arg1/2/3 u64 (24) + result i64 (8) + duration_ns u64 (8) = 56.
+        assert_eq!(TRACE_ENTRY_SIZE, 56);
+    }
+
+    #[test]
+    fn trace_entry_zeroed_has_all_zero_fields() {
+        let e = TraceEntry::zeroed();
+        assert_eq!(e.timestamp_ns, 0);
+        assert_eq!(e.syscall_nr, 0);
+        assert_eq!(e.pid, 0);
+        assert_eq!(e.arg1, 0);
+        assert_eq!(e.arg2, 0);
+        assert_eq!(e.arg3, 0);
+        assert_eq!(e.result, 0);
+        assert_eq!(e.duration_ns, 0);
+    }
+
+    // ---- build_syscall_table -----------------------------------------------
+
+    #[test]
+    fn syscall_table_has_known_entries() {
+        let t = build_syscall_table();
+        assert_eq!(t.get(&0).map(|i| i.name), Some("yield"));
+        assert_eq!(t.get(&1).map(|i| i.name), Some("exit"));
+        assert_eq!(t.get(&200).map(|i| i.name), Some("channel_create"));
+        assert_eq!(t.get(&500).map(|i| i.name), Some("process_spawn"));
+        assert_eq!(t.get(&520).map(|i| i.name), Some("trace_enable"));
+        assert_eq!(t.get(&521).map(|i| i.name), Some("trace_read"));
+        assert_eq!(t.get(&610).map(|i| i.name), Some("fs_open"));
+        assert_eq!(t.get(&800).map(|i| i.name), Some("tcp_connect"));
+        assert_eq!(t.get(&1000).map(|i| i.name), Some("drm_open"));
+    }
+
+    #[test]
+    fn syscall_table_does_not_contain_unknown_numbers() {
+        let t = build_syscall_table();
+        // Number from the gap between known ranges.
+        assert!(!t.contains_key(&999_999));
+        assert!(!t.contains_key(&7));
+    }
+
+    // ---- syscall_group -----------------------------------------------------
+
+    #[test]
+    fn syscall_group_file_includes_fs_range() {
+        let g = syscall_group("file");
+        assert!(g.contains(&600));
+        assert!(g.contains(&610));
+        assert!(g.contains(&651));
+    }
+
+    #[test]
+    fn syscall_group_network_alias_matches_net() {
+        assert_eq!(syscall_group("network"), syscall_group("net"));
+        assert!(syscall_group("network").contains(&800));
+        assert!(syscall_group("network").contains(&855));
+    }
+
+    #[test]
+    fn syscall_group_ipc_covers_range() {
+        let g = syscall_group("ipc");
+        assert!(g.contains(&200));
+        assert!(g.contains(&295));
+    }
+
+    #[test]
+    fn syscall_group_process_alias_matches_proc() {
+        assert_eq!(syscall_group("process"), syscall_group("proc"));
+    }
+
+    #[test]
+    fn syscall_group_memory_lists_mm_syscalls() {
+        let g = syscall_group("memory");
+        assert!(g.contains(&20));
+        assert!(g.contains(&21));
+        assert!(g.contains(&42));
+    }
+
+    #[test]
+    fn syscall_group_unknown_returns_empty() {
+        assert!(syscall_group("nonexistent-group").is_empty());
+    }
+
+    // ---- parse_filter ------------------------------------------------------
+
+    #[test]
+    fn parse_filter_by_name_with_trace_prefix() {
+        let table = build_syscall_table();
+        let result = parse_filter("trace=fs_open,fs_close", &table);
+        assert!(result.contains(&610));
+        assert!(result.contains(&611));
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn parse_filter_by_name_without_trace_prefix() {
+        let table = build_syscall_table();
+        let result = parse_filter("yield,exit", &table);
+        assert!(result.contains(&0));
+        assert!(result.contains(&1));
+    }
+
+    #[test]
+    fn parse_filter_by_group_expands_range() {
+        let table = build_syscall_table();
+        let result = parse_filter("trace=ipc", &table);
+        // Group "ipc" covers 200..=295 — check both ends.
+        assert!(result.contains(&200));
+        assert!(result.contains(&295));
+        assert!(result.len() > 1);
+    }
+
+    #[test]
+    fn parse_filter_unknown_name_yields_empty() {
+        let table = build_syscall_table();
+        let result = parse_filter("trace=nonexistent_syscall_name", &table);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_filter_results_are_sorted_and_deduped() {
+        let table = build_syscall_table();
+        // Add duplicates and out-of-order names.
+        let result = parse_filter("trace=fs_close,fs_open,fs_close,fs_open", &table);
+        // Should be sorted and unique.
+        assert_eq!(result, vec![610, 611]);
+    }
+
+    // ---- format_ptr_as_string ----------------------------------------------
+
+    #[test]
+    fn format_ptr_as_string_null_pointer() {
+        assert_eq!(format_ptr_as_string(0, 16), "NULL");
+    }
+
+    #[test]
+    fn format_ptr_as_string_zero_length_keeps_pointer() {
+        // ptr non-zero, len zero -> show "0x{ptr}, 0".
+        assert_eq!(format_ptr_as_string(0xDEAD, 0), "0xdead, 0");
+    }
+
+    #[test]
+    fn format_ptr_as_string_caps_display_length() {
+        // length > 256 gets clamped to 256 in the printed form.
+        let s = format_ptr_as_string(0x1000, 1024);
+        assert_eq!(s, "0x1000, 256");
+    }
+
+    #[test]
+    fn format_ptr_as_string_small_length() {
+        let s = format_ptr_as_string(0x2000, 14);
+        assert_eq!(s, "0x2000, 14");
+    }
+
+    // ---- format_args_into --------------------------------------------------
+
+    fn entry_with(nr: u32, a1: u64, a2: u64, a3: u64, result: i64) -> TraceEntry {
+        TraceEntry {
+            timestamp_ns: 0,
+            syscall_nr: nr,
+            pid: 0,
+            arg1: a1,
+            arg2: a2,
+            arg3: a3,
+            result,
+            duration_ns: 0,
+        }
+    }
+
+    #[test]
+    fn format_args_into_none_emits_nothing() {
+        let mut out = String::new();
+        format_args_into(&mut out, &entry_with(0, 1, 2, 3, 0), ArgFormat::None, false);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn format_args_into_int_shows_only_arg1() {
+        let mut out = String::new();
+        format_args_into(&mut out, &entry_with(1, 42, 99, 0, 0), ArgFormat::Int, false);
+        assert_eq!(out, "42");
+    }
+
+    #[test]
+    fn format_args_into_intint_shows_two_args() {
+        let mut out = String::new();
+        format_args_into(&mut out, &entry_with(0, 7, 8, 0, 0), ArgFormat::IntInt, false);
+        assert_eq!(out, "7, 8");
+    }
+
+    #[test]
+    fn format_args_into_ptrlen_verbose_shows_hex_and_dec() {
+        let mut out = String::new();
+        format_args_into(&mut out, &entry_with(0, 0x1000, 16, 0, 0), ArgFormat::PtrLen, true);
+        assert_eq!(out, "0x1000, 16");
+    }
+
+    #[test]
+    fn format_args_into_ptrlen_brief_uses_format_ptr() {
+        let mut out = String::new();
+        format_args_into(&mut out, &entry_with(0, 0, 16, 0, 0), ArgFormat::PtrLen, false);
+        // NULL pointer goes through format_ptr_as_string.
+        assert_eq!(out, "NULL");
+    }
+
+    #[test]
+    fn format_args_into_fdptrlen_shows_fd_then_buffer() {
+        let mut out = String::new();
+        format_args_into(&mut out, &entry_with(0, 3, 0x1000, 256, 0), ArgFormat::FdPtrLen, true);
+        assert_eq!(out, "3, 0x1000, 256");
+    }
+
+    #[test]
+    fn format_args_into_generic_collapses_zero_args() {
+        // Generic format trims trailing zero args.
+        let mut out = String::new();
+        format_args_into(&mut out, &entry_with(0, 0xABCD, 0, 0, 0), ArgFormat::Generic, false);
+        assert_eq!(out, "0xabcd");
+
+        let mut out2 = String::new();
+        format_args_into(&mut out2, &entry_with(0, 1, 2, 0, 0), ArgFormat::Generic, false);
+        assert_eq!(out2, "0x1, 0x2");
+
+        let mut out3 = String::new();
+        format_args_into(&mut out3, &entry_with(0, 1, 2, 3, 0), ArgFormat::Generic, false);
+        assert_eq!(out3, "0x1, 0x2, 0x3");
+
+        let mut out4 = String::new();
+        format_args_into(&mut out4, &entry_with(0, 0, 0, 0, 0), ArgFormat::Generic, false);
+        assert!(out4.is_empty());
+    }
+
+    // ---- format_trace_line -------------------------------------------------
+
+    #[test]
+    fn format_trace_line_basic_success_return() {
+        let table = build_syscall_table();
+        let config = Config::new();
+        let entry = entry_with(2, 0, 0, 0, 7); // task_id => returns 7
+        let mut prev = 0u64;
+        let line = format_trace_line(&entry, &table, &config, 0, &mut prev);
+        assert_eq!(line, "task_id() = 7");
+    }
+
+    #[test]
+    fn format_trace_line_negative_result_formats_as_error() {
+        let table = build_syscall_table();
+        let config = Config::new();
+        let entry = entry_with(2, 0, 0, 0, -13);
+        let mut prev = 0u64;
+        let line = format_trace_line(&entry, &table, &config, 0, &mut prev);
+        assert_eq!(line, "task_id() = -1 (err 13)");
+    }
+
+    #[test]
+    fn format_trace_line_exit_shows_question_mark() {
+        let table = build_syscall_table();
+        let config = Config::new();
+        let entry = entry_with(1, 0, 0, 0, 0); // exit
+        let mut prev = 0u64;
+        let line = format_trace_line(&entry, &table, &config, 0, &mut prev);
+        // exit() never returns -> "= ?"
+        assert!(line.ends_with("= ?"), "got: {line}");
+        assert!(line.contains("exit("));
+    }
+
+    #[test]
+    fn format_trace_line_unknown_syscall_uses_unknown_label() {
+        let table = build_syscall_table();
+        let config = Config::new();
+        let entry = entry_with(99_999, 0, 0, 0, 0);
+        let mut prev = 0u64;
+        let line = format_trace_line(&entry, &table, &config, 0, &mut prev);
+        assert!(line.starts_with("unknown("), "got: {line}");
+    }
+
+    #[test]
+    fn format_trace_line_with_duration_appends_angle_brackets() {
+        let table = build_syscall_table();
+        let mut config = Config::new();
+        config.show_duration = true;
+        let mut entry = entry_with(2, 0, 0, 0, 7);
+        entry.duration_ns = 1_500_000; // 1.5ms = 0.001500s
+        let mut prev = 0u64;
+        let line = format_trace_line(&entry, &table, &config, 0, &mut prev);
+        assert!(line.contains("<0.001500>"), "got: {line}");
+    }
+
+    #[test]
+    fn format_trace_line_follow_forks_prefixes_pid() {
+        let table = build_syscall_table();
+        let mut config = Config::new();
+        config.follow_forks = true;
+        let mut entry = entry_with(2, 0, 0, 0, 7);
+        entry.pid = 1234;
+        let mut prev = 0u64;
+        let line = format_trace_line(&entry, &table, &config, 0, &mut prev);
+        assert!(line.contains("[pid  1234]"), "got: {line}");
+    }
+
+    // ---- format_trace_json -------------------------------------------------
+
+    #[test]
+    fn format_trace_json_includes_required_fields() {
+        let table = build_syscall_table();
+        let config = Config::new();
+        let mut entry = entry_with(2, 10, 20, 30, 7);
+        entry.timestamp_ns = 1_000;
+        entry.pid = 42;
+        let s = format_trace_json(&entry, &table, &config);
+        assert!(s.contains("\"timestamp_ns\":1000"));
+        assert!(s.contains("\"pid\":42"));
+        assert!(s.contains("\"syscall\":\"task_id\""));
+        assert!(s.contains("\"nr\":2"));
+        assert!(s.contains("\"args\":[10,20,30]"));
+        assert!(s.contains("\"result\":7"));
+        // Without -T, no duration_ns key.
+        assert!(!s.contains("duration_ns"));
+        assert!(s.ends_with('}'));
+    }
+
+    #[test]
+    fn format_trace_json_with_duration_includes_duration_field() {
+        let table = build_syscall_table();
+        let mut config = Config::new();
+        config.show_duration = true;
+        let mut entry = entry_with(2, 0, 0, 0, 7);
+        entry.duration_ns = 999;
+        let s = format_trace_json(&entry, &table, &config);
+        assert!(s.contains("\"duration_ns\":999"));
+    }
+
+    // ---- Config ------------------------------------------------------------
+
+    #[test]
+    fn config_show_trace_default_is_true() {
+        // Default Config (no -c, no -C) prints trace.
+        assert!(Config::new().show_trace());
+    }
+
+    #[test]
+    fn config_show_trace_false_when_summary_only() {
+        let mut c = Config::new();
+        c.summary_only = true;
+        assert!(!c.show_trace());
+    }
+
+    #[test]
+    fn config_show_trace_true_when_summary_with_trace() {
+        let mut c = Config::new();
+        c.summary_only = true;
+        c.summary_with_trace = true;
+        // -C overrides -c: still show trace lines.
+        assert!(c.show_trace());
+    }
+
+    // ---- SyscallStats ------------------------------------------------------
+
+    #[test]
+    fn syscall_stats_starts_zeroed() {
+        let s = SyscallStats::new();
+        assert_eq!(s.calls, 0);
+        assert_eq!(s.errors, 0);
+        assert_eq!(s.total_time_ns, 0);
+    }
+
+    // ---- print_summary smoke test ------------------------------------------
+
+    #[test]
+    fn print_summary_writes_header_and_rows() {
+        let table = build_syscall_table();
+        let mut stats = HashMap::new();
+        let mut s1 = SyscallStats::new();
+        s1.calls = 3;
+        s1.errors = 1;
+        s1.total_time_ns = 5_000_000; // 5ms
+        stats.insert(2u32, s1);
+
+        let mut buf: Vec<u8> = Vec::new();
+        print_summary(&stats, &table, &mut buf);
+        let text = String::from_utf8(buf).expect("ASCII summary");
+
+        assert!(text.contains("% time"));
+        assert!(text.contains("syscall"));
+        assert!(text.contains("task_id"));
+        assert!(text.contains("total"));
+    }
+}

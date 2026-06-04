@@ -116,6 +116,7 @@ fn errno_msg(code: i64) -> &'static str {
 // Parsed command-line options
 // ============================================================================
 
+#[cfg_attr(test, derive(Debug))]
 struct Options {
     /// Filesystem type override (`-t`).
     fstype: Option<String>,
@@ -176,8 +177,24 @@ fn fstype_from_argv0(argv0: &str) -> Option<String> {
     None
 }
 
-fn parse_args() -> Options {
-    let args: Vec<String> = env::args().collect();
+/// Outcome of argument parsing that's terminal — the binary should
+/// print something and exit immediately.  Pulled out of the parser so
+/// that tests can observe these decisions without `process::exit`.
+#[derive(Debug, PartialEq, Eq)]
+enum ParseTerminal {
+    /// `-h`/`--help` was seen.  Caller prints usage and exits 0.
+    Help,
+    /// `--version` was seen.  Caller prints version and exits 0.
+    Version,
+    /// A usage error.  String is the human-readable message (printed to
+    /// stderr by `main`).  Exit code is `EXIT_USAGE`.
+    UsageError(String),
+}
+
+/// Pure-Rust argument parser used by both `main()` and the unit tests.
+/// Returns `Ok(Options)` on success, `Err(ParseTerminal)` when the
+/// caller should print a message and exit.
+fn parse_args_from(args: &[String]) -> Result<Options, ParseTerminal> {
     let mut opts = Options::new();
 
     // Detect type from program name first.
@@ -192,8 +209,9 @@ fn parse_args() -> Options {
             "-t" => {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("fsck: -t requires a filesystem type argument");
-                    process::exit(EXIT_USAGE);
+                    return Err(ParseTerminal::UsageError(
+                        "fsck: -t requires a filesystem type argument".to_string(),
+                    ));
                 }
                 opts.fstype = Some(args[i].clone());
             }
@@ -205,18 +223,13 @@ fn parse_args() -> Options {
             "-C" => opts.progress = true,
             "-A" => opts.check_all = true,
             "--json" => opts.json = true,
-            "-h" | "--help" => {
-                print_usage();
-                process::exit(EXIT_CLEAN);
-            }
-            "--version" => {
-                println!("fsck (OurOS) 0.1.0");
-                process::exit(EXIT_CLEAN);
-            }
+            "-h" | "--help" => return Err(ParseTerminal::Help),
+            "--version" => return Err(ParseTerminal::Version),
             other => {
                 if other.starts_with('-') {
-                    eprintln!("fsck: unknown option '{other}'");
-                    process::exit(EXIT_USAGE);
+                    return Err(ParseTerminal::UsageError(format!(
+                        "fsck: unknown option '{other}'"
+                    )));
                 }
                 opts.devices.push(other.to_string());
             }
@@ -224,7 +237,26 @@ fn parse_args() -> Options {
         i += 1;
     }
 
-    opts
+    Ok(opts)
+}
+
+fn parse_args() -> Options {
+    let args: Vec<String> = env::args().collect();
+    match parse_args_from(&args) {
+        Ok(opts) => opts,
+        Err(ParseTerminal::Help) => {
+            print_usage();
+            process::exit(EXIT_CLEAN);
+        }
+        Err(ParseTerminal::Version) => {
+            println!("fsck (OurOS) 0.1.0");
+            process::exit(EXIT_CLEAN);
+        }
+        Err(ParseTerminal::UsageError(msg)) => {
+            eprintln!("{msg}");
+            process::exit(EXIT_USAGE);
+        }
+    }
 }
 
 fn print_usage() {
@@ -838,4 +870,342 @@ fn main() {
 
     let code = exit_code_for(&results);
     process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    // --- fstype_from_argv0 --------------------------------------------------
+
+    #[test]
+    fn fstype_from_plain_fsck() {
+        assert_eq!(fstype_from_argv0("fsck"), None);
+        assert_eq!(fstype_from_argv0("/sbin/fsck"), None);
+    }
+
+    #[test]
+    fn fstype_from_fsck_dot_ext4() {
+        assert_eq!(fstype_from_argv0("fsck.ext4"), Some("ext4".to_string()));
+    }
+
+    #[test]
+    fn fstype_from_path_with_fsck_dot_type() {
+        assert_eq!(
+            fstype_from_argv0("/sbin/fsck.fat32"),
+            Some("fat32".to_string())
+        );
+    }
+
+    #[test]
+    fn fstype_from_dot_with_no_type_is_none() {
+        // "fsck." with no type suffix is not a valid filesystem name.
+        assert_eq!(fstype_from_argv0("fsck."), None);
+    }
+
+    // --- parse_args_from ----------------------------------------------------
+
+    #[test]
+    fn parse_args_no_devices() {
+        let opts = parse_args_from(&args(&["fsck"])).expect("should parse");
+        assert!(opts.devices.is_empty());
+        assert!(opts.fstype.is_none());
+    }
+
+    #[test]
+    fn parse_args_single_device() {
+        let opts = parse_args_from(&args(&["fsck", "/dev/sda1"])).expect("should parse");
+        assert_eq!(opts.devices, vec!["/dev/sda1".to_string()]);
+    }
+
+    #[test]
+    fn parse_args_t_sets_fstype() {
+        let opts =
+            parse_args_from(&args(&["fsck", "-t", "ext4", "/dev/sda1"])).expect("should parse");
+        assert_eq!(opts.fstype.as_deref(), Some("ext4"));
+        assert_eq!(opts.devices, vec!["/dev/sda1".to_string()]);
+    }
+
+    #[test]
+    fn parse_args_t_without_value_is_usage_error() {
+        let err = parse_args_from(&args(&["fsck", "-t"])).expect_err("expected usage error");
+        match err {
+            ParseTerminal::UsageError(msg) => assert!(msg.contains("-t")),
+            other => panic!("expected UsageError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_short_flags_set_options() {
+        let opts =
+            parse_args_from(&args(&["fsck", "-a", "-y", "-f", "-v", "-C", "-A", "/dev/sda1"]))
+                .expect("should parse");
+        assert!(opts.auto_repair);
+        assert!(opts.yes_all);
+        assert!(opts.force);
+        assert!(opts.verbose);
+        assert!(opts.progress);
+        assert!(opts.check_all);
+    }
+
+    #[test]
+    fn parse_args_preen_alias_p() {
+        // `-p` is the BSD alias for `-a` (preen mode).
+        let opts = parse_args_from(&args(&["fsck", "-p", "/dev/sda1"])).expect("should parse");
+        assert!(opts.auto_repair);
+    }
+
+    #[test]
+    fn parse_args_long_flags_set_options() {
+        let opts = parse_args_from(&args(&["fsck", "--force", "--verbose", "--json", "/dev/sda1"]))
+            .expect("should parse");
+        assert!(opts.force);
+        assert!(opts.verbose);
+        assert!(opts.json);
+    }
+
+    #[test]
+    fn parse_args_n_sets_no_modify() {
+        let opts = parse_args_from(&args(&["fsck", "-n", "/dev/sda1"])).expect("should parse");
+        assert!(opts.no_modify);
+        assert!(!opts.yes_all);
+    }
+
+    #[test]
+    fn parse_args_help_returns_help_terminal() {
+        let err = parse_args_from(&args(&["fsck", "--help"])).expect_err("expected Help");
+        assert_eq!(err, ParseTerminal::Help);
+    }
+
+    #[test]
+    fn parse_args_short_h_returns_help_terminal() {
+        let err = parse_args_from(&args(&["fsck", "-h"])).expect_err("expected Help");
+        assert_eq!(err, ParseTerminal::Help);
+    }
+
+    #[test]
+    fn parse_args_version_returns_version_terminal() {
+        let err = parse_args_from(&args(&["fsck", "--version"])).expect_err("expected Version");
+        assert_eq!(err, ParseTerminal::Version);
+    }
+
+    #[test]
+    fn parse_args_unknown_option_is_usage_error() {
+        let err =
+            parse_args_from(&args(&["fsck", "--nope"])).expect_err("expected usage error");
+        match err {
+            ParseTerminal::UsageError(msg) => assert!(msg.contains("--nope")),
+            other => panic!("expected UsageError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_picks_fstype_from_argv0() {
+        let opts =
+            parse_args_from(&args(&["/sbin/fsck.ext4", "/dev/sda1"])).expect("should parse");
+        assert_eq!(opts.fstype.as_deref(), Some("ext4"));
+    }
+
+    #[test]
+    fn parse_args_t_overrides_argv0_fstype() {
+        let opts = parse_args_from(&args(&["fsck.ext4", "-t", "fat32", "/dev/sda1"]))
+            .expect("should parse");
+        // -t comes after fstype_from_argv0, so it wins.
+        assert_eq!(opts.fstype.as_deref(), Some("fat32"));
+    }
+
+    #[test]
+    fn parse_args_multiple_devices() {
+        let opts = parse_args_from(&args(&["fsck", "/dev/sda1", "/dev/sdb1", "/dev/sdc1"]))
+            .expect("should parse");
+        assert_eq!(opts.devices.len(), 3);
+    }
+
+    // --- build_flags --------------------------------------------------------
+
+    #[test]
+    fn build_flags_empty_options_is_zero() {
+        let opts = Options::new();
+        assert_eq!(build_flags(&opts), 0);
+    }
+
+    #[test]
+    fn build_flags_each_bit_sets_correctly() {
+        let mut opts = Options::new();
+        opts.force = true;
+        assert_eq!(build_flags(&opts) & FSCK_FLAG_FORCE, FSCK_FLAG_FORCE);
+
+        let mut opts = Options::new();
+        opts.auto_repair = true;
+        assert_eq!(
+            build_flags(&opts) & FSCK_FLAG_AUTO_REPAIR,
+            FSCK_FLAG_AUTO_REPAIR
+        );
+
+        let mut opts = Options::new();
+        opts.yes_all = true;
+        assert_eq!(build_flags(&opts) & FSCK_FLAG_YES_ALL, FSCK_FLAG_YES_ALL);
+
+        let mut opts = Options::new();
+        opts.no_modify = true;
+        assert_eq!(
+            build_flags(&opts) & FSCK_FLAG_NO_MODIFY,
+            FSCK_FLAG_NO_MODIFY
+        );
+
+        let mut opts = Options::new();
+        opts.verbose = true;
+        assert_eq!(build_flags(&opts) & FSCK_FLAG_VERBOSE, FSCK_FLAG_VERBOSE);
+
+        let mut opts = Options::new();
+        opts.progress = true;
+        assert_eq!(build_flags(&opts) & FSCK_FLAG_PROGRESS, FSCK_FLAG_PROGRESS);
+    }
+
+    #[test]
+    fn build_flags_all_set() {
+        let opts = Options {
+            fstype: None,
+            devices: vec![],
+            auto_repair: true,
+            yes_all: true,
+            no_modify: true,
+            force: true,
+            verbose: true,
+            progress: true,
+            check_all: false,
+            json: false,
+        };
+        let flags = build_flags(&opts);
+        assert_eq!(
+            flags,
+            FSCK_FLAG_FORCE
+                | FSCK_FLAG_AUTO_REPAIR
+                | FSCK_FLAG_YES_ALL
+                | FSCK_FLAG_NO_MODIFY
+                | FSCK_FLAG_VERBOSE
+                | FSCK_FLAG_PROGRESS
+        );
+    }
+
+    // --- normalise_device ---------------------------------------------------
+
+    #[test]
+    fn normalise_device_prepends_dev_to_bare_name() {
+        assert_eq!(normalise_device("sda1"), "/dev/sda1");
+    }
+
+    #[test]
+    fn normalise_device_keeps_absolute_path() {
+        assert_eq!(normalise_device("/dev/sda1"), "/dev/sda1");
+    }
+
+    #[test]
+    fn normalise_device_keeps_relative_with_slash() {
+        // A path with any '/' is treated as already-pathlike — the user
+        // is presumed to know where their device node lives.
+        assert_eq!(normalise_device("./sda1"), "./sda1");
+    }
+
+    // --- json_escape --------------------------------------------------------
+
+    #[test]
+    fn json_escape_plain_passthrough() {
+        assert_eq!(json_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn json_escape_quotes_and_backslashes() {
+        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+    }
+
+    #[test]
+    fn json_escape_control_chars() {
+        assert_eq!(json_escape("\n\r\t"), "\\n\\r\\t");
+    }
+
+    #[test]
+    fn json_escape_low_unicode_is_u_encoded() {
+        // \x01 → \u0001
+        assert_eq!(json_escape("\x01"), "\\u0001");
+    }
+
+    // --- exit_code_for ------------------------------------------------------
+
+    fn clean_result(dev: &str) -> CheckResult {
+        CheckResult {
+            device: dev.to_string(),
+            fstype: "ext4".to_string(),
+            errors_found: 0,
+            errors_fixed: 0,
+            needs_reboot: false,
+            errors_remaining: 0,
+            syscall_error: None,
+        }
+    }
+
+    #[test]
+    fn exit_code_clean_for_no_errors() {
+        let results = [clean_result("/dev/sda1")];
+        assert_eq!(exit_code_for(&results), EXIT_CLEAN);
+    }
+
+    #[test]
+    fn exit_code_fixed_when_errors_fixed() {
+        let mut r = clean_result("/dev/sda1");
+        r.errors_fixed = 3;
+        assert_eq!(exit_code_for(&[r]), EXIT_FIXED);
+    }
+
+    #[test]
+    fn exit_code_reboot_when_needs_reboot() {
+        let mut r = clean_result("/dev/sda1");
+        r.needs_reboot = true;
+        // Just the reboot bit (no other errors).
+        assert_eq!(exit_code_for(&[r]) & EXIT_REBOOT, EXIT_REBOOT);
+    }
+
+    #[test]
+    fn exit_code_errors_when_remaining() {
+        let mut r = clean_result("/dev/sda1");
+        r.errors_remaining = 2;
+        assert_eq!(exit_code_for(&[r]) & EXIT_ERRORS, EXIT_ERRORS);
+    }
+
+    #[test]
+    fn exit_code_usage_when_syscall_error() {
+        let mut r = clean_result("/dev/sda1");
+        r.syscall_error = Some("boom".to_string());
+        assert_eq!(exit_code_for(&[r]) & EXIT_USAGE, EXIT_USAGE);
+    }
+
+    #[test]
+    fn exit_code_combines_bits_across_devices() {
+        let mut r1 = clean_result("/dev/sda1");
+        r1.errors_fixed = 1;
+        let mut r2 = clean_result("/dev/sdb1");
+        r2.errors_remaining = 1;
+        let code = exit_code_for(&[r1, r2]);
+        assert!(code & EXIT_FIXED != 0);
+        assert!(code & EXIT_ERRORS != 0);
+    }
+
+    // --- errno_msg ----------------------------------------------------------
+
+    #[test]
+    fn errno_msg_known_codes() {
+        assert_eq!(errno_msg(-2), "no such file or directory");
+        assert_eq!(errno_msg(-5), "I/O error");
+        assert_eq!(errno_msg(-13), "permission denied");
+        assert_eq!(errno_msg(-22), "invalid argument");
+    }
+
+    #[test]
+    fn errno_msg_unknown_returns_unknown() {
+        assert_eq!(errno_msg(-9999), "unknown error");
+    }
 }

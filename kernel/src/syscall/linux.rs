@@ -509,6 +509,32 @@ pub mod nr {
     pub const PROCESS_VM_READV: u64 = 310;
     pub const PROCESS_VM_WRITEV: u64 = 311;
     pub const PROCESS_MRELEASE: u64 = 448;
+    pub const SETXATTR: u64 = 188;
+    pub const LSETXATTR: u64 = 189;
+    pub const FSETXATTR: u64 = 190;
+    pub const GETXATTR: u64 = 191;
+    pub const LGETXATTR: u64 = 192;
+    pub const FGETXATTR: u64 = 193;
+    pub const LISTXATTR: u64 = 194;
+    pub const LLISTXATTR: u64 = 195;
+    pub const FLISTXATTR: u64 = 196;
+    pub const REMOVEXATTR: u64 = 197;
+    pub const LREMOVEXATTR: u64 = 198;
+    pub const FREMOVEXATTR: u64 = 199;
+    pub const QUOTACTL: u64 = 179;
+    pub const QUOTACTL_FD: u64 = 443;
+    pub const INIT_MODULE: u64 = 175;
+    pub const FINIT_MODULE: u64 = 313;
+    pub const DELETE_MODULE: u64 = 176;
+    pub const UNSHARE: u64 = 272;
+    pub const SETNS: u64 = 308;
+    pub const MOUNT: u64 = 165;
+    pub const UMOUNT2: u64 = 166;
+    pub const PIVOT_ROOT: u64 = 155;
+    pub const SWAPON: u64 = 167;
+    pub const SWAPOFF: u64 = 168;
+    pub const REBOOT: u64 = 169;
+    pub const SYSLOG: u64 = 103;
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +631,7 @@ pub mod errno {
     pub const EOPNOTSUPP: i32 = 95;
     pub const ETIMEDOUT: i32 = 110;
     pub const ECANCELED: i32 = 125;
+    pub const ENODATA: i32 = 61;
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,6 +1464,32 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::PROCESS_VM_READV => sys_process_vm_readv(args),
         nr::PROCESS_VM_WRITEV => sys_process_vm_writev(args),
         nr::PROCESS_MRELEASE => sys_process_mrelease(args),
+        nr::SETXATTR => sys_setxattr(args),
+        nr::LSETXATTR => sys_lsetxattr(args),
+        nr::FSETXATTR => sys_fsetxattr(args),
+        nr::GETXATTR => sys_getxattr(args),
+        nr::LGETXATTR => sys_lgetxattr(args),
+        nr::FGETXATTR => sys_fgetxattr(args),
+        nr::LISTXATTR => sys_listxattr(args),
+        nr::LLISTXATTR => sys_llistxattr(args),
+        nr::FLISTXATTR => sys_flistxattr(args),
+        nr::REMOVEXATTR => sys_removexattr(args),
+        nr::LREMOVEXATTR => sys_lremovexattr(args),
+        nr::FREMOVEXATTR => sys_fremovexattr(args),
+        nr::QUOTACTL => sys_quotactl(args),
+        nr::QUOTACTL_FD => sys_quotactl_fd(args),
+        nr::INIT_MODULE => sys_init_module(args),
+        nr::FINIT_MODULE => sys_finit_module(args),
+        nr::DELETE_MODULE => sys_delete_module(args),
+        nr::UNSHARE => sys_unshare(args),
+        nr::SETNS => sys_setns(args),
+        nr::MOUNT => sys_mount(args),
+        nr::UMOUNT2 => sys_umount2(args),
+        nr::PIVOT_ROOT => sys_pivot_root(args),
+        nr::SWAPON => sys_swapon(args),
+        nr::SWAPOFF => sys_swapoff(args),
+        nr::REBOOT => sys_reboot(args),
+        nr::SYSLOG => sys_syslog(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -6326,6 +6379,423 @@ fn sys_process_mrelease(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+// ---------------------------------------------------------------------------
+// Extended attributes (xattr)
+//
+// Our FS has no extended attribute support yet.  The truthful answers
+// per the Linux man-page are:
+//   - get / list: ENODATA ("attribute does not exist") for path/fd
+//     variants — i.e., no attributes are present.
+//   - set / remove: EOPNOTSUPP ("filesystem does not support xattrs").
+// EOPNOTSUPP is what callers check to learn the FS lacks xattr; ENODATA
+// is what they check to learn a specific attribute is missing.  Both
+// are commonly handled in portable code.
+// ---------------------------------------------------------------------------
+
+/// Helper: validate path + name pointers for path-based xattr ops.
+fn xattr_validate_path_name(path: u64, name: u64) -> Result<(), SyscallResult> {
+    if path == 0 || name == 0 {
+        return Err(linux_err(errno::EFAULT));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(name, 1) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    Ok(())
+}
+
+/// Helper: validate fd + name for fd-based xattr ops.
+fn xattr_validate_fd_name(fd: i32, name: u64) -> Result<(), SyscallResult> {
+    if name == 0 {
+        return Err(linux_err(errno::EFAULT));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(name, 1) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    validate_linux_fd(fd)
+}
+
+fn xattr_set_path(args: &SyscallArgs) -> SyscallResult {
+    if let Err(r) = xattr_validate_path_name(args.arg0, args.arg1) {
+        return r;
+    }
+    // value pointer is optional (NULL = delete-like behaviour for some
+    // FS), validate when non-NULL.
+    let size = args.arg3 as usize;
+    if args.arg2 != 0 && size > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, size) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EOPNOTSUPP)
+}
+
+/// `setxattr(path, name, value, size, flags)`.
+fn sys_setxattr(args: &SyscallArgs) -> SyscallResult {
+    xattr_set_path(args)
+}
+/// `lsetxattr(path, name, value, size, flags)`.
+fn sys_lsetxattr(args: &SyscallArgs) -> SyscallResult {
+    xattr_set_path(args)
+}
+
+/// `fsetxattr(fd, name, value, size, flags)`.
+fn sys_fsetxattr(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = xattr_validate_fd_name(fd, args.arg1) {
+        return r;
+    }
+    let size = args.arg3 as usize;
+    if args.arg2 != 0 && size > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, size) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EOPNOTSUPP)
+}
+
+fn xattr_get_path(args: &SyscallArgs) -> SyscallResult {
+    if let Err(r) = xattr_validate_path_name(args.arg0, args.arg1) {
+        return r;
+    }
+    let size = args.arg3 as usize;
+    if args.arg2 != 0 && size > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, size) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENODATA)
+}
+
+/// `getxattr(path, name, value, size)`.
+fn sys_getxattr(args: &SyscallArgs) -> SyscallResult {
+    xattr_get_path(args)
+}
+/// `lgetxattr(path, name, value, size)`.
+fn sys_lgetxattr(args: &SyscallArgs) -> SyscallResult {
+    xattr_get_path(args)
+}
+
+/// `fgetxattr(fd, name, value, size)`.
+fn sys_fgetxattr(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = xattr_validate_fd_name(fd, args.arg1) {
+        return r;
+    }
+    let size = args.arg3 as usize;
+    if args.arg2 != 0 && size > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, size) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENODATA)
+}
+
+fn xattr_list_path(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    let size = args.arg2 as usize;
+    if args.arg1 != 0 && size > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, size) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // No attributes -> empty list -> 0.
+    SyscallResult::ok(0)
+}
+
+/// `listxattr(path, list, size)`.
+fn sys_listxattr(args: &SyscallArgs) -> SyscallResult {
+    xattr_list_path(args)
+}
+/// `llistxattr(path, list, size)`.
+fn sys_llistxattr(args: &SyscallArgs) -> SyscallResult {
+    xattr_list_path(args)
+}
+
+/// `flistxattr(fd, list, size)`.
+fn sys_flistxattr(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    let size = args.arg2 as usize;
+    if args.arg1 != 0 && size > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, size) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+fn xattr_remove_path(args: &SyscallArgs) -> SyscallResult {
+    if let Err(r) = xattr_validate_path_name(args.arg0, args.arg1) {
+        return r;
+    }
+    linux_err(errno::EOPNOTSUPP)
+}
+
+/// `removexattr(path, name)`.
+fn sys_removexattr(args: &SyscallArgs) -> SyscallResult {
+    xattr_remove_path(args)
+}
+/// `lremovexattr(path, name)`.
+fn sys_lremovexattr(args: &SyscallArgs) -> SyscallResult {
+    xattr_remove_path(args)
+}
+
+/// `fremovexattr(fd, name)`.
+fn sys_fremovexattr(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = xattr_validate_fd_name(fd, args.arg1) {
+        return r;
+    }
+    linux_err(errno::EOPNOTSUPP)
+}
+
+// ---------------------------------------------------------------------------
+// Disk quotas, kernel modules, namespaces, mount, swap, reboot, syslog
+//
+// All privileged; without writable filesystems / kernel-module loader /
+// namespace support / power management, these return EPERM after input
+// validation.  The truthful answer to "did you do it?" is "no, the
+// caller lacks privilege" — which is also what a real Linux kernel
+// would say if the caller isn't root with CAP_SYS_ADMIN.
+// ---------------------------------------------------------------------------
+
+/// `quotactl(cmd, special, id, addr)`.
+fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
+    // special is a path pointer (when needed); validate if non-NULL.
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `quotactl_fd(fd, cmd, id, addr)`.
+fn sys_quotactl_fd(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `init_module(module_image, len, param_values)`.
+fn sys_init_module(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let len = args.arg1 as usize;
+    if len == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `finit_module(fd, param_values, flags)`.
+fn sys_finit_module(args: &SyscallArgs) -> SyscallResult {
+    // MODULE_INIT_IGNORE_MODVERSIONS = 1, IGNORE_VERMAGIC = 2,
+    // COMPRESSED_FILE = 4.
+    const VALID_FLAGS: u64 = 1 | 2 | 4;
+    if args.arg2 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `delete_module(name, flags)`.
+fn sys_delete_module(args: &SyscallArgs) -> SyscallResult {
+    // O_NONBLOCK=0o4000, O_TRUNC=0o1000 (the only valid flags).
+    const VALID_FLAGS: u64 = 0o4000 | 0o1000;
+    if args.arg1 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `unshare(flags)`.
+fn sys_unshare(args: &SyscallArgs) -> SyscallResult {
+    // CLONE_FILES=0x400, CLONE_FS=0x200, CLONE_NEWNS=0x20000,
+    // CLONE_SYSVSEM=0x40000, CLONE_NEWIPC=0x8000000, CLONE_NEWNET=0x40000000,
+    // CLONE_NEWPID=0x20000000, CLONE_NEWUSER=0x10000000,
+    // CLONE_NEWUTS=0x4000000, CLONE_NEWCGROUP=0x2000000,
+    // CLONE_NEWTIME=0x80, CLONE_THREAD=0x10000, CLONE_SIGHAND=0x800,
+    // CLONE_VM=0x100.
+    const VALID_FLAGS: u64 = 0x400 | 0x200 | 0x20000 | 0x40000 | 0x800_0000
+        | 0x4000_0000 | 0x2000_0000 | 0x1000_0000 | 0x400_0000
+        | 0x200_0000 | 0x80 | 0x10000 | 0x800 | 0x100;
+    if args.arg0 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // unshare(0) trivially succeeds: nothing to unshare.
+    if args.arg0 == 0 {
+        return SyscallResult::ok(0);
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `setns(fd, nstype)`.
+fn sys_setns(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `mount(source, target, fstype, mountflags, data)`.
+fn sys_mount(args: &SyscallArgs) -> SyscallResult {
+    // target is required; source/fstype/data optional depending on op.
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    for ptr in [args.arg0, args.arg2, args.arg4] {
+        if ptr != 0 {
+            if let Err(e) = crate::mm::user::validate_user_read(ptr, 1) {
+                return linux_err(linux_errno_for(e));
+            }
+        }
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `umount2(target, flags)`.
+fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
+    // MNT_FORCE=1, MNT_DETACH=2, MNT_EXPIRE=4, UMOUNT_NOFOLLOW=8.
+    const VALID_FLAGS: u64 = 1 | 2 | 4 | 8;
+    if args.arg1 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `pivot_root(new_root, put_old)`.
+fn sys_pivot_root(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 || args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `swapon(path, swapflags)`.
+fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `swapoff(path)`.
+fn sys_swapoff(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `reboot(magic1, magic2, cmd, arg)`.
+fn sys_reboot(args: &SyscallArgs) -> SyscallResult {
+    // Linux requires magic1 = LINUX_REBOOT_MAGIC1 (0xfee1dead)
+    // and magic2 in a fixed set (672274793 etc.).  We refuse all
+    // reboots from userspace for now.
+    const MAGIC1: u64 = 0xfee1_dead;
+    if args.arg0 != MAGIC1 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `syslog(type, bufp, len)` — read / write the kernel log buffer.
+fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
+    // type 0..=10 are defined in Linux.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let typ = args.arg0 as i32;
+    if !(0..=10).contains(&typ) {
+        return linux_err(errno::EINVAL);
+    }
+    // Most useful actions (SYSLOG_ACTION_READ family) need bufp/len;
+    // validate len-pointer writes when applicable, but we don't have
+    // a Linux-shaped klog buffer available so refuse.
+    let len = args.arg2 as usize;
+    if typ == 2 || typ == 3 || typ == 4 {
+        // Read variants: need buffer if len > 0.
+        if args.arg1 == 0 && len > 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if len > 0 {
+            if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len) {
+                return linux_err(linux_errno_for(e));
+            }
+        }
+    }
+    // SYSLOG_ACTION_SIZE_BUFFER and SIZE_UNREAD return 0 (no log
+    // available).
+    if typ == 6 || typ == 7 || typ == 9 || typ == 10 {
+        return SyscallResult::ok(0);
+    }
+    linux_err(errno::EPERM)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -10279,6 +10749,268 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::PROCESS_MRELEASE, &a).value
             != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: process_mrelease not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // xattr / quota / module / namespace / mount / swap / reboot /
+    // syslog — input validation plus principled errno.
+    {
+        // setxattr(NULL,_,_,_,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETXATTR, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: setxattr(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // setxattr(path,name,_,_,_) -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETXATTR, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: setxattr not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // getxattr(path,name,_,_) -> ENODATA.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETXATTR, &a).value
+            != -i64::from(errno::ENODATA) {
+            serial_println!("[syscall/linux]   FAIL: getxattr not ENODATA");
+            return Err(KernelError::InternalError);
+        }
+        // listxattr(path, NULL, 0) -> 0 (empty list).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTXATTR, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: listxattr not 0");
+            return Err(KernelError::InternalError);
+        }
+        // removexattr -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMOVEXATTR, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: removexattr not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // fgetxattr(NULL name) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FGETXATTR, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: fgetxattr(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // flistxattr in kernel context -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FLISTXATTR, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: flistxattr not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // quotactl with NULL special -> EPERM (NULL is allowed).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: quotactl not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // quotactl_fd in kernel context -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL_FD, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: quotactl_fd not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // init_module(NULL,_,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INIT_MODULE, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: init_module(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // init_module(img, 0, _) -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INIT_MODULE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: init_module(len=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // finit_module bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x8000_0000, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FINIT_MODULE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: finit_module(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // finit_module(_, NULL, 0) in kernel context -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FINIT_MODULE, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: finit_module not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // delete_module(NULL,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::DELETE_MODULE, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: delete_module(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+
+        // unshare(0) -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UNSHARE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: unshare(0) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // unshare with bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0x8, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UNSHARE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: unshare(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // unshare(CLONE_FILES) -> EPERM.
+        let a = SyscallArgs { arg0: 0x400, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UNSHARE, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: unshare not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // setns in kernel context -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETNS, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: setns not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // mount(NULL target) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MOUNT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mount(NULL target) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // mount(target) -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MOUNT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // umount2(target, bad flag) -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x8000_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UMOUNT2, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: umount2(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // umount2(target, 0) -> EPERM.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UMOUNT2, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: umount2 not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // pivot_root(NULL, NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIVOT_ROOT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: pivot_root(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // pivot_root(x, y) -> EPERM.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIVOT_ROOT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: pivot_root not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // swapon(path) -> EPERM.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SWAPON, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: swapon not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // swapoff(path) -> EPERM.
+        if dispatch_linux(nr::SWAPOFF, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: swapoff not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // reboot with bad magic1 -> EINVAL.
+        let a = SyscallArgs { arg0: 0xdead, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REBOOT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: reboot(bad magic) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // reboot with valid magic -> EPERM.
+        let a = SyscallArgs { arg0: 0xfee1_dead, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REBOOT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: reboot not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // syslog(99) -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSLOG, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: syslog(99) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // syslog(6) -> 0 (size_buffer).
+        let a = SyscallArgs { arg0: 6, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSLOG, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: syslog(6) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // syslog(2, NULL, 16) read -> EFAULT.
+        let a = SyscallArgs { arg0: 2, arg1: 0, arg2: 16, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSLOG, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: syslog(2,NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // syslog(0) (CLOSE) -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSLOG, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: syslog(0) not EPERM");
             return Err(KernelError::InternalError);
         }
     }

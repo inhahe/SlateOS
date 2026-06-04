@@ -6388,3 +6388,66 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      sandboxes); the rest are mostly used by tracing /
 ##      privileged tools that handle missing-feature paths
 ##      gracefully.
+##  46. XATTR family (set / get / list / remove × path / l /
+##      f variants = 12 syscalls), QUOTACTL / QUOTACTL_FD,
+##      INIT_MODULE / FINIT_MODULE / DELETE_MODULE, UNSHARE /
+##      SETNS, MOUNT / UMOUNT2 / PIVOT_ROOT, SWAPON / SWAPOFF,
+##      REBOOT, SYSLOG — DONE as input-validated principled-
+##      errno stubs.
+##         - Extended attributes:
+##              * set / remove (12 variants) -> EOPNOTSUPP
+##                ("filesystem does not support xattrs") so
+##                callers that test feature support fall back
+##                gracefully.
+##              * get -> ENODATA ("attribute does not exist")
+##                so callers see the right errno for a missing
+##                attribute, which they all handle.
+##              * list -> 0 (empty list) since no attributes
+##                exist; this is the truthful answer and lets
+##                portable code complete without error.
+##         - quotactl / quotactl_fd: EPERM after validating
+##           any non-NULL special pointer / fd.  Quotas are a
+##           privileged feature and the truthful answer is
+##           "you lack CAP_SYS_ADMIN".
+##         - init_module / finit_module / delete_module:
+##           validate the module image / fd / name pointers
+##           and the flag bits (MODULE_INIT_IGNORE_MODVERSIONS |
+##           IGNORE_VERMAGIC | COMPRESSED_FILE for finit;
+##           O_NONBLOCK | O_TRUNC for delete), then EPERM.
+##         - unshare: validate the CLONE_* flag mask;
+##           unshare(0) succeeds (trivial); anything else
+##           EPERM until namespace plumbing exists.
+##         - setns: validate fd; EPERM.
+##         - mount: validate target (required), source / type /
+##           data (optional); EPERM.  umount2 validates MNT_FORCE
+##           | DETACH | EXPIRE | UMOUNT_NOFOLLOW; pivot_root
+##           validates both pointers; all EPERM.
+##         - swapon / swapoff: validate path; EPERM.
+##         - reboot: requires LINUX_REBOOT_MAGIC1 (0xfee1dead);
+##           bad magic -> EINVAL; valid magic -> EPERM.
+##         - syslog: type 0..=10 valid, anything else EINVAL.
+##           SIZE_BUFFER (6 / 9) and SIZE_UNREAD (7 / 10)
+##           return 0 (truthful: no log).  READ family (2 / 3 /
+##           4) validates buf/len then EPERM.  Other types
+##           return EPERM.
+##      Choice rationale:
+##         * EOPNOTSUPP / ENODATA for xattr is the universal
+##           portable-code answer and avoids "ENOSYS makes
+##           glibc behave weirdly" failures observed with some
+##           hardened userspace.
+##         * EPERM for privileged operations matches what a
+##           non-root Linux process sees, which is also the
+##           expected behaviour of a microkernel that simply
+##           doesn't give userspace these capabilities.
+##         * unshare(0) -> 0 is exactly what Linux does and is
+##           a common idiom in init systems to detect support.
+##      Limitation: when a real VFS lands and xattr storage is
+##      added, set/get/list/remove must route through it.
+##      When (and if) a kernel-module loader is added,
+##      init_module/finit_module/delete_module need to do real
+##      work.  Namespaces and mount need actual namespace and
+##      mount-tree infrastructure.  reboot needs ACPI shutdown
+##      / restart wiring.  syslog needs hookup to the kernel's
+##      log buffer (which already exists for our serial
+##      logger; just not Linux-shaped klogd buffer).
+

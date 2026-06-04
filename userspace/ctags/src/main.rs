@@ -1399,14 +1399,16 @@ fn extract_js_tags(content: &str, file: &str) -> Vec<Tag> {
                     .trim_start_matches("set ");
                 if let Some(paren) = method_line.find('(') {
                     let name = first_ident(&method_line[..paren]);
+                    // Skip control-flow keywords but keep "constructor" as
+                    // a real method name. (The expression below simplifies
+                    // from a `(... && != "constructor") || == "constructor"`
+                    // form clippy flagged as redundant.)
                     if !name.is_empty()
                         && name != "if"
                         && name != "while"
                         && name != "for"
                         && name != "switch"
                         && name != "return"
-                        && name != "constructor"
-                        || name == "constructor"
                     {
                         tags.push(Tag {
                             name,
@@ -1682,7 +1684,7 @@ fn read_stdin_filelist() -> Vec<String> {
     let reader = BufReader::new(stdin.lock());
     reader
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(Result::ok)
         .filter(|l| !l.is_empty())
         .collect()
 }

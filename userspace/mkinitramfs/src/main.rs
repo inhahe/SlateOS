@@ -32,7 +32,10 @@ struct InitramfsConfig {
     modules: Vec<String>,
     /// Extra files/directories to include.
     extra_files: Vec<PathBuf>,
-    /// Hooks/scripts to run.
+    /// Hooks/scripts to run. Parsed from /etc/mkinitramfs.conf; the
+    /// runner that consumes them is part of the still-pending boot
+    /// hook stage.
+    #[allow(dead_code)]
     hooks: Vec<String>,
     /// Compression method.
     compression: Compression,
@@ -56,6 +59,9 @@ enum Compression {
 }
 
 impl Compression {
+    // Consumed by the future output-naming pass that suffixes the
+    // initramfs file with the compression extension.
+    #[allow(dead_code)]
     fn extension(&self) -> &str {
         match self {
             Compression::Gzip => ".gz",

@@ -332,13 +332,13 @@ fn evaluate(board: &Board, color: Cell) -> i32 {
     score += (my_pieces - opp_pieces) * 10;
 
     // Positional weights
-    for row in 0..8 {
-        for col in 0..8 {
+    for (row, weights_row) in POSITION_WEIGHTS.iter().enumerate().take(8) {
+        for (col, &w) in weights_row.iter().enumerate().take(8) {
             let cell = board.cells[row][col];
             if cell == color {
-                score += POSITION_WEIGHTS[row][col];
+                score += w;
             } else if cell == opponent {
-                score -= POSITION_WEIGHTS[row][col];
+                score -= w;
             }
         }
     }

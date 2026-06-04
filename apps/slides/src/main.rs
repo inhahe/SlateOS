@@ -2270,7 +2270,12 @@ impl SlidesApp {
         });
 
         for (i, slide) in self.slides.iter().enumerate() {
+            // cols was clamped to >= 1 above, so the divisions are
+            // safe — silence arithmetic_side_effects locally rather
+            // than going through checked_* helpers.
+            #[allow(clippy::arithmetic_side_effects)]
             let col = i % cols;
+            #[allow(clippy::arithmetic_side_effects)]
             let row = i / cols;
             let tx = grid_x + (col as f32) * (thumb_w + gap);
             let ty = top + gap + (row as f32) * (thumb_h + gap + 24.0);

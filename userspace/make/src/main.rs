@@ -321,8 +321,8 @@ fn read_logical_lines(contents: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for raw in contents.lines() {
-        if raw.ends_with('\\') {
-            current.push_str(&raw[..raw.len() - 1]);
+        if let Some(head) = raw.strip_suffix('\\') {
+            current.push_str(head);
             current.push(' ');
         } else {
             current.push_str(raw);
@@ -767,10 +767,13 @@ fn find_rule_colon(line: &str) -> Option<usize> {
 
 /// Try to strip a conditional directive keyword from the beginning of a line.
 fn try_strip_directive<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
-    if let Some(rest) = line.strip_prefix(keyword) {
-        if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') || rest.starts_with('(') {
-            return Some(rest.trim_start());
-        }
+    if let Some(rest) = line.strip_prefix(keyword)
+        && (rest.is_empty()
+            || rest.starts_with(' ')
+            || rest.starts_with('\t')
+            || rest.starts_with('('))
+    {
+        return Some(rest.trim_start());
     }
     None
 }

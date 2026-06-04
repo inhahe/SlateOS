@@ -750,10 +750,13 @@ fn compile_branch(branch: &str) -> Result<PatternBranch, String> {
     Ok(elements)
 }
 
+/// Result of parsing a character class: the ranges, the negation flag,
+/// and the index just past the closing `]`.
+type CharClassParse = (Vec<(u8, u8)>, bool, usize);
+
 /// Parse a `[...]` or `[^...]` character class starting at position `start`
-/// (which points at the `[`). Returns the ranges, negated flag, and the
-/// index just past the closing `]`.
-fn parse_char_class(bytes: &[u8], start: usize) -> Result<(Vec<(u8, u8)>, bool, usize), String> {
+/// (which points at the `[`).
+fn parse_char_class(bytes: &[u8], start: usize) -> Result<CharClassParse, String> {
     let mut i = start + 1; // skip `[`
     let mut negated = false;
     let mut ranges: Vec<(u8, u8)> = Vec::new();
@@ -977,7 +980,7 @@ fn lower_pattern(pattern: &mut CompiledPattern) {
 }
 
 fn to_ascii_lower(b: u8) -> u8 {
-    if (b'A'..=b'Z').contains(&b) { b + 32 } else { b }
+    if b.is_ascii_uppercase() { b + 32 } else { b }
 }
 
 // ============================================================================

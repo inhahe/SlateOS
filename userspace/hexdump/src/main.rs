@@ -725,8 +725,8 @@ fn dump_one_byte_generic(
         if n == 0 {
             if line_len > 0 {
                 write!(out, "{offset:07x}")?;
-                for i in 0..line_len {
-                    format_byte(out, line_buf[i])?;
+                for &b in &line_buf[..line_len] {
+                    format_byte(out, b)?;
                 }
                 writeln!(out)?;
             }
@@ -755,8 +755,8 @@ fn dump_one_byte_generic(
                         }
 
                 write!(out, "{offset:07x}")?;
-                for i in 0..DEFAULT_LINE_WIDTH {
-                    format_byte(out, line_buf[i])?;
+                for &b in &line_buf[..DEFAULT_LINE_WIDTH] {
+                    format_byte(out, b)?;
                 }
                 writeln!(out)?;
 

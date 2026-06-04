@@ -5,7 +5,7 @@
 //! browser for saved recordings. Uses the guitk library for UI rendering
 //! with Catppuccin Mocha theme.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::too_many_arguments, clippy::vec_init_then_push)]
 
 #[allow(unused_imports)]
 use guitk::color::Color;

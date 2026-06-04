@@ -607,7 +607,7 @@ fn fill_columns(words: &[String], term_width: usize, output_sep: &str) -> Vec<St
     let mut output = Vec::with_capacity(nrows);
     for row in 0..nrows {
         let mut line = String::new();
-        for col in 0..ncols {
+        for (col, target) in col_widths.iter().copied().enumerate().take(ncols) {
             let idx = col * nrows + row;
             if idx >= words.len() {
                 break;
@@ -620,7 +620,6 @@ fn fill_columns(words: &[String], term_width: usize, output_sep: &str) -> Vec<St
             // Pad to column width (except for the last column).
             if col + 1 < ncols {
                 let w = display_width(word);
-                let target = col_widths[col];
                 if w < target {
                     for _ in 0..(target - w) {
                         line.push(' ');
@@ -692,7 +691,7 @@ fn fill_rows(words: &[String], term_width: usize, output_sep: &str) -> Vec<Strin
     let mut output = Vec::with_capacity(nrows);
     for row in 0..nrows {
         let mut line = String::new();
-        for col in 0..ncols {
+        for (col, target) in col_widths.iter().copied().enumerate().take(ncols) {
             let idx = row * ncols + col;
             if idx >= words.len() {
                 break;
@@ -706,7 +705,6 @@ fn fill_rows(words: &[String], term_width: usize, output_sep: &str) -> Vec<Strin
             let is_last_in_row = col + 1 >= ncols || (row * ncols + col + 1) >= words.len();
             if !is_last_in_row {
                 let w = display_width(word);
-                let target = col_widths[col];
                 if w < target {
                     for _ in 0..(target - w) {
                         line.push(' ');

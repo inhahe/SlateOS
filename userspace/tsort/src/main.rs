@@ -60,8 +60,8 @@ impl Graph {
 
         // Start with all nodes that have no incoming edges
         let mut queue: VecDeque<usize> = VecDeque::new();
-        for i in 0..n {
-            if in_degree[i] == 0 {
+        for (i, &deg) in in_degree.iter().enumerate().take(n) {
+            if deg == 0 {
                 queue.push_back(i);
             }
         }
@@ -80,8 +80,8 @@ impl Graph {
         let has_cycle = result.len() != n;
         if has_cycle {
             // Report which nodes are in cycles
-            for i in 0..n {
-                if in_degree[i] > 0 {
+            for (i, &deg) in in_degree.iter().enumerate().take(n) {
+                if deg > 0 {
                     eprintln!("tsort: {}: input contains a loop", self.idx_to_name[i]);
                 }
             }

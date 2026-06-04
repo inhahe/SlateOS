@@ -38,6 +38,9 @@ struct CgroupInfo {
 struct SubsysInfo {
     name: String,
     _hierarchy: u32,
+    // Reported by /proc/cgroups; consumed by the future `cgroup list`
+    // verbose path that includes per-controller cgroup counts.
+    #[allow(dead_code)]
     num_cgroups: u32,
     enabled: bool,
 }
@@ -70,6 +73,10 @@ fn write_cgroup_param(group: &str, param: &str, value: &str) -> Result<(), Strin
     fs::write(&path, value).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
+// Consumed by the same verbose `cgroup list` path that uses num_cgroups
+// — both are wired to the cgroup-v2 controllers file but the listing
+// command isn't yet hooked into the CLI dispatch.
+#[allow(dead_code)]
 fn list_controllers() -> Vec<String> {
     let path = Path::new(CGROUP_ROOT).join("cgroup.controllers");
     if let Ok(data) = fs::read_to_string(&path) {

@@ -173,7 +173,10 @@ impl FontSizePreset {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    // Named `parse_label` rather than `from_str` so it doesn't shadow
+    // the standard `std::str::FromStr::from_str` trait method (which
+    // would require returning `Result<Self, ...>`).
+    pub fn parse_label(s: &str) -> Option<Self> {
         match s {
             "Small" | "small" => Some(Self::Small),
             "Medium" | "medium" => Some(Self::Medium),
@@ -977,7 +980,7 @@ impl NoteStore {
                 tag_count: n.tags.len(),
             })
             .collect();
-        items.sort_by(|a, b| b.pinned.cmp(&a.pinned));
+        items.sort_by_key(|item| std::cmp::Reverse(item.pinned));
         items
     }
 }
@@ -1092,7 +1095,7 @@ pub fn deserialize_notes(data: &str) -> Option<NoteStore> {
             .replace('\x00', "\\");
 
         let color_index = NoteColorIndex::from_usize(color_idx).unwrap_or(NoteColorIndex::Yellow);
-        let font_size = FontSizePreset::from_str(font_size_str).unwrap_or(FontSizePreset::Medium);
+        let font_size = FontSizePreset::parse_label(font_size_str).unwrap_or(FontSizePreset::Medium);
         let tags: Vec<String> = if tags_str.is_empty() {
             Vec::new()
         } else {
@@ -2379,10 +2382,10 @@ mod tests {
 
     #[test]
     fn test_font_size_preset_from_str() {
-        assert_eq!(FontSizePreset::from_str("Small"), Some(FontSizePreset::Small));
-        assert_eq!(FontSizePreset::from_str("medium"), Some(FontSizePreset::Medium));
-        assert_eq!(FontSizePreset::from_str("Large"), Some(FontSizePreset::Large));
-        assert_eq!(FontSizePreset::from_str("???"), None);
+        assert_eq!(FontSizePreset::parse_label("Small"), Some(FontSizePreset::Small));
+        assert_eq!(FontSizePreset::parse_label("medium"), Some(FontSizePreset::Medium));
+        assert_eq!(FontSizePreset::parse_label("Large"), Some(FontSizePreset::Large));
+        assert_eq!(FontSizePreset::parse_label("???"), None);
     }
 
     // -- TextSpan / RichLine -------------------------------------------------

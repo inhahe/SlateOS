@@ -1061,7 +1061,9 @@ fn signal_name_to_number(name: &str) -> Result<i32, String> {
     }
 }
 
-/// Map a signal number to its name.
+/// Map a signal number to its name. Held for the future -N / --watchfd
+/// path where we emit signal info; currently unused.
+#[allow(dead_code)]
 fn signal_number_to_name(num: i32) -> &'static str {
     match num {
         1 => "HUP",
@@ -1399,9 +1401,10 @@ fn send_signal(pid: u32, sig: i32) -> Result<(), String> {
     #[cfg(not(target_family = "unix"))]
     {
         let _ = (pid, sig);
-        return Err("signal sending not supported on this platform".into());
+        Err("signal sending not supported on this platform".into())
     }
 
+    #[cfg(target_family = "unix")]
     Ok(())
 }
 

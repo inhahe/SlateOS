@@ -1309,11 +1309,11 @@ impl App {
         }
 
         // If there are more right-column lines than CPU lines, print them.
-        for i in self.num_cpus..right_lines.len() {
+        for (offset, line) in right_lines.iter().enumerate().skip(self.num_cpus) {
             let right_col_start = half_cols + 1;
-            let _ = write!(buf, "\x1b[{};1H\x1b[K", i + 1);
-            let _ = write!(buf, "\x1b[{};{}H", i + 1, right_col_start);
-            let _ = write!(buf, "{}", right_lines[i]);
+            let _ = write!(buf, "\x1b[{};1H\x1b[K", offset + 1);
+            let _ = write!(buf, "\x1b[{};{}H", offset + 1, right_col_start);
+            let _ = write!(buf, "{line}");
         }
 
         // Fill remaining header lines if any.
@@ -2009,7 +2009,7 @@ impl App {
         // SAFETY: getpriority/setpriority are provided by the POSIX layer.
         // PRIO_PROCESS with the pid targets a single process.
         let current = unsafe { getpriority(PRIO_PROCESS, pid) };
-        let new_nice = (current + delta).max(-20).min(19);
+        let new_nice = (current + delta).clamp(-20, 19);
         // SAFETY: Same FFI call with validated parameters.
         let ret = unsafe { setpriority(PRIO_PROCESS, pid, new_nice) };
 

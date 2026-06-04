@@ -28,7 +28,7 @@
 //! SchedulerUI       -- guitk-based GUI with task list, add/edit, history
 //! ```
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::too_many_arguments)]
 
 #[allow(unused_imports)]
 use guitk::color::Color;
@@ -973,7 +973,7 @@ fn decompose_timestamp(ts: u64) -> DecomposedTime {
     let hour = ((secs % 86400) / 3600) as u8;
 
     // Days since epoch (1970-01-01, which was a Thursday = weekday 4).
-    let days = (secs / 86400);
+    let days = secs / 86400;
     let weekday = ((days + 4) % 7) as u8; // 0 = Sunday
 
     // Compute year, month, day from days since epoch.

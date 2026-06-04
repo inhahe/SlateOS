@@ -397,9 +397,9 @@ fn join_words_simple(words: &[&str], width: usize, _goal: usize, indent: &str) -
         }
     }
 
-    if !current_line.is_empty() && current_line != indent {
-        lines.push(current_line);
-    } else if !current_line.is_empty() && current_line == indent && lines.is_empty() {
+    // Keep any final non-empty buffer; if it's just the indent, only keep
+    // it when no other lines were emitted (so the result isn't empty).
+    if !current_line.is_empty() && (current_line != indent || lines.is_empty()) {
         lines.push(current_line);
     }
 
@@ -425,13 +425,12 @@ fn format_paragraph(lines: &[&str], config: &Config) -> Vec<String> {
     // In tagged-paragraph mode, first line keeps its indent, rest use the
     // second line's indent.
     // In default mode, all lines use the first line's indent.
-    let (first_line_indent, continuation_indent) = if config.crown_margin {
-        (first_indent.to_string(), rest_indent.to_string())
-    } else if config.tagged_paragraph {
-        (first_indent.to_string(), rest_indent.to_string())
-    } else {
-        (first_indent.to_string(), first_indent.to_string())
-    };
+    let (first_line_indent, continuation_indent) =
+        if config.crown_margin || config.tagged_paragraph {
+            (first_indent.to_string(), rest_indent.to_string())
+        } else {
+            (first_indent.to_string(), first_indent.to_string())
+        };
 
     if config.split_only {
         // Split-only mode: break long lines but never join short ones.

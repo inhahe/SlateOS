@@ -37,6 +37,9 @@ struct FileXattrs {
 // Namespace helpers
 // ============================================================================
 
+// Held for the future namespaced-listing path that groups output by
+// the user./trusted./security./system. prefix; not yet wired in.
+#[allow(dead_code)]
 fn xattr_namespace(name: &str) -> &str {
     if let Some(dot_pos) = name.find('.') {
         &name[..dot_pos]
@@ -65,6 +68,10 @@ fn format_value(value: &[u8], hex: bool, text_mode: bool) -> String {
     }
 }
 
+// Held for the future setxattr CLI path that accepts 0x-prefixed hex
+// or text values from the command line. The current set/get only
+// passes raw bytes through.
+#[allow(dead_code)]
 fn parse_value(s: &str) -> Vec<u8> {
     if let Some(hex) = s.strip_prefix("0x") {
         // Hex value.

@@ -625,15 +625,7 @@ fn find_device(name: &str) -> Option<BlockDevice> {
 /// Find a disk (parent) device by kernel name, returning it with children.
 fn find_disk(name: &str) -> Option<BlockDevice> {
     let name = name.strip_prefix("/dev/").unwrap_or(name);
-    let devices = get_all_devices();
-
-    for dev in devices {
-        if dev.name == name {
-            return Some(dev);
-        }
-    }
-
-    None
+    get_all_devices().into_iter().find(|dev| dev.name == name)
 }
 
 // ============================================================================
@@ -1541,9 +1533,7 @@ fn detect_partition_table_type(disk_name: &str) -> &'static str {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.starts_with(disk_name) {
-                // Extract the numeric suffix.
-                let suffix = &name_str[disk_name.len()..];
+            if let Some(suffix) = name_str.strip_prefix(disk_name) {
                 // NVMe partitions have a 'p' prefix before the number.
                 let suffix = suffix.strip_prefix('p').unwrap_or(suffix);
                 if let Ok(num) = suffix.parse::<u32>()

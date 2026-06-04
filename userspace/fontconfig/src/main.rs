@@ -43,6 +43,10 @@ struct FontEntry {
     _charset: String,
 }
 
+// Full CSS font-style ladder kept for symmetry with FontWeight; only a
+// subset is currently emitted by the sample-data generator, so allow
+// dead_code on the unused variants.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum FontStyle {
     Regular,
@@ -81,6 +85,8 @@ enum FontSlant {
     _Oblique,
 }
 
+// Same rationale as FontStyle — full CSS weight ladder, partial usage.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum FontWeight {
     Thin,

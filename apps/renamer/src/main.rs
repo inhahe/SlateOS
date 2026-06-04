@@ -346,7 +346,8 @@ impl RenameEngine {
                     InsertPosition::End => stem.len(),
                     InsertPosition::At(pos) => (*pos).min(stem.len()),
                 };
-                let mut new_stem = String::with_capacity(stem.len() + text.len());
+                let mut new_stem =
+                    String::with_capacity(stem.len().saturating_add(text.len()));
                 new_stem.push_str(&stem[..insert_pos]);
                 new_stem.push_str(text);
                 new_stem.push_str(&stem[insert_pos..]);
@@ -946,11 +947,16 @@ impl RenamerApp {
             max_width: Some(200.0),
         });
 
-        // Toolbar buttons
-        let btn_labels = ["Add Files", "Rename", "Undo", "Redo", "Clear"];
-        let btn_colors = [BLUE, GREEN, PEACH, PEACH, RED];
+        // Toolbar buttons. Pair label with color so we never index out of bounds.
+        let buttons = [
+            ("Add Files", BLUE),
+            ("Rename", GREEN),
+            ("Undo", PEACH),
+            ("Redo", PEACH),
+            ("Clear", RED),
+        ];
         let mut bx = 220.0;
-        for (i, label) in btn_labels.iter().enumerate() {
+        for (label, color) in buttons {
             let bw = label.len() as f32 * 8.0 + 20.0;
             cmds.push(RenderCommand::FillRect {
                 x: bx,
@@ -963,9 +969,9 @@ impl RenamerApp {
             cmds.push(RenderCommand::Text {
                 x: bx + 10.0,
                 y: 12.0,
-                text: (*label).into(),
+                text: label.into(),
                 font_size: SMALL_TEXT,
-                color: btn_colors[i],
+                color,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(bw - 16.0),
             });

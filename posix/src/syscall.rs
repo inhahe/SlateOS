@@ -252,85 +252,150 @@ pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers
 // ---------------------------------------------------------------------------
+//
+// Host-build safety gate
+// ----------------------
+// `syscallN()` issues a raw `SYSCALL` x86_64 instruction.  On our OS
+// target (`target_os = "none"`, the bare-metal posix staticlib) that
+// instruction transfers control to the kernel's syscall entry.  On any
+// host build (`not(target_os = "none")`, used by `cargo test` against
+// the host triple) the same instruction transfers control to whatever
+// the host OS placed at SYSCALL — on Windows it dispatches to NT
+// system services, with completely different ABI and semantics.
+//
+// To prevent that UB during host test runs we gate the inline asm
+// behind `cfg(target_os = "none")` and have host builds return a
+// documented sentinel (`-ENOSYS`).  Wrapper functions that need
+// host-meaningful behaviour (e.g. `getpid`, `eventfd`, `timerfd_create`)
+// detect this sentinel via `errno::translate` and either fall back to
+// a host-friendly implementation or fail cleanly.  Tests that need to
+// exercise post-syscall validator logic on host use the dedicated
+// test-only fdtable helpers (see `fdtable::test_install_handle_kind`)
+// rather than calling the real wrappers.
+
+/// Sentinel returned by every `syscallN()` on host builds.  Equals
+/// `-(errno::ENOSYS as i64)`.  Pinned by `host_enosys_matches_errno_module`
+/// so a future renumbering of ENOSYS won't drift this value.
+#[cfg(not(target_os = "none"))]
+const HOST_ENOSYS: i64 = -38;
 
 /// Issue a syscall with 0 arguments.
 #[inline(always)]
 #[must_use]
 pub fn syscall0(nr: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: The SYSCALL instruction is the defined kernel entry point.
-    // RCX and R11 are clobbered by SYSCALL (saves RIP and RFLAGS).
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        // SAFETY: The SYSCALL instruction is the defined kernel entry
+        // point on our OS target.  RCX and R11 are clobbered by SYSCALL
+        // (saves RIP and RFLAGS).
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = nr;
+        HOST_ENOSYS
+    }
 }
 
 /// Issue a syscall with 1 argument.
 #[inline(always)]
 #[must_use]
 pub fn syscall1(nr: u64, arg0: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") arg0,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        // SAFETY: SYSCALL is the OS-target kernel entry; RCX/R11 are
+        // clobbered by the instruction itself.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") arg0,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (nr, arg0);
+        HOST_ENOSYS
+    }
 }
 
 /// Issue a syscall with 2 arguments.
 #[inline(always)]
 #[must_use]
 pub fn syscall2(nr: u64, arg0: u64, arg1: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        // SAFETY: SYSCALL is the OS-target kernel entry; RCX/R11 are
+        // clobbered by the instruction itself.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") arg0,
+                in("rsi") arg1,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (nr, arg0, arg1);
+        HOST_ENOSYS
+    }
 }
 
 /// Issue a syscall with 3 arguments.
 #[inline(always)]
 #[must_use]
 pub fn syscall3(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            in("rdx") arg2,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        // SAFETY: SYSCALL is the OS-target kernel entry; RCX/R11 are
+        // clobbered by the instruction itself.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") arg0,
+                in("rsi") arg1,
+                in("rdx") arg2,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (nr, arg0, arg1, arg2);
+        HOST_ENOSYS
+    }
 }
 
 /// Issue a syscall with 3 arguments, capturing both return values.
@@ -341,95 +406,133 @@ pub fn syscall3(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
 #[inline(always)]
 #[must_use]
 pub fn syscall3_2ret(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> (i64, i64) {
-    let ret: i64;
-    let ret2: i64;
-    // SAFETY: SYSCALL is the defined kernel entry point.  RCX and R11 are
-    // clobbered by the instruction (saved RIP/RFLAGS); RAX holds `value`
-    // and RDX holds `value2` on return.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            in("rdx") arg2,
-            lateout("rax") ret,
-            lateout("rdx") ret2,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        let ret2: i64;
+        // SAFETY: SYSCALL is the OS-target kernel entry; RCX/R11 are
+        // clobbered by the instruction itself.  RAX holds `value`,
+        // RDX holds `value2` on return.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") arg0,
+                in("rsi") arg1,
+                in("rdx") arg2,
+                lateout("rax") ret,
+                lateout("rdx") ret2,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        (ret, ret2)
     }
-    (ret, ret2)
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (nr, arg0, arg1, arg2);
+        (HOST_ENOSYS, 0)
+    }
 }
 
 /// Issue a syscall with 4 arguments.
 #[inline(always)]
 #[must_use]
 pub fn syscall4(nr: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            in("rdx") arg2,
-            in("r10") arg3,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        // SAFETY: SYSCALL is the OS-target kernel entry; RCX/R11 are
+        // clobbered by the instruction itself.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") arg0,
+                in("rsi") arg1,
+                in("rdx") arg2,
+                in("r10") arg3,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (nr, arg0, arg1, arg2, arg3);
+        HOST_ENOSYS
+    }
 }
 
 /// Issue a syscall with 5 arguments.
 #[inline(always)]
 #[must_use]
 pub fn syscall5(nr: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            in("rdx") arg2,
-            in("r10") arg3,
-            in("r8") arg4,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        // SAFETY: SYSCALL is the OS-target kernel entry; RCX/R11 are
+        // clobbered by the instruction itself.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") arg0,
+                in("rsi") arg1,
+                in("rdx") arg2,
+                in("r10") arg3,
+                in("r8") arg4,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (nr, arg0, arg1, arg2, arg3, arg4);
+        HOST_ENOSYS
+    }
 }
 
 /// Issue a syscall with 6 arguments.
 #[inline(always)]
 #[must_use]
 pub fn syscall6(nr: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") arg0,
-            in("rsi") arg1,
-            in("rdx") arg2,
-            in("r10") arg3,
-            in("r8") arg4,
-            in("r9") arg5,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_os = "none")]
+    {
+        let ret: i64;
+        // SAFETY: SYSCALL is the OS-target kernel entry; RCX/R11 are
+        // clobbered by the instruction itself.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") arg0,
+                in("rsi") arg1,
+                in("rdx") arg2,
+                in("r10") arg3,
+                in("r8") arg4,
+                in("r9") arg5,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (nr, arg0, arg1, arg2, arg3, arg4, arg5);
+        HOST_ENOSYS
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -954,5 +1057,69 @@ mod tests {
         assert!(SYS_MMAP <= 199);
         assert!(SYS_MUNMAP <= 199);
         assert!(SYS_MPROTECT <= 199);
+    }
+
+    // -- Host-build safety gate --
+    //
+    // On host builds (`not(target_os = "none")`), every `syscallN()`
+    // returns -ENOSYS rather than emitting a real SYSCALL instruction.
+    // These tests pin that contract so a future refactor cannot
+    // regress us into executing UB against NT system services on the
+    // Windows test host.
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_enosys_matches_errno_module() {
+        // If `errno::ENOSYS` ever changes, `HOST_ENOSYS` must move with
+        // it.  Pin both ends here.
+        assert_eq!(HOST_ENOSYS, -(crate::errno::ENOSYS as i64));
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall0_returns_enosys() {
+        assert_eq!(syscall0(SYS_EXIT), HOST_ENOSYS);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall1_returns_enosys() {
+        assert_eq!(syscall1(SYS_EXIT, 0), HOST_ENOSYS);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall2_returns_enosys() {
+        assert_eq!(syscall2(SYS_EVENTFD_CREATE, 0, 0), HOST_ENOSYS);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall3_returns_enosys() {
+        assert_eq!(syscall3(SYS_FS_READ, 0, 0, 0), HOST_ENOSYS);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall3_2ret_returns_enosys_and_zero() {
+        assert_eq!(syscall3_2ret(SYS_LOG_READ, 0, 0, 0), (HOST_ENOSYS, 0));
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall4_returns_enosys() {
+        assert_eq!(syscall4(SYS_FS_LINK, 0, 0, 0, 0), HOST_ENOSYS);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall5_returns_enosys() {
+        assert_eq!(syscall5(SYS_MMAP, 0, 0, 0, 0, 0), HOST_ENOSYS);
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn host_syscall6_returns_enosys() {
+        assert_eq!(syscall6(SYS_MMAP, 0, 0, 0, 0, 0, 0), HOST_ENOSYS);
     }
 }

@@ -102,11 +102,7 @@ fn main() {
             }
 
             'i' => {
-                let insert_at = if addr_start >= 1 {
-                    addr_start - 1
-                } else {
-                    0
-                };
+                let insert_at = addr_start.saturating_sub(1);
                 let new_lines = read_input_lines(&stdin);
                 for (j, new_line) in new_lines.iter().enumerate() {
                     buffer.insert(insert_at + j, new_line.clone());
@@ -115,9 +111,9 @@ fn main() {
                 modified = true;
             }
 
-            'c' => {
+            'c'
                 // Change: delete range, then insert
-                if addr_start >= 1 && addr_end <= buffer.len() {
+                if addr_start >= 1 && addr_end <= buffer.len() => {
                     let drain_start = addr_start - 1;
                     let drain_end = addr_end;
                     buffer.drain(drain_start..drain_end);
@@ -127,13 +123,10 @@ fn main() {
                     }
                     current = drain_start + new_lines.len();
                     modified = true;
-                } else {
-                    println!("?");
                 }
-            }
 
-            'd' => {
-                if addr_start >= 1 && addr_end <= buffer.len() {
+            'd'
+                if addr_start >= 1 && addr_end <= buffer.len() => {
                     buffer.drain(addr_start - 1..addr_end);
                     current = if addr_start <= buffer.len() {
                         addr_start
@@ -141,14 +134,11 @@ fn main() {
                         buffer.len()
                     };
                     modified = true;
-                } else {
-                    println!("?");
                 }
-            }
 
-            's' => {
+            's'
                 // s/pattern/replacement/[g]
-                if current >= 1 && current <= buffer.len() {
+                if current >= 1 && current <= buffer.len() => {
                     if let Some((pat, repl, global)) = parse_substitute(&arg) {
                         let line = &buffer[current - 1];
                         let new_line = if global {
@@ -162,10 +152,7 @@ fn main() {
                     } else {
                         println!("?");
                     }
-                } else {
-                    println!("?");
                 }
-            }
 
             'w' => {
                 let path = if arg.is_empty() {
@@ -268,7 +255,7 @@ fn parse_command(input: &str, current: usize, total: usize) -> (usize, usize, ch
         let c = bytes[pos] as char;
         pos += 1;
         c
-    } else if addr1 != current || input.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+    } else if addr1 != current || input.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         '\0' // just a line number
     } else {
         '\0'
@@ -343,6 +330,6 @@ fn parse_substitute(arg: &str) -> Option<(String, String, bool)> {
         return None;
     }
 
-    let global = parts.get(2).map_or(false, |f| f.contains('g'));
+    let global = parts.get(2).is_some_and(|f| f.contains('g'));
     Some((parts[0].clone(), parts[1].clone(), global))
 }

@@ -41,9 +41,8 @@ fn parse_patterns(args: &[String]) -> Vec<Pattern> {
     while i < args.len() {
         let arg = &args[i];
 
-        if arg.starts_with('/') {
+        if let Some(rest) = arg.strip_prefix('/') {
             // /REGEX/ or /REGEX/+N or /REGEX/-N
-            let rest = &arg[1..];
             let (regex_str, offset) = if let Some(end) = rest.rfind('/') {
                 let pat = &rest[..end];
                 let after = &rest[end + 1..];
@@ -66,9 +65,8 @@ fn parse_patterns(args: &[String]) -> Vec<Pattern> {
                 pattern: regex_str,
                 offset,
             });
-        } else if arg.starts_with('%') {
+        } else if let Some(rest) = arg.strip_prefix('%') {
             // %REGEX%
-            let rest = &arg[1..];
             let regex_str = if let Some(end) = rest.rfind('%') {
                 &rest[..end]
             } else {

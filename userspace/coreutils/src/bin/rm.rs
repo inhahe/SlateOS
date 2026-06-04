@@ -63,12 +63,11 @@ fn main() {
             fs::remove_file(path)
         };
 
-        if let Err(e) = result {
-            if !force {
+        if let Err(e) = result
+            && !force {
                 eprintln!("rm: cannot remove '{path_str}': {e}");
                 failed = true;
             }
-        }
     }
 
     if failed {

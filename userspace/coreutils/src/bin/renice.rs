@@ -40,12 +40,11 @@ fn main() {
     let mut i = 0;
 
     // First argument may be an absolute priority (old-style syntax).
-    if !args[0].starts_with('-') || args[0].parse::<i32>().is_ok() {
-        if let Ok(prio) = args[0].parse::<i32>() {
+    if (!args[0].starts_with('-') || args[0].parse::<i32>().is_ok())
+        && let Ok(prio) = args[0].parse::<i32>() {
             absolute = Some(prio);
             i = 1;
         }
-    }
 
     while i < args.len() {
         match args[i].as_str() {

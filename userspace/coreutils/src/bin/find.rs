@@ -70,17 +70,15 @@ fn find_recursive(
     type_filter: Option<char>,
 ) {
     // Check the directory itself at depth 0
-    if depth == 0 {
-        if matches_filters(dir, name_pattern, type_filter) {
+    if depth == 0
+        && matches_filters(dir, name_pattern, type_filter) {
             println!("{}", dir.display());
         }
-    }
 
-    if let Some(max) = max_depth {
-        if depth >= max {
+    if let Some(max) = max_depth
+        && depth >= max {
             return;
         }
-    }
 
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,

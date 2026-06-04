@@ -261,12 +261,11 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
     }
 
     // Handle variable assignment: VAR=value
-    if words.len() == 1 && words[0].contains('=') && !words[0].starts_with('=') {
-        if let Some((key, val)) = words[0].split_once('=') {
+    if words.len() == 1 && words[0].contains('=') && !words[0].starts_with('=')
+        && let Some((key, val)) = words[0].split_once('=') {
             state.vars.insert(key.to_string(), val.to_string());
             return 0;
         }
-    }
 
     // Handle redirections
     let (words, redirects) = parse_redirections(&words);
@@ -803,15 +802,11 @@ fn parse_redirections(words: &[String]) -> (Vec<String>, Vec<(String, String)>) 
 
     while i < words.len() {
         match words[i].as_str() {
-            ">" | ">>" | "<" | "2>" => {
-                if i + 1 < words.len() {
+            ">" | ">>" | "<" | "2>"
+                if i + 1 < words.len() => {
                     redirects.push((words[i].clone(), words[i + 1].clone()));
                     i += 2;
-                } else {
-                    cmd_words.push(words[i].clone());
-                    i += 1;
                 }
-            }
             w if w.starts_with('>') => {
                 redirects.push((">".to_string(), w[1..].to_string()));
                 i += 1;

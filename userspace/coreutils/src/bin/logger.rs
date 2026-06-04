@@ -64,7 +64,7 @@ fn parse_priority(s: &str) -> Option<u32> {
     } else {
         // Could be severity alone (assume user facility).
         let sev = severity_code(s)?;
-        Some(1 * 8 + sev)
+        Some(8 + sev)
     }
 }
 
@@ -126,7 +126,7 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 fn main() {

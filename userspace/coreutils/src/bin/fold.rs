@@ -73,11 +73,10 @@ fn main() {
 
                 if break_spaces {
                     // Find last space within width
-                    if let Some(last_space) = remaining[..width].rfind(' ') {
-                        if last_space > 0 {
+                    if let Some(last_space) = remaining[..width].rfind(' ')
+                        && last_space > 0 {
                             break_at = last_space + 1; // include the space
                         }
-                    }
                 }
 
                 let _ = writeln!(out, "{}", &remaining[..break_at]);

@@ -69,7 +69,7 @@ fn list_dir(out: &mut impl Write, path: &str, opts: &Options) {
         Err(e) => {
             // Maybe it's a file, not a directory
             if Path::new(path).is_file() {
-                show_entry(out, path, &Path::new(path).to_path_buf(), opts);
+                show_entry(out, path, Path::new(path), opts);
                 return;
             }
             eprintln!("ls: cannot access '{path}': {e}");
@@ -85,7 +85,7 @@ fn list_dir(out: &mut impl Write, path: &str, opts: &Options) {
         }
         names.push((name, entry.path()));
     }
-    names.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    names.sort_by_key(|a| a.0.to_lowercase());
 
     if opts.long {
         for (name, path) in &names {

@@ -2465,6 +2465,22 @@ Remaining net improvements (diminishing returns):
   via the existing TruncatedData error path — the warnings are about
   bounds-safety not currently visible to clippy, not real bugs.
 
+- (NOTED 2026-06-03) userspace/coreutils has zero unit tests across ALL
+  binaries (cargo test -p coreutils runs ~50 binaries, every one reports
+  "0 passed; 0 failed"). The package contains no #[test] or #[cfg(test)]
+  blocks anywhere under src/. This is a much bigger gap than the
+  individual stub crates. Filling it in is a large project — most
+  bins need at least argument-parsing and core-behavior smoke tests
+  to meet the CLAUDE.md "every binary gets tests" rule.
+
+- (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to
+  link on the host target (x86_64-pc-windows-gnu) with "undefined
+  reference to `geteuid'". Uses a libc symbol unavailable in the
+  mingw-w64 toolchain. Fix: wire the host-target stub to GetUserName
+  (Win32) or feature-gate on cfg(target_os = "linux"/ouros) so the
+  POSIX path only compiles on those targets. Discovered while
+  surveying clippy warnings.
+
 - (NOTED 2026-06-03) userspace/lsusb, userspace/strace, userspace/lsblk,
   userspace/mkfs, userspace/fsck have no unit tests at all (`cargo test`
   reports "0 passed; 0 failed"). All are personality-CLI stubs and the

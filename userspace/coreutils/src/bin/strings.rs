@@ -78,5 +78,5 @@ fn main() {
 
 fn is_printable(b: u8) -> bool {
     // Printable ASCII (space through tilde) plus tab
-    (b >= 0x20 && b <= 0x7e) || b == b'\t'
+    (0x20..=0x7e).contains(&b) || b == b'\t'
 }

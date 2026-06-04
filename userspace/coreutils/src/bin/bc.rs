@@ -222,7 +222,7 @@ fn digits_to_limbs(digits: &str) -> Vec<u64> {
     // Process from right to left in chunks of LIMB_DIGITS.
     let mut end = len;
     while end > 0 {
-        let start = if end >= LIMB_DIGITS { end - LIMB_DIGITS } else { 0 };
+        let start = end.saturating_sub(LIMB_DIGITS);
         let chunk = &digits[start..end];
         let val: u64 = chunk.parse().unwrap_or(0);
         limbs.push(val);
@@ -729,11 +729,7 @@ fn bd_div(a: &BigDecimal, b: &BigDecimal, scale: usize) -> Option<BigDecimal> {
     // then the result has `scale` decimal places.
 
     let extra = scale + b.scale;
-    let total_scale = if extra >= a.scale {
-        extra - a.scale
-    } else {
-        0
-    };
+    let total_scale = extra.saturating_sub(a.scale);
 
     let mut a_limbs = a.limbs.clone();
     multiply_by_pow10(&mut a_limbs, total_scale);
@@ -2044,10 +2040,7 @@ fn run_input(interp: &mut Interpreter, input: &str) -> bool {
     let stmts = parser.parse_program();
 
     for stmt in &stmts {
-        match interp.run_stmt(stmt) {
-            ControlFlow::Quit => return true,
-            _ => {}
-        }
+        if let ControlFlow::Quit = interp.run_stmt(stmt) { return true }
     }
     false
 }

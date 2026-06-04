@@ -153,7 +153,7 @@ const BASE64_CHARS: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn base64_encode(input: &[u8]) -> String {
-    let mut output = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < input.len() {
         let b0 = input[i] as u32;
@@ -294,7 +294,7 @@ fn build_request(
         // Only set Content-Type if user hasn't provided one.
         let has_content_type = headers
             .iter()
-            .any(|(k, _)| k.to_ascii_lowercase() == "content-type");
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
         if !has_content_type {
             let _ = writeln!(req, "Content-Type: application/x-www-form-urlencoded\r");
         }

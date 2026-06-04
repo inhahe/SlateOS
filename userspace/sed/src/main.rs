@@ -250,6 +250,9 @@ impl Regex {
 
     /// Try to match at a specific position, starting from a given node index.
     /// Returns the end position if successful.
+    // Vec is required: backtracking saves/restores `groups` via .clone(),
+    // which only works on Vec, not slices.
+    #[allow(clippy::ptr_arg)]
     fn match_at(
         &self,
         text: &[u8],
@@ -296,7 +299,7 @@ impl Regex {
                     let in_class = if self.ignore_case {
                         bytes
                             .iter()
-                            .any(|&b| b.to_ascii_lowercase() == ch.to_ascii_lowercase())
+                            .any(|&b| b.eq_ignore_ascii_case(&ch))
                     } else {
                         bytes.contains(&ch)
                     };
@@ -365,11 +368,10 @@ impl Regex {
             ReNode::Question(inner) => {
                 // Try matching once first (greedy), then zero times.
                 let mut dummy = groups.clone();
-                if let Some(end1) = self.match_single(inner, text, pos, &mut dummy) {
-                    if let Some(end) = self.match_at(text, end1, node_idx + 1, groups) {
+                if let Some(end1) = self.match_single(inner, text, pos, &mut dummy)
+                    && let Some(end) = self.match_at(text, end1, node_idx + 1, groups) {
                         return Some(end);
                     }
-                }
                 self.match_at(text, pos, node_idx + 1, groups)
             }
             ReNode::GroupStart(n) => {
@@ -407,6 +409,8 @@ impl Regex {
     }
 
     /// Try to match a single node at the given position.
+    // See match_at: Vec is required for backtracking via .clone().
+    #[allow(clippy::ptr_arg)]
     fn match_single(
         &self,
         node: &ReNode,
@@ -435,7 +439,7 @@ impl Regex {
                     let in_class = if self.ignore_case {
                         bytes
                             .iter()
-                            .any(|&b| b.to_ascii_lowercase() == ch.to_ascii_lowercase())
+                            .any(|&b| b.eq_ignore_ascii_case(&ch))
                     } else {
                         bytes.contains(&ch)
                     };
@@ -458,11 +462,10 @@ impl Regex {
             }
             ReNode::GroupEnd(n) => {
                 let n = *n;
-                if n < groups.len() {
-                    if let Some((start, _)) = groups[n] {
+                if n < groups.len()
+                    && let Some((start, _)) = groups[n] {
                         groups[n] = Some((start, pos));
                     }
-                }
                 Some(pos)
             }
             _ => None,
@@ -472,7 +475,7 @@ impl Regex {
     /// Compare two bytes, respecting case-insensitivity.
     fn char_eq(&self, a: u8, b: u8) -> bool {
         if self.ignore_case {
-            a.to_ascii_lowercase() == b.to_ascii_lowercase()
+            a.eq_ignore_ascii_case(&b)
         } else {
             a == b
         }
@@ -512,6 +515,7 @@ enum AddressRange {
 
 /// Substitution flags.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 struct SubFlags {
     /// Replace all occurrences.
     global: bool,
@@ -523,16 +527,6 @@ struct SubFlags {
     nth: usize,
 }
 
-impl Default for SubFlags {
-    fn default() -> Self {
-        Self {
-            global: false,
-            print: false,
-            ignore_case: false,
-            nth: 0,
-        }
-    }
-}
 
 /// A sed editing command.
 #[derive(Debug, Clone)]
@@ -1030,11 +1024,10 @@ impl SedEngine {
                 }
                 Command::Transliterate { src, dst } => {
                     for byte in pattern_space.iter_mut() {
-                        if let Some(idx) = src.iter().position(|&s| s == *byte) {
-                            if let Some(&replacement) = dst.get(idx) {
+                        if let Some(idx) = src.iter().position(|&s| s == *byte)
+                            && let Some(&replacement) = dst.get(idx) {
                                 *byte = replacement;
                             }
-                        }
                     }
                 }
                 Command::LineNumber => {
@@ -1074,15 +1067,14 @@ impl SedEngine {
                 let active = self
                     .range_active
                     .get(idx)
-                    .map_or(false, |c| c.get());
+                    .is_some_and(|c| c.get());
 
                 if active {
                     // We're inside the range. Check if end matches.
-                    if self.matches_single_address(end, pattern_space, is_last) {
-                        if let Some(cell) = self.range_active.get(idx) {
+                    if self.matches_single_address(end, pattern_space, is_last)
+                        && let Some(cell) = self.range_active.get(idx) {
                             cell.set(false);
                         }
-                    }
                     true
                 } else if self.matches_single_address(start, pattern_space, is_last) {
                     if let Some(cell) = self.range_active.get(idx) {
@@ -1245,14 +1237,12 @@ fn build_replacement(template: &[u8], text: &[u8], mat: &MatchResult) -> Vec<u8>
             let next = template[i + 1];
             if next.is_ascii_digit() && next != b'0' {
                 let group_num = (next - b'0') as usize;
-                if group_num < mat.groups.len() {
-                    if let Some((gs, ge)) = mat.groups[group_num] {
-                        if gs < text.len() {
+                if group_num < mat.groups.len()
+                    && let Some((gs, ge)) = mat.groups[group_num]
+                        && gs < text.len() {
                             let end = ge.min(text.len());
                             result.extend_from_slice(&text[gs..end]);
                         }
-                    }
-                }
                 i += 2;
             } else if next == b'n' {
                 result.push(b'\n');

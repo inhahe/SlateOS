@@ -5,6 +5,11 @@
 //! patterns, field splitting, associative arrays, and the standard built-in
 //! functions required for everyday text processing.
 
+// Stmt::ExprStmt/PrintStmt/PrintfStmt intentionally repeat the "Stmt" suffix
+// to disambiguate from the corresponding Expr variants (a Print can appear
+// as both a statement and inside expressions for piping).
+#![allow(clippy::enum_variant_names)]
+
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -244,11 +249,10 @@ impl Regex {
                 None
             }
             ReNode::Question(inner) => {
-                if let Some(end1) = self.match_single(inner, text, pos) {
-                    if let Some(end) = self.match_at(text, end1, ni + 1) {
+                if let Some(end1) = self.match_single(inner, text, pos)
+                    && let Some(end) = self.match_at(text, end1, ni + 1) {
                         return Some(end);
                     }
-                }
                 self.match_at(text, pos, ni + 1)
             }
         }
@@ -305,18 +309,20 @@ fn regex_find_all(re: &Regex, text: &[u8]) -> Vec<(usize, usize)> {
             }
             continue;
         }
-        let mut found = false;
+        // Find next match position, then update `start` for the outer loop
+        // after the search range has been captured. Avoids the clippy
+        // mut_range_bound trap (mutating the bound inside the inner loop
+        // would be ignored anyway since the range is evaluated once).
+        let mut hit: Option<(usize, usize)> = None;
         for try_start in start..=text.len() {
             if let Some(end) = re.match_at(text, try_start, 0) {
-                results.push((try_start, end));
-                start = if end > try_start { end } else { try_start + 1 };
-                found = true;
+                hit = Some((try_start, end));
                 break;
             }
         }
-        if !found {
-            break;
-        }
+        let Some((try_start, end)) = hit else { break };
+        results.push((try_start, end));
+        start = if end > try_start { end } else { try_start + 1 };
     }
     results
 }
@@ -1859,12 +1865,8 @@ impl Interpreter {
 
         // Run BEGIN rules.
         for rule in &program.rules {
-            if matches!(rule.pattern, Pattern::Begin) {
-                match self.exec_stmts(&rule.action, out)? {
-                    ControlFlow::Exit(code) => return Ok(code),
-                    _ => {}
-                }
-            }
+            if matches!(rule.pattern, Pattern::Begin)
+                && let ControlFlow::Exit(code) = self.exec_stmts(&rule.action, out)? { return Ok(code) }
         }
 
         // Process input.
@@ -1878,22 +1880,16 @@ impl Interpreter {
                 self.globals
                     .insert("FILENAME".into(), Value::Str(path.clone()));
                 if path == "-" {
-                    match self.process_reader(io::stdin().lock(), "-", program, out)? {
-                        Some(c) => {
-                            code = Some(c);
-                            break;
-                        }
-                        None => {}
+                    if let Some(c) = self.process_reader(io::stdin().lock(), "-", program, out)? {
+                        code = Some(c);
+                        break;
                     }
                 } else {
                     let file = fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
                     let reader = io::BufReader::new(file);
-                    match self.process_reader(reader, path, program, out)? {
-                        Some(c) => {
-                            code = Some(c);
-                            break;
-                        }
-                        None => {}
+                    if let Some(c) = self.process_reader(reader, path, program, out)? {
+                        code = Some(c);
+                        break;
                     }
                 }
             }
@@ -1908,12 +1904,8 @@ impl Interpreter {
 
         // Run END rules.
         for rule in &program.rules {
-            if matches!(rule.pattern, Pattern::End) {
-                match self.exec_stmts(&rule.action, out)? {
-                    ControlFlow::Exit(code) => return Ok(code),
-                    _ => {}
-                }
-            }
+            if matches!(rule.pattern, Pattern::End)
+                && let ControlFlow::Exit(code) = self.exec_stmts(&rule.action, out)? { return Ok(code) }
         }
 
         Ok(exit_code)
@@ -2312,7 +2304,7 @@ impl Interpreter {
                 let exists = self
                     .arrays
                     .get(arr)
-                    .map_or(false, |m| m.contains_key(&key));
+                    .is_some_and(|m| m.contains_key(&key));
                 Ok(Value::Num(if exists { 1.0 } else { 0.0 }))
             }
             Expr::Call(name, args) => self.call_function(name, args, out),
@@ -2473,8 +2465,8 @@ impl Interpreter {
                 let start_idx = if start < 1 { 0 } else { (start - 1) as usize };
                 let chars: Vec<char> = s.chars().collect();
                 let len = if args.len() > 2 {
-                    let l = self.eval_expr(&args[2], out)?.to_num() as usize;
-                    l
+                    
+                    self.eval_expr(&args[2], out)?.to_num() as usize
                 } else {
                     chars.len().saturating_sub(start_idx)
                 };
@@ -2873,7 +2865,7 @@ impl Interpreter {
                         ' '
                     };
                     let padding: String =
-                        std::iter::repeat(pad_char).take(w - formatted.len()).collect();
+                        std::iter::repeat_n(pad_char, w - formatted.len()).collect();
                     if left_align {
                         result.push_str(&formatted);
                         result.push_str(&padding);
@@ -2932,7 +2924,7 @@ fn format_g(n: f64, prec: usize, upper: bool) -> String {
         let s = format!("{n:.decimal_places$}");
         strip_trailing_zeros(&s)
     } else {
-        let sci_prec = if p > 1 { p - 1 } else { 0 };
+        let sci_prec = p.saturating_sub(1);
         let s = format_scientific(n, sci_prec, upper);
         // Strip trailing zeros in mantissa.
         if let Some(e_pos) = s.find(if upper { 'E' } else { 'e' }) {

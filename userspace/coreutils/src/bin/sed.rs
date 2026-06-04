@@ -211,7 +211,7 @@ fn parse_script(script: &str) -> Vec<SedCommand> {
     let mut commands = Vec::new();
 
     // Split on semicolons or newlines for multiple commands
-    for part in script.split(|c| c == ';' || c == '\n') {
+    for part in script.split([';', '\n']) {
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -303,7 +303,7 @@ fn parse_action(s: &str) -> Option<Action> {
             if parts.len() < 2 {
                 return None;
             }
-            let global = parts.get(2).map_or(false, |flags| flags.contains('g'));
+            let global = parts.get(2).is_some_and(|flags| flags.contains('g'));
             Some(Action::Substitute {
                 pattern: parts[0].to_string(),
                 replacement: parts[1].to_string(),

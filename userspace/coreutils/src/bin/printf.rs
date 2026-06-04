@@ -110,7 +110,7 @@ fn main() {
                     let mut count = 0;
                     while fi < fmt_bytes.len() && count < 3 {
                         let d = fmt_bytes[fi];
-                        if d >= b'0' && d <= b'7' {
+                        if (b'0'..=b'7').contains(&d) {
                             val = val * 8 + (d - b'0');
                             fi += 1;
                             count += 1;

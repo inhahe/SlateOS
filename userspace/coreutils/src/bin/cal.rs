@@ -58,7 +58,7 @@ fn print_month(month: u32, year: u32) {
         "December",
     ];
 
-    let name = if month >= 1 && month <= 12 {
+    let name = if (1..=12).contains(&month) {
         month_names[(month - 1) as usize]
     } else {
         "Unknown"
@@ -79,12 +79,12 @@ fn print_month(month: u32, year: u32) {
 
     for day in 1..=days {
         print!("{day:>2} ");
-        if (start_dow + day) % 7 == 0 {
+        if (start_dow + day).is_multiple_of(7) {
             println!();
         }
     }
 
-    if (start_dow + days) % 7 != 0 {
+    if !(start_dow + days).is_multiple_of(7) {
         println!();
     }
 }
@@ -105,7 +105,7 @@ fn days_in_month(month: u32, year: u32) -> u32 {
 }
 
 fn is_leap(y: u32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Zeller's congruence — returns day of week (0=Sunday).

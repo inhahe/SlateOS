@@ -51,8 +51,8 @@ fn main() {
 
     let _ = writeln!(
         out,
-        "{:<20} {:>10} {:>10} {:>10} {:>5} {}",
-        "Filesystem", "Size", "Used", "Avail", "Use%", "Mounted on"
+        "{:<20} {:>10} {:>10} {:>10} {:>5} Mounted on",
+        "Filesystem", "Size", "Used", "Avail", "Use%"
     );
 
     let mut exit_code = 0;

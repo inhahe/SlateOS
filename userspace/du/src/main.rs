@@ -425,7 +425,7 @@ fn glob_match_inner(pat: &[u8], name: &[u8]) -> bool {
                 }
             }
         } else if pi < pat.len()
-            && pat[pi].to_ascii_lowercase() == name[ni].to_ascii_lowercase()
+            && pat[pi].eq_ignore_ascii_case(&name[ni])
             && pat[pi] != b'*'
             && pat[pi] != b'?'
         {
@@ -751,13 +751,11 @@ fn walk(
     let dev = meta_ext::device(&meta);
 
     // Check one-file-system: skip if device differs from root.
-    if cfg.one_file_system {
-        if let Some(rd) = root_device {
-            if dev != rd {
+    if cfg.one_file_system
+        && let Some(rd) = root_device
+            && dev != rd {
                 return (0, 0);
             }
-        }
-    }
 
     // Determine the effective root device (set on first call).
     let effective_root_device = root_device.or(Some(dev));
@@ -842,7 +840,7 @@ fn walk(
 
         // In summarize mode we only show the top-level total.
         if !cfg.summarize {
-            let within_depth = cfg.max_depth.is_none_or(|md| depth + 1 <= md);
+            let within_depth = cfg.max_depth.is_none_or(|md| depth < md);
 
             if within_depth && (cfg.all_files || child_is_dir) && child_size > 0 {
                 child_entries.push(DuEntry {

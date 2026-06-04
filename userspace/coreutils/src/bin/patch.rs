@@ -503,11 +503,10 @@ fn main() {
             }
 
             // Create parent directories if needed (for new files).
-            if let Some(parent) = Path::new(&file_path).parent() {
-                if !parent.as_os_str().is_empty() {
+            if let Some(parent) = Path::new(&file_path).parent()
+                && !parent.as_os_str().is_empty() {
                     let _ = fs::create_dir_all(parent);
                 }
-            }
 
             // Write the patched file.
             let mut output = lines.join("\n");

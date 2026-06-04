@@ -34,11 +34,11 @@ fn main() {
     if full_format {
         let _ = writeln!(
             out,
-            "{:>5} {:>5} {:>5}  {:<6} {:<8} {}",
-            "UID", "PID", "PPID", "STAT", "TIME", "CMD"
+            "{:>5} {:>5} {:>5}  {:<6} {:<8} CMD",
+            "UID", "PID", "PPID", "STAT", "TIME"
         );
     } else {
-        let _ = writeln!(out, "{:>5} {:<8} {}", "PID", "TTY", "CMD");
+        let _ = writeln!(out, "{:>5} {:<8} CMD", "PID", "TTY");
     }
 
     let proc_dir = match fs::read_dir("/proc") {

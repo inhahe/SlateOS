@@ -17,15 +17,14 @@ use std::time::SystemTime;
 /// or fall back to "console".
 fn current_tty() -> String {
     // Try reading the symlink target of stdin.
-    if let Ok(target) = fs::read_link("/proc/self/fd/0") {
-        if let Some(s) = target.to_str() {
+    if let Ok(target) = fs::read_link("/proc/self/fd/0")
+        && let Some(s) = target.to_str() {
             // Strip leading /dev/ if present.
             if let Some(stripped) = s.strip_prefix("/dev/") {
                 return stripped.to_string();
             }
             return s.to_string();
         }
-    }
 
     // Try the TTY environment variable.
     if let Ok(tty) = env::var("TTY") {
@@ -87,7 +86,7 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Parse binary utmp records. Each record is 384 bytes on Linux.

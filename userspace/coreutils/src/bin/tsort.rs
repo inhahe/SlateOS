@@ -51,7 +51,7 @@ fn main() {
         }
     }
 
-    if tokens.len() % 2 != 0 {
+    if !tokens.len().is_multiple_of(2) {
         eprintln!("tsort: odd number of tokens");
         process::exit(1);
     }

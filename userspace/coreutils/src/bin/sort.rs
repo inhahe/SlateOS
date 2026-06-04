@@ -86,13 +86,11 @@ fn main() {
 
     let mut prev: Option<&str> = None;
     for line in &lines {
-        if unique {
-            if let Some(p) = prev {
-                if p == line {
+        if unique
+            && let Some(p) = prev
+                && p == line {
                     continue;
                 }
-            }
-        }
         let _ = writeln!(out, "{line}");
         prev = Some(line);
     }

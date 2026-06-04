@@ -30,7 +30,7 @@ struct Options {
     empty: String,
 }
 
-fn split_fields<'a>(line: &'a str, sep: Option<char>) -> Vec<&'a str> {
+fn split_fields(line: &str, sep: Option<char>) -> Vec<&str> {
     match sep {
         Some(c) => line.split(c).collect(),
         None => line.split_whitespace().collect(),
@@ -122,7 +122,7 @@ fn parse_output_spec(s: &str) -> Option<Vec<(usize, usize)>> {
         if let Some((file_str, field_str)) = part.split_once('.') {
             let file_num: usize = file_str.parse().ok()?;
             let field_num: usize = field_str.parse().ok()?;
-            if file_num < 1 || file_num > 2 || field_num < 1 {
+            if !(1..=2).contains(&file_num) || field_num < 1 {
                 return None;
             }
             result.push((file_num, field_num - 1)); // convert to 0-indexed

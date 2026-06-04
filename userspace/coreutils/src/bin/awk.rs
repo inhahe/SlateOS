@@ -237,8 +237,8 @@ fn eval_condition(cond: &str, fields: &[&str], line: &str, nr: usize) -> bool {
         let right_val = resolve_value(right.trim(), fields, line, nr);
         return left_val != right_val;
     }
-    if let Some((left, right)) = cond.split_once('>') {
-        if !right.starts_with('=') {
+    if let Some((left, right)) = cond.split_once('>')
+        && !right.starts_with('=') {
             let l: f64 = resolve_value(left.trim(), fields, line, nr)
                 .parse()
                 .unwrap_or(0.0);
@@ -247,9 +247,8 @@ fn eval_condition(cond: &str, fields: &[&str], line: &str, nr: usize) -> bool {
                 .unwrap_or(0.0);
             return l > r;
         }
-    }
-    if let Some((left, right)) = cond.split_once('<') {
-        if !right.starts_with('=') {
+    if let Some((left, right)) = cond.split_once('<')
+        && !right.starts_with('=') {
             let l: f64 = resolve_value(left.trim(), fields, line, nr)
                 .parse()
                 .unwrap_or(0.0);
@@ -258,13 +257,12 @@ fn eval_condition(cond: &str, fields: &[&str], line: &str, nr: usize) -> bool {
                 .unwrap_or(0.0);
             return l < r;
         }
-    }
 
     // NR > N, NF > N etc.
     true
 }
 
-fn resolve_value<'a>(expr: &'a str, fields: &[&str], line: &str, nr: usize) -> String {
+fn resolve_value(expr: &str, fields: &[&str], line: &str, nr: usize) -> String {
     let expr = expr.trim().trim_matches('"');
 
     if expr.starts_with('$') {
@@ -303,8 +301,7 @@ fn execute_action(
 
         if stmt == "print" || stmt == "print $0" {
             let _ = writeln!(out, "{line}");
-        } else if stmt.starts_with("print ") {
-            let args_str = &stmt[6..];
+        } else if let Some(args_str) = stmt.strip_prefix("print ") {
             let mut output = String::new();
 
             // Parse print arguments separated by commas
@@ -371,8 +368,8 @@ fn eval_expr(expr: &str, fields: &[&str], line: &str, nr: usize, nf: usize) -> S
 
     // Arithmetic: check for +, -, *, /
     for op in &['+', '-', '*', '/'] {
-        if let Some((left, right)) = expr.split_once(*op) {
-            if !left.is_empty() {
+        if let Some((left, right)) = expr.split_once(*op)
+            && !left.is_empty() {
                 let l: f64 = eval_expr(left, fields, line, nr, nf)
                     .parse()
                     .unwrap_or(0.0);
@@ -383,13 +380,10 @@ fn eval_expr(expr: &str, fields: &[&str], line: &str, nr: usize, nf: usize) -> S
                     '+' => l + r,
                     '-' => l - r,
                     '*' => l * r,
-                    '/' => {
-                        if r != 0.0 {
+                    '/'
+                        if r != 0.0 => {
                             l / r
-                        } else {
-                            0.0
                         }
-                    }
                     _ => 0.0,
                 };
                 // Print as integer if no fractional part
@@ -398,7 +392,6 @@ fn eval_expr(expr: &str, fields: &[&str], line: &str, nr: usize, nf: usize) -> S
                 }
                 return format!("{result}");
             }
-        }
     }
 
     // Literal number or string

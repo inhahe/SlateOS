@@ -79,11 +79,10 @@ fn main() {
         // Try seek first, fall back to reading
         if let Some(f) = input_file.as_ref() {
             // Re-open is simpler than downcasting
-            if let Ok(mut fh) = File::open(f) {
-                if fh.seek(SeekFrom::Start(skip_bytes as u64)).is_ok() {
+            if let Ok(mut fh) = File::open(f)
+                && fh.seek(SeekFrom::Start(skip_bytes as u64)).is_ok() {
                     reader = Box::new(fh);
                 }
-            }
         } else {
             // stdin: just read and discard
             let mut discard = vec![0u8; bs];
@@ -98,13 +97,11 @@ fn main() {
     // Seek output blocks
     if seek > 0 {
         let seek_bytes = seek * bs;
-        if let Some(f) = output_file.as_ref() {
-            if let Ok(mut fh) = OpenOptions::new().write(true).create(true).open(f) {
-                if fh.seek(SeekFrom::Start(seek_bytes as u64)).is_ok() {
+        if let Some(f) = output_file.as_ref()
+            && let Ok(mut fh) = OpenOptions::new().write(true).create(true).open(f)
+                && fh.seek(SeekFrom::Start(seek_bytes as u64)).is_ok() {
                     writer = Box::new(fh);
                 }
-            }
-        }
     }
 
     let start = Instant::now();
@@ -116,11 +113,10 @@ fn main() {
     let mut total_bytes: u64 = 0;
 
     loop {
-        if let Some(c) = count {
-            if blocks_in + partial_in >= c {
+        if let Some(c) = count
+            && blocks_in + partial_in >= c {
                 break;
             }
-        }
 
         let n = match reader.read(&mut buf) {
             Ok(0) => break,

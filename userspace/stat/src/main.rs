@@ -370,7 +370,7 @@ fn format_timestamp(secs: u64, nsec: u64) -> String {
 }
 
 fn is_leap_year(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 // ============================================================================
@@ -1073,10 +1073,10 @@ fn parse_touch_stamp(s: &str) -> Result<i64, String> {
         .parse()
         .map_err(|_| "invalid minute".to_string())?;
 
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err(format!("month out of range: {month}"));
     }
-    if day < 1 || day > 31 {
+    if !(1..=31).contains(&day) {
         return Err(format!("day out of range: {day}"));
     }
     if hour > 23 {
@@ -1135,10 +1135,10 @@ fn parse_date_string(s: &str) -> Result<i64, String> {
         (0, 0, 0)
     };
 
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err(format!("month out of range: {month}"));
     }
-    if day < 1 || day > 31 {
+    if !(1..=31).contains(&day) {
         return Err(format!("day out of range: {day}"));
     }
     if hour > 23 {
@@ -1175,10 +1175,9 @@ fn date_to_epoch(year: u32, month: u32, day: u32, hour: u32, min: u32, sec: u32)
         if leap { 29 } else { 28 },
         31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
     ];
-    for m in 0..(month.saturating_sub(1) as usize) {
-        if m < 12 {
-            days += month_days[m];
-        }
+    let months_elapsed = (month.saturating_sub(1) as usize).min(12);
+    for d in month_days.iter().take(months_elapsed) {
+        days += *d;
     }
     days += (day as i64) - 1;
 
@@ -1241,7 +1240,7 @@ fn run_touch(opts: &TouchOpts) -> bool {
         }
 
         // Build timespec pair [atime, mtime].
-        let now_ts = explicit_time.unwrap_or_else(|| {
+        let now_ts = explicit_time.unwrap_or({
             Timespec { tv_sec: 0, tv_nsec: UTIME_NOW }
         });
 

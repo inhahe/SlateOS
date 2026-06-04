@@ -100,10 +100,9 @@ fn read_key() -> Key {
 
 fn get_terminal_lines() -> usize {
     // Try reading from LINES env var or default to 24
-    if let Ok(val) = std::env::var("LINES") {
-        if let Ok(n) = val.parse::<usize>() {
+    if let Ok(val) = std::env::var("LINES")
+        && let Ok(n) = val.parse::<usize>() {
             return n;
         }
-    }
     24
 }

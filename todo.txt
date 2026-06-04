@@ -3023,11 +3023,76 @@ Remaining net improvements (diminishing returns):
       empty pattern matches only empty, multiple stars, unicode).
   All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  RUNNING TOTAL: 1051 tests across 68 binaries (whoami + batches 1-12).
-  ~17 binaries still pending.
+  PROGRESS 2026-06-04 (batch 13): added 95 unit tests across 5 more
+  binaries (ls, ps, test, touch, realpath).
+    * ls.rs: extracted `parse_args(args) -> LsArgs { opts, paths,
+      unknown: Vec<char> }` (clustered short flags, unknown chars
+      collected for caller to warn).  Pulled `is_hidden(name, all)`,
+      `sort_key(name)`, and `join_simple_row(names)` out as pure
+      helpers.  Kept `human_size`.  21 tests covering parse_args
+      (empty, single path, short flag, clustered -lah1, unknown -Z
+      recorded, `--color` passed through as path, flags+paths mixed),
+      is_hidden (dotfile vs `-a`, normal file always visible),
+      sort_key (lowercase, ordering preserves bananas/Apple), join
+      (empty, single, multi), human_size (under-KiB, KiB, MiB, GiB,
+      boundary just under KiB and MiB).
+    * ps.rs: extracted `parse_args(args) -> PsArgs { all_procs,
+      full_format }` (-e, -A alias, -f, clustered -ef, unknown
+      silently ignored, bare args ignored).  Hardened
+      `parse_proc_stat` so it never panics: uses Option matching on
+      `find('(')` / `rfind(')')` (the previous `.find().unwrap_or(0)`
+      pattern returned garbage for input with no parens like
+      `garbage` -> `arbage`).  Extracted `format_tty(tty_nr)` (zero
+      ->`?`, else `pts/<minor & 0xff>`) and
+      `format_cpu_time(utime, stime)` (HH:MM:SS at 100 Hz with
+      saturating_add for overflow safety).  23 tests covering
+      parse_args (7), format_tty (2 -- zero is question mark,
+      non-zero masked to byte), format_cpu_time (7 -- zero, one
+      second, one minute, one hour, user+system combined, overflow
+      saturates), parse_proc_stat (7 -- minimal, with cpu time,
+      comm-with-spaces, comm-with-parens uses last paren, missing
+      parens, empty string, truncated returns defaults).  Real bug
+      fix: `parse_missing_parens` would have returned garbage.
+    * test.rs: lifted `evaluate` and `int_cmp` out of `cfg(unix)` so
+      they are exercised on every host.  Made permission tests
+      (`-r`/`-w`/`-x`) go through `check_mode(path, mask)` which is
+      Unix mode-bit checking on Unix and `false` on Windows
+      (Windows ACLs are not POSIX bits).  All string, integer,
+      negation, and `-a`/`-o` operators are platform-independent.
+      27 tests covering empty/single args, string `=`/`==`/`!=`,
+      `-n`/`-z`, integer `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge` (with
+      negatives and non-numeric -> 0), negation (single, double,
+      with compare), logical AND/OR (precedence: `-o` lower than
+      `-a`), file tests against nonexistent paths, unknown ops are
+      false, `check_mode` on missing path is false.
+    * touch.rs: extracted `parse_args(args) -> Result<Vec<String>>`
+      (only error: missing operand) and `touch_one(path) ->
+      io::Result<()>` (create-or-update-mtime).  Switched
+      `OpenOptions` from `.append(true)` to `.write(true).truncate
+      (false)` so that `set_len(len)` works on Windows -- append-
+      only handles cannot be resized there.  Existing content is
+      still preserved because `truncate(false)` is the default.
+      7 tests covering parse_args (empty errors, single, multiple,
+      dash-args passed through as paths), touch_one (creates
+      missing file, does not truncate existing content, errors on
+      nonexistent directory).
+    * realpath.rs: extracted `parse_args(args) -> Result<Vec<String>>`
+      and `resolve_all(paths, out, err) -> i32` which canonicalises
+      each path through `fs::canonicalize`, writes successes to
+      `out` and errors to `err`, returns exit code (0 if all OK, 1
+      if any failed).  Split lets tests verify success/error
+      fan-out via in-memory Vec<u8> writers.  10 tests covering
+      parse_args (empty errors, single, multiple, dash-args passed
+      through), resolve_all (existing file succeeds, missing fails
+      with stderr message, mixed exits 1 but still prints good
+      paths, empty input is success).
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  REMAINING: awk, bc, ed, false, fetch, ls, nohup, patch, ps, pwd,
-  realpath, sed, sh, tar, test, touch, true.
+  RUNNING TOTAL: 1146 tests across 73 binaries (whoami + batches 1-13).
+  ~12 binaries still pending.
+
+  REMAINING: awk, bc, ed, false, fetch, nohup, patch, pwd, sed, sh,
+  tar, true.
   Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to

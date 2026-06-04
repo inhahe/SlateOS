@@ -6685,4 +6685,66 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      requires path-based access control hooks throughout the
 ##      VFS; it is a strong defense-in-depth feature for desktop
 ##      sandboxing but depends on the VFS landing first.
+##  51. SECCOMP / PTRACE / CLONE3 / MEMBARRIER / RSEQ /
+##      SYNC_FILE_RANGE / PROCESS_MADVISE / CACHESTAT / MSEAL /
+##      MAP_SHADOW_STACK — 10 syscalls DONE as input-validated
+##      principled-errno stubs.
+##         - seccomp: validate op ∈ 0..=3 (SET_MODE_STRICT,
+##           SET_MODE_FILTER, GET_ACTION_AVAIL, GET_NOTIF_SIZES)
+##           and flag/args requirements per op, then ENOSYS so
+##           programs run without a BPF filter.
+##         - ptrace: cap req at 0x10_000, ESRCH for negative
+##           pid, otherwise EPERM (the answer for an
+##           untraceable target on Linux).  gdb / strace / perf
+##           handle this gracefully.
+##         - clone3: validate args ptr + size ∈ [88, 1 MiB]
+##           (struct clone_args is 88 bytes minimum), then
+##           ENOSYS so glibc falls back to clone (implemented).
+##         - membarrier: cmd 0 (QUERY) returns 0 (no commands
+##           supported); other cmds get EINVAL.  libstdc++
+##           asymmetric-barriers / Folly handle this.
+##         - rseq: validate len == 32 + flags ∈ {0, 1} +
+##           non-NULL ptr, then ENOSYS so glibc skips
+##           registration.
+##         - sync_file_range: validate WAIT_BEFORE | WRITE |
+##           WAIT_AFTER flag mask + non-negative off/nbytes +
+##           fd, then 0 (truthful: all our filesystems write
+##           through; no buffered cache to flush yet).
+##         - process_madvise: validate flags == 0 + iov_cnt ≤
+##           IOV_MAX + 16B iovec entries + advice ≤ 100 + fd,
+##           then EBADF (no real pidfd).
+##         - cachestat: validate flags == 0 + 16B range ptr +
+##           32B stats writable ptr + fd, then ENOSYS.
+##         - mseal: validate flags == 0 + addr + len no
+##           overflow, then ENOSYS.  Memory-sealing is a
+##           hardening feature; absence is fine.
+##         - map_shadow_stack: validate size % 8 == 0 + non-
+##           zero + SHADOW_STACK_SET_TOKEN flag bit, then
+##           ENOSYS (CET shadow stacks require hardware +
+##           kernel infrastructure not yet wired).
+##      Choice rationale:
+##         * sync_file_range returns 0 because the operation
+##           is semantically a no-op — we have no buffered
+##           write cache to flush.  Userspace callers (mostly
+##           databases like PostgreSQL using SYNC_FILE_RANGE
+##           to bound fsync latency) get correct behaviour.
+##         * membarrier QUERY returning 0 (no commands)
+##           matches what Linux returns for an unsupported
+##           build; portable code skips memory barriers and
+##           falls back to seq_cst, which the ISA gives us
+##           naturally.
+##         * ENOSYS for seccomp lets unprivileged code run
+##           without a filter.  This is a real loss of
+##           defense-in-depth — when (and if) we add seccomp
+##           filtering, it should be an EBPF-style filter in
+##           the syscall dispatcher, NOT pretended-success
+##           which would be a security-misadvertisement bug.
+##      Limitation: when ptrace, seccomp, clone3, rseq,
+##      membarrier, or shadow-stack land for real, these stubs
+##      get replaced.  ptrace is by far the highest-priority
+##      for desktop usability (gdb, strace, perf, debuggers
+##      need it).  clone3 is the second-highest because every
+##      modern Linux libc uses it as the primary thread-spawn
+##      path.  seccomp is third (sandboxes).  The rest are
+##      lower-priority since their absence is well-handled.
 

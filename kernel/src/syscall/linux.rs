@@ -583,6 +583,16 @@ pub mod nr {
     pub const LANDLOCK_RESTRICT_SELF: u64 = 446;
     pub const KCMP: u64 = 312;
     pub const RESTART_SYSCALL: u64 = 219;
+    pub const SECCOMP: u64 = 317;
+    pub const PTRACE: u64 = 101;
+    pub const CLONE3: u64 = 435;
+    pub const MEMBARRIER: u64 = 324;
+    pub const RSEQ: u64 = 334;
+    pub const SYNC_FILE_RANGE: u64 = 277;
+    pub const PROCESS_MADVISE: u64 = 440;
+    pub const CACHESTAT: u64 = 451;
+    pub const MSEAL: u64 = 462;
+    pub const MAP_SHADOW_STACK: u64 = 453;
 }
 
 // ---------------------------------------------------------------------------
@@ -1588,6 +1598,16 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::LANDLOCK_RESTRICT_SELF => sys_landlock_restrict_self(args),
         nr::KCMP => sys_kcmp(args),
         nr::RESTART_SYSCALL => sys_restart_syscall(args),
+        nr::SECCOMP => sys_seccomp(args),
+        nr::PTRACE => sys_ptrace(args),
+        nr::CLONE3 => sys_clone3(args),
+        nr::MEMBARRIER => sys_membarrier(args),
+        nr::RSEQ => sys_rseq(args),
+        nr::SYNC_FILE_RANGE => sys_sync_file_range(args),
+        nr::PROCESS_MADVISE => sys_process_madvise(args),
+        nr::CACHESTAT => sys_cachestat(args),
+        nr::MSEAL => sys_mseal(args),
+        nr::MAP_SHADOW_STACK => sys_map_shadow_stack(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -8020,6 +8040,240 @@ fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EINTR)
 }
 
+// ---------------------------------------------------------------------------
+// seccomp / ptrace / clone3 / membarrier / rseq / sync_file_range +
+// process_madvise / cachestat / mseal / map_shadow_stack
+//
+// A grab-bag of "security, sandboxing, and modern syscall extensions"
+// that this kernel does not implement yet.  All are validated and
+// returned a principled error:
+//
+//   * seccomp: ENOSYS so programs fall back to no-filter execution.
+//     GET_NOTIF_SIZES could return zeroed sizes but ENOSYS is fine.
+//   * ptrace: EPERM (the answer for an untraceable target on Linux).
+//     gdb / strace / perf handle this and either fail with a clear
+//     error or refuse to start.
+//   * clone3: ENOSYS so glibc falls back to clone (which we implement).
+//   * membarrier: query (cmd=0) returns 0 (no commands available);
+//     other cmds get EINVAL.  Glibc, libstdc++ asymmetric-barriers,
+//     Folly, and Boost all handle the absence path.
+//   * rseq: ENOSYS so glibc falls back to no-rseq.
+//   * sync_file_range: validated then 0 (we always write through; no
+//     buffered cache yet, so flushing is a no-op).
+//   * process_madvise: EBADF (no real pidfd in our kernel).
+//   * cachestat / mseal / map_shadow_stack: ENOSYS — newer extensions
+//     that all gracefully degrade.
+// ---------------------------------------------------------------------------
+
+/// `seccomp(op, flags, args*)`.
+fn sys_seccomp(args: &SyscallArgs) -> SyscallResult {
+    // Valid ops: SET_MODE_STRICT(0), SET_MODE_FILTER(1),
+    // GET_ACTION_AVAIL(2), GET_NOTIF_SIZES(3).
+    let op = args.arg0;
+    if op > 3 {
+        return linux_err(errno::EINVAL);
+    }
+    // Flags must be zero for SET_MODE_STRICT.
+    if op == 0 && args.arg1 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // For SET_MODE_FILTER / GET_ACTION_AVAIL / GET_NOTIF_SIZES the
+    // args pointer must be non-NULL.
+    if op > 0 {
+        if args.arg2 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // Validate at least 4 bytes — enough to look at struct
+        // seccomp_notif_sizes.seccomp_notif (u16) or the action field.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 4) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `ptrace(request, pid, addr, data)`.
+fn sys_ptrace(args: &SyscallArgs) -> SyscallResult {
+    // Linux requests range 0..=0x4300 but the dense common ones are
+    // 0..=33.  Just cap at 0x10_000 as a sanity bound; anything bigger
+    // is clearly bogus.
+    if args.arg0 > 0x10_000 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg1 as i32;
+    if pid < 0 {
+        return linux_err(errno::ESRCH);
+    }
+    // EPERM is the truthful answer: this kernel does not allow
+    // attaching a tracer to a process.
+    linux_err(errno::EPERM)
+}
+
+/// `clone3(cl_args*, size)` — modern clone with an explicit args struct.
+fn sys_clone3(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct clone_args is 88 bytes minimum in current Linux; reject
+    // anything smaller.  Cap at 1 MiB.
+    if args.arg1 < 88 || args.arg1 > (1 << 20) {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, args.arg1 as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `membarrier(cmd, flags, cpu_id)`.
+fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
+    let cmd = args.arg0;
+    // Linux cmds: QUERY(0), GLOBAL(1<<0), GLOBAL_EXPEDITED(1<<1),
+    // REGISTER_GLOBAL_EXPEDITED(1<<2), PRIVATE_EXPEDITED(1<<3), ...
+    // up to PRIVATE_EXPEDITED_RSEQ(1<<8).  The numeric range is sparse
+    // so we just cap at a reasonable bound.
+    if cmd > (1 << 16) {
+        return linux_err(errno::EINVAL);
+    }
+    if cmd == 0 {
+        // QUERY: return bitmask of supported commands.  We support none.
+        return SyscallResult::ok(0);
+    }
+    // Real barrier commands need cross-CPU IPIs and per-task state; we
+    // do not implement them.
+    linux_err(errno::EINVAL)
+}
+
+/// `rseq(rseq*, len, flags, sig)`.
+fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
+    // flags must be 0 (or RSEQ_FLAG_UNREGISTER = 1).
+    if args.arg2 > 1 {
+        return linux_err(errno::EINVAL);
+    }
+    // Linux requires len == sizeof(struct rseq) = 32.
+    if args.arg1 != 32 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 32) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `sync_file_range(fd, offset, nbytes, flags)`.
+fn sys_sync_file_range(args: &SyscallArgs) -> SyscallResult {
+    const VALID_FLAGS: u32 = 0x7; // WAIT_BEFORE | WRITE | WAIT_AFTER
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    if flags & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Negative offset / nbytes -> EINVAL.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let off = args.arg1 as i64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let n = args.arg2 as i64;
+    if off < 0 || n < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // All our filesystems write through immediately, so a flush is
+    // a no-op.  Returning 0 is the truthful answer.
+    SyscallResult::ok(0)
+}
+
+/// `process_madvise(pidfd, iov*, iovcnt, advice, flags)`.
+fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
+    if args.arg4 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let iovcnt = args.arg2;
+    // IOV_MAX is 1024 on Linux.
+    if iovcnt > 1024 {
+        return linux_err(errno::EINVAL);
+    }
+    if iovcnt > 0 {
+        if args.arg1 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        let bytes = iovcnt.saturating_mul(16) as usize;
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, bytes) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Common advice values: MADV_NORMAL(0)..MADV_PAGEOUT(21).  Just
+    // sanity-cap.
+    if args.arg3 > 100 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // No real pidfd exists in our kernel.
+    linux_err(errno::EBADF)
+}
+
+/// `cachestat(fd, cstat_range*, cstat*, flags)`.
+fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
+    if args.arg3 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 || args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct cachestat_range is 16 bytes (u64 off, u64 len).
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 16) {
+        return linux_err(linux_errno_for(e));
+    }
+    // struct cachestat is 32 bytes (5 * u64 + padding).
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 32) {
+        return linux_err(linux_errno_for(e));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `mseal(addr, len, flags)`.
+fn sys_mseal(args: &SyscallArgs) -> SyscallResult {
+    // flags must be 0 in current Linux.
+    if args.arg2 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // len must not overflow when added to addr.
+    if args.arg0.checked_add(args.arg1).is_none() {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `map_shadow_stack(addr, size, flags)`.
+fn sys_map_shadow_stack(args: &SyscallArgs) -> SyscallResult {
+    // size must be a multiple of 8 (CET pushes u64 SSP entries) and
+    // at least 8 bytes.
+    if args.arg1 == 0 || args.arg1 % 8 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // flags: SHADOW_STACK_SET_TOKEN (1) is the only defined bit.
+    if args.arg2 & !1 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
     // type 0..=10 are defined in Linux.
@@ -12968,6 +13222,211 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RESTART_SYSCALL, &a).value != -i64::from(errno::EINTR) {
             serial_println!("[syscall/linux]   FAIL: restart_syscall not EINTR");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // seccomp / ptrace / clone3 / membarrier / rseq / sync_file_range +
+    // process_madvise / cachestat / mseal / map_shadow_stack
+    // -----------------------------------------------------------------
+    {
+        let buf = [0u8; 128];
+        let buf_ptr = buf.as_ptr() as u64;
+
+        // seccomp bad op -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: seccomp bad op not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp STRICT (0) with non-zero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: seccomp STRICT+flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp FILTER (1) with NULL args -> EFAULT.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: seccomp FILTER NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp STRICT (0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: seccomp STRICT not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // ptrace huge req -> EINVAL.
+        let a = SyscallArgs { arg0: 0x20_000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ptrace huge req not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // ptrace negative pid -> ESRCH.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: ptrace neg pid not ESRCH");
+            return Err(KernelError::InternalError);
+        }
+        // ptrace valid -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: ptrace valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // clone3 NULL args -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 88, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: clone3 NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 small size -> EINVAL.
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 32, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: clone3 small size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 valid -> ENOSYS.
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 88, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: clone3 valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // membarrier QUERY -> 0 (no commands).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier QUERY not 0");
+            return Err(KernelError::InternalError);
+        }
+        // membarrier huge cmd -> EINVAL.
+        let a = SyscallArgs { arg0: 0x20_000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier huge cmd not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // membarrier valid cmd -> EINVAL (no commands supported).
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier cmd=1 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // rseq wrong len -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 16, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rseq wrong len not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // rseq bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 32, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rseq bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // rseq NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 32, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rseq NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // rseq valid -> ENOSYS.
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 32, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: rseq valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // sync_file_range bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0xff, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYNC_FILE_RANGE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sync_file_range bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // sync_file_range negative offset -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYNC_FILE_RANGE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sync_file_range neg off not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // sync_file_range valid -> 0 (write-through).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYNC_FILE_RANGE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: sync_file_range valid not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // process_madvise non-zero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 1, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_MADVISE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: process_madvise flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // process_madvise valid -> EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_MADVISE, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: process_madvise valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // cachestat non-zero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: cachestat flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // cachestat NULL range -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: cachestat NULL range not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // cachestat valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: buf_ptr, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: cachestat valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // mseal non-zero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSEAL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mseal flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mseal addr+len overflow -> EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSEAL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mseal overflow not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mseal valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x1000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSEAL, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: mseal valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // map_shadow_stack non-multiple-of-8 size -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 13, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: map_shadow_stack bad size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // map_shadow_stack bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: map_shadow_stack flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // map_shadow_stack valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: map_shadow_stack valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

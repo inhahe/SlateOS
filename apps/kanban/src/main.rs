@@ -2884,7 +2884,7 @@ mod tests {
         board.add_card_to_column(card, 0);
         let result = board.move_card(card_id, 0, 1, 0);
         assert!(result);
-        assert!(!board.columns.get(0).unwrap().card_ids.contains(&card_id));
+        assert!(!board.columns.first().unwrap().card_ids.contains(&card_id));
         assert!(board.columns.get(1).unwrap().card_ids.contains(&card_id));
     }
 
@@ -2912,7 +2912,7 @@ mod tests {
         assert!(result);
         assert!(board.cards.get(&card_id).unwrap().archived);
         assert!(board.archived_card_ids.contains(&card_id));
-        assert!(!board.columns.get(0).unwrap().card_ids.contains(&card_id));
+        assert!(!board.columns.first().unwrap().card_ids.contains(&card_id));
     }
 
     #[test]
@@ -3016,7 +3016,7 @@ mod tests {
         board.add_card_to_column(Card::new("High").with_priority(Priority::High), 0);
         board.sort_column(0);
 
-        let ids: Vec<Id> = board.columns.get(0).unwrap().card_ids.clone();
+        let ids: Vec<Id> = board.columns.first().unwrap().card_ids.clone();
         let priorities: Vec<Priority> = ids.iter().map(|id| board.cards.get(id).unwrap().priority).collect();
         // Sorted descending by priority
         assert_eq!(priorities.first(), Some(&Priority::Critical));
@@ -3033,7 +3033,7 @@ mod tests {
         }
         board.sort_column(0);
 
-        let ids: Vec<Id> = board.columns.get(0).unwrap().card_ids.clone();
+        let ids: Vec<Id> = board.columns.first().unwrap().card_ids.clone();
         let titles: Vec<&str> = ids.iter().map(|id| board.cards.get(id).unwrap().title.as_str()).collect();
         assert_eq!(titles.first().copied(), Some("Apple"));
         assert_eq!(titles.last().copied(), Some("Zebra"));
@@ -3565,7 +3565,7 @@ mod tests {
         app.add_card("A", 0);
         handle_key_event(&mut app, &make_key(Key::T, Modifiers::NONE));
         // Sort happened (by priority, which are both Medium, so stable)
-        assert_eq!(app.active_board().columns.get(0).unwrap().card_ids.len(), 2);
+        assert_eq!(app.active_board().columns.first().unwrap().card_ids.len(), 2);
     }
 
     #[test]
@@ -3618,7 +3618,7 @@ mod tests {
         app.selected_column = 0;
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.input_mode, InputMode::None);
-        assert_eq!(app.active_board().columns.get(0).unwrap().card_ids.len(), 1);
+        assert_eq!(app.active_board().columns.first().unwrap().card_ids.len(), 1);
     }
 
     #[test]
@@ -3628,7 +3628,7 @@ mod tests {
         app.input_buffer.clear();
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.input_mode, InputMode::None);
-        assert!(app.active_board().columns.get(0).unwrap().card_ids.is_empty());
+        assert!(app.active_board().columns.first().unwrap().card_ids.is_empty());
     }
 
     #[test]
@@ -3719,7 +3719,7 @@ mod tests {
         app.input_mode = InputMode::RenameColumn;
         app.input_buffer = "Inbox".to_string();
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
-        assert_eq!(app.active_board().columns.get(0).unwrap().name, "Inbox");
+        assert_eq!(app.active_board().columns.first().unwrap().name, "Inbox");
     }
 
     #[test]
@@ -3786,7 +3786,7 @@ mod tests {
         let mut board = Board::default_board();
         board.add_card_to_column(Card::new("A"), 0);
         board.add_card_to_column(Card::new("B"), 0);
-        let count = board.columns.get(0).unwrap().active_card_count(&board.cards);
+        let count = board.columns.first().unwrap().active_card_count(&board.cards);
         assert_eq!(count, 2);
     }
 
@@ -3798,7 +3798,7 @@ mod tests {
         board.add_card_to_column(c1, 0);
         board.add_card_to_column(Card::new("B"), 0);
         board.archive_card(c1_id);
-        let count = board.columns.get(0).unwrap().active_card_count(&board.cards);
+        let count = board.columns.first().unwrap().active_card_count(&board.cards);
         assert_eq!(count, 1);
     }
 }

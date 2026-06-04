@@ -376,6 +376,7 @@ pub mod nr {
     pub const PIPE2: u64 = 293;
     pub const GETRANDOM: u64 = 318;
     pub const STATX: u64 = 332;
+    pub const PRLIMIT64: u64 = 302;
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,6 +1162,7 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::EXIT_GROUP => sys_exit_group(args),
         nr::SET_ROBUST_LIST => sys_set_robust_list(args),
         nr::GETRANDOM => sys_getrandom(args),
+        nr::PRLIMIT64 => sys_prlimit64(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -2641,6 +2643,170 @@ fn sys_getegid(args: &SyscallArgs) -> SyscallResult {
     sys_getgid(args)
 }
 
+/// `prlimit64(pid, resource, new_limit, old_limit)` — get and/or set
+/// a Linux per-process resource limit.
+///
+/// Linux's `struct rlimit { rlim_t rlim_cur; rlim_t rlim_max; }` is
+/// 16 bytes (`rlim_t` is `u64` on x86_64 LP64).  glibc calls
+/// `prlimit64(0, RLIMIT_STACK, NULL, &out)` at process startup to
+/// size the main thread's stack — returning ENOSYS there causes glibc
+/// to either abort or use an unreasonably small default.
+///
+/// Our policy:
+///   - pid == 0  → self (the only target we honour).  pid != 0 with
+///     identity == caller is treated as self; everything else returns
+///     -EPERM (cross-process rlimit queries require CAP_SYS_RESOURCE
+///     on Linux and we have no equivalent for non-self at this layer).
+///   - `resource` must be in 0..=15 (RLIMIT_CPU..RLIMIT_RTTIME);
+///     anything else returns -EINVAL.
+///   - `new_limit` non-null: copy in, then silently ignore the
+///     request (we don't honour limit changes yet but accept them as
+///     a no-op so programs that "lower then re-read" see consistent
+///     state).
+///   - `old_limit` non-null: write our compiled-in default for
+///     `resource` (see [`rlimit_default`]).
+///   - NULL pointers are skipped (POSIX).
+///
+/// Returns 0 on success, negative errno otherwise.
+fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    let resource = args.arg1;
+    let new_limit_ptr = args.arg2;
+    let old_limit_ptr = args.arg3;
+
+    // Resource validation up front — Linux rejects unknown resources
+    // before touching any user pointer.
+    if resource > 15 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Cross-process queries: only allow when targeting self (pid == 0
+    // or pid == caller's PID).  Otherwise EPERM (matches Linux's
+    // behaviour for unprivileged callers without CAP_SYS_RESOURCE).
+    if pid != 0 {
+        let me = caller_pid().unwrap_or(0);
+        if pid != me {
+            return linux_err(errno::EPERM);
+        }
+    }
+
+    // Pre-validate user pointers.  Each rlimit is 16 bytes.
+    const RLIMIT_SIZE: usize = 16;
+    if new_limit_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(new_limit_ptr, RLIMIT_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if old_limit_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(old_limit_ptr, RLIMIT_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    // Read the new limit (we don't store it, but copying it in and
+    // discarding lets us validate the pointer was actually a valid
+    // user mapping — Linux faults on bad new_limit even when
+    // old_limit is the "real" target).
+    if new_limit_ptr != 0 {
+        let mut tmp = [0u8; RLIMIT_SIZE];
+        // SAFETY: validate_user_read above confirmed the range; we
+        // pass a kernel-owned buffer of the correct size.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(new_limit_ptr, tmp.as_mut_ptr(), RLIMIT_SIZE)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        // Discard — limit changes are no-ops until we have a per-
+        // process rlimit store.  See todo.txt.
+    }
+
+    // Write the default for `resource` to old_limit_ptr.
+    if old_limit_ptr != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let r = resource as u32;
+        let (cur, max) = rlimit_default(r);
+        let buf: [u64; 2] = [cur, max];
+        // SAFETY: validated as a writable user range of RLIMIT_SIZE
+        // bytes above.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(
+                buf.as_ptr().cast::<u8>(),
+                old_limit_ptr,
+                RLIMIT_SIZE,
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    SyscallResult::ok(0)
+}
+
+/// Compiled-in default `(rlim_cur, rlim_max)` for each Linux RLIMIT_*
+/// resource.  These are static — we don't carry per-process state yet,
+/// so every process sees the same limits.
+///
+/// Values mirror typical Linux distro defaults where they matter for
+/// program startup (RLIMIT_STACK == 8 MiB so glibc sizes the main
+/// stack correctly; RLIMIT_NOFILE == 1024; RLIMIT_CORE == 0 so we
+/// don't pretend to support core dumps).  Everything else is
+/// `RLIM_INFINITY` because nothing in the kernel imposes a real
+/// limit on those resources today.
+fn rlimit_default(resource: u32) -> (u64, u64) {
+    /// `RLIM_INFINITY` on Linux x86_64.
+    const INF: u64 = u64::MAX;
+
+    match resource {
+        // RLIMIT_CPU: CPU seconds.  No limiter today.
+        0 => (INF, INF),
+        // RLIMIT_FSIZE: max file size.  No limiter today.
+        1 => (INF, INF),
+        // RLIMIT_DATA: data-segment size.  No tracker today.
+        2 => (INF, INF),
+        // RLIMIT_STACK: 8 MiB matches glibc's main-thread sizing.
+        3 => (8 * 1024 * 1024, INF),
+        // RLIMIT_CORE: 0 — we never produce core dumps, so advertise
+        // a hard zero so programs don't trip on them.
+        4 => (0, 0),
+        // RLIMIT_RSS: resident set size.  No tracker.
+        5 => (INF, INF),
+        // RLIMIT_NPROC: per-uid process count.  No tracker.
+        6 => (INF, INF),
+        // RLIMIT_NOFILE: per-process open-fd limit.  1024 matches
+        // most Linux distros; programs that select() on bare fd
+        // numbers rely on this fitting in FD_SETSIZE.
+        7 => (1024, 4096),
+        // RLIMIT_MEMLOCK: mlock()'d memory.  No tracker.
+        8 => (INF, INF),
+        // RLIMIT_AS: address-space size.  No tracker.
+        9 => (INF, INF),
+        // RLIMIT_LOCKS: fcntl(F_SETLK) lock count.  No tracker.
+        10 => (INF, INF),
+        // RLIMIT_SIGPENDING: per-uid pending signal count.  We have
+        // a 64-bit pending word per process; advertise a generous
+        // cap so programs that compute "can I queue another?" don't
+        // think they're full.
+        11 => (65_536, 65_536),
+        // RLIMIT_MSGQUEUE: POSIX message queue bytes.  We don't
+        // implement them; advertise the Linux default.
+        12 => (819_200, 819_200),
+        // RLIMIT_NICE: nice ceiling.  0 means "may not lower nice".
+        // We don't support nice anyway.
+        13 => (0, 0),
+        // RLIMIT_RTPRIO: real-time priority ceiling.  0 means "no
+        // RT scheduling".  Our scheduler is priority round-robin
+        // without Linux-style RT semantics, so 0 is honest.
+        14 => (0, 0),
+        // RLIMIT_RTTIME: max contiguous RT CPU microseconds.
+        15 => (INF, INF),
+        // Caller has already gated 0..=15; this is unreachable, but
+        // we return INFINITY rather than panic out of caution.
+        _ => (INF, INF),
+    }
+}
+
 /// `wait4(pid, wstatus, options, rusage)` — reap a child process,
 /// optionally non-blocking, with Linux-shaped status encoding.
 ///
@@ -4097,6 +4263,97 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // boot self-test.  The validation logic itself is shared
         // infrastructure exercised by every other syscall — it WILL
         // EFAULT on bad pointers from real userspace.
+    }
+
+    // rlimit_default coverage — pure function table, no userspace.
+    //
+    // Critical defaults programs depend on:
+    //   - RLIMIT_STACK (3) cur == 8 MiB so glibc's main-thread sizing
+    //     produces a usable stack.
+    //   - RLIMIT_NOFILE (7) cur == 1024 to fit FD_SETSIZE on select().
+    //   - RLIMIT_CORE (4) cur == max == 0 (we don't produce cores).
+    //   - All others either INFINITY or honestly zero.
+    {
+        let (cur, max) = rlimit_default(3); // RLIMIT_STACK
+        if cur != 8 * 1024 * 1024 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rlimit_default(STACK).cur = {}", cur
+            );
+            return Err(KernelError::InternalError);
+        }
+        if max != u64::MAX {
+            serial_println!(
+                "[syscall/linux]   FAIL: rlimit_default(STACK).max = {}", max
+            );
+            return Err(KernelError::InternalError);
+        }
+        let (cur, max) = rlimit_default(7); // RLIMIT_NOFILE
+        if cur != 1024 || max != 4096 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rlimit_default(NOFILE) = ({}, {})",
+                cur, max
+            );
+            return Err(KernelError::InternalError);
+        }
+        let (cur, max) = rlimit_default(4); // RLIMIT_CORE
+        if cur != 0 || max != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rlimit_default(CORE) = ({}, {})",
+                cur, max
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Default for an arbitrary RLIM_INFINITY one — CPU.
+        let (cur, max) = rlimit_default(0);
+        if cur != u64::MAX || max != u64::MAX {
+            serial_println!(
+                "[syscall/linux]   FAIL: rlimit_default(CPU) = ({}, {})",
+                cur, max
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // prlimit64 dispatch validation:
+    //   - resource > 15 -> EINVAL.
+    //   - pid != 0 and pid != caller -> EPERM.  caller_pid resolves to
+    //     0/None in the boot self-test, so any non-zero pid takes the
+    //     EPERM path.
+    //   - pid == 0 with both pointers NULL -> 0 (success no-op).
+    {
+        // Unknown resource.
+        let a = SyscallArgs { arg0: 0, arg1: 16, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: prlimit64 bad resource");
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: prlimit64 u64-max resource");
+            return Err(KernelError::InternalError);
+        }
+        // Cross-pid query: caller_pid is None/0 in self-test, so any
+        // nonzero pid != caller -> EPERM.
+        let a = SyscallArgs { arg0: 1, arg1: 3, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 cross-pid not EPERM ({})",
+                dispatch_linux(nr::PRLIMIT64, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // pid==0 with both NULL pointers is a pure no-op success.
+        let a = SyscallArgs { arg0: 0, arg1: 3, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 pid=0 STACK NULL,NULL not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     serial_println!("[syscall/linux] Translation self-test PASSED");

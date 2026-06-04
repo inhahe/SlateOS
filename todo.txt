@@ -5615,6 +5615,13 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     WIFEXITED true (low 7 bits == 0) and WEXITSTATUS == 42; kernel
 ##     exit code 128+15 -> WTERMSIG == 15 and WIFSIGNALED true; any
 ##     ExitInfo.crash.is_some() -> wstatus low 7 bits == 11 (SIGSEGV).
+##   - rlimit_default pure-function: RLIMIT_STACK (3) is (8 MiB,
+##     u64::MAX), RLIMIT_NOFILE (7) is (1024, 4096), RLIMIT_CORE
+##     (4) is (0, 0), RLIMIT_CPU (0) is (u64::MAX, u64::MAX).
+##   - prlimit64 dispatch: resource == 16 and u64::MAX both return
+##     -EINVAL; cross-pid query (pid=1 with caller_pid=0/None)
+##     returns -EPERM; pid=0 with both NULL pointers is a 0-return
+##     no-op success.
 ##   - wait4 dispatch via dispatch_linux: unknown option bits return
 ##     -EINVAL before any reap attempt; wait-any WNOHANG from
 ##     contextless test task does NOT return -EINVAL (proves the
@@ -5784,3 +5791,28 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      aren't implemented (pid==0 and pid<-1 both degrade to
 ##      "any child"), which is conformant but loses fidelity for
 ##      shells that wait on a process group.
+##  10. PRLIMIT64 — DONE with static defaults.  sys_prlimit64
+##      validates resource in 0..=15 (otherwise EINVAL), permits
+##      target pid 0 or pid == caller (otherwise EPERM — Linux
+##      requires CAP_SYS_RESOURCE for cross-process limits), pre-
+##      validates new_limit / old_limit user pointers (each 16
+##      bytes: rlim_cur, rlim_max as u64), accepts the new limit
+##      as a no-op, and writes a compiled-in default to old_limit
+##      via rlimit_default(resource).
+##      Defaults that matter for glibc / typical programs:
+##        - RLIMIT_STACK = (8 MiB, INFINITY)   sizes glibc's main
+##          thread stack correctly
+##        - RLIMIT_NOFILE = (1024, 4096)       fits FD_SETSIZE for
+##          select(); matches typical Linux distro defaults
+##        - RLIMIT_CORE = (0, 0)               we never produce
+##          core dumps
+##        - RLIMIT_NICE / RLIMIT_RTPRIO = (0, 0)  no nice / RT
+##        - everything else = (INFINITY, INFINITY)
+##      Limitation: limits are global and read-only.  Per-process
+##      storage would let setrlimit honour user changes; today they
+##      silently no-op.  This is fine for read-mostly users (glibc
+##      sizing its main thread stack from RLIMIT_STACK) but
+##      programs that lower a limit then verify it failed (e.g. a
+##      sandbox dropping privileges) won't see the lowered value
+##      reflected.  Tracked as a future enhancement when a real
+##      per-process rlimit store is added.

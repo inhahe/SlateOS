@@ -9,6 +9,9 @@
 //! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
 //! Windows when running `cargo test --workspace`), a stub `main` keeps
 //! the workspace compile-clean.
+//!
+//! The pure helpers (`parse_args`, `parse_owner_group`) are exposed on
+//! all platforms so they can be unit-tested anywhere.
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
@@ -35,32 +38,99 @@ unsafe extern "C" {
     fn chown(path: *const u8, owner: u32, group: u32) -> i32;
 }
 
-#[cfg(unix)]
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut recursive = false;
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct ChownArgs {
+    recursive: bool,
+    owner: String,
+    paths: Vec<String>,
+}
+
+/// Parse chown's argv.  The first non-flag positional argument is the
+/// owner spec (`UID`, `UID:GID`, `:GID`, or `UID:`); the rest are paths.
+/// Returns an error if there are fewer than two positionals.
+fn parse_args(args: &[String]) -> Result<ChownArgs, String> {
+    let mut out = ChownArgs::default();
     let mut positional: Vec<&str> = Vec::new();
 
-    for arg in &args {
+    for arg in args {
         if arg == "-R" || arg == "-r" {
-            recursive = true;
+            out.recursive = true;
         } else {
             positional.push(arg);
         }
     }
 
     if positional.len() < 2 {
-        eprintln!("chown: missing operand");
-        eprintln!("Usage: chown [-R] OWNER[:GROUP] FILE...");
-        process::exit(1);
+        return Err("missing operand".to_string());
     }
 
-    let (uid, gid) = parse_owner_group(positional[0]);
-    let mut exit_code = 0;
+    out.owner = positional.first().copied().unwrap_or_default().to_string();
+    out.paths = positional
+        .get(1..)
+        .unwrap_or(&[])
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    Ok(out)
+}
 
-    for path_str in &positional[1..] {
+/// Parse an `OWNER[:GROUP]` spec into (uid, gid).  `None` for a field
+/// means "leave unchanged".  Empty owner with `:GROUP` is allowed (gid-
+/// only change); empty group after `:` is allowed (uid-only).
+fn parse_owner_group(spec: &str) -> Result<(Option<u32>, Option<u32>), String> {
+    if let Some((owner_str, group_str)) = spec.split_once(':') {
+        let uid = if owner_str.is_empty() {
+            None
+        } else {
+            Some(
+                owner_str
+                    .parse::<u32>()
+                    .map_err(|_| format!("invalid user: '{owner_str}' (only numeric UIDs supported)"))?,
+            )
+        };
+        let gid = if group_str.is_empty() {
+            None
+        } else {
+            Some(
+                group_str
+                    .parse::<u32>()
+                    .map_err(|_| format!("invalid group: '{group_str}' (only numeric GIDs supported)"))?,
+            )
+        };
+        Ok((uid, gid))
+    } else {
+        let uid = spec
+            .parse::<u32>()
+            .map_err(|_| format!("invalid user: '{spec}' (only numeric UIDs supported)"))?;
+        Ok((Some(uid), None))
+    }
+}
+
+#[cfg(unix)]
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let parsed = match parse_args(&args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("chown: {e}");
+            eprintln!("Usage: chown [-R] OWNER[:GROUP] FILE...");
+            process::exit(1);
+        }
+    };
+
+    let (uid, gid) = match parse_owner_group(&parsed.owner) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("chown: {e}");
+            process::exit(1);
+        }
+    };
+
+    let mut exit_code = 0;
+    for path_str in &parsed.paths {
         let path = Path::new(path_str);
-        if recursive && path.is_dir() {
+        if parsed.recursive && path.is_dir() {
             if let Err(e) = chown_recursive(path, uid, gid) {
                 eprintln!("chown: {path_str}: {e}");
                 exit_code = 1;
@@ -72,35 +142,6 @@ fn main() {
     }
 
     process::exit(exit_code);
-}
-
-#[cfg(unix)]
-fn parse_owner_group(spec: &str) -> (Option<u32>, Option<u32>) {
-    if let Some((owner_str, group_str)) = spec.split_once(':') {
-        let uid = if owner_str.is_empty() {
-            None
-        } else {
-            Some(owner_str.parse::<u32>().unwrap_or_else(|_| {
-                eprintln!("chown: invalid user: '{owner_str}' (only numeric UIDs supported)");
-                process::exit(1);
-            }))
-        };
-        let gid = if group_str.is_empty() {
-            None
-        } else {
-            Some(group_str.parse::<u32>().unwrap_or_else(|_| {
-                eprintln!("chown: invalid group: '{group_str}' (only numeric GIDs supported)");
-                process::exit(1);
-            }))
-        };
-        (uid, gid)
-    } else {
-        let uid = spec.parse::<u32>().unwrap_or_else(|_| {
-            eprintln!("chown: invalid user: '{spec}' (only numeric UIDs supported)");
-            process::exit(1);
-        });
-        (Some(uid), None)
-    }
 }
 
 #[cfg(unix)]
@@ -135,7 +176,137 @@ fn apply_chown(path: &Path, uid: Option<u32>, gid: Option<u32>) -> Result<(), St
     // provided by the POSIX layer.
     let ret = unsafe { chown(c_path.as_ptr(), actual_uid, actual_gid) };
     if ret != 0 {
-        return Err(format!("chown failed (errno)"));
+        return Err("chown failed (errno)".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    // ---------------- parse_args ----------------
+
+    #[test]
+    fn parse_no_args_errors() {
+        let err = parse_args(&s(&[])).unwrap_err();
+        assert!(err.contains("missing operand"));
+    }
+
+    #[test]
+    fn parse_owner_only_errors() {
+        let err = parse_args(&s(&["1000"])).unwrap_err();
+        assert!(err.contains("missing operand"));
+    }
+
+    #[test]
+    fn parse_owner_and_file() {
+        let a = parse_args(&s(&["1000", "f"])).unwrap();
+        assert!(!a.recursive);
+        assert_eq!(a.owner, "1000");
+        assert_eq!(a.paths, vec!["f"]);
+    }
+
+    #[test]
+    fn parse_recursive_dash_r_uppercase() {
+        let a = parse_args(&s(&["-R", "1000:100", "dir"])).unwrap();
+        assert!(a.recursive);
+        assert_eq!(a.owner, "1000:100");
+        assert_eq!(a.paths, vec!["dir"]);
+    }
+
+    #[test]
+    fn parse_recursive_lowercase_r_accepted() {
+        let a = parse_args(&s(&["-r", "1000", "f"])).unwrap();
+        assert!(a.recursive);
+    }
+
+    #[test]
+    fn parse_multiple_files() {
+        let a = parse_args(&s(&["0:0", "a", "b", "c"])).unwrap();
+        assert_eq!(a.paths, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_recursive_flag_position_independent() {
+        let a = parse_args(&s(&["1000", "-R", "dir"])).unwrap();
+        assert!(a.recursive);
+        assert_eq!(a.owner, "1000");
+        assert_eq!(a.paths, vec!["dir"]);
+    }
+
+    // ---------------- parse_owner_group ----------------
+
+    #[test]
+    fn pog_owner_only() {
+        assert_eq!(parse_owner_group("1000").unwrap(), (Some(1000), None));
+    }
+
+    #[test]
+    fn pog_owner_and_group() {
+        assert_eq!(parse_owner_group("1000:100").unwrap(), (Some(1000), Some(100)));
+    }
+
+    #[test]
+    fn pog_owner_with_empty_group() {
+        // "1000:" — uid set, gid unchanged.
+        assert_eq!(parse_owner_group("1000:").unwrap(), (Some(1000), None));
+    }
+
+    #[test]
+    fn pog_empty_owner_with_group() {
+        // ":100" — uid unchanged, gid set.
+        assert_eq!(parse_owner_group(":100").unwrap(), (None, Some(100)));
+    }
+
+    #[test]
+    fn pog_both_empty() {
+        // ":" — both unchanged (no-op).
+        assert_eq!(parse_owner_group(":").unwrap(), (None, None));
+    }
+
+    #[test]
+    fn pog_root() {
+        assert_eq!(parse_owner_group("0").unwrap(), (Some(0), None));
+        assert_eq!(parse_owner_group("0:0").unwrap(), (Some(0), Some(0)));
+    }
+
+    #[test]
+    fn pog_non_numeric_owner_errors() {
+        let err = parse_owner_group("alice").unwrap_err();
+        assert!(err.contains("invalid user"));
+        assert!(err.contains("alice"));
+    }
+
+    #[test]
+    fn pog_non_numeric_group_errors() {
+        let err = parse_owner_group("1000:wheel").unwrap_err();
+        assert!(err.contains("invalid group"));
+        assert!(err.contains("wheel"));
+    }
+
+    #[test]
+    fn pog_non_numeric_owner_with_group_errors() {
+        let err = parse_owner_group("alice:100").unwrap_err();
+        assert!(err.contains("invalid user"));
+    }
+
+    #[test]
+    fn pog_max_u32() {
+        assert_eq!(
+            parse_owner_group("4294967295:4294967295").unwrap(),
+            (Some(u32::MAX), Some(u32::MAX)),
+        );
+    }
+
+    #[test]
+    fn pog_negative_errors() {
+        let err = parse_owner_group("-1").unwrap_err();
+        assert!(err.contains("invalid user"));
+    }
 }

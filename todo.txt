@@ -2922,12 +2922,69 @@ Remaining net improvements (diminishing returns):
       cstring (basic, empty, unicode passthrough, path with slashes).
   All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  RUNNING TOTAL: 902 tests across 59 binaries (whoami + batches 1-10).
-  ~26 binaries still pending.
+  PROGRESS 2026-06-04 (batch 11): added 73 unit tests across 5 more
+  binaries (tty, hostname, id, chmod, chown).  Also fixed a real chmod
+  bug along the way (see below).
+    * tty.rs: gated `unsafe extern "C" { isatty, ttyname }` on
+      `cfg(target_os = "linux")` (whoami pattern).  Extracted
+      `parse_silent(args) -> bool`, `unsafe fn read_cstr_lossy(*const
+      u8) -> Option<String>` to wrap ttyname's NUL-terminated pointer,
+      and `output_line(silent, is_tty, name) -> Option<String>` (None
+      when silent, "/dev/tty" fallback, "not a tty" otherwise).  10
+      tests: silent absent/present, output silent emits nothing, not-a-
+      tty branch, tty-with-name, tty-without-name fallback, null
+      pointer returns None, read until NUL, empty string, invalid UTF-8
+      lossy.
+    * hostname.rs: gated `gethostname`/`sethostname` extern on
+      `cfg(target_os = "linux")`.  Added Windows-host fallbacks (read
+      HOSTNAME/COMPUTERNAME env var when printing; refuse to set).
+      Extracted `decode_hostname(buf: &[u8]) -> String` (find NUL or
+      use full buffer, lossy UTF-8).  7 tests: empty, zero-filled,
+      name+NUL+junk, name filling buffer with no NUL, stops at first
+      NUL, invalid UTF-8 lossy, FQDN.
+    * id.rs: gated `getuid/geteuid/getgid/getegid` extern on
+      `cfg(target_os = "linux")`.  Extracted `parse_args(args) ->
+      IdArgs { show_uid_only, show_gid_only, unknown: Vec<char> }`
+      (clustered flags supported; unknown chars collected for warning
+      instead of process::exit).  Added `format_full(uid, euid, gid,
+      egid) -> String` (omits euid/egid when equal).  14 tests:
+      parse (no args, -u, -g, -n silent, clustered -un, unknown -X
+      recorded, mixed -uXg, bare arg ignored, multiple groups),
+      format_full (all equal, distinct euid, distinct egid, all
+      distinct, root).
+    * chmod.rs: extracted `parse_args(args) -> Result<ChmodArgs,
+      String>` with `{ recursive, mode, paths }`.  Added
+      `apply_mode_string(spec, current) -> Result<u32>` (tries octal
+      first, falls through to symbolic).  Lifted `parse_symbolic`
+      outside `cfg(unix)` so it's testable on Windows hosts.  BUG FIX:
+      `s` and `t` bits were masked away by `who_mask` (since 0o4000/
+      0o2000/0o1000 are outside the 0o777 range).  Reworked to collect
+      `high_bits` separately: `s` sets 0o4000 iff `u` is in who-class,
+      0o2000 iff `g` is in who-class; `t` is not who-scoped.  24 tests:
+      parse_args (no-args, mode-only, mode+file, -R, -r, multiple files,
+      -R anywhere), apply_mode_string (octal ignores current, four-digit
+      octal, symbolic delegates), parse_symbolic (u+x, g-w, o=r, a+x,
+      default-who-is-a, comma-separated clauses, u+s sets 0o4000,
+      +t sets 0o1000, high bits preserved, empty spec keeps current,
+      who-with-no-op errors, invalid operator errors, u=r clears
+      then sets, u-x absent no-op).
+    * chown.rs: extracted `parse_args(args) -> Result<ChownArgs,
+      String>` with `{ recursive, owner, paths }`.  Converted
+      `parse_owner_group(spec) -> Result<(Option<u32>, Option<u32>)>`
+      from process::exit to Result; lifted it outside `cfg(unix)`.  18
+      tests: parse_args (empty, owner-only, owner+file, -R, -r,
+      multiple files, -R position-independent), parse_owner_group
+      (owner only, owner:group, owner with empty group "1000:", empty
+      owner with group ":100", both empty ":", root, non-numeric owner
+      errors, non-numeric group errors, non-numeric owner with group,
+      u32::MAX, negative errors).
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  REMAINING: awk, bc, chmod, chown, cp, ed, false, fetch, find, grep,
-  hostname, id, ls, mv, nohup, patch, ps, pwd, realpath, sed, sh,
-  tar, test, touch, true, tty.
+  RUNNING TOTAL: 975 tests across 64 binaries (whoami + batches 1-11).
+  ~21 binaries still pending.
+
+  REMAINING: awk, bc, cp, ed, false, fetch, find, grep, ls, mv, nohup,
+  patch, ps, pwd, realpath, sed, sh, tar, test, touch, true.
   Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to

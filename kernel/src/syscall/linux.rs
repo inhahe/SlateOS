@@ -68,7 +68,7 @@
 //! | 186      | gettid            | direct                             |
 //! | 201      | time              | clock_realtime / 1e9               |
 //! | 202      | futex             | maps to SYS_FUTEX_*                |
-//! | 218      | set_tid_address   | returns tid, ignores stored ptr    |
+//! | 218      | set_tid_address   | registers clear_child_tid, ret tid |
 //! | 228      | clock_gettime     | reads clock id, writes timespec    |
 //! | 229      | clock_getres      | reports 1ns res                    |
 //! | 230      | clock_nanosleep   | maps to SYS_SLEEP (relative)       |
@@ -2035,12 +2035,25 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `set_tid_address(tidptr)` — Linux uses this for thread-cleanup
-/// notification on exit.  We don't track the pointer; just return tid.
-fn sys_set_tid_address(_args: &SyscallArgs) -> SyscallResult {
-    let tid = crate::sched::current_task_id();
+/// `set_tid_address(tidptr)` — register `tidptr` as the address the
+/// kernel must zero (and futex-wake) when the calling thread exits,
+/// then return the caller's TID.
+///
+/// This is the runtime equivalent of `CLONE_CHILD_CLEARTID` for the
+/// **main** thread: glibc startup calls `set_tid_address(&pd->tid)`
+/// during the first thread's initialisation so that
+/// `pthread_join(main_thread)` from a thread library extension can
+/// observe the main thread's exit through the same futex mechanism
+/// that clone'd threads use.
+///
+/// A `tidptr` of 0 unregisters any prior address (matches Linux's
+/// behaviour of accepting NULL to clear the slot).
+fn sys_set_tid_address(args: &SyscallArgs) -> SyscallResult {
+    let tidptr = args.arg0;
+    let task_id = crate::sched::current_task_id();
+    crate::proc::thread_clone::register_clear_child_tid(task_id, tidptr);
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(tid as i64)
+    SyscallResult::ok(task_id as i64)
 }
 
 /// `set_robust_list(head, len)` — robust-mutex cleanup.  Stubbed.

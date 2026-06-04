@@ -21,6 +21,15 @@
     clippy::too_many_arguments,
     clippy::upper_case_acronyms,
 )]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::field_reassign_with_default,
+        clippy::bool_assert_comparison,
+        clippy::needless_borrows_for_generic_args,
+        clippy::manual_range_contains,
+    )
+)]
 
 #[allow(dead_code)]
 mod blur;

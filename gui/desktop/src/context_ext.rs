@@ -1339,7 +1339,7 @@ mod tests {
     #[test]
     fn query_sorted_by_position() {
         let mut mgr = make_mgr();
-        let id1 = mgr.register("Bottom", TargetKind::Any, "app", "cmd1", 1).unwrap();
+        let _id1 = mgr.register("Bottom", TargetKind::Any, "app", "cmd1", 1).unwrap();
         let id2 = mgr.register("Top", TargetKind::Any, "app2", "cmd2", 1).unwrap();
         mgr.get_mut(id2).unwrap().position = MenuPosition::Top;
         let ctx = ContextTarget::file("test.txt", Some("txt"));

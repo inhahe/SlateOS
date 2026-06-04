@@ -1238,14 +1238,14 @@ mod tests {
 
     #[test]
     fn test_color_temp_rgb_warm() {
-        let (r, g, b) = ColorTemperature::WARM.to_rgb_multiplier();
+        let (r, _g, b) = ColorTemperature::WARM.to_rgb_multiplier();
         // Warm should have more red than blue
         assert!(r > b);
     }
 
     #[test]
     fn test_color_temp_rgb_cool() {
-        let (r, g, b) = ColorTemperature::COOL.to_rgb_multiplier();
+        let (r, _g, b) = ColorTemperature::COOL.to_rgb_multiplier();
         // Cool should have more blue relative to the warm temp
         let (wr, _wg, _wb) = ColorTemperature::WARM.to_rgb_multiplier();
         assert!(b > 0.0);

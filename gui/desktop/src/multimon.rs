@@ -1483,7 +1483,7 @@ mod tests {
         let layout = MonitorLayout {
             monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true)],
         };
-        let (x, y, w, h) =
+        let (x, _y, w, h) =
             WindowPlacement::clamp_to_visible((5000, 500, 800, 600), &layout);
         assert_eq!(w, 800);
         assert_eq!(h, 600);

@@ -21,7 +21,7 @@ use std::fmt::Write as FmtWrite;
 #[cfg(not(test))]
 use std::fs;
 #[cfg(not(test))]
-use std::io;
+use std::io::{self, Write as IoWrite};
 
 // ---------------------------------------------------------------------------
 // Personality detection

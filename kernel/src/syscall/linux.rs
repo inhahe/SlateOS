@@ -1142,6 +1142,7 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::GETPID => sys_getpid(args),
         nr::EXIT => sys_exit(args),
         nr::KILL => sys_kill(args),
+        nr::WAIT4 => sys_wait4(args),
         nr::UNAME => sys_uname(args),
         nr::GETTIMEOFDAY => sys_gettimeofday(args),
         nr::GETUID => sys_getuid(args),
@@ -2640,6 +2641,208 @@ fn sys_getegid(args: &SyscallArgs) -> SyscallResult {
     sys_getgid(args)
 }
 
+/// `wait4(pid, wstatus, options, rusage)` — reap a child process,
+/// optionally non-blocking, with Linux-shaped status encoding.
+///
+/// Linux semantics:
+///   - `pid > 0`: wait for that specific child.
+///   - `pid == -1`: wait for any child.
+///   - `pid == 0`: wait for any child in the caller's process group
+///     (we have no process groups; treated as `-1`).
+///   - `pid < -1`: wait for any child in process group `-pid` (treated
+///     as `-1`).
+///
+/// `wstatus`: optional `*mut i32` receiving the encoded status.  Per
+/// glibc's `<sys/wait.h>` macros:
+///   - normal exit with code C (0..=127): `status = (C & 0xff) << 8`
+///     → `WIFEXITED(status)` is true, `WEXITSTATUS(status)` == C.
+///   - killed by signal N (our convention: native exit codes 128..=255
+///     are signal kills with `N = exit_code - 128`):
+///     `status = N & 0x7f` → `WIFSIGNALED(status)` is true,
+///     `WTERMSIG(status)` == N.
+///   - crashed (hardware fault): we synthesise `SIGSEGV` (11) since
+///     the vast majority of crashes are page faults / access
+///     violations.  Future enhancement: map exception_code → real
+///     Linux signal (SIGFPE for divide error, SIGILL for invalid op,
+///     etc.) by consulting `CrashInfo`.
+///
+/// `options`: `WNOHANG` (1) routes to the non-blocking
+/// [`pcb::try_reap`] / [`pcb::try_reap_any`]; the caller sees a
+/// "0 returned, no status written" result when no child is ready.
+/// `WUNTRACED` (2) / `WCONTINUED` (8) are accepted-but-ignored — we
+/// have no process-stop mechanism, so there are no stopped or
+/// continued children to report.  Any other options bits return
+/// `-EINVAL`.
+///
+/// `rusage`: optional pointer to a `struct rusage` (144 bytes on
+/// x86_64 Linux).  We don't track per-process resource usage yet, so
+/// we zero the entire structure if the pointer is non-null.  Programs
+/// that consume `rusage` fields (top, time, gnu time) will see zero
+/// CPU time for the child — incorrect but harmless.
+///
+/// Return value (Linux convention):
+///   - on success: the reaped child's PID;
+///   - on `WNOHANG` with no ready child: 0;
+///   - no children at all: `-ECHILD`;
+///   - target is not a child of the caller: `-ECHILD`;
+///   - bad `wstatus` or `rusage` pointer: `-EFAULT`;
+///   - bad `options` bits: `-EINVAL`.
+fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    // Linux WAIT4 option flags.
+    const WNOHANG: u64 = 1;
+    const WUNTRACED: u64 = 2;
+    const WCONTINUED: u64 = 8;
+    const VALID_OPTIONS: u64 = WNOHANG | WUNTRACED | WCONTINUED;
+
+    #[allow(clippy::cast_possible_wrap)]
+    let pid_arg = args.arg0 as i64;
+    let wstatus_ptr = args.arg1;
+    let options = args.arg2;
+    let rusage_ptr = args.arg3;
+
+    if (options & !VALID_OPTIONS) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let nohang = (options & WNOHANG) != 0;
+
+    // Pre-validate user pointers if non-null.  Doing this BEFORE the
+    // wait avoids reaping a child and then failing to deliver the
+    // status (which would leak the exit info — there's no "un-reap").
+    if wstatus_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(
+            wstatus_ptr,
+            core::mem::size_of::<i32>(),
+        ) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Linux's struct rusage is 144 bytes on x86_64 (16×i64 longs:
+    // 2 timevals of 2 longs each + 14 scalar longs).
+    const RUSAGE_SIZE: usize = 144;
+    if rusage_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(rusage_ptr, RUSAGE_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    let parent_pid = caller_pid().unwrap_or(0);
+    let task_id = crate::sched::current_task_id();
+
+    // Specific-pid vs any-child path mirrors sys_process_wait.
+    let (child_pid, info) = if pid_arg > 0 {
+        #[allow(clippy::cast_sign_loss)]
+        let target_pid = pid_arg as u64;
+        loop {
+            match pcb::try_reap(parent_pid, target_pid) {
+                Ok(Some(info)) => break (target_pid, info),
+                Ok(None) => {} // still running
+                Err(KernelError::PermissionDenied) | Err(KernelError::NoSuchProcess) => {
+                    // Not our child / doesn't exist → ECHILD.
+                    return linux_err(errno::ECHILD);
+                }
+                Err(e) => return linux_err(linux_errno_for(e)),
+            }
+            if nohang {
+                return SyscallResult::ok(0);
+            }
+            // Block until the child exits (lost-wakeup-safe via
+            // set_wait_task + re-check, same pattern as sys_process_wait).
+            if let Err(e) = pcb::set_wait_task(target_pid, task_id) {
+                return linux_err(linux_errno_for(e));
+            }
+            match pcb::try_reap(parent_pid, target_pid) {
+                Ok(Some(info)) => break (target_pid, info),
+                Ok(None) => crate::sched::block_current(),
+                Err(KernelError::PermissionDenied) | Err(KernelError::NoSuchProcess) => {
+                    return linux_err(errno::ECHILD);
+                }
+                Err(e) => return linux_err(linux_errno_for(e)),
+            }
+        }
+    } else {
+        // pid <= 0: wait for any child.  Same register-before-check
+        // discipline as sys_process_wait's wait-any path.
+        loop {
+            if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
+                // ECHILD if the parent has no children at all.
+                pcb::clear_wait_any_task(parent_pid, task_id);
+                return linux_err(linux_errno_for(e));
+            }
+            match pcb::try_reap_any(parent_pid) {
+                Ok(Some((cpid, info))) => {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                    break (cpid, info);
+                }
+                Ok(None) => {
+                    if nohang {
+                        pcb::clear_wait_any_task(parent_pid, task_id);
+                        return SyscallResult::ok(0);
+                    }
+                    crate::sched::block_current();
+                }
+                Err(e) => {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+        }
+    };
+
+    // Encode wstatus per the Linux <sys/wait.h> macros.
+    let wstatus: i32 = encode_linux_wstatus(&info);
+
+    if wstatus_ptr != 0 {
+        // SAFETY: validated as a writable user range of i32 size at the
+        // top of the function; the address space hasn't changed because
+        // we're still in the calling process.
+        unsafe {
+            core::ptr::write(wstatus_ptr as *mut i32, wstatus);
+        }
+    }
+    if rusage_ptr != 0 {
+        // We don't track per-process resource usage; zero the whole
+        // struct.  Validated as writable above.
+        // SAFETY: same as wstatus write — validated user range, no ASID
+        // change since.
+        unsafe {
+            core::ptr::write_bytes(rusage_ptr as *mut u8, 0, RUSAGE_SIZE);
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(child_pid as i64)
+}
+
+/// Translate our [`pcb::ExitInfo`] into a Linux-shaped `wstatus` word.
+///
+/// Pure function — split out so the boot self-test can exercise the
+/// three branches (normal / signaled / crashed) without needing a
+/// real reaped child.
+fn encode_linux_wstatus(info: &crate::proc::pcb::ExitInfo) -> i32 {
+    // Crash: synthesise SIGSEGV.  This is "good enough" for the
+    // common case; a future enhancement could map exception codes
+    // (DivideError → SIGFPE, InvalidOpcode → SIGILL, etc.) by
+    // consulting CrashInfo.exception_code.
+    if info.crash.is_some() {
+        return 11; // SIGSEGV, low 7 bits of wstatus, WIFSIGNALED true
+    }
+    let code = info.exit_code;
+    if (128..=255).contains(&code) {
+        // Killed by signal: kernel convention is exit_code = 128 + sig.
+        let sig = (code - 128) & 0x7f;
+        sig
+    } else {
+        // Normal exit: low byte of exit_code lives in bits 8..=15.
+        #[allow(clippy::cast_sign_loss)]
+        let lo = (code as u32) & 0xff;
+        #[allow(clippy::cast_possible_wrap)]
+        let s = (lo << 8) as i32;
+        s
+    }
+}
+
 /// `getppid()` — parent's PID.
 fn sys_getppid(_args: &SyscallArgs) -> SyscallResult {
     let pid = match caller_pid() {
@@ -3781,6 +3984,119 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: madvise kernel-addr");
             return Err(KernelError::InternalError);
         }
+    }
+
+    // wait4 wstatus encoding (pure function — no real reaped child
+    // needed).  Three branches: normal exit, signaled, crashed.
+    //
+    // Linux's <sys/wait.h> macros:
+    //   WIFEXITED(s)    -> (s & 0x7f) == 0
+    //   WEXITSTATUS(s)  -> (s >> 8) & 0xff
+    //   WIFSIGNALED(s)  -> ((s & 0x7f) + 1) >> 1 > 0   ≡ low7 in 1..=126
+    //   WTERMSIG(s)     -> s & 0x7f
+    {
+        use crate::proc::pcb::ExitInfo;
+        // Normal exit with code 42 — WIFEXITED + WEXITSTATUS==42.
+        let s = encode_linux_wstatus(&ExitInfo { exit_code: 42, crash: None });
+        if (s & 0x7f) != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus normal exit not WIFEXITED ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        if ((s >> 8) & 0xff) != 42 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus normal exit WEXITSTATUS != 42 ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Killed by SIGTERM (15) — kernel exit_code convention 128+sig.
+        let s = encode_linux_wstatus(&ExitInfo { exit_code: 128 + 15, crash: None });
+        let low7 = s & 0x7f;
+        if low7 != 15 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus SIGTERM WTERMSIG != 15 ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        // WIFSIGNALED check: ((low7 + 1) >> 1) > 0 — true for 1..=126.
+        if ((low7 + 1) >> 1) == 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus SIGTERM not WIFSIGNALED ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Crash (any crash_info present) synthesises SIGSEGV (11).
+        let crash = crate::proc::pcb::CrashInfo {
+            exception_code: 14, // page fault
+            faulting_rip: 0xDEAD_BEEF,
+            aux: 0,
+            thread_id: 0,
+        };
+        let s = encode_linux_wstatus(&ExitInfo { exit_code: -14, crash: Some(crash) });
+        if (s & 0x7f) != 11 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus crash != SIGSEGV ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // wait4 dispatch validation via dispatch_linux:
+    //   - unknown option bits -> EINVAL (before any reap attempt).
+    //   - wait-any from a contextless test task (caller_pid resolves to 0):
+    //     either ECHILD (no children of kernel) or some other -ENOSYS-
+    //     adjacent error path, but NEVER -EINVAL (proves routing reached
+    //     the wait core, not the options validator).
+    //   - wait-specific for a pid that almost-certainly doesn't exist
+    //     (0xDEAD_BEEF) returns -ECHILD (the "not a child of caller"
+    //     path).  Must NOT be -EINVAL.
+    {
+        // Unknown option bit (WNOHANG | unknown high bit).
+        let a = SyscallArgs { arg0: u64::MAX /* -1 = wait any */, arg1: 0,
+            arg2: 1 | 0x4000_0000 /* WNOHANG + bogus */, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::WAIT4, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: wait4 bad options not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // wait-any WNOHANG from contextless test task.  parent_pid
+        // resolves to 0 (kernel) which has no children registered, so
+        // set_wait_any_task returns ECHILD.  The crucial assertion is
+        // that the call did NOT return -EINVAL or panic.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1 /* WNOHANG */,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: wait4 wait-any WNOHANG -> EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // wait-specific WNOHANG for a fake pid — ECHILD (or some other
+        // non-EINVAL negative).  Must not block (WNOHANG guarantees
+        // non-blocking) and must not panic.
+        let a = SyscallArgs { arg0: 0xDEAD_BEEF, arg1: 0, arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: wait4 wait-specific WNOHANG -> EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        if v >= 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 fake pid succeeded ({})", v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // NOTE: we deliberately don't test bad wstatus / rusage pointers
+        // here.  validate_user_write has a documented kernel-context
+        // bypass (returns Ok unconditionally for tasks with no owning
+        // process), which makes EFAULT impossible to observe from the
+        // boot self-test.  The validation logic itself is shared
+        // infrastructure exercised by every other syscall — it WILL
+        // EFAULT on bad pointers from real userspace.
     }
 
     serial_println!("[syscall/linux] Translation self-test PASSED");

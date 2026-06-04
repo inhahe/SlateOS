@@ -5611,6 +5611,22 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     advice=26 (between documented max and HWPOISON) returns
 ##     -EINVAL; misaligned addr with nonzero len returns -EINVAL;
 ##     kernel-space addr with nonzero len returns -ENOMEM.
+##   - encode_linux_wstatus pure-function: normal exit code 42 ->
+##     WIFEXITED true (low 7 bits == 0) and WEXITSTATUS == 42; kernel
+##     exit code 128+15 -> WTERMSIG == 15 and WIFSIGNALED true; any
+##     ExitInfo.crash.is_some() -> wstatus low 7 bits == 11 (SIGSEGV).
+##   - wait4 dispatch via dispatch_linux: unknown option bits return
+##     -EINVAL before any reap attempt; wait-any WNOHANG from
+##     contextless test task does NOT return -EINVAL (proves the
+##     options validator didn't reject the legal WNOHANG=1 bit);
+##     wait-specific WNOHANG for fake pid 0xDEAD_BEEF returns a
+##     negative errno other than -EINVAL (proves we reached
+##     try_reap's "not a child" path -> ECHILD).  Bad wstatus / rusage
+##     pointer EFAULT is NOT tested at boot because
+##     validate_user_write has a documented kernel-context bypass
+##     that makes it impossible to observe — the shared validation
+##     infrastructure is exercised by every other syscall and will
+##     EFAULT on bad pointers from real userspace.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
@@ -5738,3 +5754,33 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      with VMA layer).  Until then, MADV_DONTNEED leaves the pages
 ##      committed; future allocator activity re-uses them in place
 ##      rather than re-zero-faulting.
+##   9. WAIT4 — DONE.  sys_wait4 is wired through dispatch_linux,
+##      validates the options bitmap (WNOHANG=1, WUNTRACED=2,
+##      WCONTINUED=8; unknown bits -> EINVAL), pre-validates wstatus
+##      and rusage user pointers, then routes:
+##        - pid > 0  -> pcb::try_reap(parent, target)
+##        - pid <= 0 -> pcb::try_reap_any(parent)
+##      and threads through the same wait-task registration / re-check
+##      / block_current loop as sys_process_wait when WNOHANG is
+##      clear.  WNOHANG with no ready child returns 0 (Linux
+##      convention).  PermissionDenied / NoSuchProcess from try_reap
+##      collapse to -ECHILD (Linux: "not your child" and "no such
+##      child" are both ECHILD).
+##      encode_linux_wstatus translates ExitInfo to Linux <sys/wait.h>
+##      encoding: normal exit code C -> (C&0xff)<<8 (WIFEXITED+
+##      WEXITSTATUS); native exit_code in 128..=255 (our kill
+##      convention) -> sig&0x7f (WIFSIGNALED+WTERMSIG); crash -> 11
+##      (SIGSEGV).  WUNTRACED/WCONTINUED are accepted-but-ignored
+##      because we have no process-stop mechanism — there are no
+##      stopped or continued children to report.
+##      Rusage is zeroed when the user pointer is non-null (we don't
+##      track per-process resource usage yet; programs that consume
+##      ru_utime/ru_stime see zero CPU time but don't crash).
+##      Limitation: crash -> SIGSEGV is a heuristic.  Most crashes
+##      ARE page faults so SIGSEGV is correct most of the time, but
+##      a DivideError should map to SIGFPE, InvalidOpcode to SIGILL,
+##      etc.  Future enhancement: read CrashInfo.exception_code and
+##      map to the right Linux signal number.  Also: process groups
+##      aren't implemented (pid==0 and pid<-1 both degrade to
+##      "any child"), which is conformant but loses fidelity for
+##      shells that wait on a process group.

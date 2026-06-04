@@ -349,6 +349,7 @@ pub mod nr {
     pub const FCNTL: u64 = 72;
     pub const GETCWD: u64 = 79;
     pub const CHDIR: u64 = 80;
+    pub const FCHDIR: u64 = 81;
     pub const MKDIR: u64 = 83;
     pub const RMDIR: u64 = 84;
     pub const UNLINK: u64 = 87;
@@ -1726,6 +1727,11 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::MLOCK2 => sys_mlock2(args),
         nr::ACCT => sys_acct(args),
         nr::USTAT => sys_ustat(args),
+        nr::PREAD64 => sys_pread64(args),
+        nr::PWRITE64 => sys_pwrite64(args),
+        nr::GETCWD => sys_getcwd(args),
+        nr::CHDIR => sys_chdir(args),
+        nr::FCHDIR => sys_fchdir(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -9673,6 +9679,141 @@ fn sys_ustat(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+/// `pread64(fd, buf, count, offset)` — positional read.
+///
+/// We don't yet have a positional-I/O backend in the VFS, so report
+/// ENOSYS after argument validation.  glibc's stdio falls back to a
+/// `lseek + read + lseek` sequence when pread64 returns ENOSYS, which
+/// preserves the file offset for the caller.
+fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let buf = args.arg1;
+    let count = args.arg2;
+    let offset = args.arg3 as i64;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if offset < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if count == 0 {
+        return SyscallResult::ok(0);
+    }
+    let len = match usize::try_from(count) {
+        Ok(v) => v,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    if let Err(e) = crate::mm::user::validate_user_write(buf, len) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `pwrite64(fd, buf, count, offset)` — positional write.
+///
+/// Same fallback story as pread64: glibc emulates with seek+write+seek
+/// when pwrite64 returns ENOSYS.
+fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let buf = args.arg1;
+    let count = args.arg2;
+    let offset = args.arg3 as i64;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    if offset < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if count == 0 {
+        return SyscallResult::ok(0);
+    }
+    let len = match usize::try_from(count) {
+        Ok(v) => v,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    if let Err(e) = crate::mm::user::validate_user_read(buf, len) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `getcwd(buf, size)` — return current working directory as NUL-terminated path.
+///
+/// The kernel does not yet track a per-process cwd (the VFS resolves
+/// paths against an implicit root), so every caller observes `"/"` as
+/// the current directory.  This is the correct stub semantics: every
+/// shell, libc startup, and config-file loader invokes `getcwd()` at
+/// process startup and treating the absence of a cwd as a hard failure
+/// (ENOSYS) would break all of them.  Reporting `"/"` is consistent
+/// with what `chdir("/")` would set if we tracked it.
+///
+/// Linux contract: on success returns the number of bytes written
+/// **including** the trailing NUL.  `ERANGE` if `size` is too small,
+/// `EFAULT` for an unwritable `buf`, `EINVAL` for `size == 0` with
+/// non-NULL `buf`.
+fn sys_getcwd(args: &SyscallArgs) -> SyscallResult {
+    let buf = args.arg0;
+    let size = args.arg1;
+    if buf == 0 {
+        // POSIX getcwd() may allocate when buf is NULL; the raw syscall
+        // does not — it returns EFAULT.
+        return linux_err(errno::EFAULT);
+    }
+    if size == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // We need at least 2 bytes for "/" + NUL.
+    if size < 2 {
+        return linux_err(errno::ERANGE);
+    }
+    let cwd: &[u8] = b"/\0";
+    if let Err(e) = crate::mm::user::validate_user_write(buf, cwd.len()) {
+        return linux_err(linux_errno_for(e));
+    }
+    // SAFETY: validate_user_write succeeded; copy_to_user uses STAC/CLAC.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(cwd.as_ptr(), buf, cwd.len())
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(cwd.len() as i64)
+}
+
+/// `chdir(path)` — change current working directory.
+///
+/// Without per-process cwd tracking we silently succeed for any
+/// well-formed path string.  This matches the observable state via
+/// `getcwd` (always `"/"`) — a program that calls `chdir("/foo")` and
+/// then `getcwd()` will see `"/"` regardless, which is consistent with
+/// the kernel never having moved.  Once per-process cwd lands, this
+/// becomes a real path resolution + capability check.
+///
+/// TODO(item 57): wire to per-process cwd once that subsystem exists.
+fn sys_chdir(args: &SyscallArgs) -> SyscallResult {
+    let path = args.arg0;
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = validate_user_str(path) {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `fchdir(fd)` — change current working directory to an open dirfd.
+///
+/// Same stub semantics as `chdir`: validate the fd, return 0.  Real
+/// implementation requires both per-process cwd tracking and a
+/// directory-handle backend in the VFS.
+fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    SyscallResult::ok(0)
+}
+
 /// `lsm_list_modules(ids*, size*, flags)`.
 fn sys_lsm_list_modules(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 == 0 {
@@ -15818,6 +15959,106 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 0, arg1: ustat_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: ustat valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // pread64 / pwrite64 / getcwd / chdir / fchdir
+    // -----------------------------------------------------------------
+    {
+        let iobuf = [0u8; 64];
+        let iobuf_ptr = iobuf.as_ptr() as u64;
+        let mut cwd_buf = [0xFFu8; 64];
+        let cwd_ptr = cwd_buf.as_mut_ptr() as u64;
+        let path_buf = b"/tmp/foo\0";
+        let path_ptr = path_buf.as_ptr() as u64;
+
+        // pread64 negative offset -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 64, arg3: u64::MAX, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pread64 neg offset not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pread64 count=0 -> 0.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PREAD64, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: pread64 count=0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // pread64 valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: pread64 valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // pwrite64 negative offset -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 64, arg3: u64::MAX, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PWRITE64, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pwrite64 neg offset not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pwrite64 count=0 -> 0.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PWRITE64, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: pwrite64 count=0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // pwrite64 valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PWRITE64, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: pwrite64 valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // getcwd NULL buf -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETCWD, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: getcwd NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // getcwd size=0 -> EINVAL.
+        let a = SyscallArgs { arg0: cwd_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETCWD, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: getcwd size=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // getcwd size=1 -> ERANGE.
+        let a = SyscallArgs { arg0: cwd_ptr, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETCWD, &a).value != -i64::from(errno::ERANGE) {
+            serial_println!("[syscall/linux]   FAIL: getcwd size=1 not ERANGE");
+            return Err(KernelError::InternalError);
+        }
+        // getcwd valid -> 2 (length of "/\0") and buf starts with "/\0".
+        let a = SyscallArgs { arg0: cwd_ptr, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETCWD, &a).value != 2 {
+            serial_println!("[syscall/linux]   FAIL: getcwd valid not 2");
+            return Err(KernelError::InternalError);
+        }
+        #[allow(clippy::indexing_slicing)]
+        if cwd_buf[0] != b'/' || cwd_buf[1] != 0 {
+            serial_println!("[syscall/linux]   FAIL: getcwd did not write \"/\\0\"");
+            return Err(KernelError::InternalError);
+        }
+
+        // chdir NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHDIR, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: chdir NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // chdir valid -> 0.
+        let a = SyscallArgs { arg0: path_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHDIR, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: chdir valid not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // fchdir valid (any fd in kernel context) -> 0.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHDIR, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: fchdir valid not 0");
             return Err(KernelError::InternalError);
         }
     }

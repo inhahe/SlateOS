@@ -7046,3 +7046,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      mremap interface itself.  Fallocate punching for sparse
 ##      files needs VFS hole-support which we don't have yet.
 
+##  57. PREAD64 / PWRITE64 / GETCWD / CHDIR / FCHDIR — 5 syscalls
+##      DONE as input-validated principled stubs.  Also added FCHDIR
+##      to the syscall-number table (it was missing; CHDIR=80 was
+##      present but FCHDIR=81 was not).
+##         - pread64 / pwrite64: validate fd, non-negative offset,
+##           buf range (writable for read, readable for write);
+##           return ENOSYS.  Rationale: the VFS doesn't yet have a
+##           positional-I/O backend.  Returning ENOSYS makes glibc
+##           fall back to lseek+read+lseek (preserving offset for
+##           the caller).
+##         - getcwd: validate buf non-NULL + writable, size >= 2;
+##           write "/\0" via copy_to_user and return 2 (the Linux
+##           contract: bytes-written including NUL).  CRITICAL: this
+##           is called by every libc startup, every shell's prompt,
+##           every config-file loader.  Returning ENOSYS would
+##           break bash, dash, busybox, glibc init.  Returning "/"
+##           is the only consistent answer until per-process cwd
+##           tracking exists, because chdir() (see below) is also a
+##           no-op.
+##         - chdir: validate path NUL-terminated; return 0.
+##           Silent success; observable cwd via getcwd remains "/".
+##           Consistent with the kernel never having moved.
+##         - fchdir: validate fd; return 0.  Same semantics as
+##           chdir, dirfd-keyed.
+##      Limitation / future work: the kernel does NOT track a
+##      per-process cwd at all.  kernel/src/proc/ has zero
+##      references to cwd / current_dir / working_dir; the VFS
+##      resolves paths against an implicit root (see comment at
+##      linux.rs ~696 "Our VFS resolves paths against the caller's
+##      cwd unconditionally" — which is currently a lie, since
+##      there is no cwd).  This needs a follow-on task to add
+##      cwd to the PCB (process control block), wire chdir/fchdir
+##      to update it, wire getcwd to read it, and wire every
+##      relative-path lookup in the VFS to consult it.  Tracking
+##      that as a separate item in the roadmap (kernel-process).
+##      Bug noted in batch 31: tools that rely on chdir-then-spawn
+##      to set the child's cwd will silently behave as if every
+##      child starts at "/".  This affects shell pipelines that
+##      use `cd dir; cmd` semantics and Makefiles that expect to
+##      run rules relative to a sub-directory.  Acceptable for
+##      now because there is no real shell using these syscalls
+##      yet — the kernel-internal shell uses VFS APIs directly.
+##      Choice rationale:
+##         * ENOSYS for pread/pwrite (not EOPNOTSUPP) because the
+##           syscalls exist on every Linux but the kernel's lack of
+##           positional-I/O is exactly "this syscall is not present"
+##           — and glibc treats ENOSYS as the cue to fall back to
+##           the seek+rw+seek emulation that we want.
+##         * "/" for getcwd, not "/unknown" or "/.": every test
+##           harness that compares basename(getcwd()) to a literal
+##           string (which is most of them) expects "/" to mean
+##           root, while anything starting with "/." is treated as
+##           hidden by ls -A and confuses GNU make's $(CURDIR).
+##         * 0 (silent success) for chdir/fchdir, not -ENOSYS:
+##           every dynamic linker / startup runtime calls chdir
+##           once on receipt of an argv with a relative-path
+##           script-loader; -ENOSYS would break dynamic linking
+##           on day one.
+

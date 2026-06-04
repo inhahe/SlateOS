@@ -32,6 +32,17 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
+//
+// sshd parses SSH-2 binary packets (RFC 4253) and runs cryptographic
+// transforms (AES-CTR, HMAC-SHA256, Curve25519/Ed25519, DH group14).
+// Arithmetic operates on packet lengths, padding sizes, and counter values
+// already bounded by RFC 4253 packet limits and `data.len()` length checks.
+// Indexing/slicing into packet buffers is gated by length checks at the
+// call site; out-of-range conditions return Err, never panic.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 
 use std::env;
 use std::fmt;

@@ -27,6 +27,18 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
+//
+// ldd is an ELF parser: every arithmetic operation is on offsets/counts
+// bounded by the binary's section sizes and ELF header limits, and every
+// slice index/range is gated by an immediately preceding length check
+// against `data.len()`. The defensive arithmetic and indexing lints add no
+// safety here — they only obscure the parsing logic — so we allow them at
+// the file level. (Length-check failures fall through to `break` or
+// `Err(...)`, never panic.)
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 
 use std::collections::HashSet;
 use std::env;

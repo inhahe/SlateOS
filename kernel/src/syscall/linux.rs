@@ -13495,6 +13495,88 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             pcb::destroy(test_pid);
         }
+
+        // RLIMIT_NPROC enforcement in pcb::fork_create.
+        //
+        // The check kicks in when (parent.uid != 0) and
+        // (count_for_uid + 1 > rlimits[6].0).  We construct a parent
+        // owned by a non-root uid, lower NPROC tightly, and try to
+        // fork.  Then verify uid=0 is exempt regardless of NPROC.
+        {
+            let parent = pcb::create("rlimit-nproc-test-parent", 0);
+            // Give it a non-root uid so RLIMIT_NPROC actually fires.
+            let mut creds = pcb::ProcessCredentials::root();
+            creds.uid = 1000;
+            creds.gid = 1000;
+            pcb::set_credentials(parent, creds).expect("set creds");
+            // NPROC.cur = 1 so the count (just the parent) + 1 = 2 > 1
+            // triggers EAGAIN.
+            pcb::set_rlimit(parent, 6, 1, pcb::RLIM_INFINITY)
+                .expect("set NPROC=(1, INF)");
+
+            // fork_create should reject with WouldBlock (-> EAGAIN).
+            match pcb::fork_create(
+                parent,
+                0,
+                alloc::vec::Vec::new(),
+                alloc::vec::Vec::new(),
+            ) {
+                Err(KernelError::WouldBlock) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: NPROC tight fork expected WouldBlock, got {:?}",
+                        other.map(|p| { let _ = pcb::destroy(p); "Ok(pid)" }),
+                    );
+                    pcb::destroy(parent);
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // Raise NPROC.cur to 2 — fork should now succeed since
+            // (1 existing + 1 new) <= 2.
+            pcb::set_rlimit(parent, 6, 2, pcb::RLIM_INFINITY)
+                .expect("raise NPROC to 2");
+            let child = pcb::fork_create(
+                parent,
+                0,
+                alloc::vec::Vec::new(),
+                alloc::vec::Vec::new(),
+            ).expect("fork with NPROC=2 (room for 1 child)");
+            // Another fork would push count to 3 > 2 — must EAGAIN.
+            match pcb::fork_create(
+                parent,
+                0,
+                alloc::vec::Vec::new(),
+                alloc::vec::Vec::new(),
+            ) {
+                Err(KernelError::WouldBlock) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: NPROC over-fork expected WouldBlock, got {:?}",
+                        other.map(|_| "Ok(pid)"),
+                    );
+                    pcb::destroy(child);
+                    pcb::destroy(parent);
+                    return Err(KernelError::InternalError);
+                }
+            }
+            pcb::destroy(child);
+            pcb::destroy(parent);
+
+            // uid 0 is exempt — NPROC.cur=0 still allows fork.
+            let root_parent = pcb::create("rlimit-nproc-test-root", 0);
+            // root_parent inherits root creds from Process::new (uid=0).
+            pcb::set_rlimit(root_parent, 6, 0, pcb::RLIM_INFINITY)
+                .expect("set NPROC=(0, INF) on root");
+            let root_child = pcb::fork_create(
+                root_parent,
+                0,
+                alloc::vec::Vec::new(),
+                alloc::vec::Vec::new(),
+            ).expect("uid 0 fork exempt from NPROC");
+            pcb::destroy(root_child);
+            pcb::destroy(root_parent);
+        }
     }
 
     // rt_sigpending dispatch validation:

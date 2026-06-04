@@ -7822,3 +7822,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      strictly necessary.  Acceptable until profiling flags
 ##      it.
 
+##  69. Enforce RLIMIT_NPROC in fork_create — DONE.
+##      Ninth "upgrade a stub" batch.  Adds the second
+##      storage→enforcement link from item 67's priority list.
+##      Userspace fork now sees EAGAIN when the parent's uid
+##      already owns rlim_cur(NPROC) processes.
+##         - pcb::fork_create: after snapshotting the parent's
+##           rlimits + credentials, walk PROCESS_TABLE counting
+##           processes whose credentials.uid matches.  If
+##           (count + 1) > rlimits[6].0 → return WouldBlock
+##           (mapped to EAGAIN at the syscall layer).
+##         - uid 0 is exempt by convention (Linux uses
+##           CAP_SYS_RESOURCE / CAP_SYS_ADMIN; we have no cap
+##           model wired up, so root is treated as exempt —
+##           same effective behaviour for the systems we run).
+##         - RLIM_INFINITY skips the check entirely.
+##         - pcb::create (kernel-spawned processes like init)
+##           is intentionally NOT gated — RLIMIT_NPROC is a
+##           userspace-fork-only limit on Linux too.
+##      Coverage in the rlimit self-test block:
+##         - Parent with uid=1000 + NPROC.cur=1 → fork
+##           rejected with WouldBlock (1 existing + 1 new = 2
+##           > 1).
+##         - Raise NPROC.cur to 2 → one fork succeeds.
+##         - Another fork → WouldBlock (count + 1 = 3 > 2).
+##         - Parent with uid=0 + NPROC.cur=0 → fork still
+##           succeeds (root exemption).
+##         - Clean up all throwaway pids via pcb::destroy.
+##      Choice rationale:
+##         * Enforcing in fork_create catches every userspace
+##           process-creation path that flows through the PCB
+##           layer.  pcb::create (kernel-spawned) deliberately
+##           skips the check so service-manager bootstrap and
+##           init can't be locked out.
+##         * Counting includes zombies (per Linux): a zombie
+##           still holds the uid quota until reaped.  The walk
+##           doesn't filter on ProcessState, which is correct.
+##         * Rejecting before alloc_pid keeps the PID pool clean
+##           on the failure path — no leaked PIDs.
+##         * Holding the PROCESS_TABLE lock across the count
+##           and the insert keeps the check atomic with respect
+##           to other forks.  Without this, two concurrent
+##           forks could each see "room for one more" and both
+##           install, blowing past the limit.
+##      Limitation: We exempt uid=0 instead of CAP_SYS_RESOURCE
+##      because we don't have a real capability check for that
+##      cap.  When the cap model lands, swap the uid check for
+##      `has_capability(CAP_SYS_RESOURCE)`.
+##      Limitation: The per-uid count is O(N_processes).  Fine
+##      for the dozens-to-hundreds of processes a desktop runs;
+##      a per-uid counter cache would be needed for thousands.
+##      Acceptable until profiling flags it.
+##      Limitation: Threads (created via clone with CLONE_THREAD)
+##      are not currently distinguished from processes here.
+##      They're tracked separately via the thread table, so they
+##      don't show up in PROCESS_TABLE and don't count against
+##      NPROC.  Matches Linux's actual semantics (NPROC counts
+##      *processes*, not threads), but worth noting because some
+##      kernels conflate the two.
+

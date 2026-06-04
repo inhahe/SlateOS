@@ -503,6 +503,38 @@ pub fn fork_create(
         )
     };
 
+    // Enforce RLIMIT_NPROC (resource index 6): per-uid count of live
+    // processes owned by `credentials.uid` must remain below the
+    // soft limit, else fork returns EAGAIN.  Linux exempts processes
+    // with CAP_SYS_RESOURCE / CAP_SYS_ADMIN; we don't have those caps
+    // wired up yet, so we exempt uid 0 (root) by convention — it's
+    // the same effective behaviour for the systems we run.
+    //
+    // RLIM_INFINITY skips the check.  This runs against the just-
+    // snapshotted parent rlimits and credentials; we already hold
+    // the PROCESS_TABLE lock so the count is consistent with the
+    // limit decision.
+    let nproc_soft = rlimits[6].0;
+    if credentials.uid != 0 && nproc_soft != RLIM_INFINITY {
+        let target_uid = credentials.uid;
+        let mut count: u64 = 0;
+        for (_, p) in table.iter() {
+            // Count only live processes (not Zombie/Exited): a zombie
+            // still occupies a PID slot until reaped, but Linux
+            // includes them in RLIMIT_NPROC since they still hold the
+            // uid quota.  We follow Linux and count all non-finalised
+            // processes regardless of state.
+            if p.credentials.uid == target_uid {
+                count = count.saturating_add(1);
+            }
+        }
+        // Forking adds one more.  Reject before allocating a PID so
+        // we don't leak a PID on the failure path.
+        if count.saturating_add(1) > nproc_soft {
+            return Err(KernelError::WouldBlock);
+        }
+    }
+
     let pid = alloc_pid();
     let child = Process {
         pid,

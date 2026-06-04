@@ -6127,3 +6127,14 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      lands, these must route through it; until then, programs
 ##      that rely on alarm() to interrupt blocking calls will
 ##      not be interrupted.
+##  38. ACCESS / FACCESSAT / FACCESSAT2 — DONE as
+##      ENOENT-after-validate stubs.  Mode bits validated against
+##      R_OK|W_OK|X_OK; bogus bits -> EINVAL.  faccessat2 also
+##      validates the AT_* flag bits.  After validation, returns
+##      -ENOENT because no path exists in our empty FS.
+##      ENOENT is the truthful answer (the path is not present)
+##      and is universally handled by loader fallback code,
+##      unlike ENOSYS which can cause some loaders to bail out.
+##      Limitation: when a real VFS lands these must route
+##      through it and report EACCES / EOK based on real
+##      permissions.

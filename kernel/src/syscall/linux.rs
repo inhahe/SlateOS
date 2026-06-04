@@ -445,6 +445,8 @@ pub mod nr {
     pub const SETITIMER: u64 = 38;
     pub const ALARM: u64 = 37;
     pub const PAUSE: u64 = 34;
+    pub const FACCESSAT: u64 = 269;
+    pub const FACCESSAT2: u64 = 439;
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,6 +1303,9 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::SETITIMER => sys_setitimer(args),
         nr::ALARM => sys_alarm(args),
         nr::PAUSE => sys_pause(args),
+        nr::ACCESS => sys_access(args),
+        nr::FACCESSAT => sys_faccessat(args),
+        nr::FACCESSAT2 => sys_faccessat2(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -4567,6 +4572,90 @@ fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+// ---------------------------------------------------------------------------
+// access / faccessat / faccessat2 — file permission probes
+//
+// Without a backing filesystem there is no path that exists.  The
+// truthful answer is ENOENT ("no such file") rather than ENOSYS — every
+// real userspace fallback path treats ENOENT as "not present, move on",
+// which is the correct behaviour for our empty FS.  Returning ENOSYS
+// instead would cause some loaders to bail out.
+//
+// We still validate the mode bits and reject bogus ones with EINVAL so
+// callers passing garbage observe Linux-shaped errors.
+// ---------------------------------------------------------------------------
+
+const ACCESS_VALID_MODE: u32 = 0x07; // R_OK=4 | W_OK=2 | X_OK=1 (F_OK=0)
+
+/// `access(path, mode)` — reports the path does not exist.
+fn sys_access(args: &SyscallArgs) -> SyscallResult {
+    let path = args.arg0;
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = args.arg1 as u32;
+
+    if mode & !ACCESS_VALID_MODE != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOENT)
+}
+
+/// `faccessat(dirfd, path, mode, flags)` — same as access for now.
+///
+/// Linux flag bits: `AT_EACCESS = 0x200`, `AT_SYMLINK_NOFOLLOW = 0x100`.
+fn sys_faccessat(args: &SyscallArgs) -> SyscallResult {
+    let path = args.arg1;
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = args.arg2 as u32;
+    // arg3 is flags; faccessat ignores unknown bits historically (Linux's
+    // faccessat2 was added because faccessat silently dropped flags).
+
+    if mode & !ACCESS_VALID_MODE != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOENT)
+}
+
+/// `faccessat2(dirfd, path, mode, flags)` — explicit-flag variant.
+///
+/// Differs from `faccessat` in that it validates flag bits.
+fn sys_faccessat2(args: &SyscallArgs) -> SyscallResult {
+    const AT_EACCESS: u64 = 0x200;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const VALID_FLAGS: u64 = AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    let path = args.arg1;
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = args.arg2 as u32;
+    let flags = args.arg3;
+
+    if mode & !ACCESS_VALID_MODE != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if flags & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOENT)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -7357,6 +7446,70 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::PAUSE, &a).value
             != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: pause not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // access / faccessat / faccessat2 — input validation, then ENOENT.
+    {
+        // Bogus mode bit (8 is not R/W/X/F) -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 8, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCESS, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: access(_,8) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // NULL path -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCESS, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: access(NULL,0) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Valid call in kernel context (bypass) -> ENOENT.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCESS, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: access not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // faccessat: NULL path -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FACCESSAT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: faccessat(_,NULL,_,_) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // faccessat2: bogus flag bit -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0x800_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FACCESSAT2, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: faccessat2(bad flag) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // faccessat2 with valid flag -> ENOENT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0x200, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FACCESSAT2, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: faccessat2 not ENOENT"
+            );
             return Err(KernelError::InternalError);
         }
     }

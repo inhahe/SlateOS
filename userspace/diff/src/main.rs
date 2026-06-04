@@ -566,14 +566,13 @@ fn myers_diff(
 
         let mut k = -d_signed;
         while k <= d_signed {
-            let x: isize;
-            if k == -d_signed
+            let x: isize = if k == -d_signed
                 || (k != d_signed && old_v[idx(k - 1)] < old_v[idx(k + 1)])
             {
-                x = old_v[idx(k + 1)];
+                old_v[idx(k + 1)]
             } else {
-                x = old_v[idx(k - 1)] + 1;
-            }
+                old_v[idx(k - 1)] + 1
+            };
 
             let mut x_curr = x;
             let mut y_curr = x_curr - k;
@@ -616,14 +615,13 @@ fn myers_diff(
         let k = cx - cy;
         let vd = &v_history[d];
 
-        let prev_k: isize;
-        if k == -d_signed
+        let prev_k: isize = if k == -d_signed
             || (k != d_signed && vd[idx(k - 1)] < vd[idx(k + 1)])
         {
-            prev_k = k + 1;
+            k + 1
         } else {
-            prev_k = k - 1;
-        }
+            k - 1
+        };
 
         let prev_x = if d > 0 { v_history[d - 1][idx(prev_k)] } else { 0 };
         let prev_y = prev_x - prev_k;
@@ -703,7 +701,7 @@ fn myers_diff(
 
 /// If `--ignore-blank-lines` is set, reclassify insertions and deletions of
 /// blank lines as equal (keeping the line from whichever side is available).
-fn filter_blank_lines(ops: &mut Vec<(Op, String)>) {
+fn filter_blank_lines(ops: &mut [(Op, String)]) {
     for entry in ops.iter_mut() {
         if entry.0 != Op::Equal && is_blank(&entry.1) {
             entry.0 = Op::Equal;
@@ -888,14 +886,10 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
             }
         }
 
-        let r1 = range_str(
-            if del_count > 0 { line1_pos } else { line1_pos },
-            del_count,
-        );
-        let r2 = range_str(
-            if ins_count > 0 { line2_pos } else { line2_pos },
-            ins_count,
-        );
+        // POSIX diff prints the starting line of each range whether or not
+        // the count is zero; both arms return the same value.
+        let r1 = range_str(line1_pos, del_count);
+        let r2 = range_str(line2_pos, ins_count);
 
         let op_char = match (has_del, has_ins) {
             (true, true) => 'c',
@@ -1366,12 +1360,11 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
     // Handle binary files.
     match (&content1, &content2) {
         (FileContent::Binary, _) | (_, FileContent::Binary) => {
-            // For binary files, just report whether they differ.
-            if config.brief || config.json {
-                println!("Binary files {path1_str} and {path2_str} differ");
-            } else {
-                println!("Binary files {path1_str} and {path2_str} differ");
-            }
+            // For binary files, just report whether they differ — same
+            // message regardless of --brief or --json (we don't emit a
+            // JSON object for binary file comparisons).
+            let _ = (config.brief, config.json);
+            println!("Binary files {path1_str} and {path2_str} differ");
             return 1;
         }
         _ => {}

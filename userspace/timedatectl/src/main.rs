@@ -10,12 +10,24 @@
 // ── Constants ──────────────────────────────────────────────────────────
 
 const HOSTNAME_MAX_LEN: usize = 64;
+// Path constants for the configuration files this binary manipulates.
+// Some are not yet exercised by every personality (timedatectl uses
+// LOCALTIME/TIMEZONE/ADJTIME, hostnamectl uses HOSTNAME/MACHINE_INFO,
+// localectl uses LOCALE_CONF/VCONSOLE) — they're listed together to
+// document the full surface area in one place.
+#[allow(dead_code)]
 const LOCALE_CONF_PATH: &[u8] = b"/etc/locale.conf";
+#[allow(dead_code)]
 const HOSTNAME_PATH: &[u8] = b"/etc/hostname";
+#[allow(dead_code)]
 const MACHINE_INFO_PATH: &[u8] = b"/etc/machine-info";
+#[allow(dead_code)]
 const LOCALTIME_PATH: &[u8] = b"/etc/localtime";
+#[allow(dead_code)]
 const TIMEZONE_PATH: &[u8] = b"/etc/timezone";
+#[allow(dead_code)]
 const ADJTIME_PATH: &[u8] = b"/etc/adjtime";
+#[allow(dead_code)]
 const VCONSOLE_PATH: &[u8] = b"/etc/vconsole.conf";
 
 // ── Personality Detection ──────────────────────────────────────────────
@@ -500,16 +512,15 @@ fn hostname_status() -> i32 {
 }
 
 fn hostname_get(args: &HostnameArgs) -> i32 {
-    // In real implementation: gethostname() syscall
-    if args.static_only {
-        print_out(b"ouros\n");
-    } else if args.transient {
-        print_out(b"ouros\n");
-    } else if args.pretty {
+    // In real implementation: gethostname() syscall. The static, transient,
+    // and default cases all report the kernel hostname; only --pretty
+    // produces the human-readable form.
+    if args.pretty {
         print_out(b"OurOS Desktop\n");
     } else {
         print_out(b"ouros\n");
     }
+    let _ = (args.static_only, args.transient);
     0
 }
 

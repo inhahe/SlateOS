@@ -21,6 +21,9 @@
 //! ```
 
 #![allow(dead_code)]
+// Widget-heavy GUI crate: render helpers take many positional
+// parameters (theme, geometry, hit-test state, etc.).
+#![allow(clippy::too_many_arguments)]
 
 #[allow(unused_imports)]
 use guitk::color::Color;
@@ -583,8 +586,10 @@ impl StartupManager {
 
     /// Compute aggregate statistics.
     pub fn stats(&self) -> StartupStats {
-        let mut s = StartupStats::default();
-        s.total = self.entries.len();
+        let mut s = StartupStats {
+            total: self.entries.len(),
+            ..StartupStats::default()
+        };
         for entry in self.entries.values() {
             if entry.enabled {
                 s.enabled += 1;

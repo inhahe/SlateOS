@@ -15,6 +15,10 @@
 //   - PAM-like authentication flow (simplified)
 
 #![cfg_attr(not(test), no_main)]
+// Tracked-but-not-yet-wired fields and constants are kept to document the
+// intended interface as the login implementation grows (PAM/shadow have
+// many fields that the current minimal flow doesn't read yet).
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;
@@ -383,13 +387,10 @@ fn is_hushlogin(user: &PasswdEntry) -> bool {
 /// Check for new mail
 fn check_mail(writer: &mut dyn Write, username: &str) -> io::Result<()> {
     let mail_path = format!("{MAIL_DIR}/{username}");
-    match std::fs::metadata(&mail_path) {
-        Ok(meta) => {
-            if meta.len() > 0 {
-                writeln!(writer, "You have mail.")?;
-            }
-        }
-        Err(_) => {} // No mail file
+    if let Ok(meta) = std::fs::metadata(&mail_path)
+        && meta.len() > 0
+    {
+        writeln!(writer, "You have mail.")?;
     }
     Ok(())
 }

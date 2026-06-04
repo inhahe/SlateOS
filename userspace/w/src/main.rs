@@ -11,6 +11,12 @@
 //   pinky [OPTIONS] [user...]
 
 #![cfg_attr(not(test), no_main)]
+// Several fields are read from utmp/finger structures whose full layout we
+// preserve even when the current minimal output doesn't render every
+// column (pid, home_phone, idle_sort, OldMail status). The MailStatus
+// variants share the `Mail` postfix because that matches the finger
+// protocol's terminology.
+#![allow(dead_code, clippy::enum_variant_names)]
 
 use std::env;
 use std::io::{self, Write};

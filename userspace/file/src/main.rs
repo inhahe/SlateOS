@@ -373,11 +373,8 @@ fn detect_pe(buf: &[u8]) -> Option<FileType> {
 
     Some(FileType {
         description: format!("{pe_type} {kind}, {machine_str}"),
-        mime: if characteristics & 0x2000 != 0 {
-            "application/x-dosexec".into()
-        } else {
-            "application/x-dosexec".into()
-        },
+        // PE files (both DLLs and executables) share the same MIME type.
+        mime: "application/x-dosexec".into(),
     })
 }
 
@@ -735,8 +732,8 @@ fn detect_data(buf: &[u8]) -> Option<FileType> {
     // JSON: starts with { or [.
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         // Quick plausibility check: look for a quote after the opening brace.
-        if trimmed.starts_with('{') {
-            let rest = trimmed[1..].trim_start();
+        if let Some(after_brace) = trimmed.strip_prefix('{') {
+            let rest = after_brace.trim_start();
             if rest.starts_with('"') || rest.starts_with('}') {
                 return Some(FileType {
                     description: "JSON text data".into(),
@@ -974,9 +971,13 @@ fn text_type(buf: &[u8]) -> FileType {
 // Top-level identification
 // ============================================================================
 
+/// One magic-number detector's signature: takes the file's leading bytes,
+/// returns `Some(FileType)` on match or `None` to skip.
+type Detector = fn(&[u8]) -> Option<FileType>;
+
 /// Ordered list of magic-number detectors. Checked in priority order; the
 /// first match wins (unless `--keep-going` is set).
-const DETECTORS: &[fn(&[u8]) -> Option<FileType>] = &[
+const DETECTORS: &[Detector] = &[
     detect_elf,
     detect_pe,
     detect_shebang,

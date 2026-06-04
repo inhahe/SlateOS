@@ -388,8 +388,8 @@ impl BigInt {
         if s.is_empty() {
             return Self::zero();
         }
-        let (negative, digits) = if s.starts_with('-') {
-            (true, &s[1..])
+        let (negative, digits) = if let Some(rest) = s.strip_prefix('-') {
+            (true, rest)
         } else {
             (false, s)
         };
@@ -785,8 +785,8 @@ impl BcNum {
         if s.is_empty() {
             return Self::zero();
         }
-        let (negative, body) = if s.starts_with('-') {
-            (true, &s[1..])
+        let (negative, body) = if let Some(rest) = s.strip_prefix('-') {
+            (true, rest)
         } else {
             (false, s)
         };
@@ -1584,15 +1584,11 @@ impl Parser {
         let mut auto_vars = Vec::new();
         if *self.peek() == Token::Auto {
             self.advance();
-            loop {
-                if let Token::Ident(v) = self.peek().clone() {
+            while let Token::Ident(v) = self.peek().clone() {
+                self.advance();
+                auto_vars.push(v);
+                if *self.peek() == Token::Comma {
                     self.advance();
-                    auto_vars.push(v);
-                    if *self.peek() == Token::Comma {
-                        self.advance();
-                    } else {
-                        break;
-                    }
                 } else {
                     break;
                 }

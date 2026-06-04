@@ -14,7 +14,6 @@
 //! through OurOS syscalls; stubbed with representative data for initial
 //! development.
 
-#[allow(dead_code)]
 pub mod hwquery;
 
 #[allow(unused_imports)]
@@ -505,6 +504,12 @@ pub struct SysInfoState {
     pub usb_devices: Vec<UsbDeviceInfo>,
     pub sound_devices: Vec<SoundInfo>,
     pub startup_programs: Vec<StartupEntry>,
+}
+
+impl Default for SysInfoState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SysInfoState {

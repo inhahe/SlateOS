@@ -152,6 +152,12 @@ pub struct SyscallProvider {
     file_cache: HashMap<String, String>,
 }
 
+impl Default for SyscallProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SyscallProvider {
     /// Create a new syscall-based provider.
     pub fn new() -> Self {

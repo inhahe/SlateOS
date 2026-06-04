@@ -10,6 +10,11 @@
 //! extended diagnostics by default.
 
 #![cfg_attr(not(test), no_main)]
+// LALR(1) table construction inherently shuffles long argument lists
+// (item sets, action/goto tables, terminal/nonterminal indices, ...);
+// adding builder structs for the inner helpers would obscure the
+// classic algorithm. Allow too_many_arguments at file scope.
+#![allow(clippy::too_many_arguments)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::env;
@@ -35,6 +40,11 @@ const BISON_NAME: &str = "bison";
 // -------------------------------------------------------------------------
 
 /// Operator associativity for conflict resolution.
+///
+/// `NonAssoc` mirrors the `%nonassoc` directive in YACC/Bison grammar
+/// files, so we keep the conventional name even though it ends in the
+/// enum's own name.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Assoc {
     Left,
@@ -1802,10 +1812,8 @@ fn generate_c_output(
 
     // Non-terminal ID mapping
     let mut nt_ids: HashMap<String, usize> = HashMap::new();
-    let mut next_nt: usize = 10000;
-    for nt in &grammar.nonterminals {
-        nt_ids.insert(nt.clone(), next_nt);
-        next_nt += 1;
+    for (next_nt, nt) in grammar.nonterminals.iter().enumerate() {
+        nt_ids.insert(nt.clone(), 10000 + next_nt);
     }
 
     // Production tables: yylen[i] = #symbols in RHS of production i,

@@ -19,7 +19,7 @@
 //! ```
 
 #![cfg_attr(not(test), no_main)]
-#![allow(clippy::needless_range_loop)]
+#![allow(clippy::needless_range_loop, clippy::vec_init_then_push)]
 
 use std::collections::HashMap;
 use std::env;
@@ -2839,8 +2839,8 @@ fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
             sa.system = false;
         } else if arg == "--print-reply" {
             sa.print_reply = true;
-        } else if arg.starts_with("--dest=") {
-            sa.dest = arg[7..].to_string();
+        } else if let Some(dest) = arg.strip_prefix("--dest=") {
+            sa.dest = dest.to_string();
         } else if arg == "--type=method_call" {
             sa.msg_type = MSG_METHOD_CALL;
         } else if arg == "--type=signal" {
@@ -3040,13 +3040,14 @@ fn run_dbus_daemon(args: &[String]) -> i32 {
             BusType::System => SYSTEM_CONF,
             BusType::Session => SESSION_CONF,
         };
-        BusConfig::parse_file(Path::new(default_path)).unwrap_or_else(|_| {
-            let mut c = BusConfig::default();
-            c.bus_type = bus_type;
-            if bus_type == BusType::System {
-                c.listen_address = SYSTEM_SOCKET.to_string();
-            }
-            c
+        BusConfig::parse_file(Path::new(default_path)).unwrap_or_else(|_| BusConfig {
+            bus_type,
+            listen_address: if bus_type == BusType::System {
+                SYSTEM_SOCKET.to_string()
+            } else {
+                BusConfig::default().listen_address
+            },
+            ..BusConfig::default()
         })
     };
 

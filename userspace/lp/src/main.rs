@@ -55,6 +55,9 @@ fn detect_personality(argv0: &str) -> Personality {
 // Print job and queue
 // ---------------------------------------------------------------------------
 
+// Several fields are parsed from the CUPS queue state file and only
+// consumed by the still-pending verbose `lpstat -l` listing path.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PrintJob {
     job_id: u32,
@@ -88,6 +91,9 @@ impl JobStatus {
     }
 }
 
+// Same rationale as PrintJob — enabled/jobs_queued feed the verbose
+// `lpstat -l` listing path.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PrinterInfo {
     name: String,
@@ -101,6 +107,9 @@ struct PrinterInfo {
     jobs_queued: u32,
 }
 
+// Processing/Stopped are produced by the CUPS-style state machine that
+// hasn't been wired up yet; the sample data only emits Idle.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrinterState {
     Idle,

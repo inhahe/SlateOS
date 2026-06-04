@@ -3540,22 +3540,52 @@ fn sys_tgkill(args: &SyscallArgs) -> SyscallResult {
 /// value is returned.  Programs use it both to set new permissions and
 /// to read the current one (the common idiom `old = umask(0); umask(old);`).
 ///
-/// We don't have per-process umask storage yet (the PCB doesn't carry
-/// one) and the VFS doesn't apply umask at create time either, so
-/// nothing else in the kernel observes the value.  Stub semantics:
-///   - Always return 0o022 (the standard Linux distro default — what
-///     most programs would see on a fresh shell).
-///   - Silently accept and discard the new mask.
+/// Batch 51 wires this through per-process state in the PCB
+/// ([`pcb::Process::linux_umask`]):
+///   - The new mask is masked with `& 0o777` (Linux silently drops
+///     higher bits — there is no error path for out-of-range mask
+///     values).
+///   - The previous mask, as held by the calling process, is returned.
+///   - Kernel-context callers (boot self-test, in-kernel helpers
+///     that have no `caller_pid()`) fall back to the historical
+///     `0o022` default so the dispatch path remains usable before
+///     any process exists.
 ///
-/// Limitation: a program that does `umask(0o077); creat(file);` and
-/// then checks the file mode will see the kernel default permissions
-/// rather than mask-respecting ones.  Tracked in todo.txt as needing
-/// per-process umask storage + VFS plumbing.
-fn sys_umask(_args: &SyscallArgs) -> SyscallResult {
-    // 0o022 is the de-facto Linux distro default (group/other lose
-    // write bits).  Returning it as the "previous" umask is the
-    // friendliest stub for programs that do `old = umask(N); umask(old);`.
-    SyscallResult::ok(0o022)
+/// Round-trip property — the common idiom
+/// `old = umask(N); ... ; umask(old);` now preserves the original
+/// mask exactly, because both halves go through the same per-process
+/// store.  Previously every call returned the same hard-coded
+/// `0o022` regardless of what was stored, silently corrupting
+/// sandbox setup code that depended on the round-trip.
+///
+/// Limitation: the VFS does NOT yet consult `linux_umask` at file
+/// creation time, so `umask(0o077); creat(file);` still produces a
+/// file with the kernel's default permissions on the resulting
+/// inode.  Tracked in todo.txt — needs VFS plumbing to call
+/// [`pcb::get_umask`] when computing initial inode mode.
+fn sys_umask(args: &SyscallArgs) -> SyscallResult {
+    // Linux always masks with 0o777 — out-of-range bits are silently
+    // dropped, never rejected with EINVAL.  We truncate to u16 first
+    // because the PCB field is u16 (the upper bits are structurally
+    // zero once masked).
+    #[allow(clippy::cast_possible_truncation)]
+    let requested = (args.arg0 & 0o777) as u16;
+    let Some(pid) = caller_pid() else {
+        // Boot self-test / kernel helper path: no PCB to update.
+        // Return the canonical distro default so callers that only
+        // probe ("what is my umask?") see a stable answer.
+        return SyscallResult::ok(0o022);
+    };
+    match pcb::set_umask(pid, requested) {
+        Some(old) => SyscallResult::ok(i64::from(old)),
+        None => {
+            // The caller's PID was reported but the PCB lookup
+            // failed — the process is mid-tear-down and its record
+            // is gone.  Linux's umask has no errno (it never
+            // fails); fall back to the distro default.
+            SyscallResult::ok(0o022)
+        }
+    }
 }
 
 /// `sigaltstack(ss, old_ss)` — install / query the alternate signal
@@ -14558,15 +14588,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    // umask dispatch validation:
-    //   - Always returns 0o022 (our compiled-in distro-default stub).
-    //   - Any mask argument is silently accepted.
+    // umask dispatch validation (batch 51 — per-process umask storage).
+    //
+    // Kernel-context path (caller_pid == None): the syscall falls
+    // back to the historical 0o022 distro default regardless of the
+    // argument, since there is no PCB to read or update.  All three
+    // dispatch cases below exercise that fall-back.
     {
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::UMASK, &a).value != 0o022 {
             serial_println!(
-                "[syscall/linux]   FAIL: umask(0) not 0o022 ({})",
+                "[syscall/linux]   FAIL: umask(0) kernel-context not 0o022 ({})",
                 dispatch_linux(nr::UMASK, &a).value
             );
             return Err(KernelError::InternalError);
@@ -14575,7 +14608,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::UMASK, &a).value != 0o022 {
             serial_println!(
-                "[syscall/linux]   FAIL: umask(0o777) not 0o022 ({})",
+                "[syscall/linux]   FAIL: umask(0o777) kernel-context not 0o022 ({})",
                 dispatch_linux(nr::UMASK, &a).value
             );
             return Err(KernelError::InternalError);
@@ -14585,8 +14618,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::UMASK, &a).value != 0o022 {
-            serial_println!("[syscall/linux]   FAIL: umask(u64::MAX) not 0o022");
+            serial_println!("[syscall/linux]   FAIL: umask(u64::MAX) kernel-context not 0o022");
             return Err(KernelError::InternalError);
+        }
+
+        // Direct pcb::get_umask / pcb::set_umask coverage on a dummy
+        // process so we exercise the round-trip property that the
+        // boot self-test can't reach through the dispatch path
+        // (caller_pid is None during the dispatch self-test).
+        //
+        //   1. Fresh process starts at 0o022.
+        //   2. set_umask(0o077) -> Some(0o022); subsequent get -> 0o077.
+        //   3. set_umask with bits above 0o777 silently masks them off.
+        //   4. set_umask on a destroyed PID returns None.
+        //   5. get_umask on a destroyed PID returns None.
+        {
+            let test_pid = pcb::create("umask-self-test", 0);
+            // (1) Default.
+            assert_eq!(pcb::get_umask(test_pid), Some(0o022));
+            // (2) Round trip 0o022 <-> 0o077.
+            match pcb::set_umask(test_pid, 0o077) {
+                Some(0o022) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: umask set 0o077 expected Some(0o022), got {:?}",
+                        other
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            assert_eq!(pcb::get_umask(test_pid), Some(0o077));
+            match pcb::set_umask(test_pid, 0o022) {
+                Some(0o077) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: umask restore 0o022 expected Some(0o077), got {:?}",
+                        other
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            assert_eq!(pcb::get_umask(test_pid), Some(0o022));
+            // (3) High bits silently dropped.  0o7777 -> 0o777 stored,
+            //     and the *returned* old is whatever was stored from
+            //     step 2 (0o022).
+            match pcb::set_umask(test_pid, 0o7777) {
+                Some(0o022) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: umask set 0o7777 expected Some(0o022), got {:?}",
+                        other
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Only 9 bits should have stuck.
+            assert_eq!(pcb::get_umask(test_pid), Some(0o777));
+            // Clean up before testing the post-destroy lookup paths.
+            pcb::destroy(test_pid);
+            // (4) set on destroyed PID -> None.
+            if pcb::set_umask(test_pid, 0).is_some() {
+                serial_println!(
+                    "[syscall/linux]   FAIL: umask set on destroyed PID returned Some"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (5) get on destroyed PID -> None.
+            if pcb::get_umask(test_pid).is_some() {
+                serial_println!(
+                    "[syscall/linux]   FAIL: umask get on destroyed PID returned Some"
+                );
+                return Err(KernelError::InternalError);
+            }
         }
     }
 

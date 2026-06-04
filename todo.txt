@@ -8419,3 +8419,60 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Documented here so future audits don't mistake the
 ##      now-passing EBADF tests for "fsync works".
 
+##   77. Per-process umask storage (batch 51).
+##      Status: PARTIAL.  Round-trip is now correct; VFS
+##      consumption is not yet wired.
+##      Before batch 51, sys_umask was a hard-coded stub:
+##      every call returned 0o022 and the argument was
+##      silently discarded.  That broke the "save and
+##      restore" idiom programs use during sandbox setup:
+##         int old = umask(0o077);
+##         ... do privileged work ...
+##         umask(old);
+##      With the old stub, `old` always came back as
+##      0o022 regardless of what was actually in effect,
+##      so the second umask call would install 0o022
+##      instead of whatever the caller had inherited.
+##      Some test suites (notably postfix's, sendmail's,
+##      and parts of glibc's locale install scripts)
+##      gate on `umask(0) == umask()` and would fail.
+##      Wiring up:
+##         - Added pcb::Process::linux_umask: u16
+##           (default 0o022, masked to 0o777 on write).
+##         - Added pcb::get_umask(pid) -> Option<u16>.
+##         - Added pcb::set_umask(pid, new) -> Option<u16>
+##           returning the old mask, masking new with
+##           & 0o777 (Linux silently drops higher bits).
+##         - fork_create copies parent's linux_umask
+##           verbatim (POSIX inheritance).
+##         - sys_umask now routes through these helpers
+##           when caller_pid is Some.  Kernel-context
+##           callers (boot self-test) fall back to the
+##           0o022 default so the dispatch path stays
+##           usable before any process exists.
+##      Boot self-test coverage:
+##         - Kernel-context dispatch: umask(0), umask(0o777),
+##           umask(u64::MAX) all return 0o022.
+##         - Per-process direct test on a dummy PID:
+##              fresh PID → 0o022 default
+##              set 0o077 → returns Some(0o022),
+##                          get returns Some(0o077)
+##              set 0o022 → returns Some(0o077),
+##                          get returns Some(0o022)
+##              set 0o7777 → returns Some(0o022),
+##                           get returns Some(0o777)
+##                           (high bits silently dropped)
+##              destroy + set on destroyed PID → None
+##              destroy + get on destroyed PID → None
+##      Limitation: the VFS does NOT yet consult
+##      linux_umask at file creation time.  A program that
+##      does `umask(0o077); creat(file, 0o666);` will
+##      still get the kernel's default permissions on the
+##      created inode rather than `0o666 & ~0o077 = 0o600`
+##      as Linux would.  What works now is the round-trip
+##      property (what most callers actually depend on);
+##      the actual permission-masking on creat/openat/mkdir
+##      is a separate wiring task.  When that lands, the
+##      VFS open path should call pcb::get_umask(caller_pid)
+##      and mask the requested mode before storing it.
+

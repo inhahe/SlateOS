@@ -361,6 +361,24 @@ pub struct Process {
     /// field, matching Linux's "RLIMIT_AS only applies to processes
     /// going through the Linux ABI" model in our codebase.
     pub linux_as_bytes: u64,
+    /// Per-process file-mode creation mask, as installed by Linux's
+    /// `umask(2)`.
+    ///
+    /// Stored as a `u16` (the upper bits are always zero — Linux masks
+    /// the user-supplied value with `& 0o777` before storing).  The
+    /// default for a new process is `0o022` (group/other lose write
+    /// bits), matching the de-facto distro default that programs
+    /// expect from a fresh shell.  Inherited verbatim across `fork`,
+    /// in line with POSIX.
+    ///
+    /// The VFS does not currently consult this field at file-creation
+    /// time — it's read and written through the Linux `sys_umask`
+    /// translation only.  That means programs that round-trip the
+    /// umask (`old = umask(N); ... ; umask(old);`) see consistent
+    /// state and their `old != N` invariant holds, even though the
+    /// kernel's actual default-mode behaviour is unaffected.  Real
+    /// VFS plumbing is tracked separately in todo.txt.
+    pub linux_umask: u16,
 }
 
 impl Process {
@@ -395,6 +413,9 @@ impl Process {
             rlimits: DEFAULT_RLIMITS,
             // Fresh process has no Linux-mapped pages yet.
             linux_as_bytes: 0,
+            // De-facto Linux distro default — what programs expect
+            // when they query a freshly-spawned process's umask.
+            linux_umask: 0o022,
         }
     }
 }
@@ -494,7 +515,7 @@ pub fn fork_create(
     // path, this keeps the refcount at exactly "one per process that
     // holds at least one fd referencing the handle", which is what
     // fork's `dup_one` per-process bump preserves.
-    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd, rlimits, linux_as_bytes) = {
+    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd, rlimits, linux_as_bytes, linux_umask) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
             let mut copy = super::linux_fd::KernelFdTable::new();
@@ -515,6 +536,7 @@ pub fn fork_create(
             parent.cwd.clone(),
             parent.rlimits,
             parent.linux_as_bytes,
+            parent.linux_umask,
         )
     };
 
@@ -587,6 +609,10 @@ pub fn fork_create(
         // so it inherits the same RLIMIT_AS charge.  Each future
         // mmap/munmap in either process is accounted independently.
         linux_as_bytes,
+        // POSIX: the child inherits the parent's umask at the moment
+        // of fork.  Subsequent umask calls in either process are
+        // independent.
+        linux_umask,
     };
 
     table.insert(pid, child);
@@ -1006,6 +1032,31 @@ pub fn set_rlimit(
     }
     proc.rlimits[resource as usize] = (new_cur, new_max);
     Ok(())
+}
+
+/// Read the current Linux file-mode creation mask for `pid`.
+///
+/// Returns `None` if `pid` is unknown.  The returned value is always
+/// in the range `0..=0o777` (set_umask masks higher bits on the way
+/// in).  Callers in kernel context (no live PCB) should fall back to
+/// the `0o022` distro default rather than going through this lookup.
+#[must_use]
+pub fn get_umask(pid: ProcessId) -> Option<u16> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_umask)
+}
+
+/// Install a new Linux file-mode creation mask for `pid`, returning
+/// the old one.
+///
+/// The new mask is masked with `& 0o777` before being stored, matching
+/// Linux's `umask(2)` semantics — out-of-range bits are silently
+/// dropped, never rejected.  Returns `None` if `pid` is unknown.
+pub fn set_umask(pid: ProcessId, new: u16) -> Option<u16> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_umask;
+    proc.linux_umask = new & 0o777;
+    Some(old)
 }
 
 /// Index of `RLIMIT_AS` (resident *address space* size) in [`Process::rlimits`].

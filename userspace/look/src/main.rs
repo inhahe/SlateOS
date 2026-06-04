@@ -317,7 +317,7 @@ mod tests {
     // Binary search correctness
     #[test]
     fn test_binary_search_finds_prefix() {
-        let lines = vec!["apple", "banana", "cherry", "date", "elderberry"];
+        let lines = ["apple", "banana", "cherry", "date", "elderberry"];
         let search = normalize("ch", false, false);
 
         let mut lo = 0usize;
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_binary_search_no_match() {
-        let lines = vec!["apple", "banana", "cherry"];
+        let lines = ["apple", "banana", "cherry"];
         let search = normalize("dog", false, false);
 
         let mut lo = 0usize;
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_binary_search_first_element() {
-        let lines = vec!["apple", "banana", "cherry"];
+        let lines = ["apple", "banana", "cherry"];
         let search = normalize("ap", false, false);
 
         let mut lo = 0usize;
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_binary_search_last_element() {
-        let lines = vec!["apple", "banana", "cherry"];
+        let lines = ["apple", "banana", "cherry"];
         let search = normalize("ch", false, false);
 
         let mut lo = 0usize;

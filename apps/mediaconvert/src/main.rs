@@ -2235,6 +2235,12 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -2330,8 +2336,9 @@ mod tests {
     #[test]
     fn test_video_settings_from_preset() {
         let s = VideoSettings::from_preset(QualityPreset::Low);
-        assert!(s.resolution.is_some());
-        let res = s.resolution.unwrap();
+        let Some(res) = s.resolution else {
+            panic!("Low preset must have a resolution");
+        };
         assert_eq!(res.width, 854);
     }
 
@@ -2559,7 +2566,9 @@ mod tests {
         app.queue_all();
         assert!(app.start_next_job());
 
-        let job_id = app.jobs.first().map(|j| j.id).unwrap();
+        let Some(job_id) = app.jobs.first().map(|j| j.id) else {
+            panic!("expected at least one job");
+        };
         assert!(app.complete_job(job_id, 5000));
         assert_eq!(app.history.len(), 1);
     }
@@ -2571,7 +2580,9 @@ mod tests {
         app.queue_all();
         app.start_next_job();
 
-        let job_id = app.jobs.first().map(|j| j.id).unwrap();
+        let Some(job_id) = app.jobs.first().map(|j| j.id) else {
+            panic!("expected at least one job");
+        };
         assert!(app.fail_job(job_id, "Test error"));
     }
 
@@ -2592,7 +2603,9 @@ mod tests {
         app.add_source("/a", "a", 100, MediaCategory::Audio);
         app.queue_all();
         app.start_next_job();
-        let job_id = app.jobs.first().map(|j| j.id).unwrap();
+        let Some(job_id) = app.jobs.first().map(|j| j.id) else {
+            panic!("expected at least one job");
+        };
         app.complete_job(job_id, 50);
 
         let cleared = app.clear_finished_jobs();

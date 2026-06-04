@@ -2144,43 +2144,36 @@ mod tests {
     #[test]
     fn test_parse_pasv_standard() {
         let text = "227 Entering Passive Mode (192,168,1,1,4,1)";
-        let result = parse_pasv_response(text);
-        assert!(result.is_some());
-        let (ip, port) = result.unwrap();
-        // IP: 192.168.1.1 in network byte order
-        assert_eq!(ip, u32::from_be_bytes([192, 168, 1, 1]));
-        // Port: 4*256 + 1 = 1025
-        assert_eq!(port, 1025);
+        // IP: 192.168.1.1 in network byte order. Port: 4*256 + 1 = 1025.
+        let expected_ip = u32::from_be_bytes([192, 168, 1, 1]);
+        assert_eq!(parse_pasv_response(text), Some((expected_ip, 1025)));
     }
 
     #[test]
     fn test_parse_pasv_high_port() {
         let text = "227 Entering Passive Mode (10,0,0,1,200,100)";
-        let result = parse_pasv_response(text);
-        assert!(result.is_some());
-        let (ip, port) = result.unwrap();
-        assert_eq!(ip, u32::from_be_bytes([10, 0, 0, 1]));
-        assert_eq!(port, 200 * 256 + 100);
+        let expected_ip = u32::from_be_bytes([10, 0, 0, 1]);
+        assert_eq!(
+            parse_pasv_response(text),
+            Some((expected_ip, 200 * 256 + 100))
+        );
     }
 
     #[test]
     fn test_parse_pasv_with_spaces() {
         let text = "227 Entering Passive Mode ( 10, 0, 0, 1, 200, 100 )";
-        let result = parse_pasv_response(text);
-        assert!(result.is_some());
-        let (ip, port) = result.unwrap();
-        assert_eq!(ip, u32::from_be_bytes([10, 0, 0, 1]));
-        assert_eq!(port, 200 * 256 + 100);
+        let expected_ip = u32::from_be_bytes([10, 0, 0, 1]);
+        assert_eq!(
+            parse_pasv_response(text),
+            Some((expected_ip, 200 * 256 + 100))
+        );
     }
 
     #[test]
     fn test_parse_pasv_localhost() {
         let text = "227 Entering Passive Mode (127,0,0,1,0,21)";
-        let result = parse_pasv_response(text);
-        assert!(result.is_some());
-        let (ip, port) = result.unwrap();
-        assert_eq!(ip, u32::from_be_bytes([127, 0, 0, 1]));
-        assert_eq!(port, 21);
+        let expected_ip = u32::from_be_bytes([127, 0, 0, 1]);
+        assert_eq!(parse_pasv_response(text), Some((expected_ip, 21)));
     }
 
     #[test]

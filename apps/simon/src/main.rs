@@ -2041,10 +2041,10 @@ mod tests {
 
     #[test]
     fn test_window_constants_positive() {
-        assert!(WINDOW_WIDTH > 0.0);
-        assert!(WINDOW_HEIGHT > 0.0);
-        assert!(BUTTON_SIZE > 0.0);
-        assert!(BUTTON_GAP > 0.0);
+        const { assert!(WINDOW_WIDTH > 0.0) };
+        const { assert!(WINDOW_HEIGHT > 0.0) };
+        const { assert!(BUTTON_SIZE > 0.0) };
+        const { assert!(BUTTON_GAP > 0.0) };
     }
 
     #[test]

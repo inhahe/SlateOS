@@ -1427,10 +1427,10 @@ mod tests {
         let mut app = Klotski::new();
         let mut total = 0;
         for _ in 0..5 {
-            if let Some((idx, dir)) = find_movable_block(&app) {
-                if app.move_block(idx, dir) {
-                    total += 1;
-                }
+            if let Some((idx, dir)) = find_movable_block(&app)
+                && app.move_block(idx, dir)
+            {
+                total += 1;
             }
         }
         assert_eq!(app.moves, total);
@@ -2170,9 +2170,9 @@ mod tests {
 
     #[test]
     fn test_cell_size_positive() {
-        assert!(CELL_SIZE > 0.0);
-        assert!(CELL_GAP >= 0.0);
-        assert!(PADDING > 0.0);
+        const { assert!(CELL_SIZE > 0.0) };
+        const { assert!(CELL_GAP >= 0.0) };
+        const { assert!(PADDING > 0.0) };
     }
 
     #[test]

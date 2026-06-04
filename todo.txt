@@ -5816,3 +5816,33 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      sandbox dropping privileges) won't see the lowered value
 ##      reflected.  Tracked as a future enhancement when a real
 ##      per-process rlimit store is added.
+##  11. RT_SIGPENDING — DONE.  sys_rt_sigpending validates sigsetsize
+##      == sizeof(sigset_t) == 8 first (EINVAL otherwise) so a sane
+##      libc bug-checks its own assumptions before we touch user
+##      memory, validates the user-write range, then copies the
+##      caller process's pending-signal bitmap from
+##      crate::proc::signal::pending(pid) into the user sigset_t.
+##      For tasks with no owning process (kernel self-tests) the
+##      pending mask reads back as 0, which matches "no signals
+##      pending" — observationally correct.
+##  12. TKILL / TGKILL — DONE-with-approximation.  sys_tkill resolves
+##      owner_process(tid) and, on ESRCH for non-thread tids,
+##      degenerates to sys_kill(pid, sig) with the same sig==0
+##      existence-probe semantics.  sys_tgkill additionally verifies
+##      that owner_process(tid) == tgid (Linux's race-free tid-reuse
+##      check); a mismatch yields ESRCH.  Both wire through
+##      dispatch_linux at the new nr::TKILL=200 / nr::TGKILL=234
+##      slots.
+##      Limitation: we don't have multi-threaded per-thread signal
+##      routing yet.  Every signal — whether sent via kill(pid),
+##      tkill(tid), or tgkill(tgid,tid) — gets posted to the owning
+##      process's single pending mask and delivered to whichever
+##      thread of that process happens to be ready.  For single-
+##      threaded programs (the common case for early Linux binaries)
+##      this is observationally identical to Linux.  For glibc's
+##      pthread_kill targeting a specific worker thread of a multi-
+##      threaded process, the signal will be delivered, just not
+##      necessarily to the requested thread.  Real per-thread
+##      delivery is tracked alongside the Linux-shaped rt_sigframe
+##      delivery work (item 6) — they touch the same pending-set
+##      machinery in proc::signal.

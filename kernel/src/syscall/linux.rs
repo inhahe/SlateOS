@@ -377,6 +377,9 @@ pub mod nr {
     pub const GETRANDOM: u64 = 318;
     pub const STATX: u64 = 332;
     pub const PRLIMIT64: u64 = 302;
+    pub const RT_SIGPENDING: u64 = 127;
+    pub const TKILL: u64 = 200;
+    pub const TGKILL: u64 = 234;
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,6 +1166,9 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::SET_ROBUST_LIST => sys_set_robust_list(args),
         nr::GETRANDOM => sys_getrandom(args),
         nr::PRLIMIT64 => sys_prlimit64(args),
+        nr::RT_SIGPENDING => sys_rt_sigpending(args),
+        nr::TKILL => sys_tkill(args),
+        nr::TGKILL => sys_tgkill(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -2538,6 +2544,110 @@ fn sys_kill(args: &SyscallArgs) -> SyscallResult {
     // Real signal: delegate to native.  Native SYS_SIGNAL_SEND:
     // arg0 = target pid, arg1 = signum.
     linux_from_native(handlers::sys_signal_send(args))
+}
+
+/// `rt_sigpending(set, sigsetsize)` — report the pending-signal mask
+/// for the calling process.
+///
+/// Semantics (Linux man 2 rt_sigpending):
+///   - `set`: user pointer to `sigset_t` to fill with the bitmap of
+///     signals that have been raised on this process but not yet
+///     consumed (delivered to a handler, dropped, or used to terminate).
+///   - `sigsetsize`: must equal `sizeof(sigset_t)` (8 bytes on x86_64
+///     Linux), else `-EINVAL`.
+///   - `set` may not be NULL — Linux returns `-EFAULT` for NULL.  Our
+///     [`validate_user_write`] returns the same.
+///
+/// We use [`crate::proc::signal::pending`] which mirrors the in-kernel
+/// pending mask exactly; for tasks with no owning process (kernel
+/// self-tests), the pending mask is reported as 0.
+fn sys_rt_sigpending(args: &SyscallArgs) -> SyscallResult {
+    let set_ptr = args.arg0;
+    let sigsetsize = args.arg1 as usize;
+
+    // Validate sigsetsize == 8 first (Linux rejects mismatched sizes
+    // before touching the pointer).
+    if sigsetsize != core::mem::size_of::<u64>() {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Validate user pointer.
+    if let Err(e) = crate::mm::user::validate_user_write(set_ptr, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let pid = caller_pid().unwrap_or(0);
+    let mask: u64 = crate::proc::signal::pending(pid);
+
+    let bytes = mask.to_ne_bytes();
+    // SAFETY: validate_user_write above confirmed an 8-byte writable
+    // user range; we copy exactly 8 bytes from a kernel-owned array.
+    let r = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), set_ptr, 8) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `tkill(tid, sig)` — send `sig` to the thread identified by `tid`.
+///
+/// Linux distinguishes tkill (thread-targeted) from kill (process-
+/// targeted).  We don't have multi-threaded signal routing yet — every
+/// signal goes to the owning process — so tkill degenerates to
+/// `kill(owner_process(tid), sig)`.  For single-threaded processes
+/// (the common case for early Linux binaries we'd run, and for libc's
+/// `pthread_kill` against the main thread), this is observationally
+/// identical to Linux.
+///
+/// `sig == 0` is the existence probe, same as `kill(pid, 0)`.
+///
+/// Errors:
+///   - `-ESRCH` if `tid` is not a registered thread.
+///   - All other errors delegate to [`sys_kill`].
+fn sys_tkill(args: &SyscallArgs) -> SyscallResult {
+    let tid = args.arg0;
+    let sig = args.arg1;
+    let pid = match crate::proc::thread::owner_process(tid) {
+        Some(p) => p,
+        None => return linux_err(errno::ESRCH),
+    };
+    let kill_args = SyscallArgs {
+        arg0: pid,
+        arg1: sig,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    sys_kill(&kill_args)
+}
+
+/// `tgkill(tgid, tid, sig)` — send `sig` to thread `tid` in thread-
+/// group `tgid`.
+///
+/// Semantics:
+///   - `tgid` is the thread-group ID, which on Linux equals the PID
+///     of the group leader.  In our model, every thread's owning
+///     process IS its tgid.
+///   - If `tid` does not exist, or does not belong to `tgid`,
+///     `-ESRCH`.  Linux mandates this — `tgkill` is the race-free
+///     `pthread_kill` because it can detect tid reuse across a fork.
+///   - Otherwise, behaves exactly like [`sys_tkill`] (and thus like
+///     `kill(tgid, sig)` for now).
+fn sys_tgkill(args: &SyscallArgs) -> SyscallResult {
+    let tgid = args.arg0;
+    let tid = args.arg1;
+    let sig = args.arg2;
+    let pid = match crate::proc::thread::owner_process(tid) {
+        Some(p) => p,
+        None => return linux_err(errno::ESRCH),
+    };
+    if pid != tgid {
+        return linux_err(errno::ESRCH);
+    }
+    let kill_args = SyscallArgs {
+        arg0: pid,
+        arg1: sig,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    sys_kill(&kill_args)
 }
 
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
@@ -4351,6 +4461,75 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::PRLIMIT64, &a).value != 0 {
             serial_println!(
                 "[syscall/linux]   FAIL: prlimit64 pid=0 STACK NULL,NULL not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // rt_sigpending dispatch validation:
+    //   - sigsetsize != 8 -> EINVAL (before pointer fault).
+    //   - sigsetsize == 8 with a NULL set pointer would normally EFAULT,
+    //     but validate_user_write's documented kernel-context bypass
+    //     returns Ok for tasks with no owning process (see comment near
+    //     sys_wait4 self-tests).  So we can only verify the
+    //     size-validation path here; the EFAULT path is exercised by
+    //     every other syscall under real userspace.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGPENDING, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigpending bad sigsetsize=0");
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: 16, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGPENDING, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigpending bad sigsetsize=16");
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGPENDING, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigpending u64-max sigsetsize");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // tkill / tgkill dispatch validation:
+    //   - Non-existent tid -> ESRCH (no owning process).
+    //   - tgkill with mismatched tgid -> ESRCH even if tid exists.
+    //   - In boot context, current_task_id() may or may not be a
+    //     registered thread; we test only the unambiguous "tid that
+    //     definitely doesn't exist" path to avoid coupling to scheduler
+    //     state.
+    {
+        // tkill on a definitely-nonexistent tid (u64::MAX) -> ESRCH.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TKILL, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: tkill nonexistent tid not ESRCH ({})",
+                dispatch_linux(nr::TKILL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tkill with sig=0 on nonexistent tid still ESRCH (probe).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TKILL, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: tkill nonexistent tid sig=0 not ESRCH ({})",
+                dispatch_linux(nr::TKILL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tgkill on nonexistent tid -> ESRCH.
+        let a = SyscallArgs { arg0: 1, arg1: u64::MAX, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TGKILL, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: tgkill nonexistent tid not ESRCH ({})",
+                dispatch_linux(nr::TGKILL, &a).value
             );
             return Err(KernelError::InternalError);
         }

@@ -1133,6 +1133,7 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::MMAP => sys_mmap(args),
         nr::MPROTECT => sys_mprotect(args),
         nr::MUNMAP => sys_munmap(args),
+        nr::MADVISE => sys_madvise(args),
         nr::BRK => sys_brk(args),
         nr::RT_SIGACTION => sys_rt_sigaction(args),
         nr::RT_SIGPROCMASK => sys_rt_sigprocmask(args),
@@ -2130,6 +2131,88 @@ fn mprotect_flush_range(start: u64, end: u64) {
         // page_count <= 64 — fits comfortably in u32.
         #[allow(clippy::cast_possible_truncation)]
         crate::tlb::flush_range(start, page_count as u32);
+    }
+}
+
+/// `madvise(addr, len, advice)` — advisory hint about future access.
+///
+/// All [`MADV_*`](madv) hints we recognise are advisory: telling the
+/// kernel "I'll touch this soon" / "I won't touch this for a while" /
+/// "you can drop these pages and re-zero on next fault" / etc.  Linux
+/// is allowed to silently ignore any advisory hint, and most glibc
+/// allocators (jemalloc, tcmalloc, mimalloc, even modern glibc malloc)
+/// expect MADV_DONTNEED to "succeed-or-be-irrelevant" — they never
+/// check the return value for correctness, only for "did the kernel
+/// even understand this call".  Returning ENOSYS for every madvise
+/// makes those allocators spam the syscall on every free without ever
+/// releasing memory back to the kernel, growing RSS unbounded.
+///
+/// Our policy:
+///
+/// - Accept every documented MADV_* hint in `1..=25` plus `0`
+///   (MADV_NORMAL) and return 0.  We don't actually act on any of them
+///   yet — MADV_DONTNEED on anonymous memory could free the frames
+///   eagerly, but that needs VMA tracking to know what's anonymous.
+///   Treating them as no-ops is the documented "kernel ignored the
+///   hint" path and is always semantically valid.
+/// - Reject `MADV_HWPOISON` (100) and `MADV_SOFT_OFFLINE` (101) with
+///   EPERM — on Linux these require CAP_SYS_ADMIN and we don't expose
+///   memory-failure injection to userspace.
+/// - Reject everything else with EINVAL (matches Linux's behaviour for
+///   unknown advice values).
+/// - Validate `addr` is frame-aligned and `[addr, addr+len)` lies
+///   entirely in user space.  Length 0 succeeds without further
+///   checking (POSIX).
+fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::USER_SPACE_END;
+
+    let addr = args.arg0;
+    let len = args.arg1;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let advice = args.arg2 as i32;
+
+    // POSIX: zero-length succeeds as a no-op without any validation.
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // addr must be page-aligned (Linux requires alignment to the system
+    // page size; ours is 16 KiB).
+    let frame_size = FRAME_SIZE as u64;
+    if (addr & (frame_size - 1)) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Round len up to whole frames for the bounds check.
+    let len_aligned = match len
+        .checked_add(frame_size - 1)
+        .map(|v| v & !(frame_size - 1))
+    {
+        Some(v) => v,
+        None => return linux_err(errno::EINVAL),
+    };
+    let end = match addr.checked_add(len_aligned) {
+        Some(e) => e,
+        None => return linux_err(errno::EINVAL),
+    };
+    if addr >= USER_SPACE_END || end > USER_SPACE_END {
+        return linux_err(errno::ENOMEM);
+    }
+
+    // Documented Linux MADV_* values.  Anything in 0..=25 is a known
+    // advisory hint we accept as a no-op.  HWPOISON / SOFT_OFFLINE are
+    // privileged.  Anything else is EINVAL.
+    //
+    // See `include/uapi/asm-generic/mman-common.h` in the Linux tree.
+    const MADV_HWPOISON: i32 = 100;
+    const MADV_SOFT_OFFLINE: i32 = 101;
+    const MADV_KNOWN_MAX: i32 = 25; // MADV_COLLAPSE
+
+    match advice {
+        0..=MADV_KNOWN_MAX => SyscallResult::ok(0),
+        MADV_HWPOISON | MADV_SOFT_OFFLINE => linux_err(errno::EPERM),
+        _ => linux_err(errno::EINVAL),
     }
 }
 
@@ -3615,6 +3698,87 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: mprotect_flush_range large not full-flushed (delta={})",
                 full_delta,
             );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // madvise(addr, len, advice) coverage:
+    //   - len == 0: succeeds without further validation, even for bogus
+    //     addr / advice values.
+    //   - Known MADV_* advice (0..=25): returns 0 (no-op).  Crucial
+    //     because glibc/jemalloc/tcmalloc call MADV_DONTNEED on every
+    //     free; ENOSYS here would make them spam the syscall and leak
+    //     RSS unbounded.
+    //   - MADV_HWPOISON (100) and MADV_SOFT_OFFLINE (101): EPERM —
+    //     these are privileged memory-failure injection on Linux and
+    //     we don't expose them.
+    //   - Unknown advice: EINVAL.
+    //   - Misaligned addr (with nonzero len): EINVAL.
+    //   - Kernel-space addr (with nonzero len): ENOMEM.
+    {
+        const MADV_DONTNEED: u64 = 4;
+        const MADV_FREE: u64 = 8;
+        const MADV_COLLAPSE: u64 = 25; // upper documented bound
+        const MADV_HWPOISON: u64 = 100;
+        const MADV_SOFT_OFFLINE: u64 = 101;
+
+        // Zero-length always succeeds — even with intentionally bad
+        // addr and advice.
+        let a = SyscallArgs { arg0: 0x4001 /* misaligned! */, arg1: 0,
+            arg2: 9999 /* bogus advice */, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: madvise(len=0)");
+            return Err(KernelError::InternalError);
+        }
+
+        // Known hints over a valid user-space range return 0.
+        for advice in [0u64, 1, 2, 3, MADV_DONTNEED, MADV_FREE, MADV_COLLAPSE] {
+            let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
+                arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::MADVISE, &a).value;
+            if v != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: madvise(advice={}) -> {} (expected 0)",
+                    advice, v
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // HWPOISON / SOFT_OFFLINE: EPERM.
+        for advice in [MADV_HWPOISON, MADV_SOFT_OFFLINE] {
+            let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
+                arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EPERM) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: madvise(advice={}) not EPERM", advice
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Unknown advice (26 — between documented max 25 and HWPOISON):
+        // EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
+            arg2: 26, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: madvise unknown advice");
+            return Err(KernelError::InternalError);
+        }
+
+        // Misaligned addr with nonzero len: EINVAL.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: madvise misalign");
+            return Err(KernelError::InternalError);
+        }
+
+        // Kernel-space addr with nonzero len: ENOMEM.
+        let a = SyscallArgs { arg0: 0xFFFF_8000_0000_0000, arg1: 0x4000,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::ENOMEM) {
+            serial_println!("[syscall/linux]   FAIL: madvise kernel-addr");
             return Err(KernelError::InternalError);
         }
     }

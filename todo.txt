@@ -5604,6 +5604,13 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     -EINVAL; sig in {9, 15, 17, 64} each progress past the gate
 ##     (i.e. don't return -EINVAL, proving the linux ABI accepts the
 ##     full 1..=NSIG range and not just SIGKILL/SIGTERM).
+##   - madvise: len=0 succeeds even with bogus addr+advice; known
+##     hints 0/1/2/3/MADV_DONTNEED(4)/MADV_FREE(8)/MADV_COLLAPSE(25)
+##     return 0; MADV_HWPOISON(100) and MADV_SOFT_OFFLINE(101) return
+##     -EPERM (privileged on real Linux, never exposed here);
+##     advice=26 (between documented max and HWPOISON) returns
+##     -EINVAL; misaligned addr with nonzero len returns -EINVAL;
+##     kernel-space addr with nonzero len returns -ENOMEM.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
@@ -5709,3 +5716,25 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      bails with ESRCH in the contextless test task); clone with
 ##      any of CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE still
 ##      returns -ENOSYS.
+##   8. MADVISE — DONE-as-advisory-no-op.  sys_madvise validates
+##      addr alignment, frame-rounds len, range-checks against
+##      USER_SPACE_END, then accepts all documented Linux MADV_*
+##      hints in 0..=25 (NORMAL/RANDOM/SEQUENTIAL/WILLNEED/DONTNEED/
+##      FREE/REMOVE/DONTFORK/DOFORK/MERGEABLE/UNMERGEABLE/HUGEPAGE/
+##      NOHUGEPAGE/DONTDUMP/DODUMP/WIPEONFORK/KEEPONFORK/COLD/
+##      PAGEOUT/POPULATE_READ/POPULATE_WRITE/DONTNEED_LOCKED/
+##      COLLAPSE) returning 0.  HWPOISON (100) and SOFT_OFFLINE (101)
+##      return -EPERM (privileged memory-failure injection that we
+##      don't expose).  Unknown advice returns -EINVAL.
+##      Rationale: glibc/jemalloc/tcmalloc/mimalloc call
+##      MADV_DONTNEED on every free() to release pages back to the
+##      kernel.  Returning -ENOSYS made every free() syscall-and-fail
+##      while RSS grew unbounded.  Treating advisory hints as a no-op
+##      is always semantically valid (Linux is allowed to ignore any
+##      MADV_* hint) and lets allocators stop spamming the syscall.
+##      Limitation: we don't actually free anonymous frames on
+##      MADV_DONTNEED yet — that needs VMA tracking to know what's
+##      anonymous vs file-backed.  Tracked in item 3 (PROT_NONE
+##      with VMA layer).  Until then, MADV_DONTNEED leaves the pages
+##      committed; future allocator activity re-uses them in place
+##      rather than re-zero-faulting.

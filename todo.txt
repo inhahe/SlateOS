@@ -5436,9 +5436,20 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##             open-dir handle, which the VFS does not currently expose.
 ##   2. FRAME-MODIFYING PATHS: fork / vfork DONE (route through the
 ##      same fork::fork_process the native ABI uses).  clone DONE for
-##      the SIGCHLD-only "fork-equivalent" case; CLONE_VM / CLONE_THREAD
-##      / non-zero child_stack still return -ENOSYS until we implement
-##      real thread creation on shared address spaces.  execve DONE —
+##      both the SIGCHLD-only "fork-equivalent" case AND the
+##      pthread-creation case (CLONE_VM | CLONE_THREAD with non-zero
+##      child_stack) via proc::thread_clone::clone_thread.  The thread
+##      path honours CLONE_SETTLS (writes IA32_FS_BASE before IRETQ),
+##      CLONE_PARENT_SETTID / CLONE_CHILD_SETTID (copy_to_user of new
+##      tid before parent returns), and CLONE_CHILD_CLEARTID (registers
+##      the ctid in a per-task map; on_thread_exit zeroes *ctid and
+##      futex_wakes one waiter so pthread_join unblocks).  Limitations:
+##      CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE still
+##      reject with -ENOSYS; partial-share clones (CLONE_FILES alone
+##      etc.) reject because the PCB is per-process not per-resource-
+##      table; the trampoline copies most GPRs from the parent's
+##      syscall frame so any glibc clone wrapper that touches r12-r15
+##      etc. before the syscall sees them preserved.  execve DONE —
 ##      reads filename via VFS, walks argv/envp pointer arrays into
 ##      kernel buffers BEFORE exec_process tears down the old AS, then
 ##      hands off to proc::spawn::exec_process and rewrites the saved
@@ -5510,28 +5521,41 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     None; EXECVE from a contextless self-test task returns
 ##     Some(-ESRCH) (no owning process to exec); FORK / VFORK from a
 ##     contextless self-test task return a negative errno (proves
-##     routing reaches fork_process); CLONE with thread-creation bits
-##     or non-zero child_stack returns Some(-ENOSYS).
+##     routing reaches fork_process); CLONE with thread-creation
+##     bits but child_stack=0 returns Some(-ENOSYS); CLONE with bad
+##     stack and no CLONE_VM/CLONE_THREAD returns Some(-ENOSYS);
+##     full pthread-style CLONE (CLONE_VM | CLONE_THREAD | ... with
+##     non-zero child_stack) reaches thread_clone::clone_thread which
+##     returns Some(-ESRCH) when there's no owning process — proves
+##     the new thread-creation route is wired (NOT -ENOSYS).
 ##   - read_user_cstr(NULL, _) returns Err(EFAULT) without touching
 ##     userspace; read_user_ptr_array(NULL, _) returns Ok(empty) (how
 ##     glibc passes an argv-less execve).
+##   - thread_clone::self_test() at boot exercises: build_register_image
+##     slot layout (RIP/RFLAGS/RSP/RDI/R9/R15/FS_BASE positions);
+##     RFLAGS substitution (zero -> 0x202); CLEAR_CHILD_TID register
+##     and clear (register-to-0 removes the entry per Linux
+##     set_tid_address semantics); on_thread_exit_hook is a no-op for
+##     unregistered tasks; clone_thread rejects child_stack==0 with
+##     KernelError::InvalidArgument BEFORE looking up the pid.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
 ##     actual Linux binary can be loaded.
 ##
 ## NEXT STEPS (in priority order):
-##   1. Real thread-creation clone (CLONE_VM | CLONE_THREAD).  This is
-##      what pthread_create uses and is the next blocker for any
-##      multi-threaded glibc/musl program.  Needs:
-##        - new thread sharing the parent's address space and fd table;
-##        - separate kernel stack but caller-supplied user stack
-##          (child_stack arg);
-##        - CLONE_SETTLS to install a TLS base via arch_prctl
-##          equivalent;
-##        - CLONE_PARENT_SETTID / CLONE_CHILD_SETTID / CLONE_CHILD_CLEARTID
-##          futex semantics for join/exit notification.
-##   2. Replace xorshift64 with kernel CSPRNG when one exists.
-##   3. Honour mprotect / brk / sigaction properly.
-##   4. Real sigreturn / rt_sigreturn handler that restores the
+##   1. Replace xorshift64 with kernel CSPRNG when one exists.
+##   2. Honour mprotect / brk / sigaction properly.  mprotect is a
+##      security hole (we say success but never change page perms);
+##      brk's no-op is acceptable because glibc malloc falls back to
+##      mmap; sigaction ignores sa_mask / sa_flags / SA_RESTART etc.
+##   3. Real sigreturn / rt_sigreturn handler that restores the
 ##      pre-signal frame.
+##   4. set_tid_address(2) syscall — currently absent.  Should call
+##      thread_clone::register_clear_child_tid(current_task, addr)
+##      and return current TID.  This is what glibc's pthread
+##      initialization calls in the main thread so the main thread
+##      itself gets ctid cleared on exit too.
+##   5. CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
+##      support if any target program actually needs them — currently
+##      all return -ENOSYS.

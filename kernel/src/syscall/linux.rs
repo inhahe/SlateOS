@@ -507,33 +507,86 @@ fn linux_fork(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     }
 }
 
-/// Linux `clone()` translation — limited support.
+/// Linux `clone()` translation.
 ///
-/// Linux `clone(flags, child_stack, ptid, ctid, tls)` is the swiss-army
-/// knife behind both `fork()` and `pthread_create()`.  Implementing the
-/// full thread-creation path requires creating a new thread sharing the
-/// parent's address space / fd table / signal handlers, with TLS
-/// pointer setup and futex-on-exit hooks for `pthread_join()` — that's
-/// a substantial chunk of work.
+/// Linux `clone(flags, child_stack, ptid, ctid, tls)` is the swiss-
+/// army knife behind both `fork()` and `pthread_create()`.  We split
+/// it three ways:
 ///
-/// For now we only support the "fork-equivalent" use of clone: glibc's
-/// `fork()` wrapper issues `clone(SIGCHLD, 0, ...)` (zero child_stack,
-/// no CLONE_VM, just the SIGCHLD termination signal).  Anything that
-/// asks for CLONE_VM, CLONE_THREAD, or a non-zero child_stack returns
-/// `-ENOSYS` so glibc falls back to the no-threads path where possible.
+///   1. **Thread creation** (`CLONE_VM | CLONE_THREAD` set, non-zero
+///      `child_stack`) — routes to
+///      [`crate::proc::thread_clone::clone_thread`] which spawns a
+///      new ring-3 thread sharing the parent's address space, fd
+///      table, signal handlers, and credentials.  Honours
+///      `CLONE_SETTLS` (FS base), `CLONE_PARENT_SETTID` /
+///      `CLONE_CHILD_SETTID` (TID notification), and
+///      `CLONE_CHILD_CLEARTID` (futex-wake on exit, for
+///      `pthread_join`).
+///   2. **Fork-equivalent** (`CLONE_VM` clear, `child_stack == 0`) —
+///      glibc's `fork()` wrapper issues `clone(SIGCHLD, 0, ...)`.
+///      Routes to [`linux_fork`].
+///   3. **Unsupported combinations** (vfork, namespace clones,
+///      ptrace, partial-share flag sets that don't match (1) or
+///      (2)) — return `-ENOSYS`.
 fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    use crate::proc::{thread, thread_clone};
+
     let flags = frame.arg0;
     let child_stack = frame.arg1;
+    let parent_tid_ptr = frame.arg2;
+    // Linux x86_64 ABI: clone(flags, stack, ptid, ctid, tls) maps to
+    // (rdi, rsi, rdx, r10, r8) which in our SyscallFrame are
+    // (arg0, arg1, arg2, arg3, arg4).
+    let child_tid_ptr = frame.arg3;
+    let new_tls = frame.arg4;
 
-    // A non-zero child_stack means the caller wants the child to run
-    // on a different stack than the parent — only meaningful for true
-    // thread creation (shared address space).  Reject explicitly.
+    // (1) Thread-creation path: requires CLONE_VM | CLONE_THREAD AND
+    //     a non-zero child_stack.  glibc's pthread_create wrapper
+    //     also passes CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+    //     CLONE_SYSVSEM (all of which we share by virtue of sharing
+    //     the PCB), plus CLONE_SETTLS and the TID notification bits.
+    const THREAD_REQUIRED: u64 =
+        clone_flags::CLONE_VM | clone_flags::CLONE_THREAD;
+    if (flags & THREAD_REQUIRED) == THREAD_REQUIRED && child_stack != 0 {
+        // Reject thread-creation flags we genuinely can't honour.
+        // CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
+        // all need infrastructure we don't have yet.
+        const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_VFORK
+            | clone_flags::CLONE_PARENT
+            | clone_flags::CLONE_NEWNS
+            | clone_flags::CLONE_PTRACE;
+        if (flags & UNSUPPORTED_BITS) != 0 {
+            return -i64::from(errno::ENOSYS);
+        }
+
+        let task_id = crate::sched::current_task_id();
+        let parent_pid = match thread::owner_process(task_id) {
+            Some(pid) if pid != 0 => pid,
+            _ => return -i64::from(errno::ESRCH),
+        };
+
+        let args = thread_clone::CloneThreadArgs {
+            flags,
+            child_stack,
+            parent_tid_ptr,
+            child_tid_ptr,
+            new_tls,
+        };
+        return match thread_clone::clone_thread(parent_pid, frame, &args) {
+            Ok(new_tid) => i64::try_from(new_tid).unwrap_or(i64::MAX),
+            Err(e) => -i64::from(linux_errno_for(e)),
+        };
+    }
+
+    // (2) Anything-but-fork: a non-zero child_stack outside the
+    // thread path is invalid.  Same for any "share with parent" bit
+    // without the full CLONE_VM | CLONE_THREAD pairing — we can't
+    // honour partial sharing (e.g. CLONE_FILES alone) because our
+    // PCB model is per-process, not per-resource-table.
     if child_stack != 0 {
         return -i64::from(errno::ENOSYS);
     }
 
-    // Any "share with parent" bit means this is a thread-creation
-    // request, not a fork.  We don't support those yet.
     const THREAD_BITS: u64 = clone_flags::CLONE_VM
         | clone_flags::CLONE_FS
         | clone_flags::CLONE_FILES
@@ -2544,7 +2597,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
         }
 
-        // CLONE with a non-zero child_stack — also -ENOSYS.
+        // CLONE with a non-zero child_stack but no CLONE_VM /
+        // CLONE_THREAD pair — invalid, must reject as -ENOSYS.
         f.syscall_nr = nr::CLONE;
         f.arg0 = clone_flags::SIGCHLD;
         f.arg1 = 0xDEAD_BEEF;
@@ -2553,6 +2607,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             other => {
                 serial_println!(
                     "[syscall/linux]   FAIL: stack-clone via with_frame → {:?}",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Full pthread-like clone: CLONE_VM | CLONE_THREAD | ...
+        // with a non-zero child_stack reaches thread_clone::clone_thread
+        // which then fails with ESRCH (no owning Linux process in the
+        // self-test context).  Proves the new thread-creation route is
+        // wired correctly — must NOT return -ENOSYS.
+        f.syscall_nr = nr::CLONE;
+        f.arg0 = clone_flags::CLONE_VM
+            | clone_flags::CLONE_FS
+            | clone_flags::CLONE_FILES
+            | clone_flags::CLONE_SIGHAND
+            | clone_flags::CLONE_THREAD
+            | clone_flags::CLONE_SYSVSEM
+            | clone_flags::CLONE_SETTLS
+            | clone_flags::CLONE_PARENT_SETTID
+            | clone_flags::CLONE_CHILD_CLEARTID
+            | clone_flags::CLONE_CHILD_SETTID;
+        f.arg1 = 0xDEAD_BEEF; // non-zero child_stack
+        f.arg2 = 0; // ptid
+        f.arg3 = 0; // ctid
+        f.arg4 = 0; // tls
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ESRCH) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pthread-clone via with_frame → {:?} (expected -ESRCH)",
                     other
                 );
                 return Err(KernelError::InternalError);

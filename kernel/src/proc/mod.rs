@@ -42,6 +42,7 @@ pub mod pcb;
 pub mod signal;
 pub mod spawn;
 pub mod thread;
+pub mod thread_clone;
 
 use crate::error::KernelResult;
 use crate::serial_println;
@@ -69,6 +70,8 @@ pub fn self_test() -> KernelResult<()> {
     fork::self_test()?;
     serial_println!("[proc] Running Linux fd-table self-test...");
     linux_fd::self_test()?;
+    serial_println!("[proc] Running thread-clone self-test...");
+    thread_clone::self_test()?;
 
     serial_println!("[proc] Process management self-test PASSED");
     Ok(())

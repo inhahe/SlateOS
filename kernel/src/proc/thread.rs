@@ -371,6 +371,14 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
 /// thread was not registered (e.g., a bare kernel task not owned by any
 /// process).
 pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
+    // Linux CLONE_CHILD_CLEARTID hook: if this task was created via
+    // clone(CLONE_CHILD_CLEARTID, ...) and registered a `ctid`
+    // address, zero it in user space and wake one futex waiter so
+    // any pthread_join blocked on it can proceed.  Do this BEFORE
+    // any process-state mutation while CR3 still points at this
+    // thread's address space.
+    super::thread_clone::on_thread_exit_hook(task_id);
+
     // Look up and remove the reverse mapping.
     let pid = {
         let mut owners = THREAD_OWNERS.lock();

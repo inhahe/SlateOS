@@ -270,12 +270,9 @@ impl LoginScreen {
             self.failed_attempts = 0;
             self.locked_out = false;
 
-            // If user has no password, go to PasswordEntry phase (auto-submit).
-            if !self.users[index].has_password {
-                self.phase = LoginPhase::PasswordEntry;
-            } else {
-                self.phase = LoginPhase::PasswordEntry;
-            }
+            // Always advance to PasswordEntry: users without passwords still
+            // pass through this phase so they can auto-submit an empty entry.
+            self.phase = LoginPhase::PasswordEntry;
         }
     }
 

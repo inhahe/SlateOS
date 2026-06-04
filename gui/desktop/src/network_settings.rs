@@ -115,18 +115,20 @@ pub struct Ipv4Addr {
     pub octets: [u8; 4],
 }
 
+impl std::fmt::Display for Ipv4Addr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}.{}",
+            self.octets[0], self.octets[1], self.octets[2], self.octets[3]
+        )
+    }
+}
+
 impl Ipv4Addr {
     /// Create from four octets.
     pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
         Self { octets: [a, b, c, d] }
-    }
-
-    /// Format as dotted decimal string.
-    pub fn to_string(&self) -> String {
-        format!(
-            "{}.{}.{}.{}",
-            self.octets[0], self.octets[1], self.octets[2], self.octets[3]
-        )
     }
 
     /// Parse from dotted decimal string.
@@ -225,7 +227,7 @@ impl Ipv4Config {
         match self.method {
             IpConfigMethod::Dhcp => {
                 if let Some(ref addr) = self.address {
-                    format!("DHCP ({})", addr.to_string())
+                    format!("DHCP ({addr})")
                 } else {
                     "DHCP (obtaining...)".to_string()
                 }
@@ -381,9 +383,9 @@ impl WiFiNetwork {
 
     /// Get frequency band label.
     pub fn band(&self) -> &'static str {
-        if self.frequency_mhz >= 5000 {
-            "5 GHz"
-        } else if self.frequency_mhz >= 4900 {
+        // 4900-4999 MHz is the public-safety/unlicensed slice that's still
+        // colloquially called "5 GHz" alongside the regular 5 GHz band.
+        if self.frequency_mhz >= 4900 {
             "5 GHz"
         } else {
             "2.4 GHz"

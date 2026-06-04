@@ -351,7 +351,8 @@ impl SessionManager {
 
     /// Sort workspaces by last used (most recent first).
     pub fn sort_by_recent(&mut self) {
-        self.workspaces.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+        self.workspaces
+            .sort_by_key(|w| std::cmp::Reverse(w.last_used));
     }
 
     /// Sort workspaces by name.

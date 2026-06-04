@@ -1107,7 +1107,7 @@ impl RunDialog {
         }
 
         // Sort by score descending.
-        results.sort_by(|a, b| b.score.cmp(&a.score));
+        results.sort_by_key(|r| std::cmp::Reverse(r.score));
         results.truncate(MAX_AUTOCOMPLETE);
 
         self.show_autocomplete = !results.is_empty();

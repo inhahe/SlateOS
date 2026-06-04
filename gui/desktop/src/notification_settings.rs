@@ -582,7 +582,7 @@ impl NotificationSettings {
     /// Apps sorted by total notifications received (descending).
     pub fn apps_by_activity(&self) -> Vec<&AppNotificationPrefs> {
         let mut apps: Vec<_> = self.app_prefs.iter().collect();
-        apps.sort_by(|a, b| b.total_received.cmp(&a.total_received));
+        apps.sort_by_key(|a| std::cmp::Reverse(a.total_received));
         apps
     }
 

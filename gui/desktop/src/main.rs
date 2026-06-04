@@ -12,6 +12,16 @@
 //! Communicates with the compositor via IPC messages (channels).
 //! Uses the guitk library for UI rendering.
 
+// The desktop shell is a widget-heavy crate: render/draw functions
+// commonly take many positional parameters (font, theme, geometry,
+// hit-test state, cursor, etc.), and several network/graphics protocol
+// names use capitalized acronyms (VPN, WEP, WPA, WPA2, SRGB) that
+// match RFC / spec terminology.
+#![allow(
+    clippy::too_many_arguments,
+    clippy::upper_case_acronyms,
+)]
+
 #[allow(dead_code)]
 mod blur;
 #[allow(dead_code)]

@@ -61,6 +61,10 @@ pub enum OsdKind {
 }
 
 /// Keyboard lock types.
+// Variants share the `Lock` postfix because the keys themselves are named
+// "Caps Lock" / "Num Lock" / "Scroll Lock" — dropping it would obscure the
+// reference to the physical keys.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockType {
     CapsLock,

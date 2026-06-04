@@ -365,9 +365,9 @@ impl StartupSettings {
         let mut entries: Vec<_> = self.entries.iter().collect();
         match sort {
             StartupSort::Name => entries.sort_by_key(|a| a.name.to_lowercase()),
-            StartupSort::Impact => entries.sort_by(|a, b| b.impact.cmp(&a.impact)),
+            StartupSort::Impact => entries.sort_by_key(|e| std::cmp::Reverse(e.impact)),
             StartupSort::StartupType => entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label())),
-            StartupSort::Status => entries.sort_by(|a, b| b.enabled.cmp(&a.enabled)),
+            StartupSort::Status => entries.sort_by_key(|e| std::cmp::Reverse(e.enabled)),
         }
         entries
     }
@@ -485,9 +485,9 @@ impl StartupSettingsUI {
 
         match self.sort {
             StartupSort::Name => entries.sort_by_key(|a| a.name.to_lowercase()),
-            StartupSort::Impact => entries.sort_by(|a, b| b.impact.cmp(&a.impact)),
+            StartupSort::Impact => entries.sort_by_key(|e| std::cmp::Reverse(e.impact)),
             StartupSort::StartupType => entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label())),
-            StartupSort::Status => entries.sort_by(|a, b| b.enabled.cmp(&a.enabled)),
+            StartupSort::Status => entries.sort_by_key(|e| std::cmp::Reverse(e.enabled)),
         }
 
         entries

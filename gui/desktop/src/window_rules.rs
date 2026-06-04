@@ -432,7 +432,7 @@ impl WindowRulesManager {
     /// Get all rules (sorted by priority, highest first).
     pub fn rules(&self) -> Vec<&WindowRule> {
         let mut sorted: Vec<&WindowRule> = self.rules.iter().collect();
-        sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
+        sorted.sort_by_key(|r| std::cmp::Reverse(r.priority));
         sorted
     }
 

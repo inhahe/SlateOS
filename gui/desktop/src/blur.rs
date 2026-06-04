@@ -274,15 +274,15 @@ impl BlurRenderer {
         let tint_argb = Self::color_to_argb(tint);
         let ta = tint.a as u32;
         let inv_ta = 255u32.saturating_sub(ta);
-        let tr = ((tint_argb >> 16) & 0xFF);
-        let tg = ((tint_argb >> 8) & 0xFF);
-        let tb = (tint_argb & 0xFF);
+        let tr = (tint_argb >> 16) & 0xFF;
+        let tg = (tint_argb >> 8) & 0xFF;
+        let tb = tint_argb & 0xFF;
 
         let mut out = Vec::with_capacity(len);
         for &bg_px in background.iter().take(len) {
-            let br = ((bg_px >> 16) & 0xFF);
-            let bg_g = ((bg_px >> 8) & 0xFF);
-            let bb = (bg_px & 0xFF);
+            let br = (bg_px >> 16) & 0xFF;
+            let bg_g = (bg_px >> 8) & 0xFF;
+            let bb = bg_px & 0xFF;
 
             let r = (tr * ta + br * inv_ta) / 255;
             let g = (tg * ta + bg_g * inv_ta) / 255;

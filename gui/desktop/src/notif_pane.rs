@@ -640,6 +640,9 @@ impl NotificationPane {
     // ========================================================================
 
     /// Render the pane. Returns draw commands in screen space.
+    // The render body builds up its command list incrementally with helper
+    // calls between pushes; vec![...] would require relocating all of those.
+    #[allow(clippy::vec_init_then_push)]
     pub fn render(&self, screen_width: f32, screen_height: f32) -> Vec<RenderCommand> {
         if !self.state.is_visible() {
             return Vec::new();

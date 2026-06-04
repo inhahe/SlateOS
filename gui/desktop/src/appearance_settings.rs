@@ -522,26 +522,10 @@ impl AppearanceSettings {
 
     /// Validate and clamp settings to sane ranges.
     pub fn validate(&mut self) {
-        // Clamp font sizes
-        if self.fonts.ui_size < 8.0 {
-            self.fonts.ui_size = 8.0;
-        }
-        if self.fonts.ui_size > 32.0 {
-            self.fonts.ui_size = 32.0;
-        }
-        if self.fonts.mono_size < 6.0 {
-            self.fonts.mono_size = 6.0;
-        }
-        if self.fonts.mono_size > 32.0 {
-            self.fonts.mono_size = 32.0;
-        }
-        // Clamp scaling
-        if self.scaling_percent < 100 {
-            self.scaling_percent = 100;
-        }
-        if self.scaling_percent > 300 {
-            self.scaling_percent = 300;
-        }
+        // Clamp font sizes (NaN-safe: settings are read from YAML, never NaN).
+        self.fonts.ui_size = self.fonts.ui_size.clamp(8.0, 32.0);
+        self.fonts.mono_size = self.fonts.mono_size.clamp(6.0, 32.0);
+        self.scaling_percent = self.scaling_percent.clamp(100, 300);
     }
 }
 

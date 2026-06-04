@@ -253,6 +253,9 @@ impl GridConfig {
     }
 
     /// Convert pixel position to grid column/row.
+    // Kept as &self for symmetry with the sibling Grid methods
+    // (snap, columns_in, rows_in) — all take &self for a consistent API.
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_cell(&self, x: i32, y: i32) -> (i32, i32) {
         let col = if x >= 0 {
             x / self.cell_width as i32
@@ -268,6 +271,9 @@ impl GridConfig {
     }
 
     /// Convert grid column/row to pixel position.
+    // Despite the `from_*` name this is an inverse of `to_cell` that needs
+    // the grid's cell dimensions, so it stays as a method.
+    #[allow(clippy::wrong_self_convention)]
     pub fn from_cell(&self, col: i32, row: i32) -> (i32, i32) {
         (col * self.cell_width as i32, row * self.cell_height as i32)
     }
@@ -562,12 +568,8 @@ impl DesktopIconLayer {
 
         for (idx, icon) in self.icons.iter_mut().enumerate() {
             // Fill column-first (top to bottom, then next column).
-            let col = if rows == 0 {
-                idx as u32
-            } else {
-                (idx as u32) / rows
-            };
-            let row = if rows == 0 { 0 } else { (idx as u32) % rows };
+            let col = (idx as u32).checked_div(rows).unwrap_or(idx as u32);
+            let row = (idx as u32).checked_rem(rows).unwrap_or(0);
 
             if col >= cols {
                 // Overflow — wrap or leave at last valid column.

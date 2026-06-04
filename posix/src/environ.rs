@@ -554,15 +554,36 @@ pub unsafe fn load_packed_envp(data: *const u8, data_len: usize, count: usize) {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Cross-test serialisation lock for the process-global `ENV_STORE` /
+/// `ENVIRON_PTRS`.  Tests (in this file and others, e.g. `wordexp`)
+/// that read or mutate the environment must hold this lock for their
+/// duration.  Without it, cargo's parallel test runner interleaves
+/// `clearenv()` / `setenv()` calls from different tests and produces
+/// intermittent failures (see `wordexp::tests::tilde_*` flakes).
+#[cfg(test)]
+pub static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the env test lock, recovering from poison.
+#[cfg(test)]
+#[must_use = "the returned guard serialises env-mutating tests; bind it to `_g`"]
+pub fn lock_env_for_test() -> std::sync::MutexGuard<'static, ()> {
+    ENV_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Reset environment state before each test.  Tests run with
-    /// `--test-threads=1` so the global store is safe to mutate, but
-    /// residue from a prior test would cause false failures.
-    fn reset() {
+    /// Reset environment state before each test.  Acquires the
+    /// cross-test env lock and clears the store; bind the returned
+    /// guard to `_g` so it lives for the test body.
+    #[must_use = "the returned guard serialises env-mutating tests; bind it to `_g`"]
+    fn reset() -> std::sync::MutexGuard<'static, ()> {
+        let g = super::lock_env_for_test();
         clearenv();
+        g
     }
 
     /// Helper: read a C string pointer into a `&[u8]` slice (without
@@ -579,21 +600,21 @@ mod tests {
 
     #[test]
     fn getenv_returns_null_for_missing_var() {
-        reset();
+        let _g = reset();
         let ptr = unsafe { getenv(b"NOSUCH\0".as_ptr()) };
         assert!(ptr.is_null());
     }
 
     #[test]
     fn getenv_returns_null_for_null_name() {
-        reset();
+        let _g = reset();
         let ptr = unsafe { getenv(core::ptr::null()) };
         assert!(ptr.is_null());
     }
 
     #[test]
     fn getenv_returns_null_for_empty_name() {
-        reset();
+        let _g = reset();
         // Empty string = just a null terminator.
         let ptr = unsafe { getenv(b"\0".as_ptr()) };
         assert!(ptr.is_null());
@@ -605,7 +626,7 @@ mod tests {
 
     #[test]
     fn setenv_then_getenv() {
-        reset();
+        let _g = reset();
         let rc = unsafe { setenv(b"HOME\0".as_ptr(), b"/root\0".as_ptr(), 1) };
         assert_eq!(rc, 0);
 
@@ -616,7 +637,7 @@ mod tests {
 
     #[test]
     fn setenv_overwrite_replaces_value() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"K\0".as_ptr(), b"old\0".as_ptr(), 1) };
         unsafe { setenv(b"K\0".as_ptr(), b"new\0".as_ptr(), 1) };
 
@@ -626,7 +647,7 @@ mod tests {
 
     #[test]
     fn setenv_no_overwrite_keeps_original() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"K\0".as_ptr(), b"first\0".as_ptr(), 1) };
         let rc = unsafe { setenv(b"K\0".as_ptr(), b"second\0".as_ptr(), 0) };
         assert_eq!(rc, 0); // success, but value unchanged
@@ -637,7 +658,7 @@ mod tests {
 
     #[test]
     fn setenv_empty_value() {
-        reset();
+        let _g = reset();
         let rc = unsafe { setenv(b"EMPTY\0".as_ptr(), b"\0".as_ptr(), 1) };
         assert_eq!(rc, 0);
 
@@ -648,7 +669,7 @@ mod tests {
 
     #[test]
     fn setenv_rejects_null_name() {
-        reset();
+        let _g = reset();
         let rc = unsafe { setenv(core::ptr::null(), b"v\0".as_ptr(), 1) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -656,7 +677,7 @@ mod tests {
 
     #[test]
     fn setenv_rejects_null_value() {
-        reset();
+        let _g = reset();
         let rc = unsafe { setenv(b"K\0".as_ptr(), core::ptr::null(), 1) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -664,7 +685,7 @@ mod tests {
 
     #[test]
     fn setenv_rejects_empty_name() {
-        reset();
+        let _g = reset();
         let rc = unsafe { setenv(b"\0".as_ptr(), b"v\0".as_ptr(), 1) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -672,7 +693,7 @@ mod tests {
 
     #[test]
     fn setenv_rejects_equals_in_name() {
-        reset();
+        let _g = reset();
         let rc = unsafe { setenv(b"A=B\0".as_ptr(), b"v\0".as_ptr(), 1) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -680,7 +701,7 @@ mod tests {
 
     #[test]
     fn setenv_rejects_too_long_entry() {
-        reset();
+        let _g = reset();
         // Build a value that, combined with a 1-char name + '=' + '\0',
         // exceeds MAX_ENTRY_LEN (256).  Name "X" = 1, '=' = 1, '\0' = 1,
         // so value must be > 253 bytes to overflow.
@@ -705,7 +726,7 @@ mod tests {
 
     #[test]
     fn unsetenv_removes_variable() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"DEL\0".as_ptr(), b"yes\0".as_ptr(), 1) };
         let rc = unsafe { unsetenv(b"DEL\0".as_ptr()) };
         assert_eq!(rc, 0);
@@ -716,14 +737,14 @@ mod tests {
 
     #[test]
     fn unsetenv_nonexistent_succeeds() {
-        reset();
+        let _g = reset();
         let rc = unsafe { unsetenv(b"GHOST\0".as_ptr()) };
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn unsetenv_rejects_null_name() {
-        reset();
+        let _g = reset();
         let rc = unsafe { unsetenv(core::ptr::null()) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -731,7 +752,7 @@ mod tests {
 
     #[test]
     fn unsetenv_rejects_empty_name() {
-        reset();
+        let _g = reset();
         let rc = unsafe { unsetenv(b"\0".as_ptr()) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -739,7 +760,7 @@ mod tests {
 
     #[test]
     fn unsetenv_rejects_equals_in_name() {
-        reset();
+        let _g = reset();
         let rc = unsafe { unsetenv(b"A=B\0".as_ptr()) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -751,7 +772,7 @@ mod tests {
 
     #[test]
     fn putenv_sets_variable() {
-        reset();
+        let _g = reset();
         let mut s = *b"LANG=en_US\0";
         let rc = unsafe { putenv(s.as_mut_ptr()) };
         assert_eq!(rc, 0);
@@ -762,7 +783,7 @@ mod tests {
 
     #[test]
     fn putenv_overwrites_existing() {
-        reset();
+        let _g = reset();
         let mut s1 = *b"Z=one\0";
         unsafe { putenv(s1.as_mut_ptr()) };
 
@@ -775,7 +796,7 @@ mod tests {
 
     #[test]
     fn putenv_no_equals_unsets() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"REM\0".as_ptr(), b"v\0".as_ptr(), 1) };
         let mut s = *b"REM\0";
         let rc = unsafe { putenv(s.as_mut_ptr()) };
@@ -787,7 +808,7 @@ mod tests {
 
     #[test]
     fn putenv_rejects_null() {
-        reset();
+        let _g = reset();
         let rc = unsafe { putenv(core::ptr::null_mut()) };
         assert_eq!(rc, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -795,7 +816,7 @@ mod tests {
 
     #[test]
     fn putenv_rejects_empty_name_with_equals() {
-        reset();
+        let _g = reset();
         // "=value" has an empty name portion.
         let mut s = *b"=value\0";
         let rc = unsafe { putenv(s.as_mut_ptr()) };
@@ -809,7 +830,7 @@ mod tests {
 
     #[test]
     fn clearenv_removes_all() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"A\0".as_ptr(), b"1\0".as_ptr(), 1) };
         unsafe { setenv(b"B\0".as_ptr(), b"2\0".as_ptr(), 1) };
         unsafe { setenv(b"C\0".as_ptr(), b"3\0".as_ptr(), 1) };
@@ -824,7 +845,7 @@ mod tests {
 
     #[test]
     fn clearenv_on_empty_is_noop() {
-        reset();
+        let _g = reset();
         let rc = clearenv();
         assert_eq!(rc, 0);
     }
@@ -835,7 +856,7 @@ mod tests {
 
     #[test]
     fn secure_getenv_matches_getenv() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"SEC\0".as_ptr(), b"val\0".as_ptr(), 1) };
 
         let a = unsafe { getenv(b"SEC\0".as_ptr()) };
@@ -850,7 +871,7 @@ mod tests {
 
     #[test]
     fn multiple_variables_independent() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"X\0".as_ptr(), b"10\0".as_ptr(), 1) };
         unsafe { setenv(b"Y\0".as_ptr(), b"20\0".as_ptr(), 1) };
         unsafe { setenv(b"XX\0".as_ptr(), b"30\0".as_ptr(), 1) };
@@ -863,7 +884,7 @@ mod tests {
 
     #[test]
     fn unsetenv_does_not_affect_others() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"KEEP\0".as_ptr(), b"yes\0".as_ptr(), 1) };
         unsafe { setenv(b"DROP\0".as_ptr(), b"no\0".as_ptr(), 1) };
 
@@ -875,7 +896,7 @@ mod tests {
 
     #[test]
     fn setenv_after_unsetenv_reuses_slot() {
-        reset();
+        let _g = reset();
         unsafe { setenv(b"REUSE\0".as_ptr(), b"a\0".as_ptr(), 1) };
         unsafe { unsetenv(b"REUSE\0".as_ptr()) };
         let rc = unsafe { setenv(b"REUSE\0".as_ptr(), b"b\0".as_ptr(), 1) };
@@ -889,7 +910,7 @@ mod tests {
 
     #[test]
     fn load_packed_envp_basic() {
-        reset();
+        let _g = reset();
         // Two entries: "HOME=/root\0" + "USER=test\0"
         let data = b"HOME=/root\0USER=test\0";
         unsafe { load_packed_envp(data.as_ptr(), data.len(), 2) };
@@ -905,7 +926,7 @@ mod tests {
 
     #[test]
     fn load_packed_envp_single() {
-        reset();
+        let _g = reset();
         let data = b"LANG=C\0";
         unsafe { load_packed_envp(data.as_ptr(), data.len(), 1) };
 
@@ -916,7 +937,7 @@ mod tests {
 
     #[test]
     fn load_packed_envp_null() {
-        reset();
+        let _g = reset();
         // Null data should be a no-op.
         unsafe { load_packed_envp(core::ptr::null(), 0, 0) };
         // No crash, no vars set.
@@ -924,7 +945,7 @@ mod tests {
 
     #[test]
     fn load_packed_envp_zero_count() {
-        reset();
+        let _g = reset();
         let data = b"FOO=bar\0";
         unsafe { load_packed_envp(data.as_ptr(), data.len(), 0) };
         // Count 0 — nothing loaded.
@@ -933,7 +954,7 @@ mod tests {
 
     #[test]
     fn load_packed_envp_zero_len() {
-        reset();
+        let _g = reset();
         let data = b"FOO=bar\0";
         unsafe { load_packed_envp(data.as_ptr(), 0, 1) };
         // Zero length — nothing loaded.
@@ -942,7 +963,7 @@ mod tests {
 
     #[test]
     fn load_packed_envp_preserves_existing() {
-        reset();
+        let _g = reset();
         // Set an existing var first.
         unsafe { setenv(b"EXISTING\0".as_ptr(), b"yes\0".as_ptr(), 1) };
 

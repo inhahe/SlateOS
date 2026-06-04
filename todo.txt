@@ -3751,6 +3751,24 @@ Remaining net improvements (diminishing returns):
 
 ## Judgment Calls
 
+- (2026-06-04) Host-side raw `syscall` instruction in posix functions.
+  `posix/src/syscall.rs` exposes `syscall0..syscall6` that issue a raw
+  `syscall` x86_64 instruction with no host gating.  On a Windows host,
+  this hits whatever NT system service occupies the matching syscall
+  number, with undefined / occasionally STATUS_INSUFFICIENT_RESOURCES
+  results — which caused the `test_setsid_sets_sid_and_pgid` flake.
+  Fixed for `getpid()` and `gettid()` by adding
+  `#[cfg(not(target_os = "none"))]` host fallbacks.  However, ~290
+  other call sites across pthread, file, socket, time, signal, etc.
+  still emit raw `syscall` on the host.  Most of them are not exercised
+  by unit tests (the tests stop at argument validation and return
+  EINVAL/EBADF before reaching the syscall), but any future test that
+  exercises a happy path will hit the same class of bug.  Proper fix:
+  gate `syscallN()` itself in `posix/src/syscall.rs` so on host builds
+  it returns a documented sentinel (e.g. -ENOSYS) instead of executing
+  the instruction.  Deferred because it touches every syscall function
+  and would need each caller's host fallback re-audited.
+
 - (2026-06-03) clipmanager: full feature surface (ClipEntry, ClipTemplate,
   ClipboardStore, AppState, render_entry_row, render_history_panel,
   render_detail_panel, build_render_tree, build_widget_tree, detect_code_
@@ -3869,25 +3887,27 @@ Remaining net improvements (diminishing returns):
   Always copy built kernel to esp/boot/kernel.
 
 - (2026-05-27) Flaky test: `posix::process::tests::test_setsid_sets_sid_and_pgid`
-  fails intermittently during the full `cargo test -p posix --lib` run
-  with a Windows NTSTATUS `0xC0000056` / `-1073741670` (STATUS_INSUFFICIENT_
-  RESOURCES) but passes cleanly in isolation.  Looks like a parallel-
-  test interaction (probably PID-table or thread-spawning resource
-  pressure on Windows when ~13k tests run concurrently).  Not caused
-  by recent changes — observed during EFD_SEMAPHORE work but the test
-  doesn't touch eventfd code.  Investigate: add cross-test isolation
-  for setsid/setpgid state, or serialize that suite with #[serial].
+  RESOLVED 2026-06-04.  Root cause was NOT process-group state racing — it
+  was the raw `syscall` instruction inside `getpid()`/`gettid()` firing on
+  the Windows host with rax=502/SYS_PROCESS_ID.  That hit some random NT
+  service which intermittently returned STATUS_INSUFFICIENT_RESOURCES
+  (0xC0000056) under parallel load.  Fix: host-gated `getpid()` and
+  `gettid()` in `posix/src/process.rs` so on `not(target_os = "none")`
+  they return `std::process::id()` / a thread-id hash instead of invoking
+  the raw syscall.  See todo.txt "Judgment Calls" — the wider issue of
+  many host-side functions still calling `syscall0` etc. on Windows is
+  documented separately below.
 
 - (2026-05-27) Flaky test: `posix::getopt::tests::test_long_only_double_dash_still_works`
-  intermittently fails during full `cargo test -p posix --lib` with
-  `assertion left == right failed, left: -1, right: 86` at
-  posix/src/getopt.rs:1113 but passes cleanly in isolation.  Cause:
-  getopt's global `optind`/`optarg`/`optopt` static state is shared
-  across parallel test threads, so a concurrent test that resets or
-  advances `optind` between calls in this test corrupts its iteration.
-  Fix: serialize the getopt test module with `#[serial]` (add the
-  `serial_test` dev-dep) or restructure getopt to take a context
-  pointer so the tests don't share global state.
+  RESOLVED 2026-06-04.  Added `GETOPT_TEST_LOCK: Mutex<()>` to
+  `posix/src/getopt.rs` and split the reset helper into two:
+    * `zero_getopt_globals()` — zeros the 5 statics, caller holds lock
+    * `reset_getopt_state()` — acquires the lock + zeros, returns the guard
+  All 30 test sites changed from `unsafe { reset_getopt_state(); }` to
+  `let _g = unsafe { reset_getopt_state() };` so the guard lives for the
+  whole test.  `test_reset_allows_reparse` (which needs a mid-test reset)
+  uses `zero_getopt_globals()` for the second pass to avoid deadlocking on
+  the non-reentrant mutex (Rust shadowing keeps both `_g` bindings alive).
 
 - (Phase 74, sched.rs) RESOLVED in Phase 210.  All six sched_*
   functions now return EFAULT for NULL pointers, matching Linux.
@@ -3897,14 +3917,25 @@ Remaining net improvements (diminishing returns):
   10 new tests added covering EFAULT, ordering, and recovery.
 
 - (2026-05-27) Flaky test: `posix::stdio::tests::test_alloc_file_pool_exhaustion`
-  intermittently fails during full `cargo test -p posix --lib` with
-  "pool should be exhausted" but passes cleanly in isolation.  Cause:
-  stdio's `FILE` pool is a process-wide static array; concurrent tests
-  that allocate and free FILE handles in parallel cause an
-  fclose-in-another-thread to free a slot just as this test is checking
-  pool fullness.  Same fix class as the getopt flake: either serialize
-  the stdio FILE-pool tests with `#[serial]` or make the FILE pool
-  per-process-context for tests.
+  RESOLVED 2026-06-04.  Added `STDIO_POOL_TEST_LOCK: Mutex<()>` to
+  `posix/src/stdio.rs` tests module and a `lock_and_reset_file_pool()`
+  helper that acquires the lock + zeros the pool, returning the guard.
+  The 5 pool-mutating tests (`test_alloc_free_file_round_trip`,
+  `test_alloc_file_pool_exhaustion`, `test_fflush_null_flushes_all_idle`,
+  `test_fdopen_allocates_from_pool`, `test_fclose_pool_file`) all bind
+  the returned guard to `_g` for the whole test body.
+
+- (2026-06-04) Flaky test: `posix::wordexp::tests::tilde_*` and a few
+  related env-mutating tests.  RESOLVED same day.  Added
+  `pub static ENV_TEST_LOCK: Mutex<()>` and `lock_env_for_test()` at
+  module level in `posix/src/environ.rs` (gated `#[cfg(test)]`).  Both
+  `environ::tests::reset()` and `wordexp::tests::setup_home()` now
+  acquire the lock and return a guard; all 34 environ test sites and
+  6 wordexp tilde tests updated to `let _g = ...;`.  Two wordexp tests
+  that only need a cleared env (`tilde_no_home_set_returns_literal`,
+  `tilde_slash_no_home_returns_literal_plus_path`) use a sibling
+  `clear_env_locked()` helper.  Confirmed clean: 30/30 full `cargo test
+  -p posix --lib` runs after fix.
 
 - (2026-05-26) Linux eventfd(): EFD_SEMAPHORE flag is unsupported.
   [DONE 2026-05-27] Kernel EventFd grew a `semaphore` field and a new

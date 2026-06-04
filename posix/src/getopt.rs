@@ -467,14 +467,30 @@ fn names_match(arg: *const u8, name_start: usize, name_len: usize, opt_name: *co
     true
 }
 
-/// Reset all getopt global state.
+/// Cross-test serialisation for getopt's process-global parser state.
 ///
-/// Must be called between test runs (or when an application needs to
-/// re-parse a different argv).  Not part of the POSIX spec but
-/// necessary for test isolation.
+/// `optarg`/`optind`/`opterr`/`optopt`/`OPTPOS` are mutable statics by
+/// POSIX requirement, so every getopt test (and every test of code
+/// that calls getopt) races against every other under cargo's default
+/// parallel runner. Holding this mutex for the duration of a test
+/// guarantees the globals reflect that test's call sequence end-to-
+/// end, eliminating the spurious `optind`-corruption failures
+/// previously documented in todo.txt
+/// (test_long_only_double_dash_still_works flake, 2026-05-27).
+///
+/// Only compiled on host builds (`std::sync::Mutex` is unavailable in
+/// the no_std `target_os = "none"` build).
+#[cfg(all(test, not(target_os = "none")))]
+static GETOPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Zero the getopt globals back to their post-init values.
+///
+/// Internal helper: assumes the caller already holds
+/// `GETOPT_TEST_LOCK` (typically via `reset_getopt_state`) or runs in
+/// a context where parallel access is impossible.
 #[cfg(test)]
-unsafe fn reset_getopt_state() {
-    // SAFETY: single-threaded test environment.
+unsafe fn zero_getopt_globals() {
+    // SAFETY: caller guarantees serialised access to the globals.
     unsafe {
         core::ptr::addr_of_mut!(optind).write(1);
         core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
@@ -482,6 +498,31 @@ unsafe fn reset_getopt_state() {
         core::ptr::addr_of_mut!(optopt).write(0);
         core::ptr::addr_of_mut!(OPTPOS).write(0);
     }
+}
+
+/// Reset all getopt global state AND acquire the cross-test
+/// serialisation lock.
+///
+/// Returns a `MutexGuard` that the caller must keep alive for the
+/// duration of the test. Poisoned guards are recovered so a prior
+/// panicking test doesn't wedge subsequent ones.
+///
+/// Must be called as `let _g = unsafe { reset_getopt_state() };`
+/// at the top of every getopt-touching test. Tests that need a
+/// mid-test reset (e.g. re-parse the same argv) should use
+/// `zero_getopt_globals()` instead of re-acquiring the lock — calling
+/// `reset_getopt_state` a second time would deadlock because Rust
+/// shadowing keeps the prior guard alive.
+#[cfg(test)]
+#[must_use = "the returned guard serialises getopt tests; bind it to `_g`"]
+unsafe fn reset_getopt_state() -> std::sync::MutexGuard<'static, ()> {
+    let guard = GETOPT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: we now hold the cross-test lock; no other thread can
+    // touch the globals concurrently.
+    unsafe { zero_getopt_globals() };
+    guard
 }
 
 /// Handle the argument for a matched long option.
@@ -582,9 +623,7 @@ mod tests {
 
     #[test]
     fn test_short_options_abc() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-a", "-b", "-c"]);
         let opts = cstr("abc");
 
@@ -603,9 +642,7 @@ mod tests {
 
     #[test]
     fn test_grouped_short_options() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "-abc" is equivalent to "-a -b -c"
         let (argc, argv, _b) = make_argv(&["prog", "-abc"]);
         let opts = cstr("abc");
@@ -632,9 +669,7 @@ mod tests {
     #[test]
     fn test_option_with_arg_separate() {
         // "-o value" — argument in the next argv element.
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-o", "myfile"]);
         let opts = cstr("o:");
 
@@ -653,9 +688,7 @@ mod tests {
     #[test]
     fn test_option_with_arg_attached() {
         // "-omyfile" — argument attached to the option.
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-omyfile"]);
         let opts = cstr("o:");
 
@@ -676,9 +709,7 @@ mod tests {
 
     #[test]
     fn test_unknown_option_returns_question() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-z"]);
         let opts = cstr("abc");
 
@@ -692,9 +723,7 @@ mod tests {
 
     #[test]
     fn test_unknown_among_known() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "-axb" — 'a' is known, 'x' is unknown, 'b' is known.
         let (argc, argv, _b) = make_argv(&["prog", "-axb"]);
         let opts = cstr("ab");
@@ -722,9 +751,7 @@ mod tests {
 
     #[test]
     fn test_optind_advances() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-a", "-b"]);
         let opts = cstr("ab");
 
@@ -741,9 +768,7 @@ mod tests {
 
     #[test]
     fn test_reset_allows_reparse() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-a"]);
         let opts = cstr("a");
 
@@ -753,10 +778,9 @@ mod tests {
         );
         assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, -1);
 
-        // Reset and parse again.
-        unsafe {
-            reset_getopt_state();
-        }
+        // Reset and parse again. Use zero_getopt_globals to avoid re-acquiring
+        // the lock (which would deadlock — `_g` from above is still alive).
+        unsafe { zero_getopt_globals() };
         assert_eq!(
             unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
             i32::from(b'a')
@@ -770,9 +794,7 @@ mod tests {
 
     #[test]
     fn test_double_dash_stops_parsing() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "--", "-a"]);
         let opts = cstr("a");
 
@@ -786,9 +808,7 @@ mod tests {
 
     #[test]
     fn test_bare_dash_stops_parsing() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-"]);
         let opts = cstr("a");
 
@@ -802,9 +822,7 @@ mod tests {
 
     #[test]
     fn test_null_optstring() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-a"]);
 
         let r = unsafe { getopt(argc, argv.as_ptr(), core::ptr::null()) };
@@ -813,9 +831,7 @@ mod tests {
 
     #[test]
     fn test_null_argv() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let opts = cstr("a");
 
         let r = unsafe { getopt(3, core::ptr::null(), opts.as_ptr()) };
@@ -824,9 +840,7 @@ mod tests {
 
     #[test]
     fn test_empty_optstring_returns_unknown() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-a"]);
         let opts = cstr("");
 
@@ -844,9 +858,7 @@ mod tests {
 
     #[test]
     fn test_missing_required_arg() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "-o" without a following argument.
         let (argc, argv, _b) = make_argv(&["prog", "-o"]);
         let opts = cstr("o:");
@@ -860,9 +872,7 @@ mod tests {
 
     #[test]
     fn test_missing_required_arg_colon_mode() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // Leading ':' in optstring changes missing-arg return to ':'.
         let (argc, argv, _b) = make_argv(&["prog", "-o"]);
         let opts = cstr(":o:");
@@ -912,9 +922,7 @@ mod tests {
 
     #[test]
     fn test_long_option_verbose() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "--verbose"]);
         let opts = cstr(""); // no short options
         let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'v'))]);
@@ -942,9 +950,7 @@ mod tests {
 
     #[test]
     fn test_long_option_with_equals_arg() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "--output=myfile"]);
         let opts = cstr("");
         let (longopts, _lb) = make_longopts(&[(b"output", REQUIRED_ARGUMENT, i32::from(b'o'))]);
@@ -968,9 +974,7 @@ mod tests {
 
     #[test]
     fn test_long_option_with_separate_arg() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "--output", "myfile"]);
         let opts = cstr("");
         let (longopts, _lb) = make_longopts(&[(b"output", REQUIRED_ARGUMENT, i32::from(b'o'))]);
@@ -996,9 +1000,7 @@ mod tests {
 
     #[test]
     fn test_long_option_flag_mode() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "--debug"]);
         let opts = cstr("");
 
@@ -1034,9 +1036,7 @@ mod tests {
 
     #[test]
     fn test_long_option_unknown() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "--nonexistent"]);
         let opts = cstr("");
         let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'v'))]);
@@ -1053,9 +1053,7 @@ mod tests {
 
     #[test]
     fn test_long_option_missing_required_arg() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "--output"]);
         let opts = cstr("");
         let (longopts, _lb) = make_longopts(&[(b"output", REQUIRED_ARGUMENT, i32::from(b'o'))]);
@@ -1077,9 +1075,7 @@ mod tests {
 
     #[test]
     fn test_long_and_short_mixed() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "-a", "--verbose", "-b"]);
         let opts = cstr("ab");
         let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'v'))]);
@@ -1125,9 +1121,7 @@ mod tests {
 
     #[test]
     fn test_long_option_no_arg_with_equals_is_error() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "--verbose=foo" when verbose takes no argument.
         let (argc, argv, _b) = make_argv(&["prog", "--verbose=foo"]);
         let opts = cstr("");
@@ -1150,9 +1144,7 @@ mod tests {
 
     #[test]
     fn test_long_option_multiple_defined() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         let (argc, argv, _b) = make_argv(&["prog", "--beta"]);
         let opts = cstr("");
         let (longopts, _lb) = make_longopts(&[
@@ -1203,9 +1195,7 @@ mod tests {
 
     #[test]
     fn test_long_only_single_dash() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "-verbose" should match long option "verbose" with long_only.
         let (argc, argv, _b) = make_argv(&["prog", "-verbose"]);
         let opts = cstr("v");
@@ -1226,9 +1216,7 @@ mod tests {
 
     #[test]
     fn test_long_only_with_arg() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "-output=file.txt" should match long option with =arg.
         let (argc, argv, _b) = make_argv(&["prog", "-output=file.txt"]);
         let opts = cstr("");
@@ -1253,9 +1241,7 @@ mod tests {
 
     #[test]
     fn test_long_only_double_dash_still_works() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "--verbose" should still work with getopt_long_only.
         let (argc, argv, _b) = make_argv(&["prog", "--verbose"]);
         let opts = cstr("");
@@ -1275,9 +1261,7 @@ mod tests {
 
     #[test]
     fn test_long_only_no_match_falls_to_short() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "-a" should still work as short option when no long option matches.
         let (argc, argv, _b) = make_argv(&["prog", "-a"]);
         let opts = cstr("ab");
@@ -1295,9 +1279,7 @@ mod tests {
 
     #[test]
     fn test_long_only_unknown_option() {
-        unsafe {
-            reset_getopt_state();
-        }
+        let _g = unsafe { reset_getopt_state() };
         // "-nonexistent" with no matching long option and not a valid short.
         let (argc, argv, _b) = make_argv(&["prog", "-nonexistent"]);
         let opts = cstr("ab");

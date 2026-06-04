@@ -1180,16 +1180,34 @@ mod tests {
     // =======================================================================
 
     /// Helper to reset environment and set HOME for tilde tests.
-    fn setup_home(home: &[u8]) {
+    ///
+    /// Returns the cross-test env lock guard; bind it to `_g` so it
+    /// lives for the test body.  Without serialisation, parallel tests
+    /// would interleave `clearenv()`/`setenv()` calls and produce
+    /// intermittent assertion failures (see todo.txt entries for
+    /// `wordexp::tests::tilde_*`).
+    #[must_use = "the returned guard serialises env-mutating tests; bind it to `_g`"]
+    fn setup_home(home: &[u8]) -> std::sync::MutexGuard<'static, ()> {
+        let g = crate::environ::lock_env_for_test();
         crate::environ::clearenv();
         unsafe {
             crate::environ::setenv(b"HOME\0".as_ptr(), home.as_ptr(), 1);
         }
+        g
+    }
+
+    /// Acquire the env lock and clear the environment.  Used by tests
+    /// that need an empty environment but no `HOME` set.
+    #[must_use = "the returned guard serialises env-mutating tests; bind it to `_g`"]
+    fn clear_env_locked() -> std::sync::MutexGuard<'static, ()> {
+        let g = crate::environ::lock_env_for_test();
+        crate::environ::clearenv();
+        g
     }
 
     #[test]
     fn tilde_alone_expands_to_home() {
-        setup_home(b"/users/alice\0");
+        let _g = setup_home(b"/users/alice\0");
         let input = b"~";
         let result = expand_single_word(input, 0, input.len(), 0);
         let exp = result.unwrap();
@@ -1198,7 +1216,7 @@ mod tests {
 
     #[test]
     fn tilde_slash_expands_to_home_slash() {
-        setup_home(b"/home/bob\0");
+        let _g = setup_home(b"/home/bob\0");
         let input = b"~/Documents";
         let result = expand_single_word(input, 0, input.len(), 0);
         let exp = result.unwrap();
@@ -1207,7 +1225,7 @@ mod tests {
 
     #[test]
     fn tilde_user_not_expanded() {
-        setup_home(b"/home/me\0");
+        let _g = setup_home(b"/home/me\0");
         // ~otheruser should be left as a literal (we don't do passwd lookups).
         let input = b"~otheruser";
         let result = expand_single_word(input, 0, input.len(), 0);
@@ -1217,7 +1235,7 @@ mod tests {
 
     #[test]
     fn tilde_no_home_set_returns_literal() {
-        crate::environ::clearenv();
+        let _g = clear_env_locked();
         // HOME is not set.
         let input = b"~";
         let result = expand_single_word(input, 0, input.len(), 0);
@@ -1227,7 +1245,7 @@ mod tests {
 
     #[test]
     fn tilde_slash_no_home_returns_literal_plus_path() {
-        crate::environ::clearenv();
+        let _g = clear_env_locked();
         let input = b"~/foo";
         let result = expand_single_word(input, 0, input.len(), 0);
         let exp = result.unwrap();
@@ -1236,7 +1254,7 @@ mod tests {
 
     #[test]
     fn tilde_not_at_word_start() {
-        setup_home(b"/home/me\0");
+        let _g = setup_home(b"/home/me\0");
         // Tilde in the middle of a word is literal.
         let input = b"foo~bar";
         let result = expand_single_word(input, 0, input.len(), 0);
@@ -1246,7 +1264,7 @@ mod tests {
 
     #[test]
     fn tilde_with_home_trailing_slash() {
-        setup_home(b"/home/user/\0");
+        let _g = setup_home(b"/home/user/\0");
         let input = b"~/bin";
         let result = expand_single_word(input, 0, input.len(), 0);
         let exp = result.unwrap();

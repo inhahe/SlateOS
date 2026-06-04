@@ -2094,6 +2094,50 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
+    // Serialisation of FILE_POOL-mutating tests
+    //
+    // `FILE_POOL` is a process-global static.  When tests run in parallel
+    // (cargo's default), one test's allocation can fill slots that another
+    // test expects to be free, producing intermittent failures such as
+    // `test_alloc_file_pool_exhaustion` seeing fewer slots than
+    // `MAX_OPEN_FILES`.  Any test that observes or mutates pool state must
+    // hold this lock for its duration.
+    // -----------------------------------------------------------------------
+
+    static STDIO_POOL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Zero all `FILE_POOL` slots.  Caller must hold `STDIO_POOL_TEST_LOCK`.
+    unsafe fn zero_file_pool() {
+        // SAFETY: caller serialises access via the lock.
+        unsafe {
+            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
+            let mut i: usize = 0;
+            while i < MAX_OPEN_FILES {
+                (*pool.add(i)).in_use = false;
+                i += 1;
+            }
+        }
+    }
+
+    /// Acquire `STDIO_POOL_TEST_LOCK` (with poison recovery) and zero the
+    /// pool.  Returns the guard; bind it to `_g` so it lives for the whole
+    /// test body.
+    ///
+    /// Tests that need a mid-test reset should call `zero_file_pool()`
+    /// directly — re-calling this function would deadlock because the
+    /// previous guard is still alive (Rust shadowing keeps both `_g`
+    /// bindings in scope until the end of the block).
+    #[must_use = "the returned guard serialises FILE_POOL tests; bind it to `_g`"]
+    fn lock_and_reset_file_pool() -> std::sync::MutexGuard<'static, ()> {
+        let guard = STDIO_POOL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: we just acquired the lock.
+        unsafe { zero_file_pool() };
+        guard
+    }
+
+    // -----------------------------------------------------------------------
     // Constants
     // -----------------------------------------------------------------------
 
@@ -2995,16 +3039,7 @@ mod tests {
 
     #[test]
     fn test_alloc_free_file_round_trip() {
-        // Reset pool state to avoid interference.
-        // SAFETY: Single-threaded test.
-        unsafe {
-            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
-            let mut i: usize = 0;
-            while i < MAX_OPEN_FILES {
-                (*pool.add(i)).in_use = false;
-                i += 1;
-            }
-        }
+        let _g = lock_and_reset_file_pool();
 
         let f = alloc_file(42, BUF_MODE_FULL);
         assert!(!f.is_null(), "alloc_file should succeed with empty pool");
@@ -3025,15 +3060,7 @@ mod tests {
 
     #[test]
     fn test_alloc_file_pool_exhaustion() {
-        // Reset pool.
-        unsafe {
-            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
-            let mut i: usize = 0;
-            while i < MAX_OPEN_FILES {
-                (*pool.add(i)).in_use = false;
-                i += 1;
-            }
-        }
+        let _g = lock_and_reset_file_pool();
 
         // Allocate all slots.
         let mut ptrs = [core::ptr::null_mut::<File>(); MAX_OPEN_FILES];
@@ -3305,14 +3332,7 @@ mod tests {
         // Ensure all streams are idle (no pending writes).
         // fflush(NULL) should return 0 when all buffers are idle.
         // Reset FILE_POOL so no in-use files interfere.
-        unsafe {
-            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
-            let mut i: usize = 0;
-            while i < MAX_OPEN_FILES {
-                (*pool.add(i)).in_use = false;
-                i += 1;
-            }
-        }
+        let _g = lock_and_reset_file_pool();
 
         // Reset stdout and stderr write buffers to idle.
         let f_out = stream_to_file(STDOUT_SENTINEL as *mut u8);
@@ -3536,15 +3556,7 @@ mod tests {
 
     #[test]
     fn test_fdopen_allocates_from_pool() {
-        // Reset pool.
-        unsafe {
-            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
-            let mut i: usize = 0;
-            while i < MAX_OPEN_FILES {
-                (*pool.add(i)).in_use = false;
-                i += 1;
-            }
-        }
+        let _g = lock_and_reset_file_pool();
 
         let stream = fdopen(42, b"r\0".as_ptr());
         assert!(!stream.is_null(), "fdopen(42) should allocate from pool");
@@ -3584,14 +3596,7 @@ mod tests {
     #[test]
     fn test_fclose_pool_file() {
         // Allocate a pool file, then close it.
-        unsafe {
-            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
-            let mut i: usize = 0;
-            while i < MAX_OPEN_FILES {
-                (*pool.add(i)).in_use = false;
-                i += 1;
-            }
-        }
+        let _g = lock_and_reset_file_pool();
         let stream = fdopen(99, b"r\0".as_ptr());
         assert!(!stream.is_null());
         // fclose will call close(99) which may fail on host, but the

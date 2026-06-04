@@ -159,10 +159,31 @@ pub extern "C" fn _Exit(status: i32) -> ! {
 }
 
 /// Get the process ID of the calling process.
+///
+/// On the kernel target this issues `SYS_PROCESS_ID`.  On host builds it
+/// returns a deterministic placeholder (the host process ID, truncated
+/// to `PidT`).  We deliberately do not issue the raw `syscall`
+/// instruction on the host — its register-based ABI clashes with
+/// Windows' user-mode syscall layer, and under heavy parallel test load
+/// it can return `STATUS_INSUFFICIENT_RESOURCES` (0xC0000056) from
+/// whatever NT service happens to occupy the `SYS_PROCESS_ID` slot,
+/// causing intermittent test failures (see todo.txt 2026-05-27 entry).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpid() -> PidT {
-    let ret = syscall0(SYS_PROCESS_ID);
-    ret as PidT
+    #[cfg(target_os = "none")]
+    {
+        let ret = syscall0(SYS_PROCESS_ID);
+        ret as PidT
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // Host build: use std::process::id().  Tests rely on a stable,
+        // non-zero PID and don't care about the exact value.
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        {
+            std::process::id() as PidT
+        }
+    }
 }
 
 /// Get the parent process ID of the calling process.
@@ -438,10 +459,30 @@ pub extern "C" fn vfork() -> PidT {
 }
 
 /// Get the task/thread ID (Linux-specific, but commonly used).
+///
+/// On the kernel target this issues `SYS_TASK_ID`.  On host builds it
+/// returns a deterministic placeholder derived from the host thread ID.
+/// See `getpid` for why we don't issue the raw `syscall` on the host.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gettid() -> PidT {
-    let ret = syscall0(SYS_TASK_ID);
-    ret as PidT
+    #[cfg(target_os = "none")]
+    {
+        let ret = syscall0(SYS_TASK_ID);
+        ret as PidT
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // Host build: hash the std::thread::ThreadId into a positive
+        // PidT.  Real per-thread distinct values are not required for
+        // any test; only stability within a thread is.
+        use core::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::thread::current().id().hash(&mut h);
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        {
+            ((h.finish() & 0x7FFF_FFFF) as u32) as PidT
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

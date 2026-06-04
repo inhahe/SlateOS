@@ -6032,3 +6032,33 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      implementation.
 ##      Limitation: programs that set then read back via uname
 ##      see "localhost" instead of the requested name.
+##  28. MLOCK / MUNLOCK / MLOCKALL / MUNLOCKALL — DONE as
+##      accepting stubs.  All pages are resident on this kernel
+##      (no swap), so the calls are semantically no-ops; we still
+##      validate the address range so callers passing garbage see
+##      EFAULT, and reject unknown MCL_* bits with EINVAL.
+##      Limitation: when a swap subsystem lands, these need to
+##      mark VMAs as locked so the pageout path skips them.
+##  29. MSYNC — DONE as accepting stub.  Validates flag bits
+##      (MS_ASYNC / MS_SYNC / MS_INVALIDATE; requires exactly one
+##      of SYNC/ASYNC; rejects unknown bits), enforces 16-KiB
+##      address alignment, and validates the user range.  Returns
+##      0 because we don't yet have a writeback cache between
+##      userspace and the page allocator.
+##      Limitation: when an fs-backed page cache lands, msync must
+##      actually flush dirty pages and (with MS_INVALIDATE) drop
+##      cached pages so the next read picks up disk state.
+##  30. FADVISE64 / READAHEAD — DONE as advisory accept.
+##      fadvise64 validates POSIX_FADV_* values 0..=6, checks the
+##      fd is open, and returns 0.  readahead also validates the
+##      fd and returns 0.
+##      Limitation: we don't act on the hints, so workloads that
+##      depend on willneed-style prefetch see no speedup.
+##  31. CLOSE_RANGE — DONE.  Closes (or sets CLOEXEC on) every
+##      open fd in [first, last] clamped to MAX_FDS.  Honours
+##      CLOSE_RANGE_CLOEXEC by toggling FD_CLOEXEC instead of
+##      closing.  CLOSE_RANGE_UNSHARE is a no-op because we
+##      don't share fd tables across processes (fork copies).
+##      Limitation: when fd-table sharing (CLONE_FILES) lands,
+##      CLOSE_RANGE_UNSHARE must allocate a private table before
+##      the close loop.

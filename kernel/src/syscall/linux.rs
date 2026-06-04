@@ -423,6 +423,13 @@ pub mod nr {
     pub const SYNCFS: u64 = 306;
     pub const SETHOSTNAME: u64 = 170;
     pub const SETDOMAINNAME: u64 = 171;
+    pub const MLOCK: u64 = 149;
+    pub const MUNLOCK: u64 = 150;
+    pub const MLOCKALL: u64 = 151;
+    pub const MUNLOCKALL: u64 = 152;
+    pub const FADVISE64: u64 = 221;
+    pub const READAHEAD: u64 = 187;
+    pub const CLOSE_RANGE: u64 = 436;
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,6 +1263,14 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::SYNCFS => sys_syncfs(args),
         nr::SETHOSTNAME => sys_sethostname(args),
         nr::SETDOMAINNAME => sys_setdomainname(args),
+        nr::MLOCK => sys_mlock(args),
+        nr::MUNLOCK => sys_munlock(args),
+        nr::MLOCKALL => sys_mlockall(args),
+        nr::MUNLOCKALL => sys_munlockall(args),
+        nr::MSYNC => sys_msync(args),
+        nr::FADVISE64 => sys_fadvise64(args),
+        nr::READAHEAD => sys_readahead(args),
+        nr::CLOSE_RANGE => sys_close_range(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -3859,6 +3874,228 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
     sys_sethostname(args)
 }
 
+// ---------------------------------------------------------------------------
+// Memory-locking / paging hints (mlock, munlock, mlockall, munlockall, msync)
+//
+// We do not yet support memory locking — pages are always resident in our
+// design until a swap subsystem lands.  Linux programs (notably hardened
+// allocators and crypto libraries) call mlock() defensively to prevent
+// sensitive bytes from being swapped out; the correct response on a
+// non-swapping kernel is to accept the call silently.  msync() flushes a
+// memory mapping; with no writeback cache between userspace and the page
+// allocator, there is nothing to flush.
+//
+// All five validate their argument shape (user-range check, flag bits)
+// before returning success so that callers passing garbage still observe
+// EFAULT/EINVAL as Linux would.
+// ---------------------------------------------------------------------------
+
+/// `mlock(addr, len)` — accept after validating the range.
+fn sys_mlock(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let len = args.arg1;
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    let len_usize = match usize::try_from(len) {
+        Ok(v) => v,
+        Err(_) => return linux_err(errno::ENOMEM),
+    };
+    if let Err(e) = crate::mm::user::validate_user_read(addr, len_usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `munlock(addr, len)` — accept after validating the range.
+fn sys_munlock(args: &SyscallArgs) -> SyscallResult {
+    sys_mlock(args)
+}
+
+/// `mlockall(flags)` — accept if flags are in the documented set.
+///
+/// Linux defines MCL_CURRENT=1, MCL_FUTURE=2, MCL_ONFAULT=4.  Any bits
+/// outside this set are EINVAL.
+fn sys_mlockall(args: &SyscallArgs) -> SyscallResult {
+    const MCL_CURRENT: u64 = 1;
+    const MCL_FUTURE: u64 = 2;
+    const MCL_ONFAULT: u64 = 4;
+    const MCL_ALL: u64 = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
+    let flags = args.arg0;
+    if flags == 0 || (flags & !MCL_ALL) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `munlockall()` — always succeeds.
+fn sys_munlockall(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `msync(addr, len, flags)` — accept after validating shape.
+///
+/// Flag bits per Linux: MS_ASYNC=1, MS_INVALIDATE=2, MS_SYNC=4.
+/// MS_SYNC and MS_ASYNC are mutually exclusive.
+fn sys_msync(args: &SyscallArgs) -> SyscallResult {
+    use crate::mm::frame::FRAME_SIZE;
+    const MS_ASYNC: u64 = 1;
+    const MS_INVALIDATE: u64 = 2;
+    const MS_SYNC: u64 = 4;
+    const MS_ALL: u64 = MS_ASYNC | MS_INVALIDATE | MS_SYNC;
+
+    let addr = args.arg0;
+    let len = args.arg1;
+    let flags = args.arg2;
+
+    // Validate flag combination.
+    if (flags & !MS_ALL) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if (flags & MS_SYNC) != 0 && (flags & MS_ASYNC) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // At least one of ASYNC/SYNC must be set per Linux semantics.
+    if (flags & (MS_SYNC | MS_ASYNC)) == 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // addr must be page-aligned (16 KiB on this kernel).
+    let frame_size = FRAME_SIZE as u64;
+    if (addr & (frame_size - 1)) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    let len_usize = match usize::try_from(len) {
+        Ok(v) => v,
+        Err(_) => return linux_err(errno::ENOMEM),
+    };
+    if let Err(e) = crate::mm::user::validate_user_read(addr, len_usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// I/O hints (fadvise64, readahead)
+//
+// These are advisory: the kernel is free to ignore them.  We validate the
+// fd and accept the call.  Real implementations would prefetch pages or
+// adjust the readahead window.
+// ---------------------------------------------------------------------------
+
+/// `fadvise64(fd, offset, len, advice)` — accept advisory hint.
+fn sys_fadvise64(args: &SyscallArgs) -> SyscallResult {
+    // POSIX_FADV_* values 0..=6: NORMAL, RANDOM, SEQUENTIAL, WILLNEED,
+    // DONTNEED, NOREUSE.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let advice = args.arg3 as i32;
+    if !(0..=6).contains(&advice) {
+        return linux_err(errno::EINVAL);
+    }
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::ok(0), // kernel context: accept
+    };
+    if pcb::linux_fd_lookup(pid, fd).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `readahead(fd, offset, count)` — accept advisory hint.
+fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::ok(0),
+    };
+    if pcb::linux_fd_lookup(pid, fd).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// close_range — bulk fd close
+//
+// Introduced in Linux 5.9 and adopted by glibc/musl posix_spawn() and
+// daemon-startup helpers as a fast way to drop all inherited file
+// descriptors before exec.  Without this, programs fall back to a manual
+// for(fd = 3; fd < limit; fd++) close(fd) loop, which can be slow.
+//
+// Flags:
+//   CLOSE_RANGE_UNSHARE = 2 — unshare the fd table before closing.
+//     We do not share fd tables across processes (fork copies), so this
+//     bit is a no-op.
+//   CLOSE_RANGE_CLOEXEC = 4 — set FD_CLOEXEC on the range instead of
+//     closing.  We honour this by walking the range and toggling the
+//     flag on each existing fd.
+// ---------------------------------------------------------------------------
+
+/// `close_range(first, last, flags)` — close (or set CLOEXEC on) all open
+/// fds in `[first, last]` inclusive.
+fn sys_close_range(args: &SyscallArgs) -> SyscallResult {
+    const CLOSE_RANGE_UNSHARE: u32 = 2;
+    const CLOSE_RANGE_CLOEXEC: u32 = 4;
+    const ALL_FLAGS: u32 = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
+
+    let first = args.arg0 as u32;
+    let last = args.arg1 as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+
+    if (flags & !ALL_FLAGS) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if first > last {
+        return linux_err(errno::EINVAL);
+    }
+
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // Clamp `last` to the fd-table capacity to bound the loop.
+    let cap = crate::proc::linux_fd::MAX_FDS as u32;
+    let stop = last.min(cap.saturating_sub(1));
+
+    if (flags & CLOSE_RANGE_CLOEXEC) != 0 {
+        // Set FD_CLOEXEC on every existing fd in the range.
+        for fd in first..=stop {
+            #[allow(clippy::cast_possible_wrap)]
+            let fd_i = fd as i32;
+            if pcb::linux_fd_lookup(pid, fd_i).is_some() {
+                let _ = pcb::linux_fd_set_fd_flags(
+                    pid,
+                    fd_i,
+                    crate::proc::linux_fd::FD_CLOEXEC,
+                );
+            }
+        }
+        return SyscallResult::ok(0);
+    }
+
+    // Close every fd in the range.  Reuse the same logic as sys_close()
+    // so we honour the refcount-aware kernel-resource release.
+    for fd in first..=stop {
+        #[allow(clippy::cast_possible_wrap)]
+        let fd_i = fd as i32;
+        if let Some(entry) = pcb::linux_fd_take(pid, fd_i)
+            && entry.kind.needs_kernel_close()
+            && !pcb::linux_fd_is_handle_referenced(pid, entry.kind, entry.raw_handle, -1)
+        {
+            let _ = close_handle(entry);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -6265,6 +6502,158 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::SETDOMAINNAME, &a).value != 0 {
             serial_println!(
                 "[syscall/linux]   FAIL: setdomainname(NULL,0) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // mlock / munlock / mlockall / munlockall.
+    //   - zero len succeeds without touching memory.
+    //   - mlockall with zero flags -> EINVAL; valid bits -> 0; bad bit -> EINVAL.
+    {
+        let zero = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCK, &zero).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mlock(0,0) != 0");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::MUNLOCK, &zero).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: munlock(0,0) != 0");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::MUNLOCKALL, &zero).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: munlockall != 0");
+            return Err(KernelError::InternalError);
+        }
+        // mlockall(0) -> EINVAL.
+        if dispatch_linux(nr::MLOCKALL, &zero).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mlockall(0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mlockall(1|2|4 = 7) -> 0.
+        let a = SyscallArgs { arg0: 7, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCKALL, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mlockall(7) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // mlockall(8) -> EINVAL (unknown bit).
+        let a = SyscallArgs { arg0: 8, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCKALL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mlockall(8) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // msync flag/alignment validation.
+    {
+        // flags == 0 -> EINVAL (need at least MS_SYNC or MS_ASYNC).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: msync(flags=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // MS_SYNC | MS_ASYNC -> EINVAL (mutually exclusive).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1 | 4, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: msync(SYNC|ASYNC) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Unknown flag bit -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x10, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(flags=0x10) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Misaligned addr with valid flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1234, arg1: 4096, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(misaligned) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Zero len with valid flags & aligned addr -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: msync(len=0) not 0");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // fadvise64 / readahead — advice validation.
+    {
+        // Bad advice (7) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 7,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FADVISE64, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fadvise64(advice=7) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Valid advice in kernel context (no caller pid) -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 3,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FADVISE64, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: fadvise64(WILLNEED) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::READAHEAD, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: readahead not 0");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // close_range — argument validation.
+    {
+        // first > last -> EINVAL.
+        let a = SyscallArgs { arg0: 10, arg1: 5, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOSE_RANGE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: close_range(first>last) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Unknown flag bit -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 10, arg2: 0x100, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOSE_RANGE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: close_range(flags=0x100) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Valid call in kernel context (no caller pid) -> EBADF, since
+        // close_range cannot operate without an owning process's fd table.
+        let a = SyscallArgs { arg0: 3, arg1: 10, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOSE_RANGE, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: close_range(no caller) not EBADF"
             );
             return Err(KernelError::InternalError);
         }

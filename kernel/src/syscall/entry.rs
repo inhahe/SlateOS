@@ -317,13 +317,28 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // native dispatch table.  See `kernel/src/syscall/linux.rs` for the
     // full set of translated syscalls and their semantics.
     //
-    // The Linux frame-modifying paths (execve/fork/vfork/clone/sigreturn)
-    // would have to be wired alongside the native frame-modifiers above,
-    // but the dispatcher returns -ENOSYS for those today.  See `todo.txt`.
+    // Linux frame-modifying syscalls (fork / vfork / clone / execve)
+    // are dispatched via `dispatch_linux_with_frame` BEFORE the regular
+    // value-returning dispatcher gets a chance, because they need to
+    // mutate the saved register frame (clone snapshots the parent
+    // frame for the child trampoline; execve rewrites user_rip/rsp).
+    // Returns `None` for any other syscall number and we fall through.
     let task = crate::sched::current_task_id();
     let abi_mode = crate::proc::thread::owner_process(task)
         .and_then(crate::proc::pcb::get_abi_mode)
         .unwrap_or(crate::proc::pcb::AbiMode::Native);
+
+    if abi_mode == crate::proc::pcb::AbiMode::Linux {
+        if let Some(rax) = super::linux::dispatch_linux_with_frame(f) {
+            // Same signal-delivery hook as the regular return path —
+            // ensures pending signals can interrupt around an execve
+            // boundary, exactly as in native sys_process_exec_with_frame.
+            if super::handlers::deliver_pending_signal(f, rax) {
+                return 0;
+            }
+            return rax;
+        }
+    }
 
     let result = match abi_mode {
         crate::proc::pcb::AbiMode::Native => super::dispatch::dispatch(f.syscall_nr, &args),

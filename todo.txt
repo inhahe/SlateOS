@@ -5434,12 +5434,15 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##       (v)   openat() only accepts AT_FDCWD; directory file
 ##             descriptors (the dirfd argument) require a kernel-side
 ##             open-dir handle, which the VFS does not currently expose.
-##   2. FRAME-MODIFYING PATHS: execve, fork, vfork, clone, sigreturn,
-##      rt_sigreturn need to live alongside the existing native
-##      frame-modifying handlers in entry.rs (the ones that call
-##      `_with_frame` variants).  Currently they hit the ENOSYS
-##      fallthrough in `dispatch_linux`.  Add a parallel
-##      `dispatch_linux_with_frame` path when we wire these up.
+##   2. FRAME-MODIFYING PATHS: fork / vfork DONE (route through the
+##      same fork::fork_process the native ABI uses).  clone DONE for
+##      the SIGCHLD-only "fork-equivalent" case; CLONE_VM / CLONE_THREAD
+##      / non-zero child_stack still return -ENOSYS until we implement
+##      real thread creation on shared address spaces.  execve still
+##      returns -ENOSYS — the Linux signature (filename + argv/envp
+##      pointer arrays) needs VFS-resolved file loading and a
+##      pointer-array walker before it can hand off to exec_process.
+##      sigreturn / rt_sigreturn still need a real handler.
 ##   3. FILE-BACKED MMAP.  `mmap(MAP_PRIVATE | MAP_FILE)` returns
 ##      -ENOSYS today.  Anonymous mmap works.  File-backed needs the
 ##      fd table first (item 1).
@@ -5497,6 +5500,9 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     and leaves non-cloexec fds intact; ensure_stdio refills missing
 ##     stdio slots with Console entries but does NOT overwrite a
 ##     non-Console fd sitting at 0/1/2.
+##   - dispatch_linux_with_frame routing: non-frame syscalls return
+##     None; EXECVE returns Some(-ENOSYS); CLONE with thread-creation
+##     bits or non-zero child_stack returns Some(-ENOSYS).
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an

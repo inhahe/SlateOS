@@ -155,6 +155,7 @@ pub mod nr {
     pub const DUP2: u64 = 33;
     pub const NANOSLEEP: u64 = 35;
     pub const GETPID: u64 = 39;
+    pub const CLONE: u64 = 56;
     pub const FORK: u64 = 57;
     pub const VFORK: u64 = 58;
     pub const EXECVE: u64 = 59;
@@ -416,6 +417,175 @@ pub const fn kernel_error_from_code(code: i32) -> Option<KernelError> {
 #[must_use]
 pub const fn linux_err(errno_val: i32) -> SyscallResult {
     SyscallResult::ok(-(errno_val as i64))
+}
+
+// ---------------------------------------------------------------------------
+// Linux frame-modifying constants (clone flags)
+// ---------------------------------------------------------------------------
+
+/// Subset of Linux `CLONE_*` flag bits we explicitly recognise.  Bits
+/// 0..7 of `flags` carry the termination signal (`CSIGNAL`); the rest
+/// are the actual sharing-control bits.
+///
+/// Source: `include/uapi/linux/sched.h`.
+pub mod clone_flags {
+    pub const CSIGNAL: u64 = 0x0000_00ff;
+    pub const CLONE_VM: u64 = 0x0000_0100;
+    pub const CLONE_FS: u64 = 0x0000_0200;
+    pub const CLONE_FILES: u64 = 0x0000_0400;
+    pub const CLONE_SIGHAND: u64 = 0x0000_0800;
+    pub const CLONE_PTRACE: u64 = 0x0000_2000;
+    pub const CLONE_VFORK: u64 = 0x0000_4000;
+    pub const CLONE_PARENT: u64 = 0x0000_8000;
+    pub const CLONE_THREAD: u64 = 0x0001_0000;
+    pub const CLONE_NEWNS: u64 = 0x0002_0000;
+    pub const CLONE_SYSVSEM: u64 = 0x0004_0000;
+    pub const CLONE_SETTLS: u64 = 0x0008_0000;
+    pub const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+    pub const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+    pub const CLONE_DETACHED: u64 = 0x0040_0000;
+    pub const CLONE_UNTRACED: u64 = 0x0080_0000;
+    pub const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    /// SIGCHLD is the conventional CSIGNAL byte for fork-equivalent
+    /// `clone()` calls.
+    pub const SIGCHLD: u64 = 17;
+}
+
+// ---------------------------------------------------------------------------
+// Frame-modifying dispatch
+// ---------------------------------------------------------------------------
+
+/// Dispatch the Linux syscalls that need direct access to the saved
+/// register frame (fork / vfork / clone / execve).
+///
+/// Returns `Some(rax)` if this function handled the syscall — the caller
+/// must propagate `rax` straight back to userspace (after the usual
+/// signal-delivery hook).  Returns `None` for any syscall number that
+/// is not one of these frame-modifying paths; the caller then falls
+/// through to the regular `dispatch_linux(nr, args)`.
+///
+/// This mirrors the native `syscall_handler_inner` top-of-function
+/// checks for `SYS_PROCESS_EXEC` / `SYS_PROCESS_FORK` etc., but for
+/// Linux-ABI processes and using Linux syscall numbers.
+#[must_use]
+pub fn dispatch_linux_with_frame(
+    frame: &mut crate::syscall::entry::SyscallFrame,
+) -> Option<i64> {
+    match frame.syscall_nr {
+        nr::FORK | nr::VFORK => Some(linux_fork(frame)),
+        nr::CLONE => Some(linux_clone(frame)),
+        nr::EXECVE => Some(linux_execve(frame)),
+        _ => None,
+    }
+}
+
+/// Linux `fork()` / `vfork()` translation.
+///
+/// vfork is implemented identically to fork: the Linux `vfork()`
+/// optimisation (parent blocks until child execs/exits, child shares
+/// parent's pages) is a performance hint, not a correctness
+/// requirement — every conformant caller of vfork must work correctly
+/// against a plain fork.  We pay the CoW page table walk vfork was
+/// trying to avoid, but the program behaves the same.
+fn linux_fork(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    use crate::proc::{fork, thread};
+
+    let task_id = crate::sched::current_task_id();
+    let parent_pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return -i64::from(errno::ESRCH),
+    };
+
+    match fork::fork_process(parent_pid, frame) {
+        Ok(child_pid) => {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                child_pid as i64
+            }
+        }
+        Err(e) => -i64::from(linux_errno_for(e)),
+    }
+}
+
+/// Linux `clone()` translation — limited support.
+///
+/// Linux `clone(flags, child_stack, ptid, ctid, tls)` is the swiss-army
+/// knife behind both `fork()` and `pthread_create()`.  Implementing the
+/// full thread-creation path requires creating a new thread sharing the
+/// parent's address space / fd table / signal handlers, with TLS
+/// pointer setup and futex-on-exit hooks for `pthread_join()` — that's
+/// a substantial chunk of work.
+///
+/// For now we only support the "fork-equivalent" use of clone: glibc's
+/// `fork()` wrapper issues `clone(SIGCHLD, 0, ...)` (zero child_stack,
+/// no CLONE_VM, just the SIGCHLD termination signal).  Anything that
+/// asks for CLONE_VM, CLONE_THREAD, or a non-zero child_stack returns
+/// `-ENOSYS` so glibc falls back to the no-threads path where possible.
+fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    let flags = frame.arg0;
+    let child_stack = frame.arg1;
+
+    // A non-zero child_stack means the caller wants the child to run
+    // on a different stack than the parent — only meaningful for true
+    // thread creation (shared address space).  Reject explicitly.
+    if child_stack != 0 {
+        return -i64::from(errno::ENOSYS);
+    }
+
+    // Any "share with parent" bit means this is a thread-creation
+    // request, not a fork.  We don't support those yet.
+    const THREAD_BITS: u64 = clone_flags::CLONE_VM
+        | clone_flags::CLONE_FS
+        | clone_flags::CLONE_FILES
+        | clone_flags::CLONE_SIGHAND
+        | clone_flags::CLONE_THREAD
+        | clone_flags::CLONE_SYSVSEM
+        | clone_flags::CLONE_SETTLS
+        | clone_flags::CLONE_PARENT_SETTID
+        | clone_flags::CLONE_CHILD_CLEARTID
+        | clone_flags::CLONE_CHILD_SETTID;
+    if flags & THREAD_BITS != 0 {
+        return -i64::from(errno::ENOSYS);
+    }
+
+    // CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE are
+    // also outside what plain-fork semantics give us; reject.
+    const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_VFORK
+        | clone_flags::CLONE_PARENT
+        | clone_flags::CLONE_NEWNS
+        | clone_flags::CLONE_PTRACE;
+    if flags & UNSUPPORTED_BITS != 0 {
+        return -i64::from(errno::ENOSYS);
+    }
+
+    // Everything that remains is just the CSIGNAL byte — fork-equivalent.
+    // glibc fork() passes SIGCHLD here; we don't actually deliver a
+    // signal yet (no Unix-style signals to userspace), but the kernel
+    // already records parent/child relationships in the PCB.
+    linux_fork(frame)
+}
+
+/// Linux `execve(filename, argv[], envp[])` — not yet implemented.
+///
+/// Unlike the native `SYS_PROCESS_EXEC` (which takes the ELF data
+/// packed into a buffer the caller already loaded), Linux `execve`
+/// names a path to a file the kernel must open, read entirely, and
+/// load.  That requires:
+///   1. Reading the NUL-terminated `filename` from userspace.
+///   2. Resolving the path through the VFS / namespace.
+///   3. Reading the entire file into a kernel buffer.
+///   4. Walking the `argv` / `envp` arrays (arrays of `char*`
+///      pointers, NUL-terminated) and packing them into the format
+///      `exec_process` expects.
+///   5. Calling `exec_process`, with all the error-recovery footwork
+///      to handle "filename resolves but file is unreadable / not
+///      ELF / too big" without destroying the caller's image first.
+///
+/// Returning `-ENOSYS` lets glibc fall back to its `posix_spawn` or
+/// CRT-only paths (or, for the shell case, propagate the error to
+/// the user).  Tracked in `todo.txt`.
+fn linux_execve(_frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    -i64::from(errno::ENOSYS)
 }
 
 // ---------------------------------------------------------------------------
@@ -2077,6 +2247,79 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     if kernel_error_from_code(-9999).is_some() {
         serial_println!("[syscall/linux]   FAIL: unknown code mapped to Some(_)");
         return Err(KernelError::InternalError);
+    }
+
+    // (13) dispatch_linux_with_frame routing.
+    //
+    // We can exercise the routing logic without actually calling
+    // fork::fork_process by:
+    //   - feeding a non-frame syscall_nr (READ) and expecting None;
+    //   - feeding EXECVE and expecting Some(-ENOSYS);
+    //   - feeding CLONE with thread-creation bits and expecting
+    //     Some(-ENOSYS) (linux_clone rejects before touching fork).
+    //
+    // We CANNOT exercise the fork-equivalent CLONE / FORK / VFORK
+    // paths here because they require a live calling process to
+    // succeed.  Those are covered by the boot-time integration
+    // suite when a real Linux binary calls them.
+    {
+        use crate::syscall::entry::SyscallFrame;
+        let mut f = SyscallFrame {
+            syscall_nr: nr::READ,
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+            user_rip: 0, user_rsp: 0, user_rflags: 0,
+        };
+        if dispatch_linux_with_frame(&mut f).is_some() {
+            serial_println!(
+                "[syscall/linux]   FAIL: with_frame routed non-frame syscall"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        f.syscall_nr = nr::EXECVE;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ENOSYS) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: execve via with_frame → {:?}", other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // CLONE with CLONE_VM | CLONE_THREAD | SIGCHLD — pthread-like.
+        f.syscall_nr = nr::CLONE;
+        f.arg0 = clone_flags::CLONE_VM
+            | clone_flags::CLONE_THREAD
+            | clone_flags::CLONE_SIGHAND
+            | clone_flags::SIGCHLD;
+        f.arg1 = 0; // child_stack must be 0 to reach the flag check
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ENOSYS) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: thread-clone via with_frame → {:?}",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // CLONE with a non-zero child_stack — also -ENOSYS.
+        f.syscall_nr = nr::CLONE;
+        f.arg0 = clone_flags::SIGCHLD;
+        f.arg1 = 0xDEAD_BEEF;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ENOSYS) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: stack-clone via with_frame → {:?}",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
     }
 
     serial_println!("[syscall/linux] Translation self-test PASSED");

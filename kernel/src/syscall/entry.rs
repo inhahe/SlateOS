@@ -311,7 +311,24 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
         arg5: f.arg5,
     };
 
-    let result = super::dispatch::dispatch(f.syscall_nr, &args);
+    // ABI-mode routing: a process loaded as a Linux binary runs against
+    // the Linux x86_64 syscall numbering and -errno return convention.
+    // Route those calls through the translation layer instead of the
+    // native dispatch table.  See `kernel/src/syscall/linux.rs` for the
+    // full set of translated syscalls and their semantics.
+    //
+    // The Linux frame-modifying paths (execve/fork/vfork/clone/sigreturn)
+    // would have to be wired alongside the native frame-modifiers above,
+    // but the dispatcher returns -ENOSYS for those today.  See `todo.txt`.
+    let task = crate::sched::current_task_id();
+    let abi_mode = crate::proc::thread::owner_process(task)
+        .and_then(crate::proc::pcb::get_abi_mode)
+        .unwrap_or(crate::proc::pcb::AbiMode::Native);
+
+    let result = match abi_mode {
+        crate::proc::pcb::AbiMode::Native => super::dispatch::dispatch(f.syscall_nr, &args),
+        crate::proc::pcb::AbiMode::Linux => super::linux::dispatch_linux(f.syscall_nr, &args),
+    };
 
     // On the way back to userspace, deliver a pending signal if one is
     // ready and the process registered a trampoline. This rewrites the

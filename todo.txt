@@ -2465,13 +2465,56 @@ Remaining net improvements (diminishing returns):
   via the existing TruncatedData error path — the warnings are about
   bounds-safety not currently visible to clippy, not real bugs.
 
-- (NOTED 2026-06-03) userspace/coreutils has zero unit tests across ALL
-  binaries (cargo test -p coreutils runs ~50 binaries, every one reports
-  "0 passed; 0 failed"). The package contains no #[test] or #[cfg(test)]
-  blocks anywhere under src/. This is a much bigger gap than the
-  individual stub crates. Filling it in is a large project — most
+- (IN PROGRESS 2026-06-04) userspace/coreutils has zero unit tests across
+  ALL binaries (cargo test -p coreutils runs ~85 binaries, every one
+  reports "0 passed; 0 failed"). The package contains no #[test] or
+  #[cfg(test)] blocks anywhere under src/. This is a much bigger gap than
+  the individual stub crates. Filling it in is a large project — most
   bins need at least argument-parsing and core-behavior smoke tests
   to meet the CLAUDE.md "every binary gets tests" rule.
+
+  PROGRESS 2026-06-04 (batch 1): refactored 6 small binaries to extract
+  pure helpers and added 102 unit tests total:
+    * basename.rs: extracted `basename(path, suffix) -> String`; 14 tests
+      covering simple/absolute/relative paths, root "/", empty path,
+      trailing slash, suffix stripping (matched, longer than base, equal
+      length not stripped, non-matching), empty suffix, nested paths,
+      hidden files, "." and ".." behavior.
+    * dirname.rs: extracted `dirname_of(path) -> String`; 11 tests for
+      simple file, absolute/relative paths, root, empty, trailing slash,
+      top-level cases, ".", "..", deeply nested.
+    * echo.rs: extracted `parse_flags`, `render`, kept `unescape`. 26
+      tests: flag parsing for -n/-e/-ne/-en, stop-at-non-flag, unknown
+      flag, render output for no/single/multi args, with/without
+      escapes, all unescape sequences (\n \t \r \\ \0 \a \b \f),
+      trailing-backslash, unknown-escape passthrough.
+    * seq.rs: extracted `generate(args) -> Result<Vec<String>, String>`
+      and `format_value`. 16 tests: 1/2/3-arg forms, default step,
+      negative step (descending), out-of-range (first past last, both
+      directions), single value, fractional step, negative range,
+      missing-operand/invalid-number/zero-increment/too-many-args
+      errors, format_value integer-no-decimal and huge-value fallback.
+    * printf.rs: extracted `format_into_bytes(format, args) -> Vec<u8>`.
+      28 tests: literal text, %s/%d/%i/%u/%x/%X/%o/%c/%%, missing-arg
+      uses empty, invalid-int uses 0, negative for %u uses 0, trailing
+      lone %, unknown spec emitted literally, all escape sequences
+      including octal (\0NNN, short \07, lone \0), trailing backslash,
+      unknown escape passthrough, arg_str in/out of range, combined
+      format+escapes.
+    * logname.rs: extracted `resolve_login_name(candidates) ->
+      Option<String>`. 7 tests: first-wins, fallback when first unset,
+      fallback when first empty (empty treated as unset), None when all
+      unset/all empty, empty list, single candidate.
+  All 102 tests pass; clippy clean on x86_64-pc-windows-gnu.
+
+  REMAINING (~79 binaries): awk, bc, cal, cat, chmod, chown, cmp, comm,
+  cp, csplit, cut, date, dd, df, diff, du, ed, env, expand, expr, false,
+  fetch, find, fold, free, grep, head, hostname, id, join, kill, ln,
+  logger, ls, md5sum, mkdir, mkfifo, more, mv, nice, nl, nohup, od,
+  paste, patch, ps, pwd, readlink, realpath, renice, rm, rmdir, sed,
+  sh, sha256sum, sleep, sort, split, stat, strings, tail, tar, tee,
+  test, time_cmd, touch, tr, true, tsort, tty, uname, unexpand, uniq,
+  uptime, wc, which, who, xargs, yes. Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to
   link on the host target (x86_64-pc-windows-gnu) with "undefined

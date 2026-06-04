@@ -10,6 +10,7 @@
 
 #![cfg_attr(not(test), no_main)]
 
+#[cfg(not(test))]
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -324,6 +325,7 @@ fn update_password(
 // Password status display
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 fn show_password_status(
     shadow_path: &std::path::Path,
     username: &str,
@@ -441,6 +443,7 @@ fn run_chpasswd(
 // passwd mode (interactive)
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 fn run_passwd(
     cfg: &Config,
     reader: &mut dyn BufRead,
@@ -573,6 +576,7 @@ fn run_passwd(
     }
 }
 
+#[cfg(not(test))]
 fn lock_user(shadow_path: &std::path::Path, username: &str) -> Result<(), String> {
     let mut entries = read_shadow_file(shadow_path)
         .map_err(|e| format!("cannot read shadow: {e}"))?;
@@ -591,6 +595,7 @@ fn lock_user(shadow_path: &std::path::Path, username: &str) -> Result<(), String
     Ok(())
 }
 
+#[cfg(not(test))]
 fn unlock_user(shadow_path: &std::path::Path, username: &str) -> Result<(), String> {
     let mut entries = read_shadow_file(shadow_path)
         .map_err(|e| format!("cannot read shadow: {e}"))?;
@@ -613,6 +618,7 @@ fn unlock_user(shadow_path: &std::path::Path, username: &str) -> Result<(), Stri
 // Help / version
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 fn print_help(personality: Personality) {
     match personality {
         Personality::Chpasswd => {
@@ -645,6 +651,7 @@ fn print_help(personality: Personality) {
     }
 }
 
+#[cfg(not(test))]
 fn print_version(personality: Personality) {
     let name = match personality {
         Personality::Chpasswd => "chpasswd",

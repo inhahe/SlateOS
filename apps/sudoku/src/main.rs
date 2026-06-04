@@ -1685,9 +1685,7 @@ mod tests {
         let solution = known_solution();
         let mut grid = [0u8; TOTAL_CELLS];
         // Give some cells
-        for i in 0..20 {
-            grid[i] = solution[i];
-        }
+        grid[..20].copy_from_slice(&solution[..20]);
         assert!(solve(&mut grid));
         assert!(is_grid_complete(&grid));
     }
@@ -1722,9 +1720,7 @@ mod tests {
         let solution = known_solution();
         let mut grid = [0u8; TOTAL_CELLS];
         // Remove only a few cells from a known grid
-        for i in 0..TOTAL_CELLS {
-            grid[i] = solution[i];
-        }
+        grid[..TOTAL_CELLS].copy_from_slice(&solution[..TOTAL_CELLS]);
         // Remove 5 cells
         grid[idx(0, 0)] = 0;
         grid[idx(1, 1)] = 0;
@@ -1826,7 +1822,7 @@ mod tests {
         let (cells, _solution) = generate_puzzle(&mut rng, Difficulty::Easy);
         let given_count: usize = cells.iter().filter(|c| c.given).count();
         assert!(
-            given_count >= 35 && given_count <= 40,
+            (35..=40).contains(&given_count),
             "Easy should have 35-40 givens, got {given_count}"
         );
     }
@@ -1837,7 +1833,7 @@ mod tests {
         let (cells, _solution) = generate_puzzle(&mut rng, Difficulty::Medium);
         let given_count: usize = cells.iter().filter(|c| c.given).count();
         assert!(
-            given_count >= 28 && given_count <= 34,
+            (28..=34).contains(&given_count),
             "Medium should have 28-34 givens, got {given_count}"
         );
     }
@@ -2777,7 +2773,7 @@ mod tests {
         let digit_count = cmds.iter().filter(|cmd| {
             matches!(cmd, RenderCommand::Text { text, font_size, .. }
                 if text.len() == 1
-                    && text.chars().next().map_or(false, |ch| ch.is_ascii_digit() && ch != '0')
+                    && text.chars().next().is_some_and(|ch| ch.is_ascii_digit() && ch != '0')
                     && (*font_size - CELL_FONT_SIZE).abs() < 0.1)
         }).count();
         assert!(digit_count > 0, "Render should contain cell digits");
@@ -2884,8 +2880,8 @@ mod tests {
     fn test_values_array() {
         let app = SudokuApp::new();
         let vals = values_array(&app.cells);
-        for i in 0..TOTAL_CELLS {
-            assert_eq!(vals[i], app.cells[i].value);
+        for (v, cell) in vals.iter().zip(app.cells.iter()).take(TOTAL_CELLS) {
+            assert_eq!(*v, cell.value);
         }
     }
 

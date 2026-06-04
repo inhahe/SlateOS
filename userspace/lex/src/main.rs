@@ -15,10 +15,13 @@
 #![cfg_attr(not(test), no_main)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+#[cfg(not(test))]
 use std::env;
 use std::fmt::Write as FmtWrite;
+#[cfg(not(test))]
 use std::fs;
-use std::io::{self, Write};
+#[cfg(not(test))]
+use std::io;
 
 // ---------------------------------------------------------------------------
 // Personality detection
@@ -1666,6 +1669,7 @@ fn parse_cli(args: &[String]) -> CliArgs {
     result
 }
 
+#[cfg(not(test))]
 fn print_help(personality: Personality) {
     let name = match personality {
         Personality::Lex => "lex",
@@ -1682,6 +1686,7 @@ fn print_help(personality: Personality) {
     println!("  -V        Show version");
 }
 
+#[cfg(not(test))]
 fn print_version(personality: Personality) {
     let name = match personality {
         Personality::Lex => "lex",
@@ -1694,6 +1699,7 @@ fn print_version(personality: Personality) {
 // run() wrapper
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 fn run() -> Result<i32, String> {
     let args: Vec<String> = env::args().collect();
     let personality = detect_personality(args.first().map_or("lex", |s| s.as_str()));
@@ -2702,13 +2708,13 @@ ab  yymore();
 
     #[test]
     fn test_char_class_bytes_singles() {
-        let bytes = char_class_bytes(&[], &[b'x', b'y']);
+        let bytes = char_class_bytes(&[], b"xy");
         assert_eq!(bytes, vec![b'x', b'y']);
     }
 
     #[test]
     fn test_char_class_bytes_dedup() {
-        let bytes = char_class_bytes(&[(b'a', b'c')], &[b'b']);
+        let bytes = char_class_bytes(&[(b'a', b'c')], b"b");
         // 'b' is in both range and singles; dedup removes it.
         assert_eq!(bytes, vec![b'a', b'b', b'c']);
     }

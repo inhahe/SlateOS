@@ -1996,7 +1996,7 @@ mod tests {
         let mut store = NoteStore::new();
         let id = store.create_note(0.0, 0.0);
         assert!(store.pin_note(id));
-        assert!(store.get_note(id).map_or(false, |n| n.pinned));
+        assert!(store.get_note(id).is_some_and(|n| n.pinned));
     }
 
     #[test]
@@ -2005,7 +2005,7 @@ mod tests {
         let id = store.create_note(0.0, 0.0);
         store.pin_note(id);
         assert!(store.unpin_note(id));
-        assert!(!store.get_note(id).map_or(true, |n| n.pinned));
+        assert!(!store.get_note(id).is_none_or(|n| n.pinned));
     }
 
     #[test]
@@ -2013,9 +2013,9 @@ mod tests {
         let mut store = NoteStore::new();
         let id = store.create_note(0.0, 0.0);
         store.toggle_pin(id);
-        assert!(store.get_note(id).map_or(false, |n| n.pinned));
+        assert!(store.get_note(id).is_some_and(|n| n.pinned));
         store.toggle_pin(id);
-        assert!(!store.get_note(id).map_or(true, |n| n.pinned));
+        assert!(!store.get_note(id).is_none_or(|n| n.pinned));
     }
 
     // -- Z-order -------------------------------------------------------------
@@ -2503,10 +2503,10 @@ mod tests {
 
     #[test]
     fn test_all_8_palettes_distinct() {
-        for i in 0..8 {
-            for j in (i + 1)..8 {
-                assert_ne!(NOTE_COLORS[i].light, NOTE_COLORS[j].light);
-                assert_ne!(NOTE_COLORS[i].dark, NOTE_COLORS[j].dark);
+        for (i, a) in NOTE_COLORS.iter().enumerate() {
+            for b in NOTE_COLORS.iter().skip(i + 1) {
+                assert_ne!(a.light, b.light);
+                assert_ne!(a.dark, b.dark);
             }
         }
     }

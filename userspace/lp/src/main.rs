@@ -18,8 +18,11 @@
 
 #![cfg_attr(not(test), no_main)]
 
+#[cfg(not(test))]
 use std::env;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+#[cfg(not(test))]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -290,6 +293,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 const SPOOL_DIR: &str = "/var/spool/lpd";
 const PRINTERS_FILE: &str = "/etc/printcap";
 
+#[cfg(not(test))]
 fn get_next_job_id() -> u32 {
     let counter_file = format!("{SPOOL_DIR}/.next_id");
     let current = std::fs::read_to_string(&counter_file)
@@ -302,6 +306,7 @@ fn get_next_job_id() -> u32 {
     current
 }
 
+#[cfg(not(test))]
 fn get_default_printer() -> String {
     // Check PRINTER env var, then LPDEST, then first in printcap
     if let Ok(p) = env::var("PRINTER") {
@@ -428,6 +433,7 @@ fn parse_job_file(content: &str) -> Option<PrintJob> {
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 fn run_lp(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     let username = env::var("USER").unwrap_or_else(|_| "root".to_string());
     let printer = cfg
@@ -600,6 +606,7 @@ fn run_lpstat(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     Ok(0)
 }
 
+#[cfg(not(test))]
 fn run_lprm(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     if cfg.cancel_all {
         // Cancel all jobs
@@ -655,6 +662,7 @@ fn format_size(bytes: u64) -> String {
 // Help / version
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 fn print_help(personality: Personality) {
     match personality {
         Personality::Lp | Personality::Lpr => {
@@ -704,6 +712,7 @@ fn print_help(personality: Personality) {
     }
 }
 
+#[cfg(not(test))]
 fn print_version(personality: Personality) {
     let name = match personality {
         Personality::Lp => "lp",

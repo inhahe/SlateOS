@@ -1257,12 +1257,8 @@ mod tests {
             [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow],
             [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
         ];
-        for row in 0..ROWS {
-            for col in 0..COLS {
-                board.grid[row][col] = pattern[row][col];
-            }
-            board.heights = [ROWS; COLS];
-        }
+        board.grid = pattern;
+        board.heights = [ROWS; COLS];
         board.piece_count = ROWS * COLS;
 
         // Verify no winner exists in this pattern
@@ -1446,11 +1442,7 @@ mod tests {
             [Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow],
             [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Red],
         ];
-        for row in 0..ROWS {
-            for col in 0..COLS {
-                board.grid[row][col] = pattern[row][col];
-            }
-        }
+        board.grid = pattern;
         board.heights = [ROWS; COLS];
         board.piece_count = ROWS * COLS;
         assert!(is_terminal(&board));
@@ -1936,11 +1928,7 @@ mod tests {
             [Cell::Red,    Cell::Red,    Cell::Red,    Cell::Yellow, Cell::Yellow, Cell::Yellow, Cell::Yellow],
         ];
         // Fill all but one cell
-        for row in 0..ROWS {
-            for col in 0..COLS {
-                app.board.grid[row][col] = pattern[row][col];
-            }
-        }
+        app.board.grid = pattern;
         // Leave top of last column open
         app.board.grid[ROWS - 1][COLS - 1] = Cell::Empty;
         for col in 0..COLS - 1 {

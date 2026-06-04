@@ -6138,3 +6138,18 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Limitation: when a real VFS lands these must route
 ##      through it and report EACCES / EOK based on real
 ##      permissions.
+##  39. STAT / LSTAT / FSTAT / NEWFSTATAT — DONE.
+##         - stat / lstat (path-based) validate the path pointer
+##           and the 144-byte statbuf output pointer, then return
+##           -ENOENT (no VFS, no files).
+##         - fstat (fd-based) validates the statbuf pointer and
+##           the fd, then synthesises a struct stat that reports
+##           the correct S_IFCHR for Console, S_IFIFO for Pipe,
+##           S_IFREG for File — so isatty() answers correctly on
+##           our stdio fds.  Timestamps use clock_realtime().
+##         - newfstatat honours AT_EMPTY_PATH by routing to fstat
+##           with the dirfd, and otherwise validates the AT_*
+##           flag bits and returns ENOENT for path lookups.
+##      Limitation: synthetic data is per-handle-type only; when
+##      a real VFS lands, stat must report real inode numbers,
+##      sizes, link counts, ownership, and timestamps.

@@ -447,6 +447,7 @@ pub mod nr {
     pub const PAUSE: u64 = 34;
     pub const FACCESSAT: u64 = 269;
     pub const FACCESSAT2: u64 = 439;
+    pub const NEWFSTATAT: u64 = 262;
 }
 
 // ---------------------------------------------------------------------------
@@ -1306,6 +1307,10 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::ACCESS => sys_access(args),
         nr::FACCESSAT => sys_faccessat(args),
         nr::FACCESSAT2 => sys_faccessat2(args),
+        nr::STAT => sys_stat(args),
+        nr::LSTAT => sys_lstat(args),
+        nr::FSTAT => sys_fstat(args),
+        nr::NEWFSTATAT => sys_newfstatat(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -4656,6 +4661,220 @@ fn sys_faccessat2(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOENT)
 }
 
+// ---------------------------------------------------------------------------
+// stat / lstat / fstat / newfstatat — file metadata
+//
+// Path-based variants (stat, lstat, newfstatat with a path) cannot
+// find any file because we have no backing filesystem, so they return
+// -ENOENT after validating their inputs.  fstat (and newfstatat with
+// AT_EMPTY_PATH or fd-only lookup semantics) can succeed for fds we
+// have in our table — we synthesise a struct stat that reports the
+// correct file type for Console / Pipe / File handles so callers like
+// isatty() get the right answer.
+//
+// struct stat layout (x86_64 Linux, 144 bytes):
+//   dev_t   st_dev        (8)
+//   ino_t   st_ino        (8)
+//   nlink_t st_nlink      (8)
+//   mode_t  st_mode       (4)
+//   uid_t   st_uid        (4)
+//   gid_t   st_gid        (4)
+//   int     __pad0        (4)
+//   dev_t   st_rdev       (8)
+//   off_t   st_size       (8)
+//   blksize_t st_blksize  (8)
+//   blkcnt_t  st_blocks   (8)
+//   timespec  st_atim     (16)
+//   timespec  st_mtim     (16)
+//   timespec  st_ctim     (16)
+//   long      __unused[3] (24)
+// ---------------------------------------------------------------------------
+
+const STAT_SIZE: usize = 144;
+
+/// Linux S_IF* file-type bits.
+const S_IFREG: u32 = 0o100000;
+const S_IFCHR: u32 = 0o020000;
+const S_IFIFO: u32 = 0o010000;
+
+/// Fill a 144-byte struct stat for the given Linux fd-table entry.
+fn fill_stat_for_fd(
+    buf: &mut [u8; STAT_SIZE],
+    entry: &crate::proc::linux_fd::FdEntry,
+) {
+    use crate::proc::linux_fd::HandleKind;
+
+    // Choose file type and mode bits based on what backs the fd.
+    let (mode, blksize): (u32, u64) = match entry.kind {
+        HandleKind::Console => (S_IFCHR | 0o620, 1024),
+        HandleKind::Pipe => (S_IFIFO | 0o600, 4096),
+        HandleKind::File => (S_IFREG | 0o644, 16 * 1024),
+    };
+
+    // Inode: use the raw_handle as a stable-ish identity.
+    let st_ino: u64 = entry.raw_handle;
+    // Use the current monotonic clock for atime/mtime/ctime so callers
+    // see plausible recent timestamps.
+    let now_ns = crate::timekeeping::clock_realtime();
+    let now_sec = now_ns / 1_000_000_000;
+    let now_nsec = now_ns % 1_000_000_000;
+
+    // Write u64 little-endian at offset `off`.
+    fn put_u64(buf: &mut [u8; STAT_SIZE], off: usize, v: u64) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing)]
+        for j in 0..8 {
+            buf[off + j] = bytes[j];
+        }
+    }
+    fn put_u32(buf: &mut [u8; STAT_SIZE], off: usize, v: u32) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing)]
+        for j in 0..4 {
+            buf[off + j] = bytes[j];
+        }
+    }
+
+    put_u64(buf, 0,   0);              // st_dev
+    put_u64(buf, 8,   st_ino);         // st_ino
+    put_u64(buf, 16,  1);              // st_nlink
+    put_u32(buf, 24,  mode);           // st_mode
+    put_u32(buf, 28,  0);              // st_uid
+    put_u32(buf, 32,  0);              // st_gid
+    // 36..=39: __pad0 (already zero)
+    put_u64(buf, 40,  0);              // st_rdev
+    put_u64(buf, 48,  0);              // st_size
+    put_u64(buf, 56,  blksize);        // st_blksize
+    put_u64(buf, 64,  0);              // st_blocks
+    put_u64(buf, 72,  now_sec);        // st_atim.tv_sec
+    put_u64(buf, 80,  now_nsec);       // st_atim.tv_nsec
+    put_u64(buf, 88,  now_sec);        // st_mtim.tv_sec
+    put_u64(buf, 96,  now_nsec);       // st_mtim.tv_nsec
+    put_u64(buf, 104, now_sec);        // st_ctim.tv_sec
+    put_u64(buf, 112, now_nsec);       // st_ctim.tv_nsec
+    // 120..143: __unused[3] (already zero)
+}
+
+/// Shared path-based stat back-end (used by stat, lstat).
+fn stat_path_impl(path_ptr: u64, statbuf_ptr: u64) -> SyscallResult {
+    if path_ptr == 0 || statbuf_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(statbuf_ptr, STAT_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOENT)
+}
+
+/// `stat(path, statbuf)` — no such file (no VFS yet).
+fn sys_stat(args: &SyscallArgs) -> SyscallResult {
+    stat_path_impl(args.arg0, args.arg1)
+}
+
+/// `lstat(path, statbuf)` — no such file (no VFS yet).
+fn sys_lstat(args: &SyscallArgs) -> SyscallResult {
+    stat_path_impl(args.arg0, args.arg1)
+}
+
+/// `fstat(fd, statbuf)` — synthesise stat based on the fd's HandleKind.
+fn sys_fstat(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let statbuf_ptr = args.arg1;
+
+    if statbuf_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(statbuf_ptr, STAT_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let entry = match caller_pid() {
+        Some(pid) => match pcb::linux_fd_lookup(pid, fd) {
+            Some(e) => e,
+            None => return linux_err(errno::EBADF),
+        },
+        None => {
+            // Kernel context (boot self-test): synthesise a Console
+            // entry so the path is still exercised.
+            crate::proc::linux_fd::FdEntry {
+                kind: crate::proc::linux_fd::HandleKind::Console,
+                raw_handle: 0,
+                fd_flags: 0,
+                status_flags: 0,
+            }
+        }
+    };
+
+    let mut buf = [0u8; STAT_SIZE];
+    fill_stat_for_fd(&mut buf, &entry);
+    // SAFETY: validated as a writable STAT_SIZE-byte range above.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(buf.as_ptr(), statbuf_ptr, STAT_SIZE)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `newfstatat(dirfd, path, statbuf, flags)` — path-relative stat.
+///
+/// AT_EMPTY_PATH (0x1000): if path is empty, operate on dirfd itself.
+/// AT_SYMLINK_NOFOLLOW (0x100): for our purposes equivalent to lstat.
+fn sys_newfstatat(args: &SyscallArgs) -> SyscallResult {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_NO_AUTOMOUNT: u64 = 0x800;
+    const VALID_FLAGS: u64 = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT;
+
+    let dirfd = args.arg0 as i32;
+    let path = args.arg1;
+    let statbuf = args.arg2;
+    let flags = args.arg3;
+
+    if flags & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if statbuf == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(statbuf, STAT_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // AT_EMPTY_PATH with empty path means "stat dirfd itself".
+    if flags & AT_EMPTY_PATH != 0 {
+        // Check the path is empty (first byte is NUL).
+        if path != 0 {
+            if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+                return linux_err(linux_errno_for(e));
+            }
+            // We don't actually probe the byte in kernel context (the
+            // validate bypass means we could read garbage); just treat
+            // as fd-only stat in that case.
+        }
+        // Route to fstat logic.
+        let fstat_args = SyscallArgs {
+            arg0: dirfd as u64,
+            arg1: statbuf,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        return sys_fstat(&fstat_args);
+    }
+
+    // Otherwise it's a path lookup we cannot satisfy.
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOENT)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -7509,6 +7728,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             != -i64::from(errno::ENOENT) {
             serial_println!(
                 "[syscall/linux]   FAIL: faccessat2 not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // stat / lstat / fstat / newfstatat — input validation.
+    {
+        // stat(NULL, _) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STAT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: stat(NULL,_) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // stat(/whatever, statbuf) in kernel context -> ENOENT.
+        let mut sbuf = [0u8; 144];
+        let a = SyscallArgs {
+            arg0: 0x1000,
+            arg1: sbuf.as_mut_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::STAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: stat not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // lstat: same.
+        if dispatch_linux(nr::LSTAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: lstat not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // fstat(_, NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSTAT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: fstat(_,NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // fstat(0, kbuf) in kernel context -> 0 (synthesised Console
+        // entry), and the struct stat reports S_IFCHR.
+        let mut sbuf = [0u8; 144];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sbuf.as_mut_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FSTAT, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: fstat in kctx not 0");
+            return Err(KernelError::InternalError);
+        }
+        // st_mode is at offset 24, 4 bytes.  Top bits should be S_IFCHR
+        // (0o020000 == 0x2000).
+        let mode = u32::from_ne_bytes([
+            sbuf[24], sbuf[25], sbuf[26], sbuf[27],
+        ]);
+        if (mode & 0o170000) != 0o020000 {
+            serial_println!(
+                "[syscall/linux]   FAIL: fstat reported mode {:#o} not S_IFCHR",
+                mode
+            );
+            return Err(KernelError::InternalError);
+        }
+        // newfstatat: bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0x2000,
+            arg3: 0x800_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NEWFSTATAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: newfstatat(bad flag) not EINVAL"
             );
             return Err(KernelError::InternalError);
         }

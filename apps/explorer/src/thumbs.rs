@@ -1637,7 +1637,7 @@ mod tests {
 
         let lines = read_text_lines(&file_path, TEXT_PREVIEW_MAX_LINES).unwrap();
         assert!(lines.len() <= TEXT_PREVIEW_MAX_LINES);
-        assert!(lines.len() >= 1);
+        assert!(!lines.is_empty());
 
         let _ = fs::remove_file(&file_path);
         let _ = fs::remove_dir(&dir);

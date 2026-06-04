@@ -15,6 +15,7 @@
 // that future boundary.
 #![allow(dead_code)]
 
+#[cfg(not(test))]
 use std::env;
 use std::io::{self, Write};
 

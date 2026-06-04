@@ -2876,7 +2876,7 @@ mod tests {
         let serialized = manifest.serialize();
         let deserialized = Manifest::deserialize(&serialized).unwrap();
 
-        assert_eq!(deserialized.files[0].is_symlink, true);
+        assert!(deserialized.files[0].is_symlink);
         assert_eq!(
             deserialized.files[0].link_target.as_deref(),
             Some("/usr/bin/target")

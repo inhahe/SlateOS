@@ -1060,15 +1060,9 @@ fn print_err(msg: &[u8]) {
     }
 }
 
+#[cfg(not(test))]
 fn get_args() -> Vec<Vec<u8>> {
-    #[cfg(not(test))]
-    {
-        std::env::args().map(|a| a.into_bytes()).collect()
-    }
-    #[cfg(test)]
-    {
-        Vec::new()
-    }
+    std::env::args().map(|a| a.into_bytes()).collect()
 }
 
 // ── Entry Point ────────────────────────────────────────────────────────

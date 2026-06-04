@@ -3744,7 +3744,7 @@ mod tests {
         let mut rng = SimRng::new(123);
         for _ in 0..100 {
             let val = rng.next_range(10, 20);
-            assert!(val >= 10 && val <= 20);
+            assert!((10..=20).contains(&val));
         }
     }
 }

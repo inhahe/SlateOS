@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_get_scan_results() {
-        let (results, count) = get_scan_results();
+        let (_results, count) = get_scan_results();
         assert!(count >= 4);
     }
 

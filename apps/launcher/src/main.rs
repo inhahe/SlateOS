@@ -1306,7 +1306,7 @@ mod tests {
             launcher
                 .apps
                 .get(s.db_index)
-                .map_or(false, |e| e.name == "Calculator")
+                .is_some_and(|e| e.name == "Calculator")
         });
         assert!(has_calc, "Calculator should appear in results for 'calc'");
     }

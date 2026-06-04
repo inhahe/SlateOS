@@ -1871,7 +1871,7 @@ mod tests {
     fn test_char_info_emoji_display() {
         let info = char_info(0x1F600);
         // Should be a valid character display
-        assert!(info.display_char().len() > 0);
+        assert!(!info.display_char().is_empty());
     }
 
     #[test]

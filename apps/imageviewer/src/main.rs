@@ -1922,8 +1922,10 @@ mod tests {
 
     #[test]
     fn test_image_info_file_size_display() {
-        let mut info = ImageInfo::default();
-        info.file_size = 500;
+        let mut info = ImageInfo {
+            file_size: 500,
+            ..ImageInfo::default()
+        };
         assert_eq!(info.file_size_display(), "500 B");
 
         info.file_size = 2048;

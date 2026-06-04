@@ -1668,11 +1668,11 @@ mod tests {
         let src = b"abc".to_vec();
         let dst = b"xyz".to_vec();
         let mut ps = b"abcdef".to_vec();
-        for byte in ps.iter_mut() {
-            if let Some(idx) = src.iter().position(|&s| s == *byte) {
-                if let Some(&repl) = dst.get(idx) {
-                    *byte = repl;
-                }
+        for byte in &mut ps {
+            if let Some(idx) = src.iter().position(|&s| s == *byte)
+                && let Some(&repl) = dst.get(idx)
+            {
+                *byte = repl;
             }
         }
         assert_eq!(ps, b"xyzdef");

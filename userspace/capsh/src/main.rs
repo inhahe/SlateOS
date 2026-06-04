@@ -2883,7 +2883,7 @@ mod tests {
     fn test_capsh_addamb_without_inheritable() {
         // Should fail — ambient requires permitted AND inheritable.
         // Default state has full permitted but empty inheritable.
-        let mut state = CapshState::new();
+        let state = CapshState::new();
         // inheritable is empty by default.
         assert!(!state.caps.inheritable.has(Cap::Chown));
         // So adding to ambient should fail.

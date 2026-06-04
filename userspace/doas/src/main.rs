@@ -1916,7 +1916,7 @@ mod tests {
         let now: u64 = 1000;
         let stamp: u64 = 700;
         let elapsed = now.saturating_sub(stamp);
-        assert!(!(elapsed < PERSIST_TIMEOUT_SECS));
+        assert!(elapsed >= PERSIST_TIMEOUT_SECS);
     }
 
     #[test]

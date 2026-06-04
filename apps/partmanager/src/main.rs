@@ -3947,7 +3947,7 @@ mod tests {
     fn test_create_partition_dialog_selected_size() {
         let mut d = CreatePartitionDialog::new(0, 2048, 512);
         d.size_percent = 50;
-        let expected = (2048u64 * 512 / 2) as u64;
+        let expected = 2048u64 * 512 / 2;
         assert_eq!(d.selected_size_bytes(), expected);
     }
 

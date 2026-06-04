@@ -1364,7 +1364,7 @@ mod tests {
 
     /// Build a game with a specific tableau setup for testing.
     fn empty_game() -> GameState {
-        let state = GameState {
+        GameState {
             free_cells: [None; FREE_CELL_COUNT],
             foundations: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             tableau: [
@@ -1383,8 +1383,7 @@ mod tests {
             move_count: 0,
             won: false,
             rng: Rng::new(99),
-        };
-        state
+        }
     }
 
     // ── Deck & Card tests ──────────────────────────────────────────

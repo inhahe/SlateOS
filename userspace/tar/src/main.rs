@@ -1369,7 +1369,7 @@ mod tests {
     #[test]
     fn test_encode_octal_large() {
         let mut buf = [0u8; 12];
-        encode_octal(&mut buf, 0o7777777_7777).unwrap();
+        encode_octal(&mut buf, 0o77_777_777_777).unwrap();
         // 11 octal digits
         assert_eq!(&buf, b"77777777777\0");
     }

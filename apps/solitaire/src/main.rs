@@ -2123,10 +2123,11 @@ mod tests {
         gs.waste.clear();
         // Make sure no tableau top is an ace.
         for col in 0..TABLEAU_COLS {
-            if let Some(top) = gs.tableau[col].last() {
-                if top.card.rank == Rank::Ace {
-                    gs.tableau[col].last_mut().unwrap().card = card(Suit::Hearts, Rank::King);
-                }
+            if let Some(top) = gs.tableau[col].last()
+                && top.card.rank == Rank::Ace
+                && let Some(top_mut) = gs.tableau[col].last_mut()
+            {
+                top_mut.card = card(Suit::Hearts, Rank::King);
             }
         }
         assert!(!gs.auto_move_to_foundation());

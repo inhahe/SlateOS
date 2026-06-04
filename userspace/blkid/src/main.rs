@@ -14,6 +14,7 @@
 // lint cannot see across that future boundary.
 #![allow(dead_code)]
 
+#[cfg(not(test))]
 use std::env;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};

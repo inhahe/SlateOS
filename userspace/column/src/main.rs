@@ -1249,7 +1249,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let result = fill_columns(&words, 80, "  ");
+        let _result = fill_columns(&words, 80, "  ");
         // With such tiny words, they likely all fit on one row. Let's use
         // narrow width to force 2 cols.
         let result2 = fill_columns(&words, 6, "  ");

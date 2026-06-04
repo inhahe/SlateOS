@@ -1598,10 +1598,10 @@ mod tests {
         assert!(count > 0);
         // Verify ext4 is in the list
         let mut found_ext4 = false;
-        for i in 0..count {
-            if modules[i].name.eq_bytes(b"ext4") {
+        for m in modules.iter().take(count) {
+            if m.name.eq_bytes(b"ext4") {
                 found_ext4 = true;
-                assert!(modules[i].size > 0);
+                assert!(m.size > 0);
                 break;
             }
         }

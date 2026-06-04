@@ -2645,10 +2645,10 @@ mod tests {
     #[test]
     fn test_sort_by() {
         let v = eval_first("sort_by(.x)", r#"[{"x":3},{"x":1},{"x":2}]"#);
-        if let Value::Array(arr) = v {
-            if let Value::Object(first) = &arr[0] {
-                assert_eq!(first.get("x"), Some(&Value::Number(1.0)));
-            }
+        if let Value::Array(arr) = v
+            && let Value::Object(first) = &arr[0]
+        {
+            assert_eq!(first.get("x"), Some(&Value::Number(1.0)));
         }
     }
 

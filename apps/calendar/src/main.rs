@@ -3342,7 +3342,7 @@ mod tests {
             day: 8,
         };
         let wn = d.week_number();
-        assert!(wn >= 1 && wn <= 53);
+        assert!((1..=53).contains(&wn));
     }
 
     // Event time range label

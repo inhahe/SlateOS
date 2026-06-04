@@ -595,8 +595,9 @@ mod tests {
 
     #[test]
     fn test_parse_timing() {
-        let args = parse_hdparm_args(&[b"-tT".to_vec(), b"/dev/sda".to_vec()]);
-        // -tT is combined but our parser handles -t and -T separately
+        let _args = parse_hdparm_args(&[b"-tT".to_vec(), b"/dev/sda".to_vec()]);
+        // -tT is combined but our parser handles -t and -T separately.
+        // Just verifies the combined-flag form parses without panicking.
     }
 
     #[test]

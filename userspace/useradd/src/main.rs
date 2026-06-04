@@ -1622,11 +1622,16 @@ mod tests {
             self.dir.join(name).to_string_lossy().to_string()
         }
 
+        // Reserved for use in future tests that round-trip files through
+        // useradd's read/write paths; the matching Drop impl below cleans
+        // up the directory in all current tests.
+        #[allow(dead_code)]
         fn write_file(&self, name: &str, content: &str) {
             let p = self.dir.join(name);
             fs::write(p, content).expect("write test file");
         }
 
+        #[allow(dead_code)]
         fn read_file(&self, name: &str) -> String {
             let p = self.dir.join(name);
             fs::read_to_string(p).unwrap_or_default()

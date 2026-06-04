@@ -2243,7 +2243,7 @@ mod tests {
     #[test]
     fn rolling_checksum_empty() {
         let ck = RollingChecksum::new();
-        assert_eq!(ck.digest(), (0 << 16) | 1);
+        assert_eq!(ck.digest(), 1);
     }
 
     #[test]

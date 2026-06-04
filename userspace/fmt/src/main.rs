@@ -1032,13 +1032,10 @@ mod tests {
         let output = format_text(input, &config);
         // Quoted lines should be reformatted with prefix.
         for line in output.lines() {
-            if line.starts_with("> ") || line == "Not quoted." {
-                // ok
-            } else if line.is_empty() {
-                // ok
-            } else {
-                panic!("unexpected line without prefix: '{line}'");
-            }
+            let acceptable = line.starts_with("> ")
+                || line == "Not quoted."
+                || line.is_empty();
+            assert!(acceptable, "unexpected line without prefix: '{line}'");
         }
         assert!(output.contains("Not quoted."), "non-prefixed line preserved");
     }

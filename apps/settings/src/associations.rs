@@ -1715,9 +1715,8 @@ mod tests {
         // All affected extensions should now have text editor as default
         // (since text editor is the other available app for code files)
         for ext in &affected {
-            let default = mgr.get_default(ext);
-            if default.is_some() {
-                assert_eq!(default.unwrap().id, "com.ouros.texteditor");
+            if let Some(default) = mgr.get_default(ext) {
+                assert_eq!(default.id, "com.ouros.texteditor");
             }
         }
     }

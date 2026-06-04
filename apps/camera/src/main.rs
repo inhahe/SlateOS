@@ -3395,10 +3395,12 @@ mod tests {
 
     #[test]
     fn test_settings_reset() {
-        let mut s = CameraSettings::default();
-        s.brightness = 100;
-        s.zoom = 5.0;
-        s.flip_horizontal = true;
+        let mut s = CameraSettings {
+            brightness: 100,
+            zoom: 5.0,
+            flip_horizontal: true,
+            ..CameraSettings::default()
+        };
         s.reset();
         assert_eq!(s.brightness, 50);
         assert_eq!(s.zoom, 1.0);

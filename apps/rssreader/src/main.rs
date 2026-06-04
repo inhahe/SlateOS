@@ -5384,7 +5384,7 @@ mod tests {
     #[test]
     fn test_wrap_text_wraps_long_string() {
         let long = "word ".repeat(50);
-        let lines = wrap_text(&long.trim(), 100.0, 14.0);
+        let lines = wrap_text(long.trim(), 100.0, 14.0);
         assert!(lines.len() > 1);
     }
 

@@ -540,7 +540,12 @@ fn parse_wtmp_records(data: &[u8]) -> Vec<WtmpRecord> {
 }
 
 /// Build a synthetic wtmp record from raw parts (used in tests).
+//
+// This helper mirrors the on-disk wtmp record layout and needs all of these
+// independent fields to build a faithful test fixture; collapsing them into
+// a struct would just spread the arity across additional types.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn build_wtmp_record_bytes(
     record_type: u16,
     pid: u32,

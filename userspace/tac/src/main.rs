@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_rev_multiple_lines() {
-        let lines = vec!["hello", "world", "test"];
+        let lines = ["hello", "world", "test"];
         let reversed: Vec<String> = lines.iter().map(|l| reverse_line(l)).collect();
         assert_eq!(reversed, vec!["olleh", "dlrow", "tset"]);
     }

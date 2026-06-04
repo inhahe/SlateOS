@@ -3621,8 +3621,10 @@ mod tests {
 
     #[test]
     fn test_output_generate_filename_with_increment() {
-        let mut out = OutputSettings::default();
-        out.filename_template = "rec_{n}_{date}".to_string();
+        let out = OutputSettings {
+            filename_template: "rec_{n}_{date}".to_string(),
+            ..OutputSettings::default()
+        };
         let name = out.generate_filename(2026, 1, 1, 0, 0, 0);
         assert_eq!(name, "rec_0001_20260101");
     }

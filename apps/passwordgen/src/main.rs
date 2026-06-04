@@ -1822,7 +1822,7 @@ mod tests {
     fn test_analyze_empty() {
         let analysis = analyze_password("");
         assert_eq!(analysis.length, 0);
-        assert_eq!(analysis.entropy_bits, 0.0);
+        assert!(analysis.entropy_bits.abs() < f64::EPSILON);
     }
 
     #[test]

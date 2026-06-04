@@ -2900,7 +2900,7 @@ mod tests {
         assert_eq!(parsed[0].uid, 1000);
         assert_eq!(parsed[0].username, "testuser");
         assert_eq!(parsed[0].display_name, "Test User");
-        assert_eq!(parsed[0].is_admin, false);
+        assert!(!parsed[0].is_admin);
         assert_eq!(parsed[1].uid, 65534);
         assert_eq!(parsed[1].username, "guest");
     }

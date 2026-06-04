@@ -3240,13 +3240,12 @@ mod tests {
         // Execute BEGIN.
         let mut exited = false;
         for rule in &prog.rules {
-            if matches!(rule.pattern, Pattern::Begin) {
-                if let Ok(ControlFlow::Exit(_)) =
+            if matches!(rule.pattern, Pattern::Begin)
+                && let Ok(ControlFlow::Exit(_)) =
                     interp.exec_stmts(&rule.action, &mut output)
-                {
-                    exited = true;
-                    break;
-                }
+            {
+                exited = true;
+                break;
             }
         }
 

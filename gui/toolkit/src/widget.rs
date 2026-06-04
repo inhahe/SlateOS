@@ -913,7 +913,7 @@ mod tests {
 
     #[test]
     fn test_button_press() {
-        let mut root = Widget::container().with_child(Widget::button("OK"));
+        let root = Widget::container().with_child(Widget::button("OK"));
 
         let mut tree = WidgetTree::new(root, 200.0, 100.0);
         tree.layout();

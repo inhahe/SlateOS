@@ -2771,7 +2771,7 @@ mod tests {
         assert!(game.score > old_score);
         // The color bomb should be gone.
         // Other gems of type 2 should be cleared.
-        assert!(game.board[0][0].map_or(true, |g| g.gem_type != GemType::Emerald));
+        assert!(game.board[0][0].is_none_or(|g| g.gem_type != GemType::Emerald));
     }
 
     // ── Comprehensive integration test ──────────────────────────────

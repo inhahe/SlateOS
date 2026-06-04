@@ -704,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn test__parse_temp() {
+    fn test_parse_temp_function() {
         assert_eq!(_parse_temp("85c"), Some(85000));
         assert_eq!(_parse_temp("100000mc"), Some(100000));
         assert_eq!(_parse_temp("45.5"), Some(45500));

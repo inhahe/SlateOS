@@ -303,6 +303,19 @@ pub struct Process {
     /// detects a Linux binary) or set explicitly via
     /// [`set_abi_mode`].  Inherited across `fork`.
     pub abi_mode: AbiMode,
+    /// Kernel-side fd table for Linux-ABI processes.
+    ///
+    /// `None` for Native processes (whose fd table lives in
+    /// userspace under `posix/src/fdtable.rs`).  `Some` for Linux-ABI
+    /// processes: holds the mapping from Linux integer fds to
+    /// (`HandleKind`, raw kernel handle), pre-populated with
+    /// console-backed stdin/stdout/stderr at process creation.
+    ///
+    /// Allocated when the ELF loader detects a Linux binary and stamps
+    /// [`AbiMode::Linux`].  See [`crate::proc::linux_fd`] for the
+    /// table implementation and [`crate::syscall::linux`] for the
+    /// callers.
+    pub linux_fd_table: Option<alloc::boxed::Box<super::linux_fd::KernelFdTable>>,
 }
 
 impl Process {
@@ -328,6 +341,7 @@ impl Process {
             initial_argv: Vec::new(),
             initial_envp: Vec::new(),
             abi_mode: AbiMode::Native,
+            linux_fd_table: None,
         }
     }
 }
@@ -407,14 +421,33 @@ pub fn fork_create(
 
     // Clone the parent-derived state while holding only an immutable
     // borrow, then release it before inserting the child.
-    let (name, cap_table, credentials, vmas, abi_mode) = {
+    //
+    // Linux fd table inheritance note: we duplicate the parent's table
+    // structurally so child fds remain numerically valid, but we do
+    // NOT yet bump the refcount on `File` / `Pipe` kernel handles.
+    // That is safe today because the only handles populated by the
+    // Linux ABI translator are `Console` entries (no kernel resource),
+    // but will need fixing in lockstep with adding Linux `openat` /
+    // `pipe2` translation.  Tracked under the "fd-table follow-ups"
+    // entry in `todo.txt`.
+    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
+        let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
+            let mut copy = super::linux_fd::KernelFdTable::new();
+            for (fd, entry) in t.open_entries() {
+                // install_at on a fresh table cannot fail for fds in
+                // range [0, MAX_FDS); the iterator only yields those.
+                let _ = copy.install_at(fd, entry);
+            }
+            alloc::boxed::Box::new(copy)
+        });
         (
             parent.name.clone(),
             parent.cap_table.clone(),
             parent.credentials.clone(),
             parent.vmas.clone(),
             parent.abi_mode,
+            cloned_fd_table,
         )
     };
 
@@ -443,6 +476,7 @@ pub fn fork_create(
         // Linux/native ABI is a property of the loaded binary, so a
         // forked child speaks the same ABI as its parent.
         abi_mode,
+        linux_fd_table,
     };
 
     table.insert(pid, child);
@@ -1562,14 +1596,201 @@ pub fn get_abi_mode(pid: ProcessId) -> Option<AbiMode> {
 ///
 /// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
 ///   live process.
-//
-// Not yet wired into the loader; suppress dead-code lint until that lands.
-#[allow(dead_code)]
 pub fn set_abi_mode(pid: ProcessId, mode: AbiMode) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
     proc.abi_mode = mode;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Linux fd table accessors
+// ---------------------------------------------------------------------------
+//
+// All operations take the global `PROCESS_TABLE` lock for the duration
+// of the call.  Callers should NOT hold any other PCB-related lock
+// when invoking these — they are designed to be called from the Linux
+// syscall translators in `kernel::syscall::linux`, which run in the
+// SYSCALL handler with no other locks held.
+
+/// Install an empty Linux fd table (with stdio pre-installed) on
+/// `pid`, replacing any prior table.
+///
+/// Idempotent in the sense that calling it twice on the same Linux-ABI
+/// process simply re-initialises the table — but typically it is
+/// called exactly once, immediately after [`set_abi_mode`] flips the
+/// process to Linux ABI in `spawn_process` / `exec_process`.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
+///   live process.
+pub fn linux_fd_install_stdio(pid: ProcessId) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.linux_fd_table = Some(alloc::boxed::Box::new(
+        super::linux_fd::KernelFdTable::with_stdio(),
+    ));
+    Ok(())
+}
+
+/// Look up `fd` in the Linux fd table.  Returns `None` if the process
+/// does not have a Linux fd table or if `fd` is unused/out-of-range.
+#[must_use]
+pub fn linux_fd_lookup(
+    pid: ProcessId,
+    fd: i32,
+) -> Option<super::linux_fd::FdEntry> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    let fd_table = proc.linux_fd_table.as_ref()?;
+    fd_table.lookup(fd)
+}
+
+/// Install `entry` at the lowest free fd >= `min_fd`.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
+///   live process.
+/// - [`KernelError::InvalidHandle`] if the process has no Linux fd
+///   table (i.e. it is a Native-ABI process).
+/// - [`KernelError::TooManyOpenFiles`] if the table is full.
+pub fn linux_fd_install(
+    pid: ProcessId,
+    entry: super::linux_fd::FdEntry,
+    min_fd: i32,
+) -> KernelResult<i32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.install_lowest_from(min_fd, entry)
+}
+
+/// Remove the entry at `fd` and return it, so the caller can decide
+/// whether to call the appropriate kernel close on the underlying
+/// handle.  Returns `None` if the process has no Linux fd table or
+/// `fd` was already closed.
+#[must_use]
+pub fn linux_fd_take(
+    pid: ProcessId,
+    fd: i32,
+) -> Option<super::linux_fd::FdEntry> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let fd_table = proc.linux_fd_table.as_mut()?;
+    fd_table.take(fd)
+}
+
+/// Check whether any fd OTHER than `excluded_fd` references the same
+/// `(kind, raw_handle)`.  Used by `close()` to decide whether to
+/// release the underlying kernel resource.
+#[must_use]
+pub fn linux_fd_is_handle_referenced(
+    pid: ProcessId,
+    kind: super::linux_fd::HandleKind,
+    raw_handle: u64,
+    excluded_fd: i32,
+) -> bool {
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid) else { return false };
+    let Some(fd_table) = proc.linux_fd_table.as_ref() else { return false };
+    fd_table.is_handle_referenced(kind, raw_handle, excluded_fd)
+}
+
+/// Duplicate `oldfd` onto the lowest free slot >= `min_fd`.
+///
+/// Implements both `dup` (min_fd=0) and `fcntl(F_DUPFD, min_fd)`.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
+///   live process.
+/// - [`KernelError::InvalidHandle`] if the process has no Linux fd
+///   table or `oldfd` is not open.
+/// - [`KernelError::TooManyOpenFiles`] if the table is full.
+pub fn linux_fd_dup(
+    pid: ProcessId,
+    oldfd: i32,
+    min_fd: i32,
+) -> KernelResult<i32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.dup_lowest(oldfd, min_fd)
+}
+
+/// Duplicate `oldfd` onto exactly `newfd`, returning `(newfd,
+/// previous_occupant)`.  The caller is responsible for closing the
+/// previous occupant (if `Some`) after dropping the lock.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
+///   live process.
+/// - [`KernelError::InvalidHandle`] if `oldfd` is not open or the
+///   process has no Linux fd table.
+/// - [`KernelError::TooManyOpenFiles`] if `newfd` is out of range.
+pub fn linux_fd_dup2(
+    pid: ProcessId,
+    oldfd: i32,
+    newfd: i32,
+) -> KernelResult<(i32, Option<super::linux_fd::FdEntry>)> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.dup2(oldfd, newfd)
+}
+
+/// Set `FD_CLOEXEC` (and any other future fd flags) for `fd`.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
+///   live process.
+/// - [`KernelError::InvalidHandle`] if `fd` is not open or the
+///   process has no Linux fd table.
+pub fn linux_fd_set_fd_flags(
+    pid: ProcessId,
+    fd: i32,
+    fd_flags: u32,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.set_fd_flags(fd, fd_flags)
+}
+
+/// Set status flags (`O_APPEND` / `O_NONBLOCK` / ...) for `fd`,
+/// preserving the access-mode bits.
+///
+/// # Errors
+///
+/// As [`linux_fd_set_fd_flags`].
+pub fn linux_fd_set_status_flags(
+    pid: ProcessId,
+    fd: i32,
+    new_flags: u32,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.set_status_flags(fd, new_flags)
 }
 
 /// Check if a process holds a capability for a specific resource

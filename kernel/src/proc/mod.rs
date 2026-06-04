@@ -37,6 +37,7 @@
 pub mod elf;
 pub mod exception;
 pub mod fork;
+pub mod linux_fd;
 pub mod pcb;
 pub mod signal;
 pub mod spawn;
@@ -66,6 +67,8 @@ pub fn self_test() -> KernelResult<()> {
     signal::self_test()?;
     serial_println!("[proc] Running fork self-test...");
     fork::self_test()?;
+    serial_println!("[proc] Running Linux fd-table self-test...");
+    linux_fd::self_test()?;
 
     serial_println!("[proc] Process management self-test PASSED");
     Ok(())

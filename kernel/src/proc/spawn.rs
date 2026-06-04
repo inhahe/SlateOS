@@ -412,7 +412,10 @@ pub fn spawn_process(
 
     // Stamp Linux ABI mode immediately after creation so any subsequent
     // syscall this process makes (including its very first) is dispatched
-    // through `kernel::syscall::linux::dispatch_linux`.
+    // through `kernel::syscall::linux::dispatch_linux`.  Also install the
+    // kernel-side fd table with stdin/stdout/stderr pre-pointing at the
+    // console — without these entries the very first write(1, ...) from a
+    // Linux binary would return -EBADF.
     if is_linux_abi {
         if let Err(e) = pcb::set_abi_mode(pid, pcb::AbiMode::Linux) {
             serial_println!(
@@ -423,6 +426,13 @@ pub fn spawn_process(
             // detect_linux_abi was a hint; the failure mode (process can't
             // be found in the table immediately after create) shouldn't
             // happen unless something else is very wrong.
+        } else if let Err(e) = pcb::linux_fd_install_stdio(pid) {
+            serial_println!(
+                "[spawn] WARNING: failed to install Linux stdio fds on process {}: {:?}",
+                pid, e
+            );
+            // Non-fatal — the process runs but read/write on stdio
+            // will fail until the binary opens something explicitly.
         }
     }
 
@@ -849,6 +859,13 @@ pub fn exec_process(
     // versa.  The actual switch takes effect on the next syscall from
     // ring 3 because `syscall_handler_inner` re-reads the abi_mode on
     // every entry.
+    //
+    // exec also re-initialises the kernel-side Linux fd table: per
+    // POSIX, fds with FD_CLOEXEC survive only in the parent address
+    // space (which is gone), so the new image starts with a fresh
+    // stdin/stdout/stderr trio.  TODO: honour FD_CLOEXEC for inherited
+    // non-cloexec fds when we wire up the full exec-time fd-table
+    // walk; that requires support for non-Console handle kinds first.
     if let Err(e) = pcb::set_abi_mode(pid, new_abi_mode) {
         serial_println!(
             "[exec] WARNING: failed to update ABI mode on process {}: {:?}",
@@ -860,6 +877,14 @@ pub fn exec_process(
         // vice-versa).  Caller has a destroyed-image process either
         // way; this just makes its syscalls behave inconsistently
         // rather than failing the exec.
+    }
+    if new_abi_mode == pcb::AbiMode::Linux {
+        if let Err(e) = pcb::linux_fd_install_stdio(pid) {
+            serial_println!(
+                "[exec] WARNING: failed to install Linux stdio fds on process {}: {:?}",
+                pid, e
+            );
+        }
     }
 
     // Step 6: Store argv/envp in the PCB for the new process image.

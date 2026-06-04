@@ -56,11 +56,13 @@
     clippy::large_stack_arrays,
 )]
 #![cfg_attr(not(test), no_main)]
+#![cfg_attr(test, allow(dead_code))]
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
 
 use std::collections::HashMap;
+#[cfg(not(test))]
 use std::env;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1894,6 +1896,12 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 

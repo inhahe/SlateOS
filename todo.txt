@@ -5438,10 +5438,16 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      same fork::fork_process the native ABI uses).  clone DONE for
 ##      the SIGCHLD-only "fork-equivalent" case; CLONE_VM / CLONE_THREAD
 ##      / non-zero child_stack still return -ENOSYS until we implement
-##      real thread creation on shared address spaces.  execve still
-##      returns -ENOSYS — the Linux signature (filename + argv/envp
-##      pointer arrays) needs VFS-resolved file loading and a
-##      pointer-array walker before it can hand off to exec_process.
+##      real thread creation on shared address spaces.  execve DONE —
+##      reads filename via VFS, walks argv/envp pointer arrays into
+##      kernel buffers BEFORE exec_process tears down the old AS, then
+##      hands off to proc::spawn::exec_process and rewrites the saved
+##      syscall frame so SYSRET lands at the new entry point with a
+##      clean register state (POSIX execve register semantics).  Caps:
+##      PATH_MAX=4096 on filename; EXECVE_MAX_ARGS=2048 entries per
+##      argv/envp; EXECVE_MAX_STR_LEN=128 KiB per string;
+##      EXECVE_MAX_TOTAL_BYTES=256 KiB aggregate.  signal::on_exec is
+##      called on success to clear caught handlers (POSIX).
 ##      sigreturn / rt_sigreturn still need a real handler.
 ##   3. FILE-BACKED MMAP.  `mmap(MAP_PRIVATE | MAP_FILE)` returns
 ##      -ENOSYS today.  Anonymous mmap works.  File-backed needs the
@@ -5501,16 +5507,31 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     stdio slots with Console entries but does NOT overwrite a
 ##     non-Console fd sitting at 0/1/2.
 ##   - dispatch_linux_with_frame routing: non-frame syscalls return
-##     None; EXECVE returns Some(-ENOSYS); CLONE with thread-creation
-##     bits or non-zero child_stack returns Some(-ENOSYS).
+##     None; EXECVE from a contextless self-test task returns
+##     Some(-ESRCH) (no owning process to exec); FORK / VFORK from a
+##     contextless self-test task return a negative errno (proves
+##     routing reaches fork_process); CLONE with thread-creation bits
+##     or non-zero child_stack returns Some(-ENOSYS).
+##   - read_user_cstr(NULL, _) returns Err(EFAULT) without touching
+##     userspace; read_user_ptr_array(NULL, _) returns Ok(empty) (how
+##     glibc passes an argv-less execve).
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
 ##     actual Linux binary can be loaded.
 ##
 ## NEXT STEPS (in priority order):
-##   1. Add Linux execve/fork/clone in a parallel
-##      dispatch_linux_with_frame path; clone() is what pthread_create
-##      uses so this is the next blocker for multi-threaded glibc.
+##   1. Real thread-creation clone (CLONE_VM | CLONE_THREAD).  This is
+##      what pthread_create uses and is the next blocker for any
+##      multi-threaded glibc/musl program.  Needs:
+##        - new thread sharing the parent's address space and fd table;
+##        - separate kernel stack but caller-supplied user stack
+##          (child_stack arg);
+##        - CLONE_SETTLS to install a TLS base via arch_prctl
+##          equivalent;
+##        - CLONE_PARENT_SETTID / CLONE_CHILD_SETTID / CLONE_CHILD_CLEARTID
+##          futex semantics for join/exit notification.
 ##   2. Replace xorshift64 with kernel CSPRNG when one exists.
 ##   3. Honour mprotect / brk / sigaction properly.
+##   4. Real sigreturn / rt_sigreturn handler that restores the
+##      pre-signal frame.

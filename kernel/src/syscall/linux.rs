@@ -565,27 +565,223 @@ fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     linux_fork(frame)
 }
 
-/// Linux `execve(filename, argv[], envp[])` — not yet implemented.
+/// Maximum length of a single NUL-terminated string read from
+/// userspace during `execve` argument marshalling.  Matches Linux's
+/// `MAX_ARG_STRLEN` ceiling at 128 KiB but our typical use cases are
+/// far smaller — most argv entries are tens of bytes.
+const EXECVE_MAX_STR_LEN: usize = 128 * 1024;
+
+/// Maximum number of entries in `argv` or `envp` during `execve`.
+/// Linux uses `MAX_ARG_STRINGS = 0x7FFFFFFF`, but a realistic cap
+/// limits how badly a malicious caller can hold us in the pointer
+/// walk before we bail out.
+const EXECVE_MAX_ARGS: usize = 2048;
+
+/// Aggregate cap on total argv+envp bytes — matches the cap that
+/// `sys_process_exec_with_frame` uses for the native path.
+const EXECVE_MAX_TOTAL_BYTES: usize = 256 * 1024;
+
+/// Read a NUL-terminated byte string from `ptr` in userspace, up to
+/// `max_len` bytes (not counting the NUL).  Returns the bytes
+/// (without the terminator) on success, or an `errno` value on
+/// failure.
+fn read_user_cstr(ptr: u64, max_len: usize) -> Result<alloc::vec::Vec<u8>, i32> {
+    if ptr == 0 {
+        return Err(errno::EFAULT);
+    }
+    let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut i: usize = 0;
+    while i <= max_len {
+        let mut b: u8 = 0;
+        // SAFETY: copy_from_user validates the one-byte user range
+        // before touching it and uses STAC/CLAC for SMAP.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                ptr.wrapping_add(i as u64),
+                &raw mut b,
+                1,
+            )
+        };
+        if let Err(e) = r {
+            return Err(linux_errno_for(e));
+        }
+        if b == 0 {
+            return Ok(buf);
+        }
+        if i == max_len {
+            // Found a non-NUL byte at position max_len, meaning the
+            // string is longer than allowed.
+            return Err(errno::ENAMETOOLONG);
+        }
+        buf.push(b);
+        i += 1;
+    }
+    Err(errno::ENAMETOOLONG)
+}
+
+/// Read a NULL-terminated array of `u64` user pointers (argv/envp)
+/// starting at `ptr`, with at most `max_entries` non-NULL entries.
+/// A `ptr` of 0 is treated as an empty array (matching what glibc
+/// passes when the program had no arguments).
+fn read_user_ptr_array(
+    ptr: u64,
+    max_entries: usize,
+) -> Result<alloc::vec::Vec<u64>, i32> {
+    if ptr == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    let mut out: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    for i in 0..=max_entries {
+        let mut p: u64 = 0;
+        // SAFETY: copy_from_user validates the 8-byte user range
+        // before touching it.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                ptr.wrapping_add((i * 8) as u64),
+                (&raw mut p).cast::<u8>(),
+                8,
+            )
+        };
+        if let Err(e) = r {
+            return Err(linux_errno_for(e));
+        }
+        if p == 0 {
+            return Ok(out);
+        }
+        if i == max_entries {
+            return Err(errno::E2BIG);
+        }
+        out.push(p);
+    }
+    Err(errno::E2BIG)
+}
+
+/// Linux `execve(filename, argv[], envp[])` translation.
 ///
-/// Unlike the native `SYS_PROCESS_EXEC` (which takes the ELF data
-/// packed into a buffer the caller already loaded), Linux `execve`
-/// names a path to a file the kernel must open, read entirely, and
-/// load.  That requires:
-///   1. Reading the NUL-terminated `filename` from userspace.
-///   2. Resolving the path through the VFS / namespace.
-///   3. Reading the entire file into a kernel buffer.
-///   4. Walking the `argv` / `envp` arrays (arrays of `char*`
-///      pointers, NUL-terminated) and packing them into the format
-///      `exec_process` expects.
-///   5. Calling `exec_process`, with all the error-recovery footwork
-///      to handle "filename resolves but file is unreadable / not
-///      ELF / too big" without destroying the caller's image first.
+/// Resolves `filename` through the VFS, loads the file into a kernel
+/// buffer, walks the userspace `argv` and `envp` pointer arrays
+/// reading each NUL-terminated string into kernel buffers, then
+/// hands off to `proc::spawn::exec_process`.  All argument
+/// marshalling completes BEFORE the old address space is torn down,
+/// so a malformed-argv `execve` leaves the caller's image intact.
 ///
-/// Returning `-ENOSYS` lets glibc fall back to its `posix_spawn` or
-/// CRT-only paths (or, for the shell case, propagate the error to
-/// the user).  Tracked in `todo.txt`.
-fn linux_execve(_frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
-    -i64::from(errno::ENOSYS)
+/// On success the saved syscall frame is rewritten so SYSRET returns
+/// to the new entry point with a clean register state, matching the
+/// native `sys_process_exec_with_frame` behaviour.  On failure the
+/// caller observes a Linux `-errno` and continues running.
+fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    use crate::proc::{signal, spawn::exec_process, thread};
+
+    let filename_ptr = frame.arg0;
+    let argv_user = frame.arg1;
+    let envp_user = frame.arg2;
+
+    // ---- 1. Resolve caller's PID. ----
+    let task_id = crate::sched::current_task_id();
+    let pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return -i64::from(errno::ESRCH),
+    };
+
+    // ---- 2. Read filename. ----
+    // PATH_MAX on Linux is 4096; our VFS uses str so we additionally
+    // require valid UTF-8 (Linux accepts arbitrary bytes — the path
+    // is "all bytes except / and NUL").  Treat invalid UTF-8 as
+    // ENOENT (the file by that name doesn't exist on a UTF-8 VFS).
+    const PATH_MAX: usize = 4096;
+    let filename_bytes = match read_user_cstr(filename_ptr, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return -i64::from(e),
+    };
+    if filename_bytes.is_empty() {
+        return -i64::from(errno::ENOENT);
+    }
+    let filename = match core::str::from_utf8(&filename_bytes) {
+        Ok(s) => s,
+        Err(_) => return -i64::from(errno::ENOENT),
+    };
+
+    // ---- 3. Read argv and envp pointer arrays. ----
+    let argv_ptrs = match read_user_ptr_array(argv_user, EXECVE_MAX_ARGS) {
+        Ok(v) => v,
+        Err(e) => return -i64::from(e),
+    };
+    let envp_ptrs = match read_user_ptr_array(envp_user, EXECVE_MAX_ARGS) {
+        Ok(v) => v,
+        Err(e) => return -i64::from(e),
+    };
+
+    // ---- 4. Read each argv / envp string into a kernel buffer. ----
+    let mut total_bytes: usize = 0;
+    let mut argv_bufs: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+        alloc::vec::Vec::with_capacity(argv_ptrs.len());
+    for p in argv_ptrs {
+        let s = match read_user_cstr(p, EXECVE_MAX_STR_LEN) {
+            Ok(s) => s,
+            Err(e) => return -i64::from(e),
+        };
+        total_bytes = total_bytes.saturating_add(s.len()).saturating_add(1);
+        if total_bytes > EXECVE_MAX_TOTAL_BYTES {
+            return -i64::from(errno::E2BIG);
+        }
+        argv_bufs.push(s);
+    }
+    let mut envp_bufs: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+        alloc::vec::Vec::with_capacity(envp_ptrs.len());
+    for p in envp_ptrs {
+        let s = match read_user_cstr(p, EXECVE_MAX_STR_LEN) {
+            Ok(s) => s,
+            Err(e) => return -i64::from(e),
+        };
+        total_bytes = total_bytes.saturating_add(s.len()).saturating_add(1);
+        if total_bytes > EXECVE_MAX_TOTAL_BYTES {
+            return -i64::from(errno::E2BIG);
+        }
+        envp_bufs.push(s);
+    }
+
+    // ---- 5. Read file from VFS BEFORE tearing down old AS. ----
+    let elf_data = match crate::fs::vfs::Vfs::read_file(filename) {
+        Ok(d) => d,
+        Err(e) => return -i64::from(linux_errno_for(e)),
+    };
+
+    // ---- 6. Build &[&[u8]] views for exec_process. ----
+    let argv_slices: alloc::vec::Vec<&[u8]> =
+        argv_bufs.iter().map(alloc::vec::Vec::as_slice).collect();
+    let envp_slices: alloc::vec::Vec<&[u8]> =
+        envp_bufs.iter().map(alloc::vec::Vec::as_slice).collect();
+
+    // ---- 7. Exec.  After this point the old AS is gone on success. ----
+    match exec_process(pid, &elf_data, &argv_slices, &envp_slices) {
+        Ok(result) => {
+            // Reset caught signal handlers (POSIX) and drop the now-
+            // stale signal trampoline; the new image's libc init
+            // will re-register.
+            signal::on_exec(pid);
+
+            // Rewrite the saved frame so SYSRET lands at the new
+            // entry point with a clean register state.
+            frame.user_rip = result.entry_rip;
+            frame.user_rsp = result.user_rsp;
+            frame.arg0 = 0; // rdi
+            frame.arg1 = 0; // rsi
+            frame.arg2 = 0; // rdx
+            frame.arg3 = 0; // r10
+            frame.arg4 = 0; // r8
+            frame.arg5 = 0; // r9
+            frame.rbx = 0;
+            frame.rbp = 0;
+            frame.r12 = 0;
+            frame.r13 = 0;
+            frame.r14 = 0;
+            frame.r15 = 0;
+            // RFLAGS: keep IF=1 (interrupts enabled), reserved bit 1.
+            frame.user_rflags = 0x202;
+            0
+        }
+        Err(e) => -i64::from(linux_errno_for(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2249,12 +2445,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // (12b) execve user-marshalling helpers (NULL handling).
+    //
+    // These do not require a calling process — read_user_cstr returns
+    // EFAULT on a NULL pointer before touching userspace, and
+    // read_user_ptr_array returns an empty array on NULL (which is
+    // how glibc passes argv/envp for a program with no args).
+    match read_user_cstr(0, 16) {
+        Err(e) if e == errno::EFAULT => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: read_user_cstr(NULL) → {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    match read_user_ptr_array(0, 16) {
+        Ok(v) if v.is_empty() => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: read_user_ptr_array(NULL) → {:?}",
+                other.as_ref().map(alloc::vec::Vec::len)
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     // (13) dispatch_linux_with_frame routing.
     //
     // We can exercise the routing logic without actually calling
     // fork::fork_process by:
     //   - feeding a non-frame syscall_nr (READ) and expecting None;
-    //   - feeding EXECVE and expecting Some(-ENOSYS);
+    //   - feeding EXECVE and expecting Some(-ESRCH) — execve resolves
+    //     the calling PID as its first step and the boot self-test
+    //     task has no owning Linux process;
     //   - feeding CLONE with thread-creation bits and expecting
     //     Some(-ENOSYS) (linux_clone rejects before touching fork).
     //
@@ -2279,10 +2503,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         f.syscall_nr = nr::EXECVE;
         match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ENOSYS) => {}
+            Some(v) if v == -i64::from(errno::ESRCH) => {}
             other => {
                 serial_println!(
                     "[syscall/linux]   FAIL: execve via with_frame → {:?}", other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // FORK and VFORK in self-test context have no calling process
+        // either, but they reach fork::fork_process which returns
+        // ProcessNotFound → ESRCH.  This exercises the routing.
+        f.syscall_nr = nr::FORK;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v < 0 => {} // any negative errno is fine
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fork via with_frame → {:?}", other
                 );
                 return Err(KernelError::InternalError);
             }

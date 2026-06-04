@@ -8338,19 +8338,31 @@ mod tests {
 
     /// RAII guard that restores the effective capability set on drop.
     ///
-    /// Capability state is process-global, and host tests run single-
-    /// threaded (`--test-threads=1`), so a test that drops `CAP_SYS_TIME`
-    /// must restore it before returning or it would corrupt every later
-    /// test in the process.  `snapshot()` captures the current effective
-    /// caps; `Drop` reinstates them.
+    /// Capability state is process-global. Cargo's test runner is parallel
+    /// by default (one thread per core), so without serialisation two tests
+    /// can race: T1 drops `CAP_SYS_TIME`, T2 reads the dropped state and
+    /// fails its "cap held" assertion, T1's `Drop` restores. To prevent
+    /// that we hold a process-global mutex for the lifetime of the guard —
+    /// only one cap-mutating test runs at a time.
+    static CAP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct CapGuard {
         lo: u32,
         hi: u32,
+        // Held for the lifetime of the guard. Dropped after `Drop` restores
+        // the caps so the next waiter sees a consistent state.
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl CapGuard {
         fn snapshot() -> Self {
+            // Poisoned lock = a prior test panicked while holding it. The
+            // cap state may already be wrong, but we still want subsequent
+            // tests to make progress, so we accept the poisoned guard.
+            let lock = CAP_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi }
+            Self { lo, hi, _lock: lock }
         }
     }
     impl Drop for CapGuard {

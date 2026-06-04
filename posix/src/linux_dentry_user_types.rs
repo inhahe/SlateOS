@@ -137,9 +137,17 @@ mod tests {
     }
 
     #[test]
-    fn test_dt_values_all_even_except_unknown() {
-        // The Linux DT_ values are all even (low bit of file-type nibble is 0).
+    fn test_dt_values_are_low_nibble_of_st_mode() {
+        // Each DT_* equals (S_IF* >> 12). The result is in 0..16, and most
+        // file types land on an even value because the corresponding S_IF*
+        // octal constant has its low octal digit zero — except S_IFIFO
+        // (0o010000) which gives DT_FIFO = 1, an odd value.
         for t in [DT_FIFO, DT_CHR, DT_DIR, DT_BLK, DT_REG, DT_LNK, DT_SOCK, DT_WHT] {
+            assert!(t < 16);
+        }
+        // Sanity: only DT_FIFO is odd among the populated types.
+        assert_eq!(DT_FIFO % 2, 1);
+        for t in [DT_CHR, DT_DIR, DT_BLK, DT_REG, DT_LNK, DT_SOCK, DT_WHT] {
             assert_eq!(t % 2, 0);
         }
     }

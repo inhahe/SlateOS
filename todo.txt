@@ -2810,13 +2810,66 @@ Remaining net improvements (diminishing returns):
       pure insert, pure delete, replacement, partial keeps middle).
   All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  RUNNING TOTAL: 711 tests across 48 binaries (whoami + batches 1-8).
-  ~37 binaries still pending.
+  PROGRESS 2026-06-04 (batch 9): added 103 unit tests across 6 more
+  binaries focused on tests-only (no helper extraction needed for md5/
+  sha256) plus extraction-and-test for tsort, kill, nice, logger:
+    * md5sum.rs: kept existing `md5(data)` + `hex(bytes)` helpers; 16
+      tests covering hex formatting (zero/sequential/high), the RFC
+      1321 vectors (empty, "a", "abc", "message digest", alphabet,
+      alphanumeric, eight digit groups), block-boundary inputs (55,
+      56, 64 'a' bytes), high-bit bytes, single zero byte, output-
+      length sanity.
+    * sha256sum.rs: kept existing `sha256(data)` + `hex(bytes)`; 13
+      tests covering hex (zero/full range), FIPS 180-2 vectors
+      (empty, "abc", alphabet, two-block "abcdbcde..."), boundary
+      inputs (55, 56, 64 'a' bytes), 1000 'a' bytes (subset of the
+      million-a test), single zero byte, high-bit bytes, output-
+      length sanity.
+    * tsort.rs: extracted `tokenise(input) -> Result<Vec<String>>`
+      (rejects odd token count), `build_graph(tokens) -> (names,
+      adj, in_degree)` (deduplicates names, drops self-loops),
+      `topological_sort(adj, in_degree) -> (emitted, remaining)`
+      (Kahn's; `remaining` is non-empty iff cycle). 14 tests:
+      tokenise empty/pair/multiline/odd-errors/whitespace, build
+      simple/self-loop/diamond, sort empty/linear/diamond-order/
+      cycle/partial-cycle/disconnected.
+    * kill.rs: gated `unsafe extern "C" fn kill` on
+      `cfg(target_os = "linux")` with windows-host stub (matches
+      whoami pattern). Extracted `resolve_signal(token) -> Option<i32>`
+      (number, SIG-prefix, case-insensitive name), `parse_args(args)
+      -> Result<KillAction>` returning ListSignals or Send {signal,
+      pids}, `format_signal_list() -> String`. 20 tests: resolve
+      (number/bare/SIG-prefix/lowercase/unknown/empty), parse_args
+      (empty errors, -l/-L, default TERM, numeric, name, SIG-prefix,
+      unknown, missing PID, multiple PIDs, signal after PIDs), format
+      list (all names/line count/numbers).
+    * nice.rs: extracted `parse_args(args) -> NiceArgs` (adjustment
+      i32, cmd_start usize). Supports `-n N`, `-nN` combined, fallback
+      to default 10 on parse failure. 10 tests: no-flag default,
+      -n value two-tokens, -n combined, negative two-token and
+      combined, invalid falls back, -n at end with no value,
+      empty args, multiple -n flags use last, non-n dash treated
+      as cmd.
+    * logger.rs: kept existing `facility_code`, `severity_code`,
+      `parse_priority`, `is_leap`, `days_to_date` helpers; extracted
+      `parse_args(args) -> Result<LoggerArgs>` and added
+      `format_log_line(pri, ts, tag, msg)`. 30 tests covering all
+      helpers, RFC 5424 priority math (user.notice=13, kern.emerg=0,
+      local7.debug=191), severity-only defaults to user facility,
+      severity aliases (emerg/panic, err/error, warning/warn),
+      is_leap basics, days_to_date (epoch, end of 1970, start of
+      1971, leap day 2000-02-29 = day 11016), parse_args (defaults,
+      -t/-p, missing-value errors, mixed flags+message), log-line
+      formatting.
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
+
+  RUNNING TOTAL: 814 tests across 54 binaries (whoami + batches 1-9).
+  ~31 binaries still pending.
 
   REMAINING: awk, bc, chmod, chown, cp, ed, false, fetch, find, grep,
-  hostname, id, join, kill, logger, ls, md5sum, mkfifo, mv, nice,
-  nohup, patch, ps, pwd, realpath, renice, sed, sh, sha256sum, tar,
-  test, time_cmd, touch, true, tsort, tty, who.
+  hostname, id, join, ls, mkfifo, mv, nohup, patch, ps, pwd,
+  realpath, renice, sed, sh, tar, test, time_cmd, touch, true, tty,
+  who.
   Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to

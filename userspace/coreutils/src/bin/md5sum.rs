@@ -133,3 +133,122 @@ fn md5(data: &[u8]) -> [u8; 16] {
     result[12..16].copy_from_slice(&d0.to_le_bytes());
     result
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn md5_hex(data: &[u8]) -> String {
+        hex(&md5(data))
+    }
+
+    // ---------------- hex ----------------
+
+    #[test]
+    fn hex_zero_bytes() {
+        let bytes = [0u8; 16];
+        assert_eq!(hex(&bytes), "00000000000000000000000000000000");
+    }
+
+    #[test]
+    fn hex_one_to_sixteen() {
+        let mut bytes = [0u8; 16];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (i + 1) as u8;
+        }
+        assert_eq!(hex(&bytes), "0102030405060708090a0b0c0d0e0f10");
+    }
+
+    #[test]
+    fn hex_high_bytes() {
+        let bytes = [0xffu8; 16];
+        assert_eq!(hex(&bytes), "ffffffffffffffffffffffffffffffff");
+    }
+
+    // ---------------- md5: RFC 1321 test vectors ----------------
+
+    #[test]
+    fn md5_empty() {
+        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+    }
+
+    #[test]
+    fn md5_a() {
+        assert_eq!(md5_hex(b"a"), "0cc175b9c0f1b6a831c399e269772661");
+    }
+
+    #[test]
+    fn md5_abc() {
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    #[test]
+    fn md5_message_digest() {
+        assert_eq!(md5_hex(b"message digest"), "f96b697d7cb7938d525a2f31aaf161d0");
+    }
+
+    #[test]
+    fn md5_alphabet() {
+        assert_eq!(
+            md5_hex(b"abcdefghijklmnopqrstuvwxyz"),
+            "c3fcd3d76192e4007dfb496cca67e13b"
+        );
+    }
+
+    #[test]
+    fn md5_alphanumeric() {
+        assert_eq!(
+            md5_hex(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"),
+            "d174ab98d277d9f5a5611c2c9f419d9f"
+        );
+    }
+
+    #[test]
+    fn md5_eight_digit_groups() {
+        // Tests that we cross multiple 64-byte blocks correctly.
+        assert_eq!(
+            md5_hex(b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"),
+            "57edf4a22be3c955ac49da2e2107b67a"
+        );
+    }
+
+    #[test]
+    fn md5_exactly_56_bytes() {
+        // 56-byte input: padding must spill into a second block.
+        let data = vec![b'a'; 56];
+        assert_eq!(md5_hex(&data), "3b0c8ac703f828b04c6c197006d17218");
+    }
+
+    #[test]
+    fn md5_exactly_64_bytes() {
+        // One full block exactly; padding requires a second block.
+        let data = vec![b'a'; 64];
+        assert_eq!(md5_hex(&data), "014842d480b571495a4a0363793f7367");
+    }
+
+    #[test]
+    fn md5_exactly_55_bytes() {
+        // 55-byte input: padding fits in one block (boundary case for padding).
+        let data = vec![b'a'; 55];
+        assert_eq!(md5_hex(&data), "ef1772b6dff9a122358552954ad0df65");
+    }
+
+    #[test]
+    fn md5_high_bit_bytes() {
+        // Non-ASCII bytes — MD5 is byte-oriented.
+        assert_eq!(md5_hex(&[0xffu8; 16]), "8d79cbc9a4ecdde112fc91ba625b13c2");
+    }
+
+    #[test]
+    fn md5_single_zero_byte() {
+        assert_eq!(md5_hex(&[0u8]), "93b885adfe0da089cdf634904fd59f71");
+    }
+
+    #[test]
+    fn md5_length_matches() {
+        // Output should always be exactly 16 bytes.
+        let hash = md5(b"anything");
+        assert_eq!(hash.len(), 16);
+    }
+}

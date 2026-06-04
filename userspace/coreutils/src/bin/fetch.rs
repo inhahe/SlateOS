@@ -23,6 +23,7 @@ const EXIT_BAD_ARGS: i32 = 3;
 // Configuration from CLI arguments
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Config {
     urls: Vec<String>,
     output_file: Option<String>,
@@ -63,6 +64,7 @@ impl Config {
 // URL parsing
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(test, derive(PartialEq, Eq))]
 #[derive(Clone, Debug)]
 struct ParsedUrl {
     scheme: String,
@@ -751,20 +753,26 @@ fn write_output(config: &Config, url: &ParsedUrl, body: &[u8]) -> io::Result<()>
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-fn parse_args() -> Result<Config, String> {
-    let args: Vec<String> = env::args().skip(1).collect();
+/// Outcome of CLI parsing: either a usable Config, a fatal error, or the
+/// caller-requested help screen (so the test-only `parse_args` doesn't
+/// need to call `process::exit`).
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum ParseOutcome {
+    Config(Config),
+    Help,
+}
+
+fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let mut config = Config::new();
     let mut i = 0;
 
-    while i < args.len() {
-        let arg = &args[i];
+    while let Some(arg) = args.get(i) {
         match arg.as_str() {
             "-h" | "--help" => {
-                print_help();
-                process::exit(EXIT_OK);
+                return Ok(ParseOutcome::Help);
             }
             "-o" | "--output" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let val = args.get(i).ok_or("-o requires a filename argument")?;
                 config.output_file = Some(val.clone());
             }
@@ -778,7 +786,7 @@ fn parse_args() -> Result<Config, String> {
                 config.verbose = true;
             }
             "-H" | "--header" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let val = args
                     .get(i)
                     .ok_or("-H requires a header argument (\"Name: Value\")")?;
@@ -786,12 +794,12 @@ fn parse_args() -> Result<Config, String> {
                 config.headers.push((name, value));
             }
             "-X" | "--method" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let val = args.get(i).ok_or("-X requires a method argument")?;
                 config.method = Some(val.to_ascii_uppercase());
             }
             "-d" | "--data" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let val = args.get(i).ok_or("-d requires a data argument")?;
                 config.data = Some(val.clone());
             }
@@ -805,12 +813,12 @@ fn parse_args() -> Result<Config, String> {
                 config.head_only = true;
             }
             "-u" | "--user" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let val = args.get(i).ok_or("-u requires user:password argument")?;
                 config.user_pass = Some(val.clone());
             }
             "--timeout" => {
-                i += 1;
+                i = i.saturating_add(1);
                 let val = args.get(i).ok_or("--timeout requires a number")?;
                 config.timeout_secs = val
                     .parse::<u32>()
@@ -823,14 +831,14 @@ fn parse_args() -> Result<Config, String> {
                 config.urls.push(arg.clone());
             }
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     if config.urls.is_empty() {
         return Err("no URL specified".to_string());
     }
 
-    Ok(config)
+    Ok(ParseOutcome::Config(config))
 }
 
 fn parse_header_arg(raw: &str) -> Result<(String, String), String> {
@@ -901,8 +909,13 @@ Note: HTTPS is not yet supported (requires TLS implementation).
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let config = match parse_args() {
-        Ok(c) => c,
+    let args: Vec<String> = env::args().skip(1).collect();
+    let config = match parse_args(&args) {
+        Ok(ParseOutcome::Config(c)) => c,
+        Ok(ParseOutcome::Help) => {
+            print_help();
+            process::exit(EXIT_OK);
+        }
         Err(e) => {
             eprintln!("fetch: {e}");
             eprintln!("Try 'fetch --help' for usage information.");
@@ -920,4 +933,558 @@ fn main() {
     }
 
     process::exit(worst_exit);
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn cfg(args: &[&str]) -> Config {
+        match parse_args(&s(args)).unwrap() {
+            ParseOutcome::Config(c) => c,
+            ParseOutcome::Help => panic!("expected Config, got Help"),
+        }
+    }
+
+    // ---------- parse_args ----------
+
+    #[test]
+    fn parse_args_empty_errors() {
+        let err = parse_args(&[]).unwrap_err();
+        assert!(err.contains("no URL"));
+    }
+
+    #[test]
+    fn parse_args_single_url() {
+        let c = cfg(&["http://example.com/"]);
+        assert_eq!(c.urls, vec!["http://example.com/".to_string()]);
+        assert!(c.follow_redirects);
+        assert_eq!(c.timeout_secs, 30);
+    }
+
+    #[test]
+    fn parse_args_help_flag() {
+        let out = parse_args(&s(&["-h"])).unwrap();
+        assert_eq!(out, ParseOutcome::Help);
+        let out = parse_args(&s(&["--help"])).unwrap();
+        assert_eq!(out, ParseOutcome::Help);
+    }
+
+    #[test]
+    fn parse_args_output_file() {
+        let c = cfg(&["-o", "out.html", "http://x/"]);
+        assert_eq!(c.output_file, Some("out.html".to_string()));
+        let c = cfg(&["--output", "out.html", "http://x/"]);
+        assert_eq!(c.output_file, Some("out.html".to_string()));
+    }
+
+    #[test]
+    fn parse_args_missing_output_value_errors() {
+        let err = parse_args(&s(&["-o"])).unwrap_err();
+        assert!(err.contains("-o"));
+    }
+
+    #[test]
+    fn parse_args_output_from_url() {
+        let c = cfg(&["-O", "http://x/file.tar"]);
+        assert!(c.output_from_url);
+    }
+
+    #[test]
+    fn parse_args_quiet_and_verbose() {
+        let c = cfg(&["-q", "-v", "http://x/"]);
+        assert!(c.quiet);
+        assert!(c.verbose);
+    }
+
+    #[test]
+    fn parse_args_method_uppercased() {
+        let c = cfg(&["-X", "post", "http://x/"]);
+        assert_eq!(c.method, Some("POST".to_string()));
+    }
+
+    #[test]
+    fn parse_args_data_implies_post_via_determine_method() {
+        // -d alone doesn't change config.method, but determine_method() picks POST.
+        let c = cfg(&["-d", "key=value", "http://x/"]);
+        assert_eq!(c.data, Some("key=value".to_string()));
+        assert_eq!(c.method, None);
+        assert_eq!(determine_method(&c), "POST");
+    }
+
+    #[test]
+    fn parse_args_header_collects_multiple() {
+        let c = cfg(&[
+            "-H", "Accept: application/json",
+            "-H", "X-Custom: 42",
+            "http://x/",
+        ]);
+        assert_eq!(
+            c.headers,
+            vec![
+                ("Accept".to_string(), "application/json".to_string()),
+                ("X-Custom".to_string(), "42".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_args_bad_header_errors() {
+        let err = parse_args(&s(&["-H", "no-colon", "http://x/"])).unwrap_err();
+        assert!(err.contains("invalid header format"));
+    }
+
+    #[test]
+    fn parse_args_follow_and_no_follow() {
+        let c = cfg(&["--no-follow", "http://x/"]);
+        assert!(!c.follow_redirects);
+        let c = cfg(&["-L", "http://x/"]);
+        assert!(c.follow_redirects);
+    }
+
+    #[test]
+    fn parse_args_head_only() {
+        let c = cfg(&["-I", "http://x/"]);
+        assert!(c.head_only);
+    }
+
+    #[test]
+    fn parse_args_user_pass() {
+        let c = cfg(&["-u", "admin:secret", "http://x/"]);
+        assert_eq!(c.user_pass, Some("admin:secret".to_string()));
+    }
+
+    #[test]
+    fn parse_args_timeout_numeric() {
+        let c = cfg(&["--timeout", "5", "http://x/"]);
+        assert_eq!(c.timeout_secs, 5);
+    }
+
+    #[test]
+    fn parse_args_bad_timeout_errors() {
+        let err = parse_args(&s(&["--timeout", "abc", "http://x/"])).unwrap_err();
+        assert!(err.contains("invalid timeout"));
+    }
+
+    #[test]
+    fn parse_args_unknown_flag_errors() {
+        let err = parse_args(&s(&["--bogus", "http://x/"])).unwrap_err();
+        assert!(err.contains("unknown option"));
+    }
+
+    #[test]
+    fn parse_args_multiple_urls() {
+        let c = cfg(&["http://a/", "http://b/"]);
+        assert_eq!(c.urls.len(), 2);
+    }
+
+    // ---------- parse_header_arg ----------
+
+    #[test]
+    fn parse_header_splits_on_first_colon() {
+        let (n, v) = parse_header_arg("Name: value:extra").unwrap();
+        assert_eq!(n, "Name");
+        assert_eq!(v, "value:extra");
+    }
+
+    #[test]
+    fn parse_header_trims_whitespace() {
+        let (n, v) = parse_header_arg("  X-Foo  :   bar  ").unwrap();
+        assert_eq!(n, "X-Foo");
+        assert_eq!(v, "bar");
+    }
+
+    #[test]
+    fn parse_header_no_colon_errors() {
+        assert!(parse_header_arg("garbage").is_err());
+    }
+
+    #[test]
+    fn parse_header_empty_name_errors() {
+        assert!(parse_header_arg(": value").is_err());
+    }
+
+    // ---------- ParsedUrl ----------
+
+    #[test]
+    fn parsed_url_http_with_path() {
+        let u = ParsedUrl::parse("http://example.com/foo/bar").unwrap();
+        assert_eq!(u.scheme, "http");
+        assert_eq!(u.host, "example.com");
+        assert_eq!(u.port, 80);
+        assert_eq!(u.path, "/foo/bar");
+        assert_eq!(u.query, None);
+    }
+
+    #[test]
+    fn parsed_url_https_default_port() {
+        let u = ParsedUrl::parse("https://example.com/").unwrap();
+        assert_eq!(u.scheme, "https");
+        assert_eq!(u.port, 443);
+    }
+
+    #[test]
+    fn parsed_url_explicit_port() {
+        let u = ParsedUrl::parse("http://example.com:8080/x").unwrap();
+        assert_eq!(u.port, 8080);
+    }
+
+    #[test]
+    fn parsed_url_no_scheme_defaults_to_http() {
+        let u = ParsedUrl::parse("example.com/foo").unwrap();
+        assert_eq!(u.scheme, "http");
+        assert_eq!(u.host, "example.com");
+        assert_eq!(u.port, 80);
+        assert_eq!(u.path, "/foo");
+    }
+
+    #[test]
+    fn parsed_url_no_path_defaults_to_slash() {
+        let u = ParsedUrl::parse("http://example.com").unwrap();
+        assert_eq!(u.path, "/");
+    }
+
+    #[test]
+    fn parsed_url_query_string() {
+        let u = ParsedUrl::parse("http://example.com/search?q=hello&n=10").unwrap();
+        assert_eq!(u.path, "/search");
+        assert_eq!(u.query, Some("q=hello&n=10".to_string()));
+    }
+
+    #[test]
+    fn parsed_url_unsupported_scheme_errors() {
+        assert!(ParsedUrl::parse("ftp://example.com/").is_err());
+    }
+
+    #[test]
+    fn parsed_url_empty_host_errors() {
+        assert!(ParsedUrl::parse("http:///foo").is_err());
+    }
+
+    #[test]
+    fn parsed_url_request_target_includes_query() {
+        let u = ParsedUrl::parse("http://h/p?x=1").unwrap();
+        assert_eq!(u.request_target(), "/p?x=1");
+    }
+
+    #[test]
+    fn parsed_url_request_target_no_query() {
+        let u = ParsedUrl::parse("http://h/p").unwrap();
+        assert_eq!(u.request_target(), "/p");
+    }
+
+    #[test]
+    fn parsed_url_filename_from_last_segment() {
+        let u = ParsedUrl::parse("http://h/dir/file.tar").unwrap();
+        assert_eq!(u.filename(), "file.tar");
+    }
+
+    #[test]
+    fn parsed_url_filename_trailing_slash_is_index_html() {
+        let u = ParsedUrl::parse("http://h/dir/").unwrap();
+        assert_eq!(u.filename(), "index.html");
+    }
+
+    // ---------- base64_encode ----------
+
+    #[test]
+    fn base64_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn base64_single_byte() {
+        // "f" -> "Zg=="
+        assert_eq!(base64_encode(b"f"), "Zg==");
+    }
+
+    #[test]
+    fn base64_two_bytes() {
+        // "fo" -> "Zm8="
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+    }
+
+    #[test]
+    fn base64_three_bytes() {
+        // "foo" -> "Zm9v"
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn base64_credential_string() {
+        // "admin:secret" round-tripped against a known reference.
+        assert_eq!(base64_encode(b"admin:secret"), "YWRtaW46c2VjcmV0");
+    }
+
+    // ---------- determine_method ----------
+
+    #[test]
+    fn determine_method_default_is_get() {
+        let c = Config::new();
+        assert_eq!(determine_method(&c), "GET");
+    }
+
+    #[test]
+    fn determine_method_data_implies_post() {
+        let mut c = Config::new();
+        c.data = Some("x=1".to_string());
+        assert_eq!(determine_method(&c), "POST");
+    }
+
+    #[test]
+    fn determine_method_explicit_method_wins_over_data() {
+        let mut c = Config::new();
+        c.data = Some("x=1".to_string());
+        c.method = Some("put".to_string());
+        assert_eq!(determine_method(&c), "PUT");
+    }
+
+    // ---------- build_request ----------
+
+    #[test]
+    fn build_request_get_minimal() {
+        let u = ParsedUrl::parse("http://example.com/path").unwrap();
+        let req = build_request("GET", &u, &[], None, None);
+        assert!(req.starts_with("GET /path HTTP/1.1\r\n"));
+        assert!(req.contains("Host: example.com\r\n"));
+        assert!(req.contains("Connection: close\r\n"));
+        // Empty body still terminates with a blank line.
+        assert!(req.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn build_request_post_adds_content_length() {
+        let u = ParsedUrl::parse("http://example.com/").unwrap();
+        let req = build_request("POST", &u, &[], Some("hello"), None);
+        assert!(req.contains("Content-Length: 5\r\n"));
+        assert!(req.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
+        assert!(req.ends_with("hello"));
+    }
+
+    #[test]
+    fn build_request_custom_content_type_suppresses_default() {
+        let u = ParsedUrl::parse("http://example.com/").unwrap();
+        let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+        let req = build_request("POST", &u, &headers, Some("{}"), None);
+        // Only the user-supplied content-type should appear.
+        assert!(req.contains("Content-Type: application/json\r\n"));
+        assert!(!req.contains("Content-Type: application/x-www-form-urlencoded"));
+    }
+
+    #[test]
+    fn build_request_basic_auth_header_present() {
+        let u = ParsedUrl::parse("http://example.com/").unwrap();
+        let req = build_request("GET", &u, &[], None, Some("admin:secret"));
+        assert!(req.contains("Authorization: Basic YWRtaW46c2VjcmV0\r\n"));
+    }
+
+    #[test]
+    fn build_request_includes_query() {
+        let u = ParsedUrl::parse("http://example.com/search?q=hi").unwrap();
+        let req = build_request("GET", &u, &[], None, None);
+        assert!(req.starts_with("GET /search?q=hi HTTP/1.1\r\n"));
+    }
+
+    // ---------- parse_status_line ----------
+
+    #[test]
+    fn status_line_basic() {
+        let (code, text) = parse_status_line("HTTP/1.1 200 OK").unwrap();
+        assert_eq!(code, 200);
+        assert_eq!(text, "OK");
+    }
+
+    #[test]
+    fn status_line_multiword_text() {
+        let (code, text) = parse_status_line("HTTP/1.1 404 Not Found").unwrap();
+        assert_eq!(code, 404);
+        assert_eq!(text, "Not Found");
+    }
+
+    #[test]
+    fn status_line_no_reason_phrase() {
+        let (code, text) = parse_status_line("HTTP/1.0 204").unwrap();
+        assert_eq!(code, 204);
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn status_line_malformed_errors() {
+        assert!(parse_status_line("garbage").is_err());
+        assert!(parse_status_line("HTTP/1.1 not-a-number OK").is_err());
+    }
+
+    // ---------- HttpResponse helpers ----------
+
+    fn mk_resp(headers: Vec<(&str, &str)>) -> HttpResponse {
+        HttpResponse {
+            status_code: 200,
+            status_text: "OK".to_string(),
+            headers: headers
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn response_header_value_case_insensitive() {
+        let r = mk_resp(vec![("Content-Type", "text/html")]);
+        assert_eq!(r.header_value("content-type"), Some("text/html"));
+        assert_eq!(r.header_value("CONTENT-TYPE"), Some("text/html"));
+    }
+
+    #[test]
+    fn response_header_value_missing_is_none() {
+        let r = mk_resp(vec![]);
+        assert_eq!(r.header_value("Location"), None);
+    }
+
+    #[test]
+    fn response_content_length_parsed() {
+        let r = mk_resp(vec![("Content-Length", "42")]);
+        assert_eq!(r.content_length(), Some(42));
+    }
+
+    #[test]
+    fn response_content_length_garbage_is_none() {
+        let r = mk_resp(vec![("Content-Length", "abc")]);
+        assert_eq!(r.content_length(), None);
+    }
+
+    #[test]
+    fn response_is_chunked_detected() {
+        let r = mk_resp(vec![("Transfer-Encoding", "chunked")]);
+        assert!(r.is_chunked());
+        let r = mk_resp(vec![("Transfer-Encoding", "gzip, chunked")]);
+        assert!(r.is_chunked());
+    }
+
+    #[test]
+    fn response_is_chunked_false_when_absent() {
+        let r = mk_resp(vec![]);
+        assert!(!r.is_chunked());
+    }
+
+    #[test]
+    fn response_location_field() {
+        let r = mk_resp(vec![("Location", "http://other/")]);
+        assert_eq!(r.location(), Some("http://other/"));
+    }
+
+    // ---------- find_subsequence ----------
+
+    #[test]
+    fn find_subsequence_found() {
+        assert_eq!(find_subsequence(b"hello world", b"world"), Some(6));
+    }
+
+    #[test]
+    fn find_subsequence_missing() {
+        assert_eq!(find_subsequence(b"hello", b"xyz"), None);
+    }
+
+    #[test]
+    fn find_subsequence_at_start() {
+        assert_eq!(find_subsequence(b"abcdef", b"abc"), Some(0));
+    }
+
+    // ---------- try_parse_chunk ----------
+
+    #[test]
+    fn chunk_parse_simple_size() {
+        match try_parse_chunk(b"a\r\n0123456789\r\n") {
+            ChunkParse::Chunk { size, consumed } => {
+                assert_eq!(size, 0xa);
+                assert_eq!(consumed, 3); // "a\r\n" = 3 bytes
+            }
+            _ => panic!("expected Chunk"),
+        }
+    }
+
+    #[test]
+    fn chunk_parse_with_extension() {
+        match try_parse_chunk(b"ff;name=value\r\nDATA") {
+            ChunkParse::Chunk { size, .. } => assert_eq!(size, 0xff),
+            _ => panic!("expected Chunk"),
+        }
+    }
+
+    #[test]
+    fn chunk_parse_needs_more() {
+        // No CRLF yet.
+        assert!(matches!(try_parse_chunk(b"ab"), ChunkParse::NeedMore));
+    }
+
+    #[test]
+    fn chunk_parse_invalid_hex() {
+        match try_parse_chunk(b"zz\r\n") {
+            ChunkParse::Invalid(_) => {}
+            _ => panic!("expected Invalid"),
+        }
+    }
+
+    // ---------- format_size ----------
+
+    #[test]
+    fn format_size_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(500), "500 B");
+    }
+
+    #[test]
+    fn format_size_kilobytes() {
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn format_size_megabytes() {
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+    }
+
+    #[test]
+    fn format_size_gigabytes() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    // ---------- resolve_redirect ----------
+
+    #[test]
+    fn redirect_absolute_url_used_verbatim() {
+        let base = ParsedUrl::parse("http://a.com/x").unwrap();
+        assert_eq!(
+            resolve_redirect(&base, "http://b.com/y"),
+            "http://b.com/y"
+        );
+    }
+
+    #[test]
+    fn redirect_absolute_path_keeps_origin() {
+        let base = ParsedUrl::parse("http://a.com/x").unwrap();
+        assert_eq!(
+            resolve_redirect(&base, "/new"),
+            "http://a.com:80/new"
+        );
+    }
+
+    #[test]
+    fn redirect_relative_appends_to_current_dir() {
+        let base = ParsedUrl::parse("http://a.com/dir/page").unwrap();
+        assert_eq!(
+            resolve_redirect(&base, "other"),
+            "http://a.com:80/dir/other"
+        );
+    }
 }

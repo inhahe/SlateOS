@@ -3211,6 +3211,80 @@ Remaining net improvements (diminishing returns):
   REMAINING: awk, bc, fetch, sh.
   Continue in batches.
 
+  PROGRESS 2026-06-04 (batch 16 — FINAL): added 230 unit tests across
+  the last 4 binaries (awk, bc, fetch, sh).
+    * awk.rs: extracted `parse_args(args) -> Result<AwkArgs { fs_char,
+      program, files }>` and added test-only derives on Pattern / Rule.
+      Hardened parse_program (uses `.get()` on byte indexing) and the
+      field-reference branch of eval_expr / resolve_value (uses
+      `.get(n-1)` with saturating_sub).  Fixed a real pre-existing bug:
+      `eval_expr("$1+$2")` used to match the field-reference branch,
+      try to parse "1+$2" as a usize, fail, and return the empty line
+      instead of doing the arithmetic.  Tightened the field-ref check
+      to require all-digit tail, so `$1+$2` now falls through to the
+      arithmetic branch.  Built a `strip_call` helper for the
+      length/toupper/tolower builtins so they no longer use raw byte
+      indexing.  42 tests covering parse_args (7), parse_program (6
+      incl. nested braces), pattern_matches (3), simple_contains (1),
+      resolve_value (6), eval_condition (4), execute_action / eval_expr
+      via in-memory writer (12 incl. arithmetic, length, toupper,
+      tolower, divide-by-zero), strip_call (3).
+    * fetch.rs: refactored `parse_args` to take `&[String]` and return
+      a `ParseOutcome::Config(...) | ParseOutcome::Help` enum (so the
+      tests don't need to spawn a process for --help).  Added test-only
+      derives on Config / ParsedUrl / ParseOutcome.  Hardened the
+      argument-consumption loop to use saturating_add.  72 tests
+      covering parse_args (17 incl. every flag, --help, missing values,
+      bad timeout, multiple URLs), parse_header_arg (4), ParsedUrl
+      (12 incl. scheme defaults, port parsing, query string,
+      unsupported scheme, empty host, filename derivation),
+      base64_encode (5 against known vectors), determine_method (3),
+      build_request (5 incl. POST body, custom Content-Type wins,
+      basic-auth header, query-string in request-target),
+      parse_status_line (4), HttpResponse helpers (7 case-insensitive
+      header lookup, content-length, chunked, location),
+      find_subsequence (3), try_parse_chunk (4 incl. chunk extension,
+      need-more, invalid hex), format_size (4 B/KB/MB/GB),
+      resolve_redirect (3 absolute URL / absolute path / relative).
+    * sh.rs: extracted `parse_args(args) -> Result<ShMode, String>`
+      returning Interactive / Command { script, args } / Script
+      { path, args }, and `set_positionals(state, args)` for the
+      `$1..$N` + `$#` assignment.  Replaced main's hand-rolled argv
+      dispatch with a match on ShMode.  39 tests covering parse_args
+      (6: interactive default, -c without arg errors, -c + extras,
+      script + extras), set_positionals (2), ShellState (1),
+      split_commands (5 incl. quote/backslash respect), tokenize
+      (6 incl. collapse-spaces, single+double quotes, backslash escape,
+      empty), parse_redirections (4 incl. separate, joined, append,
+      stderr), find_logical_op + split_at_logical (6),
+      expand_variables (9 incl. plain, $VAR, ${VAR}, missing var,
+      single-quotes, backslash-escapes-dollar, $?, positional params,
+      trailing $).
+    * bc.rs: extracted `parse_args(args) -> Result<BcArgs { quiet,
+      math_lib, files }>` and added test-only derives.  77 tests
+      covering parse_args (7), BigDecimal::parse (11 incl. negative,
+      explicit-positive sign, decimal, zero, negative-zero,
+      whitespace, empty, garbage, leading-zeros, large-multi-limb),
+      to_string_with_scale (3 pad/truncate/<1), truncate_or_pad (3),
+      digits_to_limbs / limbs_to_digits roundtrip (3 incl. multi-limb,
+      100-digit), cmp_limbs (1), bd_add (4 incl. opposite-sign,
+      equal-magnitudes), bd_sub (3 incl. borrow across limb
+      boundary), bd_mul (5 incl. sign rules, scale truncation,
+      zero), bd_div (4 incl. divide-by-zero is None), bd_modulo (2),
+      bd_pow (5 incl. zero exp, even/odd exp on negative base),
+      bd_sqrt (4 incl. sqrt(2)≈1.4142, sqrt of negative is None),
+      bd_compare (2), bool_to_bd (2), BigDecimal::negate (2),
+      tokenize (12 incl. every operator/keyword class, line and
+      block comments, identifiers, whitespace), run_input
+      end-to-end (4: quit, assignment-persists-in-vars, scale=
+      sets Interpreter.scale, empty-is-noop).
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
+
+  RUNNING TOTAL: 1531 tests across 85 binaries
+  (whoami + batches 1-16).  COREUTILS UNIT-TEST PROJECT COMPLETE —
+  every binary in userspace/coreutils/src/bin now has its own
+  `#[cfg(test)] mod tests` block.
+
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to
   link on the host target (x86_64-pc-windows-gnu) with "undefined
   reference to `geteuid'".  RESOLVED 2026-06-04.  Gated the `geteuid`

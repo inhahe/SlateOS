@@ -30,46 +30,35 @@ use std::process::{self, Command, Stdio};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let argv0 = args.first().cloned().unwrap_or_default();
     let mut state = ShellState::new();
 
     // Set positional parameters
-    state.vars.insert("0".to_string(), args[0].clone());
+    state.vars.insert("0".to_string(), argv0);
 
-    if args.len() > 1 {
-        if args[1] == "-c" {
-            // Execute command string
-            if args.len() < 3 {
-                eprintln!("sh: -c: option requires an argument");
-                process::exit(2);
-            }
-            let script = &args[2];
-            for (i, a) in args[3..].iter().enumerate() {
-                state.vars.insert((i + 1).to_string(), a.clone());
-            }
-            state
-                .vars
-                .insert("#".to_string(), args[3..].len().to_string());
-            let exit_code = execute_script(script, &mut state);
+    match parse_args(&args) {
+        Ok(ShMode::Interactive) => { /* fall through to REPL */ }
+        Ok(ShMode::Command { script, args: cmd_args }) => {
+            set_positionals(&mut state, &cmd_args);
+            let exit_code = execute_script(&script, &mut state);
             process::exit(exit_code);
-        } else {
-            // Execute script file
-            let script_path = &args[1];
-            for (i, a) in args[2..].iter().enumerate() {
-                state.vars.insert((i + 1).to_string(), a.clone());
-            }
-            state
-                .vars
-                .insert("#".to_string(), args[2..].len().to_string());
-            match fs::read_to_string(script_path) {
+        }
+        Ok(ShMode::Script { path, args: cmd_args }) => {
+            set_positionals(&mut state, &cmd_args);
+            match fs::read_to_string(&path) {
                 Ok(content) => {
                     let exit_code = execute_script(&content, &mut state);
                     process::exit(exit_code);
                 }
                 Err(e) => {
-                    eprintln!("sh: {script_path}: {e}");
+                    eprintln!("sh: {path}: {e}");
                     process::exit(127);
                 }
             }
+        }
+        Err(msg) => {
+            eprintln!("sh: {msg}");
+            process::exit(2);
         }
     }
 
@@ -106,6 +95,48 @@ fn main() {
     }
 
     process::exit(state.last_exit_code);
+}
+
+/// Modes the shell can be invoked in, determined from argv.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum ShMode {
+    /// No script source — read from stdin.
+    Interactive,
+    /// `-c "command string" [arg ...]`.
+    Command { script: String, args: Vec<String> },
+    /// `script.sh [arg ...]`.
+    Script { path: String, args: Vec<String> },
+}
+
+/// Decide how the shell should run based on the full argv (including argv[0]).
+fn parse_args(args: &[String]) -> Result<ShMode, String> {
+    // args[0] is the program name; flags/positional start at args[1].
+    let Some(first) = args.get(1) else {
+        return Ok(ShMode::Interactive);
+    };
+    if first == "-c" {
+        let script = args.get(2).ok_or("-c: option requires an argument")?;
+        let cmd_args = args.get(3..).map(<[String]>::to_vec).unwrap_or_default();
+        Ok(ShMode::Command {
+            script: script.clone(),
+            args: cmd_args,
+        })
+    } else {
+        let cmd_args = args.get(2..).map(<[String]>::to_vec).unwrap_or_default();
+        Ok(ShMode::Script {
+            path: first.clone(),
+            args: cmd_args,
+        })
+    }
+}
+
+/// Push positional parameters `$1..$N` (and `$#`) into the shell state.
+fn set_positionals(state: &mut ShellState, args: &[String]) {
+    for (i, a) in args.iter().enumerate() {
+        // Positional indices start at $1.
+        state.vars.insert(i.saturating_add(1).to_string(), a.clone());
+    }
+    state.vars.insert("#".to_string(), args.len().to_string());
 }
 
 struct ShellState {
@@ -845,4 +876,319 @@ fn split_at_logical(cmd: &str, pos: usize) -> (&str, &str, &str) {
     let left = cmd[..pos].trim();
     let right = cmd[pos + 2..].trim();
     (left, op, right)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn mk_state(pairs: &[(&str, &str)]) -> ShellState {
+        let mut st = ShellState::new();
+        // Wipe the inherited env to keep tests deterministic.
+        st.vars.clear();
+        for (k, v) in pairs {
+            st.vars.insert((*k).to_string(), (*v).to_string());
+        }
+        st
+    }
+
+    // ---------- parse_args ----------
+
+    #[test]
+    fn parse_args_no_args_is_interactive() {
+        let m = parse_args(&s(&["sh"])).unwrap();
+        assert_eq!(m, ShMode::Interactive);
+    }
+
+    #[test]
+    fn parse_args_c_flag_requires_string() {
+        let err = parse_args(&s(&["sh", "-c"])).unwrap_err();
+        assert!(err.contains("-c"));
+    }
+
+    #[test]
+    fn parse_args_c_flag_with_string_only() {
+        let m = parse_args(&s(&["sh", "-c", "echo hi"])).unwrap();
+        assert_eq!(
+            m,
+            ShMode::Command {
+                script: "echo hi".to_string(),
+                args: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_c_flag_with_extra_args() {
+        let m = parse_args(&s(&["sh", "-c", "echo $1", "first", "second"])).unwrap();
+        assert_eq!(
+            m,
+            ShMode::Command {
+                script: "echo $1".to_string(),
+                args: vec!["first".to_string(), "second".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_script_path() {
+        let m = parse_args(&s(&["sh", "build.sh"])).unwrap();
+        assert_eq!(
+            m,
+            ShMode::Script {
+                path: "build.sh".to_string(),
+                args: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_script_with_args() {
+        let m = parse_args(&s(&["sh", "build.sh", "release", "verbose"])).unwrap();
+        assert_eq!(
+            m,
+            ShMode::Script {
+                path: "build.sh".to_string(),
+                args: vec!["release".to_string(), "verbose".to_string()],
+            }
+        );
+    }
+
+    // ---------- set_positionals ----------
+
+    #[test]
+    fn set_positionals_writes_indexed_vars_and_count() {
+        let mut st = mk_state(&[]);
+        set_positionals(&mut st, &s(&["a", "b", "c"]));
+        assert_eq!(st.vars.get("1"), Some(&"a".to_string()));
+        assert_eq!(st.vars.get("2"), Some(&"b".to_string()));
+        assert_eq!(st.vars.get("3"), Some(&"c".to_string()));
+        assert_eq!(st.vars.get("#"), Some(&"3".to_string()));
+    }
+
+    #[test]
+    fn set_positionals_empty_args_gives_count_zero() {
+        let mut st = mk_state(&[]);
+        set_positionals(&mut st, &[]);
+        assert_eq!(st.vars.get("#"), Some(&"0".to_string()));
+        assert_eq!(st.vars.get("1"), None);
+    }
+
+    // ---------- ShellState ----------
+
+    #[test]
+    fn shell_state_set_exit_code_updates_question_mark() {
+        let mut st = mk_state(&[]);
+        st.set_exit_code(42);
+        assert_eq!(st.last_exit_code, 42);
+        assert_eq!(st.vars.get("?"), Some(&"42".to_string()));
+    }
+
+    // ---------- split_commands ----------
+
+    #[test]
+    fn split_commands_simple_semicolon() {
+        assert_eq!(split_commands("a;b;c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn split_commands_no_separator_returns_single_chunk() {
+        assert_eq!(split_commands("echo hi"), vec!["echo hi"]);
+    }
+
+    #[test]
+    fn split_commands_respects_single_quotes() {
+        assert_eq!(split_commands("echo 'a;b';true"), vec!["echo 'a;b'", "true"]);
+    }
+
+    #[test]
+    fn split_commands_respects_double_quotes() {
+        assert_eq!(split_commands("echo \"a;b\";true"), vec!["echo \"a;b\"", "true"]);
+    }
+
+    #[test]
+    fn split_commands_respects_backslash() {
+        // The escape skips the next byte, so the ';' is treated as literal.
+        assert_eq!(split_commands(r"a\;b;c"), vec![r"a\;b", "c"]);
+    }
+
+    // ---------- tokenize ----------
+
+    #[test]
+    fn tokenize_simple_words() {
+        assert_eq!(tokenize("a b c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn tokenize_collapses_runs_of_spaces() {
+        // Multiple spaces between words shouldn't produce empty tokens.
+        assert_eq!(tokenize("a   b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn tokenize_single_quotes_preserve_spaces() {
+        assert_eq!(tokenize("echo 'hello world'"), vec!["echo", "hello world"]);
+    }
+
+    #[test]
+    fn tokenize_double_quotes_preserve_spaces() {
+        assert_eq!(tokenize("echo \"hi there\""), vec!["echo", "hi there"]);
+    }
+
+    #[test]
+    fn tokenize_backslash_escapes_space() {
+        assert_eq!(tokenize(r"a\ b c"), vec!["a b", "c"]);
+    }
+
+    #[test]
+    fn tokenize_empty_string() {
+        assert_eq!(tokenize(""), Vec::<String>::new());
+    }
+
+    // ---------- parse_redirections ----------
+
+    #[test]
+    fn parse_redirections_none_returns_words_unchanged() {
+        let (words, redirs) = parse_redirections(&s(&["ls", "-l"]));
+        assert_eq!(words, vec!["ls".to_string(), "-l".to_string()]);
+        assert!(redirs.is_empty());
+    }
+
+    #[test]
+    fn parse_redirections_separate_token_form() {
+        let (words, redirs) = parse_redirections(&s(&["ls", ">", "out.txt"]));
+        assert_eq!(words, vec!["ls".to_string()]);
+        assert_eq!(
+            redirs,
+            vec![(">".to_string(), "out.txt".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_redirections_append_and_stderr() {
+        let (words, redirs) =
+            parse_redirections(&s(&["cmd", ">>", "log", "2>", "err"]));
+        assert_eq!(words, vec!["cmd".to_string()]);
+        assert_eq!(
+            redirs,
+            vec![
+                (">>".to_string(), "log".to_string()),
+                ("2>".to_string(), "err".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_redirections_joined_form() {
+        // ">file" should be split into (">", "file").
+        let (words, redirs) = parse_redirections(&s(&["echo", ">file"]));
+        assert_eq!(words, vec!["echo".to_string()]);
+        assert_eq!(redirs, vec![(">".to_string(), "file".to_string())]);
+    }
+
+    // ---------- find_logical_op / split_at_logical ----------
+
+    #[test]
+    fn find_logical_op_finds_and() {
+        let pos = find_logical_op("a && b").unwrap();
+        assert_eq!(&"a && b"[pos..pos + 2], "&&");
+    }
+
+    #[test]
+    fn find_logical_op_finds_or() {
+        let pos = find_logical_op("a || b").unwrap();
+        assert_eq!(&"a || b"[pos..pos + 2], "||");
+    }
+
+    #[test]
+    fn find_logical_op_none_in_simple_command() {
+        assert_eq!(find_logical_op("echo hi"), None);
+    }
+
+    #[test]
+    fn find_logical_op_respects_single_quotes() {
+        // && inside single quotes should be ignored.
+        assert_eq!(find_logical_op("echo 'a && b'"), None);
+    }
+
+    #[test]
+    fn find_logical_op_respects_double_quotes() {
+        assert_eq!(find_logical_op("echo \"a || b\""), None);
+    }
+
+    #[test]
+    fn split_at_logical_splits_command() {
+        let cmd = "true && echo hi";
+        let pos = find_logical_op(cmd).unwrap();
+        let (left, op, right) = split_at_logical(cmd, pos);
+        assert_eq!(left, "true");
+        assert_eq!(op, "&&");
+        assert_eq!(right, "echo hi");
+    }
+
+    // ---------- expand_variables ----------
+
+    #[test]
+    fn expand_variables_no_dollar_is_identity() {
+        let st = mk_state(&[]);
+        assert_eq!(expand_variables("hello world", &st), "hello world");
+    }
+
+    #[test]
+    fn expand_variables_simple_name() {
+        let st = mk_state(&[("HOME", "/users/x")]);
+        assert_eq!(expand_variables("$HOME", &st), "/users/x");
+    }
+
+    #[test]
+    fn expand_variables_braced_name() {
+        let st = mk_state(&[("HOME", "/users/x")]);
+        assert_eq!(expand_variables("${HOME}/bin", &st), "/users/x/bin");
+    }
+
+    #[test]
+    fn expand_variables_missing_var_becomes_empty() {
+        let st = mk_state(&[]);
+        assert_eq!(expand_variables("a${MISSING}b", &st), "ab");
+    }
+
+    #[test]
+    fn expand_variables_single_quotes_suppress_expansion() {
+        let st = mk_state(&[("X", "value")]);
+        assert_eq!(expand_variables("'$X'", &st), "$X");
+    }
+
+    #[test]
+    fn expand_variables_backslash_escapes_dollar() {
+        let st = mk_state(&[("X", "value")]);
+        assert_eq!(expand_variables(r"\$X", &st), "$X");
+    }
+
+    #[test]
+    fn expand_variables_question_mark_special() {
+        let st = mk_state(&[("?", "7")]);
+        assert_eq!(expand_variables("exit=$?", &st), "exit=7");
+    }
+
+    #[test]
+    fn expand_variables_positional_param() {
+        let st = mk_state(&[("1", "first"), ("2", "second")]);
+        assert_eq!(expand_variables("$1 $2", &st), "first second");
+    }
+
+    #[test]
+    fn expand_variables_trailing_dollar_is_literal() {
+        let st = mk_state(&[]);
+        assert_eq!(expand_variables("end$", &st), "end$");
+    }
 }

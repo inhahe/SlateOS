@@ -1956,25 +1956,39 @@ fn bool_to_bd(b: bool) -> BigDecimal {
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut quiet = false;
-    let mut math_lib = false;
-    let mut files: Vec<String> = Vec::new();
+/// Parsed bc command-line arguments.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[derive(Default)]
+struct BcArgs {
+    quiet: bool,
+    math_lib: bool,
+    files: Vec<String>,
+}
 
-    for arg in &args {
+fn parse_args(args: &[String]) -> Result<BcArgs, String> {
+    let mut out = BcArgs::default();
+    for arg in args {
         match arg.as_str() {
-            "-q" | "--quiet" => quiet = true,
-            "-l" | "--mathlib" => {
-                math_lib = true;
+            "-q" | "--quiet" => out.quiet = true,
+            "-l" | "--mathlib" => out.math_lib = true,
+            other if other.starts_with('-') && other.len() > 1 => {
+                return Err(format!("unknown option: {other}"));
             }
-            arg if arg.starts_with('-') && arg.len() > 1 => {
-                eprintln!("bc: unknown option: {arg}");
-                process::exit(1);
-            }
-            _ => files.push(arg.clone()),
+            _ => out.files.push(arg.clone()),
         }
     }
+    Ok(out)
+}
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let BcArgs { quiet, math_lib, files } = match parse_args(&args) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("bc: {msg}");
+            process::exit(1);
+        }
+    };
 
     if !quiet {
         eprintln!("bc 1.0 (ouros coreutils)");
@@ -2047,4 +2061,615 @@ fn run_input(interp: &mut Interpreter, input: &str) -> bool {
         if let ControlFlow::Quit = interp.run_stmt(stmt) { return true }
     }
     false
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn bd(text: &str) -> BigDecimal {
+        BigDecimal::parse(text).expect("parse")
+    }
+
+    fn show(v: &BigDecimal, scale: usize) -> String {
+        v.to_string_with_scale(scale)
+    }
+
+    // ---------- parse_args ----------
+
+    #[test]
+    fn parse_args_empty_defaults() {
+        let p = parse_args(&[]).unwrap();
+        assert!(!p.quiet);
+        assert!(!p.math_lib);
+        assert!(p.files.is_empty());
+    }
+
+    #[test]
+    fn parse_args_quiet() {
+        let p = parse_args(&s(&["-q"])).unwrap();
+        assert!(p.quiet);
+        let p = parse_args(&s(&["--quiet"])).unwrap();
+        assert!(p.quiet);
+    }
+
+    #[test]
+    fn parse_args_math_lib() {
+        let p = parse_args(&s(&["-l"])).unwrap();
+        assert!(p.math_lib);
+        let p = parse_args(&s(&["--mathlib"])).unwrap();
+        assert!(p.math_lib);
+    }
+
+    #[test]
+    fn parse_args_files_accumulate() {
+        let p = parse_args(&s(&["a.bc", "b.bc"])).unwrap();
+        assert_eq!(p.files, vec!["a.bc".to_string(), "b.bc".to_string()]);
+    }
+
+    #[test]
+    fn parse_args_combined_flags() {
+        let p = parse_args(&s(&["-q", "-l", "a.bc"])).unwrap();
+        assert!(p.quiet);
+        assert!(p.math_lib);
+        assert_eq!(p.files, vec!["a.bc".to_string()]);
+    }
+
+    #[test]
+    fn parse_args_unknown_flag_errors() {
+        let err = parse_args(&s(&["-z"])).unwrap_err();
+        assert!(err.contains("unknown option"));
+    }
+
+    #[test]
+    fn parse_args_bare_dash_is_treated_as_file() {
+        // Single "-" is a conventional "stdin" marker; we just store it.
+        let p = parse_args(&s(&["-"])).unwrap();
+        assert_eq!(p.files, vec!["-".to_string()]);
+    }
+
+    // ---------- BigDecimal::parse ----------
+
+    #[test]
+    fn parse_simple_integer() {
+        let v = bd("42");
+        assert!(!v.negative);
+        assert_eq!(v.scale, 0);
+        assert_eq!(show(&v, 0), "42");
+    }
+
+    #[test]
+    fn parse_negative_integer() {
+        let v = bd("-7");
+        assert!(v.negative);
+        assert_eq!(show(&v, 0), "-7");
+    }
+
+    #[test]
+    fn parse_explicit_positive_sign() {
+        let v = bd("+5");
+        assert!(!v.negative);
+        assert_eq!(show(&v, 0), "5");
+    }
+
+    #[test]
+    fn parse_decimal_value() {
+        let v = bd("3.14");
+        assert_eq!(v.scale, 2);
+        assert_eq!(show(&v, 2), "3.14");
+    }
+
+    #[test]
+    fn parse_zero() {
+        let v = bd("0");
+        assert!(v.is_zero());
+        assert!(!v.negative);
+    }
+
+    #[test]
+    fn parse_negative_zero_renders_as_zero() {
+        // After normalization, -0 should render as 0.
+        let mut v = bd("-0");
+        v.normalize();
+        assert_eq!(show(&v, 0), "0");
+    }
+
+    #[test]
+    fn parse_with_whitespace_trimmed() {
+        assert_eq!(show(&bd("  100  "), 0), "100");
+    }
+
+    #[test]
+    fn parse_empty_string_is_none() {
+        assert!(BigDecimal::parse("").is_none());
+        assert!(BigDecimal::parse("   ").is_none());
+    }
+
+    #[test]
+    fn parse_garbage_is_none() {
+        assert!(BigDecimal::parse("abc").is_none());
+        assert!(BigDecimal::parse("1.2.3").is_none());
+    }
+
+    #[test]
+    fn parse_leading_zeros_stripped() {
+        assert_eq!(show(&bd("00042"), 0), "42");
+    }
+
+    #[test]
+    fn parse_large_value_above_one_limb() {
+        // 10 billion exceeds the 10^9 limb base, so spans two limbs.
+        let v = bd("10000000000");
+        assert_eq!(show(&v, 0), "10000000000");
+    }
+
+    // ---------- to_string_with_scale ----------
+
+    #[test]
+    fn display_pads_fractional_zeros() {
+        let v = bd("1.5");
+        assert_eq!(v.to_string_with_scale(4), "1.5000");
+    }
+
+    #[test]
+    fn display_truncates_to_lower_scale() {
+        let v = bd("1.234567");
+        assert_eq!(v.to_string_with_scale(2), "1.23");
+    }
+
+    #[test]
+    fn display_value_less_than_one() {
+        let v = bd("0.5");
+        assert_eq!(v.to_string_with_scale(1), "0.5");
+    }
+
+    // ---------- truncate_or_pad ----------
+
+    #[test]
+    fn truncate_or_pad_shorter_pads_with_zeros() {
+        assert_eq!(truncate_or_pad("12", 5), "12000");
+    }
+
+    #[test]
+    fn truncate_or_pad_longer_truncates() {
+        assert_eq!(truncate_or_pad("12345", 2), "12");
+    }
+
+    #[test]
+    fn truncate_or_pad_exact_passes_through() {
+        assert_eq!(truncate_or_pad("abc", 3), "abc");
+    }
+
+    // ---------- digits_to_limbs / limbs_to_digits round trip ----------
+
+    #[test]
+    fn digits_limbs_roundtrip_single_limb() {
+        let limbs = digits_to_limbs("12345");
+        assert_eq!(limbs_to_digits(&limbs), "12345");
+    }
+
+    #[test]
+    fn digits_limbs_roundtrip_multi_limb() {
+        let limbs = digits_to_limbs("123456789012345678");
+        assert_eq!(limbs_to_digits(&limbs), "123456789012345678");
+    }
+
+    #[test]
+    fn digits_limbs_roundtrip_large() {
+        let big = "1234567890".repeat(10);
+        let limbs = digits_to_limbs(&big);
+        assert_eq!(limbs_to_digits(&limbs), big);
+    }
+
+    // ---------- cmp_limbs ----------
+
+    #[test]
+    fn cmp_limbs_orderings() {
+        use std::cmp::Ordering;
+        assert_eq!(cmp_limbs(&[1], &[2]), Ordering::Less);
+        assert_eq!(cmp_limbs(&[2], &[1]), Ordering::Greater);
+        assert_eq!(cmp_limbs(&[5, 0], &[5]), Ordering::Equal);
+        // Higher limb count with a non-zero top limb beats single-limb.
+        assert_eq!(cmp_limbs(&[0, 1], &[999]), Ordering::Greater);
+    }
+
+    // ---------- bd_add / bd_sub ----------
+
+    #[test]
+    fn add_positive_integers() {
+        assert_eq!(show(&bd_add(&bd("12"), &bd("30")), 0), "42");
+    }
+
+    #[test]
+    fn add_with_decimals_aligns_scale() {
+        assert_eq!(show(&bd_add(&bd("1.5"), &bd("2.25")), 2), "3.75");
+    }
+
+    #[test]
+    fn add_opposite_signs_subtracts() {
+        assert_eq!(show(&bd_add(&bd("10"), &bd("-3")), 0), "7");
+        assert_eq!(show(&bd_add(&bd("-10"), &bd("3")), 0), "-7");
+    }
+
+    #[test]
+    fn add_equal_magnitudes_opposite_signs_is_zero() {
+        let r = bd_add(&bd("5"), &bd("-5"));
+        assert!(r.is_zero());
+    }
+
+    #[test]
+    fn sub_basic() {
+        assert_eq!(show(&bd_sub(&bd("100"), &bd("58")), 0), "42");
+    }
+
+    #[test]
+    fn sub_negative_minus_negative() {
+        // -3 - (-1) = -2
+        assert_eq!(show(&bd_sub(&bd("-3"), &bd("-1")), 0), "-2");
+    }
+
+    #[test]
+    fn sub_borrow_across_limb_boundary() {
+        // 10^9 - 1 forces a borrow into the next limb on subtraction.
+        assert_eq!(
+            show(&bd_sub(&bd("1000000000"), &bd("1")), 0),
+            "999999999"
+        );
+    }
+
+    // ---------- bd_mul ----------
+
+    #[test]
+    fn mul_basic_integer() {
+        assert_eq!(show(&bd_mul(&bd("6"), &bd("7"), 0), 0), "42");
+    }
+
+    #[test]
+    fn mul_negative_times_positive_negative() {
+        assert_eq!(show(&bd_mul(&bd("-3"), &bd("4"), 0), 0), "-12");
+    }
+
+    #[test]
+    fn mul_negative_times_negative_positive() {
+        assert_eq!(show(&bd_mul(&bd("-3"), &bd("-4"), 0), 0), "12");
+    }
+
+    #[test]
+    fn mul_decimal_truncates_to_scale() {
+        // 1.5 * 1.5 = 2.25, with scale=1 truncates to 2.2.
+        assert_eq!(show(&bd_mul(&bd("1.5"), &bd("1.5"), 1), 1), "2.2");
+    }
+
+    #[test]
+    fn mul_by_zero_is_zero() {
+        assert!(bd_mul(&bd("1234"), &bd("0"), 0).is_zero());
+    }
+
+    // ---------- bd_div / bd_modulo ----------
+
+    #[test]
+    fn div_integer_truncates_with_scale_zero() {
+        // 10 / 3 with scale=0 truncates to 3.
+        let q = bd_div(&bd("10"), &bd("3"), 0).unwrap();
+        assert_eq!(show(&q, 0), "3");
+    }
+
+    #[test]
+    fn div_with_scale_two() {
+        // 10 / 4 with scale=2 = 2.50.
+        let q = bd_div(&bd("10"), &bd("4"), 2).unwrap();
+        assert_eq!(show(&q, 2), "2.50");
+    }
+
+    #[test]
+    fn div_by_zero_returns_none() {
+        assert!(bd_div(&bd("5"), &bd("0"), 0).is_none());
+    }
+
+    #[test]
+    fn div_negative_dividend_yields_negative() {
+        let q = bd_div(&bd("-12"), &bd("4"), 0).unwrap();
+        assert_eq!(show(&q, 0), "-3");
+    }
+
+    #[test]
+    fn modulo_basic() {
+        let m = bd_modulo(&bd("10"), &bd("3"), 0).unwrap();
+        assert_eq!(show(&m, 0), "1");
+    }
+
+    #[test]
+    fn modulo_by_zero_returns_none() {
+        assert!(bd_modulo(&bd("5"), &bd("0"), 0).is_none());
+    }
+
+    // ---------- bd_pow ----------
+
+    #[test]
+    fn pow_zero_exponent_is_one() {
+        assert_eq!(show(&bd_pow(&bd("12345"), &bd("0"), 0), 0), "1");
+    }
+
+    #[test]
+    fn pow_basic_squared() {
+        assert_eq!(show(&bd_pow(&bd("7"), &bd("2"), 0), 0), "49");
+    }
+
+    #[test]
+    fn pow_basic_cubed() {
+        assert_eq!(show(&bd_pow(&bd("3"), &bd("4"), 0), 0), "81");
+    }
+
+    #[test]
+    fn pow_negative_base_odd_exp_is_negative() {
+        assert_eq!(show(&bd_pow(&bd("-2"), &bd("3"), 0), 0), "-8");
+    }
+
+    #[test]
+    fn pow_negative_base_even_exp_is_positive() {
+        assert_eq!(show(&bd_pow(&bd("-2"), &bd("4"), 0), 0), "16");
+    }
+
+    // ---------- bd_sqrt ----------
+
+    #[test]
+    fn sqrt_perfect_square() {
+        let r = bd_sqrt(&bd("144"), 0).unwrap();
+        assert_eq!(show(&r, 0), "12");
+    }
+
+    #[test]
+    fn sqrt_of_zero() {
+        let r = bd_sqrt(&bd("0"), 5).unwrap();
+        assert!(r.is_zero());
+    }
+
+    #[test]
+    fn sqrt_of_negative_is_none() {
+        assert!(bd_sqrt(&bd("-4"), 0).is_none());
+    }
+
+    #[test]
+    fn sqrt_of_two_approximate() {
+        // sqrt(2) ≈ 1.41421356...  Verify the first few digits.
+        let r = bd_sqrt(&bd("2"), 5).unwrap();
+        let text = show(&r, 5);
+        assert!(text.starts_with("1.4142"), "got {text}");
+    }
+
+    // ---------- bd_compare ----------
+
+    #[test]
+    fn compare_basic_orderings() {
+        use std::cmp::Ordering;
+        assert_eq!(bd_compare(&bd("1"), &bd("2")), Ordering::Less);
+        assert_eq!(bd_compare(&bd("2"), &bd("1")), Ordering::Greater);
+        assert_eq!(bd_compare(&bd("1.5"), &bd("1.5")), Ordering::Equal);
+    }
+
+    #[test]
+    fn compare_negative_vs_positive() {
+        use std::cmp::Ordering;
+        assert_eq!(bd_compare(&bd("-1"), &bd("1")), Ordering::Less);
+        assert_eq!(bd_compare(&bd("-1"), &bd("-2")), Ordering::Greater);
+    }
+
+    // ---------- bool_to_bd ----------
+
+    #[test]
+    fn bool_true_is_one() {
+        assert_eq!(show(&bool_to_bd(true), 0), "1");
+    }
+
+    #[test]
+    fn bool_false_is_zero() {
+        assert_eq!(show(&bool_to_bd(false), 0), "0");
+    }
+
+    // ---------- BigDecimal::negate ----------
+
+    #[test]
+    fn negate_positive_becomes_negative() {
+        let v = bd("5").negate();
+        assert!(v.negative);
+        assert_eq!(show(&v, 0), "-5");
+    }
+
+    #[test]
+    fn negate_zero_stays_zero_unsigned() {
+        let v = bd("0").negate();
+        assert!(!v.negative);
+        assert!(v.is_zero());
+    }
+
+    // ---------- tokenize ----------
+
+    #[test]
+    fn tokenize_number() {
+        let t = tokenize("42");
+        assert_eq!(t, vec![Token::Number("42".to_string()), Token::Eof]);
+    }
+
+    #[test]
+    fn tokenize_decimal_number() {
+        let t = tokenize("3.14");
+        assert_eq!(t, vec![Token::Number("3.14".to_string()), Token::Eof]);
+    }
+
+    #[test]
+    fn tokenize_arithmetic_operators() {
+        let t = tokenize("+-*/^%");
+        assert_eq!(
+            t,
+            vec![
+                Token::Plus,
+                Token::Minus,
+                Token::Star,
+                Token::Slash,
+                Token::Caret,
+                Token::Percent,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_grouping() {
+        let t = tokenize("(){}");
+        assert_eq!(
+            t,
+            vec![
+                Token::LParen,
+                Token::RParen,
+                Token::LBrace,
+                Token::RBrace,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_comparison_operators() {
+        let t = tokenize("== != <= >= < >");
+        assert_eq!(
+            t,
+            vec![
+                Token::Eq,
+                Token::Ne,
+                Token::Le,
+                Token::Ge,
+                Token::Lt,
+                Token::Gt,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_compound_assignments() {
+        let t = tokenize("+= -= *= /= %= ^=");
+        assert_eq!(
+            t,
+            vec![
+                Token::PlusAssign,
+                Token::MinusAssign,
+                Token::StarAssign,
+                Token::SlashAssign,
+                Token::PercentAssign,
+                Token::CaretAssign,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_increment_decrement() {
+        let t = tokenize("++ --");
+        assert_eq!(t, vec![Token::PlusPlus, Token::MinusMinus, Token::Eof]);
+    }
+
+    #[test]
+    fn tokenize_keywords() {
+        let t = tokenize("if else while for print quit");
+        assert_eq!(
+            t,
+            vec![
+                Token::If,
+                Token::Else,
+                Token::While,
+                Token::For,
+                Token::Print,
+                Token::Quit,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_identifier() {
+        let t = tokenize("foo_bar1");
+        assert_eq!(t, vec![Token::Ident("foo_bar1".to_string()), Token::Eof]);
+    }
+
+    #[test]
+    fn tokenize_line_comment_skipped() {
+        let t = tokenize("1 # comment\n2");
+        assert_eq!(
+            t,
+            vec![
+                Token::Number("1".to_string()),
+                Token::Newline,
+                Token::Number("2".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_block_comment_skipped() {
+        let t = tokenize("1 /* block */ 2");
+        assert_eq!(
+            t,
+            vec![
+                Token::Number("1".to_string()),
+                Token::Number("2".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_whitespace_ignored() {
+        let t = tokenize("  \t1  \t  2  ");
+        assert_eq!(
+            t,
+            vec![
+                Token::Number("1".to_string()),
+                Token::Number("2".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    // ---------- run_input (end-to-end via Interpreter) ----------
+
+    #[test]
+    fn run_input_quit_returns_true() {
+        let mut interp = Interpreter::new();
+        assert!(run_input(&mut interp, "quit"));
+    }
+
+    #[test]
+    fn run_input_simple_assignment_persists_in_vars() {
+        let mut interp = Interpreter::new();
+        // Assignment is a statement that does not print; check the var is set.
+        let quit = run_input(&mut interp, "x = 41 + 1");
+        assert!(!quit);
+        let v = interp.get_var("x");
+        assert_eq!(show(&v, 0), "42");
+    }
+
+    #[test]
+    fn run_input_sets_scale_special_var() {
+        let mut interp = Interpreter::new();
+        let _ = run_input(&mut interp, "scale = 5");
+        assert_eq!(interp.scale, 5);
+    }
+
+    #[test]
+    fn run_input_empty_is_noop() {
+        let mut interp = Interpreter::new();
+        assert!(!run_input(&mut interp, ""));
+        assert!(!run_input(&mut interp, "   \n   "));
+    }
 }

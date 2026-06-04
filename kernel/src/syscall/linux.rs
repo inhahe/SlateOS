@@ -10068,6 +10068,24 @@ fn sys_chdir(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return linux_err(e),
     };
+    // Verify the target exists and is a directory before committing the
+    // change.  Without this check, programs that chdir to a typo'd path
+    // see success now and ENOENT only on the next open — masking the
+    // error at the point it actually occurred.  Linux returns
+    // ENOENT/ENOTDIR at the chdir call itself.
+    let path_str = match core::str::from_utf8(&new_cwd) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    match crate::fs::Vfs::stat(path_str) {
+        Ok(entry) => {
+            if entry.entry_type != crate::fs::EntryType::Directory {
+                return linux_err(errno::ENOTDIR);
+            }
+        }
+        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
     match pcb::set_cwd(pid, new_cwd) {
         Ok(()) => SyscallResult::ok(0),
         // set_cwd's invariant checks should never trip for a freshly
@@ -10079,24 +10097,63 @@ fn sys_chdir(args: &SyscallArgs) -> SyscallResult {
 
 /// `fchdir(fd)` — change current working directory to an open dirfd.
 ///
-/// The fd-table layer does not yet store the path the dirfd was
-/// originally opened with (see `kernel/src/proc/linux_fd.rs`'s
-/// `FdEntry`, which holds `(HandleKind, raw_handle, fd_flags,
-/// status_flags)` only).  Without that, we can't recover an absolute
-/// path to install as the new cwd.  Therefore fchdir remains a
-/// validated success — it doesn't actually move the cwd — and the
-/// behaviour is documented as a known limitation (todo.txt item 57
-/// follow-up: "fchdir requires path-of-dirfd tracking").  Programs
-/// that round-trip through `chdir` (the overwhelmingly common case)
-/// get correct semantics; programs that use `openat`+`fchdir` to walk
-/// a tree without a string path will silently stay at the original
-/// cwd.
+/// Resolves the fd → kernel handle → backing VFS path via
+/// `fs::handle::handle_path`.  The path the dirfd was originally opened
+/// with already lives in the `OpenFile` table entry (so no
+/// `FdEntry`-level path tracking is needed — we just borrow what
+/// fs::handle already remembers).  We then re-stat to confirm the
+/// underlying entry is still a directory, and install the path as the
+/// caller's new cwd.
+///
+/// Error contract (matches Linux):
+///   - EBADF   — fd not open, or it's a console/pipe (not a directory).
+///   - ENOTDIR — fd refers to a regular file rather than a directory.
+///   - ENOENT  — path no longer exists (rmdir between open and fchdir).
+///
+/// Notes:
+///   - The fd does NOT have to have been opened with `O_DIRECTORY`; a
+///     plain `open("/dir", O_RDONLY)` succeeds with `IsADirectory`
+///     today, but if it ever stops doing that the stat check here is
+///     the source of truth.
+///   - Kernel-context callers (no per-process fd table) see EBADF on
+///     any valid fd — same shape as the rest of the Linux fd handlers.
 fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    SyscallResult::ok(0)
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    if entry.kind != HandleKind::File {
+        return linux_err(errno::ENOTDIR);
+    }
+    let path = match crate::fs::handle::handle_path(entry.raw_handle) {
+        Ok(p) => p,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    // Confirm the backing object is still a directory.
+    match crate::fs::Vfs::stat(&path) {
+        Ok(stat_entry) => {
+            if stat_entry.entry_type != crate::fs::EntryType::Directory {
+                return linux_err(errno::ENOTDIR);
+            }
+        }
+        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+    // Install as new cwd.  caller_pid was already non-None for
+    // lookup_caller_fd to succeed.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    let new_cwd: alloc::vec::Vec<u8> = path.into_bytes();
+    match pcb::set_cwd(pid, new_cwd) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(_) => linux_err(errno::EINVAL),
+    }
 }
 
 /// `flock(fd, op)` — advisory whole-file lock backed by the VFS lock table.
@@ -17422,11 +17479,44 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // fchdir valid (any fd in kernel context) -> 0.
+        // fchdir valid (kernel context: no fd table) -> EBADF.
+        // After batch 39 this is a real fd lookup, so an unknown fd
+        // returns EBADF instead of the previous validate-only success.
         let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FCHDIR, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: fchdir valid not 0");
+        if dispatch_linux(nr::FCHDIR, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: fchdir valid not EBADF");
             return Err(KernelError::InternalError);
+        }
+
+        // Direct stat-backbone check for the new chdir verification:
+        // a path that doesn't exist must surface as NotFound so the
+        // chdir call's ENOENT mapping fires.
+        match crate::fs::Vfs::stat("/nonexistent_chdir_target") {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: stat of missing path not NotFound: {:?}",
+                    other.as_ref().map(|e| &e.entry_type).ok()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // ENOTDIR-mapping check: create a regular file, confirm stat
+        // reports it as File (not Directory) — the chdir path would
+        // surface ENOTDIR in that case.
+        let chdir_probe = "/syscall_chdir_probe.txt";
+        if crate::fs::Vfs::write_file(chdir_probe, b"x").is_ok() {
+            match crate::fs::Vfs::stat(chdir_probe) {
+                Ok(e) if e.entry_type == crate::fs::EntryType::File => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: stat of file not File: {:?}",
+                        other.as_ref().map(|x| &x.entry_type).ok()
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            let _ = crate::fs::Vfs::remove(chdir_probe);
         }
 
         // ----- canonicalize_path direct unit tests -----

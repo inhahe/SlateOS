@@ -7573,3 +7573,48 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      (sys_fcntl currently stubs F_SETLK as 0) and would need
 ##      a range-locking table; tracked separately.
 
+##  65. CHDIR target verification + real FCHDIR — DONE.
+##      Fifth "upgrade a stub" batch.  Closes two documented
+##      batch-35 limitations: chdir didn't verify the target
+##      existed (lazy ENOENT on next open) and fchdir was a
+##      validate-only no-op.
+##         - sys_chdir: after canonicalize_path produces a
+##           candidate cwd, stat it via Vfs::stat.  NotFound →
+##           ENOENT, exists-but-not-dir → ENOTDIR, otherwise
+##           commit via pcb::set_cwd.  Matches Linux's "the
+##           error fires at chdir, not at the next file op".
+##           Kernel-context branch unchanged (still validate-
+##           only, used by self-tests).
+##         - sys_fchdir: real implementation.  lookup_caller_fd
+##           → must be HandleKind::File → fs::handle::handle_path
+##           recovers the original open path → re-stat to confirm
+##           it's still a directory → pcb::set_cwd.  No FdEntry
+##           refactor required: the path the fd was opened with
+##           already lives in the fs::handle OpenFile entry, so
+##           we just borrow what handle.rs already remembers.
+##           Console/Pipe fds → ENOTDIR (rather than EBADF —
+##           Linux returns ENOTDIR for fchdir-on-pipe).
+##      Choice rationale:
+##         * Re-statting at fchdir rather than caching is-a-dir
+##           on the FdEntry catches the rmdir-while-open race
+##           naturally — programs see ENOENT just like Linux's
+##           fchdir would.
+##         * Recovering the path from fs::handle (rather than
+##           growing FdEntry with a String path field) keeps
+##           KernelFdTable a fixed-size [Option<FdEntry>; MAX_FDS]
+##           array of Copy entries.  The path lives in exactly
+##           one place (OpenFile) and is reachable from anywhere
+##           we hold a raw_handle.  Same trick will work for
+##           openat(dirfd, ...) when we wire that up.
+##         * In sys_chdir, doing the stat after canonicalize_path
+##           (rather than inside) keeps the canonicalizer a pure
+##           string transform — easier to unit-test in isolation
+##           via the boot self-test's 14-case table.
+##      Limitation: openat with a non-AT_FDCWD dirfd still
+##      doesn't honour the dirfd as a starting directory for
+##      relative paths.  Same path-from-handle recovery applies;
+##      tracked as a separate batch.
+##      Limitation: a chdir target that exists at chdir time but
+##      is removed before the next openat will still see ENOENT
+##      at the openat (no caching).  This matches Linux exactly.
+

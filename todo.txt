@@ -1,5 +1,24 @@
 The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
+## FLAKY TEST (noticed 2026-06-04): ktrace::self_test "Read back" assertion
+##   `assert_eq!(last.category(), Category::General as u8)` at
+##   kernel/src/ktrace.rs:458 occasionally fails on SMP when an IRQ-
+##   category event from another CPU lands in the trace buffer between
+##   the test's `record(General, ...)` and `read_recent(&mut entries)`.
+##   When this happens the panic shows left=5 (Irq) right=15 (General).
+##   The test passes on retry — confirmed by re-running boot-test.sh
+##   immediately after a fail.
+##   ROOT CAUSE: read_recent returns the newest events globally, not
+##   per-CPU, so any remote-CPU IRQ recording wins the "most recent"
+##   slot.  The test was authored when ktrace was UP-only / pre-SMP.
+##   FIX: either (a) save the sequence number returned by record() and
+##   look that specific entry up by seq rather than "the last one",
+##   (b) snapshot total_events() before record() and walk only entries
+##   with seq > snapshot, picking the one matching arg0=0xDEAD, or
+##   (c) disable categories other than General around the test.  None
+##   of these are tackled in this session; tracked here so the next
+##   visitor doesn't chase the flakiness as a regression.
+
 
 ## PROGRESS (2026-06-03): userspace personality-CLI stub flesh-out, batch 2.
 ##   Following the openssl-tool flesh-out earlier this session, the four
@@ -5479,14 +5498,16 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      sys_mprotect now walks the caller's PML4 and applies
 ##      WRITABLE / NO_EXECUTE flag changes per 16 KiB frame, with a
 ##      first-pass mapping check that returns -ENOMEM if the range
-##      contains a hole (matches Linux semantics).  Limitations:
-##      (a) PROT_NONE is approximated as "read-only, no-execute"
-##      because clearing the PRESENT bit without VMA tracking would
-##      be indistinguishable from a never-mapped hole on the next
-##      fault; (b) TLB invalidation is local-CPU only via invlpg —
-##      cross-CPU shootdown will be needed once multi-threaded Linux
-##      processes can migrate.  CoW pages requesting PROT_WRITE are
-##      NOT immediately made writable; the existing CoW fault handler
+##      contains a hole (matches Linux semantics).  Limitation:
+##      PROT_NONE is approximated as "read-only, no-execute" because
+##      clearing the PRESENT bit without VMA tracking would be
+##      indistinguishable from a never-mapped hole on the next fault.
+##      TLB invalidation is now CROSS-CPU: a single batched shootdown
+##      at the end of the syscall (flush_range for <=64 4 KiB pages,
+##      flush_all otherwise) sends an IPI to every other online CPU,
+##      so multi-threaded Linux processes see consistent permissions
+##      across cores.  CoW pages requesting PROT_WRITE are NOT
+##      immediately made writable; the existing CoW fault handler
 ##      upgrades them on first write.
 ##   7. BRK NO-OP.  We return the input address unchanged, which is
 ##      enough to make glibc's malloc fall back to mmap.  Real brk
@@ -5559,6 +5580,15 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     defaults again.
 ##   - dispatch_linux rt_sigaction validation: sig=0, sig=65, and
 ##     sigsetsize=7 each return -EINVAL without mutating any state.
+##   - mprotect argument validation via dispatch_linux: zero length
+##     succeeds as no-op; unknown prot bits, misaligned addr, and
+##     kernel-space addr each return their respective errnos (EINVAL
+##     / EINVAL / EFAULT).
+##   - mprotect_flush_range routing: degenerate (end<=start) is a
+##     no-op; ranges <= 64 4 KiB pages bump tlb::stats().range_flushes;
+##     ranges > 64 pages bump tlb::stats().full_flushes; tested with
+##     kernel-VA dummy addresses since the function only does TLB
+##     work, never page-table walks.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
@@ -5571,12 +5601,21 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      stream is gone.  Flags (GRND_NONBLOCK / GRND_RANDOM /
 ##      GRND_INSECURE) are accepted but ignored — we never block and
 ##      we don't distinguish urandom/random sources.
-##   2. Cross-CPU TLB shootdown for mprotect.  Currently only the
-##      local CPU's TLB is flushed; a sibling thread running on
-##      another CPU could observe stale permissions until its next
-##      context switch.  Acceptable while Linux processes are
-##      single-threaded; must be fixed before pthread-using
-##      programs migrate across CPUs.
+##   2. Cross-CPU TLB shootdown for mprotect — DONE.  sys_mprotect
+##      now batches all PTE updates and ends with a single
+##      mprotect_flush_range() call that delegates to
+##      crate::tlb::flush_range / flush_all.  Both are SMP-aware (send
+##      an IPI to every other online CPU and spin until they ack),
+##      so a sibling pthread running on another core cannot observe
+##      stale permissions past the mprotect return.  Strategy:
+##        - len <= 64 4 KiB pages -> flush_range (one IPI, N invlpgs)
+##        - len  > 64 4 KiB pages -> flush_all (one IPI, CR3 reload)
+##      Threshold 64 ≈ Linux's tlb_single_page_flush_ceiling (33),
+##      bumped up to 64 because our hardware page is the same 4 KiB
+##      but our frames are 16 KiB so the average mprotect covers a
+##      smaller page-count for a given byte size.  Boot self-test
+##      observes crate::tlb::stats() delta to prove small ranges take
+##      the range path and large ranges promote to full-flush.
 ##   3. Real PROT_NONE.  Requires VMA tracking so the page-fault
 ##      handler can distinguish "mapped but PROT_NONE" from "never
 ##      mapped".  Today PROT_NONE is approximated as read-only +

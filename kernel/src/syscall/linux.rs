@@ -1948,6 +1948,16 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 /// even if `PROT_WRITE` was requested.  The CoW fault handler will
 /// upgrade the page on first write, which is the correct lazy
 /// behaviour.
+///
+/// ## TLB consistency
+///
+/// After applying all PTE changes the function issues **one** TLB
+/// shootdown covering the entire range, rather than one per frame.
+/// For small ranges this is a single `crate::tlb::flush_range` call
+/// (one IPI, N×4 `invlpg` on each remote CPU).  For ranges larger
+/// than `MPROTECT_FULL_FLUSH_PAGES` 4 KiB pages we promote to a full
+/// `crate::tlb::flush_all` (one CR3 reload per CPU) since N×4 invlpg
+/// becomes more expensive than dumping the whole TLB.
 fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::{self, PageFlags, VirtAddr, USER_SPACE_END};
@@ -2052,19 +2062,57 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
         // SAFETY: same as translate_flags above — pml4 is valid,
         // virt is user-space frame-aligned, mapping exists.
         if let Err(e) = unsafe { page_table::change_flags(pml4, virt, new_flags) } {
+            // On partial failure mid-loop, still flush whatever we
+            // already modified so other CPUs don't observe stale
+            // permissions for those frames.
+            mprotect_flush_range(addr, va);
             return linux_err(linux_errno_for(e));
         }
-
-        // Invalidate TLB for this 16 KiB frame (4 × invlpg) on the
-        // local CPU.  Remote-CPU shootdown for cross-CPU mprotect is
-        // a known limitation tracked in todo.txt.
-        // SAFETY: invlpg is always safe in ring 0.
-        unsafe { page_table::flush_frame_local(virt) };
 
         va = va.saturating_add(frame_size);
     }
 
+    // Single batched TLB shootdown covering the entire modified range
+    // (cross-CPU via IPI when SMP is active, no-op IPI on single-CPU).
+    mprotect_flush_range(addr, end);
+
     SyscallResult::ok(0)
+}
+
+/// Threshold (in 4 KiB pages) at which `mprotect` switches from a
+/// range-shootdown (`invlpg` per page on each CPU) to a full TLB flush
+/// (CR3 reload).  Mirrors Linux's `tlb_single_page_flush_ceiling`
+/// (~33 pages).  We round up to 64 4 KiB pages = 16 frames = 256 KiB
+/// — small enough that 64 invlpgs are cheap, large enough that most
+/// mprotect calls hit the range path.
+const MPROTECT_FULL_FLUSH_PAGES: u64 = 64;
+
+/// Flush the TLB on every online CPU for the range `[start, end)`.
+///
+/// Picks `flush_range` for small ranges and `flush_all` for large
+/// ones.  Called with `start == end` when the loop bailed out on the
+/// very first frame (no-op).
+fn mprotect_flush_range(start: u64, end: u64) {
+    if end <= start {
+        return;
+    }
+    // Both are u64; the early-return above guarantees end > start.
+    let bytes = end.saturating_sub(start);
+    // 4 KiB hardware pages.  bytes is already frame-aligned (16 KiB
+    // multiple), so this divides evenly.
+    let page_count = bytes / 4096;
+    if page_count == 0 {
+        return;
+    }
+    if page_count > MPROTECT_FULL_FLUSH_PAGES {
+        // Large range — one CR3 reload per CPU is cheaper than
+        // N×invlpg.  Also covers the case where page_count > u32::MAX.
+        crate::tlb::flush_all();
+    } else {
+        // page_count <= 64 — fits comfortably in u32.
+        #[allow(clippy::cast_possible_truncation)]
+        crate::tlb::flush_range(start, page_count as u32);
+    }
 }
 
 /// `munmap(addr, len)` — passes through to native.
@@ -3330,6 +3378,51 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         if dispatch_linux(nr::MPROTECT, &args3).value != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: mprotect kernel-addr");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // mprotect_flush_range routing: tiny range (<= MPROTECT_FULL_FLUSH_
+    // PAGES) takes the per-page invlpg path; large range promotes to
+    // full TLB flush.  We can't directly observe which path was taken
+    // from outside the function, but we *can* prove the function
+    // doesn't panic, doesn't deadlock the shootdown lock, and returns
+    // promptly on every code path including the degenerate end<=start
+    // and zero-length cases.  We use a kernel-space address since the
+    // function only flushes — it doesn't touch the page tables.
+    {
+        let pre = crate::tlb::stats();
+        // Degenerate: end == start -> no-op.
+        mprotect_flush_range(0xFFFF_8000_0000_0000, 0xFFFF_8000_0000_0000);
+        // Degenerate: end < start -> no-op.
+        mprotect_flush_range(0xFFFF_8000_0001_0000, 0xFFFF_8000_0000_0000);
+        // Small range: 16 KiB = 4 hardware pages, below threshold.
+        // Should take flush_range path (one range-flush stat bump).
+        mprotect_flush_range(0xFFFF_8000_0010_0000, 0xFFFF_8000_0010_4000);
+        // Threshold-boundary range: exactly 64 4 KiB pages = 16 frames
+        // = 256 KiB.  Should still take flush_range path (page_count
+        // == MPROTECT_FULL_FLUSH_PAGES is "<= threshold"... wait, our
+        // check is `> MPROTECT_FULL_FLUSH_PAGES`, so == takes range).
+        mprotect_flush_range(0xFFFF_8000_0020_0000, 0xFFFF_8000_0024_0000);
+        // Large range: well above threshold, promotes to full flush.
+        mprotect_flush_range(0xFFFF_8000_0030_0000, 0xFFFF_8000_0100_0000);
+        let post = crate::tlb::stats();
+        // Three non-degenerate calls -> three flush stat bumps total
+        // (two range + one full).
+        let range_delta = post.range_flushes.saturating_sub(pre.range_flushes);
+        let full_delta = post.full_flushes.saturating_sub(pre.full_flushes);
+        if range_delta < 2 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mprotect_flush_range small/threshold not range-flushed (delta={})",
+                range_delta,
+            );
+            return Err(KernelError::InternalError);
+        }
+        if full_delta < 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mprotect_flush_range large not full-flushed (delta={})",
+                full_delta,
+            );
             return Err(KernelError::InternalError);
         }
     }

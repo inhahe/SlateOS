@@ -5846,3 +5846,40 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      delivery is tracked alongside the Linux-shaped rt_sigframe
 ##      delivery work (item 6) — they touch the same pending-set
 ##      machinery in proc::signal.
+##  13. UMASK — DONE as static-stub.  sys_umask always returns 0o022
+##      (the de-facto Linux distro default) and silently discards the
+##      requested mask.  Rationale: the PCB doesn't carry per-process
+##      umask storage, the VFS doesn't apply umask at create time,
+##      and no other kernel code observes the value — so a no-op
+##      returning the conventional default is the most useful stub
+##      for programs that read-then-restore (`old = umask(0);
+##      umask(old);`) or check whether umask is "sane" at startup.
+##      Limitation: a program that does `umask(0o077); creat(...);`
+##      and then stats the new file will see the kernel-default
+##      permissions, not mask-respecting ones.  Tracked as needing
+##      per-process umask storage on the PCB plus VFS plumbing to
+##      consume it at create time.
+##  14. SIGALTSTACK — DONE as disabled-stub.  sys_sigaltstack
+##      validates ss/old_ss user pointers (24 bytes: stack_t {ss_sp,
+##      ss_flags, padding, ss_size}) when non-NULL, silently
+##      discards any input ss, writes ss_flags == SS_DISABLE (= 2)
+##      to old_ss to communicate "no alternate stack in effect",
+##      and returns 0.
+##      Limitation: programs that catch SIGSEGV with SA_ONSTACK to
+##      print a backtrace after blowing the main stack will deliver
+##      to the already-blown stack and double-fault.  Tracked
+##      alongside item 6 (Linux-shaped rt_sigframe delivery) — the
+##      signal-delivery path is the same refactor.
+##  15. IOCTL — DONE as ENOTTY-everywhere.  sys_ioctl returns
+##      -ENOTTY for every (fd, request) pair, which is the
+##      semantically correct response for ioctls on non-tty fds.
+##      Specifically, isatty(3) is defined as `ioctl(fd, TCGETS,
+##      &tio) != -1`, so this stub gives isatty() a clean "0 with
+##      errno=ENOTTY" answer — exactly what Linux returns for
+##      isatty(stdout) when stdout is a regular file.
+##      Limitation: programs that legitimately need ioctl to succeed
+##      (e.g. FIONBIO on a socket, though glibc/musl normally use
+##      fcntl(F_SETFL, O_NONBLOCK) for this) will hard-fail.  Once
+##      we have a real fd table with driver routing, this becomes a
+##      per-fd dispatch — the driver decides whether to handle the
+##      request and we fall back to ENOTTY only if nobody does.

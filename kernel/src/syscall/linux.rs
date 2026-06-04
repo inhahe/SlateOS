@@ -380,6 +380,8 @@ pub mod nr {
     pub const RT_SIGPENDING: u64 = 127;
     pub const TKILL: u64 = 200;
     pub const TGKILL: u64 = 234;
+    pub const UMASK: u64 = 95;
+    pub const SIGALTSTACK: u64 = 131;
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1171,9 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::RT_SIGPENDING => sys_rt_sigpending(args),
         nr::TKILL => sys_tkill(args),
         nr::TGKILL => sys_tgkill(args),
+        nr::UMASK => sys_umask(args),
+        nr::SIGALTSTACK => sys_sigaltstack(args),
+        nr::IOCTL => sys_ioctl(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -2648,6 +2653,141 @@ fn sys_tgkill(args: &SyscallArgs) -> SyscallResult {
         arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
     sys_kill(&kill_args)
+}
+
+/// `umask(mask)` — set the process file-mode creation mask, returning
+/// the previous value.
+///
+/// Linux semantics: `mask & 0o777` is stored as the new umask; the old
+/// value is returned.  Programs use it both to set new permissions and
+/// to read the current one (the common idiom `old = umask(0); umask(old);`).
+///
+/// We don't have per-process umask storage yet (the PCB doesn't carry
+/// one) and the VFS doesn't apply umask at create time either, so
+/// nothing else in the kernel observes the value.  Stub semantics:
+///   - Always return 0o022 (the standard Linux distro default — what
+///     most programs would see on a fresh shell).
+///   - Silently accept and discard the new mask.
+///
+/// Limitation: a program that does `umask(0o077); creat(file);` and
+/// then checks the file mode will see the kernel default permissions
+/// rather than mask-respecting ones.  Tracked in todo.txt as needing
+/// per-process umask storage + VFS plumbing.
+fn sys_umask(_args: &SyscallArgs) -> SyscallResult {
+    // 0o022 is the de-facto Linux distro default (group/other lose
+    // write bits).  Returning it as the "previous" umask is the
+    // friendliest stub for programs that do `old = umask(N); umask(old);`.
+    SyscallResult::ok(0o022)
+}
+
+/// `sigaltstack(ss, old_ss)` — install / query the alternate signal
+/// stack used when a handler has SA_ONSTACK set.
+///
+/// We don't currently implement alternate signal stacks (signals
+/// always deliver on the thread's main stack).  This stub:
+///   - Accepts any `ss` pointer and silently ignores it (we read it to
+///     validate it's a valid user-mapped range when non-NULL, matching
+///     Linux's EFAULT-on-bad-pointer behaviour).
+///   - When `old_ss` is non-NULL, writes a `stack_t` with `ss_flags ==
+///     SS_DISABLE` to communicate "no alternate stack is in effect".
+///   - Returns 0 (success) regardless.
+///
+/// `struct stack_t` on Linux x86_64:
+///   ```
+///   struct stack_t {
+///       void  *ss_sp;     // 8 bytes
+///       int    ss_flags;  // 4 bytes
+///       size_t ss_size;   // 8 bytes (after 4 bytes of padding)
+///   };  // 24 bytes total
+///   ```
+/// (`int` is followed by 4 bytes of natural-alignment padding before
+/// the `size_t`.)
+///
+/// Limitation: programs that catch SIGSEGV with SA_ONSTACK to print a
+/// backtrace after blowing the main stack will deliver to the
+/// already-blown stack and double-fault.  Tracked in todo.txt
+/// alongside the Linux-shaped rt_sigframe delivery work — both
+/// require the same signal-delivery refactor.
+fn sys_sigaltstack(args: &SyscallArgs) -> SyscallResult {
+    /// `SS_DISABLE` from `<signal.h>` — communicates "no alternate
+    /// stack is in effect" in `stack_t.ss_flags`.
+    const SS_DISABLE: i32 = 2;
+    const STACK_T_SIZE: usize = 24;
+
+    let ss_ptr = args.arg0;
+    let old_ss_ptr = args.arg1;
+
+    // Validate ss (input) pointer if non-NULL.  We don't honour its
+    // contents but we MUST fault on a bad user range — Linux does, and
+    // programs sometimes rely on the fault to detect ABI mismatches.
+    if ss_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(ss_ptr, STACK_T_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    // Write old_ss (output) as "disabled" if non-NULL.
+    if old_ss_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(old_ss_ptr, STACK_T_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
+        // Pack the disabled stack_t into a byte buffer.  Layout:
+        //   [0..8]   ss_sp (null)
+        //   [8..12]  ss_flags = SS_DISABLE
+        //   [12..16] padding
+        //   [16..24] ss_size (0)
+        let mut buf = [0u8; STACK_T_SIZE];
+        // ss_flags at offset 8.
+        let flags_bytes = SS_DISABLE.to_ne_bytes();
+        buf[8] = flags_bytes[0];
+        buf[9] = flags_bytes[1];
+        buf[10] = flags_bytes[2];
+        buf[11] = flags_bytes[3];
+        // SAFETY: validate_user_write above confirmed the 24-byte
+        // writable user range; we copy exactly STACK_T_SIZE bytes
+        // from a kernel-owned buffer.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(buf.as_ptr(), old_ss_ptr, STACK_T_SIZE)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    SyscallResult::ok(0)
+}
+
+/// `ioctl(fd, request, arg)` — device/driver-specific control.
+///
+/// Linux's `ioctl` is the catch-all for everything that doesn't fit a
+/// dedicated syscall: terminal control (`TCGETS`/`TIOCGWINSZ`),
+/// non-blocking flags (`FIONBIO`), interface configuration, etc.
+/// Every operation has its own semantics; there's no generic
+/// implementation.
+///
+/// We have no terminal devices, no Linux-style device files, and no
+/// fd table that maps to ioctl-aware drivers yet.  The semantically
+/// correct response for *every* ioctl on a non-special fd is
+/// `-ENOTTY` ("inappropriate ioctl for device" — the historical name
+/// for "this fd isn't a tty and your op only makes sense on a tty").
+/// That's also what Linux returns for ioctls on regular files and
+/// most non-tty fds.
+///
+/// Returning `-ENOTTY` instead of `-ENOSYS` matters: `isatty(3)` is
+/// defined as `ioctl(fd, TCGETS, &tio) != -1`, so programs probing
+/// "is stdout a terminal?" need ENOTTY to get the right "no" answer.
+/// `-ENOSYS` would confuse them ("the syscall doesn't exist", not
+/// "this fd isn't a terminal").
+///
+/// Limitation: programs that legitimately need an ioctl to succeed
+/// (e.g. `ioctl(sock, FIONBIO, &one)` to set non-blocking on a
+/// socket — though glibc/musl normally use `fcntl(F_SETFL, O_NONBLOCK)`
+/// for this) will hard-fail.  Once we have a real fd table with
+/// driver routing, this stub becomes a per-fd dispatch table that
+/// asks the driver "do you handle this request?" and only falls back
+/// to ENOTTY if nobody does.
+fn sys_ioctl(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOTTY)
 }
 
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
@@ -4530,6 +4670,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   FAIL: tgkill nonexistent tid not ESRCH ({})",
                 dispatch_linux(nr::TGKILL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // umask dispatch validation:
+    //   - Always returns 0o022 (our compiled-in distro-default stub).
+    //   - Any mask argument is silently accepted.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UMASK, &a).value != 0o022 {
+            serial_println!(
+                "[syscall/linux]   FAIL: umask(0) not 0o022 ({})",
+                dispatch_linux(nr::UMASK, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0o777, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UMASK, &a).value != 0o022 {
+            serial_println!(
+                "[syscall/linux]   FAIL: umask(0o777) not 0o022 ({})",
+                dispatch_linux(nr::UMASK, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Garbage mask still accepted — Linux masks with & 0o777 so we
+        // never error on out-of-range bits.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UMASK, &a).value != 0o022 {
+            serial_println!("[syscall/linux]   FAIL: umask(u64::MAX) not 0o022");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // sigaltstack dispatch validation:
+    //   - Both NULL pointers -> 0 (the trivial no-op success).
+    //   - ss / old_ss with kernel-context bypass on validate_user_*
+    //     means we can't actually verify EFAULT here without going
+    //     through real userspace; the validation infrastructure is
+    //     exercised by every other syscall that takes user pointers.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SIGALTSTACK, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack(NULL, NULL) not 0 ({})",
+                dispatch_linux(nr::SIGALTSTACK, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // ioctl dispatch validation:
+    //   - Every ioctl returns ENOTTY (no tty / no driver routing yet).
+    //   - The "right" answer here matters for isatty(3), which is
+    //     defined as ioctl(fd, TCGETS, &tio) != -1 — returning ENOTTY
+    //     gives isatty() a clean "0 with errno=ENOTTY" rather than
+    //     the misleading ENOSYS.
+    {
+        // TCGETS request code 0x5401 — the canonical isatty probe.
+        let a = SyscallArgs { arg0: 1, arg1: 0x5401, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOCTL, &a).value != -i64::from(errno::ENOTTY) {
+            serial_println!(
+                "[syscall/linux]   FAIL: ioctl(TCGETS) not ENOTTY ({})",
+                dispatch_linux(nr::IOCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Arbitrary unknown ioctl also ENOTTY.
+        let a = SyscallArgs { arg0: 1, arg1: 0xdead_beef, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOCTL, &a).value != -i64::from(errno::ENOTTY) {
+            serial_println!(
+                "[syscall/linux]   FAIL: ioctl(arbitrary) not ENOTTY"
             );
             return Err(KernelError::InternalError);
         }

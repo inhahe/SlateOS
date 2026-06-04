@@ -5545,6 +5545,10 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     set_tid_address semantics); on_thread_exit_hook is a no-op for
 ##     unregistered tasks; clone_thread rejects child_stack==0 with
 ##     KernelError::InvalidArgument BEFORE looking up the pid.
+##   - rt_sigreturn via dispatch_linux_with_frame with a misaligned
+##     user_rsp returns -EFAULT (both candidate ucontext addresses
+##     fail the alignment gate before any unsafe deref).  user_rip is
+##     left untouched on the failure path so userspace can recover.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
@@ -5571,8 +5575,32 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   4. Honour brk / sigaction properly.  brk's no-op is acceptable
 ##      because glibc malloc falls back to mmap; sigaction ignores
 ##      sa_mask / sa_flags / SA_RESTART etc.
-##   5. Real sigreturn / rt_sigreturn handler that restores the
-##      pre-signal frame.
-##   6. CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
+##   5. RT_SIGRETURN — DONE (via native restore path).  Linux's
+##      rt_sigreturn(2) is now routed through
+##      dispatch_linux_with_frame and reuses sys_signal_return_with_
+##      frame to restore the saved SignalContext.  Both calling
+##      conventions are supported: direct sigreturn from the handler
+##      (ctx at user_rsp + 8) and via SA_RESTORER (ctx at user_rsp).
+##      Defensive alignment check on the candidate ucontext pointer
+##      keeps us out of Rust's debug-mode misaligned-deref panic when
+##      validate_user_read short-circuits in kernel context.
+##      Limitation: signal delivery (proc::signal::deliver_pending_
+##      signal) writes our *native* SignalContext on the user stack,
+##      not Linux's ucontext_t.  Real Linux programs using a glibc
+##      that walks the ucontext at known field offsets won't work
+##      until delivery emits a Linux-shaped rt_sigframe — tracked as
+##      a follow-up below.
+##   6. Linux-shaped signal delivery frame.  Today
+##      deliver_pending_signal writes a native SignalContext for both
+##      ABIs.  For full Linux compat the delivery path needs to know
+##      the calling ABI and emit either:
+##        - native SignalContext (current behavior, for our ABI), or
+##        - Linux rt_sigframe { ucontext_t uc; siginfo_t info; ... }
+##          with mcontext_t.gregs[*] populated per AMD64 SysV.
+##      rt_sigreturn would then need to detect which layout is on the
+##      stack (probably via a magic / sentinel field) and restore
+##      accordingly.  Acceptable to defer until real Linux binaries
+##      are running.
+##   7. CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
 ##      support if any target program actually needs them — currently
 ##      all return -ENOSYS.

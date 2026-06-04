@@ -475,8 +475,73 @@ pub fn dispatch_linux_with_frame(
         nr::FORK | nr::VFORK => Some(linux_fork(frame)),
         nr::CLONE => Some(linux_clone(frame)),
         nr::EXECVE => Some(linux_execve(frame)),
+        nr::RT_SIGRETURN => Some(linux_rt_sigreturn(frame)),
         _ => None,
     }
+}
+
+/// Linux `rt_sigreturn(2)` translation.
+///
+/// Linux semantics: takes no arguments, returns no value (it cannot
+/// "return" to the caller in the C sense — it rewrites the saved
+/// register state and the syscall-return path then resumes at the
+/// pre-signal `RIP/RSP/RFLAGS` with all the pre-signal GPRs).
+///
+/// Our implementation reuses the native `sys_signal_return_with_frame`
+/// restore path because our `proc::signal::deliver_pending_signal`
+/// writes a native `SignalContext` on the user stack regardless of
+/// the calling ABI.  The only Linux-side wrinkle is *where* on the
+/// user stack the context lives at `rt_sigreturn` entry — Linux
+/// programs reach `rt_sigreturn` via two paths:
+///
+///   1. Direct: the signal handler calls `rt_sigreturn` itself
+///      (Linux-equivalent of our own POSIX-shim trampoline).  At this
+///      point `user_rsp == ctx_addr - 8` because we placed a fake
+///      8-byte null return slot below the context (see
+///      `deliver_pending_signal`).  The context address is therefore
+///      `user_rsp + 8`.
+///   2. Via `SA_RESTORER`: the handler does `ret`, which pops the
+///      8-byte return slot (transferring control to the restorer),
+///      and the restorer does `mov rax, 15; syscall`.  At that point
+///      `user_rsp == ctx_addr`.
+///
+/// We probe both candidates in order and use the first one that
+/// points at a readable user mapping.  This covers both shim styles
+/// without requiring the caller to know which we used.
+///
+/// If neither candidate is mapped, return `-EFAULT` — the syscall
+/// frame is left untouched, and the userspace handler will continue
+/// (which is wrong but defensive: corrupting RIP/RSP on a bad
+/// `rt_sigreturn` call would just SIGSEGV the process anyway).
+fn linux_rt_sigreturn(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    use crate::proc::signal::SignalContext;
+    let ctx_size = core::mem::size_of::<SignalContext>();
+    let ctx_align = core::mem::align_of::<SignalContext>() as u64;
+    // Case 1: direct sigreturn from handler — ctx is at RSP + 8.
+    // Case 2: SA_RESTORER path — ctx is at RSP.
+    let candidates = [
+        frame.user_rsp.wrapping_add(8),
+        frame.user_rsp,
+    ];
+    for candidate in candidates {
+        // Reject misaligned candidates *before* validate_user_read:
+        // validate_user_read has a kernel-context bypass that returns
+        // Ok(()) during boot self-tests, but the subsequent unsafe
+        // deref in sys_signal_return_with_frame fires a debug-mode
+        // alignment panic on misaligned pointers.  Defensive
+        // alignment check keeps us out of that path entirely.
+        if candidate == 0 || (candidate & (ctx_align - 1)) != 0 {
+            continue;
+        }
+        if crate::mm::user::validate_user_read(candidate, ctx_size).is_ok() {
+            // sys_signal_return_with_frame reads ctx from frame.arg0
+            // and overwrites it (along with the other GPRs) from the
+            // restored context, so it's safe to clobber arg0 here.
+            frame.arg0 = candidate;
+            return crate::syscall::handlers::sys_signal_return_with_frame(frame);
+        }
+    }
+    -i64::from(errno::EFAULT)
 }
 
 /// Linux `fork()` / `vfork()` translation.
@@ -2786,6 +2851,44 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+        }
+    }
+
+    // rt_sigreturn:
+    //   - misaligned user_rsp causes both candidate addresses to fail
+    //     the SignalContext alignment check, returning -EFAULT
+    //     without attempting any unsafe dereference.  This proves the
+    //     defensive alignment gate works (necessary because
+    //     validate_user_read has a kernel-context bypass that would
+    //     otherwise let us deref garbage during boot self-tests).
+    //   - frame.user_rip must be left untouched on the failure path
+    //     so a userspace program can debug the EFAULT without losing
+    //     control.
+    {
+        use crate::syscall::entry::SyscallFrame;
+        let mut f = SyscallFrame {
+            syscall_nr: nr::RT_SIGRETURN,
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+            user_rip: 0xCAFE_BABE_DEAD_BEEF,
+            user_rsp: 1, // misaligned; both candidates (9, 1) fail
+            user_rflags: 0x202,
+        };
+        let pre_rip = f.user_rip;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::EFAULT) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rt_sigreturn EFAULT → {:?}", other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        if f.user_rip != pre_rip {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigreturn EFAULT mutated user_rip"
+            );
+            return Err(KernelError::InternalError);
         }
     }
 

@@ -6615,4 +6615,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      if we add openat2 before then, we MUST implement
 ##      RESOLVE_BENEATH / IN_ROOT / NO_SYMLINKS or it becomes
 ##      a path-traversal escape valve.
+##  50. NUMA memory-policy family (MBIND / SET_MEMPOLICY /
+##      GET_MEMPOLICY / MIGRATE_PAGES / MOVE_PAGES) +
+##      SCHED_SETATTR / SCHED_GETATTR + Landlock
+##      (LANDLOCK_CREATE_RULESET / ADD_RULE / RESTRICT_SELF) +
+##      KCMP + RESTART_SYSCALL — 12 syscalls DONE as input-
+##      validated principled-errno stubs.
+##         - NUMA: validate the MPOL_DEFAULT / PREFERRED / BIND /
+##           INTERLEAVE / LOCAL / PREFERRED_MANY mode + MPOL_F_*
+##           mode flags + nodemask pointers (ceil(maxnode/8)
+##           bytes, capped at 1 MiB worth of bits) + MPOL_MF_MOVE
+##           / MOVE_ALL / STRICT flags + count caps; then ENOSYS
+##           so libnuma-style callers know we are single-node
+##           UMA.
+##         - sched_setattr: validate non-zero flags (EINVAL) and
+##           sched_attr ptr; then EPERM (SCHED_DEADLINE requires
+##           CAP_SYS_NICE; we cannot honour it).
+##         - sched_getattr: validate size in [48, 1 MiB] and
+##           writable buffer; then ENOSYS so glibc's
+##           sched_getscheduler / sched_getparam fallback fires.
+##         - Landlock:
+##              * landlock_create_ruleset with
+##                LANDLOCK_CREATE_RULESET_VERSION returns 0
+##                (= "ABI v0 = no Landlock") — the honest
+##                answer; portable code uses this exact value
+##                to detect absence and skip sandboxing.
+##              * Real ruleset-creation path validates the
+##                attr ptr + 8..=1MiB size, then ENOSYS.
+##              * landlock_add_rule validates rule_type
+##                (1 = PATH_BENEATH | 2 = NET_PORT) + 16-byte
+##                rule_attr, then EBADF (the ruleset fd cannot
+##                exist).
+##              * landlock_restrict_self: flags must be 0,
+##                then EBADF for the same reason.
+##         - kcmp: validate type ∈ 0..=7 + non-negative pids;
+##           ESRCH for negative pid (matches Linux), else ENOSYS.
+##         - restart_syscall: -EINTR (no saved syscall to
+##           restart; matches Linux behaviour for a stale
+##           restart frame).
+##      Choice rationale:
+##         * The Landlock version-query returning 0 is critical.
+##           If we returned ENOSYS, portable sandbox code (Tor,
+##           systemd, sandbox-helpers in browsers) would log a
+##           noisy "unexpected error querying Landlock version"
+##           rather than silently skipping it.  Returning 0
+##           tells them "version 0 = no Landlock = skip".
+##         * ENOSYS for the NUMA syscalls is correct because
+##           libnuma probes /sys/devices/system/node/possible
+##           first; on a single-node system the syscalls are
+##           never called.  The few callers that hit them
+##           anyway handle ENOSYS gracefully.
+##         * EPERM for sched_setattr avoids granting privileged
+##           SCHED_DEADLINE without enforcing the bandwidth /
+##           admission-control guarantees DEADLINE requires —
+##           a partial implementation would be a real-time
+##           correctness bug.
+##         * EINTR for restart_syscall matches what the Linux
+##           kernel does when a userspace process makes a
+##           direct (incorrect) call.  ENOSYS would be wrong
+##           because the syscall number IS valid; the syscall
+##           itself just has no state to restart from.
+##      Limitation: NUMA hardware support is gated on a real
+##      SRAT-parsing path through ACPI + per-node page lists
+##      + per-task mempolicy + page-migration; estimated ~2-3
+##      months of work and not on the desktop-OS critical path.
+##      sched_setattr / DEADLINE require an EDF / global-EDF
+##      scheduler with proper admission control — out of scope
+##      until real-time workloads are a requirement.  Landlock
+##      requires path-based access control hooks throughout the
+##      VFS; it is a strong defense-in-depth feature for desktop
+##      sandboxing but depends on the VFS landing first.
 

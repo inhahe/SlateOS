@@ -396,6 +396,18 @@ pub mod nr {
     pub const GETSID: u64 = 124;
     pub const GETPRIORITY: u64 = 140;
     pub const SETPRIORITY: u64 = 141;
+    pub const SETUID: u64 = 105;
+    pub const SETGID: u64 = 106;
+    pub const SETREUID: u64 = 113;
+    pub const SETREGID: u64 = 114;
+    pub const GETGROUPS: u64 = 115;
+    pub const SETGROUPS: u64 = 116;
+    pub const SETRESUID: u64 = 117;
+    pub const SETRESGID: u64 = 119;
+    pub const SETFSUID: u64 = 122;
+    pub const SETFSGID: u64 = 123;
+    pub const CAPGET: u64 = 125;
+    pub const CAPSET: u64 = 126;
 }
 
 // ---------------------------------------------------------------------------
@@ -1202,6 +1214,18 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::SETSID => sys_setsid(args),
         nr::GETPRIORITY => sys_getpriority(args),
         nr::SETPRIORITY => sys_setpriority(args),
+        nr::SETUID => sys_setuid(args),
+        nr::SETGID => sys_setgid(args),
+        nr::SETREUID => sys_setreuid(args),
+        nr::SETREGID => sys_setregid(args),
+        nr::GETGROUPS => sys_getgroups(args),
+        nr::SETGROUPS => sys_setgroups(args),
+        nr::SETRESUID => sys_setresuid(args),
+        nr::SETRESGID => sys_setresgid(args),
+        nr::SETFSUID => sys_setfsuid(args),
+        nr::SETFSGID => sys_setfsgid(args),
+        nr::CAPGET => sys_capget(args),
+        nr::CAPSET => sys_capset(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -3250,6 +3274,234 @@ fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// Credentials: setuid / setgid family + capabilities
+//
+// We have no UID/GID model — all processes run as the implicit "root"
+// owner of all kernel objects, mediated by the capability system.
+// The Linux credential syscalls all degenerate to silent success
+// (since "set to 0" is always permitted, and we treat every value as
+// "becoming 0" effectively).  Rejecting non-zero values with EPERM
+// would be more truthful, but breaks programs that drop privileges at
+// startup as a defense-in-depth measure: they'd refuse to continue
+// when setuid(nobody) fails.  The friendlier stub accepts the call
+// and quietly keeps the program in its "as if root" state — which is
+// the only state we actually support.
+// ---------------------------------------------------------------------------
+
+/// `setuid(uid)` — set the effective uid (and real/saved if caller is
+/// root).  Silent success in our model.
+fn sys_setuid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `setgid(gid)` — set the effective gid.  Silent success.
+fn sys_setgid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `setreuid(ruid, euid)` — set real and effective uid.  Silent success.
+fn sys_setreuid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `setregid(rgid, egid)` — set real and effective gid.  Silent success.
+fn sys_setregid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `setresuid(ruid, euid, suid)` — set real / effective / saved uid.
+/// Silent success.
+fn sys_setresuid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `setresgid(rgid, egid, sgid)` — set real / effective / saved gid.
+/// Silent success.
+fn sys_setresgid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `setfsuid(fsuid)` — set the filesystem uid (used for permission
+/// checks on subsequent FS ops).  Linux's contract is unusual: it
+/// returns the *previous* fsuid regardless of whether the change
+/// succeeded.  We always report 0.
+fn sys_setfsuid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `setfsgid(fsgid)` — set the filesystem gid.  Same contract as
+/// [`sys_setfsuid`].
+fn sys_setfsgid(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `getgroups(size, list)` — fetch the supplementary group list.
+///
+/// We don't carry supp groups; return 0 (empty list).  When `size`
+/// is 0, this is "tell me how many supp groups I have"; when `size`
+/// is non-zero and `list` is non-NULL, we'd normally write up to
+/// `size` gid_t values.  Either way we report zero groups.
+///
+/// Note: Linux validates `size < 0` as EINVAL but the arg is a `size_t`
+/// (unsigned) so negative values aren't representable; we don't gate
+/// on size and let the empty-list answer ride.
+fn sys_getgroups(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `setgroups(size, list)` — set the supplementary group list.
+///
+/// We don't carry supp groups; accept any size (including 0) as
+/// silent success.  Programs that drop groups via `setgroups(0,
+/// NULL)` (the canonical "drop all supp groups before chroot"
+/// pattern) get the success they expect.
+fn sys_setgroups(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `capget(hdrp, datap)` — query the calling thread's capability sets.
+///
+/// `struct __user_cap_header_struct *hdrp = { __u32 version; int pid; }`
+/// (8 bytes).
+/// `struct __user_cap_data_struct *datap = { __u32 effective;
+///                                            __u32 permitted;
+///                                            __u32 inheritable; }`
+/// (12 bytes per element; 2 elements for `_LINUX_CAPABILITY_VERSION_3`).
+///
+/// We don't have POSIX-style capability bits.  Report all-ones for
+/// every set, signalling "this process has every capability".  That's
+/// the most permissive answer and the one that matches our "everyone's
+/// effectively root" stance.
+///
+/// `hdrp.version` is validated as one of the three known Linux
+/// versions (1/2/3); unknown versions get rewritten to v3 and we
+/// return -EINVAL (Linux's documented behaviour — caller must retry
+/// with the new version).
+///
+/// On unknown version, we also write the v3 version sentinel into
+/// hdrp.version before returning EINVAL so the caller's retry loop
+/// converges.
+fn sys_capget(args: &SyscallArgs) -> SyscallResult {
+    let hdrp = args.arg0;
+    let datap = args.arg1;
+
+    /// `_LINUX_CAPABILITY_VERSION_1` (1985 vintage, single 32-bit set).
+    const V1: u32 = 0x1998_0330;
+    /// `_LINUX_CAPABILITY_VERSION_2` (2008 vintage, 64-bit but buggy).
+    const V2: u32 = 0x2007_1026;
+    /// `_LINUX_CAPABILITY_VERSION_3` (current — 64-bit, fixed).
+    const V3: u32 = 0x2008_0522;
+
+    if hdrp == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(hdrp, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Read version.
+    let mut hdr_buf = [0u8; 8];
+    // SAFETY: validate_user_read above confirmed an 8-byte readable
+    // user range.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(hdrp, hdr_buf.as_mut_ptr(), 8)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let version = u32::from_ne_bytes([hdr_buf[0], hdr_buf[1], hdr_buf[2], hdr_buf[3]]);
+    let elems: usize = match version {
+        V1 => 1,
+        V2 | V3 => 2,
+        _ => {
+            // Rewrite header version to V3 and return EINVAL —
+            // Linux's documented retry protocol.
+            if let Err(e) = crate::mm::user::validate_user_write(hdrp, 8) {
+                return linux_err(linux_errno_for(e));
+            }
+            let v3 = V3.to_ne_bytes();
+            hdr_buf[0] = v3[0]; hdr_buf[1] = v3[1];
+            hdr_buf[2] = v3[2]; hdr_buf[3] = v3[3];
+            // SAFETY: validate_user_write confirmed the 8-byte range.
+            let r = unsafe { crate::mm::user::copy_to_user(hdr_buf.as_ptr(), hdrp, 8) };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            return linux_err(errno::EINVAL);
+        }
+    };
+
+    if datap == 0 {
+        // Linux allows datap == NULL when the caller is probing for
+        // version support; we already returned the version-OK signal
+        // by getting this far, so return 0.
+        return SyscallResult::ok(0);
+    }
+    let total = elems.saturating_mul(12);
+    if let Err(e) = crate::mm::user::validate_user_write(datap, total) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Build all-ones data structure.
+    let mut data = [0xffu8; 24]; // max V2/V3 size
+    // V1 datap is only 12 bytes; we'll copy `total` bytes which is
+    // exactly the right amount.
+    let _ = &mut data; // ensure the slice is materialised
+    // SAFETY: validate_user_write above confirmed `total` writable
+    // bytes; we copy exactly `total` 0xff bytes.
+    let r = unsafe { crate::mm::user::copy_to_user(data.as_ptr(), datap, total) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `capset(hdrp, datap)` — install new capability sets.
+///
+/// We accept any well-formed request as silent success.  Validation
+/// mirrors [`sys_capget`] (version must be V1/V2/V3, else EINVAL with
+/// the version-rewrite-to-V3 protocol).
+fn sys_capset(args: &SyscallArgs) -> SyscallResult {
+    let hdrp = args.arg0;
+
+    const V1: u32 = 0x1998_0330;
+    const V2: u32 = 0x2007_1026;
+    const V3: u32 = 0x2008_0522;
+
+    if hdrp == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(hdrp, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut hdr_buf = [0u8; 8];
+    // SAFETY: validate_user_read above confirmed an 8-byte readable
+    // user range.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(hdrp, hdr_buf.as_mut_ptr(), 8)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let version = u32::from_ne_bytes([hdr_buf[0], hdr_buf[1], hdr_buf[2], hdr_buf[3]]);
+    match version {
+        V1 | V2 | V3 => SyscallResult::ok(0),
+        _ => {
+            if let Err(e) = crate::mm::user::validate_user_write(hdrp, 8) {
+                return linux_err(linux_errno_for(e));
+            }
+            let v3 = V3.to_ne_bytes();
+            hdr_buf[0] = v3[0]; hdr_buf[1] = v3[1];
+            hdr_buf[2] = v3[2]; hdr_buf[3] = v3[3];
+            // SAFETY: validate_user_write confirmed the 8-byte range.
+            let r = unsafe { crate::mm::user::copy_to_user(hdr_buf.as_ptr(), hdrp, 8) };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            linux_err(errno::EINVAL)
+        }
+    }
 }
 
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
@@ -5430,6 +5682,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::SETPRIORITY, &a).value != -i64::from(errno::EINVAL) {
             serial_println!(
                 "[syscall/linux]   FAIL: setpriority(3) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Credential setters: all of setuid/setgid/setre*/setres*/setfs*/
+    // getgroups/setgroups silently succeed.  We test a representative
+    // sample.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        for nr in [nr::SETUID, nr::SETGID, nr::SETREUID, nr::SETREGID,
+                   nr::SETRESUID, nr::SETRESGID, nr::SETFSUID, nr::SETFSGID,
+                   nr::GETGROUPS, nr::SETGROUPS] {
+            if dispatch_linux(nr, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: credential syscall {} not 0 ({})",
+                    nr, dispatch_linux(nr, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Non-zero arg also accepted silently.
+        let a = SyscallArgs { arg0: 1000, arg1: 1000, arg2: 1000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETRESUID, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: setresuid(1000,...) not 0");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // capget / capset dispatch validation.
+    //   - hdrp == NULL -> EFAULT.
+    //   - We can't exercise the version path easily without staging a
+    //     real user-space buffer; the validate_user_read kernel-context
+    //     bypass means even a "kernel" pointer will appear readable.
+    //     The dispatch routing itself is what we're testing here.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: capget(NULL) not EFAULT ({})",
+                dispatch_linux(nr::CAPGET, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: capset(NULL) not EFAULT ({})",
+                dispatch_linux(nr::CAPSET, &a).value
             );
             return Err(KernelError::InternalError);
         }

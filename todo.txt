@@ -5962,3 +5962,35 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      values return EINVAL per Linux.
 ##      Limitation: programs that try to raise their own priority
 ##      with setpriority(-20) won't see preferential scheduling.
+##  22. Credential setters (SETUID, SETGID, SETREUID, SETREGID,
+##      SETRESUID, SETRESGID, SETFSUID, SETFSGID, GETGROUPS,
+##      SETGROUPS) — DONE as silent successes.  We have no
+##      UID/GID model — all processes run as the implicit root
+##      owner of all kernel objects, mediated by the capability
+##      system.  Accepting every credential change as a no-op is
+##      consistent with the "everyone's effectively root" stance
+##      and friendlier than EPERM (which would break programs
+##      that drop privileges as a defense-in-depth measure: they'd
+##      refuse to start when setuid(nobody) fails).
+##      Limitation: a program that drops to non-root and then
+##      audits via getresuid sees uid 0 back (already documented
+##      under getresuid/getresgid in item 18) — they might refuse
+##      to continue.  No such programs in the early-bring-up corpus.
+##  23. CAPGET / CAPSET — DONE for V1/V2/V3 with all-ones caps.
+##      sys_capget validates the version field (Linux's documented
+##      retry protocol: unknown version returns EINVAL with the
+##      hdrp.version rewritten to V3), reads the requested element
+##      count (1 for V1, 2 for V2/V3), and writes 0xff into every
+##      byte of the datap range — reporting "every capability is
+##      effective + permitted + inheritable."  This is the
+##      friendliest answer for systemd, Docker, and the like which
+##      probe capabilities at startup; reporting "no caps" would
+##      make them refuse to do almost anything.
+##      sys_capset accepts any well-formed (validated version)
+##      request as silent success.
+##      Limitation: capabilities don't actually gate any kernel
+##      operation today (the kernel-level capability system uses
+##      typed handles, not POSIX cap bits).  PR_CAPBSET_DROP /
+##      CAPSET combinations that sandboxes use to drop dangerous
+##      privileges are observed but not enforced.  Tracked
+##      alongside POSIX-cap-style enforcement work in todo.txt.

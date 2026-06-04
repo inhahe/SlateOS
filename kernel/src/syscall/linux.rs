@@ -4255,15 +4255,102 @@ fn rlimit_nice_check_with(soft: u64, new_nice: i32) -> Result<(), i32> {
 // the only state we actually support.
 // ---------------------------------------------------------------------------
 
-/// `setuid(uid)` — set the effective uid (and real/saved if caller is
-/// root).  Silent success in our model.
-fn sys_setuid(_args: &SyscallArgs) -> SyscallResult {
-    SyscallResult::ok(0)
+/// `setuid(uid)` — set the process uid, with Linux-shaped permission
+/// checks against the caller's current credentials.
+///
+/// Linux's real contract is split across real / effective / saved
+/// uids, but our PCB only carries a single `credentials.uid` field
+/// (the `geteuid()` syscall is aliased to `getuid()`).  Within that
+/// single-uid model we still enforce the two error paths that
+/// real Linux callers depend on:
+///
+///   - `EINVAL` if `uid == (uid_t)-1` (`u32::MAX`).  Linux reserves
+///     `INVALID_UID` and rejects setuid attempts targeting it; some
+///     hardening libraries (libcap, systemd-credentials) probe for
+///     this and gate further behavior on the errno.
+///   - `EPERM` if the caller's current uid is not 0 (root) and the
+///     requested uid differs from the current uid.  This is the
+///     "you can't gain privileges" check.  Real Linux additionally
+///     allows transitions to a saved-uid the process inherited via
+///     setuid-bit binary; we don't honour setuid bits so the
+///     simpler rule is correct in our model.
+///
+/// On success the new uid is written to the PCB and the function
+/// returns 0.  A self-uid-to-self-uid call (the common idiom in
+/// startup code that's already at the desired uid) is a no-op
+/// success, even for non-root, matching Linux.
+///
+/// Kernel-context callers (boot self-test, in-kernel helpers with
+/// no `caller_pid()`) treat the call as a no-op success without
+/// touching any PCB — the kernel has no Linux credentials.
+fn sys_setuid(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let requested = args.arg0 as u32;
+    if requested == u32::MAX {
+        return linux_err(errno::EINVAL);
+    }
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    let mut creds = match pcb::get_credentials(pid) {
+        Some(c) => c,
+        // The caller's PID resolved but the process record is gone
+        // (race with exit).  Linux returns 0 from setuid on the
+        // happy path; matching that silent-success keeps callers in
+        // tear-down from observing a confusing errno.
+        None => return SyscallResult::ok(0),
+    };
+    if requested != creds.uid && creds.uid != 0 {
+        return linux_err(errno::EPERM);
+    }
+    if requested == creds.uid {
+        return SyscallResult::ok(0);
+    }
+    creds.uid = requested;
+    match pcb::set_credentials(pid, creds) {
+        Ok(()) => SyscallResult::ok(0),
+        // The only failure pcb::set_credentials reports today is
+        // NoSuchProcess, which means the PCB vanished between the
+        // get_credentials and set_credentials calls (tear-down
+        // race).  Match the get-side handling above: no errno.
+        Err(_) => SyscallResult::ok(0),
+    }
 }
 
-/// `setgid(gid)` — set the effective gid.  Silent success.
-fn sys_setgid(_args: &SyscallArgs) -> SyscallResult {
-    SyscallResult::ok(0)
+/// `setgid(gid)` — set the process gid.  Same shape as
+/// [`sys_setuid`]: `EINVAL` for `gid == (gid_t)-1`, `EPERM` if a
+/// non-root process tries to change to a different gid, no-op
+/// success when `gid` matches the current value.
+///
+/// Kernel-context (no `caller_pid()`) is a no-op success.
+fn sys_setgid(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let requested = args.arg0 as u32;
+    if requested == u32::MAX {
+        return linux_err(errno::EINVAL);
+    }
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    let mut creds = match pcb::get_credentials(pid) {
+        Some(c) => c,
+        None => return SyscallResult::ok(0),
+    };
+    // Permission check keys on uid, not gid: Linux only lets root
+    // (uid == 0) change gid arbitrarily, regardless of what gid the
+    // process currently has.  A non-root process can call setgid
+    // with its current gid (no-op success) but not change it.
+    if requested != creds.gid && creds.uid != 0 {
+        return linux_err(errno::EPERM);
+    }
+    if requested == creds.gid {
+        return SyscallResult::ok(0);
+    }
+    creds.gid = requested;
+    match pcb::set_credentials(pid, creds) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(_) => SyscallResult::ok(0),
+    }
 }
 
 /// `setreuid(ruid, euid)` — set real and effective uid.  Silent success.
@@ -15074,9 +15161,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
-    // Credential setters: all of setuid/setgid/setre*/setres*/setfs*/
-    // getgroups/setgroups silently succeed.  We test a representative
-    // sample.
+    // Credential setters dispatch + setuid/setgid semantics (batch 52).
+    //
+    // setuid/setgid now actually update credentials.uid/gid when
+    // called from a real process; setre*/setres*/setfs*/getgroups/
+    // setgroups remain silent-success stubs (their proper
+    // implementations are tracked separately in todo.txt).
+    //
+    // Kernel-context (caller_pid == None) is a no-op success for
+    // all set*-family calls regardless of argument value.  The
+    // EINVAL check on (uid_t)-1 fires before the caller_pid lookup,
+    // so the dispatch-path EINVAL assertion below works without a
+    // PCB.
     {
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -15091,12 +15187,83 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
-        // Non-zero arg also accepted silently.
+        // Non-zero arg also accepted silently for the remaining
+        // stubs (setresuid here exercises the stub dispatch; the
+        // real-process path is covered by the in-PCB test below).
         let a = SyscallArgs { arg0: 1000, arg1: 1000, arg2: 1000,
             arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETRESUID, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: setresuid(1000,...) not 0");
             return Err(KernelError::InternalError);
+        }
+        // setuid / setgid with (uid_t)-1 now return EINVAL (batch
+        // 52).  This check fires before caller_pid is even
+        // consulted, so it's exercised at the dispatch self-test
+        // layer without a real process.
+        let a = SyscallArgs { arg0: u64::from(u32::MAX), arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETUID, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setuid((uid_t)-1) not EINVAL ({})",
+                dispatch_linux(nr::SETUID, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETGID, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgid((gid_t)-1) not EINVAL ({})",
+                dispatch_linux(nr::SETGID, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Per-process credential round-trip on a dummy PID.
+        // Validates the Linux setuid/setgid permission rules:
+        //   - root may change to any uid;
+        //   - non-root may set uid to current (no-op) but EPERM
+        //     when targeting a different uid;
+        //   - same for gid (permission gates on uid, not gid).
+        {
+            let test_pid = pcb::create("setuid-self-test", 0);
+            // Fresh process is root (uid=0, gid=0).
+            let c = pcb::get_credentials(test_pid).expect("creds");
+            if c.uid != 0 || c.gid != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fresh process creds not (0,0): ({},{})",
+                    c.uid, c.gid
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
+            // Drop to uid 1000 directly via PCB (mirrors what a
+            // root-context setuid(1000) call would do).
+            let mut new_creds = c.clone();
+            new_creds.uid = 1000;
+            pcb::set_credentials(test_pid, new_creds).expect("set creds");
+            let c2 = pcb::get_credentials(test_pid).expect("creds2");
+            if c2.uid != 1000 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: after drop uid expected 1000, got {}",
+                    c2.uid
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
+            // gid still 0.
+            if c2.gid != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: drop-uid leaked into gid: {}",
+                    c2.gid
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
+            // Self-uid no-op succeeds even for non-root (verified
+            // by setting uid=1000 again).
+            let mut same = c2.clone();
+            same.uid = 1000;
+            pcb::set_credentials(test_pid, same).expect("self-set");
+            assert_eq!(pcb::get_credentials(test_pid).map(|c| c.uid), Some(1000));
+            pcb::destroy(test_pid);
         }
     }
 

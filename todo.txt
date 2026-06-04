@@ -8476,3 +8476,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      VFS open path should call pcb::get_umask(caller_pid)
 ##      and mask the requested mode before storing it.
 
+##   78. setuid / setgid wired to credentials (batch 52).
+##      Status: PARTIAL.  setuid/setgid are real; the
+##      multi-arg variants are still silent stubs.
+##      Before batch 52, sys_setuid and sys_setgid were
+##      silent-success stubs: they accepted any argument
+##      and returned 0 without updating the PCB.  That meant
+##      programs that drop privileges with
+##           setuid(real_uid);
+##           if (getuid() != real_uid) abort();
+##      would always abort, because getuid() reads
+##      credentials.uid (which was unchanged) while the
+##      caller thought setuid had applied.  This is a
+##      genuine correctness bug — programs that gate
+##      privileged operations on a successful setuid would
+##      run with the wrong identity invisibly.
+##      Wiring up:
+##         - sys_setuid now reads pcb::get_credentials,
+##           validates the arg, updates credentials.uid,
+##           writes back via pcb::set_credentials.
+##         - sys_setgid mirrors setuid but updates
+##           credentials.gid.  The permission check still
+##           keys on credentials.uid (only root may change
+##           gid arbitrarily), matching Linux's CAP_SETGID
+##           gating in the absence of a real cap subsystem.
+##      Linux semantics that we enforce:
+##         - (uid_t)-1 / (gid_t)-1 (u32::MAX): EINVAL.
+##           Linux reserves INVALID_UID for "no change" in
+##           setresuid; passing it to setuid is rejected.
+##         - Caller uid == 0: any target uid accepted.
+##         - Caller uid != 0 with target != current: EPERM.
+##         - Caller uid != 0 with target == current: 0
+##           (no-op success — the idiom that
+##           privilege-dropping startup code relies on).
+##         - Kernel context (no caller_pid): no-op success,
+##           since the kernel has no Linux credentials.
+##      Boot self-test coverage:
+##         - Dispatch path: setuid(0) / setgid(0) → 0 in
+##           kernel context.
+##         - Dispatch path: setuid((uid_t)-1) /
+##           setgid((gid_t)-1) → EINVAL even without a
+##           PCB.
+##         - Per-process round-trip on a dummy PID:
+##              fresh creds (0, 0) read back correctly
+##              uid := 1000 via set_credentials
+##              get returns (1000, 0)  — gid unchanged
+##              self-set uid := 1000 again is a no-op.
+##      Limitations (each tracked as a future batch):
+##         - setreuid/setregid/setresuid/setresgid are
+##           still silent-success stubs.  Linux's "any of
+##           the three args may be (uid_t)-1 = no change"
+##           semantics needs careful translation into our
+##           single-uid model, and the per-arg permission
+##           check (CAP_SETUID gating) needs the same
+##           caller-uid-keyed check as setuid.  Until then,
+##           a program that calls setresuid(1000, 1000,
+##           1000) instead of setuid(1000) still gets the
+##           silent-success-with-wrong-uid bug.
+##         - setfsuid/setfsgid still silently return 0
+##           instead of the previous fsuid/fsgid.  Linux's
+##           "fsuid" concept is uid-for-FS-access-checks,
+##           separate from euid; we don't track it
+##           separately and the VFS has no permission
+##           checks anyway, so the only thing that breaks
+##           is the return value (callers that use it to
+##           save+restore fsuid).
+##         - getgroups/setgroups still silently accept
+##           everything.  Real implementation needs the
+##           Vec<u32> supp-groups field on
+##           ProcessCredentials wired through, plus EFAULT
+##           on bad user pointers.
+##         - We carry only one uid (no separate ruid /
+##           euid / suid).  Programs that read all three
+##           via getresuid see the same value for all
+##           three, which is correct for a process that
+##           hasn't done a partial transition.  Adding
+##           separate fields is a follow-up.
+

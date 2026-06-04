@@ -985,12 +985,10 @@ impl SpeedTestUI {
             && x <= btn_x + BUTTON_WIDTH
             && y >= btn_y
             && y <= btn_y + BUTTON_HEIGHT
-        {
-            if self.phase.is_idle() || self.phase.is_complete() || matches!(self.phase, SpeedTestPhase::Error(_)) {
+            && (self.phase.is_idle() || self.phase.is_complete() || matches!(self.phase, SpeedTestPhase::Error(_))) {
                 self.simulate_test();
                 return EventResult::Consumed;
             }
-        }
 
         // Export button.
         let export_x = GRAPH_X;
@@ -1030,8 +1028,7 @@ impl SpeedTestUI {
 
         // History items.
         let hist_content_y = HISTORY_Y + 30.0;
-        if x >= HISTORY_X
-            && x <= HISTORY_X + HISTORY_WIDTH
+        if (HISTORY_X..=HISTORY_X + HISTORY_WIDTH).contains(&x)
             && y >= hist_content_y
             && y <= hist_content_y + HISTORY_HEIGHT - 30.0
         {
@@ -1063,8 +1060,7 @@ impl SpeedTestUI {
 
         // History hover.
         let hist_content_y = HISTORY_Y + 30.0;
-        if x >= HISTORY_X
-            && x <= HISTORY_X + HISTORY_WIDTH
+        if (HISTORY_X..=HISTORY_X + HISTORY_WIDTH).contains(&x)
             && y >= hist_content_y
             && y <= hist_content_y + HISTORY_HEIGHT - 30.0
         {

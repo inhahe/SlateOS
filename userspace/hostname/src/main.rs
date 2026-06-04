@@ -107,18 +107,16 @@ fn read_trimmed(path: &str) -> Result<String, String> {
 /// persistent etc file.
 fn read_hostname() -> Result<String, String> {
     // Try live kernel value first.
-    if let Ok(name) = read_trimmed(PROC_HOSTNAME) {
-        if !name.is_empty() {
+    if let Ok(name) = read_trimmed(PROC_HOSTNAME)
+        && !name.is_empty() {
             return Ok(name);
         }
-    }
 
     // Fall back to /etc/hostname.
-    if let Ok(name) = read_trimmed(ETC_HOSTNAME) {
-        if !name.is_empty() {
+    if let Ok(name) = read_trimmed(ETC_HOSTNAME)
+        && !name.is_empty() {
             return Ok(name);
         }
-    }
 
     Err("unable to determine hostname: neither /proc/sys/kernel/hostname nor /etc/hostname are readable".to_string())
 }
@@ -149,14 +147,13 @@ fn read_domain() -> Option<String> {
         }
 
         // "search" directive is the fallback — take the first entry.
-        if search_domain.is_none() {
-            if let Some(rest) = line.strip_prefix("search") {
+        if search_domain.is_none()
+            && let Some(rest) = line.strip_prefix("search") {
                 let rest = rest.trim();
                 if let Some(first) = rest.split_whitespace().next() {
                     search_domain = Some(first.to_string());
                 }
             }
-        }
     }
 
     search_domain

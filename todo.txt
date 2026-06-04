@@ -2481,6 +2481,8 @@ Remaining net improvements (diminishing returns):
   POSIX path only compiles on those targets. Discovered while
   surveying clippy warnings.
 
+- (NOTED 2026-06-03) userspace/hostname has no unit tests.
+
 - (NOTED 2026-06-03) userspace/lsusb, userspace/strace, userspace/lsblk,
   userspace/mkfs, userspace/fsck have no unit tests at all (`cargo test`
   reports "0 passed; 0 failed"). All are personality-CLI stubs and the

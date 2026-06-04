@@ -442,6 +442,7 @@ pub mod linux_apparmor_user_types;
 pub mod linux_arcnet_types;
 pub mod linux_arcnet_user_types;
 pub mod linux_arm_smccc_types;
+pub mod linux_arm_smccc_user_types;
 pub mod linux_arp_types;
 pub mod linux_at_flags_types;
 pub mod linux_ata_types;

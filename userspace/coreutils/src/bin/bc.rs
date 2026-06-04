@@ -1054,6 +1054,10 @@ fn tokenize(input: &str) -> Vec<Token> {
 // AST
 // ---------------------------------------------------------------------------
 
+// PrintExpr deliberately keeps the Expr suffix: it is the AST node for bc's
+// `print` keyword (which prints a list of expressions). Renaming to `Print`
+// would clash with `Stmt::Print` in callers that bring both into scope.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
 enum Expr {
     Number(BigDecimal),
@@ -1654,11 +1658,11 @@ impl Interpreter {
             }
             "ibase" => {
                 let s = val.to_string_with_scale(0);
-                self.ibase = s.parse::<usize>().unwrap_or(10).max(2).min(16);
+                self.ibase = s.parse::<usize>().unwrap_or(10).clamp(2, 16);
             }
             "obase" => {
                 let s = val.to_string_with_scale(0);
-                self.obase = s.parse::<usize>().unwrap_or(10).max(2).min(16);
+                self.obase = s.parse::<usize>().unwrap_or(10).clamp(2, 16);
             }
             "last" | "." => {
                 self.last = val;

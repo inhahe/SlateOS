@@ -21,8 +21,8 @@ fn main() {
     let mut show_gid_only = false;
 
     for arg in &args {
-        if arg.starts_with('-') {
-            for c in arg[1..].chars() {
+        if let Some(flags) = arg.strip_prefix('-') {
+            for c in flags.chars() {
                 match c {
                     'u' => show_uid_only = true,
                     'g' => show_gid_only = true,

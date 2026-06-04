@@ -94,8 +94,8 @@ fn main() {
 
     // Kahn's algorithm for topological sort.
     let mut queue: VecDeque<usize> = VecDeque::new();
-    for node in 0..n {
-        if in_degree[node] == 0 {
+    for (node, &deg) in in_degree.iter().enumerate().take(n) {
+        if deg == 0 {
             queue.push_back(node);
         }
     }

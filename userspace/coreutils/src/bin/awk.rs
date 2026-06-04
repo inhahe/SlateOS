@@ -161,10 +161,9 @@ fn parse_program(prog: &str) -> Vec<Rule> {
         }
 
         // Parse pattern
-        let pattern;
-        if bytes[pos] == b'{' {
+        let pattern = if bytes[pos] == b'{' {
             // No pattern — always matches
-            pattern = Pattern::Always;
+            Pattern::Always
         } else {
             let pat_start = pos;
             // Read until '{'
@@ -172,16 +171,19 @@ fn parse_program(prog: &str) -> Vec<Rule> {
                 pos += 1;
             }
             let pat_str = prog[pat_start..pos].trim();
-            pattern = if pat_str == "BEGIN" {
+            if pat_str == "BEGIN" {
                 Pattern::Begin
             } else if pat_str == "END" {
                 Pattern::End
-            } else if pat_str.starts_with('/') && pat_str.ends_with('/') {
-                Pattern::Regex(pat_str[1..pat_str.len() - 1].to_string())
+            } else if let Some(inner) = pat_str
+                .strip_prefix('/')
+                .and_then(|s| s.strip_suffix('/'))
+            {
+                Pattern::Regex(inner.to_string())
             } else {
                 Pattern::Condition(pat_str.to_string())
-            };
-        }
+            }
+        };
 
         // Parse action in braces
         if pos < bytes.len() && bytes[pos] == b'{' {
@@ -265,8 +267,8 @@ fn eval_condition(cond: &str, fields: &[&str], line: &str, nr: usize) -> bool {
 fn resolve_value(expr: &str, fields: &[&str], line: &str, nr: usize) -> String {
     let expr = expr.trim().trim_matches('"');
 
-    if expr.starts_with('$') {
-        let n: usize = expr[1..].parse().unwrap_or(0);
+    if let Some(rest) = expr.strip_prefix('$') {
+        let n: usize = rest.parse().unwrap_or(0);
         if n == 0 {
             line.to_string()
         } else if n <= fields.len() {
@@ -325,13 +327,13 @@ fn eval_expr(expr: &str, fields: &[&str], line: &str, nr: usize, nf: usize) -> S
     let expr = expr.trim();
 
     // String literal
-    if expr.starts_with('"') && expr.ends_with('"') {
-        return expr[1..expr.len() - 1].to_string();
+    if let Some(inner) = expr.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return inner.to_string();
     }
 
     // Field reference
-    if expr.starts_with('$') {
-        let n: usize = expr[1..].parse().unwrap_or(0);
+    if let Some(rest) = expr.strip_prefix('$') {
+        let n: usize = rest.parse().unwrap_or(0);
         return if n == 0 {
             line.to_string()
         } else if n <= fields.len() {

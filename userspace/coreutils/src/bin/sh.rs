@@ -239,9 +239,7 @@ fn execute_command(cmd: &str, state: &mut ShellState) -> i32 {
         let (left, op, right) = split_at_logical(cmd, pos);
         let left_code = execute_command(left, state);
         state.set_exit_code(left_code);
-        if op == "&&" && left_code == 0 {
-            return execute_command(right, state);
-        } else if op == "||" && left_code != 0 {
+        if (op == "&&" && left_code == 0) || (op == "||" && left_code != 0) {
             return execute_command(right, state);
         }
         return left_code;
@@ -485,12 +483,7 @@ fn execute_if(lines: &[&str], state: &mut ShellState) -> (i32, usize) {
         let line = lines[i].trim();
         i += 1;
 
-        if line.starts_with("if ") || line.starts_with("elif ") {
-            let cond = if line.starts_with("if ") {
-                &line[3..]
-            } else {
-                &line[5..]
-            };
+        if let Some(cond) = line.strip_prefix("if ").or_else(|| line.strip_prefix("elif ")) {
             let cond = cond.trim_end_matches("; then").trim_end_matches(" then");
 
             // Check if "then" is on same line or next

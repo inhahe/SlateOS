@@ -155,7 +155,7 @@ fn renice_target(
     };
 
     // Clamp to valid range [-20, 19].
-    let clamped = new_prio.max(-20).min(19);
+    let clamped = new_prio.clamp(-20, 19);
 
     // SAFETY: setpriority() is provided by the POSIX layer. The parameters are
     // plain integers: `which` selects process/pgroup/user, `who` is the ID,

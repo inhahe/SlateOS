@@ -50,8 +50,8 @@ fn main() {
 
         // Build translation table
         let mut table = [0u8; 256];
-        for i in 0..256 {
-            table[i] = i as u8;
+        for (i, slot) in table.iter_mut().enumerate() {
+            *slot = i as u8;
         }
         for (i, &from) in set1.iter().enumerate() {
             let to = if i < set2.len() {

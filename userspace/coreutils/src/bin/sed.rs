@@ -355,8 +355,8 @@ fn address_matches(addr: &Address, line_num: usize, line: &str) -> bool {
 /// Simple regex match — supports literal chars, `.` (any), `*` (zero or more),
 /// `^` (start), `$` (end), `[...]` (char class).
 fn simple_regex_match(pattern: &str, text: &str) -> bool {
-    if pattern.starts_with('^') {
-        return regex_match_at(&pattern[1..], text, 0);
+    if let Some(rest) = pattern.strip_prefix('^') {
+        return regex_match_at(rest, text, 0);
     }
 
     // Try matching at every position

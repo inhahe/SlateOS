@@ -250,13 +250,12 @@ fn parse_command(input: &str, current: usize, total: usize) -> (usize, usize, ch
         addr1
     };
 
-    // Parse command character
+    // Parse command character. Anything past the end of the address is either
+    // a literal command char or, for a bare line number / empty input, '\0'.
     let cmd = if pos < bytes.len() {
         let c = bytes[pos] as char;
         pos += 1;
         c
-    } else if addr1 != current || input.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        '\0' // just a line number
     } else {
         '\0'
     };

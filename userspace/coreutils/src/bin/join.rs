@@ -321,8 +321,8 @@ fn main() {
                     if key1_cur != key1 {
                         break;
                     }
-                    for j in save_idx2..idx2 {
-                        let f2_cur = split_fields(&lines2[j], opts.separator);
+                    for line2 in lines2.iter().take(idx2).skip(save_idx2) {
+                        let f2_cur = split_fields(line2, opts.separator);
                         output_line(&f1_cur, &f2_cur, &opts, &mut out);
                     }
                     idx1 += 1;

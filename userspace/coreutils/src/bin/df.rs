@@ -62,11 +62,10 @@ fn main() {
                 let total = info.total_bytes;
                 let free = info.avail_bytes;
                 let used = total.saturating_sub(info.free_bytes);
-                let pct = if total > 0 {
-                    (used * 100 / total) as u32
-                } else {
-                    0
-                };
+                let pct = used
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .unwrap_or(0) as u32;
 
                 if human {
                     let _ = writeln!(

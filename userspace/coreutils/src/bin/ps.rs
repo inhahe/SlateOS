@@ -17,8 +17,8 @@ fn main() {
     let mut full_format = false;
 
     for arg in &args {
-        if arg.starts_with('-') {
-            for c in arg[1..].chars() {
+        if let Some(flags) = arg.strip_prefix('-') {
+            for c in flags.chars() {
                 match c {
                     'e' | 'A' => all_procs = true,
                     'f' => full_format = true,

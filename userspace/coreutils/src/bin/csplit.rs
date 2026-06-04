@@ -274,13 +274,12 @@ fn main() {
         match pat {
             Pattern::Regex { pattern, offset } => {
                 // Find the next line matching the pattern, starting from current_pos.
-                let mut found = None;
-                for j in current_pos..all_lines.len() {
-                    if matches_pattern(&all_lines[j], pattern) {
-                        found = Some(j);
-                        break;
-                    }
-                }
+                let found = all_lines
+                    .iter()
+                    .enumerate()
+                    .skip(current_pos)
+                    .find(|(_, line)| matches_pattern(line, pattern))
+                    .map(|(j, _)| j);
 
                 match found {
                     Some(match_line) => {
@@ -305,13 +304,12 @@ fn main() {
             }
             Pattern::Skip { pattern } => {
                 // Skip lines until pattern matches (exclusive).
-                let mut found = None;
-                for j in current_pos..all_lines.len() {
-                    if matches_pattern(&all_lines[j], pattern) {
-                        found = Some(j);
-                        break;
-                    }
-                }
+                let found = all_lines
+                    .iter()
+                    .enumerate()
+                    .skip(current_pos)
+                    .find(|(_, line)| matches_pattern(line, pattern))
+                    .map(|(j, _)| j);
 
                 match found {
                     Some(match_line) => {

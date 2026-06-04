@@ -163,19 +163,19 @@ fn output_normal(out: &mut impl Write, a: &[&str], b: &[&str]) {
                 if let Some(is) = ins_start {
                     // Change
                     let _ = writeln!(out, "{}c{}", range_str(start + 1, end + 1), range_str(is + 1, ins_end + 1));
-                    for li in start..=end {
-                        let _ = writeln!(out, "< {}", a[li]);
+                    for line in a.iter().take(end + 1).skip(start) {
+                        let _ = writeln!(out, "< {line}");
                     }
                     let _ = writeln!(out, "---");
-                    for li in is..=ins_end {
-                        let _ = writeln!(out, "> {}", b[li]);
+                    for line in b.iter().take(ins_end + 1).skip(is) {
+                        let _ = writeln!(out, "> {line}");
                     }
                     i = k;
                 } else {
                     // Pure delete
                     let _ = writeln!(out, "{}d{}", range_str(start + 1, end + 1), start);
-                    for li in start..=end {
-                        let _ = writeln!(out, "< {}", a[li]);
+                    for line in a.iter().take(end + 1).skip(start) {
+                        let _ = writeln!(out, "< {line}");
                     }
                     i = j;
                 }
@@ -194,8 +194,8 @@ fn output_normal(out: &mut impl Write, a: &[&str], b: &[&str]) {
                 }
 
                 let _ = writeln!(out, "{}a{}", start, range_str(start + 1, end + 1));
-                for li in start..=end {
-                    let _ = writeln!(out, "> {}", b[li]);
+                for line in b.iter().take(end + 1).skip(start) {
+                    let _ = writeln!(out, "> {line}");
                 }
                 i = j;
             }

@@ -97,8 +97,15 @@ fn main() {
     // Seek output blocks
     if seek > 0 {
         let seek_bytes = seek * bs;
+        // dd with `seek=` preserves the existing tail of the output file —
+        // it positions the cursor and overwrites in place, so truncate(false)
+        // is the correct semantic (not truncate(true)).
         if let Some(f) = output_file.as_ref()
-            && let Ok(mut fh) = OpenOptions::new().write(true).create(true).open(f)
+            && let Ok(mut fh) = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(f)
                 && fh.seek(SeekFrom::Start(seek_bytes as u64)).is_ok() {
                     writer = Box::new(fh);
                 }

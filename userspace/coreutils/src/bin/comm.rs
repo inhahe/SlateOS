@@ -104,8 +104,5 @@ fn read_lines(path: &str) -> Vec<String> {
         }
     };
 
-    BufReader::new(reader)
-        .lines()
-        .filter_map(|l| l.ok())
-        .collect()
+    BufReader::new(reader).lines().map_while(Result::ok).collect()
 }

@@ -8348,3 +8348,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      valid priority returns 0 but the task's actual
 ##      scheduling behavior is unchanged.
 
+##   76. fsync / fdatasync / syncfs fd validation (batch 50).
+##      Status: DONE for ABI shape.  The four sync-family
+##      syscalls (fsync=74, fdatasync=75, sync=162, syncfs=
+##      306) previously returned 0 unconditionally — they
+##      didn't even check whether the fd was open.  That
+##      meant programs that relied on fsync to report errors
+##      (databases, journaling layers, file rename-and-sync
+##      patterns) would silently lose the EBADF signal that
+##      should have told them their fd table was corrupt.
+##      Linux contract that we now enforce:
+##         - fsync(fd) / fdatasync(fd) / syncfs(fd):
+##              EBADF if fd is not a valid file descriptor
+##              in the caller's table.
+##         - fsync(fd) / fdatasync(fd):
+##              EINVAL if fd refers to a Pipe or Console
+##              (the Linux equivalent of "Operation not
+##              supported for this fd type" — Linux returns
+##              EINVAL for pipes/sockets/character devices
+##              that don't have a backing block device).
+##         - syncfs(fd):
+##              0 for any valid fd kind.  Linux's syncfs
+##              doesn't require a regular file: it looks
+##              up the superblock containing the fd's inode
+##              and flushes that.  Console/Pipe fds in our
+##              model don't have a backing FS but we accept
+##              them best-effort, matching the spirit of
+##              the Linux semantics (the caller asked us
+##              to flush "the filesystem containing this
+##              fd" — if there isn't one, we have nothing
+##              to flush, so trivially 0).
+##         - sync(): 0 unconditionally (no fd arg, no
+##              parameters to validate).
+##      Implementation:
+##         - sys_fsync routes via lookup_caller_fd, then
+##           matches on HandleKind to gate
+##           File→0 vs Console|Pipe→EINVAL.
+##         - sys_fdatasync delegates to sys_fsync (our FS
+##           has no metadata write-back layer to skip).
+##         - sys_syncfs only checks lookup_caller_fd; any
+##           valid fd yields 0.
+##         - sys_sync is unchanged (always 0).
+##      Boot self-test coverage:
+##         - sync() → 0 (no-fd path).
+##         - fsync/fdatasync/syncfs with fd=0 from kernel
+##           context (no caller_pid → no fd table) → EBADF.
+##         - fsync/fdatasync/syncfs with fd=-1 → EBADF.
+##         - Real-fd-kind branches (File→0, Console|Pipe→
+##           EINVAL for fsync) are not covered by the boot
+##           self-test because the self-test runs without a
+##           Linux fd table; they are exercised indirectly
+##           (any regression that re-introduces the
+##           unconditional-zero behavior would fail the
+##           EBADF assertions above).
+##      Limitation: durability is still a stub.  None of
+##      these syscalls actually flush a buffer cache to
+##      durable storage because we don't have a unified
+##      buffer cache, and our current FS is in-memory only.
+##      Programs that depend on fsync for crash-consistency
+##      (SQLite, PostgreSQL, leveldb-style journal layers,
+##      file-rename-and-sync atomic-write patterns) get the
+##      Linux error semantics correctly but get NO actual
+##      durability guarantee.  This will land when:
+##         - a real storage driver layer exists (ext4 or
+##           similar with a backing block device); and
+##         - the VFS has a write-back cache that knows how
+##           to map fd → owning superblock → dirty page
+##           writeback queue.
+##      Until then, fsync-as-durability-fence is a no-op.
+##      Documented here so future audits don't mistake the
+##      now-passing EBADF tests for "fsync works".
+

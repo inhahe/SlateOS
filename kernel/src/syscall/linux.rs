@@ -4855,29 +4855,78 @@ fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // Filesystem sync syscalls
 //
-// We don't have a unified buffer-cache flush mechanism yet, so these
-// are silent-success stubs.  Programs that rely on these for
-// durability (databases, in particular) will write at risk of
-// crash-loss on real hardware.  Tracked in todo.txt.
+// We don't have a unified buffer-cache flush mechanism yet, so the
+// actual durability promise is a no-op.  We *do*, however, validate
+// the fd: previously these accepted any fd unconditionally and
+// returned 0, which let bugs like fsync(closed_fd) silently "succeed"
+// instead of returning EBADF as Linux does.  After batch 50, the
+// caller sees the same error structure as Linux even though the
+// underlying flush is still a no-op for valid fds.
+//
+// Tracked in todo.txt: real durability when storage drivers + a
+// page-cache layer land.
 // ---------------------------------------------------------------------------
 
 /// `fsync(fd)` — flush all writes for `fd` to durable storage.
-fn sys_fsync(_args: &SyscallArgs) -> SyscallResult {
-    SyscallResult::ok(0)
+///
+/// Linux semantics that we enforce:
+///   - `EBADF` if `fd` is not a valid file descriptor.
+///   - `EINVAL` if `fd` refers to a Pipe or Console — those aren't
+///     regular files and don't support sync (Linux's "Operation not
+///     supported").
+///   - `0` for regular File handles.  Real persistence will land when
+///     the storage subsystem grows a write-back cache; today the FS
+///     is in-memory and writes are immediately "durable" against the
+///     only failure mode we have (process death — kernel restart
+///     wipes everything anyway).
+fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    match entry.kind {
+        HandleKind::File => SyscallResult::ok(0),
+        HandleKind::Console | HandleKind::Pipe => linux_err(errno::EINVAL),
+    }
 }
 
 /// `fdatasync(fd)` — flush only the data (not metadata) for `fd`.
-fn sys_fdatasync(_args: &SyscallArgs) -> SyscallResult {
-    SyscallResult::ok(0)
+///
+/// Same validation surface as [`sys_fsync`]; the only Linux-side
+/// difference is that fdatasync may skip metadata writes (mtime,
+/// permissions).  Since our FS is in-memory we have no metadata
+/// write-back layer to skip either, so the two syscalls degenerate to
+/// the same implementation.
+fn sys_fdatasync(args: &SyscallArgs) -> SyscallResult {
+    sys_fsync(args)
 }
 
 /// `sync()` — flush all filesystem writes to durable storage.
+///
+/// Parameterless; nothing to validate.  Returns 0 unconditionally.
 fn sys_sync(_args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
 /// `syncfs(fd)` — flush all writes for the filesystem containing `fd`.
-fn sys_syncfs(_args: &SyscallArgs) -> SyscallResult {
+///
+/// Linux semantics that we enforce:
+///   - `EBADF` if `fd` is not a valid file descriptor.
+///   - `0` for any valid fd, regardless of kind.  Unlike fsync, Linux
+///     does *not* require the fd to refer to a regular file: syncfs
+///     looks up the superblock containing the fd's inode and flushes
+///     that, which is sensible for any fd whose inode lives on a
+///     real filesystem.  Console/Pipe fds in our model don't have a
+///     backing FS but the syscall is best-effort anyway, so silent
+///     success matches the spirit of the Linux semantics.
+fn sys_syncfs(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if lookup_caller_fd(fd).is_err() {
+        return linux_err(errno::EBADF);
+    }
     SyscallResult::ok(0)
 }
 
@@ -15214,15 +15263,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    // Filesystem sync stubs all return 0.
+    // Filesystem sync-family validation (batch 50).
+    //
+    //   - `sync()` takes no fd and always returns 0.
+    //   - `fsync(fd)` / `fdatasync(fd)` / `syncfs(fd)` validate the fd
+    //     via `lookup_caller_fd`.  The boot self-test runs with no
+    //     calling PID, so `lookup_caller_fd` returns `EBADF` for
+    //     *any* fd — that's the exact behaviour we want to assert
+    //     here (no fd table → no valid fd → EBADF, not silent 0).
+    //
+    // We don't have a self-test fd table to plumb in a real File /
+    // Console / Pipe handle, so the post-validation branches
+    // (`HandleKind::File → 0`, `Console|Pipe → EINVAL`) are exercised
+    // indirectly through the dispatch path: any future regression
+    // that re-introduces the unconditional-zero behaviour would
+    // immediately fail the EBADF assertions below.
     {
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+        let a_no_fd = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        for nr in [nr::FSYNC, nr::FDATASYNC, nr::SYNC, nr::SYNCFS] {
-            if dispatch_linux(nr, &a).value != 0 {
+        if dispatch_linux(nr::SYNC, &a_no_fd).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sync() not 0 ({})",
+                dispatch_linux(nr::SYNC, &a_no_fd).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // fd = 0 in kernel context → no caller_pid → EBADF.
+        for nr in [nr::FSYNC, nr::FDATASYNC, nr::SYNCFS] {
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr, &a).value;
+            if v != -i64::from(errno::EBADF) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: sync-family syscall {} not 0 ({})",
-                    nr, dispatch_linux(nr, &a).value
+                    "[syscall/linux]   FAIL: sync-family fd-validating syscall {} on fd=0 (no caller) not EBADF ({})",
+                    nr, v
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // fd = huge negative in kernel context → still EBADF.
+        let a_bad = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        for nr in [nr::FSYNC, nr::FDATASYNC, nr::SYNCFS] {
+            let v = dispatch_linux(nr, &a_bad).value;
+            if v != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sync-family syscall {} on fd=-1 not EBADF ({})",
+                    nr, v
                 );
                 return Err(KernelError::InternalError);
             }

@@ -7363,3 +7363,57 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      re-stringifying paths will silently stay at their
 ##      original cwd.
 
+##  62. PREAD64 / PWRITE64 / PREADV / PWRITEV / PREADV2 / PWRITEV2
+##      real implementations (was ENOSYS) — DONE.
+##      Second "upgrade a stub" batch.  Replaces batch-31's "let
+##      glibc emulate via lseek+rw+lseek" with real kernel-side
+##      positional I/O that preserves the file offset atomically.
+##         - fs::handle gains `read_at(handle, offset, &mut buf)`
+##           and `write_at(handle, offset, &data)` — pure
+##           positional ops that go straight to Vfs::read_at /
+##           Vfs::write_at without touching the cached file
+##           offset.  POSIX-correct: pwrite ignores O_APPEND.
+##         - syscall layer adds `pread_file_to_user` /
+##           `pwrite_file_from_user` backends that allocate a
+##           kernel buffer, copy_to/from_user, and dispatch to
+##           the fs::handle primitives.
+##         - sys_pread64 / sys_pwrite64 use them for File
+##           handles; Console / Pipe → ESPIPE (POSIX rule:
+##           positional I/O on non-seekable fd is ESPIPE, not
+##           ENOSYS).
+##         - sys_preadv / sys_pwritev / sys_preadv2 / sys_pwritev2
+##           walk the iovec array calling the backends with
+##           successive offsets.  Linux partial-result semantics
+##           preserved: short read mid-iov returns the accumulated
+##           total.  preadv2/pwritev2 with offset == -1 delegate
+##           to readv/writev (matches Linux: -1 means "use current
+##           file offset").
+##      Choice rationale:
+##         * Adding fs::handle::read_at/write_at as first-class
+##           primitives (rather than the seek-save+seek+rw+
+##           seek-restore dance glibc would do) gives correct
+##           atomicity for free: the file's cached offset
+##           literally never changes during a positional op.
+##         * ESPIPE (not ENOSYS) for Console/Pipe matches Linux
+##           exactly — pread on a pipe is a "wrong tool for the
+##           job" error, not a "kernel can't do this" error.
+##         * RWF_* flags on preadv2/pwritev2 are accepted (no
+##           EOPNOTSUPP except for unknown bits) and treated as
+##           hints.  We don't have a block layer that can honour
+##           RWF_HIPRI / RWF_DSYNC / RWF_NOWAIT etc., so the hint
+##           is silently ignored — same outcome as a Linux kernel
+##           on a filesystem that doesn't support the hint.
+##         * preadv2(-1) → sys_readv is the cleanest dispatch.
+##           pwritev2(-1) → sys_writev, same idea.
+##      Limitation: RWF_NOWAIT can't actually trigger EAGAIN for
+##      us yet because the VFS is synchronous.  Programs that use
+##      it for non-blocking probes will see success rather than
+##      EAGAIN — observable, but benign (the read/write itself
+##      completes immediately on a synchronous backend).
+##      Limitation: short-read accumulation in the iovec walk
+##      currently stops at the first short-read.  A more
+##      sophisticated impl would keep going across iov entries on
+##      "small read", but Linux itself stops at short read on
+##      regular files, so this matches.  On pipes Linux behaves
+##      differently — but we ESPIPE there anyway.
+

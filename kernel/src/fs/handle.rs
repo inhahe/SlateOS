@@ -386,6 +386,76 @@ pub fn write(handle: u64, data: &[u8]) -> KernelResult<usize> {
     Ok(written)
 }
 
+/// Read up to `buf.len()` bytes starting at an explicit `offset`,
+/// **without** modifying the file's current offset.
+///
+/// This is the backbone of `pread64(2)` and `preadv(2)` — they're
+/// defined to be atomic with respect to the current offset (no
+/// observable change after the call returns).  We achieve that by
+/// going straight to the VFS with the caller-supplied offset and
+/// never touching `file.offset`.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
+/// - [`KernelError::PermissionDenied`] — handle was not opened for
+///   reading.
+/// - VFS errors propagated unchanged.
+pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
+    let table = OPEN_FILES.lock();
+    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    if !file.flags.is_readable() {
+        return Err(KernelError::PermissionDenied);
+    }
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    if offset >= file.size {
+        return Ok(0);
+    }
+    let data = crate::fs::Vfs::read_at(&file.path, offset, buf.len())?;
+    let copy_len = data.len().min(buf.len());
+    if let Some(dest) = buf.get_mut(..copy_len) {
+        if let Some(src) = data.get(..copy_len) {
+            dest.copy_from_slice(src);
+        }
+    }
+    Ok(copy_len)
+}
+
+/// Write bytes at an explicit `offset`, **without** modifying the
+/// file's current offset.
+///
+/// Backbone of `pwrite64(2)` and `pwritev(2)`.  Linux ignores the
+/// `O_APPEND` flag for `pwrite` (POSIX: "the offset argument shall be
+/// used and the file offset shall not be changed") — we follow that
+/// rule.  Grows the cached size if the write extends past the
+/// current end-of-file.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
+/// - [`KernelError::PermissionDenied`] — handle was not opened for
+///   writing.
+/// - VFS errors propagated unchanged.
+pub fn write_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<usize> {
+    let mut table = OPEN_FILES.lock();
+    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    if !file.flags.is_writable() {
+        return Err(KernelError::PermissionDenied);
+    }
+    if data.is_empty() {
+        return Ok(0);
+    }
+    crate::fs::Vfs::write_at(&file.path, offset, data)?;
+    let written = data.len();
+    let new_end = offset.saturating_add(written as u64);
+    if new_end > file.size {
+        file.size = new_end;
+    }
+    Ok(written)
+}
+
 /// Seek to a new position in the file.
 ///
 /// Returns the new absolute offset after seeking.

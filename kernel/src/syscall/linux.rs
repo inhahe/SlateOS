@@ -9755,62 +9755,137 @@ fn sys_ustat(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+/// Backend for `pread64`/`preadv*`: reads from a File handle at an
+/// explicit offset (without touching the file's current position) and
+/// copies the result into the user buffer.
+///
+/// Returns the byte count on success, an `errno` value on failure.
+/// `buf == 0` with `len == 0` returns `Ok(0)` to match Linux.
+fn pread_file_to_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result<i64, i32> {
+    if len == 0 {
+        return Ok(0);
+    }
+    crate::mm::user::validate_user_write(buf, len).map_err(linux_errno_for)?;
+    let mut kbuf = alloc::vec![0u8; len];
+    let n = crate::fs::handle::read_at(handle, offset, &mut kbuf)
+        .map_err(linux_errno_for)?;
+    if n > 0 {
+        // SAFETY: validate_user_write succeeded for `len ≥ n` bytes
+        // starting at `buf`; kbuf is a kernel-owned slice; copy_to_user
+        // uses STAC/CLAC.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n)
+        };
+        r.map_err(linux_errno_for)?;
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    Ok(n as i64)
+}
+
+/// Backend for `pwrite64`/`pwritev*`: reads bytes from userspace and
+/// writes them to a File handle at an explicit offset.
+fn pwrite_file_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result<i64, i32> {
+    if len == 0 {
+        return Ok(0);
+    }
+    crate::mm::user::validate_user_read(buf, len).map_err(linux_errno_for)?;
+    let mut kbuf = alloc::vec![0u8; len];
+    // SAFETY: validate_user_read succeeded; copy_from_user uses STAC/CLAC.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len)
+    };
+    r.map_err(linux_errno_for)?;
+    let n = crate::fs::handle::write_at(handle, offset, &kbuf)
+        .map_err(linux_errno_for)?;
+    #[allow(clippy::cast_possible_wrap)]
+    Ok(n as i64)
+}
+
 /// `pread64(fd, buf, count, offset)` — positional read.
 ///
-/// We don't yet have a positional-I/O backend in the VFS, so report
-/// ENOSYS after argument validation.  glibc's stdio falls back to a
-/// `lseek + read + lseek` sequence when pread64 returns ENOSYS, which
-/// preserves the file offset for the caller.
+/// Reads `count` bytes from `fd` starting at `offset`, **without**
+/// modifying the file's current offset (atomicity is the entire point
+/// of pread vs. the lseek+read pattern).  Only File handles support
+/// positional I/O; Console and Pipe return `ESPIPE`, matching Linux.
+///
+/// On success returns the number of bytes read (0 = EOF).
+///
+/// # Errors
+///
+/// - `EBADF` — invalid fd.
+/// - `EINVAL` — negative offset or count exceeds `usize::MAX`.
+/// - `ESPIPE` — fd is not seekable (Console or Pipe).
+/// - `EFAULT` — `buf` not writable for `count` bytes.
 fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let buf = args.arg1;
     let count = args.arg2;
     let offset = args.arg3 as i64;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     if offset < 0 {
         return linux_err(errno::EINVAL);
-    }
-    if count == 0 {
-        return SyscallResult::ok(0);
     }
     let len = match usize::try_from(count) {
         Ok(v) => v,
         Err(_) => return linux_err(errno::EINVAL),
     };
-    if let Err(e) = crate::mm::user::validate_user_write(buf, len) {
-        return linux_err(linux_errno_for(e));
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    match entry.kind {
+        HandleKind::File => {
+            #[allow(clippy::cast_sign_loss)]
+            let off = offset as u64;
+            match pread_file_to_user(entry.raw_handle, off, buf, len) {
+                Ok(n) => SyscallResult::ok(n),
+                Err(e) => linux_err(e),
+            }
+        }
+        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
     }
-    linux_err(errno::ENOSYS)
 }
 
 /// `pwrite64(fd, buf, count, offset)` — positional write.
 ///
-/// Same fallback story as pread64: glibc emulates with seek+write+seek
-/// when pwrite64 returns ENOSYS.
+/// Writes `count` bytes from `buf` to `fd` starting at `offset`,
+/// **without** modifying the file's current offset.  POSIX rule:
+/// `O_APPEND` is ignored for pwrite — the offset argument wins.  Only
+/// File handles support positional I/O; Console and Pipe return
+/// `ESPIPE`.
+///
+/// # Errors
+///
+/// - `EBADF` — invalid fd.
+/// - `EINVAL` — negative offset or count exceeds `usize::MAX`.
+/// - `ESPIPE` — fd is not seekable.
+/// - `EFAULT` — `buf` not readable for `count` bytes.
 fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let buf = args.arg1;
     let count = args.arg2;
     let offset = args.arg3 as i64;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     if offset < 0 {
         return linux_err(errno::EINVAL);
-    }
-    if count == 0 {
-        return SyscallResult::ok(0);
     }
     let len = match usize::try_from(count) {
         Ok(v) => v,
         Err(_) => return linux_err(errno::EINVAL),
     };
-    if let Err(e) = crate::mm::user::validate_user_read(buf, len) {
-        return linux_err(linux_errno_for(e));
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    match entry.kind {
+        HandleKind::File => {
+            #[allow(clippy::cast_sign_loss)]
+            let off = offset as u64;
+            match pwrite_file_from_user(entry.raw_handle, off, buf, len) {
+                Ok(n) => SyscallResult::ok(n),
+                Err(e) => linux_err(e),
+            }
+        }
+        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
     }
-    linux_err(errno::ENOSYS)
 }
 
 /// Canonicalize `path` against `cwd`, producing an absolute path with
@@ -10226,25 +10301,148 @@ fn validate_iov(iov_ptr: u64, iovcnt: i32, for_write: bool) -> Result<(), Syscal
     Ok(())
 }
 
+/// Walk an iovec array, calling `pread_file_to_user` for each entry
+/// at successive offsets.  Returns the total byte count on success.
+///
+/// Partial-result semantics match Linux: if some bytes were already
+/// transferred and a later entry fails, return the accumulated total.
+/// If the very first call fails, propagate the error.
+fn preadv_file_walk(
+    handle: u64,
+    base_offset: u64,
+    iov_ptr: u64,
+    iovcnt: i32,
+) -> SyscallResult {
+    let mut total: i64 = 0;
+    let mut cur_offset: u64 = base_offset;
+    for i in 0..iovcnt {
+        let entry_ptr = iov_ptr.wrapping_add((i as u64) * 16);
+        #[repr(C)]
+        struct Iovec { base: u64, len: u64 }
+        let mut iov = Iovec { base: 0, len: 0 };
+        // SAFETY: validate_iov has already verified the iov array.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                entry_ptr,
+                (&raw mut iov).cast::<u8>(),
+                core::mem::size_of::<Iovec>(),
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        if iov.len == 0 {
+            continue;
+        }
+        let len = match usize::try_from(iov.len) {
+            Ok(v) => v,
+            Err(_) => return linux_err(errno::EINVAL),
+        };
+        match pread_file_to_user(handle, cur_offset, iov.base, len) {
+            Ok(n) => {
+                total = total.saturating_add(n);
+                #[allow(clippy::cast_sign_loss)]
+                let advance = n as u64;
+                cur_offset = cur_offset.saturating_add(advance);
+                // Short read (EOF mid-iov) — stop and report what we got.
+                if (n as u64) < iov.len {
+                    return SyscallResult::ok(total);
+                }
+            }
+            Err(e) => {
+                if total > 0 {
+                    return SyscallResult::ok(total);
+                }
+                return linux_err(e);
+            }
+        }
+    }
+    SyscallResult::ok(total)
+}
+
+/// Walk an iovec array, calling `pwrite_file_from_user` for each entry
+/// at successive offsets.  Same partial-result semantics as
+/// [`preadv_file_walk`].
+fn pwritev_file_walk(
+    handle: u64,
+    base_offset: u64,
+    iov_ptr: u64,
+    iovcnt: i32,
+) -> SyscallResult {
+    let mut total: i64 = 0;
+    let mut cur_offset: u64 = base_offset;
+    for i in 0..iovcnt {
+        let entry_ptr = iov_ptr.wrapping_add((i as u64) * 16);
+        #[repr(C)]
+        struct Iovec { base: u64, len: u64 }
+        let mut iov = Iovec { base: 0, len: 0 };
+        // SAFETY: validate_iov has already verified the iov array.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                entry_ptr,
+                (&raw mut iov).cast::<u8>(),
+                core::mem::size_of::<Iovec>(),
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        if iov.len == 0 {
+            continue;
+        }
+        let len = match usize::try_from(iov.len) {
+            Ok(v) => v,
+            Err(_) => return linux_err(errno::EINVAL),
+        };
+        match pwrite_file_from_user(handle, cur_offset, iov.base, len) {
+            Ok(n) => {
+                total = total.saturating_add(n);
+                #[allow(clippy::cast_sign_loss)]
+                let advance = n as u64;
+                cur_offset = cur_offset.saturating_add(advance);
+                if (n as u64) < iov.len {
+                    return SyscallResult::ok(total);
+                }
+            }
+            Err(e) => {
+                if total > 0 {
+                    return SyscallResult::ok(total);
+                }
+                return linux_err(e);
+            }
+        }
+    }
+    SyscallResult::ok(total)
+}
+
 /// `preadv(fd, iov, iovcnt, offset)` — positional vectored read.
 ///
-/// Same fallback story as pread64: validate args and return ENOSYS so
-/// glibc emulates with `lseek + readv + lseek`.
+/// Implemented via [`fs::handle::read_at`](crate::fs::handle::read_at):
+/// the file's current offset is **not** modified.  Only File handles
+/// support positional I/O; Console / Pipe return `ESPIPE`.
 fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let iov_ptr = args.arg1;
     let iovcnt = args.arg2 as i32;
     let offset = args.arg3 as i64;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     if offset < 0 {
         return linux_err(errno::EINVAL);
     }
     if let Err(r) = validate_iov(iov_ptr, iovcnt, false) {
         return r;
     }
-    linux_err(errno::ENOSYS)
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    match entry.kind {
+        HandleKind::File => {
+            #[allow(clippy::cast_sign_loss)]
+            let off = offset as u64;
+            preadv_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
+        }
+        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+    }
 }
 
 /// `pwritev(fd, iov, iovcnt, offset)` — positional vectored write.
@@ -10253,32 +10451,44 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
     let iov_ptr = args.arg1;
     let iovcnt = args.arg2 as i32;
     let offset = args.arg3 as i64;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     if offset < 0 {
         return linux_err(errno::EINVAL);
     }
     if let Err(r) = validate_iov(iov_ptr, iovcnt, true) {
         return r;
     }
-    linux_err(errno::ENOSYS)
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    match entry.kind {
+        HandleKind::File => {
+            #[allow(clippy::cast_sign_loss)]
+            let off = offset as u64;
+            pwritev_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
+        }
+        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+    }
 }
 
 /// `preadv2(fd, iov, iovcnt, offset, flags)` — like preadv with RWF_* flags.
 ///
 /// flags ⊆ { RWF_HIPRI=1 | RWF_DSYNC=2 | RWF_SYNC=4 | RWF_NOWAIT=8 |
 /// RWF_APPEND=16 | RWF_NOAPPEND=32 | RWF_ATOMIC=64 | RWF_DONTCACHE=128 }.
-/// offset may be -1 to mean "use current file offset" (preadv2 special case).
+/// offset == -1 means "use current file offset" (i.e. behave as
+/// `readv`); we dispatch back through `sys_readv` in that case.
+///
+/// All `RWF_*` flags are accepted but treated as hints (we don't yet
+/// have a block layer that can honour them); this matches the
+/// behaviour glibc expects — feature-detection probes call preadv2
+/// with `RWF_HIPRI=0` and either get success (modern kernel) or
+/// ENOSYS (old kernel).  We're "modern" without the perf hints.
 fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let iov_ptr = args.arg1;
     let iovcnt = args.arg2 as i32;
     let offset = args.arg3 as i64;
     let flags = args.arg4 as u32;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     if offset < -1 {
         return linux_err(errno::EINVAL);
     }
@@ -10290,7 +10500,23 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_iov(iov_ptr, iovcnt, false) {
         return r;
     }
-    linux_err(errno::ENOSYS)
+    if offset == -1 {
+        // preadv2(offset=-1) is defined to use the current file offset,
+        // i.e. behave exactly like readv.
+        return sys_readv(args);
+    }
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    match entry.kind {
+        HandleKind::File => {
+            #[allow(clippy::cast_sign_loss)]
+            let off = offset as u64;
+            preadv_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
+        }
+        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+    }
 }
 
 /// `pwritev2(fd, iov, iovcnt, offset, flags)`.
@@ -10300,9 +10526,6 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
     let iovcnt = args.arg2 as i32;
     let offset = args.arg3 as i64;
     let flags = args.arg4 as u32;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     if offset < -1 {
         return linux_err(errno::EINVAL);
     }
@@ -10313,7 +10536,21 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_iov(iov_ptr, iovcnt, true) {
         return r;
     }
-    linux_err(errno::ENOSYS)
+    if offset == -1 {
+        return sys_writev(args);
+    }
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    match entry.kind {
+        HandleKind::File => {
+            #[allow(clippy::cast_sign_loss)]
+            let off = offset as u64;
+            pwritev_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
+        }
+        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+    }
 }
 
 /// `remap_file_pages(addr, size, prot, pgoff, flags)` — non-linear mapping
@@ -16896,22 +17133,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let path_buf = b"/tmp/foo\0";
         let path_ptr = path_buf.as_ptr() as u64;
 
-        // pread64 negative offset -> EINVAL.
+        // pread64 negative offset -> EINVAL (checked before fd lookup).
         let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 64, arg3: u64::MAX, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: pread64 neg offset not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pread64 count=0 -> 0.
-        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PREAD64, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: pread64 count=0 not 0");
-            return Err(KernelError::InternalError);
-        }
-        // pread64 valid -> ENOSYS.
+        // pread64 valid args, kernel context (no fd table) -> EBADF.
+        // The Linux-ABI fd table is per-process; in kernel context
+        // (caller_pid() == None) there is none, so any fd lookup fails.
         let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 64, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: pread64 valid not ENOSYS");
+        if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: pread64 valid not EBADF (kernel ctx)");
             return Err(KernelError::InternalError);
         }
 
@@ -16921,16 +17154,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pwrite64 neg offset not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pwrite64 count=0 -> 0.
-        let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PWRITE64, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: pwrite64 count=0 not 0");
-            return Err(KernelError::InternalError);
-        }
-        // pwrite64 valid -> ENOSYS.
+        // pwrite64 valid args, kernel context (no fd table) -> EBADF.
         let a = SyscallArgs { arg0: 3, arg1: iobuf_ptr, arg2: 64, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PWRITE64, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: pwrite64 valid not ENOSYS");
+        if dispatch_linux(nr::PWRITE64, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: pwrite64 valid not EBADF (kernel ctx)");
             return Err(KernelError::InternalError);
         }
 
@@ -17155,16 +17382,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: preadv bad iovcnt not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // preadv valid -> ENOSYS.
+        // preadv valid args, kernel context (no fd table) -> EBADF.
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: preadv valid not ENOSYS");
+        if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: preadv valid not EBADF (kernel ctx)");
             return Err(KernelError::InternalError);
         }
-        // pwritev valid -> ENOSYS.
+        // pwritev valid args, kernel context -> EBADF.
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PWRITEV, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: pwritev valid not ENOSYS");
+        if dispatch_linux(nr::PWRITEV, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: pwritev valid not EBADF (kernel ctx)");
             return Err(KernelError::InternalError);
         }
         // preadv2 bad flags -> EOPNOTSUPP.
@@ -17173,16 +17400,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: preadv2 bad flags not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // preadv2 offset=-1 (use file offset) valid -> ENOSYS.
+        // preadv2 offset=-1 (use file offset) — falls through to sys_readv,
+        // which itself returns EBADF in kernel context.
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: u64::MAX, arg4: 1, arg5: 0 };
-        if dispatch_linux(nr::PREADV2, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: preadv2 offset=-1 not ENOSYS");
+        if dispatch_linux(nr::PREADV2, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: preadv2 offset=-1 not EBADF");
             return Err(KernelError::InternalError);
         }
-        // pwritev2 valid -> ENOSYS.
+        // pwritev2 valid args -> EBADF (no fd table).
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PWRITEV2, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: pwritev2 valid not ENOSYS");
+        if dispatch_linux(nr::PWRITEV2, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: pwritev2 valid not EBADF (kernel ctx)");
             return Err(KernelError::InternalError);
         }
     }

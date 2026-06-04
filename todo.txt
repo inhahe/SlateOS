@@ -2980,11 +2980,54 @@ Remaining net improvements (diminishing returns):
       u32::MAX, negative errors).
   All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  RUNNING TOTAL: 975 tests across 64 binaries (whoami + batches 1-11).
-  ~21 binaries still pending.
+  PROGRESS 2026-06-04 (batch 12): added 76 unit tests across 4 more
+  binaries (cp, mv, grep, find), focused on argv parsing and a glob
+  engine.
+    * cp.rs: extracted `parse_args(args) -> Result<CpArgs { recursive,
+      paths }>` (clustered short flags accepted, unknown errors).
+      Added `compute_target(src, dest, dest_is_dir) -> PathBuf` (when
+      dest is a directory, appends source's file-name).  14 tests:
+      parse (empty, simple, -r, -R, clustered -rR, unknown errors,
+      multiple sources, flag-at-end, bare-dash-is-path), compute_target
+      (file→file, file→dir, dir→dir basename, no-filename source,
+      absolute non-dir).
+    * mv.rs: same pattern as cp; extracted `parse_args(args) ->
+      Result<MvArgs { force, paths }>` and `compute_target`.  12 tests
+      covering both helpers.
+    * grep.rs: added `#[derive(Default)]` on Options, extracted
+      `parse_args(args) -> Result<GrepArgs { opts, pattern, files }>`
+      (clustered flags, bare "-" preserved as filename),
+      `line_selected(line, pattern_cmp, opts) -> bool` (handles
+      ignore-case at caller, applies invert at end),
+      `line_prefix(filename, line_idx_0based, show_filename,
+      line_numbers) -> String` (one-based for display).  Kept
+      `search_stream` and refactored it to use the new helpers — now
+      it's testable with byte-slice readers.  26 tests: parse_args (8
+      cases including unknown-flag errors and bare-dash-is-filename),
+      line_selected (substring, case-insensitive, invert, invert+ci,
+      empty pattern matches all, empty line vs non-empty pattern),
+      line_prefix (none, filename only, line-number only, both),
+      search_stream end-to-end via Vec<u8> readers (basic match, no
+      match returns false, count-only with and without filename, line
+      numbers, invert, ignore-case, show-filename prefix).
+    * find.rs: extracted `parse_args(args) -> Result<FindArgs { paths,
+      name_pattern, type_filter, max_depth }>` with proper Result
+      error handling (missing-value, invalid-maxdepth, unknown-flag).
+      Hardened `glob_match_inner` to use `.get()` instead of indexing,
+      added `saturating_*` arithmetic everywhere, kept the semantics
+      identical.  24 tests: parse_args (empty, single/multiple paths,
+      -name, -type, -type takes first char only, -maxdepth, invalid
+      maxdepth, missing -name value, -print ignored, unknown flag,
+      mixed paths+filters), glob_match (literal, * empty/end/start/
+      middle, ?, [abc] class, file.[ch], unmatched [ no-match,
+      empty pattern matches only empty, multiple stars, unicode).
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  REMAINING: awk, bc, cp, ed, false, fetch, find, grep, ls, mv, nohup,
-  patch, ps, pwd, realpath, sed, sh, tar, test, touch, true.
+  RUNNING TOTAL: 1051 tests across 68 binaries (whoami + batches 1-12).
+  ~17 binaries still pending.
+
+  REMAINING: awk, bc, ed, false, fetch, ls, nohup, patch, ps, pwd,
+  realpath, sed, sh, tar, test, touch, true.
   Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to

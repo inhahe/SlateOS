@@ -3275,11 +3275,11 @@ mod tests {
     fn test_vault_toggle_star() {
         let mut v = Vault::new("V", "pw");
         let id = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
-        assert!(!v.get_entry(id).map_or(false, |e| e.starred));
+        assert!(!v.get_entry(id).is_some_and(|e| e.starred));
         v.toggle_star(id);
-        assert!(v.get_entry(id).map_or(false, |e| e.starred));
+        assert!(v.get_entry(id).is_some_and(|e| e.starred));
         v.toggle_star(id);
-        assert!(!v.get_entry(id).map_or(false, |e| e.starred));
+        assert!(!v.get_entry(id).is_some_and(|e| e.starred));
     }
 
     #[test]
@@ -3287,9 +3287,9 @@ mod tests {
         let mut v = Vault::new("V", "pw");
         let id = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         v.set_compromised(id, true);
-        assert!(v.get_entry(id).map_or(false, |e| e.compromised));
+        assert!(v.get_entry(id).is_some_and(|e| e.compromised));
         v.set_compromised(id, false);
-        assert!(!v.get_entry(id).map_or(false, |e| e.compromised));
+        assert!(!v.get_entry(id).is_some_and(|e| e.compromised));
     }
 
     #[test]

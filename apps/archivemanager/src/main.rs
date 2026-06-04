@@ -3534,8 +3534,10 @@ mod tests {
 
     #[test]
     fn test_app_state_status_text_with_archive() {
-        let mut s = AppState::default();
-        s.archive = Some(create_sample_archive());
+        let s = AppState {
+            archive: Some(create_sample_archive()),
+            ..AppState::default()
+        };
         let text = s.status_text();
         assert!(text.contains("files"));
         assert!(text.contains("Ratio"));
@@ -3554,17 +3556,21 @@ mod tests {
 
     #[test]
     fn test_render_frame_with_archive() {
-        let mut state = AppState::default();
-        state.archive = Some(create_sample_archive());
+        let state = AppState {
+            archive: Some(create_sample_archive()),
+            ..AppState::default()
+        };
         let cmds = render_frame(&state);
         assert!(cmds.len() > 20, "should produce many render commands with an archive open");
     }
 
     #[test]
     fn test_render_frame_with_progress() {
-        let mut state = AppState::default();
-        state.archive = Some(create_sample_archive());
-        state.progress = Some(OperationProgress::new("Extracting", 10, 5000));
+        let state = AppState {
+            archive: Some(create_sample_archive()),
+            progress: Some(OperationProgress::new("Extracting", 10, 5000)),
+            ..AppState::default()
+        };
         let cmds = render_frame(&state);
         assert!(cmds.len() > 20);
     }
@@ -3589,8 +3595,10 @@ mod tests {
 
     #[test]
     fn test_render_sidebar_hidden() {
-        let mut state = AppState::default();
-        state.sidebar_visible = false;
+        let state = AppState {
+            sidebar_visible: false,
+            ..AppState::default()
+        };
         let mut cmds = Vec::new();
         let w = render_sidebar(&state, &mut cmds, 0.0, 400.0);
         assert_eq!(w, 0.0);
@@ -3599,8 +3607,10 @@ mod tests {
 
     #[test]
     fn test_render_sidebar_visible() {
-        let mut state = AppState::default();
-        state.archive = Some(create_sample_archive());
+        let state = AppState {
+            archive: Some(create_sample_archive()),
+            ..AppState::default()
+        };
         let mut cmds = Vec::new();
         let w = render_sidebar(&state, &mut cmds, 0.0, 400.0);
         assert!(w > 0.0);

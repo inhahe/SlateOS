@@ -1918,36 +1918,46 @@ mod tests {
 
     #[test]
     fn config_empty_url_invalid() {
-        let mut cfg = SpeedTestConfig::default();
-        cfg.server_url = String::new();
+        let cfg = SpeedTestConfig {
+            server_url: String::new(),
+            ..SpeedTestConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn config_zero_duration_invalid() {
-        let mut cfg = SpeedTestConfig::default();
-        cfg.test_duration_secs = 0;
+        let cfg = SpeedTestConfig {
+            test_duration_secs: 0,
+            ..SpeedTestConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn config_excessive_duration_invalid() {
-        let mut cfg = SpeedTestConfig::default();
-        cfg.test_duration_secs = 200;
+        let cfg = SpeedTestConfig {
+            test_duration_secs: 200,
+            ..SpeedTestConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn config_zero_connections_invalid() {
-        let mut cfg = SpeedTestConfig::default();
-        cfg.num_connections = 0;
+        let cfg = SpeedTestConfig {
+            num_connections: 0,
+            ..SpeedTestConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn config_excessive_connections_invalid() {
-        let mut cfg = SpeedTestConfig::default();
-        cfg.num_connections = 64;
+        let cfg = SpeedTestConfig {
+            num_connections: 64,
+            ..SpeedTestConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 

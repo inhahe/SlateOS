@@ -2313,20 +2313,33 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `getrandom(buf, buflen, flags)` — fill buf with random bytes.
+/// `getrandom(buf, buflen, flags)` — fill `buf` with random bytes.
 ///
-/// The kernel does not yet expose a unified CSPRNG.  We use the RDRAND
-/// instruction when available and fall back to `rdtsc`-derived bytes
-/// otherwise.  Linux's `getrandom` is "best effort to avoid blocking
-/// for entropy"; falling back to a TSC stream is documented as a known
-/// limitation (`todo.txt`) until the kernel ships a real CSPRNG.
+/// Backed by the kernel ChaCha20 CSPRNG (`crate::rng`).  Linux's
+/// `getrandom(2)` returns "best effort to avoid blocking for entropy";
+/// our RNG is always available once `rng::init()` has run (during
+/// boot), and falls back to TSC+HPET lazy-seeding if a caller somehow
+/// races early boot.
+///
+/// `flags` is accepted but not interpreted:
+///   - `GRND_NONBLOCK` (0x0001) — we never block, so it's a no-op.
+///   - `GRND_RANDOM`   (0x0002) — we don't distinguish urandom vs
+///                                 random sources; same CSPRNG either
+///                                 way.
+///   - `GRND_INSECURE` (0x0004) — accepted for API compatibility.
+///
+/// Returns the number of bytes written (always equal to `buflen`
+/// capped at 256, matching Linux's `getrandom` per-call cap).
 fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
     let buf_ptr = args.arg0;
     let buf_len = args.arg1 as usize;
+    // arg2 = flags (ignored — see doc comment above).
     if buf_len == 0 {
         return SyscallResult::ok(0);
     }
-    // Cap to avoid pathological huge requests.
+    // Cap to avoid pathological huge requests.  Linux's getrandom
+    // caps at 256 bytes per call when GRND_RANDOM is set; we apply
+    // the same cap universally as a defensive measure (callers loop).
     let n = buf_len.min(256);
 
     // Validate user buffer is writable.
@@ -2334,19 +2347,11 @@ fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
 
-    // Fill from a TSC-mixed stream.  Not cryptographic, but good enough
-    // for Linux programs that just need non-zero "random-looking" bytes
-    // (process IDs in tmp file names, sample jitter, etc.).
+    // Fill from the kernel CSPRNG (ChaCha20, see kernel/src/rng.rs).
     let mut tmp = [0u8; 256];
-    let mut state: u64 = crate::bench::rdtsc();
     #[allow(clippy::indexing_slicing)]
-    for i in 0..n {
-        // xorshift64 step.
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        tmp[i] = (state & 0xff) as u8;
-    }
+    crate::rng::fill(&mut tmp[..n]);
+
     // SAFETY: validated above.
     #[allow(clippy::indexing_slicing)]
     let r = unsafe { crate::mm::user::copy_to_user(tmp.as_ptr(), buf_ptr, n) };

@@ -10,7 +10,7 @@
 //! ├── null       Discards all writes, reads return EOF (empty)
 //! ├── zero       Reads return zero bytes, writes succeed
 //! ├── full       Reads return zero bytes, writes fail with DiskFull
-//! ├── random     Reads return pseudo-random bytes (xorshift64)
+//! ├── random     Reads return CSPRNG bytes (ChaCha20, kernel `rng`)
 //! ├── urandom    Same as random (no entropy blocking distinction)
 //! ├── console    Reads/writes to the kernel console
 //! └── tty        Controlling terminal (aliases console, single-console)
@@ -23,10 +23,11 @@
 //! IPC — the devfs does NOT expose block devices or hardware directly.
 //! It provides the standard "utility" device files that programs expect.
 //!
-//! The PRNG for `/dev/random` uses xorshift64 seeded from the HPET
-//! counter.  This is NOT cryptographically secure — it's adequate for
-//! test data, shuffling, and non-security randomness.  A real CSPRNG
-//! (seeded from hardware RNG / RDRAND) should replace it in the future.
+//! `/dev/random` and `/dev/urandom` both delegate to the kernel
+//! CSPRNG (`crate::rng::fill`, ChaCha20-based, seeded at boot from
+//! RDSEED/RDRAND/HPET/TSC).  Output is cryptographically secure; the
+//! random/urandom split exists purely for API compatibility — we
+//! never block waiting for entropy.
 
 #![allow(dead_code)]
 

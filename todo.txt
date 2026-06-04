@@ -5551,7 +5551,12 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     actual Linux binary can be loaded.
 ##
 ## NEXT STEPS (in priority order):
-##   1. Replace xorshift64 with kernel CSPRNG when one exists.
+##   1. GETRANDOM CSPRNG — DONE.  sys_getrandom now calls
+##      crate::rng::fill (ChaCha20-based CSPRNG seeded at boot from
+##      RDSEED/RDRAND/HPET/TSC).  The previous xorshift64-from-TSC
+##      stream is gone.  Flags (GRND_NONBLOCK / GRND_RANDOM /
+##      GRND_INSECURE) are accepted but ignored — we never block and
+##      we don't distinguish urandom/random sources.
 ##   2. Cross-CPU TLB shootdown for mprotect.  Currently only the
 ##      local CPU's TLB is flushed; a sibling thread running on
 ##      another CPU could observe stale permissions until its next

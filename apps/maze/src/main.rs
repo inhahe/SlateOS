@@ -1040,7 +1040,7 @@ mod tests {
 
     #[test]
     fn test_move_into_wall() {
-        let mut maze = Maze::new(3, 3);
+        let maze = Maze::new(3, 3);
         // Don't generate — all walls present
         let mut app = MazeApp::new();
         app.maze = maze;
@@ -1055,7 +1055,7 @@ mod tests {
 
     #[test]
     fn test_trail_marking() {
-        let mut app = MazeApp::new();
+        let app = MazeApp::new();
         assert!(app.trail[0]); // Starting position marked
     }
 

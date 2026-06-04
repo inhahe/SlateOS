@@ -1093,8 +1093,9 @@ mod tests {
 
     #[test]
     fn test_solvable_by_reverse() {
-        // Generate a puzzle, record the toggle positions, then replay them
-        let mut rng = Rng::new(42);
+        // Generate a puzzle, record the toggle positions, then replay them.
+        // The Rng would normally pick the toggle positions; here we use a
+        // hand-picked set so the rng is unused.
         let mut grid = vec![vec![false; 3]; 3];
         let toggles = [(1, 1), (0, 0), (2, 2)];
         for (r, c) in &toggles {

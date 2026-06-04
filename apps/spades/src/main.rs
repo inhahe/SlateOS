@@ -2205,7 +2205,7 @@ mod tests {
         let game = SpadesGame::new();
         for pid_val in 1..4u8 {
             let bid = game.ai_bid(PlayerId(pid_val));
-            assert!(bid >= 1 && bid <= 6, "AI bid {} out of expected range", bid);
+            assert!((1..=6).contains(&bid), "AI bid {} out of expected range", bid);
         }
     }
 
@@ -2893,7 +2893,6 @@ mod tests {
     #[test]
     fn test_advance_round_increments() {
         let mut game = SpadesGame::new();
-        let old_round = game.round_number;
         game.bid_selection = 3;
         game.submit_human_bid();
         game.round_number = 1;

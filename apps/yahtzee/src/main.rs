@@ -1878,7 +1878,7 @@ mod tests {
             g.held = [false; 5];
             g.roll();
             for &d in &g.dice {
-                assert!(d >= 1 && d <= 6, "Die value out of range: {d}");
+                assert!((1..=6).contains(&d), "Die value out of range: {d}");
             }
         }
     }
@@ -2562,7 +2562,7 @@ mod tests {
         let mut rng = Rng::new(9999);
         for _ in 0..1000 {
             let val = rng.die();
-            assert!(val >= 1 && val <= 6, "Die out of range: {val}");
+            assert!((1..=6).contains(&val), "Die out of range: {val}");
         }
     }
 

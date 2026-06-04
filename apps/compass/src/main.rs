@@ -1728,7 +1728,7 @@ mod tests {
                 let a = Coordinate::new(*lat, *lon);
                 let b = Coordinate::new(lat + 5.0, lon + 5.0);
                 let brg = bearing_to(&a, &b);
-                assert!(brg >= 0.0 && brg < 360.0, "bearing out of range: {brg}");
+                assert!((0.0..360.0).contains(&brg), "bearing out of range: {brg}");
             }
         }
     }
@@ -1870,7 +1870,7 @@ mod tests {
         let result = app.waypoint_bearing_distance();
         assert!(result.is_some());
         let (brg, dist) = result.unwrap();
-        assert!(brg >= 0.0 && brg < 360.0);
+        assert!((0.0..360.0).contains(&brg));
         assert!(dist > 5000.0); // NYC to London > 5000 km
     }
 

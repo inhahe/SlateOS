@@ -4437,10 +4437,10 @@ mod tests {
         let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
         let eid = app.add_episode(pid, "Ep", "", "2026-01-01", 600, "", 10_000).unwrap();
         // Manually set as downloaded.
-        if let Some(p) = app.find_podcast_mut(pid) {
-            if let Some(ep) = p.find_episode_mut(eid) {
-                ep.download_status = DownloadStatus::Downloaded;
-            }
+        if let Some(p) = app.find_podcast_mut(pid)
+            && let Some(ep) = p.find_episode_mut(eid)
+        {
+            ep.download_status = DownloadStatus::Downloaded;
         }
         app.used_disk_bytes = app.used_disk_bytes.saturating_add(10_000);
         let before = app.used_disk_bytes;
@@ -4453,7 +4453,7 @@ mod tests {
         let app = PodcastApp::new(800.0, 600.0);
         assert!(app.remaining_disk_bytes() <= app.total_disk_bytes);
         let pct = app.disk_usage_pct();
-        assert!(pct >= 0.0 && pct <= 100.0);
+        assert!((0.0..=100.0).contains(&pct));
     }
 
     // -----------------------------------------------------------------------

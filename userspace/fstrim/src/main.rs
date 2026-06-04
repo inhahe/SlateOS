@@ -1266,11 +1266,11 @@ mod tests {
         // Should find ext4 and MBR
         let mut found_ext4 = false;
         let mut found_mbr = false;
-        for i in 0..count {
-            if &sigs[i].fstype[..sigs[i].fstype_len] == b"ext4" {
+        for sig in sigs.iter().take(count) {
+            if &sig.fstype[..sig.fstype_len] == b"ext4" {
                 found_ext4 = true;
             }
-            if &sigs[i].fstype[..sigs[i].fstype_len] == b"dos" {
+            if &sig.fstype[..sig.fstype_len] == b"dos" {
                 found_mbr = true;
             }
         }
@@ -1283,8 +1283,8 @@ mod tests {
         let (mounts, count) = get_discard_mounts();
         assert!(count > 0);
         // tmpfs should be excluded
-        for i in 0..count {
-            assert_ne!(&mounts[i].2[..mounts[i].3], b"tmpfs");
+        for mount in mounts.iter().take(count) {
+            assert_ne!(&mount.2[..mount.3], b"tmpfs");
         }
     }
 

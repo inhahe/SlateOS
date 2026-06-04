@@ -2695,14 +2695,14 @@ mod tests {
     fn test_average_completion_7d() {
         let app = HabitTrackerApp::new();
         let avg = app.average_completion_7d();
-        assert!(avg >= 0.0 && avg <= 1.0);
+        assert!((0.0..=1.0).contains(&avg));
     }
 
     #[test]
     fn test_average_completion_30d() {
         let app = HabitTrackerApp::new();
         let avg = app.average_completion_30d();
-        assert!(avg >= 0.0 && avg <= 1.0);
+        assert!((0.0..=1.0).contains(&avg));
     }
 
     #[test]

@@ -963,10 +963,10 @@ mod tests {
     #[test]
     fn test_nice_no_command_prints_niceness() {
         // This is hard to test without the syscall, but we can verify
-        // the argument parsing logic
-        let args = vec!["-n".to_string(), "5".to_string()];
-        // Without a command, nice should print current niceness
-        // On non-ouros this would use the fallback syscall behavior
+        // the argument parsing logic.
+        let _args = ["-n".to_string(), "5".to_string()];
+        // Without a command, nice should print current niceness.
+        // On non-ouros this would use the fallback syscall behavior.
     }
 
     // Duration edge cases

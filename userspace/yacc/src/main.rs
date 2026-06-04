@@ -17,8 +17,10 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+#[cfg(not(test))]
 use std::env;
 use std::fmt::Write as FmtWrite;
+#[cfg(not(test))]
 use std::fs;
 
 // -------------------------------------------------------------------------
@@ -2456,6 +2458,7 @@ fn derive_verbose_name(input: &str) -> String {
     }
 }
 
+#[cfg(not(test))]
 fn run_main() -> i32 {
     let args: Vec<String> = env::args().collect();
     let opts = match parse_options(&args) {
@@ -3107,7 +3110,7 @@ factor : LPAREN expr RPAREN | NUM ;\n\
         let first = compute_first_sets(&g);
         let follow = compute_follow_sets(&g, &first);
         let (states, transitions) = build_item_sets(&g);
-        let (table, conflicts) = build_parse_table(&g, &states, &transitions, &follow);
+        let (_table, conflicts) = build_parse_table(&g, &states, &transitions, &follow);
         // Should resolve to shift for right-assoc
         let resolved_to_shift = conflicts.iter().any(|c| {
             if let ConflictKind::ShiftReduce { resolved, .. } = &c.kind {

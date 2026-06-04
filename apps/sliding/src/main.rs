@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_slide_up() {
-        let mut b = Board::new(3);
+        let b = Board::new(3);
         // Empty is at (2,2), slide Up brings (2,2-1)=(1,2) tile down
         // Actually Up means tile from below moves up into empty
         // Up: target = empty_pos + size
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_slide_left() {
-        let mut b = Board::new(3);
+        let b = Board::new(3);
         // Empty at (2,2), Left: empty_col < size-1 → 2 < 2 = false
         assert!(!b.can_move(Direction::Left));
     }

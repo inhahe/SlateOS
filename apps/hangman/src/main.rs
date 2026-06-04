@@ -1841,7 +1841,7 @@ mod tests {
     #[test]
     fn test_loss_detection() {
         let mut app = playing_app("cat");
-        for &letter in &[b'x', b'y', b'z', b'q', b'w', b'e'] {
+        for &letter in b"xyzqwe" {
             app.guess_letter(letter);
         }
         assert_eq!(app.phase, GamePhase::Lost);
@@ -1861,7 +1861,7 @@ mod tests {
     #[test]
     fn test_loss_increments_stats() {
         let mut app = playing_app("cat");
-        for &letter in &[b'x', b'y', b'z', b'q', b'w', b'e'] {
+        for &letter in b"xyzqwe" {
             app.guess_letter(letter);
         }
         assert_eq!(app.stats.losses, 1);

@@ -2443,7 +2443,7 @@ mod tests {
     #[test]
     fn test_timer_format_elapsed() {
         let mut t = RecordingTimer::new(0, 0);
-        t.tick(3661_000); // 1h 1m 1s
+        t.tick(3_661_000); // 1h 1m 1s
         assert_eq!(t.format_elapsed(), "01:01:01");
     }
 
@@ -2992,7 +2992,7 @@ mod tests {
         let mut app = SoundRecorderApp::new();
         app.transition_to(RecordingState::Recording);
         app.process_samples(&[5000, -5000, 3000, -3000]);
-        assert!(app.wav.samples.len() > 0);
+        assert!(!app.wav.samples.is_empty());
     }
 
     #[test]

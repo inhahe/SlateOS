@@ -1952,8 +1952,10 @@ mod tests {
 
     #[test]
     fn test_create_session_max_limit() {
-        let mut config = DaemonConfig::default();
-        config.max_sessions = 2;
+        let config = DaemonConfig {
+            max_sessions: 2,
+            ..DaemonConfig::default()
+        };
         let mut d = Daemon::new(config);
         d.create_session(CreateSessionParams {
             uid: 1000,
@@ -2271,8 +2273,10 @@ mod tests {
 
     #[test]
     fn test_power_action_denied() {
-        let mut config = DaemonConfig::default();
-        config.allow_suspend = false;
+        let config = DaemonConfig {
+            allow_suspend: false,
+            ..DaemonConfig::default()
+        };
         let d = Daemon::new(config);
         assert_eq!(d.request_power_action(PowerAction::Suspend, false), PowerActionResult::Denied);
     }

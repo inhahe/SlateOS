@@ -2412,14 +2412,14 @@ mod tests {
     #[test]
     fn test_normalize_angle_positive() {
         let a = normalize_angle(TAU + 1.0);
-        assert!(a >= 0.0 && a < TAU);
+        assert!((0.0..TAU).contains(&a));
         assert!((a - 1.0).abs() < 0.001);
     }
 
     #[test]
     fn test_normalize_angle_negative() {
         let a = normalize_angle(-1.0);
-        assert!(a >= 0.0 && a < TAU);
+        assert!((0.0..TAU).contains(&a));
         assert!((a - (TAU - 1.0)).abs() < 0.001);
     }
 

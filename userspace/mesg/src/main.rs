@@ -415,6 +415,7 @@ fn run_talk(
 // Help / version
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
 fn print_help(personality: Personality) {
     match personality {
         Personality::Mesg => {
@@ -447,6 +448,7 @@ fn print_help(personality: Personality) {
     }
 }
 
+#[cfg(not(test))]
 fn print_version(personality: Personality) {
     let name = match personality {
         Personality::Mesg => "mesg",

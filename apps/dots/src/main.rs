@@ -1454,12 +1454,6 @@ mod tests {
             pressed: true,
             modifiers: Modifiers::NONE,
             text: None,
-            ..KeyEvent {
-                key,
-                pressed: true,
-                modifiers: Modifiers::NONE,
-                text: None,
-            }
         })
     }
 
@@ -1469,12 +1463,6 @@ mod tests {
             pressed: false,
             modifiers: Modifiers::NONE,
             text: None,
-            ..KeyEvent {
-                key,
-                pressed: false,
-                modifiers: Modifiers::NONE,
-                text: None,
-            }
         })
     }
 

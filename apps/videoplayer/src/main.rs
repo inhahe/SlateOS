@@ -4580,16 +4580,20 @@ mod tests {
 
     #[test]
     fn test_video_adjustments_non_default() {
-        let mut adj = VideoAdjustments::default();
-        adj.brightness = 0.5;
+        let adj = VideoAdjustments {
+            brightness: 0.5,
+            ..VideoAdjustments::default()
+        };
         assert!(!adj.is_default());
     }
 
     #[test]
     fn test_video_adjustments_reset() {
-        let mut adj = VideoAdjustments::default();
-        adj.brightness = 0.5;
-        adj.contrast = 1.5;
+        let mut adj = VideoAdjustments {
+            brightness: 0.5,
+            contrast: 1.5,
+            ..VideoAdjustments::default()
+        };
         adj.reset();
         assert!(adj.is_default());
     }

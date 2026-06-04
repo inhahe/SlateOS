@@ -2118,7 +2118,7 @@ mod tests {
             let mut app = CrosswordApp::new();
             app.load_puzzle(i);
             assert_eq!(app.view, View::Playing);
-            assert!(app.cells.len() > 0);
+            assert!(!app.cells.is_empty());
             assert!(!app.clues.is_empty());
         }
     }
@@ -2131,7 +2131,7 @@ mod tests {
             let numbered = app
                 .cells
                 .iter()
-                .filter(|c| c.as_ref().map_or(false, |cell| cell.number > 0))
+                .filter(|c| c.as_ref().is_some_and(|cell| cell.number > 0))
                 .count();
             assert!(numbered > 0, "Puzzle {i} has no numbered cells");
         }

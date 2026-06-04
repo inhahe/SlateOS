@@ -1332,14 +1332,14 @@ mod tests {
     #[test]
     fn test_grid_toggle_key() {
         let mut app = LifeApp::new();
-        assert_eq!(app.show_grid, true);
+        assert!(app.show_grid);
         app.event(&Event::Key(KeyEvent {
             key: Key::G,
             modifiers: Modifiers::default(),
             pressed: true,
             text: None,
         }));
-        assert_eq!(app.show_grid, false);
+        assert!(!app.show_grid);
     }
 
     #[test]

@@ -2059,8 +2059,10 @@ mod tests {
             new_path: "a/b/c.txt".into(),
             hunks: vec![],
         };
-        let mut opts = Options::default();
-        opts.strip = Some(1);
+        let opts = Options {
+            strip: Some(1),
+            ..Options::default()
+        };
         let path = resolve_target_path(&fp, &opts);
         assert_eq!(path, PathBuf::from("b/c.txt"));
     }
@@ -2084,8 +2086,10 @@ mod tests {
             new_path: "b/new.txt".into(),
             hunks: vec![],
         };
-        let mut opts = Options::default();
-        opts.reverse = true;
+        let opts = Options {
+            reverse: true,
+            ..Options::default()
+        };
         let path = resolve_target_path(&fp, &opts);
         assert_eq!(path, PathBuf::from("b/new.txt"));
     }

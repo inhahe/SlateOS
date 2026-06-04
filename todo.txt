@@ -6918,4 +6918,61 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      can wait until we expose PKU CPUID.  Also: fixed an
 ##      existing bug where EVENTFD was defined as 290 (collision
 ##      with EVENTFD2); legacy eventfd is syscall 284.
+##  55. Legacy x86 + kexec + mount-query + LSM family
+##      (MODIFY_LDT / IOPL / IOPERM / SET_THREAD_AREA /
+##      GET_THREAD_AREA / KEXEC_LOAD / KEXEC_FILE_LOAD /
+##      STATMOUNT / LISTMOUNT / LSM_GET_SELF_ATTR /
+##      LSM_SET_SELF_ATTR / LSM_LIST_MODULES) — 12 syscalls
+##      DONE as input-validated principled-errno stubs.
+##         - modify_ldt: validate func ∈ {0, 1, 2, 0x11},
+##           bytecount >= 16 for writes; return ENOSYS
+##           (x86_64 long mode doesn't use LDT for userspace;
+##           Wine uses modify_ldt for 16/32-bit segmented code).
+##         - iopl: validate level ∈ 0..=3; return EPERM
+##           (direct I/O port access not granted — drivers run
+##           as IPC servers behind capabilities).
+##         - ioperm: validate range fits in 0..=0xFFFF; EPERM.
+##         - set_thread_area / get_thread_area: validate 16B
+##           user_desc; return ENOSYS (x86_64 uses
+##           arch_prctl(ARCH_SET_FS) for TLS).
+##         - kexec_load: validate nr_segments <= 16, segments
+##           ptr required when nr>0, 32B kexec_segment per
+##           entry; EPERM.
+##         - kexec_file_load: validate fds (initrd_fd == -1
+##           ok), cmdline ptr when len > 0; EPERM.
+##         - statmount: validate 24B mnt_id_req in, output
+##           writable, bufsize > 0, flags == 0; return ENOENT
+##           (every mnt_id is unknown — no mount tree yet).
+##         - listmount: same validation; ENOENT.
+##         - lsm_get_self_attr: validate attr ∈ 100..=105
+##           (CURRENT/EXEC/FSCREATE/KEYCREATE/PREV/SOCKCREATE),
+##           size* read+write, flags ∈ {0, LSM_FLAG_SINGLE};
+##           return EOPNOTSUPP (no LSM stacked).
+##         - lsm_set_self_attr: validate attr, ctx ptr+len,
+##           flags == 0; EOPNOTSUPP.
+##         - lsm_list_modules: validate size* read+write,
+##           flags == 0; EOPNOTSUPP.
+##      Choice rationale:
+##         * ENOSYS for modify_ldt/thread_area: x86 legacy paths;
+##           ENOSYS is the universal "this arch lacks them"
+##           signal that Wine/dosemu/glibc-32 handle by
+##           switching to long-mode paths.
+##         * EPERM for iopl/ioperm/kexec: not "feature absent"
+##           but "you can't have this privilege" — matches
+##           non-root Linux.  Returning ENOSYS would let
+##           sandbox escapes think the syscall doesn't exist
+##           when it's actually a security boundary.
+##         * ENOENT for statmount/listmount: matches "you
+##           asked about an unknown mnt_id".  Returning ENOSYS
+##           would force fallback paths even once we have a
+##           real mount tree.
+##         * EOPNOTSUPP for LSM: documents "this build lacks
+##           the feature" without claiming we lack the syscall.
+##      Limitation: none of these are particularly important.
+##      iopl/ioperm could matter if we host DOSBox-style
+##      emulators (we'll need a capability-checked port-grant
+##      then).  LSM stacking unlikely because we have a
+##      different security model (capabilities + namespaces).
+##      statmount/listmount need real backing once VFS mount
+##      tree exists (mount is also EPERM today).
 

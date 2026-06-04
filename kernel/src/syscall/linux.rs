@@ -635,6 +635,19 @@ pub mod nr {
     pub const PKEY_MPROTECT: u64 = 329;
     pub const GET_ROBUST_LIST: u64 = 274;
     pub const SET_MEMPOLICY_HOME_NODE: u64 = 450;
+    // Legacy x86 + kexec + mount-query + LSM family.
+    pub const MODIFY_LDT: u64 = 154;
+    pub const IOPL: u64 = 172;
+    pub const IOPERM: u64 = 173;
+    pub const SET_THREAD_AREA: u64 = 205;
+    pub const GET_THREAD_AREA: u64 = 211;
+    pub const KEXEC_LOAD: u64 = 246;
+    pub const KEXEC_FILE_LOAD: u64 = 320;
+    pub const STATMOUNT: u64 = 457;
+    pub const LISTMOUNT: u64 = 458;
+    pub const LSM_GET_SELF_ATTR: u64 = 459;
+    pub const LSM_SET_SELF_ATTR: u64 = 460;
+    pub const LSM_LIST_MODULES: u64 = 461;
 }
 
 // ---------------------------------------------------------------------------
@@ -1685,6 +1698,18 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::PKEY_MPROTECT => sys_pkey_mprotect(args),
         nr::GET_ROBUST_LIST => sys_get_robust_list(args),
         nr::SET_MEMPOLICY_HOME_NODE => sys_set_mempolicy_home_node(args),
+        nr::MODIFY_LDT => sys_modify_ldt(args),
+        nr::IOPL => sys_iopl(args),
+        nr::IOPERM => sys_ioperm(args),
+        nr::SET_THREAD_AREA => sys_set_thread_area(args),
+        nr::GET_THREAD_AREA => sys_get_thread_area(args),
+        nr::KEXEC_LOAD => sys_kexec_load(args),
+        nr::KEXEC_FILE_LOAD => sys_kexec_file_load(args),
+        nr::STATMOUNT => sys_statmount(args),
+        nr::LISTMOUNT => sys_listmount(args),
+        nr::LSM_GET_SELF_ATTR => sys_lsm_get_self_attr(args),
+        nr::LSM_SET_SELF_ATTR => sys_lsm_set_self_attr(args),
+        nr::LSM_LIST_MODULES => sys_lsm_list_modules(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -9196,6 +9221,276 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+// ---------------------------------------------------------------------------
+// Legacy x86 (modify_ldt / iopl / ioperm / set_thread_area /
+// get_thread_area), kexec (kexec_load / kexec_file_load), mount-query
+// (statmount / listmount), and LSM (lsm_get_self_attr /
+// lsm_set_self_attr / lsm_list_modules).
+//
+// None of these are appropriate for a microkernel design.  modify_ldt
+// is for legacy 16-bit/32-bit segmented code (Wine, dosemu); we run
+// x86_64 long mode only.  iopl/ioperm grant userspace direct I/O port
+// access — our driver model puts I/O behind IPC, so granting it would
+// break the security model.  set_thread_area / get_thread_area are
+// the 32-bit equivalents of arch_prctl(ARCH_SET_FS); on x86_64 they
+// are obsolete.  kexec_load / kexec_file_load load a replacement
+// kernel — not supported.  statmount / listmount are the new
+// mount-tree query API (Linux 6.8); requires a real VFS mount tree.
+// LSM self-attr family is the Linux Security Module interface
+// (Linux 6.8); we don't expose LSM stacking.
+// ---------------------------------------------------------------------------
+
+/// `modify_ldt(func, ptr, bytecount)`.
+fn sys_modify_ldt(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let func = args.arg0 as i32;
+    // Valid funcs: 0 (read LDT), 1 (write LDT entry), 2 (read default
+    // LDT), 0x11 (write LDT entry without alloc).
+    if !matches!(func, 0 | 1 | 2 | 0x11) {
+        return linux_err(errno::EINVAL);
+    }
+    // bytecount must be >= 16 (size of one user_desc) for writes.
+    if matches!(func, 1 | 0x11) {
+        if args.arg2 < 16 {
+            return linux_err(errno::EINVAL);
+        }
+        if args.arg1 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, args.arg2 as usize) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if matches!(func, 0 | 2) {
+        if args.arg1 == 0 || args.arg2 == 0 {
+            // Reading zero bytes is a no-op; we don't bother validating.
+        } else if let Err(e) =
+            crate::mm::user::validate_user_write(args.arg1, args.arg2 as usize)
+        {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // x86_64 long mode doesn't use LDT entries for userspace.
+    linux_err(errno::ENOSYS)
+}
+
+/// `iopl(level)`.
+fn sys_iopl(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let level = args.arg0 as i32;
+    if !(0..=3).contains(&level) {
+        return linux_err(errno::EINVAL);
+    }
+    // Direct I/O port access is not granted to userspace — drivers
+    // run as IPC servers behind capabilities.
+    linux_err(errno::EPERM)
+}
+
+/// `ioperm(from, num, turn_on)`.
+fn sys_ioperm(args: &SyscallArgs) -> SyscallResult {
+    // I/O port range is 0..=0xFFFF; from + num must not exceed.
+    if args.arg0 > 0xFFFF || args.arg1 > 0xFFFF {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0.saturating_add(args.arg1) > 0x1_0000 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `set_thread_area(user_desc*)`.
+fn sys_set_thread_area(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct user_desc is 16 bytes.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 16) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 16) {
+        return linux_err(linux_errno_for(e));
+    }
+    // x86_64 uses arch_prctl(ARCH_SET_FS) for TLS, not GDT slot
+    // allocation.
+    linux_err(errno::ENOSYS)
+}
+
+/// `get_thread_area(user_desc*)`.
+fn sys_get_thread_area(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 16) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `kexec_load(entry, nr_segments, segments*, flags)`.
+fn sys_kexec_load(args: &SyscallArgs) -> SyscallResult {
+    // nr_segments hard-capped at 16 in Linux (KEXEC_SEGMENT_MAX).
+    if args.arg1 > 16 {
+        return linux_err(errno::EINVAL);
+    }
+    // segments pointer required when nr_segments > 0.
+    if args.arg1 > 0 {
+        if args.arg2 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // struct kexec_segment is 32 bytes (4x void* fields).
+        let total = (args.arg1 as usize).saturating_mul(32);
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, total) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Loading a replacement kernel from userspace is a root-only
+    // operation we don't support.
+    linux_err(errno::EPERM)
+}
+
+/// `kexec_file_load(kernel_fd, initrd_fd, cmdline_len, cmdline*, flags)`.
+fn sys_kexec_file_load(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let kernel_fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let initrd_fd = args.arg1 as i32;
+    if kernel_fd < 0 {
+        return linux_err(errno::EBADF);
+    }
+    // initrd_fd == -1 means "no initrd"; otherwise validate.
+    if initrd_fd != -1 && initrd_fd < 0 {
+        return linux_err(errno::EBADF);
+    }
+    if args.arg2 > 0 {
+        if args.arg3 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, args.arg2 as usize) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `statmount(req*, buf*, bufsize, flags)`.
+fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 || args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct mnt_id_req has a u32 size field at offset 0; min size is
+    // 24 bytes (size, spare, mnt_id, param).
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 24) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg2 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, args.arg2 as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    // flags must be 0 (no flags defined yet).
+    if args.arg3 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // No mount-tree exposed yet — any mnt_id is unknown.
+    linux_err(errno::ENOENT)
+}
+
+/// `listmount(req*, buf*, bufsize, flags)`.
+fn sys_listmount(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 24) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg2 > 0 {
+        if args.arg1 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // Buffer holds u64 mnt_ids — 8 bytes each.
+        let total = (args.arg2 as usize).saturating_mul(8);
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, total) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg3 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOENT)
+}
+
+/// `lsm_get_self_attr(attr, ctx*, size*, flags)`.
+fn sys_lsm_get_self_attr(args: &SyscallArgs) -> SyscallResult {
+    // attr: LSM_ATTR_CURRENT=100 / EXEC=101 / FSCREATE=102 /
+    // KEYCREATE=103 / PREV=104 / SOCKCREATE=105.
+    #[allow(clippy::cast_possible_truncation)]
+    let attr = args.arg0 as u32;
+    if !(100..=105).contains(&attr) {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // size* is a u32 (size_t in some ABIs) read-modify-write.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    // flags: LSM_FLAG_SINGLE (1) only.
+    if args.arg3 & !1 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // No LSM module stacked → no attributes to report.
+    linux_err(errno::EOPNOTSUPP)
+}
+
+/// `lsm_set_self_attr(attr, ctx*, size, flags)`.
+fn sys_lsm_set_self_attr(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let attr = args.arg0 as u32;
+    if !(100..=105).contains(&attr) {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if args.arg2 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, args.arg2 as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg3 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::EOPNOTSUPP)
+}
+
+/// `lsm_list_modules(ids*, size*, flags)`.
+fn sys_lsm_list_modules(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg2 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // No LSM modules → success with zero count.  We can't actually
+    // write 0 to *size from kernel context, but glibc treats E2BIG
+    // followed by *size of 0 the same way; and EOPNOTSUPP is
+    // documented as "this build of the kernel doesn't have LSM
+    // self-attr support" which is exactly our case.
+    linux_err(errno::EOPNOTSUPP)
+}
+
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
     // type 0..=10 are defined in Linux.
@@ -14932,6 +15227,225 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Legacy x86 + kexec + mount-query + LSM family
+    // -----------------------------------------------------------------
+    {
+        let user_desc_buf = [0u8; 16];
+        let user_desc_ptr = user_desc_buf.as_ptr() as u64;
+        let kexec_seg_buf = [0u8; 64];
+        let kexec_seg_ptr = kexec_seg_buf.as_ptr() as u64;
+        let mnt_req_buf = [0u8; 24];
+        let mnt_req_ptr = mnt_req_buf.as_ptr() as u64;
+        let mnt_outbuf = [0u8; 128];
+        let mnt_outbuf_ptr = mnt_outbuf.as_ptr() as u64;
+        let size_buf = [16u8, 0, 0, 0];
+        let size_ptr = size_buf.as_ptr() as u64;
+        let ctx_buf = [0u8; 16];
+        let ctx_ptr = ctx_buf.as_ptr() as u64;
+        let cmdline_buf = [0u8; 16];
+        let cmdline_ptr = cmdline_buf.as_ptr() as u64;
+
+        // modify_ldt bad func -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: user_desc_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: modify_ldt bad func not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt write with short bytecount -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: user_desc_ptr, arg2: 4, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: modify_ldt short bytecount not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt write NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: modify_ldt NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt read valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: user_desc_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: modify_ldt valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // iopl bad level -> EINVAL.
+        let a = SyscallArgs { arg0: 4, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: iopl bad level not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // iopl valid -> EPERM.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPL, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: iopl valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // ioperm out of range -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1_0000, arg1: 1, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPERM, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ioperm out-of-range not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // ioperm spans past 0xFFFF -> EINVAL.
+        let a = SyscallArgs { arg0: 0xFFF0, arg1: 0x20, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPERM, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ioperm span not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // ioperm valid -> EPERM.
+        let a = SyscallArgs { arg0: 0x100, arg1: 4, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPERM, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: ioperm valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // set_thread_area NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_THREAD_AREA, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: set_thread_area NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // set_thread_area valid -> ENOSYS.
+        let a = SyscallArgs { arg0: user_desc_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_THREAD_AREA, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: set_thread_area valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // get_thread_area valid -> ENOSYS.
+        let a = SyscallArgs { arg0: user_desc_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GET_THREAD_AREA, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: get_thread_area valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // kexec_load too many segments -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 99, arg2: kexec_seg_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: kexec_load nr_seg>16 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // kexec_load segments NULL with nr>0 -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: kexec_load NULL seg not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // kexec_load valid -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: kexec_seg_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_load valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // kexec_file_load bad kernel_fd -> EBADF.
+        let a = SyscallArgs { arg0: u64::from(u32::MAX), arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: kexec_file_load bad fd not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // kexec_file_load cmdline non-zero len NULL ptr -> EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 4, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: kexec_file_load NULL cmdline not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // kexec_file_load valid -> EPERM.
+        let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 4, arg3: cmdline_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_file_load valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // statmount NULL req -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: statmount NULL req not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // statmount bufsize 0 -> EINVAL.
+        let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: statmount bufsize=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // statmount flags!=0 -> EINVAL.
+        let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: statmount flags!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // statmount valid -> ENOENT.
+        let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: statmount valid not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // listmount valid -> ENOENT.
+        let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 8, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: listmount valid not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+
+        // lsm_get_self_attr bad attr -> EINVAL.
+        let a = SyscallArgs { arg0: 50, arg1: ctx_ptr, arg2: size_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr bad attr not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr NULL size -> EFAULT.
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr NULL size not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 2, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr valid -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr valid not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr NULL ctx -> EFAULT.
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: lsm_set_self_attr NULL ctx not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr valid -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: lsm_set_self_attr valid not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_list_modules NULL size -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: lsm_list_modules NULL size not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_list_modules bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: lsm_list_modules bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_list_modules valid -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: lsm_list_modules valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
     }

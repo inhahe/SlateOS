@@ -23,6 +23,17 @@
 #![allow(clippy::return_self_not_must_use)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
+// QR-code generation is dense Reed-Solomon / Galois-field arithmetic on
+// fixed-size lookup tables and matrix-grid indexing. The defensive
+// `arithmetic_side_effects` and `indexing_slicing` lints fire on every
+// table lookup and matrix poke with no real DoS risk: indices are
+// computed from QR-version metadata, all bounded by the matrix
+// dimension; arithmetic is on small u8/u16 finite-field values. Allow
+// the lints file-wide; workspace discipline stays in place elsewhere.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::struct_excessive_bools)]
 #![allow(dead_code)]

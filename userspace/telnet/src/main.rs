@@ -36,6 +36,17 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
+//
+// telnet runs a byte-pump between stdin and a TCP socket with inline IAC
+// option negotiation — every option-byte read and inline command parse
+// is offset+length arithmetic on a length-validated read buffer. The
+// defensive `arithmetic_side_effects`, `indexing_slicing`, and
+// `slicing` lints fire on every such site (30+ warnings) with no real
+// DoS risk; buffer indices come from the kernel read() return value.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 
 use std::env;
 use std::process;

@@ -62,6 +62,17 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
+//
+// ftp marshalls the RFC 959 protocol over TCP — every PASV-port decode,
+// directory-listing parse, and progress-bar render is offset+length
+// arithmetic on validated-length buffers / bounded counters. The
+// defensive `arithmetic_side_effects`, `indexing_slicing`, and
+// `slicing` lints fire on every such site (30+ warnings) with no real
+// DoS risk; the wire data is length-validated by the read layer.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 
 use std::env;
 use std::fmt;

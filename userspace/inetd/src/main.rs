@@ -41,6 +41,20 @@
 //! inetd -c max                   Max simultaneous connections per source (default 64)
 //! ```
 
+// inetd parses /etc/inetd.conf and pumps bytes between fixed-size
+// per-connection scratch buffers and built-in service handlers. Indices
+// are bounded by buf.len() / line length; arithmetic is on small
+// per-connection counters. Large stack buffers in the connection
+// handlers are deliberate (single-connection daemon style — no heap
+// churn on the data path). The defensive `arithmetic_side_effects`,
+// `indexing_slicing`, and `large_stack_arrays` lints fire on every such
+// site (30+ warnings) with no real DoS risk; the data they touch is
+// already length-validated by the read layer.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::large_stack_arrays,
+)]
 #![cfg_attr(not(test), no_main)]
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow

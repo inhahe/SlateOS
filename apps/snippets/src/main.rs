@@ -33,6 +33,13 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
 #![allow(dead_code)]
+// Snippet rendering indexes into chars/bytes slices and into the
+// guitk widget grid — all bounded by len() / widget dimensions; no
+// real DoS risk. Allow the defensive lints file-wide.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};

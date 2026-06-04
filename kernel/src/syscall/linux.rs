@@ -113,6 +113,189 @@ use super::dispatch::{SyscallArgs, SyscallResult};
 use super::handlers;
 
 // ---------------------------------------------------------------------------
+// Linux sa_flags bits (subset we recognize)
+// ---------------------------------------------------------------------------
+
+/// Flags from `<bits/sigaction.h>` for x86_64 Linux.  Numeric values must
+/// match Linux exactly — they appear in user struct sigaction.sa_flags.
+#[allow(dead_code)]
+pub mod sa_flags {
+    /// Do not auto-block the delivered signal during its handler.
+    pub const SA_NODEFER: u64 = 0x4000_0000;
+    /// Reset handler to SIG_DFL after one delivery.
+    pub const SA_RESETHAND: u64 = 0x8000_0000;
+    /// Restart blocking syscalls interrupted by this signal.
+    pub const SA_RESTART: u64 = 0x1000_0000;
+    /// Handler is a `void(int, siginfo_t*, void*)`; needs Linux-shape
+    /// ucontext_t on the stack.
+    pub const SA_SIGINFO: u64 = 0x0000_0004;
+    /// `sa_restorer` is valid and should be used as the return path
+    /// instead of a kernel-injected default.
+    pub const SA_RESTORER: u64 = 0x0400_0000;
+    /// Use the alternate signal stack (sigaltstack) for this handler.
+    pub const SA_ONSTACK: u64 = 0x0800_0000;
+    /// Do not generate `SIGCHLD` for stopped/continued children.
+    pub const SA_NOCLDSTOP: u64 = 0x0000_0001;
+    /// Do not transform children into zombies on exit.
+    pub const SA_NOCLDWAIT: u64 = 0x0000_0002;
+    /// All recognised bits OR'd together.  Anything outside this mask
+    /// is rejected with -EINVAL at sigaction time.
+    pub const MASK: u64 = SA_NODEFER
+        | SA_RESETHAND
+        | SA_RESTART
+        | SA_SIGINFO
+        | SA_RESTORER
+        | SA_ONSTACK
+        | SA_NOCLDSTOP
+        | SA_NOCLDWAIT;
+}
+
+// ---------------------------------------------------------------------------
+// Linux-sigaction table (per-process, per-signal)
+// ---------------------------------------------------------------------------
+
+/// Linux `struct sigaction` on x86_64.
+///
+/// Layout (matches `<bits/sigaction.h>`):
+///
+/// ```text
+/// offset  size  field
+///   0      8    sa_handler        (function pointer, or SIG_IGN / SIG_DFL)
+///   8      8    sa_flags          (SA_* bitmask)
+///  16      8    sa_restorer       (return-trampoline pointer)
+///  24      8    sa_mask           (64-bit sigset_t)
+/// total:  32 bytes
+/// ```
+///
+/// We do not store the structure as `#[repr(C)]` directly to avoid
+/// confusing the alignment story; user-level reads/writes go through
+/// explicit field-by-field marshalling so any padding additions to
+/// the kernel-side type do not change ABI behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinuxSigaction {
+    pub sa_handler: u64,
+    pub sa_flags: u64,
+    pub sa_restorer: u64,
+    pub sa_mask: u64,
+}
+
+/// Wire size of the user-visible struct sigaction on x86_64 Linux.
+const LINUX_SIGACTION_SIZE: usize = 32;
+
+/// Special handler values (mirrors `<bits/signum-generic.h>`):
+///   `SIG_DFL` = 0  — default disposition.
+///   `SIG_IGN` = 1  — ignore the signal.
+const SIG_DFL: u64 = 0;
+const SIG_IGN: u64 = 1;
+
+mod linux_sigaction_table {
+    //! Per-process, per-signal Linux sigaction storage.
+    //!
+    //! Lives outside the existing `proc::signal` module because the
+    //! native signal-shim doesn't model per-signal handlers (it has a
+    //! single trampoline pointer per process).  When the kernel's
+    //! delivery path grows a Linux-shape frame in the future, it will
+    //! consult this table to decide which handler to invoke, what
+    //! flags to apply, and which restorer pointer to push.  For now
+    //! the table is purely a query/store of state — its lifecycle
+    //! hooks (`on_fork`, `on_exec`, `on_exit`) keep it in sync with
+    //! the rest of the proc state.
+    use super::{LinuxSigaction, SIG_DFL};
+    use crate::proc::pcb::ProcessId;
+    use alloc::collections::BTreeMap;
+    use spin::Mutex;
+
+    /// Global table: pid -> (signum -> entry).
+    ///
+    /// A missing (pid, sig) pair means "default disposition" — the
+    /// callee returns a zero-filled `LinuxSigaction` (which decodes
+    /// as `sa_handler = SIG_DFL`).
+    static TABLE: Mutex<BTreeMap<ProcessId, BTreeMap<u32, LinuxSigaction>>>
+        = Mutex::new(BTreeMap::new());
+
+    /// Read the current entry for `(pid, sig)`.
+    ///
+    /// Returns the stored entry if any, else a default-filled struct
+    /// (sa_handler = SIG_DFL, all other fields zero).  Linux behaves
+    /// the same way for an unmodified signal disposition.
+    pub fn get(pid: ProcessId, sig: u32) -> LinuxSigaction {
+        let table = TABLE.lock();
+        table
+            .get(&pid)
+            .and_then(|inner| inner.get(&sig).copied())
+            .unwrap_or(LinuxSigaction {
+                sa_handler: SIG_DFL,
+                sa_flags: 0,
+                sa_restorer: 0,
+                sa_mask: 0,
+            })
+    }
+
+    /// Install `act` as the new entry for `(pid, sig)`.
+    pub fn set(pid: ProcessId, sig: u32, act: LinuxSigaction) {
+        let mut table = TABLE.lock();
+        let inner = table.entry(pid).or_default();
+        let _ = inner.insert(sig, act);
+    }
+
+    /// `fork` hook: child inherits the parent's full sigaction table.
+    ///
+    /// Linux semantics: a `fork()` child inherits all signal
+    /// dispositions verbatim.  (Only `pending` is cleared in the
+    /// child; that's handled by `proc::signal::inherit_for_fork`.)
+    pub fn on_fork(parent: ProcessId, child: ProcessId) {
+        let mut table = TABLE.lock();
+        let entries = table.get(&parent).cloned();
+        if let Some(entries) = entries {
+            let _ = table.insert(child, entries);
+        }
+    }
+
+    /// `exec` hook: caught signals (handler != SIG_DFL and != SIG_IGN)
+    /// reset to SIG_DFL.  SIG_IGN dispositions are preserved.
+    ///
+    /// This matches POSIX `execve(2)` semantics: "Signals set to be
+    /// caught by the calling process image shall be set to the
+    /// default action in the new process image."
+    pub fn on_exec(pid: ProcessId) {
+        use super::SIG_IGN;
+        let mut table = TABLE.lock();
+        if let Some(inner) = table.get_mut(&pid) {
+            inner.retain(|_sig, act| act.sa_handler == SIG_IGN);
+            // Within retained entries, also clear sa_flags / sa_mask /
+            // sa_restorer: an SA_RESTORER pointer from the old image
+            // is now garbage in the new address space.
+            for act in inner.values_mut() {
+                act.sa_flags = 0;
+                act.sa_restorer = 0;
+                act.sa_mask = 0;
+            }
+        }
+    }
+
+    /// `exit` hook: drop all per-signal state for a defunct process.
+    pub fn on_exit(pid: ProcessId) {
+        let mut table = TABLE.lock();
+        let _ = table.remove(&pid);
+    }
+
+    /// Self-test helper: clear all state.
+    #[cfg(any(test, debug_assertions))]
+    pub fn clear_all() {
+        let mut table = TABLE.lock();
+        table.clear();
+    }
+}
+
+pub use linux_sigaction_table::{
+    get as linux_sigaction_get,
+    on_exec as linux_sigaction_on_exec,
+    on_exit as linux_sigaction_on_exit,
+    on_fork as linux_sigaction_on_fork,
+    set as linux_sigaction_set,
+};
+
+// ---------------------------------------------------------------------------
 // Linux x86_64 syscall numbers (subset).
 //
 // Source of truth: `linux/arch/x86/entry/syscalls/syscall_64.tbl` (the
@@ -877,6 +1060,7 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
             // stale signal trampoline; the new image's libc init
             // will re-register.
             signal::on_exec(pid);
+            linux_sigaction_on_exec(pid);
 
             // Rewrite the saved frame so SYSRET lands at the new
             // entry point with a clean register state.
@@ -1912,41 +2096,147 @@ fn sys_brk(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(args.arg0 as i64)
 }
 
-/// `rt_sigaction(sig, act, oldact, sigsetsize)` — register a handler.
+/// `rt_sigaction(sig, act, oldact, sigsetsize)` — install/query the
+/// per-signal disposition for the calling process.
 ///
-/// We forward only the handler pointer; sa_mask and sa_flags are
-/// silently ignored (matching native signal-shim limitations).
+/// Linux semantics:
+///   - `sig` ∈ `1..=NSIG`, excluding `SIGKILL` and `SIGSTOP` (which
+///     cannot be caught — any attempt to install a handler returns
+///     `-EINVAL`).
+///   - `sigsetsize` must equal `sizeof(sigset_t)` (8 bytes on x86_64
+///     Linux LP64).  Any other value is `-EINVAL`.
+///   - `act != NULL`: install the new disposition.  `act` points at
+///     a 32-byte `struct sigaction { sa_handler, sa_flags,
+///     sa_restorer, sa_mask }`.  Unknown bits in `sa_flags` return
+///     `-EINVAL` per Linux behaviour.
+///   - `oldact != NULL`: copy the previous disposition out to
+///     userspace before installing the new one (if any).
+///
+/// The kernel-side delivery infrastructure (`proc::signal`) does not
+/// yet consume `sa_flags` / `sa_mask` / `sa_restorer` — see todo.txt
+/// "Linux-shaped signal delivery frame" item.  Storing them today
+/// makes `oldact` queries truthful and pre-populates the table for
+/// when the Linux delivery path lands.
+///
+/// To preserve the existing behavior that signal *delivery* works at
+/// all, we still call `sys_signal_register` to keep the per-process
+/// trampoline pointer in sync with the most recently installed
+/// catchable handler.  This is a known limitation: the trampoline is
+/// a single value per process, so multiple `rt_sigaction` calls for
+/// different signals will see the last-registered handler invoked
+/// for all of them until the Linux delivery path is wired up.
 fn sys_rt_sigaction(args: &SyscallArgs) -> SyscallResult {
     let sig = args.arg0;
     let act_ptr = args.arg1;
+    let oldact_ptr = args.arg2;
+    let sigsetsize = args.arg3 as usize;
 
-    // Linux `struct sigaction { void (*sa_handler)(int); ... }` — the
-    // handler is the first 8 bytes.
-    let handler: u64 = if act_ptr == 0 {
-        // act = NULL means "just query oldact"; we don't track state,
-        // so return success without changing anything.
-        return SyscallResult::ok(0);
-    } else {
-        let mut buf = [0u8; 8];
-        // SAFETY: copy_from_user validates the user range.
+    // Validate signum.  Linux uses `_NSIG = 64`.  Signal 0 is
+    // reserved (used by kill(2) to probe existence).
+    if sig == 0 || sig > u64::from(crate::proc::signal::NSIG) {
+        return linux_err(errno::EINVAL);
+    }
+    // SIGKILL / SIGSTOP cannot be caught or ignored.
+    if sig == u64::from(crate::proc::signal::SIGKILL)
+        || sig == u64::from(crate::proc::signal::SIGSTOP)
+    {
+        if act_ptr != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        // ... but querying their (default-only) disposition is fine.
+    }
+    // Linux x86_64: sigset_t is exactly 8 bytes.
+    if sigsetsize != 0 && sigsetsize != core::mem::size_of::<u64>() {
+        return linux_err(errno::EINVAL);
+    }
+
+    let sig_u32 = sig as u32;
+
+    // Look up caller's pid.  No-pid (boot self-test) returns ESRCH —
+    // there's no process to associate the disposition with.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::ESRCH),
+    };
+
+    // If oldact != NULL, copy out the current disposition BEFORE
+    // overwriting.  This matches Linux ordering and lets a caller
+    // atomically swap (act, oldact) — the same pointer is sometimes
+    // passed for both.
+    if oldact_ptr != 0 {
+        let old = linux_sigaction_get(pid, sig_u32);
+        let mut buf = [0u8; LINUX_SIGACTION_SIZE];
+        buf[0..8].copy_from_slice(&old.sa_handler.to_ne_bytes());
+        buf[8..16].copy_from_slice(&old.sa_flags.to_ne_bytes());
+        buf[16..24].copy_from_slice(&old.sa_restorer.to_ne_bytes());
+        buf[24..32].copy_from_slice(&old.sa_mask.to_ne_bytes());
+        // SAFETY: copy_to_user validates the user range.
         let r = unsafe {
-            crate::mm::user::copy_from_user(act_ptr, buf.as_mut_ptr(), 8)
+            crate::mm::user::copy_to_user(
+                buf.as_ptr(),
+                oldact_ptr,
+                LINUX_SIGACTION_SIZE,
+            )
         };
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
         }
-        u64::from_ne_bytes(buf)
+    }
+
+    // act = NULL means "query only" — we've already done that above.
+    if act_ptr == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // Read the new sigaction (32 bytes).
+    let mut buf = [0u8; LINUX_SIGACTION_SIZE];
+    // SAFETY: copy_from_user validates the user range.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(
+            act_ptr,
+            buf.as_mut_ptr(),
+            LINUX_SIGACTION_SIZE,
+        )
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    // Field-by-field decode keeps us robust against any future
+    // padding additions to the kernel-side struct.
+    let new_act = LinuxSigaction {
+        sa_handler: u64::from_ne_bytes(buf[0..8].try_into().unwrap_or([0; 8])),
+        sa_flags: u64::from_ne_bytes(buf[8..16].try_into().unwrap_or([0; 8])),
+        sa_restorer: u64::from_ne_bytes(buf[16..24].try_into().unwrap_or([0; 8])),
+        sa_mask: u64::from_ne_bytes(buf[24..32].try_into().unwrap_or([0; 8])),
     };
 
-    let native_args = SyscallArgs {
-        arg0: sig,
-        arg1: handler,
-        arg2: 0,
-        arg3: 0,
-        arg4: 0,
-        arg5: 0,
-    };
-    linux_from_native(handlers::sys_signal_register(&native_args))
+    // Reject unknown sa_flags bits — matches Linux behaviour, helps
+    // catch userspace bugs early.
+    if (new_act.sa_flags & !sa_flags::MASK) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Persist.
+    linux_sigaction_set(pid, sig_u32, new_act);
+
+    // Keep the legacy per-process trampoline in sync with the most
+    // recently installed catchable handler.  SIG_IGN / SIG_DFL must
+    // not be invoked as code, so don't push those as the trampoline.
+    if new_act.sa_handler != SIG_IGN && new_act.sa_handler != SIG_DFL {
+        let native_args = SyscallArgs {
+            arg0: sig,
+            arg1: new_act.sa_handler,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        // Discard result — sys_signal_register only fails if there's
+        // no caller pid, which we already checked above.
+        let _ = handlers::sys_signal_register(&native_args);
+    }
+
+    SyscallResult::ok(0)
 }
 
 /// `rt_sigprocmask(how, set, oldset, sigsetsize)` — wrap signal_mask.
@@ -2888,6 +3178,121 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   FAIL: rt_sigreturn EFAULT mutated user_rip"
             );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Linux-sigaction table — round-trip + edge cases.
+    //   Operates directly on the table (not via dispatch_linux),
+    //   because dispatch_linux's rt_sigaction needs a live caller pid
+    //   to record state, which the boot self-test doesn't have.
+    {
+        // Use a synthetic pid that won't collide with any real one.
+        let test_pid: u64 = 0xFFFF_FFFF_DEAD_0001;
+
+        // Initially: get() returns SIG_DFL defaults.
+        let initial = linux_sigaction_get(test_pid, 10);
+        if initial.sa_handler != SIG_DFL || initial.sa_flags != 0
+            || initial.sa_restorer != 0 || initial.sa_mask != 0
+        {
+            serial_println!("[syscall/linux]   FAIL: sigaction initial != defaults");
+            return Err(KernelError::InternalError);
+        }
+
+        // set() then get() round-trips.
+        let act = LinuxSigaction {
+            sa_handler: 0xCAFE_BABE_1234_5678,
+            sa_flags: sa_flags::SA_RESTART | sa_flags::SA_SIGINFO,
+            sa_restorer: 0xDEAD_BEEF_0000_0001,
+            sa_mask: 0xAAAA_BBBB_CCCC_DDDD,
+        };
+        linux_sigaction_set(test_pid, 10, act);
+        let read_back = linux_sigaction_get(test_pid, 10);
+        if read_back != act {
+            serial_println!("[syscall/linux]   FAIL: sigaction round-trip");
+            return Err(KernelError::InternalError);
+        }
+
+        // Per-signal independence: signal 11 still has defaults.
+        let other = linux_sigaction_get(test_pid, 11);
+        if other != LinuxSigaction::default() {
+            serial_println!("[syscall/linux]   FAIL: sigaction per-signal independence");
+            return Err(KernelError::InternalError);
+        }
+
+        // on_exec: SIG_IGN preserved, caught -> SIG_DFL.
+        // Set 11 to SIG_IGN, then re-test exec.
+        let ign = LinuxSigaction { sa_handler: SIG_IGN, sa_flags: sa_flags::SA_RESTART,
+            sa_restorer: 0x1234, sa_mask: 0x5678 };
+        linux_sigaction_set(test_pid, 11, ign);
+        linux_sigaction_on_exec(test_pid);
+        let after_exec_10 = linux_sigaction_get(test_pid, 10);
+        let after_exec_11 = linux_sigaction_get(test_pid, 11);
+        // Caught signal 10 should reset to SIG_DFL defaults.
+        if after_exec_10 != LinuxSigaction::default() {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaction on_exec didn't reset caught"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // SIG_IGN signal 11 should keep handler but lose flags/restorer/mask.
+        if after_exec_11.sa_handler != SIG_IGN
+            || after_exec_11.sa_flags != 0
+            || after_exec_11.sa_restorer != 0
+            || after_exec_11.sa_mask != 0
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaction on_exec mishandled SIG_IGN"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // on_fork: child inherits parent's entries.
+        let child_pid: u64 = 0xFFFF_FFFF_DEAD_0002;
+        linux_sigaction_on_fork(test_pid, child_pid);
+        let child_11 = linux_sigaction_get(child_pid, 11);
+        if child_11.sa_handler != SIG_IGN {
+            serial_println!("[syscall/linux]   FAIL: sigaction on_fork didn't inherit");
+            return Err(KernelError::InternalError);
+        }
+
+        // on_exit: all entries gone.
+        linux_sigaction_on_exit(test_pid);
+        linux_sigaction_on_exit(child_pid);
+        let post_exit = linux_sigaction_get(test_pid, 11);
+        if post_exit != LinuxSigaction::default() {
+            serial_println!("[syscall/linux]   FAIL: sigaction on_exit didn't clear");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // rt_sigaction validation via dispatch_linux:
+    //   - sig == 0 -> EINVAL
+    //   - sig > NSIG -> EINVAL
+    //   - sigsetsize != 0 && != 8 -> EINVAL
+    //   - unknown sa_flags bits -> EINVAL (needs an act pointer; we
+    //     can't safely deref one from boot context so we only test
+    //     the cheap rejects above).
+    {
+        // sig == 0
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 8,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigaction sig=0");
+            return Err(KernelError::InternalError);
+        }
+        // sig > NSIG
+        let a = SyscallArgs { arg0: 65, arg1: 0, arg2: 0, arg3: 8,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigaction sig=65");
+            return Err(KernelError::InternalError);
+        }
+        // sigsetsize mismatch
+        let a = SyscallArgs { arg0: 10, arg1: 0, arg2: 0, arg3: 7,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigaction sigsetsize");
             return Err(KernelError::InternalError);
         }
     }

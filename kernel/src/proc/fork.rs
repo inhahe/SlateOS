@@ -331,6 +331,11 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
     // 6. Inherit the parent's signal mask / trampoline (pending signals
     //    are *not* inherited, matching POSIX fork semantics).
     crate::proc::signal::inherit_for_fork(parent_pid, child_pid);
+    // 6b. Inherit the Linux per-signal sigaction table (separate from
+    //     the native signal-shim because the native model has only a
+    //     single trampoline pointer per process — the Linux model is
+    //     per-signal).
+    crate::syscall::linux::linux_sigaction_on_fork(parent_pid, child_pid);
 
     // 7. Inherit the parent's filesystem namespace (best-effort, like
     //    spawn).  A non-root parent namespace propagates to the child.

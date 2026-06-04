@@ -5549,6 +5549,16 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     user_rsp returns -EFAULT (both candidate ucontext addresses
 ##     fail the alignment gate before any unsafe deref).  user_rip is
 ##     left untouched on the failure path so userspace can recover.
+##   - Linux-sigaction table round-trip: a fresh pid reads back
+##     SIG_DFL/0/0/0; storing a non-default entry round-trips; per-
+##     signal independence (writing signal 11 leaves signal 10
+##     unaffected); on_exec preserves SIG_IGN handlers but zeros their
+##     flags/restorer/mask while clearing caught (non-DFL/IGN) entries
+##     back to defaults; on_fork copies the parent table to a fresh
+##     child pid; on_exit removes every entry so a re-read returns
+##     defaults again.
+##   - dispatch_linux rt_sigaction validation: sig=0, sig=65, and
+##     sigsetsize=7 each return -EINVAL without mutating any state.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
@@ -5572,9 +5582,32 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      mapped".  Today PROT_NONE is approximated as read-only +
 ##      no-execute, which is wrong for any program that intentionally
 ##      uses PROT_NONE as a guard page or trap region.
-##   4. Honour brk / sigaction properly.  brk's no-op is acceptable
-##      because glibc malloc falls back to mmap; sigaction ignores
-##      sa_mask / sa_flags / SA_RESTART etc.
+##   4. Honour brk properly.  brk's no-op is acceptable because glibc
+##      malloc falls back to mmap.
+##   4b. sigaction sa_mask / sa_flags / SA_RESTART — STORAGE DONE.
+##      kernel/src/syscall/linux.rs now keeps a per-process per-signal
+##      table (linux_sigaction_table) of the full Linux struct sigaction
+##      { sa_handler, sa_flags, sa_restorer, sa_mask }.  rt_sigaction
+##      writes the requested entry (rejecting unknown sa_flags bits via
+##      sa_flags::MASK, sig=0 / sig>NSIG / sigsetsize != 0 && != 8 with
+##      EINVAL, and SIGKILL/SIGSTOP as SET targets with EINVAL) and
+##      copies the previous entry out to oldact before overwriting.
+##      Fork copies the parent table to the child; exec preserves
+##      SIG_IGN entries (but clears flags/restorer/mask) and resets
+##      every caught entry to SIG_DFL per POSIX; process exit clears
+##      the table.  Boot self-tests cover round-trip, per-signal
+##      independence, on_fork / on_exec / on_exit, plus the EINVAL
+##      validation paths.
+##      Limitation: stored sa_flags / sa_mask are NOT yet consumed at
+##      delivery time.  deliver_pending_signal still uses the legacy
+##      proc::signal trampoline (which rt_sigaction continues to sync
+##      for catchable handlers, so basic SIGINT/SIGTERM keep working),
+##      so SA_NODEFER / SA_RESETHAND / SA_RESTART / sa_mask blocking
+##      and SA_SIGINFO siginfo_t* delivery are all no-ops until the
+##      Linux-shaped rt_sigframe delivery work (item 6 below) lands.
+##      sys_rt_sigaction's oldact return value IS truthful now even
+##      for stored-but-unused fields, so glibc that round-trips via
+##      sigaction-old==sigaction-new sees consistent state.
 ##   5. RT_SIGRETURN — DONE (via native restore path).  Linux's
 ##      rt_sigreturn(2) is now routed through
 ##      dispatch_linux_with_frame and reuses sys_signal_return_with_

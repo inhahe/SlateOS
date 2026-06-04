@@ -3965,6 +3965,7 @@ pub fn sys_process_exec_with_frame(
             // (now-stale) signal trampoline — the new image's libc init
             // re-registers it. Pending signals are preserved.
             crate::proc::signal::on_exec(pid);
+            crate::syscall::linux::linux_sigaction_on_exec(pid);
 
             // Success: rewrite the saved frame so SYSRET returns to the
             // new entry point with a fresh stack and clean registers.

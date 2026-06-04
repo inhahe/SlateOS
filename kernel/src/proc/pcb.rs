@@ -1332,6 +1332,8 @@ fn destroy_process_resources(
 
     // Drop any signal state (pending set, blocked mask, trampoline).
     crate::proc::signal::remove(pid);
+    // Drop any Linux per-signal sigaction state for this process.
+    crate::syscall::linux::linux_sigaction_on_exit(pid);
 
     // Release any advisory file locks (flock) held by this process.
     // Locks are owner-keyed by PID; without this a crashed lock holder

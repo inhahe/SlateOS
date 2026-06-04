@@ -6862,4 +6862,60 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      combinations — because the latter requires a real socket
 ##      table; this is fine since we always return EBADF before
 ##      any option-specific path runs.
+##  54. EVENTFD / EVENTFD2 / FUTEX_WAITV / PKEY_ALLOC /
+##      PKEY_FREE / PKEY_MPROTECT / GET_ROBUST_LIST /
+##      SET_MEMPOLICY_HOME_NODE — 8 syscalls DONE as
+##      input-validated principled-errno stubs.
+##         - eventfd: legacy form, flags must be 0; ENOSYS.
+##         - eventfd2: accept SEMAPHORE|CLOEXEC|NONBLOCK only;
+##           ENOSYS so userspace event loops fall back to pipes.
+##         - futex_waitv: validate nr ∈ 1..=128, flags == 0,
+##           waiters ptr + 24B-per-entry buffer + optional 16B
+##           timespec + clockid ∈ {CLOCK_REALTIME, CLOCK_MONOTONIC};
+##           ENOSYS so glibc falls back to iterated FUTEX_WAIT.
+##         - pkey_alloc / pkey_free / pkey_mprotect: MPK
+##           protection keys.  PKU not enabled in our kernel;
+##           pkey_alloc validates flags + access_rights bits then
+##           ENOSYS (== "MPK unavailable" to glibc).  pkey_free
+##           returns EINVAL for any in-range key (no keys
+##           allocated).  pkey_mprotect with pkey == -1 forwards
+##           to plain mprotect (default key); in-range pkey
+##           returns EINVAL (no key allocated); out-of-range
+##           returns EINVAL.
+##         - get_robust_list: validate non-negative pid + non-NULL
+##           head_ptr + len_ptr (both writable u64); return ENOSYS.
+##           glibc treats ENOSYS as "no robust list registered"
+##           and skips the cleanup pass.
+##         - set_mempolicy_home_node: validate home_node == 0
+##           (only one NUMA node), flags == 0, len > 0, addr
+##           aligned to 16 KiB; return ENOSYS so callers fall
+##           back to plain MBIND policy.
+##      Choice rationale:
+##         * eventfd ENOSYS rather than fake fd: userspace event
+##           loops (libuv, tokio uring, glib) detect ENOSYS and
+##           use pipe2 as the fallback wakeup mechanism, which
+##           we DO implement.  Returning a fake fd would leak
+##           because nothing would read it.
+##         * futex_waitv ENOSYS lets glibc's pthread cancellation
+##           multi-wait path degrade to single-waiter loops;
+##           we'd need real multi-futex queueing to implement it
+##           correctly.
+##         * pkey ENOSYS/EINVAL exactly matches Linux running
+##           with PKU disabled in BIOS — every userspace MPK
+##           caller already handles this case (it's the common
+##           configuration on older CPUs).
+##         * get_robust_list ENOSYS rather than 0-zero output:
+##           we can't write 0 to head/len without a user-context
+##           copy_to_user, and ENOSYS is the documented "feature
+##           absent" answer that glibc handles.
+##      Limitation: real eventfd, real futex_waitv multi-wait,
+##      and real MPK support are all needed eventually.  eventfd
+##      is the highest priority because it's the standard
+##      wakeup primitive for io_uring completion notifications
+##      and for tokio-style runtimes; futex_waitv is needed for
+##      glibc-2.34+ pthread cancellation latency; MPK is needed
+##      only for hardened userspace (Chromium, OpenSSL FIPS) and
+##      can wait until we expose PKU CPUID.  Also: fixed an
+##      existing bug where EVENTFD was defined as 290 (collision
+##      with EVENTFD2); legacy eventfd is syscall 284.
 

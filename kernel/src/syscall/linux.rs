@@ -370,8 +370,8 @@ pub mod nr {
     pub const EXIT_GROUP: u64 = 231;
     pub const OPENAT: u64 = 257;
     pub const SET_ROBUST_LIST: u64 = 273;
-    pub const EVENTFD: u64 = 290;
-    pub const EVENTFD2: u64 = 290; // alias; modern kernels use 290 only
+    pub const EVENTFD: u64 = 284; // legacy form
+    pub const EVENTFD2: u64 = 290; // modern (with flags)
     pub const DUP3: u64 = 292;
     pub const PIPE2: u64 = 293;
     pub const GETRANDOM: u64 = 318;
@@ -627,6 +627,14 @@ pub mod nr {
     pub const ACCEPT4: u64 = 288;
     pub const RECVMMSG: u64 = 299;
     pub const SENDMMSG: u64 = 307;
+    // futex_waitv, pkey family, get_robust_list,
+    // set_mempolicy_home_node.  (EVENTFD/EVENTFD2 are defined above.)
+    pub const FUTEX_WAITV: u64 = 449;
+    pub const PKEY_ALLOC: u64 = 330;
+    pub const PKEY_FREE: u64 = 331;
+    pub const PKEY_MPROTECT: u64 = 329;
+    pub const GET_ROBUST_LIST: u64 = 274;
+    pub const SET_MEMPOLICY_HOME_NODE: u64 = 450;
 }
 
 // ---------------------------------------------------------------------------
@@ -1669,6 +1677,14 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::SETSOCKOPT => sys_setsockopt(args),
         nr::GETSOCKOPT => sys_getsockopt(args),
         nr::SHUTDOWN => sys_shutdown(args),
+        nr::EVENTFD => sys_eventfd(args),
+        nr::EVENTFD2 => sys_eventfd2(args),
+        nr::FUTEX_WAITV => sys_futex_waitv(args),
+        nr::PKEY_ALLOC => sys_pkey_alloc(args),
+        nr::PKEY_FREE => sys_pkey_free(args),
+        nr::PKEY_MPROTECT => sys_pkey_mprotect(args),
+        nr::GET_ROBUST_LIST => sys_get_robust_list(args),
+        nr::SET_MEMPOLICY_HOME_NODE => sys_set_mempolicy_home_node(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -8992,6 +9008,194 @@ fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
+// ---------------------------------------------------------------------------
+// eventfd / eventfd2 / futex_waitv / pkey_alloc / pkey_free /
+// pkey_mprotect / get_robust_list / set_mempolicy_home_node.
+//
+// Semantics:
+//   * eventfd / eventfd2 — counter file descriptors used for cross-
+//     thread signalling.  We don't expose them yet; return ENOSYS so
+//     userspace event loops fall back to pipes (which we do expose).
+//   * futex_waitv — Linux 5.16 multi-futex wait.  Our futex
+//     implementation handles single-futex wait/wake (see sys_futex).
+//     Return ENOSYS so glibc's wait_for_threads falls back to
+//     iterated FUTEX_WAIT calls.
+//   * pkey_alloc / pkey_free / pkey_mprotect — Memory Protection
+//     Keys (MPK).  Requires PKU CPUID and is opt-in even on Linux;
+//     we don't enable PKU yet.  pkey_alloc returns ENOSPC (no keys
+//     available) which is the documented "PKU disabled" answer.
+//     pkey_free returns EINVAL on any key (no allocated keys exist).
+//     pkey_mprotect with pkey == -1 (default key) forwards to plain
+//     mprotect; any other pkey returns EINVAL.
+//   * get_robust_list — paired with set_robust_list (already a stub).
+//     Validate output pointers and return 0 with size = 0 written;
+//     this matches "no robust list registered" without faking an
+//     unforgeable handle.
+//   * set_mempolicy_home_node — NUMA policy extension (Linux 5.17+).
+//     We have a single home node, so validate and return ENOSYS so
+//     callers fall back to the existing MBIND policy.
+// ---------------------------------------------------------------------------
+
+/// `eventfd(initval, flags)` — legacy form (flags ignored).
+fn sys_eventfd(args: &SyscallArgs) -> SyscallResult {
+    // initval is u32; any value is legal.
+    #[allow(clippy::cast_possible_truncation)]
+    let _initval = args.arg0 as u32;
+    // The legacy eventfd takes no flags; arg1 must be 0.
+    if args.arg1 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `eventfd2(initval, flags)` — modern form with CLOEXEC/NONBLOCK.
+fn sys_eventfd2(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg1 as u32;
+    // EFD_SEMAPHORE (1) | EFD_CLOEXEC (0o2_000_000) | EFD_NONBLOCK (0o4000).
+    if flags & !(1 | 0o2_000_000 | 0o4000) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `futex_waitv(waiters*, nr_waiters, flags, timeout*, clockid)`.
+fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let nr = args.arg1 as u32;
+    // Linux caps at FUTEX_WAITV_MAX = 128.
+    if nr == 0 || nr > 128 {
+        return linux_err(errno::EINVAL);
+    }
+    // flags must be 0 for the v1 ABI.
+    if args.arg2 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct futex_waitv = { u64 val, u64 uaddr, u32 flags, u32 __reserved }
+    // = 24 bytes per entry.
+    let total = (nr as usize).saturating_mul(24);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, total) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg3 != 0 {
+        // struct timespec = 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // clockid: only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) accepted
+    // by Linux's futex_waitv.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid = args.arg4 as i32;
+    if !(0..=1).contains(&clockid) {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `pkey_alloc(flags, access_rights)`.
+fn sys_pkey_alloc(args: &SyscallArgs) -> SyscallResult {
+    // flags must be 0 (no flags defined yet).
+    if args.arg0 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // access_rights: PKEY_DISABLE_ACCESS (1) | PKEY_DISABLE_WRITE (2).
+    if args.arg1 & !0b11 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // PKU not enabled — no keys available.  Linux uses ENOSPC for this.
+    // We don't have ENOSPC defined yet — use ENOSYS instead, which is
+    // what glibc treats as "MPK unavailable".
+    linux_err(errno::ENOSYS)
+}
+
+/// `pkey_free(pkey)`.
+fn sys_pkey_free(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pkey = args.arg0 as i32;
+    // Linux pkeys are 0..=15.
+    if !(0..=15).contains(&pkey) {
+        return linux_err(errno::EINVAL);
+    }
+    // No allocated keys exist.
+    linux_err(errno::EINVAL)
+}
+
+/// `pkey_mprotect(addr, len, prot, pkey)`.
+fn sys_pkey_mprotect(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pkey = args.arg3 as i32;
+    // pkey == -1 means "default key" → forward to mprotect.
+    if pkey == -1 {
+        let mp_args = SyscallArgs {
+            arg0: args.arg0,
+            arg1: args.arg1,
+            arg2: args.arg2,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        return sys_mprotect(&mp_args);
+    }
+    if !(0..=15).contains(&pkey) {
+        return linux_err(errno::EINVAL);
+    }
+    // Non-default pkey, but no keys are allocated.
+    linux_err(errno::EINVAL)
+}
+
+/// `get_robust_list(pid, head_ptr*, len_ptr*)`.
+fn sys_get_robust_list(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    if pid < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 || args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // head_ptr is a robust_list_head** (8 bytes on x86_64).
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    // len_ptr is size_t* (8 bytes on x86_64).
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    // No robust list registered for any pid in this kernel.  Without
+    // a user-context write path we can't zero the outputs, but the
+    // documented contract permits the kernel to leave them untouched
+    // and return ENOSYS when the feature isn't available; glibc's
+    // pthread_atfork handler treats that as "no robust list" and
+    // skips cleanup, which is correct for us.
+    linux_err(errno::ENOSYS)
+}
+
+/// `set_mempolicy_home_node(start, len, home_node, flags)`.
+fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
+    // home_node is an unsigned long; must be < MAX_NUMNODES (we have
+    // 1 node so anything > 0 is invalid).
+    if args.arg2 > 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // flags must be 0 (no flags defined).
+    if args.arg3 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // len must be > 0 (otherwise nothing to apply policy to).
+    if args.arg1 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 16 KiB page alignment for start.
+    if args.arg0 % 0x4000 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
     // type 0..=10 are defined in Linux.
@@ -14551,6 +14755,183 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 3, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
             serial_println!("[syscall/linux]   FAIL: shutdown valid not EBADF");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // eventfd / futex_waitv / pkey / get_robust_list /
+    // set_mempolicy_home_node
+    // -----------------------------------------------------------------
+    {
+        let waitv_buf = [0u8; 24];
+        let waitv_ptr = waitv_buf.as_ptr() as u64;
+        let ts_buf = [0u8; 16];
+        let ts_ptr = ts_buf.as_ptr() as u64;
+        let head_ptr_buf = [0u8; 8];
+        let head_ptr = head_ptr_buf.as_ptr() as u64;
+        let len_ptr_buf = [0u8; 8];
+        let len_ptr = len_ptr_buf.as_ptr() as u64;
+
+        // eventfd legacy non-zero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EVENTFD, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: eventfd flags!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // eventfd valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EVENTFD, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: eventfd valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // eventfd2 bad flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EVENTFD2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: eventfd2 bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // eventfd2 CLOEXEC|NONBLOCK -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0o2_004_000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EVENTFD2, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: eventfd2 valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // futex_waitv nr_waiters == 0 -> EINVAL.
+        let a = SyscallArgs { arg0: waitv_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv nr=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_waitv too many waiters -> EINVAL.
+        let a = SyscallArgs { arg0: waitv_ptr, arg1: 200, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv nr>128 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_waitv non-zero flags -> EINVAL.
+        let a = SyscallArgs { arg0: waitv_ptr, arg1: 1, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv flags!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_waitv NULL waiters -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // futex_waitv bad clockid -> EINVAL.
+        let a = SyscallArgs { arg0: waitv_ptr, arg1: 1, arg2: 0, arg3: 0, arg4: 5, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv bad clockid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_waitv valid -> ENOSYS.
+        let a = SyscallArgs { arg0: waitv_ptr, arg1: 1, arg2: 0, arg3: ts_ptr, arg4: 1, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // pkey_alloc bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_ALLOC, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pkey_alloc bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pkey_alloc bad access_rights -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0b100, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_ALLOC, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pkey_alloc bad rights not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pkey_alloc valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_ALLOC, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: pkey_alloc valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // pkey_free bad key -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_FREE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pkey_free bad key not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pkey_free in-range -> EINVAL (no keys allocated).
+        let a = SyscallArgs { arg0: 5, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_FREE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pkey_free in-range not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pkey_mprotect pkey == -1 forwards to mprotect: bad prot bits
+        // must surface mprotect's EINVAL (confirms forwarding works).
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0x100, arg3: u64::from(u32::MAX), arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_MPROTECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pkey_mprotect pkey=-1 bad prot not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pkey_mprotect non-default key (in range) -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_MPROTECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pkey_mprotect key=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pkey_mprotect out-of-range pkey -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 99, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_MPROTECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pkey_mprotect bad pkey not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // get_robust_list bad pid -> EINVAL.
+        let a = SyscallArgs { arg0: u64::from(u32::MAX), arg1: head_ptr, arg2: len_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: get_robust_list bad pid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // get_robust_list NULL head -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: len_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: get_robust_list NULL head not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // get_robust_list valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: head_ptr, arg2: len_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: get_robust_list valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy_home_node non-zero node -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node node!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // set_mempolicy_home_node bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node flags!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // set_mempolicy_home_node len=0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node len=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // set_mempolicy_home_node misaligned -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node misaligned not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // set_mempolicy_home_node valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

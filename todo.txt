@@ -7881,3 +7881,76 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      *processes*, not threads), but worth noting because some
 ##      kernels conflate the two.
 
+##  70. Enforce RLIMIT_AS in Linux sys_mmap / sys_munmap — DONE.
+##      Tenth "upgrade a stub" batch.  Third storage→enforcement
+##      link from item 67's priority list.  Userspace `mmap(2)`
+##      now sees ENOMEM when the new mapping would push the
+##      process past `rlim_cur(RLIMIT_AS)`.
+##         - pcb::linux_as_bytes field added to Process, init=0,
+##           inherited verbatim across fork_create (the child's
+##           CoW address space mirrors the parent's).
+##         - pcb::linux_as_charge(pid, bytes) checks soft limit
+##           and bumps the counter atomically under PROCESS_TABLE
+##           lock; returns OutOfMemory (→ ENOMEM at the syscall
+##           boundary) if exceeding.
+##         - pcb::linux_as_release(pid, bytes) decrements with
+##           saturating_sub so an over-release clamps to zero
+##           instead of wrapping.
+##         - pcb::linux_as_used(pid) reads the counter for self-
+##           tests and future /proc/<pid>/statm.
+##         - pcb::RLIMIT_AS_INDEX = 9 named constant so call sites
+##           don't repeat the magic number.
+##         - linux::sys_mmap: round length up to FRAME_SIZE,
+##           charge before delegating to handlers::sys_mmap, and
+##           release on native-mmap failure (so a partial failure
+##           doesn't leak accounting space).
+##         - linux::sys_munmap: on successful native unmap,
+##           release the same aligned length.  Failed munmaps
+##           don't refund (no pages actually taken back).
+##         - Kernel-context callers (caller_pid() == None) skip
+##           accounting entirely — a per-process limit doesn't
+##           apply to processes that don't exist.
+##      Coverage in the rlimit self-test block:
+##         - Fresh PID starts at 0 bytes.
+##         - Set AS soft = 64 KiB; charge exactly 64 KiB → ok.
+##         - +1 byte over → OutOfMemory; counter unchanged (the
+##           failed charge must not bump linux_as_bytes).
+##         - Release half; recharge half → ok and back to limit.
+##         - Saturating release: release u64::MAX clamps to 0.
+##         - RLIM_INFINITY soft accepts u64::MAX/2 charge.
+##         - fork_create: child inherits parent's
+##           linux_as_bytes; subsequent release on child does
+##           not affect parent (independent accounting after
+##           fork).
+##         - Clean up throwaway pids via pcb::destroy.
+##      Choice rationale:
+##         * RLIMIT_AS is a Linux-ABI concept; only the Linux
+##           translation layer charges/releases.  Native programs
+##           are unaffected — matches the design (native syscalls
+##           pre-date the Linux ABI and have their own model).
+##         * Charging the aligned length (not raw length) matches
+##           what the kernel actually allocates and what
+##           /proc/<pid>/maps would show.
+##         * Charging at sys_mmap entry (after argument validation
+##           but before delegating to native) keeps the failure
+##           path simple: on native failure we refund; on success
+##           the charge already stuck.
+##         * Fork inherits the charge so the child sees the same
+##           accounting view as if it had just executed all the
+##           parent's mmaps itself.  This matches what /proc would
+##           report on Linux after a fork.
+##      Limitation: We don't track per-mapping charges, so a
+##      munmap with a size larger than the original mmap will
+##      under-account (saturating_sub clamps at 0).  Programs
+##      that munmap exact-size or smaller see correct numbers.
+##      Acceptable until a real VMA splitter/merger lands.
+##      Limitation: brk(2) doesn't yet charge — sys_brk is still
+##      a "claim the heap is whatever you asked for" stub.  When
+##      we wire a real brk-region VMA, it should charge AS too.
+##      Limitation: Stack growth (lazy stack fault path) doesn't
+##      charge.  When RLIMIT_STACK lands as its own enforcement
+##      batch, that path should both check STACK and charge AS.
+##      Limitation: File-backed and shared-anon mmap return
+##      ENOSYS today, so AS only meaningfully counts private
+##      anonymous mappings.  Will need updating when those land.
+

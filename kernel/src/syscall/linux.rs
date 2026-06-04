@@ -2712,6 +2712,8 @@ fn sys_pipe2(args: &SyscallArgs) -> SyscallResult {
 /// - Anything else (file-backed, shared): returns -ENOSYS until the
 ///   kernel-side fd table arrives.
 fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
+    use crate::mm::frame::FRAME_SIZE;
+
     const MAP_PRIVATE: u64 = 0x02;
     const MAP_ANONYMOUS: u64 = 0x20;
     const MAP_FIXED: u64 = 0x10;
@@ -2730,6 +2732,35 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         // We don't support shared anonymous in Linux ABI yet.
         return linux_err(errno::ENOSYS);
     }
+    // length == 0 is EINVAL on Linux.  Catch it here so the rlimit
+    // charge doesn't see a zero-byte request slip through.
+    if length == 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Round the request up to the 16 KiB frame size to match what the
+    // native mmap path actually allocates.  RLIMIT_AS is documented as
+    // counting *virtual* address-space bytes, so the aligned size is
+    // the right thing to charge.
+    let frame_size = FRAME_SIZE as u64;
+    let length_aligned = match length
+        .checked_add(frame_size - 1)
+        .map(|v| v & !(frame_size - 1))
+    {
+        Some(v) if v != 0 => v,
+        _ => return linux_err(errno::ENOMEM),
+    };
+
+    // Enforce RLIMIT_AS (resource index 9) on the calling process.
+    // Kernel-context callers (no owning process) skip accounting — they
+    // can't be subject to a per-process limit they don't have.  The
+    // charge is provisional: if the native mmap fails we refund below.
+    let as_pid = caller_pid();
+    if let Some(pid) = as_pid {
+        if pcb::linux_as_charge(pid, length_aligned).is_err() {
+            return linux_err(errno::ENOMEM);
+        }
+    }
 
     // Native SYS_MMAP: arg0 = hint, arg1 = length, arg2 = our flags,
     // arg3 = phys addr.  We pass 0 flags (private RW), which our handler
@@ -2744,7 +2775,18 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         arg5: 0,
     };
     let r = handlers::sys_mmap(&native_args);
-    linux_from_native(r)
+    let result = linux_from_native(r);
+
+    // On native-mmap failure (negative return), refund the provisional
+    // RLIMIT_AS charge so a partial failure doesn't permanently leak
+    // accounting space.
+    if result.value < 0 {
+        if let Some(pid) = as_pid {
+            pcb::linux_as_release(pid, length_aligned);
+        }
+    }
+
+    result
 }
 
 /// `mprotect(addr, len, prot)` — change page protection on a range.
@@ -3018,17 +3060,44 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `munmap(addr, len)` — passes through to native.
+/// `munmap(addr, len)` — passes through to native, then refunds the
+/// equivalent RLIMIT_AS charge.
+///
+/// The native handler already rounds the request up to the 16 KiB frame
+/// size and unmaps whatever was actually mapped (idempotent for unmapped
+/// pages), so we match its accounting by computing the same aligned
+/// size and refunding it via [`pcb::linux_as_release`].  The refund is
+/// saturating, so a `munmap` that exceeds any prior `mmap` charge
+/// simply clamps `linux_as_bytes` to zero rather than wrapping.
 fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
+    use crate::mm::frame::FRAME_SIZE;
+
+    let len = args.arg1;
     let native_args = SyscallArgs {
         arg0: args.arg0,
-        arg1: args.arg1,
+        arg1: len,
         arg2: 0,
         arg3: 0,
         arg4: 0,
         arg5: 0,
     };
-    linux_from_native(handlers::sys_munmap(&native_args))
+    let result = linux_from_native(handlers::sys_munmap(&native_args));
+
+    // Only refund on success: a failed munmap (e.g. EINVAL on a bad
+    // address) didn't actually take any pages back.
+    if result.value == 0 && len != 0 {
+        let frame_size = FRAME_SIZE as u64;
+        if let Some(len_aligned) = len
+            .checked_add(frame_size - 1)
+            .map(|v| v & !(frame_size - 1))
+        {
+            if let Some(pid) = caller_pid() {
+                pcb::linux_as_release(pid, len_aligned);
+            }
+        }
+    }
+
+    result
 }
 
 /// `brk(addr)` — returns the current brk (we don't grow the heap).
@@ -13576,6 +13645,131 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             ).expect("uid 0 fork exempt from NPROC");
             pcb::destroy(root_child);
             pcb::destroy(root_parent);
+        }
+
+        // RLIMIT_AS accounting via pcb::linux_as_charge /
+        // pcb::linux_as_release.
+        //
+        // We exercise the bookkeeping directly on a throwaway PID — the
+        // dispatch_linux path through sys_mmap also calls these helpers,
+        // but exercising the helpers in isolation gives us deterministic
+        // pre/post state regardless of whether the boot scheduler has
+        // pre-loaded VMAs into the caller's process.
+        {
+            let test_pid = pcb::create("rlimit-as-test", 0);
+
+            // Fresh process starts at 0 bytes.
+            assert_eq!(
+                pcb::linux_as_used(test_pid),
+                Some(0),
+                "fresh process linux_as_bytes should be 0",
+            );
+
+            // Set AS soft = 64 KiB (4 frames), hard = inherited default.
+            // The default for RLIMIT_AS is RLIM_INFINITY, so set_rlimit
+            // will accept any soft <= INF.
+            let limit_bytes: u64 = 64 * 1024;
+            pcb::set_rlimit(
+                test_pid,
+                pcb::RLIMIT_AS_INDEX as u32,
+                limit_bytes,
+                pcb::RLIM_INFINITY,
+            ).expect("set RLIMIT_AS=(64KiB, INF)");
+
+            // Charge exactly the limit -> ok.
+            pcb::linux_as_charge(test_pid, limit_bytes)
+                .expect("charge exact limit should succeed");
+            assert_eq!(
+                pcb::linux_as_used(test_pid),
+                Some(limit_bytes),
+                "charge should bump linux_as_bytes",
+            );
+
+            // A second charge of even 1 byte must push past the soft
+            // limit and fail with OutOfMemory.
+            match pcb::linux_as_charge(test_pid, 1) {
+                Err(KernelError::OutOfMemory) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: AS-test over-charge expected OutOfMemory, got {:?}",
+                        other,
+                    );
+                    pcb::destroy(test_pid);
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Failed charge must not have modified linux_as_bytes.
+            assert_eq!(
+                pcb::linux_as_used(test_pid),
+                Some(limit_bytes),
+                "failed charge must not bump linux_as_bytes",
+            );
+
+            // Release half — counter should drop.
+            let half = limit_bytes / 2;
+            pcb::linux_as_release(test_pid, half);
+            assert_eq!(
+                pcb::linux_as_used(test_pid),
+                Some(limit_bytes - half),
+                "release should decrement linux_as_bytes",
+            );
+
+            // Now a half-size charge fits exactly.
+            pcb::linux_as_charge(test_pid, half)
+                .expect("post-release recharge should succeed");
+            assert_eq!(
+                pcb::linux_as_used(test_pid),
+                Some(limit_bytes),
+                "recharge should bring us back to the limit",
+            );
+
+            // Saturating release: refunding more than we hold clamps
+            // to zero, not wraps around.
+            pcb::linux_as_release(test_pid, u64::MAX);
+            assert_eq!(
+                pcb::linux_as_used(test_pid),
+                Some(0),
+                "over-release must saturate at zero",
+            );
+
+            // RLIM_INFINITY soft limit bypasses the check entirely.
+            pcb::set_rlimit(
+                test_pid,
+                pcb::RLIMIT_AS_INDEX as u32,
+                pcb::RLIM_INFINITY,
+                pcb::RLIM_INFINITY,
+            ).expect("raise AS soft to INF");
+            pcb::linux_as_charge(test_pid, u64::MAX / 2)
+                .expect("INF soft limit must accept any finite charge");
+
+            // fork_create copies linux_as_bytes from the parent.
+            let parent_used = pcb::linux_as_used(test_pid).expect("parent exists");
+            let child = pcb::fork_create(
+                test_pid,
+                0,
+                alloc::vec::Vec::new(),
+                alloc::vec::Vec::new(),
+            ).expect("fork after AS charges");
+            assert_eq!(
+                pcb::linux_as_used(child),
+                Some(parent_used),
+                "child must inherit parent's linux_as_bytes",
+            );
+            // Releases on the child don't affect the parent.
+            pcb::linux_as_release(child, parent_used);
+            assert_eq!(
+                pcb::linux_as_used(child),
+                Some(0),
+                "child release leaves parent untouched (1/2)",
+            );
+            assert_eq!(
+                pcb::linux_as_used(test_pid),
+                Some(parent_used),
+                "child release leaves parent untouched (2/2)",
+            );
+
+            pcb::destroy(child);
+            pcb::destroy(test_pid);
         }
     }
 

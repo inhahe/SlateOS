@@ -349,6 +349,18 @@ pub struct Process {
     /// shells and language runtimes during sandbox setup) now see
     /// consistent state.  Enforcement is tracked separately per resource.
     pub rlimits: [(u64, u64); 16],
+    /// Total bytes currently charged to this process under the Linux
+    /// address-space accounting used to enforce `RLIMIT_AS`.
+    ///
+    /// Incremented by [`linux_as_charge`] (called from the Linux `mmap`
+    /// path with the *aligned* mapping size) and decremented by
+    /// [`linux_as_release`] (called from `munmap`).  Inherited verbatim
+    /// across `fork_create` — the child starts with the same charge as
+    /// the parent since its address space mirrors the parent's at the
+    /// moment of fork.  Native (non-Linux) mmap paths do not touch this
+    /// field, matching Linux's "RLIMIT_AS only applies to processes
+    /// going through the Linux ABI" model in our codebase.
+    pub linux_as_bytes: u64,
 }
 
 impl Process {
@@ -381,6 +393,8 @@ impl Process {
             // Compiled-in Linux rlimit defaults; modified per-process
             // by setrlimit / prlimit64 and inherited across fork.
             rlimits: DEFAULT_RLIMITS,
+            // Fresh process has no Linux-mapped pages yet.
+            linux_as_bytes: 0,
         }
     }
 }
@@ -480,7 +494,7 @@ pub fn fork_create(
     // path, this keeps the refcount at exactly "one per process that
     // holds at least one fd referencing the handle", which is what
     // fork's `dup_one` per-process bump preserves.
-    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd, rlimits) = {
+    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd, rlimits, linux_as_bytes) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
             let mut copy = super::linux_fd::KernelFdTable::new();
@@ -500,6 +514,7 @@ pub fn fork_create(
             cloned_fd_table,
             parent.cwd.clone(),
             parent.rlimits,
+            parent.linux_as_bytes,
         )
     };
 
@@ -568,6 +583,10 @@ pub fn fork_create(
         // POSIX: rlimits inherit verbatim across fork.  setrlimit in
         // either process is independent thereafter.
         rlimits,
+        // The child's address space mirrors the parent's (CoW clone),
+        // so it inherits the same RLIMIT_AS charge.  Each future
+        // mmap/munmap in either process is accounted independently.
+        linux_as_bytes,
     };
 
     table.insert(pid, child);
@@ -987,6 +1006,76 @@ pub fn set_rlimit(
     }
     proc.rlimits[resource as usize] = (new_cur, new_max);
     Ok(())
+}
+
+/// Index of `RLIMIT_AS` (resident *address space* size) in [`Process::rlimits`].
+///
+/// Pulled into a named constant so the [`linux_as_charge`] /
+/// [`linux_as_release`] helpers and any future enforcement sites do not
+/// have to repeat the magic number.
+pub const RLIMIT_AS_INDEX: usize = 9;
+
+/// Charge `bytes` to the process's Linux address-space accounting and
+/// enforce [`RLIMIT_AS`] (resource index 9).
+///
+/// Called from the Linux `mmap` translation layer with the *aligned*
+/// mapping size before delegating to the native mmap path.  Returns
+/// [`KernelError::OutOfMemory`] (mapped to `ENOMEM` at the syscall
+/// boundary) when applying the charge would exceed the soft limit;
+/// [`RLIM_INFINITY`] always passes.  Native (non-Linux) mmap paths do
+/// not call this function — RLIMIT_AS is a Linux-ABI concept and
+/// native programs are unaffected.
+///
+/// On success the charge is committed; if the subsequent native mmap
+/// fails the caller **must** call [`linux_as_release`] with the same
+/// `bytes` value to refund the accounting.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` is unknown.
+/// - [`KernelError::OutOfMemory`] if `linux_as_bytes + bytes` would
+///   exceed `rlimits[9].0` (the RLIMIT_AS soft limit).
+pub fn linux_as_charge(pid: ProcessId, bytes: u64) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+    let soft = proc.rlimits[RLIMIT_AS_INDEX].0;
+    // saturating_add gives a deterministic large value rather than
+    // wrapping; in practice the soft limit will always be the deciding
+    // factor since u64::MAX is RLIM_INFINITY.
+    let new_total = proc.linux_as_bytes.saturating_add(bytes);
+    if soft != RLIM_INFINITY && new_total > soft {
+        return Err(KernelError::OutOfMemory);
+    }
+    proc.linux_as_bytes = new_total;
+    Ok(())
+}
+
+/// Refund `bytes` from the process's Linux address-space accounting.
+///
+/// Called from the Linux `munmap` translation layer after a successful
+/// unmap, and from the Linux `mmap` translation layer on the failure
+/// path to roll back a prior [`linux_as_charge`].  Saturating
+/// subtraction — if a caller releases more than was charged (for
+/// example a `munmap` whose size exceeds any prior `mmap`), the
+/// counter simply clamps to zero rather than wrapping.
+///
+/// Silently no-op if `pid` is unknown (the process is already gone).
+pub fn linux_as_release(pid: ProcessId, bytes: u64) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.linux_as_bytes = proc.linux_as_bytes.saturating_sub(bytes);
+    }
+}
+
+/// Read the current Linux address-space charge for `pid`.
+///
+/// Returns `None` if the process is unknown.  Used by self-tests and
+/// by future diagnostic syscalls (e.g. `/proc/<pid>/statm`).
+#[must_use]
+pub fn linux_as_used(pid: ProcessId) -> Option<u64> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_as_bytes)
 }
 
 /// Set the exit code for a process.

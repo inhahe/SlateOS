@@ -44,6 +44,7 @@
 //! | 14       | rt_sigprocmask    | maps to SYS_SIGNAL_MASK           |
 //! | 19       | readv             | via per-process Linux fd table     |
 //! | 20       | writev            | via per-process Linux fd table     |
+//! | 22       | pipe              | wraps SYS_PIPE_CREATE              |
 //! | 24       | sched_yield       | direct                             |
 //! | 32       | dup               | via per-process Linux fd table     |
 //! | 33       | dup2              | via per-process Linux fd table     |
@@ -51,6 +52,7 @@
 //! |          |                   | F_GETFL / F_SETFL / F_DUPFD_CLOEXEC|
 //! | 257      | openat            | only AT_FDCWD; routes to VFS open  |
 //! | 292      | dup3              | via per-process Linux fd table     |
+//! | 293      | pipe2             | pipe with O_CLOEXEC / O_NONBLOCK   |
 //! | 35       | nanosleep         | reads timespec, calls SYS_SLEEP    |
 //! | 39       | getpid            | direct                             |
 //! | 60       | exit              | direct                             |
@@ -439,6 +441,8 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::DUP2 => sys_dup2(args),
         nr::DUP3 => sys_dup3(args),
         nr::FCNTL => sys_fcntl(args),
+        nr::PIPE => sys_pipe(args),
+        nr::PIPE2 => sys_pipe2(args),
         nr::OPENAT => sys_openat(args),
         nr::MMAP => sys_mmap(args),
         nr::MPROTECT => sys_mprotect(args),
@@ -1092,6 +1096,120 @@ fn sys_openat(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::ENOSYS);
     }
     open_common(args.arg1, 0, args.arg2 as u32)
+}
+
+/// Shared backend for `pipe(2)` / `pipe2(2)`.
+///
+/// `pipefd_ptr` is a user-space `int pipefd[2]`; we write the two new
+/// fd numbers there.  `flags` is interpreted as the Linux `O_*` set
+/// (`O_CLOEXEC` and `O_NONBLOCK`).  Returns 0 on success.
+fn pipe_common(pipefd_ptr: u64, flags: u32) -> SyscallResult {
+    if pipefd_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // pipe2 rejects unknown flag bits (Linux returns -EINVAL).
+    let known = oflags::O_CLOEXEC | oflags::O_NONBLOCK;
+    if flags & !known != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // Validate the user destination up front; better to fail before
+    // creating pipe state than to leak handles on a copy_to_user fault.
+    if let Err(e) = crate::mm::user::validate_user_write(pipefd_ptr, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Create the kernel pipe.  The native handler also registers both
+    // endpoints in the per-process IPC handle list; the fd-table install
+    // below adds the user-visible reference.
+    let zero = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let create_res = handlers::sys_pipe_create(&zero);
+    if create_res.value < 0 {
+        return linux_from_native(create_res);
+    }
+    let read_raw = create_res.value as u64;
+    let write_raw = create_res.value2 as u64;
+
+    // Build entries.  Read end gets O_RDONLY, write end O_WRONLY.  Both
+    // honour the caller's O_CLOEXEC / O_NONBLOCK request.
+    let status_common = flags & oflags::O_NONBLOCK;
+    let mut read_entry = FdEntry::pipe(read_raw, oflags::O_RDONLY | status_common);
+    let mut write_entry = FdEntry::pipe(write_raw, oflags::O_WRONLY | status_common);
+    if flags & oflags::O_CLOEXEC != 0 {
+        read_entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
+        write_entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
+    }
+
+    // Install read end first, then write end.  If the second install
+    // fails (table full), roll the first one back.
+    let read_fd = match pcb::linux_fd_install(pid, read_entry, 0) {
+        Ok(fd) => fd,
+        Err(e) => {
+            // Tear down the kernel pipe state we just created.
+            let _ = handlers::sys_pipe_close(&SyscallArgs {
+                arg0: read_raw, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            });
+            let _ = handlers::sys_pipe_close(&SyscallArgs {
+                arg0: write_raw, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            });
+            return linux_err(linux_errno_for(e));
+        }
+    };
+    let write_fd = match pcb::linux_fd_install(pid, write_entry, 0) {
+        Ok(fd) => fd,
+        Err(e) => {
+            // Roll back the read-end install + both pipe endpoints.
+            let _ = pcb::linux_fd_take(pid, read_fd);
+            let _ = handlers::sys_pipe_close(&SyscallArgs {
+                arg0: read_raw, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            });
+            let _ = handlers::sys_pipe_close(&SyscallArgs {
+                arg0: write_raw, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            });
+            return linux_err(linux_errno_for(e));
+        }
+    };
+
+    // Copy the (read_fd, write_fd) pair into the user's pipefd[2].
+    let fds: [i32; 2] = [read_fd, write_fd];
+    // SAFETY: validated above.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(
+            (&raw const fds).cast::<u8>(),
+            pipefd_ptr,
+            core::mem::size_of::<[i32; 2]>(),
+        )
+    };
+    if let Err(e) = r {
+        // The destination became invalid between validation and copy
+        // (e.g. another thread unmapped it).  Roll back both installs.
+        let _ = pcb::linux_fd_take(pid, read_fd);
+        let _ = pcb::linux_fd_take(pid, write_fd);
+        let _ = handlers::sys_pipe_close(&SyscallArgs {
+            arg0: read_raw, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        });
+        let _ = handlers::sys_pipe_close(&SyscallArgs {
+            arg0: write_raw, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        });
+        return linux_err(linux_errno_for(e));
+    }
+
+    SyscallResult::ok(0)
+}
+
+/// `pipe(pipefd)` — create a new pipe; equivalent to `pipe2(pipefd, 0)`.
+fn sys_pipe(args: &SyscallArgs) -> SyscallResult {
+    pipe_common(args.arg0, 0)
+}
+
+/// `pipe2(pipefd, flags)` — like pipe but honours O_CLOEXEC / O_NONBLOCK.
+fn sys_pipe2(args: &SyscallArgs) -> SyscallResult {
+    pipe_common(args.arg0, args.arg1 as u32)
 }
 
 /// `mmap(addr, length, prot, flags, fd, offset)` — anonymous private only.
@@ -1819,6 +1937,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     if r.value != -(errno::EINVAL as i64) {
         serial_println!(
             "[syscall/linux]   FAIL: dup3(0,0,0) → {} (expected -EINVAL)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7b1) pipe / pipe2 with NULL pipefd → -EFAULT.
+    let pipe_null = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch_linux(nr::PIPE, &pipe_null);
+    if r.value != -(errno::EFAULT as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe(NULL) → {} (expected -EFAULT)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    let r = dispatch_linux(nr::PIPE2, &pipe_null);
+    if r.value != -(errno::EFAULT as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(NULL, 0) → {} (expected -EFAULT)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7b2) pipe2 with an unknown flag bit → -EINVAL.
+    let pipe2_bad_flag = SyscallArgs {
+        arg0: 1, arg1: 0x1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::PIPE2, &pipe2_bad_flag);
+    if r.value != -(errno::EINVAL as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(1, 0x1) → {} (expected -EINVAL)", r.value
         );
         return Err(KernelError::InternalError);
     }

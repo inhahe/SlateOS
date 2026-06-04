@@ -5413,11 +5413,12 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##       (iii) Console reads collapse any byte-count to a single
 ##             keystroke (one-char read).  Multi-byte reads will need a
 ##             line-buffered TTY abstraction.
-##       (iv)  pipe(2) / pipe2(2) / socket family / poll / epoll / eventfd
-##             are still -ENOSYS in dispatch_linux.  Pipe is the easiest
-##             next step: SYS_PIPE_CREATE exists in handlers.rs; the
-##             translator just needs to install the two endpoints into
-##             the fd table.
+##       (iv)  pipe(2) and pipe2(2) DONE.  socket family / poll / epoll
+##             / eventfd are still -ENOSYS in dispatch_linux.  Sockets
+##             require a kernel-side socket layer (the existing
+##             userspace TCP/IP stack would need a bridge).  poll/epoll
+##             require a HandleKind-aware readiness probe across
+##             Console / File / Pipe.
 ##       (v)   openat() only accepts AT_FDCWD; directory file
 ##             descriptors (the dirfd argument) require a kernel-side
 ##             open-dir handle, which the VFS does not currently expose.
@@ -5486,14 +5487,11 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     actual Linux binary can be loaded.
 ##
 ## NEXT STEPS (in priority order):
-##   1. Linux pipe / pipe2 translation: SYS_PIPE_CREATE already exists
-##      in handlers.rs and the FdEntry::pipe() / HandleKind::Pipe
-##      machinery is in place — just wire it into dispatch_linux.
-##   2. Add Linux execve/fork/clone in a parallel
+##   1. Add Linux execve/fork/clone in a parallel
 ##      dispatch_linux_with_frame path; clone() is what pthread_create
 ##      uses so this is the next blocker for multi-threaded glibc.
-##   3. Wire exec_process() to walk the fd table and honour FD_CLOEXEC
+##   2. Wire exec_process() to walk the fd table and honour FD_CLOEXEC
 ##      (currently rebuilds a fresh stdio-only table).
-##   4. Refcount File / Pipe handles on fork (fd-table follow-up i).
-##   5. Replace xorshift64 with kernel CSPRNG when one exists.
-##   6. Honour mprotect / brk / sigaction properly.
+##   3. Refcount File / Pipe handles on fork (fd-table follow-up i).
+##   4. Replace xorshift64 with kernel CSPRNG when one exists.
+##   5. Honour mprotect / brk / sigaction properly.

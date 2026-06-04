@@ -7,7 +7,13 @@
 //   lsmod     - list loaded kernel modules
 //   modinfo   - show information about a kernel module
 //   depmod    - generate module dependency database
-
+//
+// Many constants, struct fields, and associated `new` constructors below
+// are declared for the kmod / modules.dep / modules.alias / modprobe.conf
+// ABI vocabulary but are not exercised yet — they're kept for the
+// upcoming real depmod and config parsers. Allow dead_code file-wide so
+// the protocol surface stays visible without warning spam.
+#![allow(dead_code)]
 #![cfg_attr(not(test), no_main)]
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -446,8 +452,8 @@ fn pad_left_num(val: u64, buf: &mut [u8], width: usize) -> usize {
 fn normalize_module_name(name: &[u8]) -> ModuleName {
     // Strip path: take only the last component
     let mut start = 0;
-    for i in 0..name.len() {
-        if name[i] == b'/' {
+    for (i, &b) in name.iter().enumerate() {
+        if b == b'/' {
             start = i + 1;
         }
     }
@@ -457,9 +463,7 @@ fn normalize_module_name(name: &[u8]) -> ModuleName {
     let mut end = basename.len();
     if ends_with(basename, b".ko.zst") {
         end -= 7;
-    } else if ends_with(basename, b".ko.xz") {
-        end -= 6;
-    } else if ends_with(basename, b".ko.gz") {
+    } else if ends_with(basename, b".ko.xz") || ends_with(basename, b".ko.gz") {
         end -= 6;
     } else if ends_with(basename, b".ko") {
         end -= 3;
@@ -469,14 +473,11 @@ fn normalize_module_name(name: &[u8]) -> ModuleName {
 
     // Replace '-' with '_'
     let mut result = ModuleName::new();
-    for i in 0..stripped.len().min(MAX_NAME_LEN) {
-        result.data[i] = if stripped[i] == b'-' {
-            b'_'
-        } else {
-            stripped[i]
-        };
+    let copy_len = stripped.len().min(MAX_NAME_LEN);
+    for (slot, &b) in result.data.iter_mut().zip(stripped.iter()).take(copy_len) {
+        *slot = if b == b'-' { b'_' } else { b };
     }
-    result.len = stripped.len().min(MAX_NAME_LEN);
+    result.len = copy_len;
     result
 }
 
@@ -516,8 +517,8 @@ fn format_size(size_bytes: u64, buf: &mut [u8]) -> usize {
 fn detect_tool(argv0: &[u8]) -> Tool {
     // Find the last path component
     let mut start = 0;
-    for i in 0..argv0.len() {
-        if argv0[i] == b'/' || argv0[i] == b'\\' {
+    for (i, &b) in argv0.iter().enumerate() {
+        if b == b'/' || b == b'\\' {
             start = i + 1;
         }
     }
@@ -719,13 +720,7 @@ fn parse_args(argc: i32, argv: *const *const u8) -> Result<ModprobeOpts, i32> {
 
 fn parse_module_param(arg: &[u8], param: &mut ModuleParam) {
     // Split on '='
-    let mut eq_pos = None;
-    for i in 0..arg.len() {
-        if arg[i] == b'=' {
-            eq_pos = Some(i);
-            break;
-        }
-    }
+    let eq_pos = arg.iter().position(|&b| b == b'=');
 
     if let Some(pos) = eq_pos {
         let name = &arg[..pos];
@@ -842,8 +837,10 @@ fn get_loaded_modules() -> ([LoadedModule; 32], usize) {
     let mut modules = [LoadedModule::new(); 32];
     let mut count = 0;
 
-    // Simulated loaded module list
-    let sim_modules: &[(&[u8], u64, u32, &[&[u8]])] = &[
+    // Simulated loaded module list. Tuple shape:
+    // (name, size in bytes, use count, slice of dependency names).
+    type SimModuleFixture<'a> = (&'a [u8], u64, u32, &'a [&'a [u8]]);
+    let sim_modules: &[SimModuleFixture] = &[
         (b"ext4", 884736, 2, &[]),
         (b"mbcache", 16384, 1, &[b"ext4"]),
         (b"jbd2", 131072, 1, &[b"ext4"]),
@@ -1035,13 +1032,10 @@ fn resolve_dependencies(name: &[u8], deps: &mut [ModuleName; 64], dep_count: &mu
     for i in 0..info.dep_count {
         let dep_name = info.depends[i].as_bytes();
         // Check if already in list
-        let mut found = false;
-        for j in 0..*dep_count {
-            if deps[j].eq_bytes(dep_name) {
-                found = true;
-                break;
-            }
-        }
+        let found = deps
+            .iter()
+            .take(*dep_count)
+            .any(|d| d.eq_bytes(dep_name));
         if !found && *dep_count < 64 {
             deps[*dep_count] = info.depends[i];
             *dep_count += 1;
@@ -1060,8 +1054,7 @@ fn cmd_lsmod() -> i32 {
     print_out(b"Module                  Size  Used by\n");
 
     let mut buf = [0u8; 512];
-    for i in 0..count {
-        let m = &modules[i];
+    for m in modules.iter().take(count) {
         let mut pos = 0;
 
         // Module name (24 chars left-aligned)
@@ -1111,13 +1104,15 @@ fn cmd_insmod(opts: &ModprobeOpts) -> i32 {
 
     // Check if already loaded
     let (modules, count) = get_loaded_modules();
-    for i in 0..count {
-        if modules[i].name.eq_bytes(opts.module_name.as_bytes()) {
-            print_err(b"insmod: ERROR: could not insert module ");
-            print_err(opts.module_path.as_bytes());
-            print_err(b": File exists\n");
-            return 1;
-        }
+    if modules
+        .iter()
+        .take(count)
+        .any(|m| m.name.eq_bytes(opts.module_name.as_bytes()))
+    {
+        print_err(b"insmod: ERROR: could not insert module ");
+        print_err(opts.module_path.as_bytes());
+        print_err(b": File exists\n");
+        return 1;
     }
 
     // In a real implementation, we'd call init_module() syscall
@@ -1139,32 +1134,30 @@ fn cmd_rmmod(opts: &ModprobeOpts) -> i32 {
 
     // Check if loaded
     let (modules, count) = get_loaded_modules();
-    let mut found = false;
-    for i in 0..count {
-        if modules[i].name.eq_bytes(opts.module_name.as_bytes()) {
-            found = true;
-            // Check refcount
-            if modules[i].refcount > 0 && !opts.force {
-                print_err(b"rmmod: ERROR: Module ");
-                print_err(opts.module_name.as_bytes());
-                print_err(b" is in use by: ");
-                for j in 0..modules[i].used_by_count {
-                    if j > 0 {
-                        print_err(b", ");
-                    }
-                    print_err(modules[i].used_by[j].as_bytes());
-                }
-                print_err(b"\n");
-                return 1;
-            }
-            break;
-        }
-    }
+    let found_mod = modules
+        .iter()
+        .take(count)
+        .find(|m| m.name.eq_bytes(opts.module_name.as_bytes()));
 
-    if !found {
+    let Some(m) = found_mod else {
         print_err(b"rmmod: ERROR: Module ");
         print_err(opts.module_name.as_bytes());
         print_err(b" is not currently loaded\n");
+        return 1;
+    };
+
+    // Check refcount
+    if m.refcount > 0 && !opts.force {
+        print_err(b"rmmod: ERROR: Module ");
+        print_err(opts.module_name.as_bytes());
+        print_err(b" is in use by: ");
+        for (j, used) in m.used_by.iter().take(m.used_by_count).enumerate() {
+            if j > 0 {
+                print_err(b", ");
+            }
+            print_err(used.as_bytes());
+        }
+        print_err(b"\n");
         return 1;
     }
 
@@ -1190,19 +1183,21 @@ fn cmd_modprobe(opts: &ModprobeOpts) -> i32 {
 
     // Check if already loaded (unless --first-time)
     let (modules, count) = get_loaded_modules();
-    for i in 0..count {
-        if modules[i].name.eq_bytes(opts.module_name.as_bytes()) {
-            if opts.first_time {
-                if !opts.quiet {
-                    print_err(b"modprobe: FATAL: Module ");
-                    print_err(opts.module_name.as_bytes());
-                    print_err(b" already in kernel.\n");
-                }
-                return 1;
+    if modules
+        .iter()
+        .take(count)
+        .any(|m| m.name.eq_bytes(opts.module_name.as_bytes()))
+    {
+        if opts.first_time {
+            if !opts.quiet {
+                print_err(b"modprobe: FATAL: Module ");
+                print_err(opts.module_name.as_bytes());
+                print_err(b" already in kernel.\n");
             }
-            // Already loaded, not an error
-            return 0;
+            return 1;
         }
+        // Already loaded, not an error
+        return 0;
     }
 
     // Resolve dependencies
@@ -1213,13 +1208,10 @@ fn cmd_modprobe(opts: &ModprobeOpts) -> i32 {
     // Load dependencies first (in order)
     for i in (0..dep_count).rev() {
         // Check if dep is already loaded
-        let mut dep_loaded = false;
-        for j in 0..count {
-            if modules[j].name.eq_bytes(deps[i].as_bytes()) {
-                dep_loaded = true;
-                break;
-            }
-        }
+        let dep_loaded = modules
+            .iter()
+            .take(count)
+            .any(|m| m.name.eq_bytes(deps[i].as_bytes()));
 
         if !dep_loaded
             && (opts.verbose || opts.dry_run) {
@@ -1261,24 +1253,21 @@ fn cmd_modprobe_remove(opts: &ModprobeOpts) -> i32 {
     let (modules, count) = get_loaded_modules();
 
     // Find the module
-    let mut found = false;
-    let mut refcount = 0u32;
-    for i in 0..count {
-        if modules[i].name.eq_bytes(opts.module_name.as_bytes()) {
-            found = true;
-            refcount = modules[i].refcount;
-            break;
+    let refcount = match modules
+        .iter()
+        .take(count)
+        .find(|m| m.name.eq_bytes(opts.module_name.as_bytes()))
+    {
+        Some(m) => m.refcount,
+        None => {
+            if !opts.quiet {
+                print_err(b"modprobe: FATAL: Module ");
+                print_err(opts.module_name.as_bytes());
+                print_err(b" is not currently loaded.\n");
+            }
+            return 1;
         }
-    }
-
-    if !found {
-        if !opts.quiet {
-            print_err(b"modprobe: FATAL: Module ");
-            print_err(opts.module_name.as_bytes());
-            print_err(b" is not currently loaded.\n");
-        }
-        return 1;
-    }
+    };
 
     if refcount > 0 && !opts.force {
         if !opts.quiet {
@@ -1300,13 +1289,11 @@ fn cmd_modprobe_remove(opts: &ModprobeOpts) -> i32 {
     for i in 0..info.dep_count {
         let dep_name = info.depends[i].as_bytes();
         // Check if the dep has other users
-        let mut dep_refcount = 0u32;
-        for j in 0..count {
-            if modules[j].name.eq_bytes(dep_name) {
-                dep_refcount = modules[j].refcount;
-                break;
-            }
-        }
+        let dep_refcount = modules
+            .iter()
+            .take(count)
+            .find(|m| m.name.eq_bytes(dep_name))
+            .map_or(0u32, |m| m.refcount);
         // Would be unused after removing our module
         if dep_refcount <= 1
             && (opts.verbose || opts.dry_run) {
@@ -1501,7 +1488,7 @@ fn cmd_depmod(opts: &ModprobeOpts) -> i32 {
             print_out(b"kernel/");
             print_out(name);
             print_out(b".ko:");
-            for (_i, dep) in deps.iter().enumerate() {
+            for dep in deps.iter() {
                 print_out(b" kernel/");
                 print_out(dep);
                 print_out(b".ko");

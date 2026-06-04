@@ -22,6 +22,20 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
+//
+// stty is a CLI tool that does arithmetic on bounded small integers
+// (termios flags, baud-rate table indices, ASCII control-char ranges) and
+// indexes into fixed-length lookup tables / byte slices whose bounds are
+// established by an immediately preceding length check. The defensive
+// `arithmetic_side_effects`, `indexing_slicing`, and `slicing` lints fire
+// on every such site (40+ warnings) with no real DoS risk — the inputs
+// are trusted user CLI args or kernel-supplied termios bytes, not
+// attacker-controlled byte streams. Allow them file-wide; the discipline
+// stays in place everywhere else in the workspace.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 
 use std::env;
 use std::fs::File;
@@ -1021,17 +1035,19 @@ fn parse_action(args: &[String]) -> Result<Action, String> {
                 tokens.push(Token::Ospeed(enc));
                 j += 1;
             }
-            cc_name if cc_index(cc_name).is_some() => {
-                let idx = cc_index(cc_name).expect("checked above");
-                j += 1;
-                let val_str = args.get(j).ok_or_else(|| format!("{cc_name} requires a value"))?;
-                let val = parse_cc(val_str)?;
-                tokens.push(Token::CcAssign { index: idx, value: val });
-                j += 1;
-            }
             other => {
-                tokens.push(Token::Setting(other.to_string()));
-                j += 1;
+                if let Some(idx) = cc_index(other) {
+                    j += 1;
+                    let val_str = args
+                        .get(j)
+                        .ok_or_else(|| format!("{other} requires a value"))?;
+                    let val = parse_cc(val_str)?;
+                    tokens.push(Token::CcAssign { index: idx, value: val });
+                    j += 1;
+                } else {
+                    tokens.push(Token::Setting(other.to_string()));
+                    j += 1;
+                }
             }
         }
     }

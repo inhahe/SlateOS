@@ -6505,4 +6505,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      shm is unavailable — but both prefer POSIX shm when
 ##      offered), and a handful of embedded message-passing
 ##      daemons that use POSIX mq.
+##  48. POLL / PPOLL / SELECT / PSELECT6 + epoll family
+##      (EPOLL_CREATE / EPOLL_CREATE1 / EPOLL_CTL / EPOLL_WAIT /
+##      EPOLL_PWAIT / EPOLL_PWAIT2) — 10 syscalls, DONE as
+##      input-validated principled-errno stubs that all return
+##      ENOSYS / EBADF / EINVAL.
+##         - poll / ppoll / select / pselect6 / epoll_create /
+##           epoll_create1: validate every user pointer
+##           (pollfd is 8 bytes; fd_set is ceil(nfds/8) bytes;
+##           timespec is 16; timeval is 16; sigset_t is 8;
+##           pselect6's last arg is a 16-byte {ss*, size_t}
+##           struct; epoll_event is 12) and every flag bit,
+##           then return ENOSYS.  Why ENOSYS rather than
+##           silently returning 0 (timeout) — because programs
+##           that depend on poll/epoll for their event loop
+##           (every server, every libuv / tokio program) would
+##           otherwise busy-loop forever waiting for events
+##           that never fire.  ENOSYS is the only error code
+##           that propagates back to the caller in a way they
+##           can observe.  Programs that want graceful
+##           feature-fallback (rare for modern code; common
+##           historically with select -> poll -> epoll) see the
+##           expected error from the most-advanced syscall.
+##         - epoll_ctl: validates op (ADD | DEL | MOD), the
+##           12-byte epoll_event ptr for ADD / MOD, and the
+##           target fd, then returns EBADF on the epfd.  EBADF
+##           is the right answer because epoll_create returned
+##           ENOSYS so no caller can hold a real epfd; this is
+##           also what Linux returns for a closed-out epfd.
+##         - epoll_wait / epoll_pwait / epoll_pwait2: validate
+##           the events ptr (maxevents * 12 bytes), maxevents
+##           > 0 (EINVAL otherwise), the optional timespec and
+##           sigmask, then EBADF for the same reason.
+##      Choice rationale:
+##         * Silent return-0 would hang every event loop.  An
+##           explicit ENOSYS is the only answer modern userspace
+##           handles in a recoverable way (it propagates as
+##           ENOSYS up to the I/O multiplexer's init code,
+##           which fails fast and prints a useful message).
+##         * EBADF on epoll_ctl / wait matches what Linux
+##           returns after the epfd was closed by another
+##           thread, which is a real wire-shape every caller
+##           already handles.
+##      Limitation: when readiness multiplexing lands on top
+##      of console / pipe / file / socket fds, these stubs are
+##      replaced by dispatches into the readiness subsystem.
+##      Real epoll requires per-fd readiness state, an
+##      interest-set / ready-set queue per epoll-fd, and
+##      level- vs edge-triggered semantics.  Estimated effort:
+##      ~3-4 weeks for a feature-complete implementation
+##      including poll / ppoll / select / pselect6 translation
+##      to the same readiness primitives.  Until then, server
+##      programs (HTTP, SSH, X.org / Wayland compositors,
+##      databases, async runtimes) cannot run; only synchronous
+##      blocking-I/O programs (shells, coreutils, batch jobs)
+##      will work.
 

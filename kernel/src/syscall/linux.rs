@@ -553,6 +553,14 @@ pub mod nr {
     pub const MQ_TIMEDRECEIVE: u64 = 243;
     pub const MQ_NOTIFY: u64 = 244;
     pub const MQ_GETSETATTR: u64 = 245;
+    pub const PSELECT6: u64 = 270;
+    pub const PPOLL: u64 = 271;
+    pub const EPOLL_CREATE: u64 = 213;
+    pub const EPOLL_CTL: u64 = 233;
+    pub const EPOLL_WAIT: u64 = 232;
+    pub const EPOLL_PWAIT: u64 = 281;
+    pub const EPOLL_CREATE1: u64 = 291;
+    pub const EPOLL_PWAIT2: u64 = 441;
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,6 +1534,16 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::MQ_TIMEDRECEIVE => sys_mq_timedreceive(args),
         nr::MQ_NOTIFY => sys_mq_notify(args),
         nr::MQ_GETSETATTR => sys_mq_getsetattr(args),
+        nr::POLL => sys_poll(args),
+        nr::PPOLL => sys_ppoll(args),
+        nr::SELECT => sys_select(args),
+        nr::PSELECT6 => sys_pselect6(args),
+        nr::EPOLL_CREATE => sys_epoll_create(args),
+        nr::EPOLL_CREATE1 => sys_epoll_create1(args),
+        nr::EPOLL_CTL => sys_epoll_ctl(args),
+        nr::EPOLL_WAIT => sys_epoll_wait(args),
+        nr::EPOLL_PWAIT => sys_epoll_pwait(args),
+        nr::EPOLL_PWAIT2 => sys_epoll_pwait2(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -7057,6 +7075,276 @@ fn sys_mq_getsetattr(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
+// ---------------------------------------------------------------------------
+// poll / ppoll / select / pselect6 / epoll family
+//
+// These are the four flavours of "wait for I/O readiness on a set of file
+// descriptors with an optional timeout".  Real readiness-multiplexing does
+// not yet exist in this kernel: console / pipe / file fds are all read /
+// written synchronously, and the in-flight IPC / IOCP path is a separate
+// world from POSIX fds.  Wiring them up to a real ready-queue is a multi-
+// week effort that has to land alongside non-blocking I/O on all four
+// HandleKinds.
+//
+// In the meantime we expose a principled-stub API:
+//
+//   * Validate every user-space pointer (pollfd arrays, fd_set bitmaps,
+//     timespec, sigset_t) so a malicious caller cannot trick the kernel
+//     into reading arbitrary memory.
+//   * For all four (poll / ppoll / select / pselect6) plus all six epoll
+//     variants, return ENOSYS so glibc / libuv / tokio's feature-detect
+//     paths know to skip these and use blocking I/O directly.  Returning
+//     "0 events ready" would silently hang every event-loop based program.
+//   * epoll_ctl returns EBADF because there is no real epoll-fd to operate
+//     on.
+//
+// When real readiness multiplexing lands, these stubs are replaced by
+// dispatches into the readiness subsystem.
+// ---------------------------------------------------------------------------
+
+/// `poll(fds*, nfds, timeout_ms)` — wait for events on a set of fds.
+fn sys_poll(args: &SyscallArgs) -> SyscallResult {
+    let nfds = args.arg1;
+    // Linux caps nfds at RLIMIT_NOFILE; we accept up to 1<<20 as a sanity
+    // bound and then refuse anything larger as EINVAL.
+    if nfds > (1 << 20) {
+        return linux_err(errno::EINVAL);
+    }
+    if nfds > 0 {
+        if args.arg0 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // struct pollfd is 8 bytes: { int fd; short events; short revents; }
+        let len = nfds.saturating_mul(8);
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg0, len as usize) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `ppoll(fds*, nfds, timespec*, sigmask*, sigsetsize)` — like poll with
+/// nanosecond-precision timeout and atomic sigmask swap.
+fn sys_ppoll(args: &SyscallArgs) -> SyscallResult {
+    let nfds = args.arg1;
+    if nfds > (1 << 20) {
+        return linux_err(errno::EINVAL);
+    }
+    if nfds > 0 {
+        if args.arg0 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        let len = nfds.saturating_mul(8);
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg0, len as usize) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg2 != 0 {
+        // struct timespec is 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // sigsetsize must equal sizeof(sigset_t) = 8 on x86_64.
+    if args.arg4 != 0 && args.arg4 != 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// Round nfds bits up to bytes for an fd_set, capped at a sane maximum
+/// (1<<20 fds = 128KiB per fd_set, which is the same cap select() uses
+/// before erroring with EINVAL).
+fn fd_set_byte_len(nfds: i32) -> Result<usize, SyscallResult> {
+    if nfds < 0 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    let nfds_u = nfds as u64;
+    if nfds_u > (1 << 20) {
+        return Err(linux_err(errno::EINVAL));
+    }
+    // bits → bytes, rounded up.
+    Ok(((nfds_u + 7) / 8) as usize)
+}
+
+/// `select(nfds, readfds*, writefds*, exceptfds*, timeval*)` — classic
+/// readiness multiplexing.  timeval is 16 bytes (sec + usec).
+fn sys_select(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let nfds = args.arg0 as i32;
+    let len = match fd_set_byte_len(nfds) {
+        Ok(n) => n,
+        Err(r) => return r,
+    };
+    for ptr in [args.arg1, args.arg2, args.arg3] {
+        if ptr != 0 && len > 0 {
+            if let Err(e) = crate::mm::user::validate_user_write(ptr, len) {
+                return linux_err(linux_errno_for(e));
+            }
+        }
+    }
+    if args.arg4 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg4, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `pselect6(nfds, readfds*, writefds*, exceptfds*, timespec*, sigmask_arg*)`
+/// — sigmask_arg points to `struct { sigset_t *ss; size_t ss_len; }` (16B).
+fn sys_pselect6(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let nfds = args.arg0 as i32;
+    let len = match fd_set_byte_len(nfds) {
+        Ok(n) => n,
+        Err(r) => return r,
+    };
+    for ptr in [args.arg1, args.arg2, args.arg3] {
+        if ptr != 0 && len > 0 {
+            if let Err(e) = crate::mm::user::validate_user_write(ptr, len) {
+                return linux_err(linux_errno_for(e));
+            }
+        }
+    }
+    if args.arg4 != 0 {
+        // struct timespec is 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg5 != 0 {
+        // { const sigset_t *ss; size_t ss_len; } = 16 bytes
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg5, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `epoll_create(size)` — historical, size is now ignored but must be > 0.
+fn sys_epoll_create(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let size = args.arg0 as i32;
+    if size <= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `epoll_create1(flags)` — flags is EPOLL_CLOEXEC (0o2_000_000) only.
+fn sys_epoll_create1(args: &SyscallArgs) -> SyscallResult {
+    const EPOLL_CLOEXEC: u32 = 0o2_000_000;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg0 as u32;
+    if flags & !EPOLL_CLOEXEC != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `epoll_ctl(epfd, op, fd, event*)` — op in {ADD=1, DEL=2, MOD=3}.
+fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
+    const EPOLL_CTL_ADD: i32 = 1;
+    const EPOLL_CTL_DEL: i32 = 2;
+    const EPOLL_CTL_MOD: i32 = 3;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let op = args.arg1 as i32;
+    if !matches!(op, EPOLL_CTL_ADD | EPOLL_CTL_DEL | EPOLL_CTL_MOD) {
+        return linux_err(errno::EINVAL);
+    }
+    // event ptr is required for ADD / MOD; DEL ignores it.
+    if op != EPOLL_CTL_DEL {
+        if args.arg3 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // struct epoll_event is 12 bytes on x86_64 (packed): u32 events + u64 data.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 12) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let target_fd = args.arg2 as i32;
+    // Validate the target fd is a real fd in our table (or we are in kernel
+    // context, in which case validation is a no-op).
+    if let Err(r) = validate_linux_fd(target_fd) {
+        return r;
+    }
+    // The epfd itself does not exist in our kernel — epoll_create returned
+    // ENOSYS so no caller can hold a real epfd.  Tell them so.
+    linux_err(errno::EBADF)
+}
+
+/// `epoll_wait(epfd, events*, maxevents, timeout_ms)`.
+fn sys_epoll_wait(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let maxevents = args.arg2 as i32;
+    if maxevents <= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // struct epoll_event is 12 bytes.
+    let len = (maxevents as u64).saturating_mul(12);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `epoll_pwait(epfd, events*, maxevents, timeout_ms, sigmask*, sigsetsize)`.
+fn sys_epoll_pwait(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let maxevents = args.arg2 as i32;
+    if maxevents <= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let len = (maxevents as u64).saturating_mul(12);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg5 != 0 && args.arg5 != 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg4 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EBADF)
+}
+
+/// `epoll_pwait2(epfd, events*, maxevents, timespec*, sigmask*, sigsetsize)`.
+fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let maxevents = args.arg2 as i32;
+    if maxevents <= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let len = (maxevents as u64).saturating_mul(12);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg3 != 0 {
+        // timespec 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg5 != 0 && args.arg5 != 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg4 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EBADF)
+}
+
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
     // type 0..=10 are defined in Linux.
@@ -11487,6 +11775,129 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::MQ_GETSETATTR, &a).value
             != -i64::from(errno::EBADF) {
             serial_println!("[syscall/linux]   FAIL: mq_getsetattr not EBADF");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // poll / ppoll / select / pselect6 + epoll family
+    // -----------------------------------------------------------------
+    {
+        // poll(NULL, 0, 0) — nfds == 0 -> ENOSYS (validation skipped).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::POLL, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: poll(NULL,0,0) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // poll with absurd nfds -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: (1u64 << 21), arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::POLL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: poll huge nfds not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // poll with nfds > 0 but NULL fds -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::POLL, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: poll NULL fds not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // ppoll with nfds=0 and NULL timespec / sigmask -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: ppoll not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // ppoll bad sigsetsize -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 16, arg5: 0 };
+        if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ppoll bad sigsetsize not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // select(0, NULL, NULL, NULL, NULL) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SELECT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: select(0,...) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // select with negative nfds -> EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SELECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: select negative nfds not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pselect6(0, NULL, NULL, NULL, NULL, NULL) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PSELECT6, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: pselect6 not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_create(0) -> EINVAL (size must be > 0 historically).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CREATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: epoll_create(0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_create(1) -> ENOSYS.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CREATE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: epoll_create(1) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_create1(0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CREATE1, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: epoll_create1(0) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_create1 with unknown flag bits -> EINVAL.
+        let a = SyscallArgs { arg0: 0xff, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CREATE1, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: epoll_create1 bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_ctl with invalid op -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CTL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: epoll_ctl bad op not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_ctl with ADD and NULL event ptr -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CTL, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: epoll_ctl ADD NULL event not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_wait with maxevents == 0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: epoll_wait 0 maxevents not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_pwait with negative maxevents -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: u64::MAX, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_PWAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: epoll_pwait neg maxevents not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_pwait with bad sigsetsize -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 4 };
+        // arg1 must point to writable memory; in kernel context validation
+        // is a no-op so this proceeds to the sigsetsize check.
+        if dispatch_linux(nr::EPOLL_PWAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: epoll_pwait bad sigsetsize not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_pwait2 with 0 maxevents -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_PWAIT2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: epoll_pwait2 0 maxevents not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_wait with maxevents > 0 and kernel-context fd -> EBADF
+        // (validation is no-op so we reach the EBADF return).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_WAIT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: epoll_wait valid args not EBADF");
             return Err(KernelError::InternalError);
         }
     }

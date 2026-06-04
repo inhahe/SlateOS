@@ -17,16 +17,16 @@ fn main() {
         files.push("-".to_string());
     }
 
-    let lines_per_page = get_terminal_lines().saturating_sub(1); // leave room for prompt
+    let lines_per_page = terminal_lines(env::var("LINES").ok().as_deref()).saturating_sub(1);
 
     for (fi, path) in files.iter().enumerate() {
         if files.len() > 1 {
             if fi > 0 {
                 println!();
             }
-            println!(":::::::::::::");
-            println!("{path}");
-            println!(":::::::::::::");
+            for line in file_header(path) {
+                println!("{line}");
+            }
         }
 
         let reader: Box<dyn Read> = if path == "-" {
@@ -42,7 +42,7 @@ fn main() {
         };
 
         let buf = BufReader::new(reader);
-        let mut line_count = 0;
+        let mut line_count: usize = 0;
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
@@ -53,22 +53,19 @@ fn main() {
             };
 
             let _ = writeln!(out, "{line}");
-            line_count += 1;
+            line_count = line_count.saturating_add(1);
 
             if line_count >= lines_per_page {
                 let _ = out.flush();
-                // Show prompt
                 eprint!("--More--");
                 let _ = io::stderr().flush();
 
-                // Wait for user input
                 match read_key() {
                     Key::Quit => return,
-                    Key::Line => line_count = lines_per_page - 1, // show one more line
-                    Key::Page => line_count = 0,                  // show full page
+                    Key::Line => line_count = lines_per_page.saturating_sub(1),
+                    Key::Page => line_count = 0,
                 }
 
-                // Clear the --More-- prompt
                 eprint!("\r        \r");
                 let _ = io::stderr().flush();
             }
@@ -76,33 +73,117 @@ fn main() {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Key {
-    Page,  // space
-    Line,  // enter
-    Quit,  // q
+    Page, // space
+    Line, // enter
+    Quit, // q
 }
 
 fn read_key() -> Key {
-    // Read one byte from stdin (in raw mode ideally, but
-    // we fall back to line-buffered if raw mode isn't available).
     let stdin = io::stdin();
     let mut buf = [0u8; 1];
     match stdin.lock().read(&mut buf) {
         Ok(0) | Err(_) => Key::Quit,
-        Ok(_) => match buf[0] {
-            b'q' | b'Q' => Key::Quit,
-            b' ' => Key::Page,
-            b'\n' | b'\r' => Key::Line,
-            _ => Key::Page, // default: next page
-        },
+        Ok(_) => parse_key_byte(buf.first().copied().unwrap_or(b' ')),
     }
 }
 
-fn get_terminal_lines() -> usize {
-    // Try reading from LINES env var or default to 24
-    if let Ok(val) = std::env::var("LINES")
-        && let Ok(n) = val.parse::<usize>() {
-            return n;
-        }
+/// Translate one byte of user input into a `Key` action.
+fn parse_key_byte(b: u8) -> Key {
+    match b {
+        b'q' | b'Q' => Key::Quit,
+        b' ' => Key::Page,
+        b'\n' | b'\r' => Key::Line,
+        _ => Key::Page,
+    }
+}
+
+/// Compute the terminal line count from a `LINES` env value; falls back to 24.
+fn terminal_lines(env_value: Option<&str>) -> usize {
+    if let Some(val) = env_value
+        && let Ok(n) = val.parse::<usize>()
+        && n > 0
+    {
+        return n;
+    }
     24
+}
+
+/// Build the three header lines printed before each file in multi-file mode.
+fn file_header(path: &str) -> [String; 3] {
+    [
+        ":::::::::::::".to_string(),
+        path.to_string(),
+        ":::::::::::::".to_string(),
+    ]
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_keys() {
+        assert_eq!(parse_key_byte(b'q'), Key::Quit);
+        assert_eq!(parse_key_byte(b'Q'), Key::Quit);
+    }
+
+    #[test]
+    fn space_is_page() {
+        assert_eq!(parse_key_byte(b' '), Key::Page);
+    }
+
+    #[test]
+    fn newline_is_line() {
+        assert_eq!(parse_key_byte(b'\n'), Key::Line);
+        assert_eq!(parse_key_byte(b'\r'), Key::Line);
+    }
+
+    #[test]
+    fn unknown_byte_defaults_to_page() {
+        assert_eq!(parse_key_byte(b'x'), Key::Page);
+        assert_eq!(parse_key_byte(0), Key::Page);
+        assert_eq!(parse_key_byte(255), Key::Page);
+    }
+
+    #[test]
+    fn terminal_lines_default_when_unset() {
+        assert_eq!(terminal_lines(None), 24);
+    }
+
+    #[test]
+    fn terminal_lines_parses_env() {
+        assert_eq!(terminal_lines(Some("40")), 40);
+    }
+
+    #[test]
+    fn terminal_lines_falls_back_on_garbage() {
+        assert_eq!(terminal_lines(Some("notanumber")), 24);
+    }
+
+    #[test]
+    fn terminal_lines_falls_back_on_zero() {
+        assert_eq!(terminal_lines(Some("0")), 24);
+    }
+
+    #[test]
+    fn terminal_lines_falls_back_on_empty() {
+        assert_eq!(terminal_lines(Some("")), 24);
+    }
+
+    #[test]
+    fn file_header_contains_path() {
+        let h = file_header("data.txt");
+        assert_eq!(h[0], ":::::::::::::");
+        assert_eq!(h[1], "data.txt");
+        assert_eq!(h[2], ":::::::::::::");
+    }
+
+    #[test]
+    fn file_header_with_unusual_chars() {
+        let h = file_header("a b/c.txt");
+        assert_eq!(h[1], "a b/c.txt");
+    }
 }

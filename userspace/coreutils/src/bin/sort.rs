@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn parse_num_decimal() {
-        assert_eq!(parse_leading_number("3.14"), 3.14);
+        assert_eq!(parse_leading_number("2.5"), 2.5);
     }
 
     #[test]
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn parse_num_two_dots_stop_at_second() {
-        // "3.14.15" -> "3.14" -> 3.14
-        assert_eq!(parse_leading_number("3.14.15"), 3.14);
+        // "2.5.15" -> "2.5" -> 2.5
+        assert_eq!(parse_leading_number("2.5.15"), 2.5);
     }
 }

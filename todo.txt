@@ -2682,16 +2682,64 @@ Remaining net improvements (diminishing returns):
   Note: skipped touch (mostly I/O, no pure logic), cp (I/O-bound copy
   logic), and kill (doesn't link on host - extern "C" kill() unresolved).
 
-  RUNNING TOTAL: 449 tests across 30 binaries (whoami + batches 1-5).
-  ~55 binaries still pending.
+  PROGRESS 2026-06-04 (batch 6): extracted helpers and added 88 unit tests
+  across 7 more binaries:
+    * date.rs: extracted `unix_secs_to_datetime(total_secs) -> DateTime`
+      and `format_datetime(&DateTime) -> String`; rewrote main to use them.
+      17 tests: leap year basics (2000/2024/1900/2100/2400), epoch is
+      Thu Jan 1 1970, second/minute/hour ticks, day-of-week cycling,
+      end-of-January, start-of-February, leap day 2000 (Feb 29), Mar 1
+      2000, known datetime 2024-06-15 12:30:45 UTC, format epoch and
+      2024 known dates, day padding and zero-padded time fields.
+    * ln.rs: extracted `parse_args(args) -> Result<LnArgs, String>` with
+      combined short-option support (`-sf` style). 10 tests: hard link
+      defaults, -s symbolic, -s at end, missing/too many args, unknown
+      flag, combined -ss idempotent, combined -sx errors, duplicate -s.
+    * xargs.rs: extracted `parse_args -> XargsOpts`, `split_items(input,
+      null_delim) -> Vec<String>`, and `replace_in_args(cmd_args, repl,
+      item) -> Vec<String>`. 16 tests: parsing (no args, -0, -n N, -I
+      REPL, combined, cmd + initial args, invalid -n value), splitting
+      (whitespace runs, null-delim, empty input, drops empty segments),
+      replacement (simple, no-match, multi-occurrence, embedded token).
+    * uname.rs: extracted `parse_args(args) -> Result<UnameFlags, String>`
+      and `format_output(&UnameFlags, sys, rel, mach) -> String`. 15
+      tests: no-args default, individual -s/-r/-m, -a sets all, combined
+      `-srm`, multiple args, unknown option, unexpected positional,
+      default-to-sysname formatting, all-flags formatting, only-release,
+      only-machine, sys+mach skipping release, combined with unknown.
+    * which.rs: extracted `split_path(path_var) -> Vec<&str>` and
+      `find_command<F: FnMut(&Path) -> bool>(cmd, dirs, exists) ->
+      Option<PathBuf>`. 11 tests: PATH splitting (basic, empty,
+      empty-segments), find returns first hit, miss, slash-treated-
+      literally (found/not), absolute path, skips missing dirs, no dirs,
+      empty-dir-joined-to-name. Path comparison used to avoid Windows
+      `/` vs `\\` test flakes.
+    * readlink.rs: extracted `parse_args(args) -> ReadlinkArgs`. 8
+      tests: no args, single file, -f/-e/-m all set canonicalize,
+      multiple files, flag at end, unknown flag treated as path.
+    * more.rs: extracted `parse_key_byte(b) -> Key`, `terminal_lines(
+      env_value: Option<&str>) -> usize`, `file_header(path) -> [String;
+      3]`. 11 tests: quit keys (q/Q), space->Page, newline/CR->Line,
+      unknown byte defaults to Page, LINES env default 24, parses
+      numeric env, falls back on garbage/zero/empty, header lines
+      contain colons + path including unusual chars.
+  Also fixed pre-existing clippy::approx_constant errors in sort.rs
+  (test values 3.14 changed to 2.5 since clippy reads them as
+  approximate PI under deny). All tests pass; clippy clean on
+  x86_64-pc-windows-gnu.
+  Skipped chmod (entire file gated cfg(unix), won't compile on
+  windows-gnu host), id (extern C getuid/getgid unresolved on host),
+  pwd (trivial single fs call, no helpers worth extracting),
+  realpath (single fs::canonicalize call, no logic to test).
 
-  REMAINING: awk, bc, chmod, chown, cp, date,
-  dd, df, diff, du, ed, false, fetch, find, free, grep,
-  hostname, id, join, kill, ln, logger, ls, md5sum,
-  mkfifo, more, mv, nice, nohup, patch, ps, pwd,
-  readlink, realpath, renice, rm, rmdir, sed, sh, sha256sum,
-  stat, strings, tar, test, time_cmd, touch,
-  true, tsort, tty, uname, uptime, which, who, xargs, yes.
+  RUNNING TOTAL: 537 tests across 37 binaries (whoami + batches 1-6).
+  ~48 binaries still pending.
+
+  REMAINING: awk, bc, chmod, chown, cp, dd, df, diff, du, ed, false,
+  fetch, find, free, grep, hostname, id, join, kill, logger, ls,
+  md5sum, mkfifo, mv, nice, nohup, patch, ps, pwd, realpath, renice,
+  rm, rmdir, sed, sh, sha256sum, stat, strings, tar, test, time_cmd,
+  touch, true, tsort, tty, uptime, who, yes.
   Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to

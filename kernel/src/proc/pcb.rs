@@ -143,6 +143,10 @@ pub enum AbiMode {
     #[default]
     Native,
     /// Linux x86_64 ABI — dispatched through the translation layer.
+    ///
+    /// Currently only set by tests and the future ELF loader's Linux-binary
+    /// detection path; suppress the dead-code lint until that loader lands.
+    #[allow(dead_code)]
     Linux,
 }
 
@@ -1558,6 +1562,9 @@ pub fn get_abi_mode(pid: ProcessId) -> Option<AbiMode> {
 ///
 /// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
 ///   live process.
+//
+// Not yet wired into the loader; suppress dead-code lint until that lands.
+#[allow(dead_code)]
 pub fn set_abi_mode(pid: ProcessId, mode: AbiMode) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;

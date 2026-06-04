@@ -490,6 +490,10 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("FATAL: Syscall dispatch self-test failed: {}", e);
         cpu::halt_loop();
     }
+    if let Err(e) = syscall::linux::self_test() {
+        serial_println!("FATAL: Linux ABI translation self-test failed: {}", e);
+        cpu::halt_loop();
+    }
 
     // Step 12: Initialize futex subsystem.
     // Futexes enable fast userspace synchronization: the uncontended

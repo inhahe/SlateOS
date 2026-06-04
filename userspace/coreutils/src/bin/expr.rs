@@ -193,3 +193,167 @@ fn parse_primary(tokens: &[&str], pos: &mut usize) -> String {
     *pos += 1;
     token.to_string()
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// Convenience wrapper: parse a full expression from a tokenized array
+    /// and assert the whole input was consumed.
+    fn eval(tokens: &[&str]) -> String {
+        let mut pos = 0;
+        let result = parse_or(tokens, &mut pos);
+        assert_eq!(pos, tokens.len(), "expected all tokens consumed");
+        result
+    }
+
+    // ---------------- arithmetic ----------------
+
+    #[test]
+    fn addition() {
+        assert_eq!(eval(&["2", "+", "3"]), "5");
+    }
+
+    #[test]
+    fn subtraction() {
+        assert_eq!(eval(&["10", "-", "4"]), "6");
+    }
+
+    #[test]
+    fn multiplication() {
+        assert_eq!(eval(&["3", "*", "4"]), "12");
+    }
+
+    #[test]
+    fn division_integer() {
+        assert_eq!(eval(&["7", "/", "2"]), "3");
+    }
+
+    #[test]
+    fn modulo() {
+        assert_eq!(eval(&["7", "%", "3"]), "1");
+    }
+
+    #[test]
+    fn precedence_mul_before_add() {
+        // 2 + 3 * 4 = 14
+        assert_eq!(eval(&["2", "+", "3", "*", "4"]), "14");
+    }
+
+    #[test]
+    fn left_associative_subtraction() {
+        // (10 - 3) - 2 = 5, not 10 - (3 - 2) = 9
+        assert_eq!(eval(&["10", "-", "3", "-", "2"]), "5");
+    }
+
+    #[test]
+    fn parentheses_override_precedence() {
+        // (2 + 3) * 4 = 20
+        assert_eq!(eval(&["(", "2", "+", "3", ")", "*", "4"]), "20");
+    }
+
+    #[test]
+    fn negative_result() {
+        assert_eq!(eval(&["3", "-", "10"]), "-7");
+    }
+
+    // ---------------- comparison ----------------
+
+    #[test]
+    fn integer_equality_true() {
+        assert_eq!(eval(&["5", "=", "5"]), "1");
+    }
+
+    #[test]
+    fn integer_equality_false() {
+        assert_eq!(eval(&["5", "=", "6"]), "0");
+    }
+
+    #[test]
+    fn integer_not_equal() {
+        assert_eq!(eval(&["5", "!=", "6"]), "1");
+        assert_eq!(eval(&["5", "!=", "5"]), "0");
+    }
+
+    #[test]
+    fn integer_less_than() {
+        assert_eq!(eval(&["3", "<", "5"]), "1");
+        assert_eq!(eval(&["5", "<", "5"]), "0");
+    }
+
+    #[test]
+    fn integer_less_or_equal() {
+        assert_eq!(eval(&["5", "<=", "5"]), "1");
+        assert_eq!(eval(&["6", "<=", "5"]), "0");
+    }
+
+    #[test]
+    fn integer_greater_than() {
+        assert_eq!(eval(&["6", ">", "5"]), "1");
+        assert_eq!(eval(&["5", ">", "5"]), "0");
+    }
+
+    #[test]
+    fn string_comparison_lexicographic() {
+        assert_eq!(eval(&["apple", "<", "banana"]), "1");
+        assert_eq!(eval(&["banana", "<", "apple"]), "0");
+    }
+
+    #[test]
+    fn string_equality() {
+        assert_eq!(eval(&["foo", "=", "foo"]), "1");
+        assert_eq!(eval(&["foo", "=", "bar"]), "0");
+    }
+
+    // ---------------- logical ----------------
+
+    #[test]
+    fn or_returns_first_truthy() {
+        assert_eq!(eval(&["hello", "|", "world"]), "hello");
+    }
+
+    #[test]
+    fn or_falls_through_falsy() {
+        // 0 is falsy in expr; expression yields the second operand.
+        assert_eq!(eval(&["0", "|", "world"]), "world");
+        assert_eq!(eval(&["", "|", "world"]), "world");
+    }
+
+    #[test]
+    fn and_returns_first_when_both_truthy() {
+        assert_eq!(eval(&["foo", "&", "bar"]), "foo");
+    }
+
+    #[test]
+    fn and_returns_zero_when_either_falsy() {
+        assert_eq!(eval(&["0", "&", "bar"]), "0");
+        assert_eq!(eval(&["foo", "&", "0"]), "0");
+        assert_eq!(eval(&["", "&", "bar"]), "0");
+    }
+
+    // ---------------- length ----------------
+
+    #[test]
+    fn length_of_string() {
+        assert_eq!(eval(&["length", "hello"]), "5");
+    }
+
+    #[test]
+    fn length_empty_string() {
+        assert_eq!(eval(&["length", ""]), "0");
+    }
+
+    // ---------------- primary / literal ----------------
+
+    #[test]
+    fn bare_literal_passes_through() {
+        assert_eq!(eval(&["hello"]), "hello");
+        assert_eq!(eval(&["42"]), "42");
+    }
+
+    #[test]
+    fn parens_around_literal() {
+        assert_eq!(eval(&["(", "42", ")"]), "42");
+    }
+}

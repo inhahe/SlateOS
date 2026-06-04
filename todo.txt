@@ -2597,15 +2597,59 @@ Remaining net improvements (diminishing returns):
       "=value" not parsed as assignment.
   All 78 tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  RUNNING TOTAL: 262 tests across 18 binaries (whoami + batch 1 +
-  batch 2 + batch 3). ~67 binaries still pending.
+  PROGRESS 2026-06-04 (batch 4): added 95 tests across 6 more binaries:
+    * head.rs: extracted `parse_args(args) -> HeadArgs { count, files }`;
+      rewrote main to use it. 12 tests: default count, -n separate
+      arg, -nN joined, -N shorthand, files only, flags-and-files,
+      invalid count falls back to 10, invalid joined count falls back,
+      lone -n at end ignored, "-" arg, last -n wins, zero count.
+    * tail.rs: extracted `parse_args(args) -> TailArgs` and
+      `last_n(lines, count) -> &[String]`; rewrote main to read all
+      lines then slice. 13 tests for parse_args (default, -n
+      separate/joined, -N shorthand, files, "-" treated as file,
+      invalid falls back) and last_n (fewer/more/exact/zero/empty/one).
+    * cmp.rs: extracted `compare_bytes(a, b, start_byte, start_line)
+      -> CmpOutcome` (Equal / Diff{byte_pos, line_num, a, b} / Eof
+      {a_shorter}), `find_all_diffs(...) -> Vec<DiffRecord>` for -l
+      verbose mode, and `format_diff_line(byte_pos, a, b) -> String`.
+      Rewrote main to dispatch verbose vs default mode through them.
+      18 tests covering equal/empty/first/middle byte diff, line
+      counter tracks newlines, diff at newline itself, shorter-a/-b
+      EOF detection, start offset application, format_diff_line in
+      octal padding, find_all_diffs (equal, every byte differs, some
+      differ, stops at shorter, line numbers across newlines).
+    * paste.rs: extracted `join_serial(lines, delim)` and
+      `join_parallel(pieces, delim)`; rewrote both modes to use them.
+      10 tests: serial empty/single/multi/custom-delim/empty-lines,
+      parallel two-files/eof-empty/custom-delim/single/empty.
+    * od.rs: extracted `format_address(addr, radix) -> String`,
+      `format_byte(b, output_type) -> String`, `format_data(chunk,
+      output_type) -> String`; rewrote main to use them. 17 tests
+      covering octal/hex/decimal/none address formatting, unknown
+      radix defaults to octal, large overflow no truncation; byte
+      formatting for octal/hex/decimal/char modes including all named
+      escapes and nonprintable -> octal fallback; data chunk formatting
+      for empty, octal/hex runs, mixed char run.
+    * expr.rs: existing parse_or/parse_and/parse_comparison/parse_add/
+      parse_mul/parse_primary helpers tested in place. 25 tests
+      covering arithmetic (+ - * / %), precedence (mul before add),
+      left-associative subtraction, parens override, negative results,
+      integer comparison (= != < <= > >=), string comparison
+      (lexicographic, equality), logical or returns first-truthy /
+      falls through falsy, logical and returns first when both truthy
+      / zero when either falsy, length of string and empty, literal
+      passthrough, parens around literal.
+  All 95 tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  REMAINING: awk, bc, cat, chmod, chown, cmp, cp, csplit, date,
-  dd, df, diff, du, ed, expr, false, fetch, find, free, grep,
-  head, hostname, id, join, kill, ln, logger, ls, md5sum, mkdir,
-  mkfifo, more, mv, nice, nohup, od, paste, patch, ps, pwd,
+  RUNNING TOTAL: 357 tests across 24 binaries (whoami + batches 1-4).
+  ~61 binaries still pending.
+
+  REMAINING: awk, bc, cat, chmod, chown, cp, csplit, date,
+  dd, df, diff, du, ed, false, fetch, find, free, grep,
+  hostname, id, join, kill, ln, logger, ls, md5sum, mkdir,
+  mkfifo, more, mv, nice, nohup, patch, ps, pwd,
   readlink, realpath, renice, rm, rmdir, sed, sh, sha256sum, sort,
-  split, stat, strings, tail, tar, tee, test, time_cmd, touch,
+  split, stat, strings, tar, tee, test, time_cmd, touch,
   true, tsort, tty, uname, uptime, which, who, xargs, yes.
   Continue in batches.
 

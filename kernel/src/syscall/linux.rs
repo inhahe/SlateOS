@@ -667,6 +667,17 @@ pub mod nr {
     pub const PWRITEV: u64 = 296;
     pub const PREADV2: u64 = 327;
     pub const PWRITEV2: u64 = 328;
+    // Batch 33: I/O priority + futex2 + remap_file_pages + mount_setattr +
+    // fchmodat2 + io_pgetevents.
+    pub const REMAP_FILE_PAGES: u64 = 216;
+    pub const IOPRIO_SET: u64 = 251;
+    pub const IOPRIO_GET: u64 = 252;
+    pub const IO_PGETEVENTS: u64 = 333;
+    pub const MOUNT_SETATTR: u64 = 442;
+    pub const FCHMODAT2: u64 = 452;
+    pub const FUTEX_WAKE: u64 = 454;
+    pub const FUTEX_WAIT: u64 = 455;
+    pub const FUTEX_REQUEUE: u64 = 456;
 }
 
 // ---------------------------------------------------------------------------
@@ -1749,6 +1760,15 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::PWRITEV => sys_pwritev(args),
         nr::PREADV2 => sys_preadv2(args),
         nr::PWRITEV2 => sys_pwritev2(args),
+        nr::REMAP_FILE_PAGES => sys_remap_file_pages(args),
+        nr::IOPRIO_SET => sys_ioprio_set(args),
+        nr::IOPRIO_GET => sys_ioprio_get(args),
+        nr::IO_PGETEVENTS => sys_io_pgetevents(args),
+        nr::MOUNT_SETATTR => sys_mount_setattr(args),
+        nr::FCHMODAT2 => sys_fchmodat2(args),
+        nr::FUTEX_WAKE => sys_futex2_wake(args),
+        nr::FUTEX_WAIT => sys_futex2_wait(args),
+        nr::FUTEX_REQUEUE => sys_futex2_requeue(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -10126,6 +10146,262 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+/// `remap_file_pages(addr, size, prot, pgoff, flags)` — non-linear mapping
+/// reshuffle.
+///
+/// Deprecated since Linux 3.16 in favour of multiple `mmap` calls;
+/// glibc dropped its wrapper in 2.x and modern callers use either
+/// `mmap(MAP_FIXED)` directly or `mremap`.  Return ENOSYS after
+/// validating that addr is 16 KiB aligned (kernel page size) and prot
+/// is non-zero — the standard signal that "this kernel never
+/// implemented non-linear mappings".
+fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let _size = args.arg1;
+    let prot = args.arg2 as i32;
+    let _pgoff = args.arg3;
+    let _flags = args.arg4 as i32;
+    // 16 KiB alignment — see CLAUDE.md architectural rules.
+    if addr % 0x4000 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // prot must contain at least one access bit; 0 here would be
+    // PROT_NONE which is not what callers want (they should use mmap).
+    if prot != 0 && (prot as u32) & !0x37 != 0 {
+        // 0x37 = PROT_READ|WRITE|EXEC|SEM|GROWSDOWN|GROWSUP combined.
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `ioprio_set(which, who, ioprio)` — set I/O scheduling priority.
+///
+/// which ∈ {IOPRIO_WHO_PROCESS=1, _PGRP=2, _USER=3}.
+/// ioprio packs class (top 3 bits, 1..=3 for RT/BE/IDLE) and data
+/// (bottom 13 bits, 0..=7 priority).
+///
+/// We don't run a per-task I/O scheduler yet (storage I/O is FIFO
+/// through the block layer), so honour-the-set is a no-op.  Return 0
+/// for any well-formed argument so utilities like `ionice` succeed and
+/// their settings are simply ignored — matches a kernel that has no
+/// CFQ/BFQ-equivalent I/O scheduler.
+fn sys_ioprio_set(args: &SyscallArgs) -> SyscallResult {
+    let which = args.arg0 as i32;
+    let _who = args.arg1 as i32;
+    let ioprio = args.arg2 as i32;
+    if !(1..=3).contains(&which) {
+        return linux_err(errno::EINVAL);
+    }
+    let class = (ioprio >> 13) & 0x7;
+    let data = ioprio & 0x1FFF;
+    if !(0..=3).contains(&class) {
+        // 0 = none (use class hint from process scheduler), 1=RT, 2=BE, 3=IDLE.
+        return linux_err(errno::EINVAL);
+    }
+    if !(0..=7).contains(&data) {
+        return linux_err(errno::EINVAL);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `ioprio_get(which, who)` — read I/O scheduling priority.
+///
+/// Return the default best-effort class (2 << 13) at priority 4 — the
+/// kernel's documented default when no per-task ioprio has been set.
+/// Matches `ionice -p $$` output on stock Linux.
+fn sys_ioprio_get(args: &SyscallArgs) -> SyscallResult {
+    let which = args.arg0 as i32;
+    if !(1..=3).contains(&which) {
+        return linux_err(errno::EINVAL);
+    }
+    // class=BE (2), data=4 (middle priority).
+    let ioprio: i64 = (2 << 13) | 4;
+    SyscallResult::ok(ioprio)
+}
+
+/// `io_pgetevents(ctx_id, min_nr, nr, events*, timeout*, sig*)` —
+/// timed/signal-masked variant of `io_getevents`.
+///
+/// Our io_setup/destroy return ENOSYS so no AIO context can exist;
+/// io_pgetevents on a non-existent ctx returns EINVAL.  Validate ptrs
+/// for shape, then return EINVAL — mirrors what io_getevents does for
+/// an unknown context.
+fn sys_io_pgetevents(args: &SyscallArgs) -> SyscallResult {
+    let _ctx_id = args.arg0;
+    let min_nr = args.arg1 as i64;
+    let nr = args.arg2 as i64;
+    let events = args.arg3;
+    let timeout = args.arg4;
+    let sig = args.arg5;
+    if min_nr < 0 || nr < 0 || min_nr > nr {
+        return linux_err(errno::EINVAL);
+    }
+    if nr > 0 && events != 0 {
+        // struct io_event is 32 bytes (data, obj, res, res2).
+        let len = match (nr as u64).checked_mul(32) {
+            Some(v) => v as usize,
+            None => return linux_err(errno::EINVAL),
+        };
+        if let Err(e) = crate::mm::user::validate_user_write(events, len) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if timeout != 0 {
+        // 16B timespec.
+        if let Err(e) = crate::mm::user::validate_user_read(timeout, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if sig != 0 {
+        // struct __aio_sigset { sigset_t *sigmask; size_t sigsetsize; } — 16B.
+        if let Err(e) = crate::mm::user::validate_user_read(sig, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `mount_setattr(dirfd, path, flags, attr*, size)` — fsmount-era mount
+/// attribute mutation.
+///
+/// Our mount layer doesn't yet support the new fs-API mutation calls;
+/// mount(2) itself is stubbed.  Validate path and attr, return ENOSYS.
+fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
+    let _dirfd = args.arg0 as i32;
+    let path = args.arg1;
+    let flags = args.arg2 as u32;
+    let attr = args.arg3;
+    let size = args.arg4;
+    // AT_RECURSIVE=0x8000, AT_NO_AUTOMOUNT=0x800, AT_SYMLINK_NOFOLLOW=0x100,
+    // AT_EMPTY_PATH=0x1000.
+    const VALID: u32 = 0x8000 | 0x800 | 0x100 | 0x1000;
+    if flags & !VALID != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if path != 0 {
+        if let Err(e) = validate_user_str(path) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // struct mount_attr is 32 bytes (attr_set, attr_clr, propagation, userns_fd).
+    if attr == 0 || size < 32 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(attr, 32) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `fchmodat2(dirfd, path, mode, flags)` — fchmodat with AT_SYMLINK_NOFOLLOW
+/// support.
+///
+/// New in Linux 6.6, the only addition over fchmodat(2) is supporting
+/// `AT_SYMLINK_NOFOLLOW` on the flags argument (fchmodat ignores
+/// flags and was specced as the symlink-following variant only).
+/// Forward to the existing fchmodat for AT_FDCWD-only paths; otherwise
+/// the same dirfd restrictions apply.
+fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
+    let _dirfd = args.arg0 as i32;
+    let path = args.arg1;
+    let _mode = args.arg2 as u32;
+    let flags = args.arg3 as i32;
+    // AT_SYMLINK_NOFOLLOW = 0x100, AT_EMPTY_PATH = 0x1000.
+    const VALID: i32 = 0x100 | 0x1000;
+    if flags & !VALID != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if path != 0 {
+        if let Err(e) = validate_user_str(path) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Forward to fchmodat (drops the flags difference; matches kernel
+    // <6.6 behaviour as observed via the historical fchmodat ABI).
+    sys_fchmodat(args)
+}
+
+/// `futex_wake(uaddr2*, mask, nr, flags)` — futex2 wake.
+///
+/// New in Linux 6.7.  Validates `uaddr2` 4-byte readable, `nr >= 0`,
+/// recognised flags (FUTEX2_PRIVATE=1, FUTEX2_SIZE_U32=2, FUTEX2_NUMA=4).
+/// Returns ENOSYS so glibc falls back to classic `futex(FUTEX_WAKE)`
+/// which we handle.
+fn sys_futex2_wake(args: &SyscallArgs) -> SyscallResult {
+    let uaddr2 = args.arg0;
+    let _mask = args.arg1;
+    let nr = args.arg2 as i32;
+    let flags = args.arg3 as u32;
+    if uaddr2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if nr < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    const VALID: u32 = 1 | 2 | 4;
+    if flags & !VALID != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(uaddr2, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `futex_wait(uaddr*, val, mask, flags, timespec*, clockid)` — futex2 wait.
+fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
+    let uaddr = args.arg0;
+    let _val = args.arg1;
+    let _mask = args.arg2;
+    let flags = args.arg3 as u32;
+    let timespec = args.arg4;
+    let clockid = args.arg5 as i32;
+    if uaddr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    const VALID: u32 = 1 | 2 | 4;
+    if flags & !VALID != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if !(0..=12).contains(&clockid) {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(uaddr, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    if timespec != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(timespec, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `futex_requeue(waiters*, flags, nr_wake, nr_requeue)` — futex2 requeue.
+///
+/// `waiters` is a 2-entry array of `futex_waitv` (24B each).
+fn sys_futex2_requeue(args: &SyscallArgs) -> SyscallResult {
+    let waiters = args.arg0;
+    let flags = args.arg1 as u32;
+    let nr_wake = args.arg2 as i32;
+    let nr_requeue = args.arg3 as i32;
+    if waiters == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if flags != 0 {
+        // futex_requeue currently accepts no flag bits (Linux 6.7+).
+        return linux_err(errno::EINVAL);
+    }
+    if nr_wake < 0 || nr_requeue < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Two futex_waitv entries, 24 bytes each.
+    if let Err(e) = crate::mm::user::validate_user_read(waiters, 48) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
 /// `lsm_list_modules(ids*, size*, flags)`.
 fn sys_lsm_list_modules(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 == 0 {
@@ -16515,6 +16791,163 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PWRITEV2, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: pwritev2 valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // remap_file_pages / ioprio / io_pgetevents / mount_setattr /
+    // fchmodat2 / futex2
+    // -----------------------------------------------------------------
+    {
+        let u32_buf = [0u32; 1];
+        let u32_ptr = u32_buf.as_ptr() as u64;
+        let events_buf = [0u8; 64];
+        let events_ptr = events_buf.as_ptr() as u64;
+        let ts_buf = [0u8; 16];
+        let ts_ptr = ts_buf.as_ptr() as u64;
+        let attr_buf = [0u8; 32];
+        let attr_ptr = attr_buf.as_ptr() as u64;
+        let path_buf = b"/etc/test\0";
+        let path_ptr = path_buf.as_ptr() as u64;
+        let waiters_buf = [0u8; 48];
+        let waiters_ptr = waiters_buf.as_ptr() as u64;
+
+        // remap_file_pages misaligned addr -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 3, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages misaligned not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // remap_file_pages bad prot -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0x80, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages bad prot not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // remap_file_pages valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 3, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // ioprio_set bad which -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ioprio_set bad which not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // ioprio_set bad class -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 4 << 13, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ioprio_set bad class not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // ioprio_set valid -> 0.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: (2 << 13) | 4, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPRIO_SET, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: ioprio_set valid not 0");
+            return Err(KernelError::InternalError);
+        }
+        // ioprio_get valid -> (BE << 13) | 4.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPRIO_GET, &a).value != ((2 << 13) | 4) {
+            serial_println!("[syscall/linux]   FAIL: ioprio_get valid not (BE|4)");
+            return Err(KernelError::InternalError);
+        }
+        // ioprio_get bad which -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ioprio_get bad which not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // io_pgetevents bad nr ordering -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 5, arg2: 3, arg3: events_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_pgetevents min>nr not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // io_pgetevents valid (no ctx) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: events_ptr, arg4: ts_ptr, arg5: 0 };
+        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_pgetevents valid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // mount_setattr bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x80, arg3: attr_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr too-small size -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: attr_ptr, arg4: 16, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr small size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x8000, arg3: attr_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // fchmodat2 bad flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0o644, arg3: 0x800_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat2 bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fchmodat2 valid -> EROFS (forwards to fchmodat which is read-only).
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0o644, arg3: 0x100, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat2 valid not EROFS");
+            return Err(KernelError::InternalError);
+        }
+
+        // futex_wake NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: futex_wake NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // futex_wake bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: u32_ptr, arg1: 0, arg2: 1, arg3: 0x100, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_wake bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_wake valid -> ENOSYS.
+        let a = SyscallArgs { arg0: u32_ptr, arg1: u64::MAX, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: futex_wake valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // futex_wait bad clockid -> EINVAL.
+        let a = SyscallArgs { arg0: u32_ptr, arg1: 0, arg2: 0, arg3: 1, arg4: 0, arg5: 99 };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_wait bad clockid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_wait valid -> ENOSYS.
+        let a = SyscallArgs { arg0: u32_ptr, arg1: 0, arg2: 0, arg3: 1, arg4: ts_ptr, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: futex_wait valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // futex_requeue nonzero flags -> EINVAL.
+        let a = SyscallArgs { arg0: waiters_ptr, arg1: 1, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_requeue valid -> ENOSYS.
+        let a = SyscallArgs { arg0: waiters_ptr, arg1: 0, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

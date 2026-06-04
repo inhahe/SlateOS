@@ -7192,3 +7192,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           si_pid, si_uid, si_status, si_utime, si_stime }`.
 ##           Mechanical, just not done yet.
 
+##  59. REMAP_FILE_PAGES / IOPRIO_SET / IOPRIO_GET / IO_PGETEVENTS /
+##      MOUNT_SETATTR / FCHMODAT2 / FUTEX_WAKE / FUTEX_WAIT /
+##      FUTEX_REQUEUE — 9 syscalls DONE as input-validated
+##      principled stubs.  None had a constant defined before this
+##      batch.  Brings the constant-undispatched count to 0 again
+##      and covers the next wave of genuinely-callable gaps.
+##         - remap_file_pages: validate 16 KiB-aligned addr, prot
+##           bits (PROT_READ|WRITE|EXEC|SEM|GROWSDOWN|GROWSUP);
+##           return ENOSYS.  Deprecated since Linux 3.16 — every
+##           modern caller uses MAP_FIXED mmap or mremap instead.
+##         - ioprio_set: validate which ∈ {PROCESS, PGRP, USER},
+##           class ∈ 0..=3, data ∈ 0..=7; return 0 (silent
+##           success — we don't run a per-task I/O scheduler).
+##           ionice ignores its setting cleanly.
+##         - ioprio_get: validate which; return (BE << 13) | 4 —
+##           the stock-Linux default.
+##         - io_pgetevents: validate min<=nr, events writable,
+##           timespec/sigset readable; return EINVAL (no AIO ctx
+##           can exist because io_setup is ENOSYS — Linux's
+##           "unknown ctx" answer).
+##         - mount_setattr: validate flags ⊆ {AT_RECURSIVE,
+##           NO_AUTOMOUNT, SYMLINK_NOFOLLOW, EMPTY_PATH}, attr
+##           pointer, 32B mount_attr struct; return ENOSYS.
+##         - fchmodat2: validate flags ⊆ {SYMLINK_NOFOLLOW,
+##           EMPTY_PATH}; forward to sys_fchmodat (returns EROFS).
+##           Useful immediately when Linux 6.6+ glibc bypasses
+##           fchmodat and goes straight to fchmodat2 to honour
+##           AT_SYMLINK_NOFOLLOW for chmod on a symlink.
+##         - futex_wake / futex_wait / futex_requeue: futex2 API
+##           added in Linux 6.7.  Validate uaddr readable, flags
+##           ⊆ {PRIVATE, SIZE_U32, NUMA}, clockid 0..=12 for
+##           futex_wait, futex_waitv-array readable for
+##           futex_requeue; return ENOSYS so glibc falls back to
+##           classic futex(FUTEX_WAIT/WAKE) which we DO handle.
+##      Choice rationale:
+##         * Silent 0 for ioprio_set because the entire purpose
+##           of ionice is to express a preference — a kernel
+##           with no I/O scheduler is free to ignore it (and
+##           every BFQ/CFQ-less Linux config does exactly this).
+##         * (BE << 13) | 4 for ioprio_get matches `cat
+##           /proc/$$/io` on stock Linux when nothing has been
+##           set.  Programs that check `ionice -p` see the
+##           expected default and don't panic.
+##         * EINVAL for io_pgetevents (not ENOSYS) because the
+##           syscall exists — we just have no contexts.  Programs
+##           that probe for AIO support via io_setup get ENOSYS
+##           and never reach io_pgetevents; programs that did set
+##           up a context elsewhere (impossible today) and pass
+##           it to io_pgetevents get the truthful "no such ctx".
+##         * EROFS for fchmodat2 valid: forwarding to fchmodat
+##           preserves the existing "the filesystem is read-only"
+##           contract.  Once a writable FS lands, both fchmodat
+##           and fchmodat2 light up at once.
+##         * ENOSYS for futex2: the new ABI is rarely used today
+##           (futex2 is opt-in; glibc still defaults to classic
+##           futex).  Returning ENOSYS makes feature-detection
+##           probes work correctly.
+##      Limitation / future work:
+##         * ioprio could become real once an I/O scheduler is
+##           wired in — store the per-task class/data and consult
+##           it from the block-layer dispatch.
+##         * mount_setattr blocks on the fs-API mutation path
+##           which itself needs the new fsmount infrastructure.
+##         * fchmodat2's AT_SYMLINK_NOFOLLOW difference vs.
+##           fchmodat doesn't matter until we have writable
+##           filesystems with symlinks.
+##         * futex2 promotion: at minimum, glibc 2.42+ may start
+##           preferring futex2 for new locks.  Wiring this to the
+##           classic futex impl (per-op translation) is a one-day
+##           task once the new ABI sees real-world traction.
+

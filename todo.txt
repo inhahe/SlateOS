@@ -6747,4 +6747,61 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      modern Linux libc uses it as the primary thread-spawn
 ##      path.  seccomp is third (sandboxes).  The rest are
 ##      lower-priority since their absence is well-handled.
+##  52. RT_SIGSUSPEND / RT_SIGTIMEDWAIT / RT_SIGQUEUEINFO /
+##      RT_TGSIGQUEUEINFO + POSIX timer family (TIMER_CREATE /
+##      _DELETE / _SETTIME / _GETTIME / _GETOVERRUN) — 9
+##      syscalls DONE as input-validated principled-errno
+##      stubs.
+##         - rt_sigsuspend: validate sigsetsize == 8 +
+##           non-NULL mask; return EINTR (documented wake-up
+##           answer when a handler ran during suspend; every
+##           caller handles it because it's the ONLY way
+##           sigsuspend ever returns).
+##         - rt_sigtimedwait: validate sigsetsize == 8 + mask
+##           + optional 128B siginfo writable + optional 16B
+##           timespec; return EAGAIN (documented "timeout
+##           expired without matching signal" answer).  NULL
+##           timeout (= wait forever) ALSO returns EAGAIN to
+##           avoid hanging; this is mildly hostile but the
+##           alternative is unbounded block.
+##         - rt_sigqueueinfo: validate sig ∈ 0..=64 + 128B
+##           siginfo ptr; forward to existing kill() semantics
+##           (siginfo payload is dropped because our dispatch
+##           does not carry it).
+##         - rt_tgsigqueueinfo: same but forward to tgkill().
+##         - timer_create: validate clockid ∈ 0..=11 (REALTIME
+##           through TAI) + optional 64B sigevent + required
+##           4B timerid_t writable; return ENOSYS.
+##         - timer_delete / timer_getoverrun: EINVAL (no
+##           timers exist — any timerid is unknown).
+##         - timer_settime: validate TIMER_ABSTIME flag + 32B
+##           itimerspec read + optional 32B old_value write;
+##           EINVAL.
+##         - timer_gettime: validate 32B curr_value write;
+##           EINVAL.
+##      Choice rationale:
+##         * sigsuspend returning EINTR rather than blocking
+##           forever is essential — userspace event-loop
+##           helpers use sigsuspend during signal-safe shutdown
+##           and would hang the entire process otherwise.
+##         * sigtimedwait with NULL timeout returning EAGAIN is
+##           the only safe choice without real signal delivery.
+##           Programs that use SIGCHLD reaping (test runners,
+##           init systems) will see EAGAIN and fall back to
+##           polling waitpid, which is implemented.
+##         * Forwarding rt_sigqueueinfo to kill is correct
+##           except for the siginfo payload, which is rarely
+##           consumed (most callers fire-and-forget the signal).
+##         * EINVAL for stale timerid_t matches Linux when a
+##           timer was destroyed by a different thread.
+##      Limitation: when real signal delivery + per-process
+##      POSIX timers land, these stubs are replaced.  Per-
+##      process timers are needed for clock(2) /
+##      pthread_cond_timedwait fallback paths but most modern
+##      code uses timerfd_create or epoll_pwait2 instead;
+##      these are also stubs above so the transitive impact is
+##      limited.  RT_SIGRETURN is the signal-trampoline
+##      return path and has a frame-level implementation
+##      elsewhere; it is NOT dispatched through
+##      dispatch_linux().
 

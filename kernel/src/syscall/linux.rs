@@ -593,6 +593,18 @@ pub mod nr {
     pub const CACHESTAT: u64 = 451;
     pub const MSEAL: u64 = 462;
     pub const MAP_SHADOW_STACK: u64 = 453;
+    pub const RT_SIGSUSPEND: u64 = 130;
+    pub const RT_SIGTIMEDWAIT: u64 = 128;
+    pub const RT_SIGQUEUEINFO: u64 = 129;
+    pub const RT_TGSIGQUEUEINFO: u64 = 297;
+    // RT_SIGRETURN is defined further up — it has a frame-level
+    // implementation (linux_rt_sigreturn) and isn't dispatched through
+    // dispatch_linux().
+    pub const TIMER_CREATE: u64 = 222;
+    pub const TIMER_DELETE: u64 = 226;
+    pub const TIMER_SETTIME: u64 = 223;
+    pub const TIMER_GETTIME: u64 = 224;
+    pub const TIMER_GETOVERRUN: u64 = 225;
 }
 
 // ---------------------------------------------------------------------------
@@ -1608,6 +1620,15 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::CACHESTAT => sys_cachestat(args),
         nr::MSEAL => sys_mseal(args),
         nr::MAP_SHADOW_STACK => sys_map_shadow_stack(args),
+        nr::RT_SIGSUSPEND => sys_rt_sigsuspend(args),
+        nr::RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args),
+        nr::RT_SIGQUEUEINFO => sys_rt_sigqueueinfo(args),
+        nr::RT_TGSIGQUEUEINFO => sys_rt_tgsigqueueinfo(args),
+        nr::TIMER_CREATE => sys_timer_create(args),
+        nr::TIMER_DELETE => sys_timer_delete(args),
+        nr::TIMER_SETTIME => sys_timer_settime(args),
+        nr::TIMER_GETTIME => sys_timer_gettime(args),
+        nr::TIMER_GETOVERRUN => sys_timer_getoverrun(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -8274,6 +8295,201 @@ fn sys_map_shadow_stack(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+// ---------------------------------------------------------------------------
+// Additional signal-handling and POSIX-timer syscalls
+//
+// The basic signal API (rt_sigaction / rt_sigprocmask / rt_sigpending /
+// kill / tkill / tgkill / nanosleep / sigaltstack) is already
+// implemented elsewhere in this file.  This block fills in the rest:
+//
+//   * rt_sigsuspend: returns EINTR after validating the mask — there is
+//     no real signal delivery in this kernel, but "I was interrupted"
+//     is the documented end-of-suspend wakeup answer and callers handle
+//     it.
+//   * rt_sigtimedwait: returns EAGAIN (timeout) after validating the
+//     mask + timespec, which is the documented "no signal arrived in
+//     the timeout window" answer.  If timeout is NULL (= wait forever)
+//     we also return EAGAIN; this is mildly hostile, but the
+//     alternative — blocking forever — would hang any caller.
+//   * rt_sigqueueinfo / rt_tgsigqueueinfo: validate siginfo (128 bytes)
+//     and dispatch to the existing kill / tgkill semantics — these are
+//     just kill-with-payload.  We accept the signal but drop the
+//     siginfo because we don't carry it through dispatch.
+//   * timer_create / _delete / _settime / _gettime / _getoverrun:
+//     POSIX per-process timer objects.  No per-process timer state in
+//     this kernel, so timer_create returns ENOSYS and the rest return
+//     EINVAL (the answer for an unknown timerid_t).
+// ---------------------------------------------------------------------------
+
+/// `rt_sigsuspend(mask*, sigsetsize)`.
+fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 != 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    // We have no real signal delivery, but EINTR is the documented
+    // wake-up answer when a handler ran during sigsuspend.  Callers all
+    // handle it (it's the only way sigsuspend ever returns).
+    linux_err(errno::EINTR)
+}
+
+/// `rt_sigtimedwait(set*, info*, timeout*, sigsetsize)`.
+fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
+    if args.arg3 != 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg1 != 0 {
+        // struct siginfo is 128 bytes on Linux.
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 128) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg2 != 0 {
+        // struct timespec is 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Documented: returns EAGAIN when the timeout expires without a
+    // matching signal arriving.  We never deliver signals into this
+    // path, so EAGAIN is truthful for any finite timeout, and we treat
+    // a NULL (= infinite) timeout the same way to avoid hanging.
+    linux_err(errno::EAGAIN)
+}
+
+/// `rt_sigqueueinfo(pid, sig, info*)`.
+fn sys_rt_sigqueueinfo(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sig = args.arg1 as i32;
+    if !(0..=64).contains(&sig) {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 128) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Forward to kill semantics — the signal goes through, the siginfo
+    // payload is dropped because our dispatch doesn't carry it.
+    let kill_args = SyscallArgs {
+        arg0: args.arg0,
+        arg1: args.arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    sys_kill(&kill_args)
+}
+
+/// `rt_tgsigqueueinfo(tgid, tid, sig, info*)`.
+fn sys_rt_tgsigqueueinfo(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sig = args.arg2 as i32;
+    if !(0..=64).contains(&sig) {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg3 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 128) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Forward to tgkill semantics.
+    let tgkill_args = SyscallArgs {
+        arg0: args.arg0,
+        arg1: args.arg1,
+        arg2: args.arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    sys_tgkill(&tgkill_args)
+}
+
+/// `timer_create(clockid, sigevent*, timerid_t*)`.
+fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
+    // Valid Linux clockids: REALTIME(0), MONOTONIC(1), PROCESS_CPUTIME_ID(2),
+    // THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4), REALTIME_COARSE(5),
+    // MONOTONIC_COARSE(6), BOOTTIME(7), REALTIME_ALARM(8),
+    // BOOTTIME_ALARM(9), SGI_CYCLE(10), TAI(11).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid = args.arg0 as i32;
+    if !(0..=11).contains(&clockid) {
+        return linux_err(errno::EINVAL);
+    }
+    // sigevent is optional (NULL = use SIGALRM); when non-NULL it's 64
+    // bytes on x86_64.
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 64) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // timerid_t output ptr is required (4 bytes for a kernel_timer_t).
+    if args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `timer_delete(timerid)`.
+fn sys_timer_delete(_args: &SyscallArgs) -> SyscallResult {
+    // No timers exist in our kernel — any timerid is bogus.
+    linux_err(errno::EINVAL)
+}
+
+/// `timer_settime(timerid, flags, new_value*, old_value*)`.
+fn sys_timer_settime(args: &SyscallArgs) -> SyscallResult {
+    // flags: TIMER_ABSTIME = 1 only.
+    if args.arg1 & !1 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct itimerspec is 32 bytes (two timespecs).
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 32) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 32) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `timer_gettime(timerid, curr_value*)`.
+fn sys_timer_gettime(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 32) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `timer_getoverrun(timerid)`.
+fn sys_timer_getoverrun(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::EINVAL)
+}
+
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
     // type 0..=10 are defined in Linux.
@@ -13427,6 +13643,146 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: map_shadow_stack valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // rt_sigsuspend / rt_sigtimedwait / rt_sigqueueinfo /
+    // rt_tgsigqueueinfo / rt_sigreturn / POSIX timer family
+    // -----------------------------------------------------------------
+    {
+        let buf = [0u8; 128];
+        let buf_ptr = buf.as_ptr() as u64;
+        let siginfo_buf = [0u8; 128];
+        let siginfo_ptr = siginfo_buf.as_ptr() as u64;
+        let timerid_buf = [0u8; 4];
+        let timerid_ptr = timerid_buf.as_ptr() as u64;
+        let itimerspec_buf = [0u8; 32];
+        let itimerspec_ptr = itimerspec_buf.as_ptr() as u64;
+
+        // rt_sigsuspend wrong sigsetsize -> EINVAL.
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 16, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGSUSPEND, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigsuspend bad sigsetsize not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // rt_sigsuspend NULL mask -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGSUSPEND, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigsuspend NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // rt_sigsuspend valid -> EINTR.
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGSUSPEND, &a).value != -i64::from(errno::EINTR) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigsuspend valid not EINTR");
+            return Err(KernelError::InternalError);
+        }
+
+        // rt_sigtimedwait wrong sigsetsize -> EINVAL.
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 0, arg2: 0, arg3: 16, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGTIMEDWAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigtimedwait bad sigsetsize not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // rt_sigtimedwait NULL mask -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 8, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGTIMEDWAIT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigtimedwait NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // rt_sigtimedwait valid -> EAGAIN.
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 0, arg2: 0, arg3: 8, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGTIMEDWAIT, &a).value != -i64::from(errno::EAGAIN) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigtimedwait valid not EAGAIN");
+            return Err(KernelError::InternalError);
+        }
+
+        // rt_sigqueueinfo bad sig -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 99, arg2: siginfo_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGQUEUEINFO, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigqueueinfo bad sig not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // rt_sigqueueinfo NULL info -> EFAULT.
+        let a = SyscallArgs { arg0: 1, arg1: 9, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGQUEUEINFO, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigqueueinfo NULL info not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+
+        // rt_tgsigqueueinfo bad sig -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 99, arg3: siginfo_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_TGSIGQUEUEINFO, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rt_tgsigqueueinfo bad sig not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // rt_tgsigqueueinfo NULL info -> EFAULT.
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 9, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_TGSIGQUEUEINFO, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rt_tgsigqueueinfo NULL info not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+
+        // timer_create bad clockid -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_create bad clockid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timer_create NULL timerid -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: timer_create NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // timer_create valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: timer_create valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // timer_delete -> EINVAL (no timers).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_DELETE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_delete not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timer_settime bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0xff, arg2: itimerspec_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_settime bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timer_settime NULL new_value -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: timer_settime NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // timer_settime valid -> EINVAL (no timers).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: itimerspec_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_settime valid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timer_gettime NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_GETTIME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: timer_gettime NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // timer_gettime valid -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: itimerspec_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_GETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_gettime valid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timer_getoverrun -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_GETOVERRUN, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_getoverrun not EINVAL");
             return Err(KernelError::InternalError);
         }
     }

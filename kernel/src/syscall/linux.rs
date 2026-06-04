@@ -449,6 +449,11 @@ pub mod nr {
     pub const FACCESSAT: u64 = 269;
     pub const FACCESSAT2: u64 = 439;
     pub const NEWFSTATAT: u64 = 262;
+    pub const MKDIRAT: u64 = 258;
+    pub const UNLINKAT: u64 = 263;
+    pub const RENAMEAT: u64 = 264;
+    pub const RENAME: u64 = 82;
+    pub const RENAMEAT2: u64 = 316;
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,6 +1318,14 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::FSTAT => sys_fstat(args),
         nr::NEWFSTATAT => sys_newfstatat(args),
         nr::STATX => sys_statx(args),
+        nr::MKDIR => sys_mkdir(args),
+        nr::MKDIRAT => sys_mkdirat(args),
+        nr::RMDIR => sys_rmdir(args),
+        nr::UNLINK => sys_unlink(args),
+        nr::UNLINKAT => sys_unlinkat(args),
+        nr::RENAME => sys_rename(args),
+        nr::RENAMEAT => sys_renameat(args),
+        nr::RENAMEAT2 => sys_renameat2(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -5064,6 +5077,113 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOENT)
 }
 
+// ---------------------------------------------------------------------------
+// Directory / file create / remove / rename
+//
+// Without a backing filesystem none of these can succeed.  We pick the
+// errno most likely to let userspace fall back gracefully:
+//   - mkdir / mkdirat: EROFS ("read-only filesystem") so installers and
+//     test runners know the FS itself is the obstacle, not a path problem.
+//   - rmdir / unlink / unlinkat / rename / renameat / renameat2:
+//     ENOENT ("no such file") — the target does not exist in our empty
+//     FS, which is the truthful answer.
+// All variants validate their path pointers first so callers passing
+// garbage observe EFAULT.
+// ---------------------------------------------------------------------------
+
+/// Validate that `ptr` is a non-NULL readable user pointer (1 byte).
+fn validate_user_str(ptr: u64) -> crate::error::KernelResult<()> {
+    if ptr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    crate::mm::user::validate_user_read(ptr, 1)
+}
+
+/// `mkdir(path, mode)` — refuse with EROFS after pointer validation.
+fn sys_mkdir(args: &SyscallArgs) -> SyscallResult {
+    match validate_user_str(args.arg0) {
+        Ok(()) => linux_err(errno::EROFS),
+        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `mkdirat(dirfd, path, mode)` — same as mkdir.
+fn sys_mkdirat(args: &SyscallArgs) -> SyscallResult {
+    match validate_user_str(args.arg1) {
+        Ok(()) => linux_err(errno::EROFS),
+        Err(KernelError::InvalidAddress) if args.arg1 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `rmdir(path)` — refuse with ENOENT after pointer validation.
+fn sys_rmdir(args: &SyscallArgs) -> SyscallResult {
+    match validate_user_str(args.arg0) {
+        Ok(()) => linux_err(errno::ENOENT),
+        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `unlink(path)` — refuse with ENOENT after pointer validation.
+fn sys_unlink(args: &SyscallArgs) -> SyscallResult {
+    match validate_user_str(args.arg0) {
+        Ok(()) => linux_err(errno::ENOENT),
+        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `unlinkat(dirfd, path, flags)` — refuse with ENOENT after validation.
+fn sys_unlinkat(args: &SyscallArgs) -> SyscallResult {
+    const AT_REMOVEDIR: u64 = 0x200;
+    const VALID_FLAGS: u64 = AT_REMOVEDIR;
+    if args.arg2 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    match validate_user_str(args.arg1) {
+        Ok(()) => linux_err(errno::ENOENT),
+        Err(KernelError::InvalidAddress) if args.arg1 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// Shared rename back-end: validate two path pointers, return ENOENT.
+fn rename_impl(old_ptr: u64, new_ptr: u64) -> SyscallResult {
+    if old_ptr == 0 || new_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(old_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(new_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOENT)
+}
+
+/// `rename(oldpath, newpath)` — refuse with ENOENT after validation.
+fn sys_rename(args: &SyscallArgs) -> SyscallResult {
+    rename_impl(args.arg0, args.arg1)
+}
+
+/// `renameat(olddirfd, oldpath, newdirfd, newpath)` — same.
+fn sys_renameat(args: &SyscallArgs) -> SyscallResult {
+    rename_impl(args.arg1, args.arg3)
+}
+
+/// `renameat2(olddirfd, oldpath, newdirfd, newpath, flags)`.
+///
+/// RENAME_NOREPLACE=1, RENAME_EXCHANGE=2, RENAME_WHITEOUT=4.
+fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
+    const VALID_FLAGS: u64 = 1 | 2 | 4;
+    if args.arg4 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    rename_impl(args.arg1, args.arg3)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -8053,6 +8173,151 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::STATX, &a).value
             != -i64::from(errno::ENOENT) {
             serial_println!("[syscall/linux]   FAIL: statx path not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // mkdir / mkdirat / rmdir / unlink / unlinkat / rename family —
+    // pointer validation plus principled errno.
+    {
+        // mkdir(NULL,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKDIR, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mkdir(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // mkdir(0x1000,_) -> EROFS (validate succeeds in kernel context).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKDIR, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: mkdir not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // mkdirat(_, NULL, _) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKDIRAT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mkdirat(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // mkdirat(_, 0x1000, _) -> EROFS.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKDIRAT, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: mkdirat not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // rmdir(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RMDIR, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rmdir(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // rmdir(0x1000) -> ENOENT.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RMDIR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: rmdir not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // unlink(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UNLINK, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: unlink(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // unlink(0x1000) -> ENOENT.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UNLINK, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: unlink not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // unlinkat with bogus flag bit -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0x800_0000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UNLINKAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: unlinkat(bad flag) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // unlinkat(_, NULL, 0) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UNLINKAT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: unlinkat(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // unlinkat(_, 0x1000, AT_REMOVEDIR) -> ENOENT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0x200,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UNLINKAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: unlinkat not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // rename(NULL, x) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RENAME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rename(NULL,_) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // rename(x, NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RENAME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rename(_,NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // rename(x, y) -> ENOENT.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RENAME, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: rename not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // renameat(_, x, _, y) -> ENOENT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RENAMEAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: renameat not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // renameat2 with bogus flag bit -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x800_0000, arg5: 0 };
+        if dispatch_linux(nr::RENAMEAT2, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(bad flag) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // renameat2 valid flag (RENAME_NOREPLACE=1) -> ENOENT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 1, arg5: 0 };
+        if dispatch_linux(nr::RENAMEAT2, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: renameat2 not ENOENT");
             return Err(KernelError::InternalError);
         }
     }

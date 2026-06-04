@@ -6164,3 +6164,34 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      stat-family calls through statx, so this is the critical
 ##      one for ld.so and friends to behave.
 ##      Limitation: same as item 39 (no real VFS data).
+##  41. MKDIR / MKDIRAT / RMDIR / UNLINK / UNLINKAT / RENAME /
+##      RENAMEAT / RENAMEAT2 — DONE as pointer-validated
+##      principled-errno stubs.
+##         - mkdir / mkdirat validate the path pointer (NULL ->
+##           EFAULT) and then return -EROFS ("read-only
+##           filesystem").  EROFS is the truthful answer: the FS
+##           itself is the reason create cannot succeed, and
+##           installers/test runners that probe with mkdir know
+##           to back off rather than retry under a different
+##           path.
+##         - rmdir / unlink / unlinkat validate the path
+##           pointer and return -ENOENT (no files exist in our
+##           empty FS).  unlinkat also validates AT_REMOVEDIR
+##           (0x200) and rejects unknown flag bits with EINVAL.
+##         - rename / renameat validate both old and new path
+##           pointers (NULL on either -> EFAULT) and return
+##           -ENOENT.  renameat2 additionally validates
+##           RENAME_NOREPLACE (1) / RENAME_EXCHANGE (2) /
+##           RENAME_WHITEOUT (4); any other flag bit -> EINVAL.
+##      ENOENT for the destructive operations is preferred over
+##      ENOSYS because POSIX-correct callers handle "no such
+##      file" gracefully whereas ENOSYS often forces a hard
+##      failure path.  EROFS for create lets userspace
+##      distinguish "filesystem read-only" from "path missing",
+##      which matters for tools that probe.
+##      Limitation: when a real VFS lands, these must route
+##      through it and honour real semantics; in particular,
+##      mkdir under a writable mount should succeed, and
+##      rename's many edge cases (EXDEV across mounts,
+##      EXCHANGE atomicity, NOREPLACE conflict detection) must
+##      be implemented in the VFS layer.

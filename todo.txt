@@ -5994,3 +5994,41 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      CAPSET combinations that sandboxes use to drop dangerous
 ##      privileges are observed but not enforced.  Tracked
 ##      alongside POSIX-cap-style enforcement work in todo.txt.
+##  24. Scheduler-policy syscalls (SCHED_GETSCHEDULER /
+##      SCHED_SETSCHEDULER / SCHED_GETPARAM / SCHED_SETPARAM /
+##      SCHED_GET_PRIORITY_MAX / SCHED_GET_PRIORITY_MIN /
+##      SCHED_RR_GET_INTERVAL) — DONE returning the SCHED_OTHER
+##      defaults.  Our scheduler is strict priority-round-robin
+##      with a kernel-internal priority concept that doesn't map
+##      to Linux's policy classes (OTHER/FIFO/RR/BATCH/IDLE/DEADLINE).
+##      We report SCHED_OTHER (== 0) for every getscheduler query
+##      and accept any policy in 0..=7 as silent success.  Priority
+##      bounds match Linux exactly (FIFO/RR: [1, 99]; others: [0, 0])
+##      so sanity checks pass.  sched_rr_get_interval reports a
+##      100 ms time slice (a typical Linux RR slice).
+##      Limitation: setting policy / priority is a no-op; the
+##      scheduler still uses its own priority scheme.
+##  25. SCHED_GETAFFINITY / SCHED_SETAFFINITY — DONE reporting all
+##      online CPUs.  getaffinity bit-fills a cpuset mask from
+##      0..N where N = smp::cpu_count(), validates cpusetsize is
+##      at least ceil(N/8), and returns the number of bytes written
+##      (Linux convention).  setaffinity validates the user range
+##      and accepts the mask as silent success.
+##      Limitation: affinity is advisory and the scheduler doesn't
+##      honour it; getaffinity always reports "all CPUs" even after
+##      a successful setaffinity narrowing the mask.  Tracked
+##      alongside per-task CPU-pinning support.
+##  26. Filesystem sync stubs (FSYNC, FDATASYNC, SYNC, SYNCFS) —
+##      DONE returning 0.  We don't have a unified buffer-cache
+##      flush mechanism yet so these are silent successes.
+##      Limitation: programs that rely on these for durability
+##      (databases) write at risk of crash-loss on real hardware.
+##      Tracked alongside a real page-cache writeback pipeline.
+##  27. SETHOSTNAME / SETDOMAINNAME — DONE as accepting stubs.
+##      We don't carry a mutable hostname (uname always reports
+##      "localhost").  Validates len <= 64 (Linux's
+##      _UTSNAME_NODENAME_LENGTH) and the user pointer, then
+##      silently discards.  setdomainname shares the
+##      implementation.
+##      Limitation: programs that set then read back via uname
+##      see "localhost" instead of the requested name.

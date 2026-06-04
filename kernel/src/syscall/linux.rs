@@ -408,6 +408,21 @@ pub mod nr {
     pub const SETFSGID: u64 = 123;
     pub const CAPGET: u64 = 125;
     pub const CAPSET: u64 = 126;
+    pub const SCHED_SETPARAM: u64 = 142;
+    pub const SCHED_GETPARAM: u64 = 143;
+    pub const SCHED_SETSCHEDULER: u64 = 144;
+    pub const SCHED_GETSCHEDULER: u64 = 145;
+    pub const SCHED_GET_PRIORITY_MAX: u64 = 146;
+    pub const SCHED_GET_PRIORITY_MIN: u64 = 147;
+    pub const SCHED_RR_GET_INTERVAL: u64 = 148;
+    pub const SCHED_SETAFFINITY: u64 = 203;
+    pub const SCHED_GETAFFINITY: u64 = 204;
+    pub const FSYNC: u64 = 74;
+    pub const FDATASYNC: u64 = 75;
+    pub const SYNC: u64 = 162;
+    pub const SYNCFS: u64 = 306;
+    pub const SETHOSTNAME: u64 = 170;
+    pub const SETDOMAINNAME: u64 = 171;
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,6 +1241,21 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::SETFSGID => sys_setfsgid(args),
         nr::CAPGET => sys_capget(args),
         nr::CAPSET => sys_capset(args),
+        nr::SCHED_SETPARAM => sys_sched_setparam(args),
+        nr::SCHED_GETPARAM => sys_sched_getparam(args),
+        nr::SCHED_SETSCHEDULER => sys_sched_setscheduler(args),
+        nr::SCHED_GETSCHEDULER => sys_sched_getscheduler(args),
+        nr::SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(args),
+        nr::SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args),
+        nr::SCHED_RR_GET_INTERVAL => sys_sched_rr_get_interval(args),
+        nr::SCHED_SETAFFINITY => sys_sched_setaffinity(args),
+        nr::SCHED_GETAFFINITY => sys_sched_getaffinity(args),
+        nr::FSYNC => sys_fsync(args),
+        nr::FDATASYNC => sys_fdatasync(args),
+        nr::SYNC => sys_sync(args),
+        nr::SYNCFS => sys_syncfs(args),
+        nr::SETHOSTNAME => sys_sethostname(args),
+        nr::SETDOMAINNAME => sys_setdomainname(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -3504,6 +3534,331 @@ fn sys_capset(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scheduler queries: policy / params / priority bounds / affinity
+//
+// Linux's per-process scheduling parameters (SCHED_OTHER vs FIFO vs RR
+// vs DEADLINE etc.) aren't modelled in our kernel — we have a single
+// priority-round-robin scheduler with a kernel-internal priority
+// concept that doesn't map cleanly to Linux's policy classes.  We
+// report "SCHED_OTHER, priority 0" universally, which matches what a
+// normal Linux process sees by default.
+// ---------------------------------------------------------------------------
+
+/// `sched_getscheduler(pid)` — return the scheduling policy of `pid`.
+///
+/// Linux policy constants:
+///   - `SCHED_OTHER == 0` — the normal CFS / EEVDF default.
+///   - `SCHED_FIFO == 1`, `SCHED_RR == 2` — POSIX real-time.
+///   - `SCHED_BATCH == 3`, `SCHED_IDLE == 5`, `SCHED_DEADLINE == 6` —
+///     Linux extensions.
+///
+/// We always return 0 (SCHED_OTHER); ESRCH for non-existent pids.
+fn sys_sched_getscheduler(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    if pid != 0 {
+        if crate::proc::pcb::state(pid).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `sched_setscheduler(pid, policy, sched_param)` — install a new
+/// scheduling policy.
+///
+/// Accepts policy in 0..=7 as silent success; out-of-range -> EINVAL.
+fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    let policy = args.arg1;
+    if policy > 7 {
+        return linux_err(errno::EINVAL);
+    }
+    if pid != 0 {
+        if crate::proc::pcb::state(pid).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `sched_getparam(pid, param)` — write `struct sched_param { int
+/// sched_priority; }` to `param`.
+///
+/// We report priority 0 (the SCHED_OTHER default).
+fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    let param_ptr = args.arg1;
+    if pid != 0 {
+        if crate::proc::pcb::state(pid).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+    if param_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct sched_param is just { int sched_priority; } = 4 bytes,
+    // but glibc rounds it up via alignof so callers typically
+    // allocate sizeof(int).
+    if let Err(e) = crate::mm::user::validate_user_write(param_ptr, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    let zero = [0u8; 4];
+    // SAFETY: validated 4-byte writable user range.
+    let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), param_ptr, 4) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `sched_setparam(pid, param)` — install new sched parameters.
+///
+/// Accepted silently; only the existence-of-pid gate applies.
+fn sys_sched_setparam(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    if pid != 0 {
+        if crate::proc::pcb::state(pid).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `sched_get_priority_max(policy)` — return the maximum static
+/// priority for `policy`.
+///
+/// Linux returns:
+///   - SCHED_FIFO / SCHED_RR -> 99
+///   - SCHED_OTHER / SCHED_BATCH / SCHED_IDLE -> 0
+///   - unknown -> -EINVAL
+///
+/// We mirror that exactly even though we don't honour real-time
+/// priorities — programs sanity-check the value before using it.
+fn sys_sched_get_priority_max(args: &SyscallArgs) -> SyscallResult {
+    let policy = args.arg0;
+    match policy {
+        1 | 2 => SyscallResult::ok(99),                 // FIFO / RR
+        0 | 3 | 5 | 6 | 7 => SyscallResult::ok(0),      // OTHER / BATCH / IDLE / DEADLINE / EXT
+        _ => linux_err(errno::EINVAL),
+    }
+}
+
+/// `sched_get_priority_min(policy)` — return the minimum static
+/// priority for `policy`.
+///
+/// Linux returns:
+///   - SCHED_FIFO / SCHED_RR -> 1
+///   - SCHED_OTHER / SCHED_BATCH / SCHED_IDLE -> 0
+///   - unknown -> -EINVAL
+fn sys_sched_get_priority_min(args: &SyscallArgs) -> SyscallResult {
+    let policy = args.arg0;
+    match policy {
+        1 | 2 => SyscallResult::ok(1),
+        0 | 3 | 5 | 6 | 7 => SyscallResult::ok(0),
+        _ => linux_err(errno::EINVAL),
+    }
+}
+
+/// `sched_rr_get_interval(pid, ts)` — write the round-robin time
+/// slice to `ts` (a `struct timespec`).
+///
+/// We report 100 ms (a typical Linux RR slice).
+fn sys_sched_rr_get_interval(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    let ts_ptr = args.arg1;
+    if pid != 0 {
+        if crate::proc::pcb::state(pid).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+    if ts_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct timespec { tv_sec: i64, tv_nsec: i64 } — 16 bytes total
+    // on x86_64.
+    if let Err(e) = crate::mm::user::validate_user_write(ts_ptr, 16) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut buf = [0u8; 16];
+    // 100ms = 0 sec + 100_000_000 ns.
+    let sec: i64 = 0;
+    let nsec: i64 = 100_000_000;
+    buf[0..8].copy_from_slice(&sec.to_ne_bytes());
+    buf[8..16].copy_from_slice(&nsec.to_ne_bytes());
+    // SAFETY: validated 16-byte writable user range.
+    let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), ts_ptr, 16) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `sched_getaffinity(pid, cpusetsize, mask)` — fetch the CPU affinity
+/// mask of `pid`.
+///
+/// Linux's `cpu_set_t` is a fixed-size bitmask (typically 1024 bits).
+/// `cpusetsize` is the buffer size in bytes; the kernel writes up to
+/// that many bytes and returns the number of bytes actually written
+/// (so callers can detect a too-small buffer and retry).
+///
+/// We report every online CPU as eligible (the default affinity for a
+/// freshly-created task on Linux).  The mask is filled in bit-by-bit
+/// from 0..N where N = smp::cpu_count().
+///
+/// Errors:
+///   - `-EINVAL` if `cpusetsize` is less than the number of bytes
+///     needed to represent every online CPU (Linux's contract).
+///   - `-EFAULT` on bad `mask` pointer.
+///   - `-ESRCH` if `pid` is not the caller and not a real pid.
+///
+/// Returns the number of bytes written (Linux convention).
+fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    let cpusetsize = args.arg1 as usize;
+    let mask_ptr = args.arg2;
+
+    if pid != 0 {
+        if crate::proc::pcb::state(pid).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+    if mask_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+
+    let n_cpus = crate::smp::cpu_count().max(1);
+    // Round up to whole bytes.
+    let needed_bytes = (n_cpus + 7) / 8;
+    if cpusetsize < needed_bytes {
+        return linux_err(errno::EINVAL);
+    }
+
+    if let Err(e) = crate::mm::user::validate_user_write(mask_ptr, cpusetsize) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Build the mask in kernel memory.  Cap at a reasonable upper
+    // bound (1024 bits == 128 bytes) — anything larger is silly and
+    // glibc never asks for more than 128.
+    const MAX_MASK: usize = 128;
+    let mut buf = [0u8; MAX_MASK];
+    let write_bytes = cpusetsize.min(MAX_MASK);
+    // Set bits 0..n_cpus.
+    for cpu in 0..n_cpus {
+        let byte_off = cpu / 8;
+        let bit = cpu % 8;
+        if byte_off < write_bytes {
+            #[allow(clippy::indexing_slicing)]
+            {
+                buf[byte_off] |= 1u8 << bit;
+            }
+        }
+    }
+    // SAFETY: validate_user_write above confirmed `cpusetsize` writable
+    // bytes; we copy min(cpusetsize, MAX_MASK) bytes.
+    let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), mask_ptr, write_bytes) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Linux returns the number of bytes written.
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(write_bytes as i64)
+}
+
+/// `sched_setaffinity(pid, cpusetsize, mask)` — set the CPU affinity
+/// mask of `pid`.
+///
+/// We accept any mask as silent success — affinity is advisory and
+/// our scheduler doesn't honour it yet.  The caller's view via
+/// sched_getaffinity will continue to report "all online CPUs" even
+/// after a successful setaffinity, which is technically incorrect but
+/// matches the "we don't enforce" model.
+///
+/// Errors:
+///   - `-EFAULT` on bad mask pointer.
+///   - `-ESRCH` on bad pid.
+fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    let cpusetsize = args.arg1 as usize;
+    let mask_ptr = args.arg2;
+    if pid != 0 {
+        if crate::proc::pcb::state(pid).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+    if mask_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, cpusetsize) {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem sync syscalls
+//
+// We don't have a unified buffer-cache flush mechanism yet, so these
+// are silent-success stubs.  Programs that rely on these for
+// durability (databases, in particular) will write at risk of
+// crash-loss on real hardware.  Tracked in todo.txt.
+// ---------------------------------------------------------------------------
+
+/// `fsync(fd)` — flush all writes for `fd` to durable storage.
+fn sys_fsync(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `fdatasync(fd)` — flush only the data (not metadata) for `fd`.
+fn sys_fdatasync(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `sync()` — flush all filesystem writes to durable storage.
+fn sys_sync(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `syncfs(fd)` — flush all writes for the filesystem containing `fd`.
+fn sys_syncfs(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(0)
+}
+
+/// `sethostname(name, len)` — set the system hostname.
+///
+/// We don't carry a mutable hostname (uname reports "localhost"
+/// always).  Accept any name as silent success; validate the user
+/// pointer.
+///
+/// Errors:
+///   - `-EFAULT` on bad pointer
+///   - `-EINVAL` for `len > 64` (Linux's `_UTSNAME_NODENAME_LENGTH`).
+fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
+    let name_ptr = args.arg0;
+    let len = args.arg1 as usize;
+    if len > 64 {
+        return linux_err(errno::EINVAL);
+    }
+    if name_ptr == 0 && len != 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if name_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(name_ptr, len) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `setdomainname(name, len)` — set the NIS domain name.
+///
+/// Same model as [`sys_sethostname`].
+fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
+    sys_sethostname(args)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -5733,6 +6088,183 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   FAIL: capset(NULL) not EFAULT ({})",
                 dispatch_linux(nr::CAPSET, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Scheduler-policy / priority dispatch validation.
+    //   - sched_getscheduler(0) -> 0 (SCHED_OTHER).
+    //   - sched_get_priority_max/min on known policies match Linux.
+    //   - Unknown policy -> EINVAL.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getscheduler(0) not 0 ({})",
+                dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // SCHED_OTHER (0) max == 0.
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_max(OTHER) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // SCHED_FIFO (1) max == 99.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value != 99 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_max(FIFO) not 99 ({})",
+                dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MIN, &a).value != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_min(FIFO) not 1"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Unknown policy (99) -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_max(99) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sched_setscheduler(0, 8, NULL) -> EINVAL (policy out of range).
+        let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(8) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sched_setscheduler(0, 0, NULL) -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(OTHER) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sched_setparam(0, NULL) -> 0.
+        if dispatch_linux(nr::SCHED_SETPARAM, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: sched_setparam(0) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // sched_getparam(0, NULL) -> EFAULT.
+        if dispatch_linux(nr::SCHED_GETPARAM, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getparam(0, NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sched_rr_get_interval(0, NULL) -> EFAULT.
+        if dispatch_linux(nr::SCHED_RR_GET_INTERVAL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_rr_get_interval(0, NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // sched_get/setaffinity dispatch validation.
+    //   - getaffinity(0, 0, mask) -> EINVAL (cpusetsize too small).
+    //   - getaffinity(0, big, NULL) -> EFAULT.
+    //   - setaffinity(0, 0, NULL) -> EFAULT.
+    {
+        // cpusetsize too small.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETAFFINITY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(size=0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mask == NULL.
+        let a = SyscallArgs { arg0: 0, arg1: 16, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETAFFINITY, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(NULL mask) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SCHED_SETAFFINITY, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setaffinity(NULL mask) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Filesystem sync stubs all return 0.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        for nr in [nr::FSYNC, nr::FDATASYNC, nr::SYNC, nr::SYNCFS] {
+            if dispatch_linux(nr, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sync-family syscall {} not 0 ({})",
+                    nr, dispatch_linux(nr, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // sethostname / setdomainname validation.
+    //   - len > 64 -> EINVAL.
+    //   - NULL pointer with non-zero len -> EFAULT.
+    //   - NULL pointer with zero len -> 0 (no-op).
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 65, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(len=65) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: 5, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(NULL,5) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(NULL,0) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETDOMAINNAME, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setdomainname(NULL,0) not 0"
             );
             return Err(KernelError::InternalError);
         }

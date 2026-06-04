@@ -8623,3 +8623,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           that wiring is already in place via
 ##           batch 43).  No new accounting needed here.
 
+##   80. setfsuid / setfsgid + getgroups / setgroups wired
+##      to credentials (batch 54).
+##      Status: setfsuid/setfsgid: return-value correct.
+##              getgroups/setgroups: real, with the Linux
+##              error surface and credentials.groups
+##              backing the data.
+##      Before batch 54, setfsuid/setfsgid always returned
+##      0 regardless of the calling process's actual
+##      fs-uid/fs-gid.  Programs that use the round-trip
+##      idiom
+##           old = setfsuid(N);
+##           ... privileged FS op ...
+##           setfsuid(old);
+##      would restore the wrong fsuid (the literal 0,
+##      regardless of the real "previous" value).  Linux's
+##      setfsuid never errors (the return *is* the
+##      previous fsuid), so callers don't have a defensive
+##      check — they just use the returned value.
+##      Wiring up setfsuid/setfsgid:
+##         - Read credentials.uid (resp. gid) and return
+##           it as the "previous" fsuid.  We don't track
+##           fsuid separately from uid, so in our model
+##           fsuid == uid and the round-trip is trivially
+##           correct.
+##         - Don't mutate state — we have no VFS
+##           permission checks that would observe a
+##           changed fsuid anyway.
+##         - Kernel context (no caller_pid): return 0
+##           (no PCB to read).
+##      Wiring up getgroups:
+##         - size < 0 -> EINVAL.
+##         - size == 0 -> return ngroups (the count), no
+##           write.
+##         - size > 0 && size < ngroups -> EINVAL.
+##         - size > 0 && ngroups == 0 -> return 0 (no
+##           pointer touch).
+##         - size > 0 && ngroups > 0 && list == NULL
+##           -> EFAULT.
+##         - Else: copy_to_user the ngroups u32s, return
+##           ngroups.
+##         - Kernel context: 0 groups.
+##      Wiring up setgroups:
+##         - size > NGROUPS_MAX (65536) -> EINVAL.
+##         - caller uid != 0 -> EPERM (approximates
+##           CAP_SETGID).
+##         - size == 0 -> drop all supp groups, return 0.
+##         - size > 0 && list == NULL -> EFAULT.
+##         - Else: copy_from_user n u32s, install into
+##           credentials.groups, return 0.
+##         - Kernel context: silent success without
+##           touching the PCB.
+##      Boot self-test coverage:
+##         - setfsuid/setfsgid kernel-ctx returns 0.
+##         - setfsuid/setfsgid round-trip via direct PCB
+##           manipulation on a dummy PID (verifies the
+##           return-value path reads credentials.uid).
+##         - getgroups(size=-1) -> EINVAL.
+##         - getgroups(size=0) kernel-ctx -> 0.
+##         - getgroups(size=16) kernel-ctx -> 0.
+##         - setgroups(size=65537) -> EINVAL.
+##         - setgroups(0, NULL) kernel-ctx -> 0.
+##         - setgroups drop-all via direct PCB set
+##           (verifies clearing the groups vec sticks).
+##      Limitations:
+##         - We still don't track fsuid separately, so
+##           the *behavioural* part of setfsuid (changing
+##           which uid the VFS uses for permission
+##           checks) is unimplemented.  But the VFS has
+##           no permission checks anyway — no observable
+##           divergence.  When the VFS grows real ACL
+##           enforcement, add a separate fsuid field to
+##           credentials and route setfsuid through it.
+##         - setgroups EPERM is approximated by "uid !=
+##           0" instead of CAP_SETGID.  Equivalent in
+##           practice given we don't have setuid-bit
+##           binaries.
+##         - getgroups always reports the on-PCB supp
+##           groups; we never auto-include the gid in
+##           the supp list (Linux doesn't either — that's
+##           the caller's responsibility).
+##         - copy_from_user error in setgroups is folded
+##           into linux_errno_for, which currently maps
+##           InvalidAddress -> EFAULT.  No special
+##           handling for partial reads.
+

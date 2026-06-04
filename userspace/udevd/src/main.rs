@@ -29,6 +29,7 @@
 //! ```
 
 #![cfg_attr(not(test), no_main)]
+#![cfg_attr(test, allow(dead_code))]
 #![allow(clippy::needless_range_loop)]
 
 use std::collections::HashMap;

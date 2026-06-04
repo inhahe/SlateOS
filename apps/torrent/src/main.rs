@@ -3631,6 +3631,12 @@ fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) 
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -3898,7 +3904,7 @@ mod tests {
 
     #[test]
     fn test_piece_tracker_pick_rarest() {
-        let mut tracker = PieceTracker::new(4);
+        let tracker = PieceTracker::new(4);
         // Peer has pieces 0, 1, 2
         let peer_bf = vec![0b1110_0000];
         // Piece 1 is rarest

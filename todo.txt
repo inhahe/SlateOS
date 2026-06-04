@@ -1,23 +1,18 @@
 The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
-## FLAKY TEST (noticed 2026-06-04): ktrace::self_test "Read back" assertion
-##   `assert_eq!(last.category(), Category::General as u8)` at
-##   kernel/src/ktrace.rs:458 occasionally fails on SMP when an IRQ-
-##   category event from another CPU lands in the trace buffer between
-##   the test's `record(General, ...)` and `read_recent(&mut entries)`.
-##   When this happens the panic shows left=5 (Irq) right=15 (General).
-##   The test passes on retry — confirmed by re-running boot-test.sh
-##   immediately after a fail.
+## FLAKY TEST (noticed+FIXED 2026-06-04): ktrace::self_test "Read back"
+##   assertion `assert_eq!(last.category(), Category::General as u8)`
+##   at kernel/src/ktrace.rs:458 occasionally failed on SMP when an
+##   IRQ-category event from another CPU landed in the trace buffer
+##   between the test's `record(General, ...)` and `read_recent`.
+##   When it happened the panic showed left=5 (Irq) right=15 (General).
 ##   ROOT CAUSE: read_recent returns the newest events globally, not
 ##   per-CPU, so any remote-CPU IRQ recording wins the "most recent"
 ##   slot.  The test was authored when ktrace was UP-only / pre-SMP.
-##   FIX: either (a) save the sequence number returned by record() and
-##   look that specific entry up by seq rather than "the last one",
-##   (b) snapshot total_events() before record() and walk only entries
-##   with seq > snapshot, picking the one matching arg0=0xDEAD, or
-##   (c) disable categories other than General around the test.  None
-##   of these are tackled in this session; tracked here so the next
-##   visitor doesn't chase the flakiness as a regression.
+##   FIX: read_recent now requests a full BUFFER_SIZE window and the
+##   test searches for the entry matching our unique magic tuple
+##   (USER_EVENT + 0xDEAD + 0xBEEF) rather than asserting it's at the
+##   tail.  Validated 3x in a row with no recurrence.
 
 
 ## PROGRESS (2026-06-03): userspace personality-CLI stub flesh-out, batch 2.
@@ -5589,6 +5584,11 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     ranges > 64 pages bump tlb::stats().full_flushes; tested with
 ##     kernel-VA dummy addresses since the function only does TLB
 ##     work, never page-table walks.
+##   - clone(SIGCHLD | CLONE_VFORK) via dispatch_linux_with_frame
+##     reaches fork::fork_process (returns ESRCH in the contextless
+##     test task) — proves CLONE_VFORK is no longer rejected at the
+##     flag check.  clone(SIGCHLD | CLONE_PARENT/CLONE_NEWNS/
+##     CLONE_PTRACE) each still return -ENOSYS.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
@@ -5673,6 +5673,24 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      stack (probably via a magic / sentinel field) and restore
 ##      accordingly.  Acceptable to defer until real Linux binaries
 ##      are running.
-##   7. CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
-##      support if any target program actually needs them — currently
-##      all return -ENOSYS.
+##   7. CLONE_VFORK — DONE-with-approximation.  linux_clone now
+##      accepts clone(CLONE_VFORK | SIGCHLD, ...) and degenerates it
+##      to a plain fork.  Linux's vfork() guarantees (a) parent blocks
+##      until child execve's or _exit's, and (b) child shares parent's
+##      address space until then.  (a) is a performance hint per POSIX
+##      ("vfork == fork is permitted"), not a correctness requirement
+##      — every conformant caller of vfork must work against a plain
+##      fork.  (b) we don't honour, but CoW gives the child a logically
+##      identical address space.  Same approximation as the dedicated
+##      VFORK syscall (which has worked this way since the initial
+##      Linux ABI port).  Real parent-blocking vfork semantics are
+##      tracked as a future enhancement but are low-value since
+##      conformant callers work either way.
+##      CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE continue to return
+##      -ENOSYS — they need infrastructure (PID reparenting, mount
+##      namespaces, ptrace lineage) we don't have yet.
+##      Boot self-test exercises both: clone(SIGCHLD | CLONE_VFORK)
+##      no longer returns -ENOSYS (it reaches fork::fork_process and
+##      bails with ESRCH in the contextless test task); clone with
+##      any of CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE still
+##      returns -ENOSYS.

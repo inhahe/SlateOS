@@ -796,9 +796,12 @@ fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     const THREAD_REQUIRED: u64 =
         clone_flags::CLONE_VM | clone_flags::CLONE_THREAD;
     if (flags & THREAD_REQUIRED) == THREAD_REQUIRED && child_stack != 0 {
-        // Reject thread-creation flags we genuinely can't honour.
-        // CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
-        // all need infrastructure we don't have yet.
+        // CLONE_VFORK on a thread-creation clone is nonsensical — the
+        // new "child" shares the address space, so blocking the
+        // parent until the child execs/exits is meaningless.  Reject
+        // unambiguously.  CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
+        // need infrastructure (PID reparenting, mount namespaces,
+        // ptrace lineage) we don't have yet.
         const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_VFORK
             | clone_flags::CLONE_PARENT
             | clone_flags::CLONE_NEWNS
@@ -849,20 +852,35 @@ fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
         return -i64::from(errno::ENOSYS);
     }
 
-    // CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE are
-    // also outside what plain-fork semantics give us; reject.
-    const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_VFORK
-        | clone_flags::CLONE_PARENT
+    // CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE need infrastructure
+    // we don't have (PID reparenting, mount namespaces, ptrace
+    // lineage) — reject up-front.
+    const UNSUPPORTED_BITS: u64 = clone_flags::CLONE_PARENT
         | clone_flags::CLONE_NEWNS
         | clone_flags::CLONE_PTRACE;
     if flags & UNSUPPORTED_BITS != 0 {
         return -i64::from(errno::ENOSYS);
     }
 
-    // Everything that remains is just the CSIGNAL byte — fork-equivalent.
-    // glibc fork() passes SIGCHLD here; we don't actually deliver a
-    // signal yet (no Unix-style signals to userspace), but the kernel
-    // already records parent/child relationships in the PCB.
+    // CLONE_VFORK is *accepted* and degenerates to a plain fork.
+    // Linux's vfork() guarantees:
+    //   (a) the parent blocks until the child execve's or _exit's,
+    //   (b) the child shares the parent's address space until then.
+    // (a) is a *performance hint*, not a correctness requirement —
+    // every conformant caller of vfork must already work against a
+    // plain fork (POSIX explicitly permits implementations to make
+    // vfork == fork).  (b) we don't honour, but CoW gives the child
+    // a logically identical address space.  We pay a CoW page-table
+    // walk vfork was trying to avoid, but the program behaves the
+    // same.  Identical semantics to the dedicated VFORK syscall
+    // (see `linux_fork` doc-comment).  Limitation tracked in
+    // `todo.txt`.
+    //
+    // Everything that remains is just the CSIGNAL byte plus
+    // optionally CLONE_VFORK — fork-equivalent.  glibc fork() passes
+    // SIGCHLD here; we don't actually deliver a signal yet (no
+    // Unix-style signals to userspace), but the kernel already
+    // records parent/child relationships in the PCB.
     linux_fork(frame)
 }
 
@@ -3188,6 +3206,62 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     other
                 );
                 return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // CLONE_VFORK accept / CLONE_PARENT reject:
+    //   - clone(SIGCHLD | CLONE_VFORK, 0, ...) reaches linux_fork
+    //     (degenerates to plain fork) and bails out at fork::fork_process
+    //     with ESRCH because we have no owning Linux process.  The
+    //     point is to prove the clone() path no longer returns -ENOSYS
+    //     when CLONE_VFORK is set — that flag was previously in the
+    //     unsupported set and would have returned -ENOSYS up-front.
+    //   - clone(SIGCHLD | CLONE_PARENT, 0, ...) MUST still return
+    //     -ENOSYS because PID reparenting infrastructure is missing.
+    //   - same for CLONE_NEWNS and CLONE_PTRACE.
+    {
+        use crate::syscall::entry::SyscallFrame;
+        let mut f = SyscallFrame {
+            syscall_nr: nr::CLONE,
+            arg0: clone_flags::SIGCHLD | clone_flags::CLONE_VFORK,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+            user_rip: 0, user_rsp: 0, user_rflags: 0,
+        };
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ENOSYS) => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clone(CLONE_VFORK) still ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Any other negative errno (likely -ESRCH) proves we
+            // reached fork::fork_process rather than rejecting up-front.
+            Some(v) if v < 0 => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clone(CLONE_VFORK) → {:?}", other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        for (name, bit) in &[
+            ("CLONE_PARENT", clone_flags::CLONE_PARENT),
+            ("CLONE_NEWNS",  clone_flags::CLONE_NEWNS),
+            ("CLONE_PTRACE", clone_flags::CLONE_PTRACE),
+        ] {
+            f.arg0 = clone_flags::SIGCHLD | *bit;
+            match dispatch_linux_with_frame(&mut f) {
+                Some(v) if v == -i64::from(errno::ENOSYS) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: clone({}) → {:?} (expected -ENOSYS)",
+                        name, other
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
         }
     }

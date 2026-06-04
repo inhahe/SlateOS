@@ -450,16 +450,29 @@ pub fn self_test() {
     serial_println!("[ktrace]   Record event: OK");
 
     // --- 2. Read back ---
-    let mut entries = [TraceEntry::empty(); 4];
+    //
+    // We can't assume the entry we just wrote is at the tail of the
+    // ring — on SMP, another CPU may have recorded an IRQ / scheduler
+    // / timer event between our `record()` and `read_recent()` call.
+    // Instead, request a generous window of recent entries and search
+    // for the one matching our unique magic argument tuple
+    // (USER_EVENT + 0xDEAD + 0xBEEF).  The window size is BUFFER_SIZE
+    // so we always find it as long as it hasn't wrapped out.
+    let mut entries = [TraceEntry::empty(); BUFFER_SIZE];
     let count = read_recent(&mut entries);
     assert!(count >= 1);
-    // Most recent entry (last in the returned array) should be ours.
-    let last = &entries[count - 1];
-    assert_eq!(last.category(), Category::General as u8);
-    assert_eq!(last.event_id(), event::USER_EVENT);
-    assert_eq!(last.arg0, 0xDEAD);
-    assert_eq!(last.arg1, 0xBEEF);
-    assert!(last.timestamp > 0);
+    let ours_slice = &entries[..count];
+    let ours = ours_slice
+        .iter()
+        .rev()
+        .find(|e| {
+            e.category() == Category::General as u8
+                && e.event_id() == event::USER_EVENT
+                && e.arg0 == 0xDEAD
+                && e.arg1 == 0xBEEF
+        })
+        .expect("recorded event not found in read_recent window");
+    assert!(ours.timestamp > 0);
     serial_println!("[ktrace]   Read back: OK");
 
     // --- 3. Category filtering ---

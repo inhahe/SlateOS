@@ -10,8 +10,11 @@
 // it in a build.rs scopes it to the kernel crate only.
 
 fn main() {
+    // CARGO_MANIFEST_DIR is always set by cargo when invoking a build
+    // script; if it isn't, fall back to a relative path so we still
+    // produce a usable -T arg rather than panicking the whole build.
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR is set by cargo");
+        .unwrap_or_else(|_| ".".to_string());
     // Linker script anchored to this crate's directory. Lives here
     // rather than in `.cargo/config.toml` because cargo merges rustflags
     // into every crate sharing the target triple — a workspace-level

@@ -3250,6 +3250,13 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::format_collect
+)]
 mod tests {
     use super::*;
 

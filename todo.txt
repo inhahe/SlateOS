@@ -7764,3 +7764,61 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      target's uid + ruid.  Same caveat as the privilege
 ##      limitation above — comes with the cap model.
 
+##  68. Enforce RLIMIT_NOFILE in linux_fd_install — DONE.
+##      Eighth "upgrade a stub" batch.  Wires the rlimit store
+##      added in item 67 into the central Linux fd install
+##      choke point so the first storage→enforcement link in
+##      the enforcement-priority list takes effect.
+##         - pcb::linux_fd_install: after install_lowest_from
+##           returns the chosen fd, compare against the
+##           process's RLIMIT_NOFILE soft limit
+##           (`proc.rlimits[7].0`).  If `fd >= soft`, roll the
+##           install back via fd_table.take(fd) and surface
+##           TooManyOpenFiles (which the syscall layer already
+##           translates to EMFILE).  RLIM_INFINITY skips the
+##           check entirely.
+##         - Snapshot the soft limit before borrowing the fd
+##           table mutably (avoids a double-borrow on `proc`).
+##      Coverage in the rlimit self-test block:
+##         - Stdio (fds 0,1,2) + soft=5 → fds 3 and 4 install
+##           cleanly, fd 5 → TooManyOpenFiles.
+##         - Raising soft to 100 and re-installing must yield
+##           fd 5 (proves the failed install rolled back; no
+##           leaked entry left behind).
+##      Choice rationale:
+##         * Enforcing in linux_fd_install (PCB layer) catches
+##           every install path uniformly — open_common, the
+##           batch 40 open_kernel_path_install helper, pipe,
+##           pipe2, dup, dup2, dup3, fcntl(F_DUPFD),
+##           socketpair, accept, accept4, eventfd, signalfd,
+##           timerfd, and every future install caller.
+##           Enforcing in the syscall layer would require
+##           duplicate checks at each call site.
+##         * Rolling back via fd_table.take(fd) on EMFILE
+##           keeps the table consistent.  Without rollback, a
+##           failed install would leak the entry into the
+##           table — installable but un-closable since the
+##           caller never saw the fd.
+##         * Snapshotting nofile_soft before the mutable
+##           borrow on fd_table sidesteps Rust's borrow rules
+##           cleanly: a single shared lock on PROCESS_TABLE,
+##           one read then one write on the same `proc`
+##           reference.
+##         * `RLIM_INFINITY` skip rather than `u64::MAX as i32`
+##           comparison: the sentinel is the documented value;
+##           comparing fd (i32, max ~2 billion) against an
+##           infinity u64 is well-defined and cheap.
+##      Limitation: ENFILE (system-wide fd exhaustion) is not
+##      tracked separately.  We have no global open-file
+##      counter; processes always see EMFILE first.  Adding a
+##      global counter would be straightforward (atomic
+##      counter incremented in install, decremented in close)
+##      but premature without a published system-wide cap.
+##      Limitation: The check happens *after* allocation, not
+##      before.  install_lowest_from scans for the lowest free
+##      slot and returns its index; if that index ≥ soft, we
+##      roll back.  This is correct but slightly wasteful when
+##      the soft limit is very low — we scan further than
+##      strictly necessary.  Acceptable until profiling flags
+##      it.
+

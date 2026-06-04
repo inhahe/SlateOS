@@ -1953,13 +1953,26 @@ pub fn linux_fd_lookup(
 
 /// Install `entry` at the lowest free fd >= `min_fd`.
 ///
+/// Enforces `RLIMIT_NOFILE`: if the lowest free fd would be `>=` the
+/// process's current soft limit (`rlim_cur` for resource index 7,
+/// `RLIMIT_NOFILE`), returns `TooManyOpenFiles` rather than installing.
+/// This is the central choke point — every Linux-ABI open / pipe /
+/// dup / accept install path goes through here, so enforcing here
+/// catches them all uniformly.
+///
+/// `RLIM_INFINITY` (`u64::MAX`) disables the check, which matches
+/// Linux's behaviour for processes that have explicitly opted out.
+/// The `MAX_FDS` cap on the underlying table still applies after the
+/// rlimit check.
+///
 /// # Errors
 ///
 /// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
 ///   live process.
 /// - [`KernelError::InvalidHandle`] if the process has no Linux fd
 ///   table (i.e. it is a Native-ABI process).
-/// - [`KernelError::TooManyOpenFiles`] if the table is full.
+/// - [`KernelError::TooManyOpenFiles`] if the table is full or the
+///   installation would exceed `RLIMIT_NOFILE`.
 pub fn linux_fd_install(
     pid: ProcessId,
     entry: super::linux_fd::FdEntry,
@@ -1967,11 +1980,25 @@ pub fn linux_fd_install(
 ) -> KernelResult<i32> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    // Snapshot RLIMIT_NOFILE soft limit before borrowing the fd table
+    // mutably (fd table lives inside `proc`).
+    let nofile_soft = proc.rlimits[7].0;
     let fd_table = proc
         .linux_fd_table
         .as_mut()
         .ok_or(KernelError::InvalidHandle)?;
-    fd_table.install_lowest_from(min_fd, entry)
+    let fd = fd_table.install_lowest_from(min_fd, entry)?;
+    // Enforce RLIMIT_NOFILE.  install_lowest_from returns the chosen
+    // fd; if it lands at or above the soft limit, roll the install
+    // back and surface EMFILE.  Skip the check entirely for
+    // RLIM_INFINITY (the documented "no per-process limit" sentinel).
+    if nofile_soft != RLIM_INFINITY && (fd as u64) >= nofile_soft {
+        // Roll the install back so the caller doesn't see a leaked
+        // entry.  We allocated it; we own the rollback.
+        let _ = fd_table.take(fd);
+        return Err(KernelError::TooManyOpenFiles);
+    }
+    Ok(fd)
 }
 
 /// Remove the entry at `fd` and return it, so the caller can decide

@@ -13415,6 +13415,86 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // Clean up so we don't leak the dummy process.
             pcb::destroy(test_pid);
         }
+
+        // RLIMIT_NOFILE enforcement in pcb::linux_fd_install.
+        // Create a throwaway process with a Linux fd table, lower
+        // RLIMIT_NOFILE to a small value, and verify that exceeding
+        // the soft limit returns TooManyOpenFiles.
+        {
+            use crate::proc::linux_fd::FdEntry;
+            let test_pid = pcb::create("rlimit-nofile-test", 0);
+            pcb::linux_fd_install_stdio(test_pid).expect("install stdio");
+            // Stdio occupies fds 0,1,2.  Default NOFILE is (1024, 4096).
+            // Lower the soft cap to 5 while keeping hard at the default
+            // 4096 — set_rlimit forbids raising hard, so we can later
+            // raise soft back up within [0, 4096].
+            pcb::set_rlimit(test_pid, 7, 5, 4096).expect("set NOFILE=(5, 4096)");
+
+            // fd 3 — must succeed (3 < 5).
+            let fd3 = pcb::linux_fd_install(
+                test_pid,
+                FdEntry::console(oflags::O_RDONLY),
+                0,
+            ).expect("install fd 3 within NOFILE");
+            if fd3 != 3 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: NOFILE-test install yielded fd {} (expected 3)",
+                    fd3
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // fd 4 — must succeed (4 < 5).
+            let fd4 = pcb::linux_fd_install(
+                test_pid,
+                FdEntry::console(oflags::O_RDONLY),
+                0,
+            ).expect("install fd 4 within NOFILE");
+            if fd4 != 4 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: NOFILE-test install yielded fd {} (expected 4)",
+                    fd4
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // fd 5 — must FAIL with TooManyOpenFiles (5 >= soft limit 5).
+            match pcb::linux_fd_install(
+                test_pid,
+                FdEntry::console(oflags::O_RDONLY),
+                0,
+            ) {
+                Err(KernelError::TooManyOpenFiles) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: NOFILE-test fd 5 expected TooManyOpenFiles, got {:?}",
+                        other
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // Verify the rollback: fd 5 must still be free.  Raise the
+            // soft cap to 100 (allowed: ≤ hard=4096) and re-install —
+            // the entry must land at fd 5, not 6 (no leftover from the
+            // failed install).
+            pcb::set_rlimit(test_pid, 7, 100, 4096)
+                .expect("raise soft to 100");
+            let fd5 = pcb::linux_fd_install(
+                test_pid,
+                FdEntry::console(oflags::O_RDONLY),
+                0,
+            ).expect("install fd 5 after raising soft limit");
+            if fd5 != 5 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: NOFILE-test post-rollback install yielded fd {} (expected 5)",
+                    fd5
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            pcb::destroy(test_pid);
+        }
     }
 
     // rt_sigpending dispatch validation:

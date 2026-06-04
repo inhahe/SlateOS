@@ -1,3 +1,6 @@
+The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
+
+
 ## PROGRESS (2026-06-03): userspace personality-CLI stub flesh-out, batch 2.
 ##   Following the openssl-tool flesh-out earlier this session, the four
 ##   remaining 5-line personality-CLI stubs were fleshed out into full
@@ -2732,14 +2735,51 @@ Remaining net improvements (diminishing returns):
   pwd (trivial single fs call, no helpers worth extracting),
   realpath (single fs::canonicalize call, no logic to test).
 
-  RUNNING TOTAL: 537 tests across 37 binaries (whoami + batches 1-6).
-  ~48 binaries still pending.
+  PROGRESS 2026-06-04 (batch 7): extracted helpers and added 78 unit tests
+  across 6 more binaries:
+    * yes.rs: extracted `yes_text(args) -> String`. 6 tests: default
+      "y", single word, multi-arg space join, empty arg preserved,
+      args with internal spaces, unicode passthrough.
+    * uptime.rs: extracted `split_uptime(secs) -> (days, hours, mins)`
+      and `format_uptime_line(content) -> String`. 19 tests: zero,
+      ticks for minute/hour/hour+min/day, mixed (2d 3h 4m), fractional
+      truncation, negative/NaN/Infinity clamped, format basic seconds,
+      one day singular + two days plural, empty unknown, garbage 0,
+      multi-whitespace, almost-one-day boundary.
+    * free.rs: extracted `parse_args -> FreeOpts`, `parse_meminfo(text)
+      -> MemInfo`, kept `human_size`. 17 tests: parsing (defaults,
+      -h/-k/-m/-g, later override, unknown ignored), meminfo parsing
+      (typical, empty default, skips unrelated, unparseable zero, no
+      colon), human_size byte/KiB/MiB/GiB/fractional.
+    * df.rs: extracted `parse_args(args) -> DfArgs`, `format_row(info,
+      path, human) -> String`, gated `Statvfs` + extern statvfs on
+      cfg(target_os = "linux") with a windows-host stub (matches
+      whoami pattern). 14 tests: parse no-args/-h/paths/-h+path/-h at
+      end, human_size all ranges, format blocks vs human modes, zero
+      total no-panic, percentage calculation, full filesystem 100%.
+    * rmdir.rs: extracted `parse_args -> RmdirArgs` and `parent_chain(
+      dir) -> Vec<PathBuf>` from the inline parent-walk loop. 10 tests:
+      parse no-args/dirs/-p/-p-at-end/unknown/dash-alone, parent_chain
+      simple/single-component/deep/empty.
+    * rm.rs: extracted `parse_args(args) -> Result<(RmFlags,
+      Vec<String>), String>` with combined-short-options support. 12
+      tests: no-args, just-paths, -r/-R/-f individually, combined -rf
+      and -fr, split flags, unknown, combined with unknown errors,
+      dash-alone as path, flag at end.
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
+  Skipped true.rs (empty main), false.rs (single process::exit call,
+  no logic), hostname.rs (extern C gethostname unresolved on host),
+  tty.rs (extern C isatty/ttyname unresolved on host), test.rs (whole
+  file already cfg(unix)-gated so windows host stubs it).
 
-  REMAINING: awk, bc, chmod, chown, cp, dd, df, diff, du, ed, false,
-  fetch, find, free, grep, hostname, id, join, kill, logger, ls,
-  md5sum, mkfifo, mv, nice, nohup, patch, ps, pwd, realpath, renice,
-  rm, rmdir, sed, sh, sha256sum, stat, strings, tar, test, time_cmd,
-  touch, true, tsort, tty, uptime, who, yes.
+  RUNNING TOTAL: 615 tests across 43 binaries (whoami + batches 1-7).
+  ~42 binaries still pending.
+
+  REMAINING: awk, bc, chmod, chown, cp, dd, diff, du, ed, false,
+  fetch, find, grep, hostname, id, join, kill, logger, ls, md5sum,
+  mkfifo, mv, nice, nohup, patch, ps, pwd, realpath, renice, sed,
+  sh, sha256sum, stat, strings, tar, test, time_cmd, touch, true,
+  tsort, tty, who.
   Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to

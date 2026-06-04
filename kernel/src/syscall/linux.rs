@@ -495,6 +495,20 @@ pub mod nr {
     pub const IO_URING_SETUP: u64 = 425;
     pub const IO_URING_ENTER: u64 = 426;
     pub const IO_URING_REGISTER: u64 = 427;
+    pub const BPF: u64 = 321;
+    pub const PERF_EVENT_OPEN: u64 = 298;
+    pub const KEYCTL: u64 = 250;
+    pub const ADD_KEY: u64 = 248;
+    pub const REQUEST_KEY: u64 = 249;
+    pub const USERFAULTFD: u64 = 323;
+    pub const MEMFD_CREATE: u64 = 319;
+    pub const MEMFD_SECRET: u64 = 447;
+    pub const PIDFD_OPEN: u64 = 434;
+    pub const PIDFD_SEND_SIGNAL: u64 = 424;
+    pub const PIDFD_GETFD: u64 = 438;
+    pub const PROCESS_VM_READV: u64 = 310;
+    pub const PROCESS_VM_WRITEV: u64 = 311;
+    pub const PROCESS_MRELEASE: u64 = 448;
 }
 
 // ---------------------------------------------------------------------------
@@ -1409,6 +1423,20 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::IO_URING_SETUP => sys_io_uring_setup(args),
         nr::IO_URING_ENTER => sys_io_uring_enter(args),
         nr::IO_URING_REGISTER => sys_io_uring_register(args),
+        nr::BPF => sys_bpf(args),
+        nr::PERF_EVENT_OPEN => sys_perf_event_open(args),
+        nr::KEYCTL => sys_keyctl(args),
+        nr::ADD_KEY => sys_add_key(args),
+        nr::REQUEST_KEY => sys_request_key(args),
+        nr::USERFAULTFD => sys_userfaultfd(args),
+        nr::MEMFD_CREATE => sys_memfd_create(args),
+        nr::MEMFD_SECRET => sys_memfd_secret(args),
+        nr::PIDFD_OPEN => sys_pidfd_open(args),
+        nr::PIDFD_SEND_SIGNAL => sys_pidfd_send_signal(args),
+        nr::PIDFD_GETFD => sys_pidfd_getfd(args),
+        nr::PROCESS_VM_READV => sys_process_vm_readv(args),
+        nr::PROCESS_VM_WRITEV => sys_process_vm_writev(args),
+        nr::PROCESS_MRELEASE => sys_process_mrelease(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -6071,6 +6099,233 @@ fn sys_io_uring_register(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+// ---------------------------------------------------------------------------
+// BPF / perf_event_open / keyring / userfaultfd / memfd / pidfd /
+// process_vm
+//
+// Most of these are privileged in Linux, niche, or both.  The honest
+// answer is ENOSYS after input validation: the user can detect the
+// missing feature and fall back to an alternative (eBPF programs to
+// userspace polling, perf to RDTSC sampling, keyring to in-process
+// key management, userfaultfd to SIGSEGV handler, pidfd to /proc/PID
+// path lookup).
+//
+// memfd_create is more commonly used (Vulkan / Wayland / sandboxed
+// shared memory), but until we have an anonymous-page-backed fd we
+// can't honour it; ENOSYS makes glibc and mesa fall back to
+// shm_open()-via-tmpfs.
+// ---------------------------------------------------------------------------
+
+/// `bpf(cmd, attr, size)`.
+fn sys_bpf(args: &SyscallArgs) -> SyscallResult {
+    let size = args.arg2 as usize;
+    if size == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, size) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `perf_event_open(attr, pid, cpu, group_fd, flags)`.
+fn sys_perf_event_open(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct perf_event_attr is at least 8 bytes (size header).
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `keyctl(cmd, arg2, arg3, arg4, arg5)`.
+fn sys_keyctl(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `add_key(type, description, payload, plen, keyring)`.
+fn sys_add_key(args: &SyscallArgs) -> SyscallResult {
+    // type and description must be non-NULL.
+    if args.arg0 == 0 || args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `request_key(type, description, callout_info, keyring)`.
+fn sys_request_key(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 || args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `userfaultfd(flags)`.
+fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
+    // UFFD_USER_MODE_ONLY = 1, plus O_CLOEXEC | O_NONBLOCK.
+    const VALID_FLAGS: u64 = 1 | 0o4000 | 0o2_000_000;
+    if args.arg0 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `memfd_create(name, flags)`.
+fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    // MFD_CLOEXEC=1, ALLOW_SEALING=2, HUGETLB=4, NOEXEC_SEAL=8, EXEC=16,
+    // plus huge-page-size bits 26..31 (we accept those without parsing).
+    const VALID_LOW_FLAGS: u64 = 1 | 2 | 4 | 8 | 16;
+    const HUGE_SIZE_MASK: u64 = 0x3F << 26;
+    if args.arg1 & !(VALID_LOW_FLAGS | HUGE_SIZE_MASK) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `memfd_secret(flags)`.
+fn sys_memfd_secret(args: &SyscallArgs) -> SyscallResult {
+    const VALID_FLAGS: u64 = 0o2_000_000; // O_CLOEXEC
+    if args.arg0 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `pidfd_open(pid, flags)`.
+fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
+    // PIDFD_NONBLOCK = O_NONBLOCK = 0o4000.
+    const VALID_FLAGS: u64 = 0o4000;
+    if args.arg1 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    if pid <= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // ESRCH would be the truthful answer if pidfd existed but the pid is
+    // gone; without pidfd support, ENOSYS lets callers fall back to
+    // /proc/PID lookup.
+    linux_err(errno::ENOSYS)
+}
+
+/// `pidfd_send_signal(pidfd, sig, info, flags)`.
+fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
+    // flags must be 0 per current Linux.
+    if args.arg3 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sig = args.arg1 as i32;
+    if !(0..=64).contains(&sig) {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg2 != 0 {
+        // struct siginfo_t = 128 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 128) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `pidfd_getfd(pidfd, targetfd, flags)`.
+fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
+    // flags reserved.
+    if args.arg2 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)`.
+fn sys_process_vm_readv(args: &SyscallArgs) -> SyscallResult {
+    if args.arg5 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    process_vm_impl(args)
+}
+
+/// `process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)`.
+fn sys_process_vm_writev(args: &SyscallArgs) -> SyscallResult {
+    if args.arg5 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    process_vm_impl(args)
+}
+
+fn process_vm_impl(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    if pid <= 0 {
+        return linux_err(errno::ESRCH);
+    }
+    let liovcnt = args.arg2 as usize;
+    let riovcnt = args.arg4 as usize;
+    if liovcnt > 1024 || riovcnt > 1024 {
+        return linux_err(errno::EINVAL);
+    }
+    if liovcnt > 0 {
+        if args.arg1 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, liovcnt.saturating_mul(16)) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if riovcnt > 0 {
+        if args.arg3 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, riovcnt.saturating_mul(16)) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Cross-process VM access not yet implemented.
+    linux_err(errno::ESRCH)
+}
+
+/// `process_mrelease(pidfd, flags)`.
+fn sys_process_mrelease(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -9812,6 +10067,218 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::IO_URING_REGISTER, &a).value
             != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: io_uring_register not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // BPF / perf_event_open / keyring / userfaultfd / memfd / pidfd /
+    // process_vm — input validation plus principled errno.
+    {
+        // bpf(0, NULL, 0) -> EINVAL (size == 0).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: bpf(size=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // bpf(0, NULL, 8) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: bpf(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // bpf(0, attr, 8) in kernel context -> ENOSYS.
+        let attr = [0u8; 32];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: bpf not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // perf_event_open(NULL,_,_,_,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: perf_event_open(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // perf_event_open(attr,_,_,_,_) -> ENOSYS.
+        let a = SyscallArgs {
+            arg0: attr.as_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: perf_event_open not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // keyctl(_,_,_,_,_) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEYCTL, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: keyctl not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // add_key(NULL,_,_,_,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: add_key(NULL,_,_,_,_) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // add_key(t,d,_,_,_) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: add_key not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // request_key(t,d,_,_) -> ENOSYS.
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: request_key not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // userfaultfd with bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0x8000_0000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USERFAULTFD, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: userfaultfd(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // userfaultfd(0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USERFAULTFD, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: userfaultfd not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // memfd_create(NULL,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMFD_CREATE, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: memfd_create(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // memfd_create(name, bogus flag) -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x100_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMFD_CREATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: memfd_create(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // memfd_create(name, 0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMFD_CREATE, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: memfd_create not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // memfd_secret(0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMFD_SECRET, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: memfd_secret not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // pidfd_open(pid <= 0) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_OPEN, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pidfd_open(0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_open(1,_) -> ENOSYS.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_OPEN, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: pidfd_open not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_send_signal bogus sig -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 999, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pidfd_send_signal(bad sig) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_getfd nonzero flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_GETFD, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pidfd_getfd(flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // process_vm_readv with pid <= 0 -> ESRCH.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv(0) not ESRCH");
+            return Err(KernelError::InternalError);
+        }
+        // process_vm_readv with nonzero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 1 };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv(flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // process_vm_readv(pid=1, liovcnt=0, riovcnt=0) -> ESRCH (no
+        // target process exists).
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv not ESRCH");
+            return Err(KernelError::InternalError);
+        }
+        // process_vm_writev same.
+        if dispatch_linux(nr::PROCESS_VM_WRITEV, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: process_vm_writev not ESRCH");
+            return Err(KernelError::InternalError);
+        }
+        // process_mrelease with nonzero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_MRELEASE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: process_mrelease(flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // process_mrelease(0,0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_MRELEASE, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: process_mrelease not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

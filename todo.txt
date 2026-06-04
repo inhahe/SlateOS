@@ -6331,3 +6331,60 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      blocked on the kernel growing real async-I/O
 ##      infrastructure (already partly in place via the
 ##      kernel-side io_uring shim, but not Linux-shaped).
+##  45. BPF / PERF_EVENT_OPEN / KEYCTL / ADD_KEY / REQUEST_KEY /
+##      USERFAULTFD / MEMFD_CREATE / MEMFD_SECRET / PIDFD_OPEN /
+##      PIDFD_SEND_SIGNAL / PIDFD_GETFD / PROCESS_VM_READV /
+##      PROCESS_VM_WRITEV / PROCESS_MRELEASE — DONE as
+##      input-validated principled-errno stubs.
+##         - bpf: validates size != 0, attr pointer non-NULL
+##           and readable for `size` bytes, then -ENOSYS.
+##         - perf_event_open: validates attr pointer (at least
+##           the 8-byte size header), then -ENOSYS.
+##         - keyctl / add_key / request_key: keyctl is
+##           unconditional ENOSYS; add_key / request_key
+##           require non-NULL type & description pointers
+##           before refusing.
+##         - userfaultfd: validates UFFD_USER_MODE_ONLY |
+##           O_CLOEXEC | O_NONBLOCK; bogus -> EINVAL; then
+##           -ENOSYS so callers fall back to a SIGSEGV
+##           handler if they really need page-fault notify.
+##         - memfd_create / memfd_secret: validate name and
+##           flags (memfd_create: MFD_CLOEXEC | ALLOW_SEALING |
+##           HUGETLB | NOEXEC_SEAL | EXEC plus huge-page-size
+##           bits 26..31; memfd_secret: O_CLOEXEC).  Then
+##           -ENOSYS so mesa/Vulkan/Wayland fall back to
+##           shm_open()-via-tmpfs.
+##         - pidfd_open: pid <= 0 -> EINVAL, validates
+##           PIDFD_NONBLOCK, then -ENOSYS so callers fall back
+##           to /proc/PID path lookup.
+##         - pidfd_send_signal: flags must be 0, sig in
+##           [0,64], siginfo pointer (128B) if non-NULL,
+##           fd via linux_fd_lookup, then -EINVAL (pidfd is
+##           not actually a pidfd in our world).
+##         - pidfd_getfd: flags reserved (must be 0), fd
+##           validated, then -EINVAL.
+##         - process_vm_readv / process_vm_writev: flags must
+##           be 0, iovcnt clamped to 1024 (IOV_MAX), iovec
+##           pointers validated when nonzero count, then
+##           -ESRCH (no target process can be addressed).
+##         - process_mrelease: flags must be 0; then -ENOSYS.
+##      Choice rationale:
+##         * ENOSYS is right for the FD-creating syscalls
+##           (BPF, perf_event_open, keyctl, userfaultfd,
+##           memfd*, pidfd_open) because feature-detection
+##           code looks for it and falls back; pretending
+##           success would hand back an unusable fd.
+##         * EINVAL is right for pidfd_send_signal /
+##           pidfd_getfd because the fd is real but not a
+##           pidfd in our kernel.
+##         * ESRCH is right for process_vm_* because the
+##           target process does not exist from our point of
+##           view; this is also what Linux returns for a
+##           missing pid.
+##      Limitation: when real BPF / perf / keyring / memfd /
+##      pidfd / process-cross-VM facilities land, these
+##      stubs must be replaced.  Of these, memfd_create is
+##      the highest-priority for desktop apps (Vulkan, Wayland,
+##      sandboxes); the rest are mostly used by tracing /
+##      privileged tools that handle missing-feature paths
+##      gracefully.

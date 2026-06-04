@@ -1645,6 +1645,69 @@ pub fn linux_fd_install_stdio(pid: ProcessId) -> KernelResult<()> {
     Ok(())
 }
 
+/// Walk `pid`'s Linux fd table, remove every entry whose `FD_CLOEXEC`
+/// flag is set, ensure stdin/stdout/stderr remain populated, and
+/// return the deduplicated list of underlying kernel handles that the
+/// caller should release with the appropriate native `close`.
+///
+/// Implements the kernel half of POSIX `close-on-exec` for Linux-ABI
+/// processes.  Called by `exec_process` when re-using an existing
+/// Linux fd table across an `execve()`.
+///
+/// The returned list:
+/// - Excludes `HandleKind::Console` entries (no kernel resource).
+/// - Excludes any `(kind, raw_handle)` still referenced by a
+///   non-cloexec fd left in the table (so the open file description
+///   survives, matching POSIX).
+/// - Is deduplicated by `(kind, raw_handle)` so that two cloexec fds
+///   pointing at the same handle yield exactly one close.
+///
+/// Returns an empty vector if `pid` has no Linux fd table (e.g. it
+/// was previously a Native-ABI process); the caller can then install
+/// a fresh stdio-only table via [`linux_fd_install_stdio`].  Returns
+/// `None` only if `pid` does not refer to a live process at all.
+#[must_use]
+pub fn linux_fd_exec_cloexec(
+    pid: ProcessId,
+) -> Option<alloc::vec::Vec<super::linux_fd::FdEntry>> {
+    use super::linux_fd::FdEntry;
+
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let fd_table = proc.linux_fd_table.as_mut()?;
+
+    let taken = fd_table.take_cloexec_entries();
+    fd_table.ensure_stdio();
+
+    // Build the to-close list: kernel-resource-bearing entries, not
+    // referenced by any remaining fd, deduplicated by (kind, raw).
+    let mut to_close: alloc::vec::Vec<FdEntry> = alloc::vec::Vec::new();
+    for entry in taken {
+        if !entry.kind.needs_kernel_close() {
+            continue;
+        }
+        let already_listed = to_close
+            .iter()
+            .any(|e| e.kind == entry.kind && e.raw_handle == entry.raw_handle);
+        if already_listed {
+            continue;
+        }
+        // `excluded_fd` is irrelevant here — the cloexec entries are
+        // already gone from the table, so we just scan what remains.
+        // Use -1 (never a valid fd) to mean "exclude nothing extra".
+        let still_referenced = fd_table.is_handle_referenced(
+            entry.kind,
+            entry.raw_handle,
+            -1,
+        );
+        if !still_referenced {
+            to_close.push(entry);
+        }
+    }
+
+    Some(to_close)
+}
+
 /// Look up `fd` in the Linux fd table.  Returns `None` if the process
 /// does not have a Linux fd table or if `fd` is unused/out-of-range.
 #[must_use]

@@ -382,6 +382,55 @@ impl KernelFdTable {
                 slot.map(|e| (idx as i32, e))
             })
     }
+
+    /// Remove every open entry whose `FD_CLOEXEC` flag is set and
+    /// return them in fd order so the caller can release any kernel
+    /// resources they reference.
+    ///
+    /// This is the kernel side of POSIX `close-on-exec`: it does NOT
+    /// itself close the underlying kernel handles (it can't — it does
+    /// not know about `sys_fs_close` / `sys_pipe_close` etc., which
+    /// live in higher layers).  The caller is responsible for invoking
+    /// the appropriate native close on each returned entry whose
+    /// [`HandleKind::needs_kernel_close`] is `true`, after first
+    /// verifying via [`Self::is_handle_referenced`] that no
+    /// non-cloexec fd still references it.
+    pub fn take_cloexec_entries(&mut self) -> alloc::vec::Vec<FdEntry> {
+        let mut out = alloc::vec::Vec::new();
+        for slot in &mut self.entries {
+            if let Some(entry) = *slot
+                && entry.fd_flags & FD_CLOEXEC != 0
+            {
+                out.push(entry);
+                *slot = None;
+            }
+        }
+        out
+    }
+
+    /// Ensure stdin/stdout/stderr are present as `Console` entries,
+    /// filling any missing slot.  Existing entries at fds 0/1/2 — even
+    /// non-Console ones (e.g. an open file dup'd over stdout) — are
+    /// preserved, matching POSIX semantics where exec only closes
+    /// cloexec fds.
+    ///
+    /// Used by `exec` to guarantee a Linux image always boots with a
+    /// usable stdio trio even if the previous image had closed one of
+    /// the standard fds.
+    pub fn ensure_stdio(&mut self) {
+        const STDIO: [(i32, u32); 3] = [
+            (STDIN_FD, O_RDONLY),
+            (STDOUT_FD, O_WRONLY),
+            (STDERR_FD, O_WRONLY),
+        ];
+        for &(fd, access) in &STDIO {
+            #[allow(clippy::cast_sign_loss)]
+            let idx = fd as usize;
+            if self.entries[idx].is_none() {
+                self.entries[idx] = Some(FdEntry::console(access));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +602,79 @@ pub fn self_test() -> KernelResult<()> {
     if !matches!(t.set_fd_flags(99, 0), Err(KernelError::InvalidHandle)) {
         serial_println!("[linux_fd] FAIL: set_fd_flags on closed fd should be EBADF");
         return Err(KernelError::InternalError);
+    }
+
+    // ------------------------------------------------------------------
+    // take_cloexec_entries / ensure_stdio — exec close-on-exec semantics.
+    // ------------------------------------------------------------------
+    {
+        let mut e = KernelFdTable::with_stdio();
+        // Install three File handles; mark fds 3 and 5 cloexec, fd 4 not.
+        let f3 = e.install_lowest(FdEntry::file(0xC0DE, O_RDONLY))?;
+        let f4 = e.install_lowest(FdEntry::file(0xBEEF, O_RDWR))?;
+        let f5 = e.install_lowest(FdEntry::file(0xFACE, O_WRONLY))?;
+        if (f3, f4, f5) != (3, 4, 5) {
+            serial_println!(
+                "[linux_fd] FAIL: cloexec setup install_lowest gave {}/{}/{}",
+                f3, f4, f5,
+            );
+            return Err(KernelError::InternalError);
+        }
+        e.set_fd_flags(3, FD_CLOEXEC)?;
+        e.set_fd_flags(5, FD_CLOEXEC)?;
+        // Also mark stderr (fd 2) cloexec — to verify ensure_stdio refills.
+        e.set_fd_flags(STDERR_FD, FD_CLOEXEC)?;
+
+        let taken = e.take_cloexec_entries();
+        // Should have taken stderr + fd3 + fd5 = 3 entries.
+        if taken.len() != 3 {
+            serial_println!(
+                "[linux_fd] FAIL: take_cloexec_entries took {} entries, want 3",
+                taken.len(),
+            );
+            return Err(KernelError::InternalError);
+        }
+        // stderr slot is empty before ensure_stdio.
+        if e.lookup(STDERR_FD).is_some() {
+            serial_println!("[linux_fd] FAIL: cloexec stderr should be cleared before ensure_stdio");
+            return Err(KernelError::InternalError);
+        }
+        // fd 4 (non-cloexec) survives.
+        let surv = e.lookup(4).ok_or_else(|| {
+            serial_println!("[linux_fd] FAIL: fd 4 (non-cloexec) should have survived");
+            KernelError::InternalError
+        })?;
+        if surv.raw_handle != 0xBEEF {
+            serial_println!("[linux_fd] FAIL: surviving fd 4 wrong handle: {:?}", surv);
+            return Err(KernelError::InternalError);
+        }
+
+        e.ensure_stdio();
+        // stdin (0) was already populated and not cloexec — must not be
+        // overwritten.  stdout (1) ditto.  stderr (2) was cloexec'd —
+        // must be refilled with a Console entry.
+        let se = e.lookup(STDERR_FD).ok_or_else(|| {
+            serial_println!("[linux_fd] FAIL: stderr should be refilled by ensure_stdio");
+            KernelError::InternalError
+        })?;
+        if se.kind != HandleKind::Console {
+            serial_println!("[linux_fd] FAIL: refilled stderr kind = {:?}", se.kind);
+            return Err(KernelError::InternalError);
+        }
+
+        // ensure_stdio MUST NOT overwrite an existing non-Console fd
+        // sitting at 0/1/2.  Plant a File at stdin and rerun.
+        e.take(STDIN_FD);
+        e.install_at(STDIN_FD, FdEntry::file(0xDEAD, O_RDWR))?;
+        e.ensure_stdio();
+        let s0 = e.lookup(STDIN_FD).ok_or(KernelError::InternalError)?;
+        if s0.kind != HandleKind::File || s0.raw_handle != 0xDEAD {
+            serial_println!(
+                "[linux_fd] FAIL: ensure_stdio clobbered non-Console stdin: {:?}",
+                s0,
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     serial_println!("[linux_fd] Self-test PASSED");

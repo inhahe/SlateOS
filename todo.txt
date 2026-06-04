@@ -5411,12 +5411,17 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##             that holds at least one fd referencing the handle",
 ##             which is exactly what dup_one preserves.  Contract is
 ##             documented in pcb::fork_create.
-##        (ii) FD_CLOEXEC is stored per-entry but exec_process() does NOT
-##             walk the table and close cloexec entries.  It rebuilds a
-##             fresh stdio-only table instead, which is correct for the
-##             post-exec view but loses any non-cloexec File handles the
-##             caller wanted to keep open.  Real fix: walk old table,
-##             close cloexec entries, carry the rest into the new image.
+##        (ii) RESOLVED — exec_process now honours FD_CLOEXEC.
+##             KernelFdTable::take_cloexec_entries removes every entry
+##             with FD_CLOEXEC set; ensure_stdio refills missing
+##             stdio slots (without clobbering a non-Console fd dup'd
+##             onto 0/1/2).  pcb::linux_fd_exec_cloexec wraps these
+##             and returns a deduplicated, "not-still-referenced" list
+##             of handles for the caller to close via
+##             crate::syscall::linux::close_handle.  exec_process
+##             takes the Linux→Linux exec path through this helper and
+##             only falls back to install_stdio when transitioning
+##             from Native→Linux.
 ##       (iii) Console reads collapse any byte-count to a single
 ##             keystroke (one-char read).  Multi-byte reads will need a
 ##             line-buffered TTY abstraction.
@@ -5487,7 +5492,11 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     returns None; is_handle_referenced semantics; dup_lowest clones
 ##     entry and clears FD_CLOEXEC; dup2 closes prior occupant and
 ##     returns it; dup2(fd,fd) is a no-op; take removes entry;
-##     set_fd_flags / set_status_flags preserve O_ACCMODE.
+##     set_fd_flags / set_status_flags preserve O_ACCMODE;
+##     take_cloexec_entries returns exactly the FD_CLOEXEC'd entries
+##     and leaves non-cloexec fds intact; ensure_stdio refills missing
+##     stdio slots with Console entries but does NOT overwrite a
+##     non-Console fd sitting at 0/1/2.
 ##   - Cross-ABI dispatch routing in entry.rs is *structurally* tested
 ##     by the AbiMode default-Native path that every existing native
 ##     test hits.  The Linux path will get end-to-end coverage when an
@@ -5497,7 +5506,5 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   1. Add Linux execve/fork/clone in a parallel
 ##      dispatch_linux_with_frame path; clone() is what pthread_create
 ##      uses so this is the next blocker for multi-threaded glibc.
-##   2. Wire exec_process() to walk the fd table and honour FD_CLOEXEC
-##      (currently rebuilds a fresh stdio-only table).
-##   3. Replace xorshift64 with kernel CSPRNG when one exists.
-##   4. Honour mprotect / brk / sigaction properly.
+##   2. Replace xorshift64 with kernel CSPRNG when one exists.
+##   3. Honour mprotect / brk / sigaction properly.

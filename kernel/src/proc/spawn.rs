@@ -860,12 +860,22 @@ pub fn exec_process(
     // ring 3 because `syscall_handler_inner` re-reads the abi_mode on
     // every entry.
     //
-    // exec also re-initialises the kernel-side Linux fd table: per
-    // POSIX, fds with FD_CLOEXEC survive only in the parent address
-    // space (which is gone), so the new image starts with a fresh
-    // stdin/stdout/stderr trio.  TODO: honour FD_CLOEXEC for inherited
-    // non-cloexec fds when we wire up the full exec-time fd-table
-    // walk; that requires support for non-Console handle kinds first.
+    // exec re-initialises the kernel-side Linux fd table per POSIX
+    // close-on-exec semantics:
+    //
+    //   - If the old image was already Linux ABI, walk its fd table,
+    //     close every entry whose FD_CLOEXEC flag is set (releasing
+    //     the underlying kernel handle if no other fd references it),
+    //     and keep the rest.  Stdin/stdout/stderr are then refilled
+    //     with Console entries if the previous image had closed them.
+    //
+    //   - If the old image was Native ABI, the previous PCB had no
+    //     Linux fd table, so we install a fresh stdio-only one.
+    //
+    // The ABI switch itself takes effect on the next syscall from ring
+    // 3 because `syscall_handler_inner` re-reads abi_mode on every
+    // entry; here we just update the PCB.
+    let old_abi_mode = pcb::get_abi_mode(pid);
     if let Err(e) = pcb::set_abi_mode(pid, new_abi_mode) {
         serial_println!(
             "[exec] WARNING: failed to update ABI mode on process {}: {:?}",
@@ -879,7 +889,47 @@ pub fn exec_process(
         // rather than failing the exec.
     }
     if new_abi_mode == pcb::AbiMode::Linux {
-        if let Err(e) = pcb::linux_fd_install_stdio(pid) {
+        if old_abi_mode == Some(pcb::AbiMode::Linux) {
+            // Re-use the existing table: close cloexec entries (and
+            // ensure stdio remains populated) via the kernel helper,
+            // then close each returned handle.
+            if let Some(to_close) = pcb::linux_fd_exec_cloexec(pid) {
+                let count = to_close.len();
+                for entry in to_close {
+                    let res = crate::syscall::linux::close_handle(entry);
+                    if res.value < 0 {
+                        serial_println!(
+                            "[exec] WARNING: close-on-exec for kind={:?} \
+                             raw={:#x} returned {} on process {}",
+                            entry.kind, entry.raw_handle, res.value, pid,
+                        );
+                    }
+                }
+                if count > 0 {
+                    serial_println!(
+                        "[exec] Closed {} cloexec fd(s) on process {}",
+                        count, pid,
+                    );
+                }
+            } else {
+                // No old fd table even though abi_mode was Linux —
+                // shouldn't happen, but fall back to installing fresh
+                // stdio so the new image has something to use.
+                serial_println!(
+                    "[exec] WARNING: process {} had AbiMode::Linux but no fd \
+                     table; installing fresh stdio",
+                    pid,
+                );
+                if let Err(e) = pcb::linux_fd_install_stdio(pid) {
+                    serial_println!(
+                        "[exec] WARNING: failed to install Linux stdio fds \
+                         on process {}: {:?}",
+                        pid, e
+                    );
+                }
+            }
+        } else if let Err(e) = pcb::linux_fd_install_stdio(pid) {
+            // Native → Linux: install fresh stdio-only table.
             serial_println!(
                 "[exec] WARNING: failed to install Linux stdio fds on process {}: {:?}",
                 pid, e

@@ -576,7 +576,11 @@ fn lookup_caller_fd(fd: i32) -> Result<FdEntry, SyscallResult> {
 
 /// Issue the kernel-side close appropriate to `entry.kind`.  No-op for
 /// `Console` handles (no kernel resource).
-fn close_handle(entry: FdEntry) -> SyscallResult {
+///
+/// Public so the process-exec path in `crate::proc::spawn` can use it
+/// to release `FD_CLOEXEC` handles when an exec re-uses an existing
+/// Linux fd table — see `pcb::linux_fd_exec_cloexec`.
+pub fn close_handle(entry: FdEntry) -> SyscallResult {
     match entry.kind {
         HandleKind::Console => SyscallResult::ok(0),
         HandleKind::File => {

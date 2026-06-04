@@ -678,6 +678,26 @@ pub mod nr {
     pub const FUTEX_WAKE: u64 = 454;
     pub const FUTEX_WAIT: u64 = 455;
     pub const FUTEX_REQUEUE: u64 = 456;
+    // Batch 34: legacy / deprecated / never-implemented x86_64 syscalls.
+    pub const CREAT: u64 = 85;
+    pub const USELIB: u64 = 134;
+    pub const SYSFS: u64 = 139;
+    pub const VHANGUP: u64 = 153;
+    pub const _SYSCTL: u64 = 156;
+    pub const CREATE_MODULE: u64 = 174;
+    pub const GET_KERNEL_SYMS: u64 = 177;
+    pub const QUERY_MODULE: u64 = 178;
+    pub const NFSSERVCTL: u64 = 180;
+    pub const GETPMSG: u64 = 181;
+    pub const PUTPMSG: u64 = 182;
+    pub const AFS_SYSCALL: u64 = 183;
+    pub const TUXCALL: u64 = 184;
+    pub const SECURITY: u64 = 185;
+    pub const LOOKUP_DCOOKIE: u64 = 212;
+    pub const EPOLL_CTL_OLD: u64 = 214;
+    pub const EPOLL_WAIT_OLD: u64 = 215;
+    pub const VSERVER: u64 = 236;
+    pub const FUTIMESAT: u64 = 261;
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,6 +1789,25 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::FUTEX_WAKE => sys_futex2_wake(args),
         nr::FUTEX_WAIT => sys_futex2_wait(args),
         nr::FUTEX_REQUEUE => sys_futex2_requeue(args),
+        nr::CREAT => sys_creat(args),
+        nr::USELIB => sys_uselib(args),
+        nr::SYSFS => sys_sysfs(args),
+        nr::VHANGUP => sys_vhangup(args),
+        nr::_SYSCTL => sys__sysctl(args),
+        nr::CREATE_MODULE => sys_create_module(args),
+        nr::GET_KERNEL_SYMS => sys_get_kernel_syms(args),
+        nr::QUERY_MODULE => sys_query_module(args),
+        nr::NFSSERVCTL => sys_nfsservctl(args),
+        nr::GETPMSG => sys_getpmsg(args),
+        nr::PUTPMSG => sys_putpmsg(args),
+        nr::AFS_SYSCALL => sys_afs_syscall(args),
+        nr::TUXCALL => sys_tuxcall(args),
+        nr::SECURITY => sys_security(args),
+        nr::LOOKUP_DCOOKIE => sys_lookup_dcookie(args),
+        nr::EPOLL_CTL_OLD => sys_epoll_ctl_old(args),
+        nr::EPOLL_WAIT_OLD => sys_epoll_wait_old(args),
+        nr::VSERVER => sys_vserver(args),
+        nr::FUTIMESAT => sys_futimesat(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -10377,6 +10416,170 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+/// `creat(path, mode)` — legacy `open(path, O_CREAT|O_WRONLY|O_TRUNC, mode)`.
+///
+/// Linux still ships this as a real syscall for backwards-compat with
+/// early Unix; in practice glibc's `creat()` libcall is a wrapper for
+/// the open path.  We forward to `open_common` so the same EROFS/
+/// EFAULT behaviour as `open()` applies.
+fn sys_creat(args: &SyscallArgs) -> SyscallResult {
+    // O_WRONLY | O_CREAT | O_TRUNC.
+    let flags = oflags::O_WRONLY | oflags::O_CREAT | oflags::O_TRUNC;
+    open_common(args.arg0, 0, flags)
+}
+
+/// `uselib(library)` — deprecated dynamic-linker primitive.
+///
+/// Removed from glibc in 2.23 (2016).  Validate path and return
+/// ENOSYS — any conformant caller already handles the absence.
+fn sys_uselib(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = validate_user_str(args.arg0) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `sysfs(option, ...)` — deprecated filesystem-type enumeration.
+///
+/// Superseded by reading `/proc/filesystems` since Linux 2.4.
+/// option ∈ {1=lookup by name, 2=lookup by index, 3=count}.  Validate
+/// option and return ENOSYS.
+fn sys_sysfs(args: &SyscallArgs) -> SyscallResult {
+    let option = args.arg0 as i32;
+    if !(1..=3).contains(&option) {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `vhangup()` — privileged TTY hangup (init / getty reset).
+///
+/// Always requires CAP_SYS_TTY_CONFIG which we don't expose.
+fn sys_vhangup(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::EPERM)
+}
+
+/// `_sysctl(struct __sysctl_args *)` — removed in Linux 5.5 (2020).
+///
+/// Always returns ENOSYS on any modern kernel; emulating the removal
+/// keeps us consistent with what glibc 2.32+ expects.
+#[allow(non_snake_case)]
+fn sys__sysctl(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct __sysctl_args is 48 bytes (name*, nlen, oldval*, oldlenp*,
+    // newval*, newlen).
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 48) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `create_module(name, size)` — legacy LKM load.
+///
+/// Superseded by init_module since Linux 2.6; the legacy syscall is
+/// kept for ABI compatibility but always returns ENOSYS on modern
+/// kernels.
+fn sys_create_module(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `get_kernel_syms(table)` — legacy LKM symbol lookup.  Always ENOSYS.
+fn sys_get_kernel_syms(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `query_module(name, which, buf, bufsize, ret)` — legacy LKM query.  Always ENOSYS.
+fn sys_query_module(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `nfsservctl(cmd, argp, resp)` — kernel NFS server control.
+///
+/// Removed from Linux in 3.1 (2011); modern setups use the
+/// userspace `nfsd` daemon.  Always ENOSYS.
+fn sys_nfsservctl(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `getpmsg(...)` / `putpmsg(...)` — STREAMS subsystem.
+///
+/// STREAMS was never merged upstream; these slots are reserved as
+/// permanent ENOSYS.  We match upstream behaviour.
+fn sys_getpmsg(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+fn sys_putpmsg(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `afs_syscall(...)` — reserved for the AFS distributed FS.  Never used.
+fn sys_afs_syscall(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `tuxcall(...)` — reserved for the long-defunct Tux in-kernel HTTP server.
+fn sys_tuxcall(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `security(...)` — reserved LSM slot.  Never implemented in upstream.
+fn sys_security(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `lookup_dcookie(cookie, buffer, len)` — oprofile dcookie resolution.
+///
+/// Removed from Linux 6.7 along with the rest of oprofile; perf has
+/// replaced it.  Always ENOSYS.
+fn sys_lookup_dcookie(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `epoll_ctl_old` / `epoll_wait_old` — never-implemented epoll variants
+/// reserved during early epoll development.  Permanent ENOSYS in
+/// upstream too.
+fn sys_epoll_ctl_old(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+fn sys_epoll_wait_old(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `vserver(...)` — reserved for the Linux-VServer patch set.  Never
+/// merged.  Permanent ENOSYS.
+fn sys_vserver(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `futimesat(dirfd, path, times[2])` — legacy directory-fd-relative
+/// utime, superseded by `utimensat(2)` (which we handle).
+///
+/// Validate path string and (when non-NULL) the 32-byte `times[2]`
+/// buffer; return ENOSYS so glibc falls back to utimensat.
+fn sys_futimesat(args: &SyscallArgs) -> SyscallResult {
+    let _dirfd = args.arg0 as i32;
+    let path = args.arg1;
+    let times = args.arg2;
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = validate_user_str(path) {
+        return linux_err(linux_errno_for(e));
+    }
+    if times != 0 {
+        // times is `struct timeval[2]` — 2 * 16 = 32 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(times, 32) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
 /// `futex_requeue(waiters*, flags, nr_wake, nr_requeue)` — futex2 requeue.
 ///
 /// `waiters` is a 2-entry array of `futex_waitv` (24B each).
@@ -16948,6 +17151,123 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: waiters_ptr, arg1: 0, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: futex_requeue valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Batch 34: legacy / deprecated / never-implemented syscalls
+    // -----------------------------------------------------------------
+    {
+        let path_buf = b"/tmp/x\0";
+        let path_ptr = path_buf.as_ptr() as u64;
+        let sysctl_buf = [0u8; 48];
+        let sysctl_ptr = sysctl_buf.as_ptr() as u64;
+        let times_buf = [0u8; 32];
+        let times_ptr = times_buf.as_ptr() as u64;
+
+        // creat valid -> EROFS (forwards to open_common; FS is read-only).
+        let a = SyscallArgs { arg0: path_ptr, arg1: 0o644, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let cr = dispatch_linux(nr::CREAT, &a).value;
+        // open_common may return EROFS or another error; accept either EROFS
+        // or ENOENT (no such file) but reject success and ENOSYS.
+        if cr >= 0 || cr == -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: creat valid unexpected = {}", cr);
+            return Err(KernelError::InternalError);
+        }
+        // creat NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0o644, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CREAT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: creat NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+
+        // uselib NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USELIB, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: uselib NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // uselib valid -> ENOSYS.
+        let a = SyscallArgs { arg0: path_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USELIB, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: uselib valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // sysfs bad option -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sysfs bad option not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // sysfs valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: sysfs valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // vhangup -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::VHANGUP, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: vhangup not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // _sysctl NULL -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::_SYSCTL, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: _sysctl NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // _sysctl valid -> ENOSYS.
+        let a = SyscallArgs { arg0: sysctl_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::_SYSCTL, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: _sysctl valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // Permanent-ENOSYS stubs.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let perm_enosys: &[u64] = &[
+            nr::CREATE_MODULE,
+            nr::GET_KERNEL_SYMS,
+            nr::QUERY_MODULE,
+            nr::NFSSERVCTL,
+            nr::GETPMSG,
+            nr::PUTPMSG,
+            nr::AFS_SYSCALL,
+            nr::TUXCALL,
+            nr::SECURITY,
+            nr::LOOKUP_DCOOKIE,
+            nr::EPOLL_CTL_OLD,
+            nr::EPOLL_WAIT_OLD,
+            nr::VSERVER,
+        ];
+        for &n in perm_enosys {
+            if dispatch_linux(n, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!("[syscall/linux]   FAIL: legacy syscall {} not ENOSYS", n);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // futimesat NULL path -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: futimesat NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // futimesat with times -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: times_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: futimesat valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // futimesat NULL times -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: futimesat NULL times not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

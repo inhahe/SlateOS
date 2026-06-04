@@ -7263,3 +7263,46 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           classic futex impl (per-op translation) is a one-day
 ##           task once the new ABI sees real-world traction.
 
+##  60. CREAT / USELIB / SYSFS / VHANGUP / _SYSCTL / CREATE_MODULE /
+##      GET_KERNEL_SYMS / QUERY_MODULE / NFSSERVCTL / GETPMSG /
+##      PUTPMSG / AFS_SYSCALL / TUXCALL / SECURITY / LOOKUP_DCOOKIE /
+##      EPOLL_CTL_OLD / EPOLL_WAIT_OLD / VSERVER / FUTIMESAT —
+##      19 legacy / deprecated / never-implemented syscalls DONE.
+##      Brings the constants-undispatched count to zero and
+##      eliminates every gap in the find_gaps.py audit.
+##         - creat: forward to open_common with O_WRONLY|O_CREAT|
+##           O_TRUNC.  Real callers see the same EROFS / EFAULT
+##           behaviour as open().
+##         - uselib / _sysctl: validate args, return ENOSYS.
+##           Both are removed-from-upstream relics; our ENOSYS
+##           matches what every running Linux ≥ 5.5 / glibc 2.23+
+##           reports.
+##         - sysfs: validate option ∈ {1,2,3}, return ENOSYS.
+##           Replaced by /proc/filesystems since the 2.4 era.
+##         - vhangup: return EPERM (privileged terminal reset).
+##         - futimesat: validate path + 32B times[2]; return
+##           ENOSYS so glibc uses utimensat (which we handle).
+##         - create_module, get_kernel_syms, query_module,
+##           nfsservctl, getpmsg, putpmsg, afs_syscall, tuxcall,
+##           security, lookup_dcookie, epoll_ctl_old,
+##           epoll_wait_old, vserver: permanent-ENOSYS upstream
+##           too.  Wiring them explicitly distinguishes "known
+##           defunct" from "unimplemented" — useful for strace
+##           output clarity once we ship a strace.
+##      Choice rationale:
+##         * EPERM (not ENOSYS) for vhangup because the syscall
+##           genuinely exists on every Linux and gates on
+##           CAP_SYS_TTY_CONFIG.  Programs that handle "no
+##           permission" gracefully (every userspace init except
+##           the real one) work correctly.
+##         * Forwarding creat to open_common (not stubbing
+##           directly) keeps the EROFS contract consistent and
+##           lights up automatically once writable FS lands.
+##         * Permanent ENOSYS for the never-implemented set
+##           matches upstream exactly; nothing we do can change
+##           that without divergence.
+##      Limitation: none.  These are the right answers.
+##      Bug noted: the find_gaps.py audit script (find_gaps.py at
+##      repo root) is now a standing tool — re-run it after any
+##      future Linux release to detect new gaps.
+

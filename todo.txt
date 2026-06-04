@@ -5475,12 +5475,19 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      so this is acceptable as a first pass but must be fixed before
 ##      we run anything that actually relies on signal delivery
 ##      semantics.
-##   6. MPROTECT NO-OP.  We currently return success without changing
-##      page permissions.  Many Linux programs mprotect data segments
-##      to RW after init (or text to RX); without enforcement this is
-##      a security hole when Linux processes run alongside trusted
-##      native code.  Add real page-table mutation when the VMM gains
-##      a per-process mprotect entrypoint.
+##   6. MPROTECT — DONE (with two documented approximations).
+##      sys_mprotect now walks the caller's PML4 and applies
+##      WRITABLE / NO_EXECUTE flag changes per 16 KiB frame, with a
+##      first-pass mapping check that returns -ENOMEM if the range
+##      contains a hole (matches Linux semantics).  Limitations:
+##      (a) PROT_NONE is approximated as "read-only, no-execute"
+##      because clearing the PRESENT bit without VMA tracking would
+##      be indistinguishable from a never-mapped hole on the next
+##      fault; (b) TLB invalidation is local-CPU only via invlpg —
+##      cross-CPU shootdown will be needed once multi-threaded Linux
+##      processes can migrate.  CoW pages requesting PROT_WRITE are
+##      NOT immediately made writable; the existing CoW fault handler
+##      upgrades them on first write.
 ##   7. BRK NO-OP.  We return the input address unchanged, which is
 ##      enough to make glibc's malloc fall back to mmap.  Real brk
 ##      requires a per-process heap region in the VMM.  Acceptable
@@ -5545,12 +5552,22 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ## NEXT STEPS (in priority order):
 ##   1. Replace xorshift64 with kernel CSPRNG when one exists.
-##   2. Honour mprotect / brk / sigaction properly.  mprotect is a
-##      security hole (we say success but never change page perms);
-##      brk's no-op is acceptable because glibc malloc falls back to
-##      mmap; sigaction ignores sa_mask / sa_flags / SA_RESTART etc.
-##   3. Real sigreturn / rt_sigreturn handler that restores the
+##   2. Cross-CPU TLB shootdown for mprotect.  Currently only the
+##      local CPU's TLB is flushed; a sibling thread running on
+##      another CPU could observe stale permissions until its next
+##      context switch.  Acceptable while Linux processes are
+##      single-threaded; must be fixed before pthread-using
+##      programs migrate across CPUs.
+##   3. Real PROT_NONE.  Requires VMA tracking so the page-fault
+##      handler can distinguish "mapped but PROT_NONE" from "never
+##      mapped".  Today PROT_NONE is approximated as read-only +
+##      no-execute, which is wrong for any program that intentionally
+##      uses PROT_NONE as a guard page or trap region.
+##   4. Honour brk / sigaction properly.  brk's no-op is acceptable
+##      because glibc malloc falls back to mmap; sigaction ignores
+##      sa_mask / sa_flags / SA_RESTART etc.
+##   5. Real sigreturn / rt_sigreturn handler that restores the
 ##      pre-signal frame.
-##   4. CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
+##   6. CLONE_VFORK / CLONE_PARENT / CLONE_NEWNS / CLONE_PTRACE
 ##      support if any target program actually needs them — currently
 ##      all return -ENOSYS.

@@ -1677,18 +1677,144 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     linux_from_native(r)
 }
 
-/// `mprotect(addr, len, prot)` — silently succeeds.
+/// `mprotect(addr, len, prot)` — change page protection on a range.
 ///
-/// Our VMA layer doesn't track per-page protection changes yet.  We
-/// validate that the range is well-formed (length > 0, addr aligned to
-/// 16 KiB) and return 0.  Programs relying on actual PROT_NONE guard
-/// pages will not be protected — documented limitation.
+/// Walks every 16 KiB frame in `[addr, addr+len)` in the caller's
+/// address space and updates the WRITABLE / NO_EXECUTE bits to
+/// reflect the new `prot`:
+///
+///   - `PROT_WRITE` set    -> WRITABLE on the PTE
+///   - `PROT_WRITE` clear  -> WRITABLE cleared
+///   - `PROT_EXEC` set     -> NO_EXECUTE cleared
+///   - `PROT_EXEC` clear   -> NO_EXECUTE set
+///
+/// `PROT_READ` is the implied "still mapped"; we never clear PRESENT
+/// or USER_ACCESSIBLE.  `PROT_NONE` (prot == 0) is approximated as
+/// "read-only, no-execute" — we don't yet track VMA state and can't
+/// safely flip PRESENT off (it would be indistinguishable from a
+/// never-mapped hole on the next access).  Documented limitation in
+/// `todo.txt`.
+///
+/// Copy-on-write pages: we never set WRITABLE on a CoW-marked page
+/// even if `PROT_WRITE` was requested.  The CoW fault handler will
+/// upgrade the page on first write, which is the correct lazy
+/// behaviour.
 fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
-    let _addr = args.arg0;
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, PageFlags, VirtAddr, USER_SPACE_END};
+
+    const PROT_READ: u64 = 1;
+    const PROT_WRITE: u64 = 2;
+    const PROT_EXEC: u64 = 4;
+    const PROT_VALID_MASK: u64 = PROT_READ | PROT_WRITE | PROT_EXEC;
+
+    let addr = args.arg0;
     let len = args.arg1;
+    let prot = args.arg2;
+
+    // POSIX: a zero-length range succeeds without doing anything.
     if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    // Reject unknown prot bits.
+    if (prot & !PROT_VALID_MASK) != 0 {
         return linux_err(errno::EINVAL);
     }
+    // Addr must be frame-aligned (Linux requires alignment to system
+    // page size; ours is 16 KiB).
+    let frame_size = FRAME_SIZE as u64;
+    if (addr & (frame_size - 1)) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Round len up to whole frames.
+    let len_aligned = match len
+        .checked_add(frame_size - 1)
+        .map(|v| v & !(frame_size - 1))
+    {
+        Some(v) => v,
+        None => return linux_err(errno::EINVAL),
+    };
+    let end = match addr.checked_add(len_aligned) {
+        Some(e) => e,
+        None => return linux_err(errno::EINVAL),
+    };
+    // Range must lie entirely in user space (don't let userspace
+    // mprotect kernel mappings).
+    if addr >= USER_SPACE_END || end > USER_SPACE_END {
+        return linux_err(errno::EFAULT);
+    }
+
+    // Resolve the caller's PML4.
+    let task_id = crate::sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(p) if p != 0 => p,
+        _ => return linux_err(errno::ESRCH),
+    };
+    let pml4 = match crate::proc::pcb::get_pml4(pid) {
+        Some(p) if p != 0 => p,
+        _ => return linux_err(errno::ESRCH),
+    };
+
+    // First pass: verify the entire range is mapped.  Linux returns
+    // -ENOMEM if there's a hole, BEFORE making any changes.  This
+    // avoids leaving a half-protected range on a partial failure.
+    let mut va = addr;
+    while va < end {
+        let virt = VirtAddr::new(va);
+        if page_table::translate_flags(pml4, virt).is_none() {
+            return linux_err(errno::ENOMEM);
+        }
+        // Safe: va < end <= USER_SPACE_END so va + frame_size cannot
+        // overflow (USER_SPACE_END = 2^47 is far below u64::MAX).
+        va = va.saturating_add(frame_size);
+    }
+
+    // Second pass: apply the new flags frame by frame.
+    let want_write = (prot & PROT_WRITE) != 0;
+    let want_exec = (prot & PROT_EXEC) != 0;
+
+    va = addr;
+    while va < end {
+        let virt = VirtAddr::new(va);
+        // SAFETY: pml4 is the calling process's PML4; the address is
+        // user-space and frame-aligned; we verified the range is
+        // mapped in the first pass.  No other thread can be racing
+        // on this range without the user explicitly serialising —
+        // mprotect on a concurrently-faulting region is racy on
+        // Linux too.
+        let current = match page_table::translate_flags(pml4, virt) {
+            Some(f) => f,
+            None => return linux_err(errno::ENOMEM),
+        };
+
+        // Compute new flags: clear WRITABLE + NO_EXECUTE, then set
+        // them according to prot.  Preserve PRESENT, USER_ACCESSIBLE,
+        // COW, and any other PTE bits.
+        let mut new_flags = current & !PageFlags::WRITABLE & !PageFlags::NO_EXECUTE;
+        // Never set WRITABLE on a CoW page — the CoW fault handler
+        // will upgrade the page on first write.
+        if want_write && !current.contains(PageFlags::COW) {
+            new_flags = new_flags | PageFlags::WRITABLE;
+        }
+        if !want_exec {
+            new_flags = new_flags | PageFlags::NO_EXECUTE;
+        }
+
+        // SAFETY: same as translate_flags above — pml4 is valid,
+        // virt is user-space frame-aligned, mapping exists.
+        if let Err(e) = unsafe { page_table::change_flags(pml4, virt, new_flags) } {
+            return linux_err(linux_errno_for(e));
+        }
+
+        // Invalidate TLB for this 16 KiB frame (4 × invlpg) on the
+        // local CPU.  Remote-CPU shootdown for cross-CPU mprotect is
+        // a known limitation tracked in todo.txt.
+        // SAFETY: invlpg is always safe in ring 0.
+        unsafe { page_table::flush_frame_local(virt) };
+
+        va = va.saturating_add(frame_size);
+    }
+
     SyscallResult::ok(0)
 }
 
@@ -2655,6 +2781,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+        }
+    }
+
+    // mprotect argument validation:
+    //   - zero length succeeds (no-op);
+    //   - unknown prot bit -> EINVAL;
+    //   - misaligned addr   -> EINVAL;
+    //   - kernel-space addr -> EFAULT.
+    // We can't exercise the success path from boot context (no owning
+    // Linux process), but we *can* prove the validation layer rejects
+    // bad input before reaching the page-table walk.
+    {
+        let args0 = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MPROTECT, &args0).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mprotect zero-len");
+            return Err(KernelError::InternalError);
+        }
+        let args1 = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
+            arg2: 0x100, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MPROTECT, &args1).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mprotect bad-prot");
+            return Err(KernelError::InternalError);
+        }
+        let args2 = SyscallArgs { arg0: 0x4001, arg1: 0x4000,
+            arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MPROTECT, &args2).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mprotect misalign");
+            return Err(KernelError::InternalError);
+        }
+        let args3 = SyscallArgs {
+            arg0: 0xFFFF_8000_0000_0000,
+            arg1: 0x4000, arg2: 1, arg3: 0, arg4: 0, arg5: 0
+        };
+        if dispatch_linux(nr::MPROTECT, &args3).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mprotect kernel-addr");
+            return Err(KernelError::InternalError);
         }
     }
 

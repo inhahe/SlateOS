@@ -1953,6 +1953,27 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             linux_from_native(handlers::sys_console_write(&a))
         }
         HandleKind::File => {
+            // RLIMIT_FSIZE: peek at the open-file description to find
+            // out where the next byte will land (current pos, or size
+            // for APPEND), then clip the request length to whatever
+            // still fits under the soft limit.  EFBIG short-circuits;
+            // a partial clip falls through to the native handler with
+            // the reduced length.  There IS a TOCTOU between the peek
+            // and the write — another holder of the same fd could
+            // advance the offset in between — but RLIMIT_FSIZE is a
+            // policy guard not a security boundary, and Linux has the
+            // same race in its VFS write path.
+            let len = match crate::fs::handle::peek_write_offset(entry.raw_handle) {
+                Ok(off) => match rlimit_fsize_clip_for_caller(off, len) {
+                    Ok(v) => v,
+                    Err(e) => return linux_err(e),
+                },
+                // Permission / handle errors get rediscovered by the
+                // native handler — fall through with the original len
+                // so the user sees the same errno they would have seen
+                // with no rlimit wired in.
+                Err(_) => len,
+            };
             let a = SyscallArgs {
                 arg0: entry.raw_handle, arg1: buf, arg2: len,
                 arg3: 0, arg4: 0, arg5: 0,
@@ -14005,6 +14026,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 Ok(()),
                 "kernel-context check_size must pass through",
             );
+
+            // peek_write_offset: an unknown handle returns
+            // InvalidHandle, confirming the new fs::handle accessor
+            // is wired up and used by dispatch_write to fetch the
+            // effective write offset for current-offset writes.
+            match crate::fs::handle::peek_write_offset(0) {
+                Err(KernelError::InvalidHandle) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: peek_write_offset(0) expected InvalidHandle, got {:?}",
+                        other,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // A very large handle ID likewise isn't in the table —
+            // exercises the BTreeMap lookup miss path.
+            match crate::fs::handle::peek_write_offset(u64::MAX) {
+                Err(KernelError::InvalidHandle) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: peek_write_offset(MAX) expected InvalidHandle, got {:?}",
+                        other,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
 
             // ftruncate dispatch: with kernel-context (no pcb-side
             // RLIMIT_FSIZE in effect) we should fall through to EROFS

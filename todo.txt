@@ -8034,3 +8034,63 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      programs that DO lower it (they see EFBIG instead of
 ##      EROFS, matching what Linux would report).
 
+##  72. Extend RLIMIT_FSIZE enforcement to write / writev
+##      (current-offset write paths) — DONE.
+##      Twelfth "upgrade a stub" batch.  Closes the limitation
+##      noted in item 71: the non-positional write syscalls now
+##      participate in the same RLIMIT_FSIZE clipping that
+##      pwrite/pwritev already use.
+##         - fs::handle::peek_write_offset(handle) ->
+##           KernelResult<u64> added.  Returns file.size for
+##           handles with OpenFlags::APPEND set (POSIX rule:
+##           append writes go to EOF) and file.offset
+##           otherwise.  Validates the same conditions as
+##           write: writable flag, not a directory.  Used
+##           exclusively by the Linux ABI today; the native
+##           write paths don't have a notion of RLIMIT_FSIZE
+##           and don't call it.
+##         - linux::dispatch_write, in the HandleKind::File
+##           arm, now calls peek_write_offset → clip via
+##           rlimit_fsize_clip_for_caller → pass the (possibly
+##           reduced) len to handlers::sys_fs_write.  EFBIG
+##           short-circuits the dispatch.  peek_write_offset
+##           errors (InvalidHandle, IsADirectory,
+##           PermissionDenied) fall through with the original
+##           len so the user sees the same errno they would
+##           have seen without the rlimit check.
+##      Coverage:
+##         - Pure decision-table tests already exercise the
+##           clip math (item 71).
+##         - peek_write_offset(0) and peek_write_offset(MAX)
+##           both return InvalidHandle, confirming the new
+##           accessor is wired up and reachable from the
+##           rlimit self-test block.
+##      Choice rationale:
+##         * A peek + write pair has a TOCTOU window if two
+##           holders of the same fd write concurrently.  Linux
+##           has the identical race in its VFS write path,
+##           because RLIMIT_FSIZE is a policy guard not a
+##           security boundary.  Acceptable.
+##         * peek_write_offset is a fs::handle responsibility
+##           even though it exists solely for the Linux ABI —
+##           the function reaches into private fields (offset,
+##           size, flags) that are only visible inside the
+##           module, so making the dispatcher do it would
+##           require exposing those internals.
+##         * Falling through on peek errors (rather than
+##           propagating them) keeps the user-visible errno
+##           identical to the pre-rlimit dispatch for non-write
+##           handle states.  The actual write attempt will
+##           rediscover the same condition via sys_fs_write.
+##      Limitation: SIGXFSZ still not delivered (same as item
+##      71).  EFBIG is correct; signal delivery is a separate
+##      batch when signals lands.
+##      Limitation: write/writev paths through HandleKind::Pipe
+##      and HandleKind::Console are not clipped — pipes and
+##      consoles are not regular files and don't accumulate
+##      bytes against RLIMIT_FSIZE.  Matches Linux semantics.
+##      Limitation: The non-Linux native sys_fs_write path
+##      bypasses the clip entirely.  Native programs aren't
+##      subject to RLIMIT_FSIZE in our model, which matches
+##      the parallel treatment of RLIMIT_AS in batch 44.
+

@@ -393,6 +393,42 @@ pub fn read(handle: u64, buf: &mut [u8]) -> KernelResult<usize> {
     Ok(copy_len)
 }
 
+/// Return the file offset at which the next byte written via
+/// [`write`] would land.
+///
+/// This is `file.size` for handles opened with [`OpenFlags::APPEND`]
+/// (POSIX rule: append-mode writes always go to EOF, ignoring the
+/// stored offset) and `file.offset` otherwise.
+///
+/// Used by the Linux ABI translation layer to enforce `RLIMIT_FSIZE`
+/// against the current-offset write paths (`write(2)`, `writev(2)`)
+/// — those syscalls don't carry an explicit offset, so the kernel
+/// must peek at the open-file description to know where the write
+/// will land before clipping or rejecting it.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
+/// - [`KernelError::IsADirectory`] — `handle` is a directory handle
+///   (which doesn't support byte-oriented writes).
+/// - [`KernelError::PermissionDenied`] — handle was not opened for
+///   writing.
+pub fn peek_write_offset(handle: u64) -> KernelResult<u64> {
+    let table = OPEN_FILES.lock();
+    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
+    if !file.flags.is_writable() {
+        return Err(KernelError::PermissionDenied);
+    }
+    if file.flags.contains(OpenFlags::APPEND) {
+        Ok(file.size)
+    } else {
+        Ok(file.offset)
+    }
+}
+
 /// Write bytes to the file at the current offset (or at EOF if APPEND).
 ///
 /// Advances the offset by the number of bytes written.  Grows the

@@ -4120,17 +4120,19 @@ mod tests {
 
     #[test]
     fn test_layout_constants_positive() {
-        assert!(SIDEBAR_WIDTH > 0.0);
-        assert!(TITLE_BAR_HEIGHT > 0.0);
-        assert!(TOOLBAR_HEIGHT > 0.0);
-        assert!(STATUS_BAR_HEIGHT > 0.0);
-        assert!(TREE_ROW_HEIGHT > 0.0);
-        assert!(TREE_INDENT > 0.0);
-        assert!(PROPERTY_ROW_HEIGHT > 0.0);
-        assert!(DEFAULT_WIDTH > 0.0);
-        assert!(DEFAULT_HEIGHT > 0.0);
-        assert!(TOOLBAR_BTN_WIDTH > 0.0);
-        assert!(TOOLBAR_BTN_HEIGHT > 0.0);
+        const {
+            assert!(SIDEBAR_WIDTH > 0.0);
+            assert!(TITLE_BAR_HEIGHT > 0.0);
+            assert!(TOOLBAR_HEIGHT > 0.0);
+            assert!(STATUS_BAR_HEIGHT > 0.0);
+            assert!(TREE_ROW_HEIGHT > 0.0);
+            assert!(TREE_INDENT > 0.0);
+            assert!(PROPERTY_ROW_HEIGHT > 0.0);
+            assert!(DEFAULT_WIDTH > 0.0);
+            assert!(DEFAULT_HEIGHT > 0.0);
+            assert!(TOOLBAR_BTN_WIDTH > 0.0);
+            assert!(TOOLBAR_BTN_HEIGHT > 0.0);
+        };
     }
 
     #[test]

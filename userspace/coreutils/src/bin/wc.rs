@@ -12,6 +12,7 @@ use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
 
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Counts {
     lines: usize,
     words: usize,
@@ -128,4 +129,140 @@ fn print_counts(
     if bytes { let _ = write!(out, "{:>7} ", c.bytes); }
     if chars { let _ = write!(out, "{:>7} ", c.chars); }
     let _ = writeln!(out, "{name}");
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    // ---------------- count_data ----------------
+
+    #[test]
+    fn count_empty_data() {
+        let c = count_data(b"");
+        assert_eq!(
+            c,
+            Counts {
+                lines: 0,
+                words: 0,
+                bytes: 0,
+                chars: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn count_single_line_no_newline() {
+        let c = count_data(b"hello");
+        assert_eq!(c.lines, 0); // lines counts newline chars
+        assert_eq!(c.words, 1);
+        assert_eq!(c.bytes, 5);
+        assert_eq!(c.chars, 5);
+    }
+
+    #[test]
+    fn count_single_line_with_newline() {
+        let c = count_data(b"hello\n");
+        assert_eq!(c.lines, 1);
+        assert_eq!(c.words, 1);
+        assert_eq!(c.bytes, 6);
+    }
+
+    #[test]
+    fn count_multiple_lines() {
+        let c = count_data(b"one\ntwo\nthree\n");
+        assert_eq!(c.lines, 3);
+        assert_eq!(c.words, 3);
+        assert_eq!(c.bytes, 14);
+    }
+
+    #[test]
+    fn count_words_multiple_per_line() {
+        let c = count_data(b"the quick brown fox\n");
+        assert_eq!(c.lines, 1);
+        assert_eq!(c.words, 4);
+    }
+
+    #[test]
+    fn count_words_runs_of_whitespace() {
+        // Multiple spaces between words count as a single separator.
+        let c = count_data(b"a   b\tc\n");
+        assert_eq!(c.words, 3);
+    }
+
+    #[test]
+    fn count_words_leading_and_trailing_whitespace() {
+        let c = count_data(b"   hello world   ");
+        assert_eq!(c.words, 2);
+    }
+
+    #[test]
+    fn count_chars_utf8_vs_bytes() {
+        // "héllo" — 'é' is 2 bytes in UTF-8.
+        let data = "héllo".as_bytes();
+        let c = count_data(data);
+        assert_eq!(c.bytes, 6);
+        assert_eq!(c.chars, 5);
+    }
+
+    #[test]
+    fn count_chars_emoji() {
+        // "🌍" is 4 bytes, 1 char.
+        let data = "🌍".as_bytes();
+        let c = count_data(data);
+        assert_eq!(c.bytes, 4);
+        assert_eq!(c.chars, 1);
+    }
+
+    #[test]
+    fn count_only_whitespace() {
+        let c = count_data(b"   \t\n  \n");
+        assert_eq!(c.lines, 2);
+        assert_eq!(c.words, 0);
+        assert_eq!(c.bytes, 8);
+    }
+
+    #[test]
+    fn count_carriage_return_treated_as_separator() {
+        // wc treats \r as whitespace for word counting.
+        let c = count_data(b"a\rb\rc\n");
+        assert_eq!(c.words, 3);
+    }
+
+    // ---------------- print_counts ----------------
+
+    #[test]
+    fn print_counts_all_columns() {
+        let c = Counts { lines: 3, words: 12, bytes: 50, chars: 50 };
+        let mut buf = Vec::new();
+        print_counts(&mut buf, &c, "file.txt", true, true, true, true);
+        let s = String::from_utf8(buf).unwrap();
+        // Right-aligned width 7 columns followed by name + newline.
+        assert!(s.contains("3"));
+        assert!(s.contains("12"));
+        assert!(s.contains("50"));
+        assert!(s.ends_with("file.txt\n"));
+    }
+
+    #[test]
+    fn print_counts_only_lines() {
+        let c = Counts { lines: 42, words: 0, bytes: 0, chars: 0 };
+        let mut buf = Vec::new();
+        print_counts(&mut buf, &c, "x", true, false, false, false);
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "     42 x\n");
+    }
+
+    #[test]
+    fn print_counts_total_label() {
+        let c = Counts { lines: 100, words: 200, bytes: 300, chars: 300 };
+        let mut buf = Vec::new();
+        print_counts(&mut buf, &c, "total", true, true, true, false);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.ends_with("total\n"));
+        assert!(s.contains("100"));
+        assert!(s.contains("200"));
+        assert!(s.contains("300"));
+    }
 }

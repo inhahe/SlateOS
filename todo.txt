@@ -2507,14 +2507,57 @@ Remaining net improvements (diminishing returns):
       unset/all empty, empty list, single candidate.
   All 102 tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  REMAINING (~79 binaries): awk, bc, cal, cat, chmod, chown, cmp, comm,
-  cp, csplit, cut, date, dd, df, diff, du, ed, env, expand, expr, false,
-  fetch, find, fold, free, grep, head, hostname, id, join, kill, ln,
-  logger, ls, md5sum, mkdir, mkfifo, more, mv, nice, nl, nohup, od,
-  paste, patch, ps, pwd, readlink, realpath, renice, rm, rmdir, sed,
-  sh, sha256sum, sleep, sort, split, stat, strings, tail, tar, tee,
-  test, time_cmd, touch, tr, true, tsort, tty, uname, unexpand, uniq,
-  uptime, wc, which, who, xargs, yes. Continue in batches.
+  PROGRESS 2026-06-04 (batch 2): added 82 tests across 6 more binaries:
+    * sleep.rs: extracted `parse_seconds(args) -> Result<f64, String>`;
+      9 tests covering integer/fractional values, zero allowed,
+      missing-operand/negative/non-numeric/inf/NaN rejection, extra-args
+      ignored.
+    * cal.rs: extracted `unix_days_to_month_year(days) -> (u32, u32)`
+      from current_date so it can be tested deterministically. Added 15
+      tests covering is_leap (div-by-4-not-100, div-by-400,
+      div-by-100-not-400, not-div-by-4), days_in_month (31-day and
+      30-day months, Feb leap/non-leap, invalid month fallback),
+      day_of_week (verified against known dates 1970/2000/2024 incl.
+      Feb 29), unix_days_to_month_year (day 0, day 31, day 365 across
+      year boundary, Feb 29 2024 in a leap year).
+    * wc.rs: added Debug/Eq derive for Counts. 14 tests covering
+      count_data (empty, single line with/without newline, multiple
+      lines, multiple words per line, runs-of-whitespace,
+      leading/trailing whitespace, UTF-8 bytes vs chars, emoji,
+      whitespace-only, carriage-return as separator) and print_counts
+      (all columns, single column, total label).
+    * cut.rs: extracted `cut_line_fields(line, delim, indices)` and
+      `cut_line_chars(line, indices)`; rewrote main to use them. 23
+      tests covering parse_ranges (single, comma list, range, mixed,
+      sorted/deduped, overlapping ranges, whitespace trim, empty,
+      invalid entries skipped), cut_line_fields (single/multiple,
+      order-in-sorted-indices, out-of-bounds skipped, no-delim, tab
+      delim, empty line, zero index ignored), cut_line_chars (single,
+      multiple, out-of-bounds, unicode, empty indices/line).
+    * expand.rs: extracted `expand_line(line, tab_width) -> String`. 10
+      tests for tab expansion column math: no tabs, empty, tab at
+      start, tab after text aligns to next stop, tab exactly at stop
+      adds full width, multiple tabs, width=1, width=4, unicode chars
+      count as one column, width=0 guard drops tabs.
+    * fold.rs: extracted `fold_line(line, width, break_spaces) ->
+      Vec<String>`. 11 tests: short-line unchanged, empty, exactly at
+      width, hard break into two/three chunks, -s breaks at spaces,
+      keeps words intact, falls back to hard break when no space, space
+      at position 0 falls back, trailing short chunk, width=0
+      pass-through.
+  All 82 tests pass; clippy clean on x86_64-pc-windows-gnu.
+
+  RUNNING TOTAL: 184 tests across 12 binaries (whoami + batch 1 + batch
+  2). ~73 binaries still pending.
+
+  REMAINING: awk, bc, cat, chmod, chown, cmp, comm, cp, csplit, date,
+  dd, df, diff, du, ed, env, expr, false, fetch, find, free, grep,
+  head, hostname, id, join, kill, ln, logger, ls, md5sum, mkdir,
+  mkfifo, more, mv, nice, nl, nohup, od, paste, patch, ps, pwd,
+  readlink, realpath, renice, rm, rmdir, sed, sh, sha256sum, sort,
+  split, stat, strings, tail, tar, tee, test, time_cmd, touch, tr,
+  true, tsort, tty, uname, unexpand, uniq, uptime, which, who, xargs,
+  yes. Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to
   link on the host target (x86_64-pc-windows-gnu) with "undefined

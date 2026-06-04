@@ -438,6 +438,9 @@ pub mod nr {
     pub const CLOCK_SETTIME: u64 = 227;
     pub const CLOCK_ADJTIME: u64 = 305;
     pub const ADJTIMEX: u64 = 159;
+    pub const CHROOT: u64 = 161;
+    pub const MKNOD: u64 = 133;
+    pub const MKNODAT: u64 = 259;
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,6 +1290,9 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::CLOCK_SETTIME => sys_clock_settime(args),
         nr::CLOCK_ADJTIME => sys_clock_adjtime(args),
         nr::ADJTIMEX => sys_adjtimex(args),
+        nr::CHROOT => sys_chroot(args),
+        nr::MKNOD => sys_mknod(args),
+        nr::MKNODAT => sys_mknodat(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -4372,6 +4378,56 @@ fn sys_adjtimex(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
+// ---------------------------------------------------------------------------
+// chroot / mknod / mknodat — privileged operations we do not yet support
+//
+// All three require capabilities we don't grant any userspace task today
+// (Linux: CAP_SYS_CHROOT, CAP_MKNOD).  Validate inputs first so callers
+// passing garbage still observe EFAULT, then refuse with EPERM.
+//
+// EPERM is the truthful answer: we are not advertising a capability, so
+// the operation cannot proceed.  When a real chroot / device-node story
+// lands, these become proper FS calls.
+// ---------------------------------------------------------------------------
+
+/// `chroot(path)` — refuse with EPERM after pointer validation.
+fn sys_chroot(args: &SyscallArgs) -> SyscallResult {
+    let path = args.arg0;
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `mknod(path, mode, dev)` — refuse with EPERM after pointer validation.
+fn sys_mknod(args: &SyscallArgs) -> SyscallResult {
+    let path = args.arg0;
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `mknodat(dirfd, path, mode, dev)` — refuse with EPERM after validation.
+fn sys_mknodat(args: &SyscallArgs) -> SyscallResult {
+    // arg0 is dirfd; we do not yet support *at lookups so we don't
+    // validate it past the path-pointer check.
+    let path = args.arg1;
+    if path == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -7052,6 +7108,51 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   FAIL: adjtimex not EPERM"
             );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // chroot / mknod / mknodat — NULL path -> EFAULT, non-NULL -> EPERM.
+    {
+        let a_null = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHROOT, &a_null).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: chroot(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::MKNOD, &a_null).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mknod(NULL,_,_) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        let a_mknodat_null = SyscallArgs { arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNODAT, &a_mknodat_null).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknodat(_,NULL,_,_) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Non-NULL path with kernel-context bypass -> EPERM.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHROOT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: chroot not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::MKNOD, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mknod not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        let a_mknodat = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNODAT, &a_mknodat).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mknodat not EPERM");
             return Err(KernelError::InternalError);
         }
     }

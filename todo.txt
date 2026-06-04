@@ -6093,3 +6093,12 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      doesn't actually adjust.  Limitation: when a
 ##      time-write capability and adjustable clock land, these
 ##      must route through a real adjtimex/settime path.
+##  36. CHROOT / MKNOD / MKNODAT — DONE as EPERM-after-validate
+##      stubs.  All three require a capability no userspace
+##      currently carries (CAP_SYS_CHROOT or CAP_MKNOD on
+##      Linux).  We validate the path pointer (one byte) so
+##      callers passing NULL or garbage see EFAULT, then refuse
+##      with EPERM.  Limitation: when a per-process root state
+##      and a device-node registry land, these must route
+##      through real FS operations and a capability check
+##      rather than a blanket refusal.

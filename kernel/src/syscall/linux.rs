@@ -471,6 +471,17 @@ pub mod nr {
     pub const UTIMENSAT: u64 = 280;
     pub const UTIMES: u64 = 235;
     pub const UTIME: u64 = 132;
+    pub const SIGNALFD: u64 = 282;
+    pub const SIGNALFD4: u64 = 289;
+    pub const TIMERFD_CREATE: u64 = 283;
+    pub const TIMERFD_SETTIME: u64 = 286;
+    pub const TIMERFD_GETTIME: u64 = 287;
+    pub const INOTIFY_INIT: u64 = 253;
+    pub const INOTIFY_INIT1: u64 = 294;
+    pub const INOTIFY_ADD_WATCH: u64 = 254;
+    pub const INOTIFY_RM_WATCH: u64 = 255;
+    pub const FANOTIFY_INIT: u64 = 300;
+    pub const FANOTIFY_MARK: u64 = 301;
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,6 +1372,17 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::UTIMENSAT => sys_utimensat(args),
         nr::UTIMES => sys_utimes(args),
         nr::UTIME => sys_utime(args),
+        nr::SIGNALFD => sys_signalfd(args),
+        nr::SIGNALFD4 => sys_signalfd4(args),
+        nr::TIMERFD_CREATE => sys_timerfd_create(args),
+        nr::TIMERFD_SETTIME => sys_timerfd_settime(args),
+        nr::TIMERFD_GETTIME => sys_timerfd_gettime(args),
+        nr::INOTIFY_INIT => sys_inotify_init(args),
+        nr::INOTIFY_INIT1 => sys_inotify_init1(args),
+        nr::INOTIFY_ADD_WATCH => sys_inotify_add_watch(args),
+        nr::INOTIFY_RM_WATCH => sys_inotify_rm_watch(args),
+        nr::FANOTIFY_INIT => sys_fanotify_init(args),
+        nr::FANOTIFY_MARK => sys_fanotify_mark(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -5574,6 +5596,215 @@ fn sys_utime(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EROFS)
 }
 
+// ---------------------------------------------------------------------------
+// signalfd / timerfd / inotify / fanotify
+//
+// We do not yet implement any of these event-fd families.  The honest
+// answer to the caller is ENOSYS after input validation: this lets
+// userspace fall back to alternatives (alarm + signals, polling, etc.)
+// instead of silently misbehaving.
+//
+// We *do* still validate inputs so that programs probing argument
+// validity get the same error codes Linux would give.  In particular,
+// flag-bit validation precedes ENOSYS so callers see EINVAL where Linux
+// would also see EINVAL — useful for portable code that checks for
+// feature support via specific error codes.
+// ---------------------------------------------------------------------------
+
+/// `signalfd(fd, mask, sizemask)` — legacy signalfd.
+///
+/// `mask` points at a `sigset_t` (8 bytes on x86_64).
+fn sys_signalfd(args: &SyscallArgs) -> SyscallResult {
+    let mask_ptr = args.arg1;
+    let sizemask = args.arg2 as usize;
+    // Linux: sizemask must be sizeof(sigset_t) == 8.
+    if sizemask != 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if mask_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `signalfd4(fd, mask, sizemask, flags)`.
+fn sys_signalfd4(args: &SyscallArgs) -> SyscallResult {
+    // SFD_NONBLOCK = O_NONBLOCK = 0o4000 (2048).
+    // SFD_CLOEXEC  = O_CLOEXEC  = 0o2_000_000 (524288).
+    const SFD_NONBLOCK: u64 = 0o4000;
+    const SFD_CLOEXEC: u64 = 0o2_000_000;
+    const VALID_FLAGS: u64 = SFD_NONBLOCK | SFD_CLOEXEC;
+    if args.arg3 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let mask_ptr = args.arg1;
+    let sizemask = args.arg2 as usize;
+    if sizemask != 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if mask_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `timerfd_create(clockid, flags)`.
+fn sys_timerfd_create(args: &SyscallArgs) -> SyscallResult {
+    // Linux accepts CLOCK_REALTIME=0, CLOCK_MONOTONIC=1, CLOCK_BOOTTIME=7,
+    // CLOCK_REALTIME_ALARM=8, CLOCK_BOOTTIME_ALARM=9.  Anything else
+    // -> EINVAL.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid = args.arg0 as i32;
+    if !matches!(clockid, 0 | 1 | 7 | 8 | 9) {
+        return linux_err(errno::EINVAL);
+    }
+    const TFD_NONBLOCK: u64 = 0o4000;
+    const TFD_CLOEXEC: u64 = 0o2_000_000;
+    const VALID_FLAGS: u64 = TFD_NONBLOCK | TFD_CLOEXEC;
+    if args.arg1 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `timerfd_settime(fd, flags, new_value, old_value)`.
+///
+/// `struct itimerspec` is two `struct timespec` = 32 bytes.
+fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
+    // TFD_TIMER_ABSTIME=1, TFD_TIMER_CANCEL_ON_SET=2.
+    const VALID_FLAGS: u64 = 1 | 2;
+    if args.arg1 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let new_ptr = args.arg2;
+    if new_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(new_ptr, 32) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 32) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // No timerfd fds exist in our kernel, so any fd reference is bad.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    if pcb::linux_fd_lookup(pid, fd).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    // Even if the fd refers to a real fd, it isn't a timerfd, so:
+    linux_err(errno::EINVAL)
+}
+
+/// `timerfd_gettime(fd, curr_value)`.
+fn sys_timerfd_gettime(args: &SyscallArgs) -> SyscallResult {
+    let curr_ptr = args.arg1;
+    if curr_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(curr_ptr, 32) {
+        return linux_err(linux_errno_for(e));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    if pcb::linux_fd_lookup(pid, fd).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `inotify_init()`.
+fn sys_inotify_init(_args: &SyscallArgs) -> SyscallResult {
+    linux_err(errno::ENOSYS)
+}
+
+/// `inotify_init1(flags)`.
+fn sys_inotify_init1(args: &SyscallArgs) -> SyscallResult {
+    // IN_NONBLOCK = O_NONBLOCK, IN_CLOEXEC = O_CLOEXEC.
+    const IN_NONBLOCK: u64 = 0o4000;
+    const IN_CLOEXEC: u64 = 0o2_000_000;
+    const VALID_FLAGS: u64 = IN_NONBLOCK | IN_CLOEXEC;
+    if args.arg0 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    linux_err(errno::ENOSYS)
+}
+
+/// `inotify_add_watch(fd, pathname, mask)`.
+fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg1;
+    if path_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    // mask 0 -> EINVAL per Linux (nothing to watch for).
+    if args.arg2 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // No inotify fd exists; report EBADF on real fd validation.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    if pcb::linux_fd_lookup(pid, fd).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `inotify_rm_watch(fd, wd)`.
+fn sys_inotify_rm_watch(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    if pcb::linux_fd_lookup(pid, fd).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `fanotify_init(flags, event_f_flags)`.
+fn sys_fanotify_init(_args: &SyscallArgs) -> SyscallResult {
+    // fanotify is privileged on Linux (requires CAP_SYS_ADMIN) and
+    // userspace already handles ENOSYS as "kernel does not have
+    // fanotify"; that's the honest answer for us.
+    linux_err(errno::ENOSYS)
+}
+
+/// `fanotify_mark(fanotify_fd, flags, mask, dirfd, pathname)`.
+fn sys_fanotify_mark(args: &SyscallArgs) -> SyscallResult {
+    // Validate pathname if non-NULL so EFAULT surfaces correctly.
+    if args.arg4 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::ENOSYS)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -8989,6 +9220,176 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::UTIME, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: utime not EROFS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // signalfd / timerfd / inotify / fanotify — input validation and
+    // ENOSYS-after-validate.
+    {
+        // signalfd with wrong sizemask -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 4, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SIGNALFD, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: signalfd(wrong size) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // signalfd with NULL mask -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SIGNALFD, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: signalfd(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // signalfd with valid mask in kernel context -> ENOSYS.
+        let sigmask = [0u8; 8];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sigmask.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: signalfd not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // signalfd4 with bogus flag -> EINVAL.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sigmask.as_ptr() as u64,
+            arg2: 8, arg3: 0x8000_0000, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD4, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: signalfd4(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // signalfd4 with valid flag -> ENOSYS.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sigmask.as_ptr() as u64,
+            arg2: 8, arg3: 0o4000, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD4, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: signalfd4 not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // timerfd_create with bogus clockid -> EINVAL.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_CREATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timerfd_create(bad clock) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timerfd_create(CLOCK_MONOTONIC, bogus flag) -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 0x8000_0000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_CREATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timerfd_create(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timerfd_create(CLOCK_MONOTONIC, 0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_CREATE, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: timerfd_create not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // timerfd_settime with bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x8000_0000, arg2: 0x1000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timerfd_settime(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timerfd_settime with NULL new -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: timerfd_settime(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // timerfd_gettime with NULL curr -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_GETTIME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: timerfd_gettime(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+
+        // inotify_init() -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INOTIFY_INIT, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: inotify_init not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // inotify_init1 with bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0x8000_0000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INOTIFY_INIT1, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: inotify_init1(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // inotify_init1(0) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INOTIFY_INIT1, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: inotify_init1 not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // inotify_add_watch(NULL path) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: inotify_add_watch(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // inotify_add_watch(_, path, 0) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: inotify_add_watch(mask=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // inotify_rm_watch in kernel context -> EBADF.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INOTIFY_RM_WATCH, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: inotify_rm_watch not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // fanotify_init() -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark() -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

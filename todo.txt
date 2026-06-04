@@ -6249,3 +6249,49 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      should also return EPERM when the calling process lacks
 ##      the capability and the operation would otherwise have
 ##      succeeded.
+##  43. SIGNALFD / SIGNALFD4 / TIMERFD_CREATE / TIMERFD_SETTIME /
+##      TIMERFD_GETTIME / INOTIFY_INIT / INOTIFY_INIT1 /
+##      INOTIFY_ADD_WATCH / INOTIFY_RM_WATCH / FANOTIFY_INIT /
+##      FANOTIFY_MARK — DONE as input-validated ENOSYS stubs.
+##         - signalfd / signalfd4: sigsetsize != 8 -> EINVAL,
+##           NULL mask -> EFAULT, bogus flags -> EINVAL, then
+##           -ENOSYS.
+##         - timerfd_create: clockid must be one of
+##           CLOCK_REALTIME (0) / CLOCK_MONOTONIC (1) /
+##           CLOCK_BOOTTIME (7) / CLOCK_REALTIME_ALARM (8) /
+##           CLOCK_BOOTTIME_ALARM (9) — anything else EINVAL;
+##           flags validate against TFD_NONBLOCK | TFD_CLOEXEC;
+##           then -ENOSYS.
+##         - timerfd_settime: flags validate against
+##           TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, new
+##           value pointer validated (32B itimerspec), old
+##           pointer validated for write if non-NULL.  Then fd
+##           is looked up; in kernel context or for a non-
+##           timerfd fd this collapses to EBADF / EINVAL
+##           rather than ENOSYS because the input shape was
+##           valid but no timerfd exists in our world.
+##         - timerfd_gettime: same shape; curr ptr validated
+##           for write (32B), then EBADF/EINVAL.
+##         - inotify_init / inotify_init1: -ENOSYS.  init1
+##           validates IN_NONBLOCK | IN_CLOEXEC.
+##         - inotify_add_watch: NULL path -> EFAULT,
+##           mask == 0 -> EINVAL, then EBADF (no inotify fd
+##           exists).
+##         - inotify_rm_watch: EBADF.
+##         - fanotify_init / fanotify_mark: -ENOSYS;
+##           fanotify_mark validates a non-NULL path pointer
+##           before refusing so EFAULT can still surface.
+##      ENOSYS is the right answer for these because each one
+##      *creates* an fd that nothing else in the kernel knows
+##      how to read or wait on — pretending success would leave
+##      userspace with an unusable fd.  glibc, systemd-notify,
+##      and event-loop libraries all treat -ENOSYS as "this
+##      kernel doesn't have signalfd / timerfd / inotify" and
+##      fall back to alarm + signals / threads + nanosleep /
+##      polling-based file watch respectively, which gives the
+##      best-available behaviour with no further work.
+##      Limitation: when a real timer wheel and a file-change
+##      notification subsystem land, these must be wired
+##      through them.  Inotify in particular needs FS metadata
+##      change events bubbled up from the VFS layer, so it is
+##      blocked on real VFS more than on its own kernel object.

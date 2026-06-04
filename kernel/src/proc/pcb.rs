@@ -1030,6 +1030,17 @@ pub const RLIMIT_FSIZE_INDEX: usize = 1;
 /// is the only path that should be used from that site.
 pub const RLIMIT_STACK_INDEX: usize = 3;
 
+/// Index of `RLIMIT_NICE` (nice-value ceiling) in [`Process::rlimits`].
+///
+/// Linux encodes the ceiling as `rlim_cur = 20 - lowest_allowed_nice`,
+/// so a `rlim_cur` of 0 means "nice may never be lowered below 20",
+/// effectively forbidding any priority boost.  Higher values allow
+/// lower (more negative) nice values: `rlim_cur = 21` allows nice as
+/// low as -1, `rlim_cur = 40` allows the full -20..=19 range.
+///
+/// Consulted by the Linux `setpriority` translation layer.
+pub const RLIMIT_NICE_INDEX: usize = 13;
+
 /// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource` using
 /// `try_lock()`, returning `None` if the process table is currently held
 /// by another CPU or if `pid` is unknown.

@@ -8172,3 +8172,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Linux signal delivery lands, the si_code should be set
 ##      to SEGV_BNDERR or similar for stack-overflow refusals.
 
+##  74. Fix getpriority return value + enforce RLIMIT_NICE
+##      in setpriority — DONE.
+##      Fourteenth "upgrade a stub" batch.  Two parallel fixes
+##      under the Linux scheduler-stub umbrella:
+##         a) sys_getpriority: returns 20 (= 20 - nice with
+##            nice=0), matching Linux's kernel-ABI return
+##            convention.  Previously returned 0, which glibc's
+##            wrapper would have translated to nice=20 (the
+##            lowest priority).  Programs that called
+##            getpriority(2) directly and trusted the return
+##            value would have been told they were at the very
+##            bottom of the priority order — wrong.
+##         b) sys_setpriority: enforces RLIMIT_NICE via a new
+##            rlimit_nice_check_for_caller / _with helper pair.
+##            Linux semantics: a priority boost (new_nice < 0)
+##            requires either CAP_SYS_NICE or new_nice >=
+##            (20 - rlim_cur(RLIMIT_NICE)).  We have no
+##            CAP_SYS_NICE, so the rlimit is the only gate.
+##            DEFAULT_RLIMITS[13] = (0, 0) means a default
+##            process has floor=20 and cannot boost at all,
+##            matching unprivileged-user behavior on Linux.
+##         Bonus fixes that come along for free:
+##         - PRIO_PROCESS + who != 0 now validates the target
+##           pid exists (ESRCH on miss).  PRIO_PGRP / PRIO_USER
+##           continue to silently succeed because we don't
+##           model pgrps or per-user task sets.
+##         - Out-of-range prio is silently clamped to [-20, 19]
+##           matching Linux saturation semantics, instead of
+##           ignoring it.
+##         - rlimit_nice_check_with clamps soft to 40 before
+##           the i32 subtraction, eliminating overflow risk for
+##           pathologically large soft limits.
+##      Coverage:
+##         - getpriority(PRIO_PROCESS, 0) returns 20 (not 0).
+##         - setpriority(PRIO_PROCESS, 0, 0) returns 0.
+##         - setpriority(_, _, 19) returns 0 (max nice always OK).
+##         - setpriority(_, _, 100) returns 0 (silent clamp).
+##         - setpriority(PRIO_PROCESS, MAX_PID, _) returns ESRCH.
+##         - getpriority(PRIO_PROCESS, MAX_PID) returns ESRCH.
+##         - which > 2 returns EINVAL for both syscalls.
+##         - rlimit_nice_check_with decision table:
+##              (INF, -20) -> Ok
+##              (0,   -1)  -> EACCES (floor=20)
+##              (20,  -1)  -> EACCES (floor=0)
+##              (21,  -1)  -> Ok      (floor=-1, == floor allowed)
+##              (21,  -2)  -> EACCES (below floor)
+##              (40,  -20) -> Ok      (full Linux range)
+##              (1000,-20) -> Ok      (clamp to 40 prevents overflow)
+##         - rlimit_nice_check_for_caller in kernel context
+##           (caller_pid = None) always Ok, matching the
+##           RLIMIT_AS / RLIMIT_FSIZE bypass rule.
+##      Choice rationale:
+##         * The 20-vs-0 return-value fix is technically a
+##           behavior change, but the previous value was simply
+##           wrong against Linux's documented kernel-ABI
+##           contract.  Userspace programs that copy what they
+##           see in real Linux would compute nice = 20 -
+##           syscall_rval, which produced nice=20 here — they
+##           would think they were already at the lowest
+##           priority and refuse to call setpriority(-N).  The
+##           new return value lets such programs see nice=0
+##           (default) and decide whether to attempt a boost.
+##         * Helper split (rlimit_nice_check_for_caller vs
+##           _with) follows the exact pattern already used for
+##           RLIMIT_FSIZE clip/check — the _with form is a pure
+##           function the self-test can drive deterministically.
+##      Limitation: getpriority always reports nice=0 — we
+##      don't track per-process nice because the scheduler
+##      doesn't honor it.  setpriority is correspondingly a
+##      no-op for the scheduler; we only enforce the *policy*
+##      surface so privilege-dropping programs see the correct
+##      EACCES.  When real per-process nice tracking lands
+##      (e.g. for the priority calculator in
+##      sched::Scheduler::pick_next), wire it into the pcb's
+##      Process struct and have getpriority report it.
+##      Limitation: sched_setscheduler doesn't yet enforce
+##      RLIMIT_RTPRIO.  Same shape of fix — accept policy 1/2
+##      (FIFO/RR) only if param.sched_priority <= rlim_cur
+##      (RLIMIT_RTPRIO).  Tracked for a follow-up batch.
+

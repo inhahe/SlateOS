@@ -4076,30 +4076,138 @@ fn sys_setsid(_args: &SyscallArgs) -> SyscallResult {
 /// within a priority class.  Report nice == 0 (the unbiased default)
 /// for every query.
 ///
-/// CAUTION: Linux's getpriority return-value contract is unusual.  A
-/// successful call can return any value in `[-20, 19]`, including the
-/// negative ones that would normally indicate an error.  To
-/// disambiguate, callers must clear errno before the call and check
-/// errno after.  Our success return is 0, which is unambiguous.
+/// CAUTION: Linux's getpriority return-value contract is unusual.
+/// Internally the kernel returns `20 - nice` (so a successful call
+/// gives a value in `[1, 40]` and `-ESRCH` for "no matching target");
+/// glibc's `getpriority(3)` wrapper subtracts the returned value from
+/// 20 to recover the actual nice value.  We mirror the kernel ABI by
+/// returning 20 (= 20 - 0) for nice=0, **not** 0 — returning 0 here
+/// would translate to nice=20 in glibc, the lowest-priority value,
+/// which would surprise programs that read the result and trust it.
+///
+/// `who == 0` always succeeds (refers to the caller / caller's pgrp /
+/// caller's uid).  For PRIO_PROCESS with `who != 0` we validate that
+/// the target pid exists and return ESRCH otherwise.  PRIO_PGRP and
+/// PRIO_USER lookups silently succeed because we don't model process
+/// groups or per-user task lists.
 fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
     let which = args.arg0;
-    // Valid values: PRIO_PROCESS=0, PRIO_PGRP=1, PRIO_USER=2.
+    let who = args.arg1;
+    // Valid `which` values: PRIO_PROCESS=0, PRIO_PGRP=1, PRIO_USER=2.
     if which > 2 {
         return linux_err(errno::EINVAL);
     }
-    SyscallResult::ok(0)
+    // PRIO_PROCESS with a specific target: enforce existence.  who==0
+    // means "the caller", which we accept unconditionally.
+    if which == 0 && who != 0 {
+        if pcb::state(who).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+    // 20 - nice, with nice = 0.  Linux's kernel ABI return convention.
+    SyscallResult::ok(20)
 }
 
 /// `setpriority(which, who, prio)` — set the nice value.
 ///
-/// We don't honour nice; accept any in-range request and silently
-/// succeed.  Out-of-range or unknown `which` returns EINVAL.
+/// We don't track per-process nice (the scheduler uses our own
+/// priority classes), so a successful call is effectively a no-op for
+/// the scheduler.  We do, however, enforce the *policy* surface so
+/// programs that drop privileges or honestly probe their limits see
+/// the right answers:
+///
+///   - `which > 2` (unknown class) → `EINVAL`.
+///   - PRIO_PROCESS + `who != 0` referring to an unknown pid → `ESRCH`.
+///     PRIO_PGRP / PRIO_USER targets are accepted silently (we don't
+///     model pgrps / uids beyond the implicit "all = caller").
+///   - `prio` is clamped to `[-20, 19]` silently (Linux semantics:
+///     out-of-range values are not an error, they're just saturated
+///     to the legal interval).
+///   - If the clamped `new_nice` is **less than** the caller's current
+///     nice (which we model as 0), the caller is requesting a priority
+///     *boost*.  Linux requires either `CAP_SYS_NICE` or `new_nice >=
+///     20 - rlim_cur(RLIMIT_NICE)`; we have no `CAP_SYS_NICE` so we
+///     gate purely on the rlimit.  Default `rlim_cur(NICE) = 0` means
+///     `new_nice >= 20`, which no valid nice can satisfy — any boost
+///     attempt returns `EACCES`.  Programs that raise their
+///     `RLIMIT_NICE` ceiling first (e.g. via `prlimit64`) can then
+///     successfully boost themselves.
+///   - Kernel-context callers (caller_pid is None during self-test)
+///     bypass the rlimit gate, matching the pattern used by RLIMIT_AS
+///     / RLIMIT_FSIZE: the rlimit is a userspace policy, not a kernel
+///     boundary.
 fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
     let which = args.arg0;
+    let who = args.arg1;
+    // `prio` is `int` in the Linux ABI; read it as i32 (truncating the
+    // upper bits) before clamping.  The full 64-bit value is what
+    // would arrive in a register, but only the low 32 bits matter.
+    #[allow(clippy::cast_possible_truncation)]
+    let raw_prio = args.arg2 as i32;
+
     if which > 2 {
         return linux_err(errno::EINVAL);
     }
+    if which == 0 && who != 0 {
+        if pcb::state(who).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
+
+    // Linux silently saturates out-of-range nice values rather than
+    // erroring: see kernel/sys.c set_one_prio_perm().
+    let new_nice: i32 = raw_prio.clamp(-20, 19);
+
+    // RLIMIT_NICE gate: only required when the caller is asking to
+    // *lower* nice (raise priority) below our modelled current of 0.
+    if new_nice < 0 {
+        if let Err(e) = rlimit_nice_check_for_caller(new_nice) {
+            return linux_err(e);
+        }
+    }
+
     SyscallResult::ok(0)
+}
+
+/// Enforce `RLIMIT_NICE` for a `setpriority` request that would lower
+/// nice to `new_nice`.
+///
+/// Looks up the caller's `RLIMIT_NICE` soft limit and delegates the
+/// decision to [`rlimit_nice_check_with`].  Kernel-context callers
+/// (no `caller_pid()`) are exempted, matching every other Linux-ABI
+/// rlimit gate in this file.
+fn rlimit_nice_check_for_caller(new_nice: i32) -> Result<(), i32> {
+    let Some(pid) = caller_pid() else { return Ok(()) };
+    let Some((soft, _)) = pcb::get_rlimit(pid, pcb::RLIMIT_NICE_INDEX as u32) else {
+        return Ok(());
+    };
+    rlimit_nice_check_with(soft, new_nice)
+}
+
+/// Pure-function form of [`rlimit_nice_check_for_caller`] that takes
+/// the soft limit directly.  Split out so the self-tests can exercise
+/// the decision table without standing up a fake `caller_pid()`.
+///
+/// `soft == RLIM_INFINITY` is always Ok (no enforcement).  Otherwise
+/// the floor for new_nice is `20 - soft`; values below that floor get
+/// `EACCES`.  A saturating subtraction keeps the math safe for
+/// pathologically large `soft` values — they pin the floor at 0 and
+/// then below — but the only realistic non-INFINITY range is `[0, 40]`
+/// per Linux conventions.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn rlimit_nice_check_with(soft: u64, new_nice: i32) -> Result<(), i32> {
+    if soft == pcb::RLIM_INFINITY {
+        return Ok(());
+    }
+    // Floor = 20 - soft, clamped to i32.  soft > 40 means floor goes
+    // below -20 (full nice range allowed), so we cap soft at 40 first
+    // to keep the subtraction in i32 without overflow risk.
+    let clamped_soft = soft.min(40) as i32;
+    let floor: i32 = 20 - clamped_soft;
+    if new_nice < floor {
+        return Err(errno::EACCES);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -14518,20 +14626,79 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    // Priority dispatch validation.
-    //   - which in 0..=2 returns 0.
-    //   - which > 2 returns EINVAL for both getpriority and setpriority.
+    // Priority dispatch validation (batch 48):
+    //   - getpriority(PRIO_PROCESS, 0) returns 20 (= 20 - nice with
+    //     nice=0), the Linux kernel-ABI return convention.
+    //   - setpriority(PRIO_PROCESS, 0, 0) returns 0 (silent success,
+    //     no priority change).
+    //   - setpriority(_, _, 19) is the maximum nice (lowest priority);
+    //     always allowed regardless of rlimit.
+    //   - setpriority(_, _, 100) clamps to 19 silently — Linux saturates
+    //     out-of-range nice values rather than rejecting them.
+    //   - setpriority(PRIO_PROCESS, MAX, _) returns ESRCH (target pid
+    //     doesn't exist).
+    //   - which > 2 returns EINVAL for both syscalls.
+    //   - Pure-helper decision table for rlimit_nice_check_with covers
+    //     RLIM_INFINITY pass-through, default soft=0 boost rejection,
+    //     and soft=21 (allows nice >= -1) acceptance.
     {
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETPRIORITY, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: getpriority(PRIO_PROCESS) not 0");
+        if dispatch_linux(nr::GETPRIORITY, &a).value != 20 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(PRIO_PROCESS) expected 20 (= 20 - nice), got {}",
+                dispatch_linux(nr::GETPRIORITY, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
         if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: setpriority(PRIO_PROCESS) not 0");
             return Err(KernelError::InternalError);
         }
+
+        // setpriority(PRIO_PROCESS, 0, 19) — nice=19 (lowest priority),
+        // always allowed regardless of RLIMIT_NICE.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 19, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: setpriority(_, _, 19) not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // setpriority(PRIO_PROCESS, 0, 100) — out of range, silently
+        // clamps to 19.  Result: success (= same as nice=19 above).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 100, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpriority(_, _, 100) expected silent clamp to 19, got {}",
+                dispatch_linux(nr::SETPRIORITY, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // setpriority(PRIO_PROCESS, MAX_PID, 0) — target doesn't exist.
+        // pid u64::MAX is never assigned, so pcb::state returns None
+        // and we should see ESRCH.  Caller_pid is None in kernel
+        // context, so the rlimit gate is bypassed before this point.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETPRIORITY, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpriority(PRIO_PROCESS, MAX, _) expected ESRCH, got {}",
+                dispatch_linux(nr::SETPRIORITY, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::GETPRIORITY, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(PRIO_PROCESS, MAX) expected ESRCH, got {}",
+                dispatch_linux(nr::GETPRIORITY, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // which > 2 -> EINVAL.
         let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::GETPRIORITY, &a).value != -i64::from(errno::EINVAL) {
@@ -14546,6 +14713,62 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // rlimit_nice_check_with decision table.  Exercises the
+        // pure-function gate directly, without standing up a fake
+        // caller_pid().
+        //
+        // The helper is invoked by the call site only when new_nice <
+        // 0 (a priority *boost* request); the no-boost case is short-
+        // circuited above the call.  We therefore test only the
+        // new_nice < 0 cases plus the RLIM_INFINITY pass-through.
+        assert_eq!(
+            rlimit_nice_check_with(pcb::RLIM_INFINITY, -20),
+            Ok(()),
+            "RLIM_INFINITY must allow even the most extreme boost",
+        );
+        assert_eq!(
+            rlimit_nice_check_with(0, -1),
+            Err(errno::EACCES),
+            "soft=0 (floor=20) with new_nice=-1 must EACCES",
+        );
+        assert_eq!(
+            rlimit_nice_check_with(20, -1),
+            Err(errno::EACCES),
+            "soft=20 (floor=0) with new_nice=-1 (below floor) must EACCES",
+        );
+        assert_eq!(
+            rlimit_nice_check_with(21, -1),
+            Ok(()),
+            "soft=21 (floor=-1) with new_nice=-1 must succeed (== floor)",
+        );
+        assert_eq!(
+            rlimit_nice_check_with(21, -2),
+            Err(errno::EACCES),
+            "soft=21 (floor=-1) with new_nice=-2 (below floor) must EACCES",
+        );
+        assert_eq!(
+            rlimit_nice_check_with(40, -20),
+            Ok(()),
+            "soft=40 (floor=-20) allows the full Linux nice range",
+        );
+        // soft > 40 is unusual but well-defined: the min(40) clamp in
+        // rlimit_nice_check_with pins the floor at -20, so all valid
+        // nice values pass without u64 overflow risk.
+        assert_eq!(
+            rlimit_nice_check_with(1000, -20),
+            Ok(()),
+            "soft > 40 still admits the full nice range without overflow",
+        );
+
+        // rlimit_nice_check_for_caller in kernel context (caller_pid
+        // is None) must always succeed regardless of new_nice.  This
+        // is the documented "kernel context skips rlimits" rule.
+        assert_eq!(
+            rlimit_nice_check_for_caller(-20),
+            Ok(()),
+            "kernel-context rlimit gate must pass through",
+        );
     }
 
     // Credential setters: all of setuid/setgid/setre*/setres*/setfs*/

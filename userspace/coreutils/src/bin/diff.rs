@@ -11,24 +11,39 @@ use std::fs;
 use std::io::{self, Write};
 use std::process;
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut unified = false;
-    let mut brief = false;
-    let mut files: Vec<&str> = Vec::new();
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct DiffArgs {
+    unified: bool,
+    brief: bool,
+    files: Vec<String>,
+}
 
-    for arg in &args {
+/// Parse diff's argv into a `DiffArgs`. Unknown flags are treated as files,
+/// matching the existing implementation.
+fn parse_args(args: &[String]) -> DiffArgs {
+    let mut out = DiffArgs::default();
+    for arg in args {
         match arg.as_str() {
-            "-u" => unified = true,
-            "-q" | "--brief" => brief = true,
-            _ => files.push(arg),
+            "-u" => out.unified = true,
+            "-q" | "--brief" => out.brief = true,
+            _ => out.files.push(arg.clone()),
         }
     }
+    out
+}
 
-    if files.len() != 2 {
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let parsed = parse_args(&args);
+
+    if parsed.files.len() != 2 {
         eprintln!("diff: requires exactly two files");
         process::exit(2);
     }
+    let unified = parsed.unified;
+    let brief = parsed.brief;
+    let files: Vec<&str> = parsed.files.iter().map(String::as_str).collect();
 
     let content1 = match fs::read_to_string(files[0]) {
         Ok(c) => c,
@@ -239,5 +254,154 @@ fn range_str(start: usize, end: usize) -> String {
         format!("{start}")
     } else {
         format!("{start},{end}")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    // ---------------- parse_args ----------------
+
+    #[test]
+    fn parse_no_args() {
+        let a = parse_args(&s(&[]));
+        assert!(!a.unified && !a.brief);
+        assert!(a.files.is_empty());
+    }
+
+    #[test]
+    fn parse_unified() {
+        let a = parse_args(&s(&["-u", "a.txt", "b.txt"]));
+        assert!(a.unified);
+        assert_eq!(a.files, vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn parse_brief_short() {
+        let a = parse_args(&s(&["-q", "a", "b"]));
+        assert!(a.brief);
+    }
+
+    #[test]
+    fn parse_brief_long() {
+        let a = parse_args(&s(&["--brief", "a", "b"]));
+        assert!(a.brief);
+    }
+
+    #[test]
+    fn parse_combined() {
+        let a = parse_args(&s(&["-u", "-q", "a", "b"]));
+        assert!(a.unified && a.brief);
+        assert_eq!(a.files, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_files_only() {
+        let a = parse_args(&s(&["a", "b"]));
+        assert_eq!(a.files, vec!["a", "b"]);
+    }
+
+    // ---------------- range_str ----------------
+
+    #[test]
+    fn range_single() {
+        assert_eq!(range_str(5, 5), "5");
+    }
+
+    #[test]
+    fn range_inclusive() {
+        assert_eq!(range_str(2, 7), "2,7");
+    }
+
+    // ---------------- lcs_table ----------------
+
+    #[test]
+    fn lcs_table_empty() {
+        let dp = lcs_table(&[], &[]);
+        assert_eq!(dp, vec![vec![0u32]]);
+    }
+
+    #[test]
+    fn lcs_table_identical() {
+        let a = vec!["x", "y", "z"];
+        let b = vec!["x", "y", "z"];
+        let dp = lcs_table(&a, &b);
+        assert_eq!(dp[3][3], 3);
+    }
+
+    #[test]
+    fn lcs_table_disjoint() {
+        let a = vec!["a", "b", "c"];
+        let b = vec!["x", "y", "z"];
+        let dp = lcs_table(&a, &b);
+        assert_eq!(dp[3][3], 0);
+    }
+
+    #[test]
+    fn lcs_table_partial() {
+        // a = [a, b, c, d], b = [a, c, d, e]; LCS = [a, c, d] -> length 3.
+        let a = vec!["a", "b", "c", "d"];
+        let b = vec!["a", "c", "d", "e"];
+        let dp = lcs_table(&a, &b);
+        assert_eq!(dp[4][4], 3);
+    }
+
+    // ---------------- compute_edits ----------------
+
+    #[test]
+    fn edits_identical_all_keeps() {
+        let a = vec!["x", "y"];
+        let b = vec!["x", "y"];
+        let edits = compute_edits(&a, &b);
+        assert_eq!(edits.len(), 2);
+        assert!(matches!(edits.first(), Some(Edit::Keep(_, _))));
+        assert!(matches!(edits.get(1), Some(Edit::Keep(_, _))));
+    }
+
+    #[test]
+    fn edits_pure_insert() {
+        let a: Vec<&str> = vec![];
+        let b = vec!["x"];
+        let edits = compute_edits(&a, &b);
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(edits.first(), Some(Edit::Insert(0))));
+    }
+
+    #[test]
+    fn edits_pure_delete() {
+        let a = vec!["x"];
+        let b: Vec<&str> = vec![];
+        let edits = compute_edits(&a, &b);
+        assert_eq!(edits.len(), 1);
+        assert!(matches!(edits.first(), Some(Edit::Delete(0))));
+    }
+
+    #[test]
+    fn edits_replacement() {
+        let a = vec!["old"];
+        let b = vec!["new"];
+        let edits = compute_edits(&a, &b);
+        // No common line, so we expect one Insert and one Delete (order may vary).
+        assert_eq!(edits.len(), 2);
+        let has_delete = edits.iter().any(|e| matches!(e, Edit::Delete(_)));
+        let has_insert = edits.iter().any(|e| matches!(e, Edit::Insert(_)));
+        assert!(has_delete && has_insert);
+    }
+
+    #[test]
+    fn edits_partial_keeps_middle() {
+        // a = [keep1, del, keep2], b = [keep1, ins, keep2].
+        let a = vec!["keep1", "del", "keep2"];
+        let b = vec!["keep1", "ins", "keep2"];
+        let edits = compute_edits(&a, &b);
+        // First and last should be Keep.
+        assert!(matches!(edits.first(), Some(Edit::Keep(0, _))));
+        assert!(matches!(edits.last(), Some(Edit::Keep(2, _))));
     }
 }

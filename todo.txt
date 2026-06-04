@@ -2772,14 +2772,51 @@ Remaining net improvements (diminishing returns):
   tty.rs (extern C isatty/ttyname unresolved on host), test.rs (whole
   file already cfg(unix)-gated so windows host stubs it).
 
-  RUNNING TOTAL: 615 tests across 43 binaries (whoami + batches 1-7).
-  ~42 binaries still pending.
+  PROGRESS 2026-06-04 (batch 8): extracted helpers and added 96 unit
+  tests across 5 more binaries:
+    * strings.rs: extracted `parse_args(args) -> StringsArgs` and
+      `extract_strings(data, min_len) -> Vec<Vec<u8>>`, kept
+      `is_printable`. 19 tests: parsing (defaults, -n value, -N
+      shorthand, invalid value keeps default, -n at end dropped,
+      files-only, mixed order), is_printable basic/unprintable,
+      extract (empty, single run, drops short, multiple, threshold,
+      trailing run no terminator, min-zero basic, min-zero between
+      consecutive nulls, tab as printable, under-threshold).
+    * dd.rs: extracted `parse_operands(args) -> Result<DdOperands,
+      String>`, added `format_rate_line(bytes, secs) -> String`, kept
+      `parse_size` with saturating_mul. 19 tests: parse_size
+      (plain/k/m/g/empty/garbage/zero/trim), parse_operands
+      (defaults/if-of/bs-count-skip-seek/unknown/no-equals/embedded-
+      equals), rate_line (zero/negative elapsed, bytes/MB/GB per sec).
+    * du.rs: moved `parse_args`, `human_size`, `format_line` OUTSIDE
+      the `cfg(unix)` gate so they're testable on Windows host. 19
+      tests: parse (no-args/paths/-h/-s/-a/-hsa/separate/unknown/
+      combined-with-unknown/double-dash/dash-alone), human_size all
+      ranges, format_line blocks/human/under-KiB both modes.
+    * stat.rs: moved `format_mode`, `format_timestamp`, `is_leap`
+      OUTSIDE the `cfg(unix)` gate. Used `bytes.get_mut(idx)` instead
+      of indexing for clippy. 22 tests: format_mode (regular,
+      directory, symlink, fifo, block, char, socket, unknown
+      questionmark, no-perms, owner-only, all setuid/setgid/sticky
+      combinations with x set and clear), format_timestamp (zero,
+      negative, epoch+1, 2024-06-15 12:30:45 UTC = 1718454645,
+      leap day 2000-02-29 = 951782400), is_leap (2000/2024 true,
+      1900/2023/2100 false).
+    * diff.rs: extracted `parse_args(args) -> DiffArgs`. Default must
+      be unconditional since main() calls `::default()`. 17 tests:
+      parse (no-args, -u, -q, --brief, combined -u-q, files-only),
+      range_str (single, inclusive), lcs_table (empty, identical,
+      disjoint, partial LCS=3), compute_edits (identical all-keeps,
+      pure insert, pure delete, replacement, partial keeps middle).
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  REMAINING: awk, bc, chmod, chown, cp, dd, diff, du, ed, false,
-  fetch, find, grep, hostname, id, join, kill, logger, ls, md5sum,
-  mkfifo, mv, nice, nohup, patch, ps, pwd, realpath, renice, sed,
-  sh, sha256sum, stat, strings, tar, test, time_cmd, touch, true,
-  tsort, tty, who.
+  RUNNING TOTAL: 711 tests across 48 binaries (whoami + batches 1-8).
+  ~37 binaries still pending.
+
+  REMAINING: awk, bc, chmod, chown, cp, ed, false, fetch, find, grep,
+  hostname, id, join, kill, logger, ls, md5sum, mkfifo, mv, nice,
+  nohup, patch, ps, pwd, realpath, renice, sed, sh, sha256sum, tar,
+  test, time_cmd, touch, true, tsort, tty, who.
   Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to

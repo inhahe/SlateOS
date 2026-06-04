@@ -189,7 +189,6 @@ static mut ORIG_TERMIOS: Option<libc::termios> = None;
 fn enable_raw_mode() {
     // Try the OurOS-specific procfs toggle first.
     if std::fs::write("/proc/self/tty_raw", "1").is_ok() {
-        return;
     }
     // Fallback: use libc termios interface.
     #[cfg(unix)]
@@ -227,7 +226,6 @@ fn enable_raw_mode() {
 /// Restore normal (cooked) terminal mode.
 fn disable_raw_mode() {
     if std::fs::write("/proc/self/tty_raw", "0").is_ok() {
-        return;
     }
     #[cfg(unix)]
     {
@@ -396,9 +394,8 @@ impl Config {
                     process::exit(0);
                 }
                 other => {
-                    if other.starts_with('-') {
+                    if let Some(rest) = other.strip_prefix('-') {
                         // Handle combined flags like -NS.
-                        let rest = &other[1..];
                         let mut recognized = true;
                         for ch in rest.chars() {
                             match ch {
@@ -799,8 +796,8 @@ fn highlight_matches(text: &str, pattern: &str) -> String {
             let (start, end) = matches[match_idx];
             out.push_str(ESC_HIGHLIGHT);
             let slice_end = end.min(chars.len());
-            for ci in start..slice_end {
-                out.push(chars[ci]);
+            for ch in chars.iter().take(slice_end).skip(start) {
+                out.push(*ch);
             }
             out.push_str(ESC_RESET);
             i = end;
@@ -1335,13 +1332,13 @@ impl Pager {
 
         loop {
             // Try to load more data if we previously hit EOF on a file.
-            if self.eof_reached {
-                if let Some(ref path) = self.config.file_path.clone() {
-                    if let Ok(meta) = std::fs::metadata(path) {
+            if self.eof_reached
+                && let Some(ref path) = self.config.file_path.clone()
+                    && let Ok(meta) = std::fs::metadata(path) {
                         let current_byte_count: usize =
                             self.lines.iter().map(|l| l.raw.len() + 1).sum();
-                        if meta.len() as usize > current_byte_count {
-                            if let Ok(f) = File::open(path) {
+                        if meta.len() as usize > current_byte_count
+                            && let Ok(f) = File::open(path) {
                                 let mut r =
                                     BufReader::new(Box::new(f) as Box<dyn Read>);
                                 let mut skip_buf = String::new();
@@ -1354,10 +1351,7 @@ impl Pager {
                                 self.reader = Some(r);
                                 self.eof_reached = false;
                             }
-                        }
                     }
-                }
-            }
 
             let added = self.load_lines(256);
             if added > 0 {
@@ -1557,11 +1551,10 @@ fn read_stdin_fully() -> io::Result<Vec<u8>> {
 /// Check if a key is available on stdin without blocking.
 /// Uses the OurOS `/proc/self/tty_avail` interface or returns false.
 fn check_key_available() -> bool {
-    if let Ok(val) = std::fs::read_to_string("/proc/self/tty_avail") {
-        if let Ok(n) = val.trim().parse::<usize>() {
+    if let Ok(val) = std::fs::read_to_string("/proc/self/tty_avail")
+        && let Ok(n) = val.trim().parse::<usize>() {
             return n > 0;
         }
-    }
     false
 }
 

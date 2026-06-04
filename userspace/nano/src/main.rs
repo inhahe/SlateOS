@@ -443,13 +443,12 @@ fn terminal_size() -> (usize, usize) {
     }
     // Parse "\x1b[rows;cols"
     let s = String::from_utf8_lossy(&resp);
-    if let Some(coords) = s.strip_prefix("\x1b[") {
-        if let Some((r, c)) = coords.split_once(';') {
+    if let Some(coords) = s.strip_prefix("\x1b[")
+        && let Some((r, c)) = coords.split_once(';') {
             let rows_parsed = r.parse::<usize>().unwrap_or(24);
             let cols_parsed = c.parse::<usize>().unwrap_or(80);
             return (rows_parsed, cols_parsed);
         }
-    }
 
     (24, 80)
 }
@@ -638,21 +637,18 @@ fn highlight_line(line: &str, filetype: Option<&str>) -> Vec<Highlight> {
     if let Some(prefix) = comment_prefix(ft) {
         let pb = prefix.as_bytes();
         if bytes.len() >= pb.len() && &bytes[..pb.len()] == pb {
-            for h in &mut hl {
-                *h = Highlight::Comment;
-            }
+            hl.fill(Highlight::Comment);
             return hl;
         }
         // Also check for comment after leading whitespace.
         let trimmed_start = bytes.iter().position(|&b| b != b' ' && b != b'\t');
-        if let Some(start) = trimmed_start {
-            if bytes.len() >= start + pb.len() && &bytes[start..start + pb.len()] == pb {
+        if let Some(start) = trimmed_start
+            && bytes.len() >= start + pb.len() && &bytes[start..start + pb.len()] == pb {
                 for h in hl.iter_mut().skip(start) {
                     *h = Highlight::Comment;
                 }
                 return hl;
             }
-        }
     }
 
     let (keywords, types) = keywords_for(ft);
@@ -1329,27 +1325,22 @@ impl Editor {
             match key {
                 Key::Enter => return Some(input),
                 Key::Escape | Key::Ctrl('c') => return None,
-                Key::Backspace => {
-                    if cursor > 0 {
+                Key::Backspace
+                    if cursor > 0 => {
                         input.remove(cursor - 1);
                         cursor -= 1;
                     }
-                }
-                Key::Delete => {
-                    if cursor < input.len() {
+                Key::Delete
+                    if cursor < input.len() => {
                         input.remove(cursor);
                     }
-                }
                 Key::Left => {
-                    if cursor > 0 {
-                        cursor -= 1;
-                    }
+                    cursor = cursor.saturating_sub(1);
                 }
-                Key::Right => {
-                    if cursor < input.len() {
+                Key::Right
+                    if cursor < input.len() => {
                         cursor += 1;
                     }
-                }
                 Key::Home => cursor = 0,
                 Key::End => cursor = input.len(),
                 Key::Char(c) => {
@@ -1380,15 +1371,14 @@ impl Editor {
         let start_col = self.cursor_col + 1; // skip current position
 
         // Search rest of current line.
-        if start_col <= self.lines[start_line].len() {
-            if let Some(pos) = self.lines[start_line][start_col..].find(&query) {
+        if start_col <= self.lines[start_line].len()
+            && let Some(pos) = self.lines[start_line][start_col..].find(&query) {
                 self.cursor_line = start_line;
                 self.cursor_col = start_col + pos;
                 self.status_msg = String::new();
                 self.desired_col = None;
                 return;
             }
-        }
 
         // Search subsequent lines, wrapping around.
         let total = self.lines.len();
@@ -1820,11 +1810,10 @@ impl Editor {
 
                 // Ctrl commands
                 Key::Ctrl('o') => self.cmd_save(),
-                Key::Ctrl('x') => {
-                    if self.cmd_exit() {
+                Key::Ctrl('x')
+                    if self.cmd_exit() => {
                         break;
                     }
-                }
                 Key::Ctrl('k') => self.cut_line(),
                 Key::Ctrl('u') => self.uncut_line(),
                 Key::Ctrl('w') => self.search(),
@@ -1902,13 +1891,11 @@ fn main() {
             }
             "-t" => {
                 i += 1;
-                if i < args.len() {
-                    if let Ok(w) = args[i].parse::<usize>() {
-                        if w > 0 && w <= 16 {
+                if i < args.len()
+                    && let Ok(w) = args[i].parse::<usize>()
+                        && w > 0 && w <= 16 {
                             editor.tab_width = w;
                         }
-                    }
-                }
             }
             "-T" => {
                 editor.tabs_to_spaces = false;

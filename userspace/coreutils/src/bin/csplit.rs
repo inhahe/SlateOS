@@ -367,3 +367,186 @@ fn main() {
         process::exit(1);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    // ---------------- format_filename ----------------
+
+    #[test]
+    fn filename_default_prefix_and_digits() {
+        assert_eq!(format_filename("xx", 0, 2), "xx00");
+        assert_eq!(format_filename("xx", 1, 2), "xx01");
+        assert_eq!(format_filename("xx", 99, 2), "xx99");
+    }
+
+    #[test]
+    fn filename_three_digits() {
+        assert_eq!(format_filename("xx", 0, 3), "xx000");
+        assert_eq!(format_filename("xx", 12, 3), "xx012");
+    }
+
+    #[test]
+    fn filename_custom_prefix() {
+        assert_eq!(format_filename("out_", 5, 2), "out_05");
+    }
+
+    #[test]
+    fn filename_number_wider_than_digits_not_truncated() {
+        // 100 with 2 digits stays at natural width (3 chars).
+        assert_eq!(format_filename("xx", 100, 2), "xx100");
+    }
+
+    #[test]
+    fn filename_zero_digits_no_padding() {
+        // width=0 → use natural width.
+        assert_eq!(format_filename("p", 7, 0), "p7");
+    }
+
+    // ---------------- matches_pattern ----------------
+
+    #[test]
+    fn match_empty_pattern_matches_anything() {
+        assert!(matches_pattern("any line", ""));
+        assert!(matches_pattern("", ""));
+    }
+
+    #[test]
+    fn match_literal_substring() {
+        assert!(matches_pattern("hello world", "world"));
+        assert!(matches_pattern("hello world", "lo wo"));
+        assert!(!matches_pattern("hello world", "xyz"));
+    }
+
+    #[test]
+    fn match_caret_anchors_start() {
+        assert!(matches_pattern("hello world", "^hello"));
+        assert!(!matches_pattern("hello world", "^world"));
+    }
+
+    #[test]
+    fn match_dollar_anchors_end() {
+        assert!(matches_pattern("hello world", "world$"));
+        assert!(!matches_pattern("hello world", "hello$"));
+    }
+
+    #[test]
+    fn match_caret_and_dollar_exact() {
+        assert!(matches_pattern("exact", "^exact$"));
+        assert!(!matches_pattern("exact and more", "^exact$"));
+        assert!(!matches_pattern("before exact", "^exact$"));
+    }
+
+    #[test]
+    fn match_empty_line_with_caret_dollar() {
+        // ^$ matches the empty line exactly.
+        assert!(matches_pattern("", "^$"));
+        assert!(!matches_pattern("x", "^$"));
+    }
+
+    // ---------------- parse_patterns ----------------
+
+    #[test]
+    fn parse_single_line_number() {
+        let pats = parse_patterns(&s(&["5"]));
+        assert_eq!(pats.len(), 1);
+        matches!(pats[0], Pattern::LineNumber(5));
+    }
+
+    #[test]
+    fn parse_multiple_line_numbers() {
+        let pats = parse_patterns(&s(&["5", "10", "15"]));
+        assert_eq!(pats.len(), 3);
+    }
+
+    #[test]
+    fn parse_regex_no_offset() {
+        // /pat/ with trailing slash
+        let pats = parse_patterns(&s(&["/foo/"]));
+        assert_eq!(pats.len(), 1);
+        match &pats[0] {
+            Pattern::Regex { pattern, offset } => {
+                assert_eq!(pattern, "foo");
+                assert_eq!(*offset, 0);
+            }
+            _ => panic!("expected Regex"),
+        }
+    }
+
+    #[test]
+    fn parse_regex_with_positive_offset() {
+        let pats = parse_patterns(&s(&["/foo/+3"]));
+        match &pats[0] {
+            Pattern::Regex { pattern, offset } => {
+                assert_eq!(pattern, "foo");
+                assert_eq!(*offset, 3);
+            }
+            _ => panic!("expected Regex"),
+        }
+    }
+
+    #[test]
+    fn parse_regex_with_negative_offset() {
+        let pats = parse_patterns(&s(&["/foo/-2"]));
+        match &pats[0] {
+            Pattern::Regex { pattern, offset } => {
+                assert_eq!(pattern, "foo");
+                assert_eq!(*offset, -2);
+            }
+            _ => panic!("expected Regex"),
+        }
+    }
+
+    #[test]
+    fn parse_skip_pattern() {
+        let pats = parse_patterns(&s(&["%foo%"]));
+        assert_eq!(pats.len(), 1);
+        match &pats[0] {
+            Pattern::Skip { pattern } => assert_eq!(pattern, "foo"),
+            _ => panic!("expected Skip"),
+        }
+    }
+
+    #[test]
+    fn parse_repeat_count_expands_previous() {
+        // /foo/ {3} means /foo/ appears 1 + 3 = 4 times total.
+        let pats = parse_patterns(&s(&["/foo/", "{3}"]));
+        assert_eq!(pats.len(), 4);
+        for pat in &pats {
+            match pat {
+                Pattern::Regex { pattern, .. } => assert_eq!(pattern, "foo"),
+                _ => panic!("expected Regex"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_repeat_zero_keeps_just_original() {
+        let pats = parse_patterns(&s(&["/foo/", "{0}"]));
+        // {0} appends 0 more copies; just the original remains.
+        assert_eq!(pats.len(), 1);
+    }
+
+    #[test]
+    fn parse_repeat_star_expands_many() {
+        let pats = parse_patterns(&s(&["5", "{*}"]));
+        // We can't predict the exact value (it's 10000 + 1), but it must be
+        // large.
+        assert!(pats.len() > 100);
+    }
+
+    #[test]
+    fn parse_mixed_patterns() {
+        let pats = parse_patterns(&s(&["/foo/", "10", "%bar%"]));
+        assert_eq!(pats.len(), 3);
+        assert!(matches!(pats[0], Pattern::Regex { .. }));
+        assert!(matches!(pats[1], Pattern::LineNumber(10)));
+        assert!(matches!(pats[2], Pattern::Skip { .. }));
+    }
+}

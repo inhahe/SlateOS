@@ -2641,15 +2641,56 @@ Remaining net improvements (diminishing returns):
       passthrough, parens around literal.
   All 95 tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  RUNNING TOTAL: 357 tests across 24 binaries (whoami + batches 1-4).
-  ~61 binaries still pending.
+  PROGRESS 2026-06-04 (batch 5): added 92 tests across 6 more binaries:
+    * sort.rs: extracted `parse_flags(args) -> Result<SortFlags, String>`,
+      `sort_lines(lines, numeric, reverse)`, `dedup_if(lines, unique)`;
+      rewrote main to use them. 24 tests covering flag parsing (default,
+      separate, bundled -rnu, unknown error, dash-alone is file, files
+      collected), sort_lines (lex asc/desc, numeric asc/desc, non-numeric
+      treated as 0, empty no panic), dedup_if (off keeps dupes, on removes
+      adjacent only, non-adjacent stays), parse_leading_number (integer,
+      negative, decimal, leading whitespace, stops at non-digit, no
+      digits, empty/whitespace, sign only, double-dot).
+    * split.rs: existing helpers `suffix_for(index, len)` and
+      `parse_bytes(s)` covered in 22 tests: suffix_for (aa/ab/az/ba/zz,
+      exhaustion past 26^n, len=3 aaa/aab/zzz, len=1 a/z/None), parse_bytes
+      (plain, k/K/m/M/g/G multipliers, zero, empty/whitespace, invalid,
+      whitespace trim, suffix-only None).
+    * cat.rs: extracted `parse_args(args) -> (bool, Vec<String>)` and
+      `format_numbered_line(line_num, line)`; rewrote main to use them.
+      10 tests: parse_args (no args, -n only, files only, -n + files,
+      "-" as file, duplicate -n idempotent), format_numbered_line (basic,
+      empty line, 6-col padding, overflow not truncated).
+    * mkdir.rs: extracted `parse_args(args) -> Result<(bool, Vec<String>),
+      String>`; rewrote main to use it. 7 tests: no args, dirs only,
+      -p sets parents, -p at end, duplicate -p idempotent, unknown
+      option returns error, dash-alone as dir name.
+    * tee.rs: extracted `parse_args(args) -> Result<(bool, Vec<String>),
+      String>`; rewrote main to use it. 8 tests: defaults, -a sets append,
+      no -a default, multiple files, unknown flag error, "-" as path,
+      -a at end, duplicate -a idempotent.
+    * csplit.rs: existing `format_filename(prefix, idx, digits)`,
+      `matches_pattern(line, pattern)`, and `parse_patterns(args)` tested
+      in place. 21 tests covering format_filename (default 2-digit,
+      3-digit, custom prefix, overflow no-truncate, zero digits),
+      matches_pattern (empty matches anything, literal substring,
+      ^prefix, suffix$, ^exact$, empty line with ^$), parse_patterns
+      (line number, multiple line numbers, /regex/, /regex/+N, /regex/-N,
+      %skip%, {N} expands previous, {0} keeps just original, {*} expands
+      many, mixed types).
+  All 92 tests pass; clippy clean on x86_64-pc-windows-gnu.
+  Note: skipped touch (mostly I/O, no pure logic), cp (I/O-bound copy
+  logic), and kill (doesn't link on host - extern "C" kill() unresolved).
 
-  REMAINING: awk, bc, cat, chmod, chown, cp, csplit, date,
+  RUNNING TOTAL: 449 tests across 30 binaries (whoami + batches 1-5).
+  ~55 binaries still pending.
+
+  REMAINING: awk, bc, chmod, chown, cp, date,
   dd, df, diff, du, ed, false, fetch, find, free, grep,
-  hostname, id, join, kill, ln, logger, ls, md5sum, mkdir,
+  hostname, id, join, kill, ln, logger, ls, md5sum,
   mkfifo, more, mv, nice, nohup, patch, ps, pwd,
-  readlink, realpath, renice, rm, rmdir, sed, sh, sha256sum, sort,
-  split, stat, strings, tar, tee, test, time_cmd, touch,
+  readlink, realpath, renice, rm, rmdir, sed, sh, sha256sum,
+  stat, strings, tar, test, time_cmd, touch,
   true, tsort, tty, uname, uptime, which, who, xargs, yes.
   Continue in batches.
 

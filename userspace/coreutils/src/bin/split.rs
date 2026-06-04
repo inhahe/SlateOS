@@ -250,3 +250,132 @@ fn split_by_bytes(reader: Box<dyn Read>, prefix: &str, bytes_per_file: u64, suff
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    // ---------------- suffix_for ----------------
+
+    #[test]
+    fn suffix_first_position_aa() {
+        assert_eq!(suffix_for(0, 2), Some("aa".to_string()));
+    }
+
+    #[test]
+    fn suffix_second_position_ab() {
+        assert_eq!(suffix_for(1, 2), Some("ab".to_string()));
+    }
+
+    #[test]
+    fn suffix_az_at_index_25() {
+        assert_eq!(suffix_for(25, 2), Some("az".to_string()));
+    }
+
+    #[test]
+    fn suffix_ba_after_az() {
+        assert_eq!(suffix_for(26, 2), Some("ba".to_string()));
+    }
+
+    #[test]
+    fn suffix_zz_at_max() {
+        // 26*26 - 1 = 675 is the last suffix for len=2.
+        assert_eq!(suffix_for(675, 2), Some("zz".to_string()));
+    }
+
+    #[test]
+    fn suffix_exhausted_returns_none() {
+        // 26*26 = 676 is out of range.
+        assert_eq!(suffix_for(676, 2), None);
+    }
+
+    #[test]
+    fn suffix_length_three_aaa() {
+        assert_eq!(suffix_for(0, 3), Some("aaa".to_string()));
+    }
+
+    #[test]
+    fn suffix_length_three_aab() {
+        assert_eq!(suffix_for(1, 3), Some("aab".to_string()));
+    }
+
+    #[test]
+    fn suffix_length_three_zzz_at_max() {
+        // 26^3 - 1 = 17575
+        assert_eq!(suffix_for(17575, 3), Some("zzz".to_string()));
+    }
+
+    #[test]
+    fn suffix_length_one_a() {
+        assert_eq!(suffix_for(0, 1), Some("a".to_string()));
+        assert_eq!(suffix_for(25, 1), Some("z".to_string()));
+        assert_eq!(suffix_for(26, 1), None);
+    }
+
+    // ---------------- parse_bytes ----------------
+
+    #[test]
+    fn bytes_plain_number() {
+        assert_eq!(parse_bytes("100"), Some(100));
+    }
+
+    #[test]
+    fn bytes_kilo_lowercase() {
+        assert_eq!(parse_bytes("2k"), Some(2 * 1024));
+    }
+
+    #[test]
+    fn bytes_kilo_uppercase() {
+        assert_eq!(parse_bytes("2K"), Some(2 * 1024));
+    }
+
+    #[test]
+    fn bytes_mega_lowercase() {
+        assert_eq!(parse_bytes("3m"), Some(3 * 1024 * 1024));
+    }
+
+    #[test]
+    fn bytes_mega_uppercase() {
+        assert_eq!(parse_bytes("3M"), Some(3 * 1024 * 1024));
+    }
+
+    #[test]
+    fn bytes_giga_lowercase() {
+        assert_eq!(parse_bytes("1g"), Some(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn bytes_giga_uppercase() {
+        assert_eq!(parse_bytes("1G"), Some(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn bytes_zero_allowed_at_parse_level() {
+        // parse_bytes itself returns Some(0); the >0 check happens in main.
+        assert_eq!(parse_bytes("0"), Some(0));
+    }
+
+    #[test]
+    fn bytes_empty_returns_none() {
+        assert_eq!(parse_bytes(""), None);
+        assert_eq!(parse_bytes("   "), None);
+    }
+
+    #[test]
+    fn bytes_invalid_returns_none() {
+        assert_eq!(parse_bytes("abc"), None);
+        assert_eq!(parse_bytes("12abc"), None);
+    }
+
+    #[test]
+    fn bytes_trims_whitespace() {
+        assert_eq!(parse_bytes(" 100 "), Some(100));
+    }
+
+    #[test]
+    fn bytes_suffix_only_returns_none() {
+        // "k" with no number portion: num_str is "" -> parse fails.
+        assert_eq!(parse_bytes("k"), None);
+    }
+}

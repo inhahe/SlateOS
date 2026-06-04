@@ -5928,3 +5928,37 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      will see "uid 0" returned and may refuse to continue.  No
 ##      such programs are in our early bring-up corpus; future work
 ##      tracked alongside a real uid model.
+##  19. GETRUSAGE / SYSINFO / TIMES — DONE as best-effort stubs.
+##      sys_getrusage zeros a 144-byte struct rusage (no per-process
+##      CPU time tracking yet).  sys_sysinfo fills in uptime
+##      (from timekeeping::uptime_secs) and totalram / freeram (from
+##      mm::frame::stats) with mem_unit==1; load averages, swap, and
+##      proc counts stay zero.  sys_times zeros the 32-byte tms
+##      struct when non-NULL and returns ticks since boot at HZ==100
+##      (clock_monotonic / 1e7).
+##      Limitation: per-process CPU accounting is not tracked.
+##      Programs that profile themselves with getrusage(SELF) and
+##      time their own execution will see zero CPU time.  Tracked
+##      alongside scheduler-side per-task accounting in todo.txt.
+##  20. Process groups & sessions (GETPGRP, GETPGID, SETPGID,
+##      GETSID, SETSID) — DONE as "every process is alone".  We
+##      don't carry group / session membership on the PCB so the
+##      most truthful answer is "pgid == sid == pid" — each process
+##      is the leader of its own pgroup and session.  GETPGRP /
+##      GETPGID(0) / GETSID(0) return the caller pid; GETPGID(p) /
+##      GETSID(p) return p if it exists else ESRCH.  SETPGID
+##      rejects negative pgids (EINVAL), accepts everything else as
+##      silent success.  SETSID returns the caller pid (per Linux's
+##      "new session ID equals caller pid" contract).
+##      Limitation: kill(-pgid) for "signal the whole group" won't
+##      hit multiple processes — they're all in their own groups.
+##      Shell job control (Ctrl-Z, fg/bg) needs real process groups.
+##      Tracked alongside session / pgroup infrastructure on the PCB.
+##  21. GETPRIORITY / SETPRIORITY — DONE returning 0.  Our scheduler
+##      runs strict round-robin within a priority class; nice values
+##      are not honoured.  Reporting "nice == 0" (the unbiased
+##      default) is the most truthful answer.  which must be in
+##      0..=2 (PRIO_PROCESS / PRIO_PGRP / PRIO_USER); larger
+##      values return EINVAL per Linux.
+##      Limitation: programs that try to raise their own priority
+##      with setpriority(-20) won't see preferential scheduling.

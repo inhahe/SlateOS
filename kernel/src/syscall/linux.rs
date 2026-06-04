@@ -386,6 +386,16 @@ pub mod nr {
     pub const GETRESGID: u64 = 120;
     pub const PERSONALITY: u64 = 135;
     pub const PRCTL: u64 = 157;
+    pub const GETRUSAGE: u64 = 98;
+    pub const SYSINFO: u64 = 99;
+    pub const TIMES: u64 = 100;
+    pub const SETPGID: u64 = 109;
+    pub const GETPGRP: u64 = 111;
+    pub const SETSID: u64 = 112;
+    pub const GETPGID: u64 = 121;
+    pub const GETSID: u64 = 124;
+    pub const GETPRIORITY: u64 = 140;
+    pub const SETPRIORITY: u64 = 141;
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,6 +1192,16 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::PERSONALITY => sys_personality(args),
         nr::GETRESUID => sys_getresuid(args),
         nr::GETRESGID => sys_getresgid(args),
+        nr::GETRUSAGE => sys_getrusage(args),
+        nr::SYSINFO => sys_sysinfo(args),
+        nr::TIMES => sys_times(args),
+        nr::GETPGRP => sys_getpgrp(args),
+        nr::GETPGID => sys_getpgid(args),
+        nr::SETPGID => sys_setpgid(args),
+        nr::GETSID => sys_getsid(args),
+        nr::SETSID => sys_setsid(args),
+        nr::GETPRIORITY => sys_getpriority(args),
+        nr::SETPRIORITY => sys_setpriority(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -2951,6 +2971,283 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
         }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `getrusage(who, usage)` — query resource usage for the calling
+/// process or one of its children.
+///
+/// We don't track per-process CPU time, page faults, context switches,
+/// etc., so we report all-zero `struct rusage` (144 bytes on x86_64).
+/// Programs that consume `ru_utime` / `ru_stime` (e.g. `time(1)` after
+/// a child exits) see zero CPU time — observationally correct in the
+/// sense that nothing claims false work, but loses fidelity.
+///
+/// `who`:
+///   - `RUSAGE_SELF == 0`: stats for the calling process
+///   - `RUSAGE_CHILDREN == -1`: aggregate stats for reaped children
+///   - `RUSAGE_THREAD == 1`: stats for the calling thread
+///
+/// We accept all three (and silently accept anything else) — every
+/// value gets the same zero rusage back.  Strict Linux returns EINVAL
+/// for unknown `who`, but we'd rather be lenient than break a program
+/// that's sloppy about the constant.
+///
+/// Returns 0 on success, `-EFAULT` if `usage` is a bad pointer.
+fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
+    let usage_ptr = args.arg1;
+    if usage_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct rusage on Linux x86_64 is 18 longs = 144 bytes.
+    const RUSAGE_SIZE: usize = 144;
+    if let Err(e) = crate::mm::user::validate_user_write(usage_ptr, RUSAGE_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    let zero = [0u8; RUSAGE_SIZE];
+    // SAFETY: validate_user_write above confirmed a 144-byte
+    // writable user range; we copy 144 zero bytes from kernel memory.
+    let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), usage_ptr, RUSAGE_SIZE) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `sysinfo(info)` — fill in `struct sysinfo` with system-wide
+/// stats (uptime, load avg, total/free RAM, swap, processes, etc.).
+///
+/// `struct sysinfo` on Linux x86_64 is 112 bytes: `long uptime; ulong
+/// loads[3]; ulong totalram; ulong freeram; ulong sharedram; ulong
+/// bufferram; ulong totalswap; ulong freeswap; ushort procs; ushort
+/// pad; ulong totalhigh; ulong freehigh; uint mem_unit; char _f[8];`.
+///
+/// We fill in:
+///   - `uptime` — boot-relative time in seconds
+///   - `totalram` / `freeram` — best-effort from the page allocator
+///   - `mem_unit` — 1 (so totalram/freeram are byte counts directly)
+///
+/// Everything else is zero.  This is enough for `uptime(1)` and most
+/// monitoring tools to produce a sensible display rather than crashing
+/// on uninit fields.
+///
+/// Returns 0 on success, `-EFAULT` if `info` is a bad pointer.
+fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
+    let info_ptr = args.arg0;
+    if info_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    const SYSINFO_SIZE: usize = 112;
+    if let Err(e) = crate::mm::user::validate_user_write(info_ptr, SYSINFO_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Build the struct in kernel memory.  Field offsets per Linux
+    // x86_64 ABI:
+    //   0..8    uptime (long)
+    //   8..32   loads[3] (3 × ulong)
+    //  32..40   totalram
+    //  40..48   freeram
+    //  48..56   sharedram
+    //  56..64   bufferram
+    //  64..72   totalswap
+    //  72..80   freeswap
+    //  80..82   procs (ushort)
+    //  82..84   pad
+    //  84..92   totalhigh
+    //  92..100  freehigh
+    // 100..104  mem_unit (uint)
+    // 104..112  _f[8]
+    let mut buf = [0u8; SYSINFO_SIZE];
+
+    // Uptime in seconds since boot.  uptime_secs is the canonical
+    // wrapper over clock_monotonic / 1e9.
+    let uptime_s: u64 = crate::timekeeping::uptime_secs();
+    #[allow(clippy::cast_possible_wrap)]
+    let uptime_i: i64 = uptime_s as i64;
+    buf[0..8].copy_from_slice(&uptime_i.to_ne_bytes());
+
+    // RAM totals from the page allocator.  Best effort — if the
+    // allocator can't report (uninitialised), leave zero.
+    if let Some(s) = crate::mm::frame::stats() {
+        #[allow(clippy::cast_possible_truncation)]
+        let total_bytes = (s.total_frames as u64)
+            .saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
+        let free_bytes = s.free_bytes as u64;
+        buf[32..40].copy_from_slice(&total_bytes.to_ne_bytes());
+        buf[40..48].copy_from_slice(&free_bytes.to_ne_bytes());
+    }
+
+    // mem_unit = 1 (totalram/freeram are byte counts directly).
+    let mem_unit: u32 = 1;
+    buf[100..104].copy_from_slice(&mem_unit.to_ne_bytes());
+
+    // SAFETY: validate_user_write above confirmed a 112-byte writable
+    // user range; we copy exactly SYSINFO_SIZE bytes.
+    let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), info_ptr, SYSINFO_SIZE) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `times(tms)` — fill in `struct tms { utime; stime; cutime; cstime }`
+/// (4 × clock_t = 4 × 8 bytes on x86_64).  Returns the clock ticks
+/// since an arbitrary reference (Linux: time since boot in jiffies).
+///
+/// We don't track per-process CPU time, so all four `tms` fields are
+/// zero.  The return value uses `CLOCKS_PER_SEC == 100` (a common
+/// libc HZ) and reports `monotonic_seconds * 100`.
+///
+/// Returns clock ticks on success, `-EFAULT` on bad `tms` pointer.
+fn sys_times(args: &SyscallArgs) -> SyscallResult {
+    let tms_ptr = args.arg0;
+
+    // tms_ptr is allowed to be NULL — POSIX says it's optional when
+    // the caller only wants the return value.  When non-NULL, write
+    // 32 zero bytes.
+    if tms_ptr != 0 {
+        const TMS_SIZE: usize = 32;
+        if let Err(e) = crate::mm::user::validate_user_write(tms_ptr, TMS_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
+        let zero = [0u8; TMS_SIZE];
+        // SAFETY: validate_user_write above confirmed a 32-byte
+        // writable user range; we copy 32 zero bytes.
+        let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), tms_ptr, TMS_SIZE) };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    // Return value: ticks since boot at HZ == 100.
+    let ticks = crate::timekeeping::clock_monotonic() / 10_000_000; // 1e9/100
+    #[allow(clippy::cast_possible_wrap)]
+    let v = ticks as i64;
+    SyscallResult::ok(v)
+}
+
+/// `getpgrp()` — return the calling process's process-group ID.
+///
+/// We don't have process groups; every process is implicitly the
+/// sole member of its own group.  Return the caller's PID, which is
+/// also what Linux would return if the process had called
+/// `setpgrp()` to detach itself into a fresh group (the common case
+/// for shells and daemons).
+///
+/// Never fails; returns 1 if there's no caller (boot-context probe).
+fn sys_getpgrp(_args: &SyscallArgs) -> SyscallResult {
+    let pid = caller_pid().unwrap_or(1);
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(pid as i64)
+}
+
+/// `getpgid(pid)` — return the process-group ID of `pid` (or self if
+/// `pid == 0`).
+///
+/// We don't track group membership.  Without it, the most truthful
+/// answer is "pgid == pid" — every process is in its own group.
+///
+/// Errors:
+///   - `-ESRCH` if `pid` refers to a non-existent process.
+fn sys_getpgid(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    let target = if pid == 0 {
+        caller_pid().unwrap_or(1)
+    } else {
+        // Verify the target exists.
+        match crate::proc::pcb::state(pid) {
+            Some(_) => pid,
+            None => return linux_err(errno::ESRCH),
+        }
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(target as i64)
+}
+
+/// `setpgid(pid, pgid)` — set the process group of `pid` to `pgid`.
+///
+/// We have no process groups; accept the call and silently no-op.
+/// Linux returns EINVAL for negative pgid and EPERM for cross-session
+/// moves; we don't validate either (no sessions, no groups), but we
+/// do reject obviously invalid values (negative-cast-from-i64 patterns
+/// like the high bit set).
+///
+/// Limitation: programs that fork a worker pool and then move all
+/// workers into a common pgrp for collective signalling won't see
+/// the effect — a `kill(-pgid)` would still ESRCH because we treat
+/// every process as its own group.  Tracked alongside process-group
+/// infrastructure in todo.txt.
+fn sys_setpgid(args: &SyscallArgs) -> SyscallResult {
+    let pgid = args.arg1;
+    // Reject obviously bogus pgid (negative when cast).
+    #[allow(clippy::cast_possible_wrap)]
+    if (pgid as i64) < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `getsid(pid)` — return the session ID of `pid` (or self if 0).
+///
+/// We have no sessions; return the target PID as a stand-in (every
+/// process is in its own session of which it is the leader).
+fn sys_getsid(args: &SyscallArgs) -> SyscallResult {
+    let pid = args.arg0;
+    let target = if pid == 0 {
+        caller_pid().unwrap_or(1)
+    } else {
+        match crate::proc::pcb::state(pid) {
+            Some(_) => pid,
+            None => return linux_err(errno::ESRCH),
+        }
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(target as i64)
+}
+
+/// `setsid()` — create a new session with the calling process as
+/// leader.
+///
+/// We have no sessions, so this is a silent success that returns the
+/// caller's PID (Linux's success contract: "new session ID, which
+/// equals the new pgid, which equals the caller's pid").
+fn sys_setsid(_args: &SyscallArgs) -> SyscallResult {
+    let pid = caller_pid().unwrap_or(1);
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(pid as i64)
+}
+
+/// `getpriority(which, who)` — return the nice value of a process,
+/// process group, or user.
+///
+/// We don't honour nice values; the scheduler runs strict round-robin
+/// within a priority class.  Report nice == 0 (the unbiased default)
+/// for every query.
+///
+/// CAUTION: Linux's getpriority return-value contract is unusual.  A
+/// successful call can return any value in `[-20, 19]`, including the
+/// negative ones that would normally indicate an error.  To
+/// disambiguate, callers must clear errno before the call and check
+/// errno after.  Our success return is 0, which is unambiguous.
+fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
+    let which = args.arg0;
+    // Valid values: PRIO_PROCESS=0, PRIO_PGRP=1, PRIO_USER=2.
+    if which > 2 {
+        return linux_err(errno::EINVAL);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `setpriority(which, who, prio)` — set the nice value.
+///
+/// We don't honour nice; accept any in-range request and silently
+/// succeed.  Out-of-range or unknown `which` returns EINVAL.
+fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
+    let which = args.arg0;
+    if which > 2 {
+        return linux_err(errno::EINVAL);
     }
     SyscallResult::ok(0)
 }
@@ -5006,6 +5303,134 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         if dispatch_linux(nr::GETRESGID, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: getresgid(NULL,NULL,NULL) not 0");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // getrusage / sysinfo / times dispatch validation.
+    //   - NULL user pointer -> EFAULT (early gate before validate_user_*).
+    //   - times(NULL) is the documented "return-value only" case and
+    //     should succeed; we verify the return is non-negative (ticks
+    //     since boot).
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETRUSAGE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage NULL not EFAULT ({})",
+                dispatch_linux(nr::GETRUSAGE, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SYSINFO, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sysinfo NULL not EFAULT ({})",
+                dispatch_linux(nr::SYSINFO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // times(NULL) succeeds with the tick count.
+        if dispatch_linux(nr::TIMES, &a).value < 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: times(NULL) returned negative ({})",
+                dispatch_linux(nr::TIMES, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Process-group / session syscall dispatch validation.
+    //   - getpgrp() returns the caller PID (or 1 in contextless boot).
+    //   - getpgid(0) same.
+    //   - getpgid(nonexistent_pid) -> ESRCH.
+    //   - setpgid(_, negative) -> EINVAL.
+    //   - setpgid(0, 0) -> 0.
+    //   - getsid(0) returns caller PID (or 1).
+    //   - getsid(nonexistent) -> ESRCH.
+    //   - setsid() returns caller PID (or 1).
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        let r = dispatch_linux(nr::GETPGRP, &a).value;
+        if r <= 0 {
+            serial_println!("[syscall/linux]   FAIL: getpgrp() returned {}", r);
+            return Err(KernelError::InternalError);
+        }
+        let r = dispatch_linux(nr::GETPGID, &a).value;
+        if r <= 0 {
+            serial_println!("[syscall/linux]   FAIL: getpgid(0) returned {}", r);
+            return Err(KernelError::InternalError);
+        }
+        // getpgid(u64::MAX) — definitely not a real PID -> ESRCH.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPGID, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpgid(u64::MAX) not ESRCH ({})",
+                dispatch_linux(nr::GETPGID, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::GETSID, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getsid(u64::MAX) not ESRCH"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setpgid(0, -1 as u64) -> EINVAL.
+        #[allow(clippy::cast_sign_loss)]
+        let neg = (-1i64) as u64;
+        let a = SyscallArgs { arg0: 0, arg1: neg, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETPGID, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid(0, -1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setpgid(0, 0) -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETPGID, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid(0, 0) not 0 ({})",
+                dispatch_linux(nr::SETPGID, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setsid() returns caller PID (or 1 in contextless boot).
+        if dispatch_linux(nr::SETSID, &a).value <= 0 {
+            serial_println!("[syscall/linux]   FAIL: setsid() returned non-positive");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Priority dispatch validation.
+    //   - which in 0..=2 returns 0.
+    //   - which > 2 returns EINVAL for both getpriority and setpriority.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPRIORITY, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: getpriority(PRIO_PROCESS) not 0");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: setpriority(PRIO_PROCESS) not 0");
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPRIORITY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(3) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETPRIORITY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpriority(3) not EINVAL"
+            );
             return Err(KernelError::InternalError);
         }
     }

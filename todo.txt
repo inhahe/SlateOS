@@ -6074,3 +6074,22 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      for either output.  Limitation: we have no NUMA topology
 ##      so the node is hard-coded; revisit if NUMA-aware
 ##      scheduling lands.
+##  34. STATFS / FSTATFS — DONE as synthetic stubs.  Both fill a
+##      120-byte struct statfs claiming TMPFS_MAGIC, 16-KiB
+##      block size, 16 GiB total / half free, 64 K inodes, 255-
+##      byte name limit.  statfs validates the path pointer but
+##      does not yet resolve the path; fstatfs validates the fd
+##      is open in the caller's table.  Limitation: every path/fd
+##      reports the same synthetic stats; when a real VFS lands
+##      these should route through it and report per-mount data.
+##  35. CLOCK_SETTIME / CLOCK_ADJTIME / ADJTIMEX — DONE as
+##      EPERM-after-validate stubs.  We validate the user pointer
+##      (16-byte timespec for clock_settime, 208-byte struct
+##      timex for the others) so callers see EFAULT on garbage
+##      pointers, then refuse with EPERM.  This is the sound
+##      response for an unprivileged caller on Linux as well
+##      (CAP_SYS_TIME required), and prevents userspace from
+##      silently appearing to set a clock that the kernel
+##      doesn't actually adjust.  Limitation: when a
+##      time-write capability and adjustable clock land, these
+##      must route through a real adjtimex/settime path.

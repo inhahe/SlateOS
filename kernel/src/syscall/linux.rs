@@ -433,6 +433,11 @@ pub mod nr {
     pub const GETRLIMIT: u64 = 97;
     pub const SETRLIMIT: u64 = 160;
     pub const GETCPU: u64 = 309;
+    pub const STATFS: u64 = 137;
+    pub const FSTATFS: u64 = 138;
+    pub const CLOCK_SETTIME: u64 = 227;
+    pub const CLOCK_ADJTIME: u64 = 305;
+    pub const ADJTIMEX: u64 = 159;
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,6 +1282,11 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::GETRLIMIT => sys_getrlimit(args),
         nr::SETRLIMIT => sys_setrlimit(args),
         nr::GETCPU => sys_getcpu(args),
+        nr::STATFS => sys_statfs(args),
+        nr::FSTATFS => sys_fstatfs(args),
+        nr::CLOCK_SETTIME => sys_clock_settime(args),
+        nr::CLOCK_ADJTIME => sys_clock_adjtime(args),
+        nr::ADJTIMEX => sys_adjtimex(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -4190,6 +4200,178 @@ fn sys_getcpu(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+// ---------------------------------------------------------------------------
+// statfs / fstatfs — filesystem statistics
+//
+// We don't have a real backing filesystem yet, but startup binaries
+// frequently call statfs("/tmp") or fstatfs(fd) to plan space and to
+// detect filesystem type (e.g. systemd detects tmpfs mounts).  Return
+// a synthetic struct that claims "16 KiB block size, plenty of space,
+// tmpfs magic".  When real filesystems land, route through the VFS.
+//
+// struct statfs layout (x86_64 Linux):
+//   long f_type, f_bsize, f_blocks, f_bfree, f_bavail,
+//        f_files, f_ffree;        // 7 longs = 56 bytes
+//   __kernel_fsid_t f_fsid;       // 8 bytes (two i32)
+//   long f_namelen, f_frsize, f_flags;
+//   long f_spare[4];
+// Total: 7*8 + 8 + 3*8 + 4*8 = 120 bytes.
+// ---------------------------------------------------------------------------
+
+/// Linux statfs structure size on x86_64.
+const STATFS_SIZE: usize = 120;
+
+/// Magic value advertised in `f_type`.  TMPFS_MAGIC is a neutral
+/// choice that tells callers "this is RAM-backed, expect no
+/// durability guarantees" — accurate for our current implementation.
+const TMPFS_MAGIC: u64 = 0x0102_1994;
+
+/// Fill `buf` with a synthetic statfs payload.
+fn fill_statfs_default(buf: &mut [u8; STATFS_SIZE]) {
+    // f_blocks of 1 << 20 (16 KiB blocks) advertises 16 GiB of space.
+    let f_blocks: u64 = 1 << 20;
+    let f_files: u64 = 1 << 16;
+    let fields: [u64; 15] = [
+        TMPFS_MAGIC,        // f_type
+        16 * 1024,          // f_bsize (matches our frame size)
+        f_blocks,           // f_blocks
+        f_blocks / 2,       // f_bfree
+        f_blocks / 2,       // f_bavail
+        f_files,            // f_files
+        f_files / 2,        // f_ffree
+        0,                  // f_fsid (two i32 packed into u64)
+        255,                // f_namelen (POSIX NAME_MAX)
+        16 * 1024,          // f_frsize
+        0,                  // f_flags
+        0, 0, 0, 0,         // f_spare[4]
+    ];
+    debug_assert_eq!(fields.len() * 8, STATFS_SIZE);
+    for (i, v) in fields.iter().enumerate() {
+        let off = i * 8;
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing)]
+        for j in 0..8 {
+            buf[off + j] = bytes[j];
+        }
+    }
+}
+
+/// `statfs(path, buf)` — fill `buf` with synthetic filesystem stats.
+fn sys_statfs(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg0;
+    let buf_ptr = args.arg1;
+
+    // Path must be a non-NULL user pointer; we don't yet resolve paths,
+    // but we still EFAULT if the pointer itself is bad.
+    if path_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if buf_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, STATFS_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let mut buf = [0u8; STATFS_SIZE];
+    fill_statfs_default(&mut buf);
+    // SAFETY: validated as a writable STATFS_SIZE-byte range above.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(buf.as_ptr(), buf_ptr, STATFS_SIZE)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+/// `fstatfs(fd, buf)` — fill `buf` with synthetic filesystem stats.
+fn sys_fstatfs(args: &SyscallArgs) -> SyscallResult {
+    let fd = args.arg0 as i32;
+    let buf_ptr = args.arg1;
+
+    // Validate the fd belongs to the caller (or skip if no caller).
+    if let Some(pid) = caller_pid()
+        && pcb::linux_fd_lookup(pid, fd).is_none()
+    {
+        return linux_err(errno::EBADF);
+    }
+
+    if buf_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, STATFS_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let mut buf = [0u8; STATFS_SIZE];
+    fill_statfs_default(&mut buf);
+    // SAFETY: validated as a writable STATFS_SIZE-byte range above.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(buf.as_ptr(), buf_ptr, STATFS_SIZE)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// Time-setting syscalls (clock_settime, clock_adjtime, adjtimex)
+//
+// These mutate the system wall clock.  Doing so safely requires CAP_SYS_TIME
+// on Linux; in our model the caller similarly needs an explicit time-write
+// capability that no userspace currently carries.  Reporting EPERM is the
+// sound response — programs that probe whether they can set the clock will
+// fall back gracefully, and programs that *expect* to set the clock will
+// fail loudly instead of silently appearing to succeed while time
+// continues to drift.
+// ---------------------------------------------------------------------------
+
+/// `clock_settime(clk_id, timespec*)` — refuse with EPERM.
+fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
+    // Validate the user pointer so callers passing garbage still see
+    // EFAULT (Linux validates before the privilege check on some
+    // codepaths).  Then return EPERM.
+    let tp = args.arg1;
+    if tp != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(tp, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    } else {
+        return linux_err(errno::EFAULT);
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `clock_adjtime(clk_id, timex*)` — refuse with EPERM.
+fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
+    let tx = args.arg1;
+    if tx == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct timex on x86_64 is 208 bytes.
+    if let Err(e) = crate::mm::user::validate_user_read(tx, 208) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `adjtimex(timex*)` — refuse with EPERM.
+fn sys_adjtimex(args: &SyscallArgs) -> SyscallResult {
+    let tx = args.arg0;
+    if tx == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(tx, 208) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -6799,6 +6981,76 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::GETCPU, &a).value != 0 {
             serial_println!(
                 "[syscall/linux]   FAIL: getcpu(NULL,NULL) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // statfs / fstatfs — NULL pointer validation.
+    //   - statfs(NULL, buf) -> EFAULT.
+    //   - fstatfs(fd, NULL) -> EFAULT.
+    //   - statfs with garbage path ptr in kernel context — kernel
+    //     context bypass allows it; we still write the buffer.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATFS, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statfs(NULL,_) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSTATFS, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fstatfs(_,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // clock_settime / clock_adjtime / adjtimex — NULL EFAULT then EPERM.
+    {
+        // clock_settime(0, NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime(NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(0, 0x1000) in kernel context (validate bypass) -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // adjtimex(NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADJTIMEX, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: adjtimex(NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // adjtimex with valid-ish ptr in kernel ctx -> EPERM.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADJTIMEX, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: adjtimex not EPERM"
             );
             return Err(KernelError::InternalError);
         }

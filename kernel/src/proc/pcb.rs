@@ -335,6 +335,20 @@ pub struct Process {
     /// the field is cheap (one heap allocation per process) and keeps
     /// fork's structural invariant simple: every child inherits.
     pub cwd: Vec<u8>,
+    /// Per-process Linux resource limits.
+    ///
+    /// Indexed by `RLIMIT_*` resource number (0..=15).  Each entry is
+    /// `(rlim_cur, rlim_max)` where `u64::MAX` represents `RLIM_INFINITY`.
+    /// Initialised from [`DEFAULT_RLIMITS`] on process creation and
+    /// inherited verbatim across `fork`.  Modified by `setrlimit` /
+    /// `prlimit64`; read by `getrlimit` / `prlimit64`.
+    ///
+    /// The kernel doesn't currently *enforce* most of these limits — the
+    /// scheduler, allocator, and fd table predate this field — but
+    /// programs that lower then re-read their limits (a common idiom in
+    /// shells and language runtimes during sandbox setup) now see
+    /// consistent state.  Enforcement is tracked separately per resource.
+    pub rlimits: [(u64, u64); 16],
 }
 
 impl Process {
@@ -364,6 +378,9 @@ impl Process {
             // Every process starts at the filesystem root.  `chdir`
             // changes this; `fork_create` clones the parent's value.
             cwd: alloc::vec![b'/'],
+            // Compiled-in Linux rlimit defaults; modified per-process
+            // by setrlimit / prlimit64 and inherited across fork.
+            rlimits: DEFAULT_RLIMITS,
         }
     }
 }
@@ -463,7 +480,7 @@ pub fn fork_create(
     // path, this keeps the refcount at exactly "one per process that
     // holds at least one fd referencing the handle", which is what
     // fork's `dup_one` per-process bump preserves.
-    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd) = {
+    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd, rlimits) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
             let mut copy = super::linux_fd::KernelFdTable::new();
@@ -482,6 +499,7 @@ pub fn fork_create(
             parent.abi_mode,
             cloned_fd_table,
             parent.cwd.clone(),
+            parent.rlimits,
         )
     };
 
@@ -515,6 +533,9 @@ pub fn fork_create(
         // of fork.  Subsequent chdirs in either process do not affect
         // the other (each owns its own Vec).
         cwd,
+        // POSIX: rlimits inherit verbatim across fork.  setrlimit in
+        // either process is independent thereafter.
+        rlimits,
     };
 
     table.insert(pid, child);
@@ -813,6 +834,126 @@ pub fn set_cwd(pid: ProcessId, new_cwd: Vec<u8>) -> KernelResult<()> {
         .get_mut(&pid)
         .ok_or(KernelError::NoSuchProcess)?;
     proc.cwd = new_cwd;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Per-process Linux resource limits
+// ---------------------------------------------------------------------------
+
+/// `RLIM_INFINITY` on Linux x86_64.  Distinct from "no limit known" —
+/// `u64::MAX` is the explicit sentinel programs check for.
+pub const RLIM_INFINITY: u64 = u64::MAX;
+
+/// Compiled-in default `(rlim_cur, rlim_max)` for each Linux RLIMIT_*
+/// resource, indexed by resource number.  Used to initialise every
+/// fresh `Process` and as the answer for kernel-context callers that
+/// have no per-process state.
+///
+/// Values mirror typical Linux distro defaults where they matter for
+/// program startup (RLIMIT_STACK == 8 MiB so glibc sizes the main
+/// stack correctly; RLIMIT_NOFILE == 1024; RLIMIT_CORE == 0 so we
+/// don't pretend to support core dumps).  Everything else is
+/// `RLIM_INFINITY` because nothing in the kernel imposes a real
+/// limit on those resources today.
+pub const DEFAULT_RLIMITS: [(u64, u64); 16] = [
+    // 0  RLIMIT_CPU:        CPU seconds.  No limiter today.
+    (RLIM_INFINITY, RLIM_INFINITY),
+    // 1  RLIMIT_FSIZE:      max file size.  No limiter today.
+    (RLIM_INFINITY, RLIM_INFINITY),
+    // 2  RLIMIT_DATA:       data-segment size.  No tracker.
+    (RLIM_INFINITY, RLIM_INFINITY),
+    // 3  RLIMIT_STACK:      8 MiB matches glibc's main-thread sizing.
+    (8 * 1024 * 1024, RLIM_INFINITY),
+    // 4  RLIMIT_CORE:       0 — we never produce core dumps.
+    (0, 0),
+    // 5  RLIMIT_RSS:        resident set size.  No tracker.
+    (RLIM_INFINITY, RLIM_INFINITY),
+    // 6  RLIMIT_NPROC:      per-uid process count.  No tracker.
+    (RLIM_INFINITY, RLIM_INFINITY),
+    // 7  RLIMIT_NOFILE:     per-process open-fd limit.  1024 matches
+    //                      most Linux distros; programs that select()
+    //                      on bare fd numbers rely on this fitting in
+    //                      FD_SETSIZE.
+    (1024, 4096),
+    // 8  RLIMIT_MEMLOCK:    mlock()'d memory.  No tracker.
+    (RLIM_INFINITY, RLIM_INFINITY),
+    // 9  RLIMIT_AS:         address-space size.  No tracker.
+    (RLIM_INFINITY, RLIM_INFINITY),
+    // 10 RLIMIT_LOCKS:      fcntl(F_SETLK) lock count.  No tracker.
+    (RLIM_INFINITY, RLIM_INFINITY),
+    // 11 RLIMIT_SIGPENDING: per-uid pending signal count.  Generous cap.
+    (65_536, 65_536),
+    // 12 RLIMIT_MSGQUEUE:   POSIX message-queue bytes.  Linux default.
+    (819_200, 819_200),
+    // 13 RLIMIT_NICE:       nice ceiling.  We don't support nice.
+    (0, 0),
+    // 14 RLIMIT_RTPRIO:     real-time priority ceiling.  No RT today.
+    (0, 0),
+    // 15 RLIMIT_RTTIME:     max contiguous RT CPU microseconds.
+    (RLIM_INFINITY, RLIM_INFINITY),
+];
+
+/// Number of `RLIMIT_*` resources we track.  Linux's stable kernel ABI
+/// reserves the range 0..=15; anything outside should be rejected at
+/// the syscall layer with `EINVAL`.
+pub const NUM_RLIMITS: u32 = 16;
+
+/// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource`.
+///
+/// Returns `None` if `pid` is unknown or `resource >= NUM_RLIMITS`.
+/// Callers in kernel context (no live PCB) should use
+/// [`DEFAULT_RLIMITS`] directly rather than going through this lookup.
+#[must_use]
+pub fn get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
+    if resource >= NUM_RLIMITS {
+        return None;
+    }
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.rlimits[resource as usize])
+}
+
+/// Install a new `(rlim_cur, rlim_max)` for `pid`'s `resource`.
+///
+/// Enforces the two invariants Linux enforces unconditionally:
+///   - `new_cur <= new_max`  (else `InvalidArgument`).
+///   - `new_max <= old_max`  (else `PermissionDenied`) — raising the
+///     hard limit requires `CAP_SYS_RESOURCE` on Linux; we have no
+///     equivalent, so unprivileged callers can only lower the hard
+///     limit.
+///
+/// `RLIM_INFINITY` (`u64::MAX`) is treated as "no limit"; setting a
+/// finite value when the old hard limit was infinity is permitted
+/// (it's a lowering operation, not a raise).
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` is unknown.
+/// - [`KernelError::InvalidArgument`] if `resource >= NUM_RLIMITS` or
+///   `new_cur > new_max`.
+/// - [`KernelError::PermissionDenied`] if `new_max` exceeds the
+///   existing hard limit.
+pub fn set_rlimit(
+    pid: ProcessId,
+    resource: u32,
+    new_cur: u64,
+    new_max: u64,
+) -> KernelResult<()> {
+    if resource >= NUM_RLIMITS {
+        return Err(KernelError::InvalidArgument);
+    }
+    if new_cur > new_max {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+    let (_, old_max) = proc.rlimits[resource as usize];
+    if new_max > old_max {
+        return Err(KernelError::PermissionDenied);
+    }
+    proc.rlimits[resource as usize] = (new_cur, new_max);
     Ok(())
 }
 

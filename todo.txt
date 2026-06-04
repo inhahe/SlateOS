@@ -7679,3 +7679,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      slower than Linux's dcache.  Acceptable until benchmarks
 ##      flag it.
 
+##  67. Per-process rlimit storage — DONE.
+##      Seventh "upgrade a stub" batch.  Closes the limitation
+##      flagged in item 11 (prlimit was validate-then-discard).
+##      Programs that lower then re-read their resource limits
+##      (a common sandbox-setup idiom in shells, languages, and
+##      service supervisors) now see consistent state.
+##         - kernel/src/proc/pcb.rs: added
+##           `pub rlimits: [(u64, u64); 16]` to Process; const
+##           `DEFAULT_RLIMITS: [(u64, u64); 16]` initialised on
+##           every Process::new(); `RLIM_INFINITY = u64::MAX`
+##           and `NUM_RLIMITS = 16` constants.
+##         - fork_create clones the parent's rlimits (POSIX
+##           inheritance — independent thereafter).
+##         - pcb::get_rlimit(pid, resource) and
+##           pcb::set_rlimit(pid, resource, cur, max) — the
+##           latter enforces cur ≤ max (InvalidArgument) and
+##           new.max ≤ old.max (PermissionDenied, no
+##           CAP_SYS_RESOURCE equivalent yet).
+##         - sys_prlimit64 in linux.rs rewritten: reads existing
+##           via pcb::get_rlimit, installs new via pcb::set_rlimit,
+##           writes the pre-install snapshot to old_limit_ptr
+##           (matching Linux's atomic read-then-write semantics).
+##           Kernel-context callers fall back to DEFAULT_RLIMITS
+##           — boot self-tests still validate-only.
+##         - sys_getrlimit and sys_setrlimit unchanged: they
+##           already forward to sys_prlimit64 with pid=0, so
+##           they automatically gain the per-process backing.
+##         - Removed the now-redundant `rlimit_default` helper
+##           from linux.rs; replaced its self-test by indexing
+##           `pcb::DEFAULT_RLIMITS` directly.
+##      New direct-API self-test block exercises:
+##         - DEFAULT_RLIMITS for fresh processes.
+##         - set_rlimit lowers cur+max together.
+##         - Raising max -> PermissionDenied.
+##         - cur > max -> InvalidArgument.
+##         - resource >= NUM_RLIMITS -> InvalidArgument
+##           (set) / None (get).
+##         - Cleanup via pcb::destroy so the throwaway PID isn't
+##           leaked into the table.
+##      New syscall-level self-tests:
+##         - prlimit64 read STACK old_limit -> DEFAULT_RLIMITS[3].
+##         - prlimit64 new(cur > max) -> EINVAL.
+##         - prlimit64 set NOFILE in kernel ctx -> 0 (validate-
+##           only) and old_limit -> DEFAULT_RLIMITS[7].
+##      Choice rationale:
+##         * Fixed-size [(u64, u64); 16] array on the Process is
+##           the smallest data structure that holds the full Linux
+##           rlimit space.  At 256 bytes per process the cost is
+##           trivial vs Vec/HashMap alternatives, and indexing is
+##           O(1) without allocator pressure on the resize-down
+##           setrlimit path.
+##         * Defaults live in pcb.rs (not linux.rs) so they're
+##           available to Process::new() without a cross-crate
+##           call.  The syscall layer (linux.rs) reads them via
+##           pcb::DEFAULT_RLIMITS rather than duplicating.
+##         * Enforcing cur ≤ max in pcb::set_rlimit (not just at
+##           the syscall layer) means any future internal caller
+##           (a future cgroup-style resource controller, say) is
+##           forced into the same invariant.
+##         * Hard-limit raise -> PermissionDenied rather than
+##           silently accepted: we don't have CAP_SYS_RESOURCE
+##           machinery yet, so the only correct answer is "no".
+##           Programs that need to raise have to wait for the
+##           privilege model to land.
+##      Limitation: Most of these limits are not actually
+##      enforced.  RLIMIT_NOFILE doesn't gate fd allocation;
+##      RLIMIT_STACK doesn't gate stack growth; RLIMIT_AS
+##      doesn't gate mmap.  Storage now exists, so enforcement
+##      can be wired up subsystem-by-subsystem as a follow-up.
+##      Listed in priority order:
+##         * RLIMIT_NOFILE   — enforce in pcb::linux_fd_install.
+##         * RLIMIT_AS       — enforce in sys_mmap / brk.
+##         * RLIMIT_STACK    — enforce in stack-growth path.
+##         * RLIMIT_NPROC    — enforce in pcb::create / fork.
+##         * RLIMIT_FSIZE    — enforce in write paths.
+##         * RLIMIT_CPU      — needs a CPU accounting subsystem.
+##      Limitation: No CAP_SYS_RESOURCE equivalent.  Hard-limit
+##      raises always fail.  Add when the cap-name table grows
+##      beyond the current set.
+##      Limitation: Cross-process prlimit (pid != self) still
+##      returns EPERM unconditionally.  Linux allows it with
+##      CAP_SYS_RESOURCE or when the caller's uid matches the
+##      target's uid + ruid.  Same caveat as the privilege
+##      limitation above — comes with the cap model.
+

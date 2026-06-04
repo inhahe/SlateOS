@@ -11563,13 +11563,18 @@ fn sys_getegid(args: &SyscallArgs) -> SyscallResult {
 ///     on Linux and we have no equivalent for non-self at this layer).
 ///   - `resource` must be in 0..=15 (RLIMIT_CPU..RLIMIT_RTTIME);
 ///     anything else returns -EINVAL.
-///   - `new_limit` non-null: copy in, then silently ignore the
-///     request (we don't honour limit changes yet but accept them as
-///     a no-op so programs that "lower then re-read" see consistent
-///     state).
-///   - `old_limit` non-null: write our compiled-in default for
-///     `resource` (see [`rlimit_default`]).
+///   - `new_limit` non-null: copy in, sanity-check (cur ≤ max), then
+///     install into the per-process rlimit store via
+///     [`pcb::set_rlimit`].  Raising the hard limit is rejected with
+///     -EPERM (no CAP_SYS_RESOURCE equivalent yet).
+///   - `old_limit` non-null: write the previous value (pre-set if
+///     `new_limit` is also set, matching Linux's atomic read-then-write
+///     ordering — POSIX guarantees the returned `old_limit` reflects
+///     the value before the install).
 ///   - NULL pointers are skipped (POSIX).
+///   - Kernel-context callers (no live PCB) read [`pcb::DEFAULT_RLIMITS`]
+///     and silently discard writes.  Lets boot self-tests exercise the
+///     argument-validation path without touching any process's state.
 ///
 /// Returns 0 on success, negative errno otherwise.
 fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
@@ -11580,16 +11585,19 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
 
     // Resource validation up front — Linux rejects unknown resources
     // before touching any user pointer.
-    if resource > 15 {
+    if resource >= u64::from(pcb::NUM_RLIMITS) {
         return linux_err(errno::EINVAL);
     }
+    #[allow(clippy::cast_possible_truncation)]
+    let resource_u32 = resource as u32;
 
     // Cross-process queries: only allow when targeting self (pid == 0
     // or pid == caller's PID).  Otherwise EPERM (matches Linux's
     // behaviour for unprivileged callers without CAP_SYS_RESOURCE).
+    let me = caller_pid();
     if pid != 0 {
-        let me = caller_pid().unwrap_or(0);
-        if pid != me {
+        let me_pid = me.unwrap_or(0);
+        if pid != me_pid {
             return linux_err(errno::EPERM);
         }
     }
@@ -11607,30 +11615,66 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Read the new limit (we don't store it, but copying it in and
-    // discarding lets us validate the pointer was actually a valid
-    // user mapping — Linux faults on bad new_limit even when
-    // old_limit is the "real" target).
+    // Read the new limit (if requested) before reading the old one,
+    // so we have the value ready to install once we've snapshotted
+    // the pre-set state for old_limit.
+    let mut new_pair: Option<(u64, u64)> = None;
     if new_limit_ptr != 0 {
-        let mut tmp = [0u8; RLIMIT_SIZE];
-        // SAFETY: validate_user_read above confirmed the range; we
-        // pass a kernel-owned buffer of the correct size.
+        let mut buf = [0u64; 2];
+        // SAFETY: validate_user_read above confirmed the range; the
+        // kernel-owned buffer is exactly RLIMIT_SIZE bytes (2 × u64).
         let r = unsafe {
-            crate::mm::user::copy_from_user(new_limit_ptr, tmp.as_mut_ptr(), RLIMIT_SIZE)
+            crate::mm::user::copy_from_user(
+                new_limit_ptr,
+                buf.as_mut_ptr().cast::<u8>(),
+                RLIMIT_SIZE,
+            )
         };
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
         }
-        // Discard — limit changes are no-ops until we have a per-
-        // process rlimit store.  See todo.txt.
+        let (cur, max) = (buf[0], buf[1]);
+        // Linux enforces cur ≤ max universally — privileged callers
+        // can raise max, but max must still be ≥ cur or the call is
+        // EINVAL before any privilege check runs.
+        if cur > max {
+            return linux_err(errno::EINVAL);
+        }
+        new_pair = Some((cur, max));
     }
 
-    // Write the default for `resource` to old_limit_ptr.
+    // Snapshot the existing (cur, max) so old_limit gets the pre-set
+    // value.  Kernel context: there's no PCB to read from, so fall
+    // back to the compiled-in defaults.
+    let (old_cur, old_max) = match me {
+        Some(p) => pcb::get_rlimit(p, resource_u32)
+            .unwrap_or(pcb::DEFAULT_RLIMITS[resource_u32 as usize]),
+        None => pcb::DEFAULT_RLIMITS[resource_u32 as usize],
+    };
+
+    // Install the new limit (if requested) before writing old_limit
+    // — matches Linux's read-then-write atomicity guarantee from the
+    // caller's perspective, because old_limit always reflects the
+    // pre-install snapshot regardless of install success.
+    if let Some((new_cur, new_max)) = new_pair {
+        match me {
+            Some(p) => {
+                if let Err(e) = pcb::set_rlimit(p, resource_u32, new_cur, new_max) {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+            None => {
+                // Kernel-context: validate-only and accept (no PCB to
+                // mutate).  The argument-validation checks above
+                // already caught cur > max; the hard-limit raise
+                // check is meaningless without per-process state.
+            }
+        }
+    }
+
+    // Write the pre-set snapshot to old_limit_ptr.
     if old_limit_ptr != 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        let r = resource as u32;
-        let (cur, max) = rlimit_default(r);
-        let buf: [u64; 2] = [cur, max];
+        let buf: [u64; 2] = [old_cur, old_max];
         // SAFETY: validated as a writable user range of RLIMIT_SIZE
         // bytes above.
         let r = unsafe {
@@ -11646,69 +11690,6 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
     }
 
     SyscallResult::ok(0)
-}
-
-/// Compiled-in default `(rlim_cur, rlim_max)` for each Linux RLIMIT_*
-/// resource.  These are static — we don't carry per-process state yet,
-/// so every process sees the same limits.
-///
-/// Values mirror typical Linux distro defaults where they matter for
-/// program startup (RLIMIT_STACK == 8 MiB so glibc sizes the main
-/// stack correctly; RLIMIT_NOFILE == 1024; RLIMIT_CORE == 0 so we
-/// don't pretend to support core dumps).  Everything else is
-/// `RLIM_INFINITY` because nothing in the kernel imposes a real
-/// limit on those resources today.
-fn rlimit_default(resource: u32) -> (u64, u64) {
-    /// `RLIM_INFINITY` on Linux x86_64.
-    const INF: u64 = u64::MAX;
-
-    match resource {
-        // RLIMIT_CPU: CPU seconds.  No limiter today.
-        0 => (INF, INF),
-        // RLIMIT_FSIZE: max file size.  No limiter today.
-        1 => (INF, INF),
-        // RLIMIT_DATA: data-segment size.  No tracker today.
-        2 => (INF, INF),
-        // RLIMIT_STACK: 8 MiB matches glibc's main-thread sizing.
-        3 => (8 * 1024 * 1024, INF),
-        // RLIMIT_CORE: 0 — we never produce core dumps, so advertise
-        // a hard zero so programs don't trip on them.
-        4 => (0, 0),
-        // RLIMIT_RSS: resident set size.  No tracker.
-        5 => (INF, INF),
-        // RLIMIT_NPROC: per-uid process count.  No tracker.
-        6 => (INF, INF),
-        // RLIMIT_NOFILE: per-process open-fd limit.  1024 matches
-        // most Linux distros; programs that select() on bare fd
-        // numbers rely on this fitting in FD_SETSIZE.
-        7 => (1024, 4096),
-        // RLIMIT_MEMLOCK: mlock()'d memory.  No tracker.
-        8 => (INF, INF),
-        // RLIMIT_AS: address-space size.  No tracker.
-        9 => (INF, INF),
-        // RLIMIT_LOCKS: fcntl(F_SETLK) lock count.  No tracker.
-        10 => (INF, INF),
-        // RLIMIT_SIGPENDING: per-uid pending signal count.  We have
-        // a 64-bit pending word per process; advertise a generous
-        // cap so programs that compute "can I queue another?" don't
-        // think they're full.
-        11 => (65_536, 65_536),
-        // RLIMIT_MSGQUEUE: POSIX message queue bytes.  We don't
-        // implement them; advertise the Linux default.
-        12 => (819_200, 819_200),
-        // RLIMIT_NICE: nice ceiling.  0 means "may not lower nice".
-        // We don't support nice anyway.
-        13 => (0, 0),
-        // RLIMIT_RTPRIO: real-time priority ceiling.  0 means "no
-        // RT scheduling".  Our scheduler is priority round-robin
-        // without Linux-style RT semantics, so 0 is honest.
-        14 => (0, 0),
-        // RLIMIT_RTTIME: max contiguous RT CPU microseconds.
-        15 => (INF, INF),
-        // Caller has already gated 0..=15; this is unreachable, but
-        // we return INFINITY rather than panic out of caution.
-        _ => (INF, INF),
-    }
 }
 
 /// `wait4(pid, wstatus, options, rusage)` — reap a child process,
@@ -13229,7 +13210,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // EFAULT on bad pointers from real userspace.
     }
 
-    // rlimit_default coverage — pure function table, no userspace.
+    // DEFAULT_RLIMITS coverage — pure const table, no userspace.
     //
     // Critical defaults programs depend on:
     //   - RLIMIT_STACK (3) cur == 8 MiB so glibc's main-thread sizing
@@ -13238,40 +13219,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   - RLIMIT_CORE (4) cur == max == 0 (we don't produce cores).
     //   - All others either INFINITY or honestly zero.
     {
-        let (cur, max) = rlimit_default(3); // RLIMIT_STACK
+        let (cur, max) = pcb::DEFAULT_RLIMITS[3]; // RLIMIT_STACK
         if cur != 8 * 1024 * 1024 {
             serial_println!(
-                "[syscall/linux]   FAIL: rlimit_default(STACK).cur = {}", cur
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[STACK].cur = {}", cur
             );
             return Err(KernelError::InternalError);
         }
         if max != u64::MAX {
             serial_println!(
-                "[syscall/linux]   FAIL: rlimit_default(STACK).max = {}", max
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[STACK].max = {}", max
             );
             return Err(KernelError::InternalError);
         }
-        let (cur, max) = rlimit_default(7); // RLIMIT_NOFILE
+        let (cur, max) = pcb::DEFAULT_RLIMITS[7]; // RLIMIT_NOFILE
         if cur != 1024 || max != 4096 {
             serial_println!(
-                "[syscall/linux]   FAIL: rlimit_default(NOFILE) = ({}, {})",
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[NOFILE] = ({}, {})",
                 cur, max
             );
             return Err(KernelError::InternalError);
         }
-        let (cur, max) = rlimit_default(4); // RLIMIT_CORE
+        let (cur, max) = pcb::DEFAULT_RLIMITS[4]; // RLIMIT_CORE
         if cur != 0 || max != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: rlimit_default(CORE) = ({}, {})",
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[CORE] = ({}, {})",
                 cur, max
             );
             return Err(KernelError::InternalError);
         }
         // Default for an arbitrary RLIM_INFINITY one — CPU.
-        let (cur, max) = rlimit_default(0);
+        let (cur, max) = pcb::DEFAULT_RLIMITS[0];
         if cur != u64::MAX || max != u64::MAX {
             serial_println!(
-                "[syscall/linux]   FAIL: rlimit_default(CPU) = ({}, {})",
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[CPU] = ({}, {})",
                 cur, max
             );
             return Err(KernelError::InternalError);
@@ -13317,6 +13298,122 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: prlimit64 pid=0 STACK NULL,NULL not 0"
             );
             return Err(KernelError::InternalError);
+        }
+
+        // Read the current RLIMIT_STACK via old_limit.  Kernel context
+        // has no PCB, so we expect DEFAULT_RLIMITS[STACK] back.
+        let mut out_buf = [0u64; 2];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 3, arg2: 0,
+            arg3: out_buf.as_mut_ptr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: prlimit64 read STACK old_limit");
+            return Err(KernelError::InternalError);
+        }
+        let (def_cur, def_max) = pcb::DEFAULT_RLIMITS[3];
+        if out_buf[0] != def_cur || out_buf[1] != def_max {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 STACK old_limit = ({}, {}) (expected ({}, {}))",
+                out_buf[0], out_buf[1], def_cur, def_max
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // cur > max in new_limit -> EINVAL (validated before any
+        // privilege check; doesn't require a PCB).
+        let bad_limit: [u64; 2] = [100, 50];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 7,
+            arg2: bad_limit.as_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 new(cur > max) not EINVAL ({})",
+                dispatch_linux(nr::PRLIMIT64, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Setting a valid new_limit in kernel context is accepted as a
+        // no-op (no PCB to mutate) and returns 0.  The old_limit
+        // snapshot is still the default since nothing was installed.
+        let new_limit: [u64; 2] = [500, 1000];
+        let mut old_buf = [0u64; 2];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 7,
+            arg2: new_limit.as_ptr() as u64,
+            arg3: old_buf.as_mut_ptr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 set NOFILE in kernel ctx not 0 ({})",
+                dispatch_linux(nr::PRLIMIT64, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let (def_cur7, def_max7) = pcb::DEFAULT_RLIMITS[7];
+        if old_buf[0] != def_cur7 || old_buf[1] != def_max7 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 NOFILE old_buf = ({}, {}) (expected default ({}, {}))",
+                old_buf[0], old_buf[1], def_cur7, def_max7
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Direct pcb::set_rlimit / get_rlimit coverage on a dummy
+        // process so we exercise the per-process store independent of
+        // the syscall layer.  Create a throwaway process, set
+        // RLIMIT_NOFILE to (256, 512), read it back, then try to raise
+        // the hard limit (-> PermissionDenied) and lower it (Ok).
+        {
+            let test_pid = pcb::create("rlimit-self-test", 0);
+            // Initial state: DEFAULT_RLIMITS.
+            assert_eq!(pcb::get_rlimit(test_pid, 7), Some((1024, 4096)));
+            pcb::set_rlimit(test_pid, 7, 256, 512).expect("set rlimit");
+            assert_eq!(pcb::get_rlimit(test_pid, 7), Some((256, 512)));
+            // Raise hard limit -> PermissionDenied.
+            match pcb::set_rlimit(test_pid, 7, 256, 1024) {
+                Err(KernelError::PermissionDenied) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: rlimit raise expected PermissionDenied, got {:?}",
+                        other
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // cur > max -> InvalidArgument.
+            match pcb::set_rlimit(test_pid, 7, 600, 500) {
+                Err(KernelError::InvalidArgument) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: rlimit cur>max expected InvalidArgument, got {:?}",
+                        other
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Lower both -> Ok.
+            pcb::set_rlimit(test_pid, 7, 64, 128).expect("lower rlimit");
+            assert_eq!(pcb::get_rlimit(test_pid, 7), Some((64, 128)));
+            // resource out of range -> InvalidArgument.
+            match pcb::set_rlimit(test_pid, 16, 0, 0) {
+                Err(KernelError::InvalidArgument) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: rlimit resource=16 expected InvalidArgument, got {:?}",
+                        other
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            assert_eq!(pcb::get_rlimit(test_pid, 16), None);
+            // Clean up so we don't leak the dummy process.
+            pcb::destroy(test_pid);
         }
     }
 

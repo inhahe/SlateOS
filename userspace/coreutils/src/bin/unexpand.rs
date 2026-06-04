@@ -129,3 +129,104 @@ fn convert_all_spaces(line: &str, tab_width: usize) -> String {
 
     result
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    // ---------------- convert_leading_spaces ----------------
+
+    #[test]
+    fn leading_no_spaces_unchanged() {
+        assert_eq!(convert_leading_spaces("hello", 8), "hello");
+    }
+
+    #[test]
+    fn leading_empty_string() {
+        assert_eq!(convert_leading_spaces("", 8), "");
+    }
+
+    #[test]
+    fn leading_full_tab_width_becomes_tab() {
+        assert_eq!(convert_leading_spaces("        text", 8), "\ttext");
+    }
+
+    #[test]
+    fn leading_two_tabs_worth() {
+        assert_eq!(
+            convert_leading_spaces("                text", 8),
+            "\t\ttext"
+        );
+    }
+
+    #[test]
+    fn leading_partial_tab_remains_as_spaces() {
+        // 5 leading spaces, tab_width=8 -> not a full tab stop, kept as 5
+        // spaces.
+        assert_eq!(convert_leading_spaces("     text", 8), "     text");
+    }
+
+    #[test]
+    fn leading_mixed_full_plus_partial() {
+        // 10 spaces, tab_width=8: 8 become a tab, 2 remain as spaces.
+        assert_eq!(convert_leading_spaces("          text", 8), "\t  text");
+    }
+
+    #[test]
+    fn leading_only_affects_leading_spaces() {
+        // Spaces in the middle of the line are not touched.
+        assert_eq!(
+            convert_leading_spaces("        a   b", 8),
+            "\ta   b"
+        );
+    }
+
+    #[test]
+    fn leading_all_spaces_no_text() {
+        // 8 spaces only -> single tab.
+        assert_eq!(convert_leading_spaces("        ", 8), "\t");
+    }
+
+    #[test]
+    fn leading_width_four() {
+        assert_eq!(convert_leading_spaces("    text", 4), "\ttext");
+        assert_eq!(convert_leading_spaces("        text", 4), "\t\ttext");
+    }
+
+    // ---------------- convert_all_spaces ----------------
+
+    #[test]
+    fn all_no_spaces_unchanged() {
+        assert_eq!(convert_all_spaces("hello", 8), "hello");
+    }
+
+    #[test]
+    fn all_single_space_not_converted() {
+        // Implementation requires >1 space to insert a tab.
+        assert_eq!(convert_all_spaces("a b c d", 8), "a b c d");
+    }
+
+    #[test]
+    fn all_runs_of_spaces_at_tab_stop_become_tab() {
+        // Spaces from col 1 to col 8 (7 spaces after the 'a') would land at
+        // col 8 = multiple of 8, and since >1 spaces, becomes \t.
+        assert_eq!(convert_all_spaces("a       b", 8), "a\tb");
+    }
+
+    #[test]
+    fn all_leading_spaces_handled() {
+        assert_eq!(convert_all_spaces("        text", 8), "\ttext");
+    }
+
+    #[test]
+    fn all_trailing_spaces_kept() {
+        // Trailing spaces with no following non-space are flushed verbatim.
+        assert_eq!(convert_all_spaces("text   ", 8), "text   ");
+    }
+
+    #[test]
+    fn all_empty_string() {
+        assert_eq!(convert_all_spaces("", 8), "");
+    }
+}

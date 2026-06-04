@@ -2547,17 +2547,67 @@ Remaining net improvements (diminishing returns):
       pass-through.
   All 82 tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  RUNNING TOTAL: 184 tests across 12 binaries (whoami + batch 1 + batch
-  2). ~73 binaries still pending.
+  PROGRESS 2026-06-04 (batch 3): added 78 tests across 6 more binaries:
+    * nl.rs: extracted `format_line(line, line_num, width, body_num) ->
+      (String, bool)` returning (formatted, should_advance_counter).
+      Rewrote main to use it. 7 tests: body 'a' numbers everything
+      including empty, body 't' skips empties (counter doesn't advance
+      on blank), body 'n' never numbers, unknown body defaults to 'a',
+      width padding right-aligned, width wider than number, number
+      wider than width (no truncation).
+    * unexpand.rs: already had pure helpers `convert_leading_spaces`
+      and `convert_all_spaces`. Added 15 tests: leading-mode (no
+      spaces, empty, full-tab-width-becomes-tab, two tabs worth,
+      partial remains as spaces, mixed full+partial, only leading
+      affected, all-spaces no text, width=4); all-mode (no spaces,
+      single space not converted (>1 required), run at tab stop
+      becomes tab, leading, trailing kept, empty).
+    * tr.rs: extracted `build_translate_table(set1, set2) -> [u8;256]`,
+      `translate(input, table) -> Vec<u8>`, `delete_bytes(input, set)
+      -> Vec<u8>`, and rewrote main to use them. 23 tests covering
+      expand_set (literal, ranges incl. reverse and single-char, dash
+      at end as literal, empty, mixed literal+range), translate_table
+      (identity for unmapped, basic mapping, set1 longer pads with
+      set2's last, set2 longer extras ignored), translate (simple,
+      uppercase via expand_set a-z/A-Z, empty input, preserves
+      unmapped), delete_bytes (basic, multi-char set, disjoint, range
+      vowels, empty input, empty set).
+    * uniq.rs: extracted `should_emit(count, dup_only, uniq_only) ->
+      bool` and `format_uniq_line(line, count, count_mode) -> String`;
+      rewrote main to use them. 11 tests: emit defaults to all,
+      duplicates-only filters singletons, unique-only filters repeats,
+      both flags suppress all, zero-count under -d is false, plain
+      append-newline, plain ignores count, count_mode prefixes count
+      right-aligned in 7-char field, large count overflows width (no
+      truncation), empty line.
+    * comm.rs: extracted `compare_lines(lines1, lines2, suppress1,
+      suppress2, suppress3) -> Vec<String>` containing the three-way
+      merge walk; rewrote main to write returned lines. 12 tests:
+      no-suppress three columns, empty inputs, only-first-empty
+      emits column two, only-second-empty emits column one, identical
+      inputs all common, disjoint no common, -1 drops col1 and shifts
+      remaining, -2 drops col2, -3 drops common, -1 -2 prints only
+      common without prefix, -1 -2 -3 emits nothing, lex ordering.
+    * env.rs: extracted `parse_assignments(args) ->
+      (Vec<(String,String)>, Option<usize>)`; rewrote main to use it.
+      10 tests: no args, single assignment no cmd, multiple
+      assignments no cmd, command only no assignments, assignments
+      then command, empty value, value with embedded '=', leading '='
+      treated as command, assignment after command stays with command,
+      "=value" not parsed as assignment.
+  All 78 tests pass; clippy clean on x86_64-pc-windows-gnu.
 
-  REMAINING: awk, bc, cat, chmod, chown, cmp, comm, cp, csplit, date,
-  dd, df, diff, du, ed, env, expr, false, fetch, find, free, grep,
+  RUNNING TOTAL: 262 tests across 18 binaries (whoami + batch 1 +
+  batch 2 + batch 3). ~67 binaries still pending.
+
+  REMAINING: awk, bc, cat, chmod, chown, cmp, cp, csplit, date,
+  dd, df, diff, du, ed, expr, false, fetch, find, free, grep,
   head, hostname, id, join, kill, ln, logger, ls, md5sum, mkdir,
-  mkfifo, more, mv, nice, nl, nohup, od, paste, patch, ps, pwd,
+  mkfifo, more, mv, nice, nohup, od, paste, patch, ps, pwd,
   readlink, realpath, renice, rm, rmdir, sed, sh, sha256sum, sort,
-  split, stat, strings, tail, tar, tee, test, time_cmd, touch, tr,
-  true, tsort, tty, uname, unexpand, uniq, uptime, which, who, xargs,
-  yes. Continue in batches.
+  split, stat, strings, tail, tar, tee, test, time_cmd, touch,
+  true, tsort, tty, uname, uptime, which, who, xargs, yes.
+  Continue in batches.
 
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to
   link on the host target (x86_64-pc-windows-gnu) with "undefined

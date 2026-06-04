@@ -44,51 +44,81 @@ fn main() {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
+    for line in compare_lines(&lines1, &lines2, suppress1, suppress2, suppress3) {
+        let _ = writeln!(out, "{line}");
+    }
+}
+
+/// Three-way merge of two pre-sorted slices, formatted as `comm` output.
+/// Returns the lines that would be printed (without trailing newlines).
+///
+/// Output columns:
+/// - Column 1: lines unique to `lines1` (no prefix)
+/// - Column 2: lines unique to `lines2` (prefix `\t` when column 1 is shown)
+/// - Column 3: lines common to both (prefix `\t\t` when columns 1 and 2 are shown)
+///
+/// The `suppress*` flags drop the corresponding column and shrink the prefix
+/// of remaining columns by one tab, matching POSIX.
+fn compare_lines(
+    lines1: &[String],
+    lines2: &[String],
+    suppress1: bool,
+    suppress2: bool,
+    suppress3: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
     let mut i = 0;
     let mut j = 0;
 
     while i < lines1.len() || j < lines2.len() {
-        if i >= lines1.len() {
-            // Only file2 lines remain
-            if !suppress2 {
-                let prefix = if suppress1 { "" } else { "\t" };
-                let _ = writeln!(out, "{}{}", prefix, lines2[j]);
+        // Safe indexing: each branch below checks bounds before accessing.
+        let l1 = lines1.get(i);
+        let l2 = lines2.get(j);
+
+        match (l1, l2) {
+            (None, Some(b)) => {
+                if !suppress2 {
+                    let prefix = if suppress1 { "" } else { "\t" };
+                    out.push(format!("{prefix}{b}"));
+                }
+                j = j.saturating_add(1);
             }
-            j += 1;
-        } else if j >= lines2.len() {
-            // Only file1 lines remain
-            if !suppress1 {
-                let _ = writeln!(out, "{}", lines1[i]);
+            (Some(a), None) => {
+                if !suppress1 {
+                    out.push(a.clone());
+                }
+                i = i.saturating_add(1);
             }
-            i += 1;
-        } else if lines1[i] < lines2[j] {
-            // Unique to file1
-            if !suppress1 {
-                let _ = writeln!(out, "{}", lines1[i]);
+            (Some(a), Some(b)) => {
+                if a < b {
+                    if !suppress1 {
+                        out.push(a.clone());
+                    }
+                    i = i.saturating_add(1);
+                } else if a > b {
+                    if !suppress2 {
+                        let prefix = if suppress1 { "" } else { "\t" };
+                        out.push(format!("{prefix}{b}"));
+                    }
+                    j = j.saturating_add(1);
+                } else {
+                    if !suppress3 {
+                        let prefix = match (suppress1, suppress2) {
+                            (true, true) => "",
+                            (true, false) | (false, true) => "\t",
+                            (false, false) => "\t\t",
+                        };
+                        out.push(format!("{prefix}{a}"));
+                    }
+                    i = i.saturating_add(1);
+                    j = j.saturating_add(1);
+                }
             }
-            i += 1;
-        } else if lines1[i] > lines2[j] {
-            // Unique to file2
-            if !suppress2 {
-                let prefix = if suppress1 { "" } else { "\t" };
-                let _ = writeln!(out, "{}{}", prefix, lines2[j]);
-            }
-            j += 1;
-        } else {
-            // Common to both
-            if !suppress3 {
-                let prefix = match (suppress1, suppress2) {
-                    (true, true) => "",
-                    (true, false) => "\t",
-                    (false, true) => "\t",
-                    (false, false) => "\t\t",
-                };
-                let _ = writeln!(out, "{}{}", prefix, lines1[i]);
-            }
-            i += 1;
-            j += 1;
+            (None, None) => break, // Loop condition prevents this, but be explicit.
         }
     }
+
+    out
 }
 
 fn read_lines(path: &str) -> Vec<String> {
@@ -105,4 +135,107 @@ fn read_lines(path: &str) -> Vec<String> {
     };
 
     BufReader::new(reader).lines().map_while(Result::ok).collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    #[test]
+    fn no_suppress_three_columns() {
+        // file1 = [a, b, d], file2 = [b, c, d]
+        // a -> col1, b -> col3, c -> col2, d -> col3
+        let out = compare_lines(
+            &s(&["a", "b", "d"]),
+            &s(&["b", "c", "d"]),
+            false,
+            false,
+            false,
+        );
+        assert_eq!(out, vec!["a", "\t\tb", "\tc", "\t\td"]);
+    }
+
+    #[test]
+    fn empty_inputs() {
+        let empty: Vec<String> = Vec::new();
+        assert!(compare_lines(&empty, &empty, false, false, false).is_empty());
+    }
+
+    #[test]
+    fn only_first_empty_emits_column_two() {
+        let out = compare_lines(&s(&[]), &s(&["a", "b"]), false, false, false);
+        assert_eq!(out, vec!["\ta", "\tb"]);
+    }
+
+    #[test]
+    fn only_second_empty_emits_column_one() {
+        let out = compare_lines(&s(&["a", "b"]), &s(&[]), false, false, false);
+        assert_eq!(out, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn identical_inputs_all_common() {
+        let out = compare_lines(&s(&["a", "b"]), &s(&["a", "b"]), false, false, false);
+        assert_eq!(out, vec!["\t\ta", "\t\tb"]);
+    }
+
+    #[test]
+    fn disjoint_inputs_no_common() {
+        // file1=[a, c], file2=[b, d] -> a col1, b col2, c col1, d col2
+        let out = compare_lines(&s(&["a", "c"]), &s(&["b", "d"]), false, false, false);
+        assert_eq!(out, vec!["a", "\tb", "c", "\td"]);
+    }
+
+    #[test]
+    fn suppress1_drops_unique_to_first() {
+        // file1=[a, b], file2=[b, c]
+        // Without -1: a, \t\tb, \tc
+        // With    -1: drop a, common still printed but shifted to col2 (one tab),
+        //             col2 (\tc) shifts to col1 (no tab).
+        let out = compare_lines(&s(&["a", "b"]), &s(&["b", "c"]), true, false, false);
+        assert_eq!(out, vec!["\tb", "c"]);
+    }
+
+    #[test]
+    fn suppress2_drops_unique_to_second() {
+        let out = compare_lines(&s(&["a", "b"]), &s(&["b", "c"]), false, true, false);
+        // a unique col1 kept; b common shifts (one suppressed -> \t); c dropped.
+        assert_eq!(out, vec!["a", "\tb"]);
+    }
+
+    #[test]
+    fn suppress3_drops_common() {
+        let out = compare_lines(&s(&["a", "b"]), &s(&["b", "c"]), false, false, true);
+        assert_eq!(out, vec!["a", "\tc"]);
+    }
+
+    #[test]
+    fn suppress12_only_common_shown_without_prefix() {
+        let out = compare_lines(&s(&["a", "b"]), &s(&["b", "c"]), true, true, false);
+        assert_eq!(out, vec!["b"]);
+    }
+
+    #[test]
+    fn suppress_all_emits_nothing() {
+        let out = compare_lines(&s(&["a", "b"]), &s(&["b", "c"]), true, true, true);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn lexicographic_ordering() {
+        // Single-char comparison is fine; comm relies on the inputs being sorted.
+        let out = compare_lines(
+            &s(&["apple", "banana"]),
+            &s(&["banana", "cherry"]),
+            false,
+            false,
+            false,
+        );
+        assert_eq!(out, vec!["apple", "\t\tbanana", "\tcherry"]);
+    }
 }

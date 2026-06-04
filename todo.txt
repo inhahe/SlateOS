@@ -6975,4 +6975,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      different security model (capabilities + namespaces).
 ##      statmount/listmount need real backing once VFS mount
 ##      tree exists (mount is also EPERM today).
+##  56. SETTIMEOFDAY / MINCORE / MREMAP / FALLOCATE / MLOCK2 /
+##      ACCT / USTAT — 7 syscalls DONE as input-validated
+##      principled-errno stubs.  (Note: NICE is NOT an x86_64
+##      syscall — glibc implements nice() as a
+##      setpriority(PRIO_PROCESS) wrapper, so no NICE constant.)
+##         - settimeofday: validate 16B timeval + optional 8B
+##           timezone; return EPERM.  Tools that need to set
+##           the wall clock fall back to adjtimex which we
+##           handle.
+##         - mincore: validate addr 16 KiB aligned, length,
+##           vec ptr writable for ceil(length/16K) bytes, addr
+##           span readable in user space (ENOMEM if not).
+##           Return ENOSYS — we don't track resident-vs-swapped
+##           state because we don't swap; glibc/libgc callers
+##           assume "all resident" on ENOSYS which is correct.
+##         - mremap: validate old_addr 16 KiB aligned, new_size
+##           > 0, flags ∈ {MAYMOVE, FIXED, DONTUNMAP},
+##           cross-flag constraints (FIXED requires MAYMOVE +
+##           aligned new_addr; DONTUNMAP requires MAYMOVE +
+##           old_size == new_size).  Return ENOMEM — Linux's
+##           "no room to grow without MAYMOVE" answer; glibc
+##           malloc handles ENOMEM by mmap+memcpy+munmap.
+##         - fallocate: validate fd, offset >= 0, len > 0,
+##           mode flag bits (KEEP_SIZE|PUNCH_HOLE|COLLAPSE_RANGE|
+##           ZERO_RANGE|INSERT_RANGE|UNSHARE_RANGE), PUNCH_HOLE
+##           requires KEEP_SIZE; return EOPNOTSUPP so sqlite /
+##           PostgreSQL WAL fall back to manual zero-writes.
+##         - mlock2: validate flags ∈ {0, MLOCK_ONFAULT}, range
+##           readable; return 0 (no swap → all memory locked).
+##         - acct: validate optional path (NUL-terminated);
+##           return EPERM (CAP_SYS_PACCT not exposed).
+##         - ustat: validate 32B ustat output buffer; return
+##           ENOSYS (deprecated since Linux 2.6, removed from
+##           glibc 2.28; callers fall back to statfs which we
+##           handle).
+##      Choice rationale:
+##         * EPERM for settimeofday matches non-root Linux;
+##           every NTP/hwclock tool already handles "can't set
+##           clock without privilege" by reporting the offset
+##           through adjtimex.
+##         * ENOSYS for mincore is friendlier than EINVAL
+##           because every caller has an "assume all resident"
+##           fallback that is exactly what we need.
+##         * ENOMEM for mremap (not ENOSYS): mremap exists,
+##           we just can't grow in place.  glibc malloc, jemalloc,
+##           and tcmalloc all have an ENOMEM → mmap+memcpy
+##           path.  Returning ENOSYS would force them onto a
+##           slower path that probes for "does mremap work at
+##           all" once per process.
+##         * EOPNOTSUPP for fallocate matches "ext2 / tmpfs
+##           don't support fallocate", which is what every
+##           database engine handles gracefully.
+##         * Success for mlock2 matches non-swapping kernels
+##           (the memory is already locked); we accept the call
+##           without doing anything.
+##         * EPERM for acct because process accounting is a
+##           privileged operation.
+##         * Also fixed: the MREMAP constant existed (since an
+##           older batch) but was never wired into dispatch —
+##           it was silently ENOSYS.  Now properly dispatched.
+##      Limitation: mincore is the most-likely future TODO —
+##      libgc and glibc malloc trim heuristics call mincore to
+##      decide when to release pages back to the kernel.  We
+##      return ENOSYS so they skip the heuristic.  If we ever
+##      implement page-out (we don't plan to), real mincore
+##      becomes relevant.  mremap real implementation is
+##      bounded by needing reservation-tracking in mm/ — we
+##      have the data structures for it; just not the
+##      mremap interface itself.  Fallocate punching for sparse
+##      files needs VFS hole-support which we don't have yet.
 

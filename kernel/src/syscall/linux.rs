@@ -635,6 +635,15 @@ pub mod nr {
     pub const PKEY_MPROTECT: u64 = 329;
     pub const GET_ROBUST_LIST: u64 = 274;
     pub const SET_MEMPOLICY_HOME_NODE: u64 = 450;
+    // settimeofday / mincore / mremap (dispatch) / fallocate /
+    // mlock2 / acct / ustat.  (nice is not an x86_64 syscall — glibc
+    // implements nice() as a setpriority(PRIO_PROCESS) wrapper.)
+    pub const SETTIMEOFDAY: u64 = 164;
+    pub const MINCORE: u64 = 27;
+    pub const FALLOCATE: u64 = 285;
+    pub const MLOCK2: u64 = 325;
+    pub const ACCT: u64 = 163;
+    pub const USTAT: u64 = 136;
     // Legacy x86 + kexec + mount-query + LSM family.
     pub const MODIFY_LDT: u64 = 154;
     pub const IOPL: u64 = 172;
@@ -1710,6 +1719,13 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::LSM_GET_SELF_ATTR => sys_lsm_get_self_attr(args),
         nr::LSM_SET_SELF_ATTR => sys_lsm_set_self_attr(args),
         nr::LSM_LIST_MODULES => sys_lsm_list_modules(args),
+        nr::SETTIMEOFDAY => sys_settimeofday(args),
+        nr::MINCORE => sys_mincore(args),
+        nr::MREMAP => sys_mremap(args),
+        nr::FALLOCATE => sys_fallocate(args),
+        nr::MLOCK2 => sys_mlock2(args),
+        nr::ACCT => sys_acct(args),
+        nr::USTAT => sys_ustat(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -9469,6 +9485,194 @@ fn sys_lsm_set_self_attr(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EOPNOTSUPP)
 }
 
+// ---------------------------------------------------------------------------
+// settimeofday / mincore / mremap / fallocate / mlock2 / acct /
+// ustat — common gaps in the basic POSIX surface.
+// ---------------------------------------------------------------------------
+
+/// `settimeofday(tv*, tz*)`.
+fn sys_settimeofday(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 != 0 {
+        // struct timeval is 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg1 != 0 {
+        // struct timezone is 8 bytes (tz_minuteswest + tz_dsttime).
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Setting the wall clock requires CAP_SYS_TIME.  We don't expose
+    // a way for userspace to acquire that capability through this
+    // ABI; tools that try (NTP, hwclock) get EPERM and fall back to
+    // adjtimex-with-modes-zero (probe-only) which we already handle.
+    linux_err(errno::EPERM)
+}
+
+/// `mincore(addr, length, vec*)`.
+fn sys_mincore(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let length = args.arg1;
+    let vec_ptr = args.arg2;
+    // addr must be 16 KiB aligned.
+    if addr % 0x4000 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if length == 0 {
+        return SyscallResult::ok(0);
+    }
+    if vec_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // vec is one byte per page; pages = ceil(length / 16 KiB).
+    let pages = length.div_ceil(0x4000);
+    if let Err(e) = crate::mm::user::validate_user_write(vec_ptr, pages as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Backing range must lie in user space; if validate_user_read of
+    // the page-aligned span fails we report ENOMEM (Linux's documented
+    // "addr+length spans an unmapped region" error).
+    if let Err(_e) = crate::mm::user::validate_user_read(addr, length as usize) {
+        return linux_err(errno::ENOMEM);
+    }
+    // We don't track resident-vs-swapped state; without a user-write
+    // copy path we can't fill `vec`.  Return ENOSYS so callers (libgc,
+    // glibc malloc trim heuristics) fall back to assuming "everything
+    // resident" which is true in our non-swapping kernel anyway.
+    linux_err(errno::ENOSYS)
+}
+
+/// `mremap(old_addr, old_size, new_size, flags, new_addr)`.
+fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
+    let old_addr = args.arg0;
+    let old_size = args.arg1;
+    let new_size = args.arg2;
+    let flags = args.arg3;
+    let new_addr = args.arg4;
+    // old_addr must be 16 KiB aligned.
+    if old_addr % 0x4000 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // new_size must be > 0.
+    if new_size == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // flags: MREMAP_MAYMOVE=1, MREMAP_FIXED=2, MREMAP_DONTUNMAP=4.
+    if flags & !0b111 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // MREMAP_FIXED requires MREMAP_MAYMOVE and a new_addr.
+    if flags & 2 != 0 {
+        if flags & 1 == 0 {
+            return linux_err(errno::EINVAL);
+        }
+        if new_addr % 0x4000 != 0 {
+            return linux_err(errno::EINVAL);
+        }
+    }
+    // MREMAP_DONTUNMAP requires MREMAP_MAYMOVE and old_size == new_size.
+    if flags & 4 != 0 {
+        if flags & 1 == 0 {
+            return linux_err(errno::EINVAL);
+        }
+        if old_size != new_size {
+            return linux_err(errno::EINVAL);
+        }
+    }
+    // We don't support resize-in-place; report ENOMEM (Linux's
+    // documented "no room to grow without MAYMOVE" answer for the
+    // shrinks/expand-only case).  glibc malloc handles ENOMEM from
+    // mremap by mmap+memcpy+munmap.
+    linux_err(errno::ENOMEM)
+}
+
+/// `fallocate(fd, mode, offset, len)`.
+fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = args.arg1 as u32;
+    #[allow(clippy::cast_possible_wrap)]
+    let offset = args.arg2 as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let len = args.arg3 as i64;
+    if offset < 0 || len <= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // mode flags: FALLOC_FL_KEEP_SIZE=1, FALLOC_FL_PUNCH_HOLE=2,
+    // _COLLAPSE_RANGE=8, _ZERO_RANGE=0x10, _INSERT_RANGE=0x20,
+    // _UNSHARE_RANGE=0x40.
+    if mode & !0x7B != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // PUNCH_HOLE requires KEEP_SIZE.
+    if mode & 2 != 0 && mode & 1 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Our VFS doesn't expose fallocate; calls fall through to
+    // ftruncate-equivalent semantics elsewhere.  Most callers (sqlite,
+    // PostgreSQL WAL) treat EOPNOTSUPP as "fs doesn't support
+    // fallocate, write zeros instead" which is the right behaviour
+    // for us.
+    linux_err(errno::EOPNOTSUPP)
+}
+
+/// `mlock2(addr, len, flags)`.
+fn sys_mlock2(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let len = args.arg1;
+    let flags = args.arg2;
+    // flags: MLOCK_ONFAULT (1) only.
+    if flags & !1 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    let len_usize = match usize::try_from(len) {
+        Ok(v) => v,
+        Err(_) => return linux_err(errno::ENOMEM),
+    };
+    if let Err(e) = crate::mm::user::validate_user_read(addr, len_usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    // No swap → all memory is implicitly locked; accept.
+    SyscallResult::ok(0)
+}
+
+/// `acct(filename*)`.
+fn sys_acct(args: &SyscallArgs) -> SyscallResult {
+    // NULL = disable process accounting.  Non-NULL = enable with given
+    // file.  Either way, requires CAP_SYS_PACCT which we don't expose.
+    if args.arg0 != 0 {
+        if let Err(e) = validate_user_str(args.arg0) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `ustat(dev, ubuf*)`.
+fn sys_ustat(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct ustat is 32 bytes (f_tfree + f_tinode + 6B fsname + 6B fpack).
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 32) {
+        return linux_err(linux_errno_for(e));
+    }
+    // ustat is deprecated since Linux 2.6 in favour of statfs/fstatfs;
+    // glibc removed the wrapper in 2.28.  Return ENOSYS — every
+    // surviving caller already handles "ustat absent" by switching to
+    // statfs (which we DO implement).
+    linux_err(errno::ENOSYS)
+}
+
 /// `lsm_list_modules(ids*, size*, flags)`.
 fn sys_lsm_list_modules(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 == 0 {
@@ -15446,6 +15650,174 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EOPNOTSUPP) {
             serial_println!("[syscall/linux]   FAIL: lsm_list_modules valid not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // settimeofday / mincore / mremap / fallocate / mlock2 / acct /
+    // ustat
+    // -----------------------------------------------------------------
+    {
+        let tv_buf = [0u8; 16];
+        let tv_ptr = tv_buf.as_ptr() as u64;
+        let tz_buf = [0u8; 8];
+        let tz_ptr = tz_buf.as_ptr() as u64;
+        let vec_buf = [0u8; 16];
+        let vec_ptr = vec_buf.as_ptr() as u64;
+        let ustat_buf = [0u8; 32];
+        let ustat_ptr = ustat_buf.as_ptr() as u64;
+        let name_buf = b"/var/log/acct\0";
+        let name_ptr = name_buf.as_ptr() as u64;
+
+        // settimeofday with tv -> EPERM.
+        let a = SyscallArgs { arg0: tv_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: settimeofday valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // settimeofday with both -> EPERM.
+        let a = SyscallArgs { arg0: tv_ptr, arg1: tz_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: settimeofday both not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // mincore misaligned -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: vec_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MINCORE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mincore misaligned not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mincore length 0 -> success.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MINCORE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mincore len=0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // mincore NULL vec -> EFAULT.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MINCORE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mincore NULL vec not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // mincore valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: vec_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MINCORE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: mincore valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // mremap misaligned -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 0x4000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap misaligned not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mremap new_size 0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap new_size=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mremap bad flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0x4000, arg3: 0x10, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mremap FIXED without MAYMOVE -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0x4000, arg3: 2, arg4: 0x4000, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap FIXED without MAYMOVE not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mremap DONTUNMAP with size mismatch -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0x8000, arg3: 5, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap DONTUNMAP mismatch not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mremap valid -> ENOMEM.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0x8000, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
+            serial_println!("[syscall/linux]   FAIL: mremap valid not ENOMEM");
+            return Err(KernelError::InternalError);
+        }
+
+        // fallocate negative offset -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: u64::MAX, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fallocate neg offset not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fallocate len 0 -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fallocate len=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fallocate bad mode -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 0x80, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fallocate bad mode not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fallocate PUNCH_HOLE without KEEP_SIZE -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 2, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fallocate PUNCH without KEEP not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fallocate valid -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fallocate valid not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+
+        // mlock2 bad flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCK2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mlock2 bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mlock2 len 0 -> 0.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCK2, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mlock2 len=0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // mlock2 valid -> 0.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCK2, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mlock2 valid not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // acct NULL -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: acct NULL not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // acct with path -> EPERM.
+        let a = SyscallArgs { arg0: name_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: acct path not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // ustat NULL buf -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: ustat NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // ustat valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: ustat_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: ustat valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
     }

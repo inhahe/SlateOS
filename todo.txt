@@ -5398,12 +5398,19 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      writev through it.
 ##
 ##      FOLLOW-UPS still owed:
-##        (i)  Fork inheritance currently clones the fd table structurally
-##             but does NOT bump refcounts on File or Pipe handles.  Safe
-##             today because only Console handles are ever populated by
-##             stdio installation, but must be fixed in lockstep with
-##             pipe() or dup-across-fork landing on a File/Pipe.  Search
-##             for "fd-table follow-ups" in pcb::fork_create.
+##        (i)  RESOLVED — verified the fork refcount path is correct as
+##             written.  pcb::fork_create clones the Linux fd table
+##             structurally; per-handle refcount bumping is driven by
+##             the parent's `ipc_handles` list, which fork::build_fork_
+##             child snapshots and runs dup_one() over (bumping pipe /
+##             file / eventfd / stream_socket refcounts).  The Linux
+##             translator's install paths (open_common, pipe_common)
+##             call register_ipc_handle exactly once per kernel handle
+##             per process, and intra-process dup/dup2/dup3 only touch
+##             the fd table — so refcount stays at "one per process
+##             that holds at least one fd referencing the handle",
+##             which is exactly what dup_one preserves.  Contract is
+##             documented in pcb::fork_create.
 ##        (ii) FD_CLOEXEC is stored per-entry but exec_process() does NOT
 ##             walk the table and close cloexec entries.  It rebuilds a
 ##             fresh stdio-only table instead, which is correct for the
@@ -5492,6 +5499,5 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      uses so this is the next blocker for multi-threaded glibc.
 ##   2. Wire exec_process() to walk the fd table and honour FD_CLOEXEC
 ##      (currently rebuilds a fresh stdio-only table).
-##   3. Refcount File / Pipe handles on fork (fd-table follow-up i).
-##   4. Replace xorshift64 with kernel CSPRNG when one exists.
-##   5. Honour mprotect / brk / sigaction properly.
+##   3. Replace xorshift64 with kernel CSPRNG when one exists.
+##   4. Honour mprotect / brk / sigaction properly.

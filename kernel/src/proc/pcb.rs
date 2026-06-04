@@ -422,14 +422,25 @@ pub fn fork_create(
     // Clone the parent-derived state while holding only an immutable
     // borrow, then release it before inserting the child.
     //
-    // Linux fd table inheritance note: we duplicate the parent's table
-    // structurally so child fds remain numerically valid, but we do
-    // NOT yet bump the refcount on `File` / `Pipe` kernel handles.
-    // That is safe today because the only handles populated by the
-    // Linux ABI translator are `Console` entries (no kernel resource),
-    // but will need fixing in lockstep with adding Linux `openat` /
-    // `pipe2` translation.  Tracked under the "fd-table follow-ups"
-    // entry in `todo.txt`.
+    // Linux fd table inheritance contract: we duplicate the parent's
+    // table *structurally* so child fds remain numerically valid.  We
+    // intentionally do NOT call any per-handle dup function here —
+    // refcount bumping is the caller's responsibility and is driven by
+    // the parent's `ipc_handles` list.  Specifically, `fork::build_
+    // fork_child` snapshots `ipc_handles`, runs `dup_one` for each
+    // entry (which bumps the per-resource refcount via `pipe::dup`,
+    // `fs::handle::dup_shared`, etc.), and passes the duplicated list
+    // in as `ipc_handles`.  The invariant that makes this work is that
+    // every Linux-ABI install path (`open_common`, `pipe_common`,
+    // future `socketpair` etc.) calls `register_ipc_handle` *exactly
+    // once per kernel handle per process* before installing into the
+    // fd table.  Per-process `dup`/`dup2`/`dup3` only touch the fd
+    // table — they do not register an additional ipc_handle entry and
+    // do not bump the underlying refcount.  Combined with `sys_close`
+    // checking `is_handle_referenced` before invoking the native close
+    // path, this keeps the refcount at exactly "one per process that
+    // holds at least one fd referencing the handle", which is what
+    // fork's `dup_one` per-process bump preserves.
     let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {

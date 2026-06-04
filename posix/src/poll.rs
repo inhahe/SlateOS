@@ -911,6 +911,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "none")] // Calls SYS_UDP_RX_READY — only runs on our OS.
     fn test_check_readiness_udp_bound() {
         let (r, w, h, e) = check_readiness(fdtable::HandleKind::UdpSocket, 99);
         assert!(r);

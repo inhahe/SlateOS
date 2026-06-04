@@ -2878,6 +2878,14 @@ mod tests {
     // -- restoration: cap drop/restore cycle ------------------------------
 
     /// After restoring CAP_KILL, ignore signals succeed again.
+    ///
+    /// The "succeed" branch issues `SYS_SIGNAL_SEND` against PID 1.  On
+    /// the OS target that hits the kernel signal shim, which dispatches
+    /// to init's handler (or its default — SIGCHLD's default is ignore,
+    /// so the syscall returns 0).  On host builds we can't issue real
+    /// syscalls, so the gate-restore half of the test only runs on the
+    /// OS target.  The CAP_KILL=dropped → EPERM half is pure-userspace
+    /// logic and runs everywhere.
     #[test]
     fn test_phase203_kill_cap_restore() {
         {
@@ -2892,10 +2900,13 @@ mod tests {
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_KILL,
         ));
-        crate::errno::set_errno(0);
-        // With cap restored, ignore signals succeed.
-        let ret = kill(1, SIGCHLD);
-        assert_eq!(ret, 0);
+        #[cfg(target_os = "none")]
+        {
+            crate::errno::set_errno(0);
+            // With cap restored, ignore signals succeed.
+            let ret = kill(1, SIGCHLD);
+            assert_eq!(ret, 0);
+        }
     }
 
     // -- sigtimedwait / sigqueue stubs --

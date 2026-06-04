@@ -1263,12 +1263,12 @@ mod tests {
     #[test]
     fn test_grantpt_succeeds() {
         // Phase 68: grantpt no longer silently returns 0 — it now
-        // validates the fd.  fd=0 is registered in the test fdtable
-        // (by ensure_std_fds), so the validator passes the EBADF
-        // checks and reports EINVAL (the fd is not a PTY master,
-        // and on this OS no fd ever is).  The original "succeeds"
-        // name is retained for git-blame friendliness; the assertion
-        // is updated to match Linux semantics.
+        // validates the fd.  fd=0 must be a registered (non-PTY-master)
+        // fd for the validator to skip EBADF and report EINVAL.  We
+        // install it explicitly here rather than rely on a previous
+        // test having called `ensure_std_fds()`, because parallel test
+        // ordering may close fd 0 before we run.
+        ensure_std_fds();
         crate::errno::set_errno(0);
         assert_eq!(grantpt(0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -1277,7 +1277,9 @@ mod tests {
     #[test]
     fn test_unlockpt_succeeds() {
         // Phase 68: unlockpt no longer silently returns 0.  See
-        // test_grantpt_succeeds for the EINVAL reasoning.
+        // test_grantpt_succeeds for the EINVAL reasoning and why we
+        // install fd 0 explicitly.
+        ensure_std_fds();
         crate::errno::set_errno(0);
         assert_eq!(unlockpt(0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);

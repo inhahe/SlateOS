@@ -7506,10 +7506,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "none")] // Calls clock_gettime → SYS_CLOCK_REALTIME (no host stub).
     fn test_clock_nanosleep_timer_abstime_alone_passes_mask() {
         // TIMER_ABSTIME alone is the canonical valid call; it must
         // not be rejected by the mask.  Path goes to the abs-time
         // branch which, with a zero/past target, returns 0 immediately.
+        //
+        // Host gate: the abs-time branch calls `clock_gettime`, which
+        // on host returns -1/EIO because `SYS_CLOCK_REALTIME` is not
+        // stubbed.  `clock_nanosleep` then collapses that to EINVAL,
+        // which would make this test (which asserts ret != EINVAL)
+        // fail for the *wrong* reason — the mask check itself does
+        // accept TIMER_ABSTIME alone.  Running this case is only
+        // meaningful with a working monotonic clock; on the OS target
+        // we have one.
         let req = Timespec {
             tv_sec: 0,
             tv_nsec: 0,

@@ -6560,4 +6560,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      databases, async runtimes) cannot run; only synchronous
 ##      blocking-I/O programs (shells, coreutils, batch jobs)
 ##      will work.
+##  49. OPENAT2 / EXECVEAT / NAME_TO_HANDLE_AT /
+##      OPEN_BY_HANDLE_AT + new mount API (FSOPEN / FSCONFIG /
+##      FSMOUNT / FSPICK / OPEN_TREE / MOVE_MOUNT) — 10
+##      syscalls DONE as input-validated principled-errno
+##      stubs.
+##         - openat2: validate path + struct open_how (24
+##           bytes: u64 flags, u64 mode, u64 resolve) + size
+##           == 24, then ENOSYS so glibc / io_uring fall back
+##           to openat (which we implement).
+##         - execveat: validate AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW
+##           flags + path (or empty path when AT_EMPTY_PATH) +
+##           argv / envp head pointers, then ENOSYS so callers
+##           fall back to execve (which we implement).
+##         - name_to_handle_at: validate AT_EMPTY_PATH |
+##           AT_SYMLINK_FOLLOW | AT_HANDLE_FID flags, path,
+##           mount_id ptr (4B), handle header (8B), then
+##           EOPNOTSUPP — the canonical answer for "this
+##           filesystem does not export persistent handles",
+##           which every caller handles (tmpfs returns this).
+##         - open_by_handle_at: validate handle header (8B),
+##           then EPERM (this syscall requires
+##           CAP_DAC_READ_SEARCH on Linux).
+##         - fsopen / fsmount / fspick / fsconfig: validate
+##           the FSOPEN_CLOEXEC / FSMOUNT_CLOEXEC / FSPICK_*
+##           and MOUNT_ATTR_* / FSCONFIG cmd ranges + every
+##           pointer, then EPERM (privileged mount API).
+##         - open_tree: validate OPEN_TREE_CLONE | O_CLOEXEC |
+##           AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT
+##           | AT_RECURSIVE + path (or empty path), EPERM.
+##         - move_mount: validate the 8-bit MOVE_MOUNT_* flag
+##           mask + both paths (each optional with EMPTY_PATH),
+##           EPERM.
+##      Choice rationale:
+##         * ENOSYS for openat2 / execveat is what glibc /
+##           io_uring expect from a pre-5.6 kernel and they
+##           fall back gracefully.  Pretending success without
+##           implementing the resolve restrictions of openat2
+##           would be a security bug — the whole point of
+##           openat2 is to enforce RESOLVE_NO_SYMLINKS /
+##           NO_MAGICLINKS / IN_ROOT etc.
+##         * EOPNOTSUPP for name_to_handle_at is the right
+##           answer for filesystems without persistent ids
+##           (tmpfs, fuse without export_operations, etc).
+##         * EPERM for the new mount API mirrors what
+##           non-CAP_SYS_ADMIN Linux processes see and is what
+##           every container runtime / mount helper handles
+##           on a hardened host.
+##      Limitation: when the VFS lands and we add mount-tree
+##      support, fsopen / fsconfig / fsmount / fspick /
+##      open_tree / move_mount become the new mount UI for
+##      portable code.  openat2's resolve flags must be
+##      implemented in the path-walk code at the same time —
+##      if we add openat2 before then, we MUST implement
+##      RESOLVE_BENEATH / IN_ROOT / NO_SYMLINKS or it becomes
+##      a path-traversal escape valve.
 

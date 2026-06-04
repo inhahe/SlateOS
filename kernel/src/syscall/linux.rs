@@ -561,6 +561,16 @@ pub mod nr {
     pub const EPOLL_PWAIT: u64 = 281;
     pub const EPOLL_CREATE1: u64 = 291;
     pub const EPOLL_PWAIT2: u64 = 441;
+    pub const OPENAT2: u64 = 437;
+    pub const EXECVEAT: u64 = 322;
+    pub const NAME_TO_HANDLE_AT: u64 = 303;
+    pub const OPEN_BY_HANDLE_AT: u64 = 304;
+    pub const FSOPEN: u64 = 430;
+    pub const FSCONFIG: u64 = 431;
+    pub const FSMOUNT: u64 = 432;
+    pub const FSPICK: u64 = 433;
+    pub const OPEN_TREE: u64 = 428;
+    pub const MOVE_MOUNT: u64 = 429;
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,6 +1554,16 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::EPOLL_WAIT => sys_epoll_wait(args),
         nr::EPOLL_PWAIT => sys_epoll_pwait(args),
         nr::EPOLL_PWAIT2 => sys_epoll_pwait2(args),
+        nr::OPENAT2 => sys_openat2(args),
+        nr::EXECVEAT => sys_execveat(args),
+        nr::NAME_TO_HANDLE_AT => sys_name_to_handle_at(args),
+        nr::OPEN_BY_HANDLE_AT => sys_open_by_handle_at(args),
+        nr::FSOPEN => sys_fsopen(args),
+        nr::FSCONFIG => sys_fsconfig(args),
+        nr::FSMOUNT => sys_fsmount(args),
+        nr::FSPICK => sys_fspick(args),
+        nr::OPEN_TREE => sys_open_tree(args),
+        nr::MOVE_MOUNT => sys_move_mount(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -7345,6 +7365,309 @@ fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
+// ---------------------------------------------------------------------------
+// openat2 / execveat / name_to_handle_at / open_by_handle_at + new mount API
+//
+// These are the post-2010 Linux syscalls that extend openat / execve and
+// reshape the mount system around fd-based handles.  Our kernel does not
+// model the resolve restrictions of openat2's struct open_how, nor does it
+// have a mount-tree to manipulate via fsopen / fsmount / open_tree /
+// move_mount, nor a persistent file_handle table for name_to_handle_at.
+//
+// In the meantime we expose principled-stub semantics:
+//
+//   * openat2 / execveat: validate every pointer and flag bit, then ENOSYS
+//     so glibc / io_uring fall back to openat / execve (which we already
+//     implement).
+//   * The new mount API (fsopen, fsconfig, fsmount, fspick, open_tree,
+//     move_mount) returns EPERM after validation — these are privileged
+//     and a non-root caller on Linux gets the same answer.
+//   * name_to_handle_at / open_by_handle_at return EOPNOTSUPP after
+//     validation — that is the canonical answer for "this filesystem does
+//     not export persistent handles", which is what filesystems like tmpfs
+//     return on Linux.
+// ---------------------------------------------------------------------------
+
+/// `openat2(dirfd, path, how*, size)` — like openat with explicit
+/// resolve flags.  `how` is `struct open_how { u64 flags; u64 mode;
+/// u64 resolve; }` (24 bytes).
+fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = validate_user_str(args.arg1) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Linux enforces size == sizeof(struct open_how) = 24 currently; any
+    // other value gets EINVAL.  The kernel may grow `how` over time but
+    // never below 24.
+    if args.arg3 != 24 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 24) {
+        return linux_err(linux_errno_for(e));
+    }
+    // We validated everything; tell callers to fall back to openat.
+    linux_err(errno::ENOSYS)
+}
+
+/// `execveat(dirfd, path, argv, envp, flags)` — like execve relative to a
+/// directory fd.  Flags are AT_EMPTY_PATH (0x1000) | AT_SYMLINK_NOFOLLOW
+/// (0x100).
+fn sys_execveat(args: &SyscallArgs) -> SyscallResult {
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg4 as u32;
+    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Validate path unless AT_EMPTY_PATH and path is empty.
+    if args.arg1 != 0 {
+        if let Err(e) = validate_user_str(args.arg1) {
+            return linux_err(linux_errno_for(e));
+        }
+    } else if flags & AT_EMPTY_PATH == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // argv / envp can be NULL only on very old code; modern callers pass
+    // valid pointers.  Validate the first slot (8 bytes for a pointer)
+    // if non-NULL.
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Fall back to execve — callers handle ENOSYS gracefully.
+    linux_err(errno::ENOSYS)
+}
+
+/// `name_to_handle_at(dirfd, path, handle*, mount_id*, flags)`.
+/// `struct file_handle { u32 handle_bytes; int handle_type; u8 f_handle[0]; }`
+/// — minimum 8 bytes for the header, but we just validate the header so
+/// the caller learns the right errno.
+fn sys_name_to_handle_at(args: &SyscallArgs) -> SyscallResult {
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_FOLLOW: u32 = 0x400;
+    const AT_HANDLE_FID: u32 = 0x200;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg4 as u32;
+    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_FOLLOW | AT_HANDLE_FID) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = validate_user_str(args.arg1) {
+            return linux_err(linux_errno_for(e));
+        }
+    } else if flags & AT_EMPTY_PATH == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // mount_id is required.
+    if args.arg3 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    // handle ptr is required.
+    if args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct file_handle header is 8 bytes (4 + 4); validate header read
+    // so we can see handle_bytes, which is what Linux does first.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    // No filesystem exports persistent handles in this kernel.
+    linux_err(errno::EOPNOTSUPP)
+}
+
+/// `open_by_handle_at(mount_fd, handle*, flags)`.
+fn sys_open_by_handle_at(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Same flags as openat (O_RDONLY/RDWR/WRONLY plus mode bits); we don't
+    // re-validate them here — Linux only sanity-checks the access mode.
+    // Real open-by-handle requires CAP_DAC_READ_SEARCH, which we don't
+    // grant; mirror Linux's EPERM in that case.
+    linux_err(errno::EPERM)
+}
+
+/// `fsopen(fsname*, flags)` — create a filesystem context.  Flags are
+/// FSOPEN_CLOEXEC (1) only.
+fn sys_fsopen(args: &SyscallArgs) -> SyscallResult {
+    const FSOPEN_CLOEXEC: u32 = 0x1;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg1 as u32;
+    if flags & !FSOPEN_CLOEXEC != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = validate_user_str(args.arg0) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `fsconfig(fs_fd, cmd, key*, value*, aux)` — configure a filesystem
+/// context.  cmd ∈ 0..=8 (FSCONFIG_SET_FLAG ... FSCONFIG_CMD_RECONFIGURE).
+fn sys_fsconfig(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd = args.arg1 as i32;
+    if !(0..=8).contains(&cmd) {
+        return linux_err(errno::EINVAL);
+    }
+    // key is required for SET_FLAG / SET_STRING / SET_BINARY / SET_PATH /
+    // SET_PATH_EMPTY / SET_FD (cmd 0..=5).
+    if cmd <= 5 && args.arg2 != 0 {
+        if let Err(e) = validate_user_str(args.arg2) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    if args.arg3 != 0 {
+        // Validate at least 1 byte of value; the actual length depends on
+        // the cmd, but if the pointer is non-NULL it must be readable.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `fsmount(fs_fd, flags, attr_flags)` — create a mount object from a
+/// configured fs context.  flags = FSMOUNT_CLOEXEC (1).
+fn sys_fsmount(args: &SyscallArgs) -> SyscallResult {
+    const FSMOUNT_CLOEXEC: u32 = 0x1;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg1 as u32;
+    if flags & !FSMOUNT_CLOEXEC != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // attr_flags are MOUNT_ATTR_* bits — RDONLY (0x1), NOSUID (0x2),
+    // NODEV (0x4), NOEXEC (0x8), _ATIME mask (0x70), STRICTATIME (0x20),
+    // NOATIME (0x10), NODIRATIME (0x80), IDMAP (0x100_000), NOSYMFOLLOW
+    // (0x20_0000) — accept the union conservatively and reject anything
+    // above.
+    const MOUNT_ATTR_MASK: u32 = 0x20_00ff;
+    #[allow(clippy::cast_possible_truncation)]
+    let attr_flags = args.arg2 as u32;
+    if attr_flags & !MOUNT_ATTR_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `fspick(dirfd, path*, flags)` — pick an existing mount to reconfigure.
+/// flags = FSPICK_CLOEXEC (1) | FSPICK_SYMLINK_NOFOLLOW (2) | NO_AUTOMOUNT
+/// (4) | EMPTY_PATH (8).
+fn sys_fspick(args: &SyscallArgs) -> SyscallResult {
+    const FSPICK_MASK: u32 = 0xf;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    if flags & !FSPICK_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = validate_user_str(args.arg1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `open_tree(dirfd, path*, flags)` — clone a mount subtree into a new
+/// detached fd.  flags include OPEN_TREE_CLONE (1), OPEN_TREE_CLOEXEC
+/// (O_CLOEXEC = 0o2_000_000), plus AT_* path-walking bits.
+fn sys_open_tree(args: &SyscallArgs) -> SyscallResult {
+    const OPEN_TREE_CLONE: u32 = 1;
+    const O_CLOEXEC: u32 = 0o2_000_000;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_NO_AUTOMOUNT: u32 = 0x800;
+    const AT_RECURSIVE: u32 = 0x8000;
+    const OPEN_TREE_MASK: u32 =
+        OPEN_TREE_CLONE | O_CLOEXEC | AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW
+        | AT_NO_AUTOMOUNT | AT_RECURSIVE;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    if flags & !OPEN_TREE_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = validate_user_str(args.arg1) {
+            return linux_err(linux_errno_for(e));
+        }
+    } else if flags & AT_EMPTY_PATH == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    linux_err(errno::EPERM)
+}
+
+/// `move_mount(from_dirfd, from_path*, to_dirfd, to_path*, flags)`.
+fn sys_move_mount(args: &SyscallArgs) -> SyscallResult {
+    const MOVE_MOUNT_F_SYMLINKS: u32 = 0x1;
+    const MOVE_MOUNT_F_AUTOMOUNTS: u32 = 0x2;
+    const MOVE_MOUNT_F_EMPTY_PATH: u32 = 0x4;
+    const MOVE_MOUNT_T_SYMLINKS: u32 = 0x10;
+    const MOVE_MOUNT_T_AUTOMOUNTS: u32 = 0x20;
+    const MOVE_MOUNT_T_EMPTY_PATH: u32 = 0x40;
+    const MOVE_MOUNT_SET_GROUP: u32 = 0x100;
+    const MOVE_MOUNT_BENEATH: u32 = 0x200;
+    const MOVE_MOUNT_MASK: u32 = MOVE_MOUNT_F_SYMLINKS
+        | MOVE_MOUNT_F_AUTOMOUNTS
+        | MOVE_MOUNT_F_EMPTY_PATH
+        | MOVE_MOUNT_T_SYMLINKS
+        | MOVE_MOUNT_T_AUTOMOUNTS
+        | MOVE_MOUNT_T_EMPTY_PATH
+        | MOVE_MOUNT_SET_GROUP
+        | MOVE_MOUNT_BENEATH;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg4 as u32;
+    if flags & !MOVE_MOUNT_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = validate_user_str(args.arg1) {
+            return linux_err(linux_errno_for(e));
+        }
+    } else if flags & MOVE_MOUNT_F_EMPTY_PATH == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if args.arg3 != 0 {
+        if let Err(e) = validate_user_str(args.arg3) {
+            return linux_err(linux_errno_for(e));
+        }
+    } else if flags & MOVE_MOUNT_T_EMPTY_PATH == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    linux_err(errno::EPERM)
+}
+
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
     // type 0..=10 are defined in Linux.
@@ -11898,6 +12221,201 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::EPOLL_WAIT, &a).value != -i64::from(errno::EBADF) {
             serial_println!("[syscall/linux]   FAIL: epoll_wait valid args not EBADF");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // openat2 / execveat / handle-at + new mount API
+    // -----------------------------------------------------------------
+    {
+        // Sample valid C string in kernel memory we can point at.
+        let path: &[u8] = b"/tmp/x\0";
+        let path_ptr = path.as_ptr() as u64;
+        let how_bytes = [0u8; 24];
+        let how_ptr = how_bytes.as_ptr() as u64;
+
+        // openat2 with NULL path -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: how_ptr, arg3: 24, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: openat2 NULL path not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // openat2 with wrong size -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_ptr, arg3: 16, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: openat2 wrong size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // openat2 with NULL how -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 24, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: openat2 NULL how not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // openat2 with valid args -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_ptr, arg3: 24, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: openat2 valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // execveat with bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0xff, arg5: 0 };
+        if dispatch_linux(nr::EXECVEAT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: execveat bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // execveat with NULL path and no AT_EMPTY_PATH -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EXECVEAT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: execveat NULL path not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // execveat with valid args -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EXECVEAT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: execveat valid not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+
+        // name_to_handle_at with bad flags -> EINVAL.
+        let mount_id_bytes = [0u8; 4];
+        let mount_id_ptr = mount_id_bytes.as_ptr() as u64;
+        let handle_bytes = [0u8; 8];
+        let handle_ptr = handle_bytes.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: handle_ptr, arg3: mount_id_ptr, arg4: 0xff, arg5: 0 };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: n_t_h_a bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // name_to_handle_at with NULL mount_id -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: handle_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: n_t_h_a NULL mount_id not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // name_to_handle_at with valid args -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: handle_ptr, arg3: mount_id_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: n_t_h_a valid not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+
+        // open_by_handle_at with NULL handle -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: open_by_handle_at NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // open_by_handle_at with valid handle -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: handle_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_by_handle_at valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // fsopen with bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: path_ptr, arg1: 0xff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsopen bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fsopen NULL fsname -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: fsopen NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // fsopen valid -> EPERM.
+        let a = SyscallArgs { arg0: path_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsopen valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // fsconfig bad cmd -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig bad cmd not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fsconfig valid cmd (in kernel context fd validation is no-op) -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // fsmount bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0xff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsmount bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fsmount bad attr_flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x4000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsmount bad attr_flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fsmount valid -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0x1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsmount valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // fspick bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0xff, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fspick bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fspick NULL path -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: fspick NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // fspick valid -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fspick valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // open_tree bad flags -> EINVAL.  Use bit 30 which is outside the
+        // OPEN_TREE_MASK (the mask tops out at AT_RECURSIVE = 0x8000 and
+        // O_CLOEXEC = 0o2_000_000 = 0x80000).
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x4000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: open_tree bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // open_tree valid -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_tree valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+
+        // move_mount bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: path_ptr, arg4: 0xffff_ffff, arg5: 0 };
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: move_mount bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // move_mount NULL from-path without EMPTY_PATH -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: path_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: move_mount NULL from not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // move_mount valid -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: path_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: move_mount valid not EPERM");
             return Err(KernelError::InternalError);
         }
     }

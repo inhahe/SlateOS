@@ -8553,3 +8553,73 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           hasn't done a partial transition.  Adding
 ##           separate fields is a follow-up.
 
+##   79. setreuid / setregid / setresuid / setresgid wired
+##      to credentials (batch 53).
+##      Status: PARTIAL.  The selection rule + EPERM gating
+##      is real; the single-uid model means partial
+##      transitions are folded.
+##      Before batch 53, all four were silent-success
+##      stubs.  After batch 52 fixed sys_setuid the
+##      multi-arg variants were the obvious remaining hole
+##      — programs that use setresuid(N, N, N) or
+##      setreuid(N, N) instead of plain setuid(N) (musl's
+##      pthread_setname_np helpers, some daemons) still
+##      hit the silent-success-with-wrong-uid bug.
+##      Wiring up:
+##         - apply_uid_change(ruid, euid, suid) helper
+##           selects the resolved new uid by priority:
+##           euid wins over ruid wins over suid.  u32::MAX
+##           is Linux's (uid_t)-1 "no change" sentinel and
+##           is skipped during selection.  All -1 = no-op
+##           success.  When a non-(-1) value resolves, the
+##           helper applies the same permission gate as
+##           sys_setuid (caller uid 0 may do anything; non-
+##           root may only set to its current uid).
+##         - apply_gid_change mirrors with gid; the
+##           permission gate still keys on uid (CAP_SETGID
+##           in Linux's model).
+##         - sys_setreuid / sys_setresuid call
+##           apply_uid_change with (ruid, euid, -1) and
+##           (ruid, euid, suid) respectively.  Same for the
+##           gid variants.
+##      Why "euid wins":
+##         - In our single-uid model the PCB uid serves as
+##           both real and effective.  Programs that call
+##           setresuid(-1, X, -1) mean "I want my effective
+##           uid to be X" — the dominant pattern in sudo-
+##           style privilege transitions.  Picking euid
+##           first matches that intent.
+##         - For setresuid(X, -1, -1) (real-uid-only
+##           change, far less common), our model still
+##           updates uid to X.  getuid() then returns X,
+##           which is what a program checking the *real*
+##           uid expects.  geteuid() (aliased to getuid)
+##           also returns X — that part diverges from
+##           Linux, but a caller that asks for euid to
+##           stay alone while changing ruid is already
+##           assuming we track them separately, which we
+##           don't and document.
+##      Boot self-test coverage:
+##         - Pure-function apply_uid_change /
+##           apply_gid_change with (-1,-1,-1) → 0.
+##         - Pure-function with each of (X,-1,-1),
+##           (-1,X,-1), (-1,-1,X) in kernel context → 0
+##           (no PCB, no-op).
+##         - Dispatch routing for SETREUID / SETREGID /
+##           SETRESUID / SETRESGID with all-(-1) → 0.
+##      Limitations:
+##         - We carry one uid, not three.  A program that
+##           does setresuid(0, 1000, 0) (drop euid only,
+##           keep ability to regain root via saved uid)
+##           cannot be faithfully represented; our model
+##           reads euid first so we'd set uid=1000 and
+##           the program loses its saved-uid handle.  Real
+##           Linux semantics for this pattern require
+##           three separate fields.  Tracked as a future
+##           credentials-subsystem batch.
+##         - We never actually deny based on RLIMIT_NPROC
+##           after a uid change (NPROC is checked at fork
+##           against the new uid by the next fork call;
+##           that wiring is already in place via
+##           batch 43).  No new accounting needed here.
+

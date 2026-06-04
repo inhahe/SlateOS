@@ -6062,3 +6062,15 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Limitation: when fd-table sharing (CLONE_FILES) lands,
 ##      CLOSE_RANGE_UNSHARE must allocate a private table before
 ##      the close loop.
+##  32. GETRLIMIT / SETRLIMIT (legacy 16-byte forms) — DONE as
+##      thin forwarders to sys_prlimit64 with pid=0.  Linux's
+##      struct rlimit and struct rlimit64 have identical layout
+##      on x86_64, so a direct shim is correct.  Inherits the
+##      prlimit64 limitation: set is a silent no-op until a
+##      per-process rlimit store lands.
+##  33. GETCPU — DONE.  Returns the current logical CPU index
+##      (via smp::current_cpu_index) and node 0.  Validates the
+##      writable user pointers (each 4 bytes) and accepts NULL
+##      for either output.  Limitation: we have no NUMA topology
+##      so the node is hard-coded; revisit if NUMA-aware
+##      scheduling lands.

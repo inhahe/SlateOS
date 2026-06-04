@@ -430,6 +430,9 @@ pub mod nr {
     pub const FADVISE64: u64 = 221;
     pub const READAHEAD: u64 = 187;
     pub const CLOSE_RANGE: u64 = 436;
+    pub const GETRLIMIT: u64 = 97;
+    pub const SETRLIMIT: u64 = 160;
+    pub const GETCPU: u64 = 309;
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,6 +1274,9 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::FADVISE64 => sys_fadvise64(args),
         nr::READAHEAD => sys_readahead(args),
         nr::CLOSE_RANGE => sys_close_range(args),
+        nr::GETRLIMIT => sys_getrlimit(args),
+        nr::SETRLIMIT => sys_setrlimit(args),
+        nr::GETCPU => sys_getcpu(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -4096,6 +4102,94 @@ fn sys_close_range(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+// ---------------------------------------------------------------------------
+// Legacy getrlimit / setrlimit
+//
+// These predate prlimit64() and operate only on the calling process.  The
+// `struct rlimit` they read/write is identical in layout to `struct
+// rlimit64` (two u64 fields), so we forward to sys_prlimit64 with pid=0.
+//
+// Glibc/musl call getrlimit() during early init to size the main-thread
+// stack; failing to handle it cleanly causes pthread_create later to
+// guess a too-small stack and crash.
+// ---------------------------------------------------------------------------
+
+/// `getrlimit(resource, rlim)` — write the current limit for `resource`
+/// into `rlim`.
+fn sys_getrlimit(args: &SyscallArgs) -> SyscallResult {
+    let prlimit_args = SyscallArgs {
+        arg0: 0,            // pid: caller
+        arg1: args.arg0,    // resource
+        arg2: 0,            // new_limit: NULL
+        arg3: args.arg1,    // old_limit: out
+        arg4: 0,
+        arg5: 0,
+    };
+    sys_prlimit64(&prlimit_args)
+}
+
+/// `setrlimit(resource, rlim)` — install a new limit for `resource`.
+fn sys_setrlimit(args: &SyscallArgs) -> SyscallResult {
+    let prlimit_args = SyscallArgs {
+        arg0: 0,            // pid: caller
+        arg1: args.arg0,    // resource
+        arg2: args.arg1,    // new_limit: in
+        arg3: 0,            // old_limit: NULL
+        arg4: 0,
+        arg5: 0,
+    };
+    sys_prlimit64(&prlimit_args)
+}
+
+// ---------------------------------------------------------------------------
+// getcpu — report current CPU / NUMA node
+//
+// `getcpu(unsigned *cpu, unsigned *node, void *tcache)`.  `tcache` is
+// unused on modern kernels.  We report the CPU we're currently running on
+// and node 0 (we have no NUMA topology yet).  Either pointer may be NULL.
+// ---------------------------------------------------------------------------
+
+/// `getcpu(cpu, node, tcache)` — write the calling thread's current
+/// logical CPU id and NUMA node.
+fn sys_getcpu(args: &SyscallArgs) -> SyscallResult {
+    let cpu_ptr = args.arg0;
+    let node_ptr = args.arg1;
+    // arg2 (tcache) ignored: NULL is the documented modern usage.
+
+    if cpu_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(cpu_ptr, 4) {
+            return linux_err(linux_errno_for(e));
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let cpu_id: u32 = crate::smp::current_cpu_index() as u32;
+        let bytes = cpu_id.to_ne_bytes();
+        // SAFETY: validated as a writable 4-byte range above.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(bytes.as_ptr(), cpu_ptr, 4)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    if node_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(node_ptr, 4) {
+            return linux_err(linux_errno_for(e));
+        }
+        let node_id: u32 = 0;
+        let bytes = node_id.to_ne_bytes();
+        // SAFETY: validated as a writable 4-byte range above.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(bytes.as_ptr(), node_ptr, 4)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    SyscallResult::ok(0)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -6654,6 +6748,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             != -i64::from(errno::EBADF) {
             serial_println!(
                 "[syscall/linux]   FAIL: close_range(no caller) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // getrlimit / setrlimit — wrappers around prlimit64.
+    //   - unknown resource -> EINVAL via the prlimit64 path.
+    //   - NULL rlim with valid resource -> 0 (matches prlimit64 NULL/NULL).
+    {
+        // getrlimit(99, NULL) -> EINVAL (resource > 15).
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETRLIMIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrlimit(bad) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setrlimit(99, NULL) -> EINVAL.
+        if dispatch_linux(nr::SETRLIMIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setrlimit(bad) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // getrlimit(RLIMIT_STACK=3, NULL) -> 0 (NULL pointer accepted).
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETRLIMIT, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrlimit(STACK,NULL) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETRLIMIT, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setrlimit(STACK,NULL) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // getcpu — both pointers NULL is allowed and returns 0.
+    {
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETCPU, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getcpu(NULL,NULL) not 0"
             );
             return Err(KernelError::InternalError);
         }

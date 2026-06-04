@@ -22,9 +22,11 @@
 #![allow(clippy::needless_range_loop, clippy::vec_init_then_push)]
 
 use std::collections::HashMap;
+#[cfg(not(test))]
 use std::env;
 use std::fmt;
 use std::fs;
+#[cfg(not(test))]
 use std::io::{self, Write as IoWrite};
 use std::path::Path;
 
@@ -93,7 +95,9 @@ const SYSTEM_SOCKET: &str = "/var/run/dbus/system_bus_socket";
 const SESSION_SOCKET_DIR: &str = "/tmp/dbus-session";
 
 /// Config file paths.
+#[cfg(not(test))]
 const SYSTEM_CONF: &str = "/etc/dbus-1/system.conf";
+#[cfg(not(test))]
 const SESSION_CONF: &str = "/etc/dbus-1/session.conf";
 
 /// Maximum message size (128 MiB, per spec).
@@ -2804,6 +2808,7 @@ fn extract_xml_attr(line: &str, attr: &str) -> Option<String> {
 // ============================================================================
 
 /// Parse command-line arguments for dbus-send.
+#[cfg(not(test))]
 struct SendArgs {
     system: bool,
     session: bool,
@@ -2815,6 +2820,7 @@ struct SendArgs {
     msg_type: u8,
 }
 
+#[cfg(not(test))]
 fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
     let mut sa = SendArgs {
         system: false,
@@ -2905,6 +2911,7 @@ fn parse_typed_value(s: &str) -> Option<DbusType> {
 }
 
 /// Run the dbus-send functionality.
+#[cfg(not(test))]
 fn run_dbus_send(args: &[String]) -> i32 {
     let sa = match parse_send_args(args) {
         Ok(a) => a,
@@ -2963,6 +2970,7 @@ fn run_dbus_send(args: &[String]) -> i32 {
 // ============================================================================
 
 /// Run the dbus-monitor functionality.
+#[cfg(not(test))]
 fn run_dbus_monitor(args: &[String]) -> i32 {
     let mut system = false;
     let mut rules = Vec::new();
@@ -3005,6 +3013,7 @@ fn run_dbus_monitor(args: &[String]) -> i32 {
 // ============================================================================
 
 /// Run the dbus-daemon functionality.
+#[cfg(not(test))]
 fn run_dbus_daemon(args: &[String]) -> i32 {
     let mut bus_type = BusType::Session;
     let mut config_path: Option<String> = None;
@@ -3133,6 +3142,7 @@ fn detect_personality(args: &[String]) -> &'static str {
     "dbus-daemon"
 }
 
+#[cfg(not(test))]
 fn run_main() -> i32 {
     let args: Vec<String> = env::args().collect();
 

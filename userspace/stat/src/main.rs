@@ -2320,41 +2320,51 @@ mod tests {
 
     #[test]
     fn test_stat_format_size() {
-        let mut st = KernelStat::default();
-        st.st_size = 12345;
+        let st = KernelStat {
+            st_size: 12345,
+            ..KernelStat::default()
+        };
         let result = apply_stat_format("%s", &st, "f", "");
         assert_eq!(result, "12345");
     }
 
     #[test]
     fn test_stat_format_octal_perms() {
-        let mut st = KernelStat::default();
-        st.st_mode = S_IFREG | 0o755;
+        let st = KernelStat {
+            st_mode: S_IFREG | 0o755,
+            ..KernelStat::default()
+        };
         let result = apply_stat_format("%a", &st, "f", "");
         assert_eq!(result, "0755");
     }
 
     #[test]
     fn test_stat_format_rwx_perms() {
-        let mut st = KernelStat::default();
-        st.st_mode = S_IFREG | 0o644;
+        let st = KernelStat {
+            st_mode: S_IFREG | 0o644,
+            ..KernelStat::default()
+        };
         let result = apply_stat_format("%A", &st, "f", "");
         assert_eq!(result, "-rw-r--r--");
     }
 
     #[test]
     fn test_stat_format_file_type() {
-        let mut st = KernelStat::default();
-        st.st_mode = S_IFDIR | 0o755;
+        let st = KernelStat {
+            st_mode: S_IFDIR | 0o755,
+            ..KernelStat::default()
+        };
         let result = apply_stat_format("%F", &st, "d", "");
         assert_eq!(result, "directory");
     }
 
     #[test]
     fn test_stat_format_inode_and_links() {
-        let mut st = KernelStat::default();
-        st.st_ino = 42;
-        st.st_nlink = 3;
+        let st = KernelStat {
+            st_ino: 42,
+            st_nlink: 3,
+            ..KernelStat::default()
+        };
         let result = apply_stat_format("%i %h", &st, "f", "");
         assert_eq!(result, "42 3");
     }
@@ -2375,25 +2385,31 @@ mod tests {
 
     #[test]
     fn test_stat_format_uid_gid() {
-        let mut st = KernelStat::default();
-        st.st_uid = 1000;
-        st.st_gid = 100;
+        let st = KernelStat {
+            st_uid: 1000,
+            st_gid: 100,
+            ..KernelStat::default()
+        };
         let result = apply_stat_format("%u:%g", &st, "f", "");
         assert_eq!(result, "1000:100");
     }
 
     #[test]
     fn test_stat_format_raw_mode_hex() {
-        let mut st = KernelStat::default();
-        st.st_mode = S_IFREG | 0o755;
+        let st = KernelStat {
+            st_mode: S_IFREG | 0o755,
+            ..KernelStat::default()
+        };
         let result = apply_stat_format("%f", &st, "f", "");
         assert_eq!(result, format!("{:x}", S_IFREG | 0o755));
     }
 
     #[test]
     fn test_stat_format_device_major_minor() {
-        let mut st = KernelStat::default();
-        st.st_rdev = (8 << 8) | 1; // major=8, minor=1
+        let st = KernelStat {
+            st_rdev: (8 << 8) | 1, // major=8, minor=1
+            ..KernelStat::default()
+        };
         let result = apply_stat_format("%t:%T", &st, "f", "");
         assert_eq!(result, "8:1");
     }

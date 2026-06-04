@@ -37,9 +37,13 @@
 #![cfg_attr(not(test), no_main)]
 
 use std::collections::BTreeSet;
+#[cfg(not(test))]
 use std::env;
+#[cfg(not(test))]
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
+#[cfg(not(test))]
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 // ============================================================================
@@ -356,6 +360,7 @@ fn detect_language(path: &str) -> Option<Language> {
 // ============================================================================
 
 /// Collect files to scan, applying recursion and exclusion rules.
+#[cfg(not(test))]
 fn collect_files(config: &Config) -> Vec<String> {
     let mut result = Vec::new();
 
@@ -387,6 +392,7 @@ fn collect_files(config: &Config) -> Vec<String> {
 }
 
 /// Recursively collect files from a directory.
+#[cfg(not(test))]
 fn collect_dir(dir: &Path, excludes: &[String], out: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -1647,6 +1653,7 @@ fn extract_shell_tags(content: &str, file: &str) -> Vec<Tag> {
 
 /// Extract all tags from one source file, dispatching to the language-specific
 /// extractor.
+#[cfg(not(test))]
 fn extract_tags_from_file(path: &str) -> Vec<Tag> {
     let language = match detect_language(path) {
         Some(l) => l,
@@ -1679,6 +1686,7 @@ fn extract_tags_from_content(content: &str, file: &str, language: Language) -> V
 }
 
 /// Read file list from stdin (one path per line).
+#[cfg(not(test))]
 fn read_stdin_filelist() -> Vec<String> {
     let stdin = io::stdin();
     let reader = BufReader::new(stdin.lock());
@@ -1841,6 +1849,7 @@ fn write_etags<W: Write>(tags: &[Tag], out: &mut W) -> io::Result<()> {
 // ============================================================================
 
 /// Read existing ctags entries from a file, returning them as raw lines.
+#[cfg(not(test))]
 fn read_existing_ctags(path: &str) -> Vec<String> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
@@ -1883,6 +1892,7 @@ fn parse_ctags_line(line: &str) -> Option<Tag> {
 // Help / version
 // ============================================================================
 
+#[cfg(not(test))]
 fn print_help() {
     println!(
         "\
@@ -1920,6 +1930,7 @@ Tag kinds generated:
 // Core run logic
 // ============================================================================
 
+#[cfg(not(test))]
 fn run_main() -> i32 {
     let args: Vec<String> = env::args().collect();
 
@@ -1936,6 +1947,7 @@ fn run_main() -> i32 {
     }
 }
 
+#[cfg(not(test))]
 fn run(config: &Config) -> i32 {
     // Collect files.
     let files = collect_files(config);

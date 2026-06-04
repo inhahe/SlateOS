@@ -1466,9 +1466,9 @@ mod tests {
     fn test_build_occupancy_empty() {
         let vehicles: Vec<Vehicle> = vec![];
         let occ = build_occupancy(&vehicles);
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                assert!(occ[r][c].is_none());
+        for row in occ.iter().take(GRID_SIZE) {
+            for cell in row.iter().take(GRID_SIZE) {
+                assert!(cell.is_none());
             }
         }
     }
@@ -2139,9 +2139,9 @@ mod tests {
         // Find an unoccupied cell
         let occ = build_occupancy(&app.vehicles);
         let mut found = false;
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                if occ[r][c].is_none() {
+        for (r, row) in occ.iter().enumerate().take(GRID_SIZE) {
+            for (c, cell) in row.iter().enumerate().take(GRID_SIZE) {
+                if cell.is_none() {
                     app.select_at_cell(r, c);
                     assert_eq!(app.selected, prev);
                     found = true;
@@ -2542,9 +2542,9 @@ mod tests {
         app.selected = 0;
         let occ = build_occupancy(&app.vehicles);
         let (gx, gy) = grid_origin();
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                if occ[r][c].is_none() {
+        for (r, row) in occ.iter().enumerate().take(GRID_SIZE) {
+            for (c, cell) in row.iter().enumerate().take(GRID_SIZE) {
+                if cell.is_none() {
                     let (cx, cy) = cell_pixel_pos(r, c);
                     let click =
                         mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
@@ -2941,9 +2941,9 @@ mod tests {
             // Check no two vehicles overlap
             let occ = build_occupancy(&vehicles);
             let mut cell_count = 0;
-            for r in 0..GRID_SIZE {
-                for c in 0..GRID_SIZE {
-                    if occ[r][c].is_some() {
+            for row in occ.iter().take(GRID_SIZE) {
+                for cell in row.iter().take(GRID_SIZE) {
+                    if cell.is_some() {
                         cell_count += 1;
                     }
                 }

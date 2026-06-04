@@ -9,6 +9,10 @@
 //! and swap configuration.
 
 #![deny(clippy::all)]
+// MemInfo::sreclaimable and FstabEntry::{mountpoint, options} mirror the
+// /proc/meminfo and /etc/fstab field vocabulary the real swapon must
+// consume. Dead-code lint cannot see across that future boundary.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;

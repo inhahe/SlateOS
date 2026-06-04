@@ -169,11 +169,10 @@ fn fstype_from_argv0(argv0: &str) -> Option<String> {
         None => argv0,
     };
     // Look for "fsck.<type>".
-    if let Some(rest) = basename.strip_prefix("fsck.") {
-        if !rest.is_empty() {
+    if let Some(rest) = basename.strip_prefix("fsck.")
+        && !rest.is_empty() {
             return Some(rest.to_string());
         }
-    }
     None
 }
 
@@ -503,14 +502,13 @@ fn check_device(device: &str, fstype: &Option<String>, opts: &Options) -> CheckR
     };
 
     // Warn if mounted (non-root checks on mounted fs are risky).
-    if is_mounted(&dev_path) && !opts.no_modify {
-        if !opts.json {
+    if is_mounted(&dev_path) && !opts.no_modify
+        && !opts.json {
             eprintln!(
                 "fsck: warning: {dev_display} is mounted; \
                  running check in read-only mode"
             );
         }
-    }
 
     if !opts.json {
         println!("fsck: checking {dev_display} (type: {resolved_fstype})");
@@ -609,14 +607,13 @@ fn check_device(device: &str, fstype: &Option<String>, opts: &Options) -> CheckR
 
         // A repair return of 0 means the kernel fixed everything.
         // Convention: if the root filesystem was repaired, recommend reboot.
-        if result.errors_fixed > 0 {
-            if dev_path == "/dev/sda1"
+        if result.errors_fixed > 0
+            && (dev_path == "/dev/sda1"
                 || dev_path == "/dev/root"
-                || dev_path == "/dev/nvme0n1p1"
+                || dev_path == "/dev/nvme0n1p1")
             {
                 result.needs_reboot = true;
             }
-        }
 
         if !opts.json {
             if result.errors_remaining == 0 {
@@ -723,12 +720,12 @@ fn print_summary(results: &[CheckResult]) {
     println!();
     println!("=== Summary ===");
     println!(
-        "  {:<24} {:>8} {:>8} {:>8}  {}",
-        "DEVICE", "FOUND", "FIXED", "REMAIN", "STATUS"
+        "  {:<24} {:>8} {:>8} {:>8}  STATUS",
+        "DEVICE", "FOUND", "FIXED", "REMAIN"
     );
     println!(
-        "  {:<24} {:>8} {:>8} {:>8}  {}",
-        "------", "-----", "-----", "------", "------"
+        "  {:<24} {:>8} {:>8} {:>8}  ------",
+        "------", "-----", "-----", "------"
     );
 
     for r in results {

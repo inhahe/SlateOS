@@ -323,7 +323,7 @@ fn decode_octal(buf: &[u8]) -> u64 {
         if b == 0 || b == b' ' {
             break;
         }
-        if b >= b'0' && b <= b'7' {
+        if (b'0'..=b'7').contains(&b) {
             val = val.saturating_mul(8).saturating_add(u64::from(b - b'0'));
         }
     }
@@ -400,13 +400,11 @@ fn is_excluded(path: &str, excludes: &[String]) -> bool {
             return true;
         }
         // Also match against just the filename component.
-        if let Some(fname) = Path::new(path).file_name() {
-            if let Some(fname_str) = fname.to_str() {
-                if glob_matches(pattern, fname_str) {
+        if let Some(fname) = Path::new(path).file_name()
+            && let Some(fname_str) = fname.to_str()
+                && glob_matches(pattern, fname_str) {
                     return true;
                 }
-            }
-        }
     }
     false
 }
@@ -453,7 +451,7 @@ fn compute_checksum(header_bytes: &[u8; BLOCK_SIZE]) -> u32 {
     let mut sum: u32 = 0;
     for (i, &b) in header_bytes.iter().enumerate() {
         // The checksum field occupies bytes 148..156.
-        if i >= 148 && i < 156 {
+        if (148..156).contains(&i) {
             sum += 0x20_u32;
         } else {
             sum += u32::from(b);
@@ -558,7 +556,7 @@ fn format_timestamp(epoch_secs: u64) -> String {
     ];
 
     fn is_leap(y: u64) -> bool {
-        (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+        (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
     }
 
     let mut remaining = epoch_secs;
@@ -1076,27 +1074,24 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
                     eprintln!("{}", msg);
                     errors.push(msg);
                 }
-                if opts.preserve_permissions {
-                    if let Err(e) = set_permissions(&dest, entry.mode) {
+                if opts.preserve_permissions
+                    && let Err(e) = set_permissions(&dest, entry.mode) {
                         let msg = format!("tar: {}: {}", dest.display(), e);
                         eprintln!("{}", msg);
                         errors.push(msg);
                     }
-                }
             }
             TYPEFLAG_REGULAR | b'\0' => {
                 // Ensure parent directory exists.
-                if let Some(parent) = dest.parent() {
-                    if !parent.exists() {
-                        if let Err(e) = fs::create_dir_all(parent) {
+                if let Some(parent) = dest.parent()
+                    && !parent.exists()
+                        && let Err(e) = fs::create_dir_all(parent) {
                             let msg = format!("tar: {}: {}", parent.display(), e);
                             eprintln!("{}", msg);
                             errors.push(msg);
                             skip_data(&mut reader, entry.size)?;
                             continue;
                         }
-                    }
-                }
 
                 if opts.keep_old_files && dest.exists() {
                     eprintln!("tar: {}: already exists, skipping", dest.display());
@@ -1106,13 +1101,12 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
 
                 match extract_file_data(&mut reader, &dest, entry.size) {
                     Ok(()) => {
-                        if opts.preserve_permissions {
-                            if let Err(e) = set_permissions(&dest, entry.mode) {
+                        if opts.preserve_permissions
+                            && let Err(e) = set_permissions(&dest, entry.mode) {
                                 let msg = format!("tar: {}: {}", dest.display(), e);
                                 eprintln!("{}", msg);
                                 errors.push(msg);
                             }
-                        }
                     }
                     Err(e) => {
                         let msg = format!("tar: {}: {}", dest.display(), e);
@@ -1123,11 +1117,10 @@ fn extract_archive(opts: &Options) -> Result<(), String> {
             }
             TYPEFLAG_SYMLINK => {
                 // Symlink creation: best-effort.
-                if let Some(parent) = dest.parent() {
-                    if !parent.exists() {
+                if let Some(parent) = dest.parent()
+                    && !parent.exists() {
                         let _ = fs::create_dir_all(parent);
                     }
-                }
                 #[cfg(unix)]
                 {
                     if let Err(e) =
@@ -1200,7 +1193,7 @@ fn skip_data<R: Read>(reader: &mut R, size: u64) -> Result<(), String> {
         0
     } else {
         // Round up to next block boundary.
-        let blocks = (size + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
+        let blocks = size.div_ceil(BLOCK_SIZE as u64);
         blocks * BLOCK_SIZE as u64
     };
 
@@ -1234,7 +1227,7 @@ fn list_archive(opts: &Options) -> Result<(), String> {
     let mut block = [0u8; BLOCK_SIZE];
 
     loop {
-        if let Err(_) = read_exact(&mut reader, &mut block) {
+        if read_exact(&mut reader, &mut block).is_err() {
             if consecutive_zero_blocks > 0 {
                 break;
             }
@@ -1330,14 +1323,12 @@ fn main() {
     };
 
     // Change to target directory if specified (for create mode).
-    if let Some(ref dir) = opts.directory {
-        if opts.mode == Mode::Create {
-            if let Err(e) = env::set_current_dir(dir) {
+    if let Some(ref dir) = opts.directory
+        && opts.mode == Mode::Create
+            && let Err(e) = env::set_current_dir(dir) {
                 eprintln!("tar: cannot change to '{}': {}", dir, e);
                 process::exit(1);
             }
-        }
-    }
 
     let result = match opts.mode {
         Mode::Create => create_archive(&opts),

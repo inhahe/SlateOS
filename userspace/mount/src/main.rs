@@ -391,8 +391,8 @@ fn main() {
         if entries.is_empty() {
             println!("No entries in /etc/fstab (or file not found)");
         } else {
-            println!("{:<20} {:<20} {:<10} {}", "Device", "Mount", "Type", "Options");
-            println!("{:<20} {:<20} {:<10} {}", "------", "-----", "----", "-------");
+            println!("{:<20} {:<20} {:<10} Options", "Device", "Mount", "Type");
+            println!("{:<20} {:<20} {:<10} -------", "------", "-----", "----");
             for e in &entries {
                 println!("{:<20} {:<20} {:<10} {}", e.device, e.mount_point, e.fs_type, e.options);
             }

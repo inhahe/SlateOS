@@ -185,7 +185,7 @@ fn read_u64(path: &str) -> u64 {
 
 /// Read a file and parse it as a boolean flag (1 = true).
 fn read_bool(path: &str) -> bool {
-    read_file(path).map_or(false, |s| s == "1")
+    read_file(path).is_some_and(|s| s == "1")
 }
 
 // ============================================================================
@@ -239,27 +239,21 @@ fn read_fsinfo(dev_name: &str, parent_name: Option<&str>) -> (String, String, St
     let mut uuid = String::new();
 
     for base in &paths_to_try {
-        if fstype.is_empty() {
-            if let Some(ft) = read_file(&format!("{base}/fstype")) {
-                if !ft.is_empty() {
+        if fstype.is_empty()
+            && let Some(ft) = read_file(&format!("{base}/fstype"))
+                && !ft.is_empty() {
                     fstype = ft;
                 }
-            }
-        }
-        if label.is_empty() {
-            if let Some(lb) = read_file(&format!("{base}/label")) {
-                if !lb.is_empty() {
+        if label.is_empty()
+            && let Some(lb) = read_file(&format!("{base}/label"))
+                && !lb.is_empty() {
                     label = lb;
                 }
-            }
-        }
-        if uuid.is_empty() {
-            if let Some(id) = read_file(&format!("{base}/uuid")) {
-                if !id.is_empty() {
+        if uuid.is_empty()
+            && let Some(id) = read_file(&format!("{base}/uuid"))
+                && !id.is_empty() {
                     uuid = id;
                 }
-            }
-        }
     }
 
     // Also try /dev/disk/by-uuid/ and /dev/disk/by-label/ symlinks.
@@ -271,31 +265,28 @@ fn read_fsinfo(dev_name: &str, parent_name: Option<&str>) -> (String, String, St
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    if target_name == dev_name {
-                        if let Some(u) = entry.file_name().to_str() {
+                    if target_name == dev_name
+                        && let Some(u) = entry.file_name().to_str() {
                             uuid = u.to_string();
                         }
-                    }
                 }
             }
         }
-        if label.is_empty() {
-            if let Ok(entries) = fs::read_dir("/dev/disk/by-label") {
+        if label.is_empty()
+            && let Ok(entries) = fs::read_dir("/dev/disk/by-label") {
                 for entry in entries.flatten() {
                     if let Ok(target) = fs::read_link(entry.path()) {
                         let target_name = target
                             .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("");
-                        if target_name == dev_name {
-                            if let Some(l) = entry.file_name().to_str() {
+                        if target_name == dev_name
+                            && let Some(l) = entry.file_name().to_str() {
                                 label = l.to_string();
                             }
-                        }
                     }
                 }
             }
-        }
     }
 
     (fstype, label, uuid)
@@ -391,8 +382,8 @@ fn scan_partitions(
 
         // Verify this is actually a partition by checking for a "partition"
         // file or a "size" file.
-        let is_partition = fs::metadata(&format!("{part_path}/partition")).is_ok()
-            || fs::metadata(&format!("{part_path}/size")).is_ok();
+        let is_partition = fs::metadata(format!("{part_path}/partition")).is_ok()
+            || fs::metadata(format!("{part_path}/size")).is_ok();
         if !is_partition {
             continue;
         }

@@ -8,6 +8,10 @@
 //! Reads `/proc/mounts`, `/proc/self/mountinfo`, and `/etc/fstab`.
 
 #![deny(clippy::all)]
+// FstabEntry::{dump, pass} are columns 5 and 6 of /etc/fstab (dump-frequency
+// and fsck-pass-number). The real findmnt -o DUMP,PASS surface must produce
+// them. Dead-code lint cannot see across that future boundary.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;

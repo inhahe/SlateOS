@@ -125,11 +125,10 @@ fn is_mounted(dev_path: &str) -> bool {
 
     for line in content.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(mounted_dev) = parts.first() {
-            if *mounted_dev == dev_path {
+        if let Some(mounted_dev) = parts.first()
+            && *mounted_dev == dev_path {
                 return true;
             }
-        }
     }
     false
 }
@@ -138,22 +137,20 @@ fn is_mounted(dev_path: &str) -> bool {
 /// Returns an empty string if no filesystem is detected.
 fn detect_existing_fs(dev_name: &str) -> String {
     // Try /sys/block/<dev>/fstype first (whole disk).
-    if let Some(ft) = read_file(&format!("/sys/block/{dev_name}/fstype")) {
-        if !ft.is_empty() {
+    if let Some(ft) = read_file(&format!("/sys/block/{dev_name}/fstype"))
+        && !ft.is_empty() {
             return ft;
         }
-    }
 
     // Try as a partition: scan parent disks.
     if let Ok(entries) = fs::read_dir("/sys/block") {
         for entry in entries.flatten() {
             if let Ok(name) = entry.file_name().into_string() {
                 let part_path = format!("/sys/block/{name}/{dev_name}/fstype");
-                if let Some(ft) = read_file(&part_path) {
-                    if !ft.is_empty() {
+                if let Some(ft) = read_file(&part_path)
+                    && !ft.is_empty() {
                         return ft;
                     }
-                }
             }
         }
     }
@@ -183,7 +180,7 @@ fn get_device_size(dev_name: &str) -> u64 {
     }
 
     // Fall back to file size for image files.
-    if let Ok(meta) = fs::metadata(&format!("/dev/{dev_name}")) {
+    if let Ok(meta) = fs::metadata(format!("/dev/{dev_name}")) {
         return meta.len();
     }
 
@@ -375,11 +372,10 @@ fn parse_args() -> MkfsOptions {
     let mut opts = MkfsOptions::new();
 
     // Detect filesystem type from program name (mkfs.ext4, mkfs.fat, etc.).
-    if let Some(argv0) = args.first() {
-        if let Some(detected) = detect_type_from_argv0(argv0) {
+    if let Some(argv0) = args.first()
+        && let Some(detected) = detect_type_from_argv0(argv0) {
             opts.fs_type = detected;
         }
-    }
 
     let mut i = 1;
     while i < args.len() {
@@ -614,7 +610,7 @@ fn validate_options(opts: &MkfsOptions) {
     // Validate ext4 block size (must be a power of 2, between 1024 and 65536).
     if opts.fs_type == "ext4" {
         let bs = opts.ext4_block_size;
-        if bs < 1024 || bs > 65536 || (bs & (bs - 1)) != 0 {
+        if !(1024..=65536).contains(&bs) || (bs & (bs - 1)) != 0 {
             eprintln!(
                 "mkfs: error: invalid ext4 block size {bs} \
                  (must be a power of 2 between 1024 and 65536)"
@@ -626,7 +622,7 @@ fn validate_options(opts: &MkfsOptions) {
     // Validate FAT sector size (must be a power of 2, between 512 and 4096).
     if opts.fs_type == "fat32" {
         let ss = opts.fat_sector_size;
-        if ss < 512 || ss > 4096 || (ss & (ss - 1)) != 0 {
+        if !(512..=4096).contains(&ss) || (ss & (ss - 1)) != 0 {
             eprintln!(
                 "mkfs: error: invalid FAT sector size {ss} \
                  (must be a power of 2 between 512 and 4096)"
@@ -672,8 +668,7 @@ fn validate_options(opts: &MkfsOptions) {
 ///
 /// Returns (dev_path_for_syscall, dev_name_for_sysfs).
 fn normalize_device(device: &str) -> (String, String) {
-    if device.starts_with("/dev/") {
-        let name = &device[5..];
+    if let Some(name) = device.strip_prefix("/dev/") {
         (device.to_string(), name.to_string())
     } else if device.starts_with('/') || device.contains('.') {
         // Absolute path or image file -- use as-is.
@@ -1007,7 +1002,7 @@ fn check_bad_blocks(dev_path: &str, verbose: bool) {
             Ok(n) => {
                 total_read += n as u64;
                 block_num += 1;
-                if verbose && block_num % 64 == 0 {
+                if verbose && block_num.is_multiple_of(64) {
                     eprint!("\r  Checked {} ...", format_size(total_read));
                 }
             }

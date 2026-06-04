@@ -2465,10 +2465,10 @@ Remaining net improvements (diminishing returns):
   via the existing TruncatedData error path — the warnings are about
   bounds-safety not currently visible to clippy, not real bugs.
 
-- (NOTED 2026-06-03) userspace/lsusb and userspace/strace have no unit
-  tests at all (`cargo test -p lsusb` / `-p strace` both report
-  "0 passed; 0 failed"). Both are personality-CLI stubs and the test
-  module is missing entirely. Add a #[cfg(test)] mod tests with at
+- (NOTED 2026-06-03) userspace/lsusb, userspace/strace, userspace/lsblk,
+  userspace/mkfs, userspace/fsck have no unit tests at all (`cargo test`
+  reports "0 passed; 0 failed"). All are personality-CLI stubs and the
+  test module is missing entirely. Add a #[cfg(test)] mod tests with at
   least: tool detection from argv[0], basic argument parsing, and
   output formatting smoke tests. Same pattern as ss/ping/iw/ethtool.
   Found while sweeping clippy warnings; not blocking but should be

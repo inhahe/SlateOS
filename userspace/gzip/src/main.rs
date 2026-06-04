@@ -471,18 +471,11 @@ impl HuffmanTable {
 /// Build the fixed literal/length Huffman decode table.
 fn fixed_litlen_table() -> Result<HuffmanTable, String> {
     let mut lengths = [0u8; 288];
-    for i in 0usize..=143 {
-        lengths[i] = 8;
-    }
-    for i in 144usize..=255 {
-        lengths[i] = 9;
-    }
-    for i in 256usize..=279 {
-        lengths[i] = 7;
-    }
-    for i in 280usize..=287 {
-        lengths[i] = 8;
-    }
+    // RFC 1951 §3.2.6: fixed literal/length code lengths.
+    lengths[0..=143].fill(8);
+    lengths[144..=255].fill(9);
+    lengths[256..=279].fill(7);
+    lengths[280..=287].fill(8);
     HuffmanTable::from_lengths(&lengths)
 }
 
@@ -560,11 +553,7 @@ fn deflate_decompress<R: Read>(
                 let _ = written;
                 crc = crc32_update(crc, &[]);
                 // Recompute crc over data we just wrote.
-                let new_data_start = output.len() - (output.len() - start_len
-                    - /* previously written */ {
-                        // We don't track incremental, so just mark and re-run at end.
-                        0
-                    });
+                let new_data_start = output.len() - (output.len() - start_len);
                 let _ = block_crc;
                 let _ = new_data_start;
             }
@@ -1463,11 +1452,10 @@ fn decompress_file(opts: &Options, path: Option<&Path>) -> Result<(), String> {
             .map_err(|e| format!("stdout: {e}"))?;
     } else if let Some(out_path) = inferred_out_path {
         write_file(&out_path, &decompressed, opts.force)?;
-        if !opts.keep {
-            if let Some(p) = path {
+        if !opts.keep
+            && let Some(p) = path {
                 fs::remove_file(p).map_err(|e| format!("{}: remove: {e}", p.display()))?;
             }
-        }
     } else {
         // No .gz suffix — with -f we can still decompress to stdout-like fallback.
         if opts.force {
@@ -1492,8 +1480,7 @@ fn decompress_file(opts: &Options, path: Option<&Path>) -> Result<(), String> {
 fn output_path_for(path: &Path) -> Option<PathBuf> {
     let p = path.to_string_lossy();
     for suffix in &[".gz", ".z", ".Z", ".tgz", ".taz"] {
-        if p.ends_with(suffix) {
-            let without = &p[..p.len() - suffix.len()];
+        if let Some(without) = p.strip_suffix(suffix) {
             let out = if *suffix == ".tgz" || *suffix == ".taz" {
                 format!("{}.tar", without)
             } else {

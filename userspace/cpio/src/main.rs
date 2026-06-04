@@ -282,10 +282,10 @@ fn parse_args() -> Result<Options, String> {
 fn encode_hex8(val: u32) -> [u8; 8] {
     let mut buf = [b'0'; 8];
     let hex_chars = b"0123456789ABCDEF";
-    for idx in 0..8 {
+    for (idx, slot) in buf.iter_mut().enumerate() {
         let shift = (7 - idx) * 4;
         let nibble = ((val >> shift) & 0xF) as usize;
-        buf[idx] = hex_chars[nibble];
+        *slot = hex_chars[nibble];
     }
     buf
 }
@@ -444,13 +444,11 @@ fn matches_patterns(filename: &str, patterns: &[String]) -> bool {
             return true;
         }
         // Also try matching against just the final component.
-        if let Some(basename) = Path::new(filename).file_name() {
-            if let Some(name_str) = basename.to_str() {
-                if glob_matches(pat, name_str) {
+        if let Some(basename) = Path::new(filename).file_name()
+            && let Some(name_str) = basename.to_str()
+                && glob_matches(pat, name_str) {
                     return true;
                 }
-            }
-        }
     }
     false
 }
@@ -816,7 +814,7 @@ fn copy_out(opts: &Options) -> Result<(), String> {
         .map_err(|e| format!("flush output: {}", e))?;
 
     if !opts.quiet {
-        let blocks = (total_bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let blocks = total_bytes.div_ceil(BLOCK_SIZE);
         eprintln!("{} blocks", blocks);
     }
 
@@ -1013,10 +1011,10 @@ fn copy_in(opts: &Options) -> Result<(), String> {
             S_IFREG | 0 => {
                 // Regular file (mode 0 is treated as regular for compat).
                 // Create parent directories if -d is set.
-                if opts.make_directories {
-                    if let Some(parent) = dest.parent() {
-                        if !parent.as_os_str().is_empty() && !parent.exists() {
-                            if let Err(e) = fs::create_dir_all(parent) {
+                if opts.make_directories
+                    && let Some(parent) = dest.parent()
+                        && !parent.as_os_str().is_empty() && !parent.exists()
+                            && let Err(e) = fs::create_dir_all(parent) {
                                 let msg = format!(
                                     "cpio: mkdir '{}': {}",
                                     parent.display(),
@@ -1026,9 +1024,6 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                                 errors.push(msg);
                                 continue;
                             }
-                        }
-                    }
-                }
 
                 // Check if file exists and -u is not set.
                 if dest.exists() && !opts.unconditional {
@@ -1065,13 +1060,11 @@ fn copy_in(opts: &Options) -> Result<(), String> {
             }
             S_IFLNK => {
                 // Symlink: data contains the target path.
-                if opts.make_directories {
-                    if let Some(parent) = dest.parent() {
-                        if !parent.as_os_str().is_empty() && !parent.exists() {
+                if opts.make_directories
+                    && let Some(parent) = dest.parent()
+                        && !parent.as_os_str().is_empty() && !parent.exists() {
                             let _ = fs::create_dir_all(parent);
                         }
-                    }
-                }
 
                 let target = String::from_utf8_lossy(&entry.data).into_owned();
                 #[cfg(unix)]
@@ -1111,7 +1104,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
     }
 
     if !opts.quiet {
-        let blocks = (total_bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let blocks = total_bytes.div_ceil(BLOCK_SIZE);
         eprintln!("{} blocks", blocks);
     }
 
@@ -1174,8 +1167,8 @@ fn pass_through(opts: &Options) -> Result<(), String> {
         // Compute destination path: dest_dir/filepath (stripping leading ./).
         let relative = if let Some(stripped) = filepath.strip_prefix("./") {
             stripped
-        } else if filepath.starts_with('/') {
-            &filepath[1..]
+        } else if let Some(stripped) = filepath.strip_prefix('/') {
+            stripped
         } else {
             filepath
         };
@@ -1191,20 +1184,18 @@ fn pass_through(opts: &Options) -> Result<(), String> {
         }
 
         if symlink_meta.is_dir() {
-            if opts.make_directories {
-                if let Err(e) = fs::create_dir_all(&dest) {
+            if opts.make_directories
+                && let Err(e) = fs::create_dir_all(&dest) {
                     let msg = format!("cpio: mkdir '{}': {}", dest.display(), e);
                     eprintln!("{}", msg);
                     errors.push(msg);
                 }
-            }
         } else if symlink_meta.is_symlink() {
             // Copy symlink.
-            if let Some(parent) = dest.parent() {
-                if opts.make_directories && !parent.exists() {
+            if let Some(parent) = dest.parent()
+                && opts.make_directories && !parent.exists() {
                     let _ = fs::create_dir_all(parent);
                 }
-            }
             match fs::read_link(src) {
                 Ok(target) => {
                     #[cfg(unix)]
@@ -1243,27 +1234,24 @@ fn pass_through(opts: &Options) -> Result<(), String> {
             }
         } else if symlink_meta.is_file() {
             // Copy regular file.
-            if let Some(parent) = dest.parent() {
-                if opts.make_directories && !parent.exists() {
-                    if let Err(e) = fs::create_dir_all(parent) {
+            if let Some(parent) = dest.parent()
+                && opts.make_directories && !parent.exists()
+                    && let Err(e) = fs::create_dir_all(parent) {
                         let msg = format!("cpio: mkdir '{}': {}", parent.display(), e);
                         eprintln!("{}", msg);
                         errors.push(msg);
                         continue;
                     }
-                }
-            }
 
             // Check unconditional / newer-than logic.
-            if dest.exists() && !opts.unconditional {
-                if let Ok(existing_meta) = fs::metadata(&dest) {
+            if dest.exists() && !opts.unconditional
+                && let Ok(existing_meta) = fs::metadata(&dest) {
                     let existing_mtime = get_mtime(&existing_meta);
                     let src_mtime = get_mtime(&symlink_meta);
                     if src_mtime <= existing_mtime {
                         continue;
                     }
                 }
-            }
 
             match fs::copy(src, &dest) {
                 Ok(_) => {
@@ -1302,7 +1290,7 @@ fn format_mtime(epoch_secs: u32) -> String {
     ];
 
     fn is_leap(y: u32) -> bool {
-        (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+        (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
     }
 
     let mut remaining = epoch_secs;

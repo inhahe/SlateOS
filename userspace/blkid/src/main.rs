@@ -9,6 +9,10 @@
 //   findfs LABEL=<label> | UUID=<uuid> | PARTUUID=<uuid>
 
 #![cfg_attr(not(test), no_main)]
+// BlkidInfo::fs_size is part of the BLKGETSIZE64 ioctl surface and the
+// blkid -o size output the real implementation must produce. Dead-code
+// lint cannot see across that future boundary.
+#![allow(dead_code)]
 
 use std::env;
 use std::io::{self, Read, Write};
@@ -377,15 +381,14 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 }
                 "-t" => {
                     i += 1;
-                    if let Some(spec) = args.get(i) {
-                        if let Some((tag, val)) = spec.split_once('=') {
+                    if let Some(spec) = args.get(i)
+                        && let Some((tag, val)) = spec.split_once('=') {
                             cfg.tag_filter = Some((tag.to_string(), val.to_string()));
                         }
-                    }
                 }
                 "-c" => {
                     i += 1;
-                    cfg.cache_file = args.get(i).map(|s| PathBuf::from(s));
+                    cfg.cache_file = args.get(i).map(PathBuf::from);
                 }
                 "-p" | "--probe" => cfg.show_all = true,
                 "-g" | "--garbage-collect" => {} // no-op

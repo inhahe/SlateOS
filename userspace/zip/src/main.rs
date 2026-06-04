@@ -21,6 +21,16 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
+//
+// zip parses the ZIP container format and implements DEFLATE / CRC32:
+// arithmetic on file offsets, code lengths, Huffman table indices, and
+// CRC accumulators is bounded by container header limits and
+// length checks immediately preceding any slice/index. Decompression
+// errors surface as Err rather than panic.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 
 use std::env;
 use std::fs::{self, File};

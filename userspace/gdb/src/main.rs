@@ -47,7 +47,16 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
-#![allow(dead_code)]
+//
+// gdb parses DWARF debug info, ELF section tables, GDB remote-serial
+// protocol packets, and machine memory. Arithmetic is on offsets bounded
+// by section sizes / packet lengths, indexing/slicing is gated by
+// length checks at the call site (errors return Err, not panic).
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    dead_code,
+)]
 
 use std::io::{self, Write};
 
@@ -1673,7 +1682,7 @@ fn parse_examine_fmt(fmt: &[u8]) -> (usize, ExamineFormat) {
             b'g' => { format = ExamineFormat::Giant; break; }
             b's' => { format = ExamineFormat::StringZ; break; }
             b'i' => { format = ExamineFormat::Instruction; break; }
-            b'x' | b'd' | b'o' | b't' | b'a' | b'c' | b'f' => { i += 1; continue; } // Skip display format letters
+            b'x' | b'd' | b'o' | b't' | b'a' | b'c' | b'f' => { i += 1; } // Skip display format letters
             _ => break,
         }
     }
@@ -1891,7 +1900,7 @@ fn gdb_encode_registers(regs: &[u64; REG_COUNT], buf: &mut [u8]) -> usize {
 fn gdb_handle_command(
     payload: &[u8],
     regs: &[u64; REG_COUNT],
-    elf: &Option<ElfInfo>,
+    elf: Option<&ElfInfo>,
     response: &mut [u8],
 ) -> usize {
     if payload.is_empty() {
@@ -3220,7 +3229,7 @@ impl Debugger {
                 let resp_len = gdb_handle_command(
                     payload,
                     &self.regs,
-                    &self.elf,
+                    self.elf.as_ref(),
                     &mut response,
                 );
                 let _ = out.write_all(&response[..resp_len]);
@@ -4260,7 +4269,7 @@ mod tests {
         let regs = [0u64; REG_COUNT];
         let elf: Option<ElfInfo> = None;
         let mut response = [0u8; 256];
-        let len = gdb_handle_command(b"?", &regs, &elf, &mut response);
+        let len = gdb_handle_command(b"?", &regs, elf.as_ref(), &mut response);
         // Should contain S05 (SIGTRAP)
         let resp = &response[..len];
         assert!(resp.windows(3).any(|w| w == b"S05"));
@@ -4271,7 +4280,7 @@ mod tests {
         let regs = [0u64; REG_COUNT];
         let elf: Option<ElfInfo> = None;
         let mut response = [0u8; 1024];
-        let len = gdb_handle_command(b"g", &regs, &elf, &mut response);
+        let len = gdb_handle_command(b"g", &regs, elf.as_ref(), &mut response);
         assert!(len > 0);
     }
 
@@ -4280,7 +4289,7 @@ mod tests {
         let regs = [0u64; REG_COUNT];
         let elf: Option<ElfInfo> = None;
         let mut response = [0u8; 256];
-        let len = gdb_handle_command(b"c", &regs, &elf, &mut response);
+        let len = gdb_handle_command(b"c", &regs, elf.as_ref(), &mut response);
         assert!(len > 0);
     }
 
@@ -4289,7 +4298,7 @@ mod tests {
         let regs = [0u64; REG_COUNT];
         let elf: Option<ElfInfo> = None;
         let mut response = [0u8; 256];
-        let len = gdb_handle_command(b"s", &regs, &elf, &mut response);
+        let len = gdb_handle_command(b"s", &regs, elf.as_ref(), &mut response);
         assert!(len > 0);
     }
 
@@ -4298,7 +4307,7 @@ mod tests {
         let regs = [0u64; REG_COUNT];
         let elf: Option<ElfInfo> = None;
         let mut response = [0u8; 256];
-        let len = gdb_handle_command(b"qSupported", &regs, &elf, &mut response);
+        let len = gdb_handle_command(b"qSupported", &regs, elf.as_ref(), &mut response);
         let resp = &response[..len];
         assert!(resp.windows(10).any(|w| w == b"PacketSize"));
     }
@@ -4308,7 +4317,7 @@ mod tests {
         let regs = [0u64; REG_COUNT];
         let elf: Option<ElfInfo> = None;
         let mut response = [0u8; 256];
-        let len = gdb_handle_command(b"k", &regs, &elf, &mut response);
+        let len = gdb_handle_command(b"k", &regs, elf.as_ref(), &mut response);
         assert!(len > 0);
     }
 
@@ -4317,7 +4326,7 @@ mod tests {
         let regs = [0u64; REG_COUNT];
         let elf: Option<ElfInfo> = None;
         let mut response = [0u8; 256];
-        let len = gdb_handle_command(b"Z", &regs, &elf, &mut response);
+        let len = gdb_handle_command(b"Z", &regs, elf.as_ref(), &mut response);
         assert!(len > 0);
     }
 

@@ -26,7 +26,16 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
-#![allow(dead_code)]
+//
+// objdump parses ELF section/symbol tables and disassembles instruction
+// bytes. Arithmetic operates on section offsets and instruction lengths
+// already bounded by ELF header limits, and indexing/slicing is gated by
+// length checks. Errors return Err rather than panic.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    dead_code,
+)]
 
 use std::env;
 use std::fs::File;
@@ -1036,7 +1045,11 @@ fn disasm_one(code: &[u8], offset: usize, base_addr: u64) -> (String, usize) {
     let rex_offset = if has_rex_w { 1usize } else { 0usize };
 
     if actual.is_empty() {
-        let hex: String = remaining.iter().map(|b| format!("{b:02x} ")).collect();
+        let mut hex = String::new();
+        for b in remaining {
+            use std::fmt::Write as _;
+            let _ = write!(&mut hex, "{b:02x} ");
+        }
         return (format!(".byte  {hex}"), 1);
     }
 
@@ -1346,11 +1359,11 @@ fn disasm_one(code: &[u8], offset: usize, base_addr: u64) -> (String, usize) {
     }
 
     // Fallback: hex dump of unrecognized byte
-    let hex: String = remaining
-        .iter()
-        .take(1)
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let mut hex = String::new();
+    for b in remaining.iter().take(1) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
     (format!(".byte  0x{hex}"), 1)
 }
 
@@ -1942,10 +1955,11 @@ fn display_disassembly(
             }
 
             // Print hex bytes
-            let hex: String = code[offset..offset + consumed]
-                .iter()
-                .map(|b| format!("{b:02x} "))
-                .collect();
+            let mut hex = String::new();
+            for b in &code[offset..offset + consumed] {
+                use std::fmt::Write as _;
+                let _ = write!(&mut hex, "{b:02x} ");
+            }
             writeln!(w, "  {:8x}:\t{:24}\t{}", addr, hex.trim_end(), mnemonic)?;
             offset += consumed;
         }

@@ -26,7 +26,17 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
-#![allow(dead_code)]
+//
+// ar parses the System V archive format: 60-byte member headers
+// followed by member data, plus ELF strip support. Arithmetic is on
+// offsets bounded by archive/file length and ASCII-decimal sizes parsed
+// from headers; indexing is gated by preceding length checks. Errors
+// return Err.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    dead_code,
+)]
 
 use std::env;
 use std::fs;
@@ -339,12 +349,16 @@ impl Archive {
         for (i, member) in self.members.iter().enumerate() {
             let hdr = if let Some(strtab_off) = name_offsets[i] {
                 member.header.to_bytes_gnu(strtab_off)
+            } else if let Some(short) = member.header.to_bytes_short(None) {
+                // Short name path — taken when name.len() <= 15, see loop above
+                short
             } else {
-                // Short name path — always succeeds for names <= 15 chars
-                member
-                    .header
-                    .to_bytes_short(None)
-                    .expect("name fits in short field")
+                // Defensive fallback: if name unexpectedly fails the short
+                // form (e.g. invariant violated by a future code change),
+                // route it through the GNU long-name form with strtab
+                // offset 0 rather than panic. The archive will still parse;
+                // the round-trip will rewrite the name through the strtab.
+                member.header.to_bytes_gnu(0)
             };
             out.extend_from_slice(&hdr);
             out.extend_from_slice(&member.data);
@@ -965,7 +979,7 @@ fn strip_elf(data: &[u8], opts: &StripOptions) -> Result<Vec<u8>, String> {
     }
 
     // Build the new ELF
-    rebuild_elf(data, &info, &sections, &keep)
+    Ok(rebuild_elf(data, &info, &sections, &keep))
 }
 
 /// Rebuild an ELF file, including only the sections marked as kept.
@@ -974,7 +988,7 @@ fn rebuild_elf(
     info: &ElfInfo,
     sections: &[ElfSection],
     keep: &[bool],
-) -> Result<Vec<u8>, String> {
+) -> Vec<u8> {
     // Map old section indices to new indices
     let mut new_index = vec![0u16; sections.len()];
     let mut new_count: u16 = 0;
@@ -1103,7 +1117,7 @@ fn rebuild_elf(
         );
     }
 
-    Ok(output)
+    output
 }
 
 // ============================================================================

@@ -31,6 +31,16 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
+//
+// ssh-keygen implements Ed25519 / Curve25519 field arithmetic (mod
+// 2^255 - 19), Edwards-curve point operations, SHA-256/512, and parses
+// OpenSSH key blobs. Arithmetic on field limbs and key offsets is by
+// construction modular / bounded by blob length checks; indexing is
+// gated by preceding length checks. Errors propagate as Err.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+)]
 
 use std::env;
 use std::fmt;

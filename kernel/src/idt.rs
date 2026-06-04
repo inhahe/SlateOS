@@ -1418,7 +1418,7 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         // Second, try stack growth (stack VMAs are handled separately
         // because they pre-date the per-process VMA system and have
         // their own growth logic with guard page detection).
-        if try_grow_user_stack(cr2, error) {
+        if try_grow_user_stack(cr2, error, pid) {
             mm::fault::record_stack_growth();
             mm::fault::record_user_resolved();
             return; // Stack grew successfully — retry the instruction.
@@ -1487,8 +1487,16 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 ///    reserved virtual address region.  Cannot grow below this even if
 ///    the sysctl value is higher.
 /// 2. The runtime `mm.max_stack_frames` sysctl — allows administrators
-///    to restrict stack growth below the compile-time maximum.  The
-///    effective guard is `max(compile_time_guard, dynamic_guard)`.
+///    to restrict stack growth below the compile-time maximum.
+/// 3. The per-process `RLIMIT_STACK` soft limit (Linux ABI), looked up
+///    via [`crate::proc::pcb::try_get_rlimit`] when `pid != 0`.  The
+///    `try_lock`-based accessor returns `None` on contention; in that
+///    case we silently skip the RLIMIT_STACK term, matching the
+///    pre-enforcement behavior — better to occasionally allow a stack
+///    page past the limit than to deadlock the page fault handler.
+///
+/// The effective guard is the maximum (i.e. most restrictive) of all
+/// applicable terms.
 ///
 /// If `cr2` is within the growable region and the page is not yet
 /// mapped, we allocate a zeroed frame and map it with user
@@ -1496,7 +1504,7 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 ///
 /// Returns `true` if the stack was successfully grown, `false` if the
 /// address is outside the stack region or allocation failed.
-fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
+fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
     // Only handle not-present faults (bit 0 clear = page not mapped).
     // A present-page violation (protection fault) is not stack growth.
     if error & 1 != 0 {
@@ -1521,7 +1529,32 @@ fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
         let max_bytes = max_frames.saturating_mul(FRAME_SIZE as u64);
         USER_STACK_TOP.saturating_sub(max_bytes)
     };
-    let effective_guard = USER_STACK_GUARD.max(dynamic_guard);
+
+    // Per-process RLIMIT_STACK guard.  RLIM_INFINITY (u64::MAX) and a
+    // `None` return (lock contention or unknown pid) both fall back to
+    // USER_STACK_GUARD — i.e. the rlimit term contributes nothing in
+    // either case, leaving only the compile-time and sysctl bounds.
+    //
+    // `try_get_rlimit` is the interrupt-safe accessor: it never blocks,
+    // so the page fault handler cannot deadlock against a syscall that
+    // happens to hold the process table.  See pcb.rs for rationale.
+    let rlimit_guard = if pid != 0 {
+        match crate::proc::pcb::try_get_rlimit(
+            pid,
+            crate::proc::pcb::RLIMIT_STACK_INDEX as u32,
+        ) {
+            Some((soft, _hard)) if soft != crate::proc::pcb::RLIM_INFINITY => {
+                USER_STACK_TOP.saturating_sub(soft)
+            }
+            _ => USER_STACK_GUARD,
+        }
+    } else {
+        USER_STACK_GUARD
+    };
+
+    let effective_guard = USER_STACK_GUARD
+        .max(dynamic_guard)
+        .max(rlimit_guard);
 
     if cr2 < effective_guard {
         return false;

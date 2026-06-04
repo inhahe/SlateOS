@@ -14080,6 +14080,105 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             pcb::destroy(test_pid);
         }
+
+        // RLIMIT_STACK accessor (batch 47): verify that
+        // pcb::try_get_rlimit returns the configured value for a known
+        // pid and mirrors set_rlimit, returns None for unknown pids,
+        // and rejects out-of-range resource numbers.  The page fault
+        // handler (idt::try_grow_user_stack) consults this accessor to
+        // bound on-demand user stack growth; if the math here is wrong
+        // every Linux-mode process gets an over- or under-tight stack
+        // ceiling.
+        {
+            let test_pid = pcb::create("rlimit-stack-try-get", 0);
+
+            // Default RLIMIT_STACK: 8 MiB soft, RLIM_INFINITY hard
+            // (mirrors DEFAULT_RLIMITS[3]).  This is the value glibc
+            // queries to size the main thread stack, so any drift
+            // here would break process startup.
+            const EXPECTED_DEFAULT_STACK: u64 = 8 * 1024 * 1024;
+            match pcb::try_get_rlimit(
+                test_pid,
+                pcb::RLIMIT_STACK_INDEX as u32,
+            ) {
+                Some((EXPECTED_DEFAULT_STACK, pcb::RLIM_INFINITY)) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: try_get_rlimit(STACK) default expected Some((8MiB, INF)), got {:?}",
+                        other,
+                    );
+                    pcb::destroy(test_pid);
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // Lower the soft limit to 64 KiB and verify try_get_rlimit
+            // observes the change.  This is the path a Linux-mode
+            // process would take via setrlimit(RLIMIT_STACK, ...).
+            pcb::set_rlimit(test_pid, 3, 64 * 1024, 64 * 1024)
+                .expect("set RLIMIT_STACK to 64 KiB");
+            match pcb::try_get_rlimit(
+                test_pid,
+                pcb::RLIMIT_STACK_INDEX as u32,
+            ) {
+                Some((65_536, 65_536)) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: try_get_rlimit after lowering: expected Some((64K, 64K)), got {:?}",
+                        other,
+                    );
+                    pcb::destroy(test_pid);
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // Unknown pid -> None.  The page fault handler treats this
+            // the same as "lock contention": skip the rlimit term and
+            // fall back to the compile-time + sysctl guard.
+            if pcb::try_get_rlimit(
+                u64::MAX,
+                pcb::RLIMIT_STACK_INDEX as u32,
+            ).is_some() {
+                serial_println!(
+                    "[syscall/linux]   FAIL: try_get_rlimit(unknown pid) should be None",
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
+
+            // Out-of-range resource number -> None, matching get_rlimit
+            // semantics.  Prevents an attacker from indexing past the
+            // 16-entry rlimits array via a crafted resource id.
+            if pcb::try_get_rlimit(test_pid, pcb::NUM_RLIMITS).is_some() {
+                serial_println!(
+                    "[syscall/linux]   FAIL: try_get_rlimit(resource=NUM_RLIMITS) should be None",
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
+
+            // RLIMIT_AS via try_get_rlimit (cross-resource sanity):
+            // the same accessor must serve every resource index.  We
+            // already exercised AS via the regular lock path in the
+            // batch 44 tests; here we just confirm the try_lock-based
+            // form returns the default infinity tuple.
+            match pcb::try_get_rlimit(
+                test_pid,
+                pcb::RLIMIT_AS_INDEX as u32,
+            ) {
+                Some((pcb::RLIM_INFINITY, pcb::RLIM_INFINITY)) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: try_get_rlimit(AS) default expected (INF, INF), got {:?}",
+                        other,
+                    );
+                    pcb::destroy(test_pid);
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            pcb::destroy(test_pid);
+        }
     }
 
     // rt_sigpending dispatch validation:

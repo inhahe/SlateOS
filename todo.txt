@@ -8094,3 +8094,81 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      subject to RLIMIT_FSIZE in our model, which matches
 ##      the parallel treatment of RLIMIT_AS in batch 44.
 
+##  73. Enforce RLIMIT_STACK in idt::try_grow_user_stack — DONE.
+##      Thirteenth "upgrade a stub" batch.  Bounds on-demand
+##      user stack growth by the per-process Linux RLIMIT_STACK
+##      soft limit, in addition to the existing compile-time
+##      USER_STACK_GUARD and runtime sysctl mm.max_stack_frames
+##      guards.  The effective stack floor is now the
+##      maximum (i.e. most restrictive) of all three terms.
+##         - pcb::RLIMIT_STACK_INDEX = 3 named constant added
+##           so the page fault handler doesn't repeat the magic
+##           number.
+##         - pcb::try_get_rlimit(pid, resource) added.  Uses
+##           PROCESS_TABLE.try_lock() and returns None on lock
+##           contention, on unknown pid, or on out-of-range
+##           resource.  This is the only safe accessor for
+##           interrupt context — the regular get_rlimit() would
+##           deadlock if a syscall holding the table happened
+##           to fault its own stack.
+##         - idt::try_grow_user_stack(cr2, error, pid) gained
+##           a pid parameter (the caller already had pid for
+##           the try_resolve_fault step).  When pid != 0 it
+##           consults try_get_rlimit(STACK); a finite soft
+##           limit yields rlimit_guard = USER_STACK_TOP -
+##           soft_bytes, and effective_guard is the max of
+##           USER_STACK_GUARD, dynamic_guard (sysctl), and
+##           rlimit_guard.  RLIM_INFINITY and None (contention
+##           or unknown pid) both fall back to USER_STACK_GUARD,
+##           contributing nothing to the bound.
+##      Coverage:
+##         - try_get_rlimit returns DEFAULT_RLIMITS[3] = (8 MiB,
+##           RLIM_INFINITY) for a freshly-created pid.
+##         - After set_rlimit(pid, 3, 64 KiB, 64 KiB),
+##           try_get_rlimit observes the lowered value.
+##         - try_get_rlimit on an unknown pid -> None.
+##         - try_get_rlimit with resource = NUM_RLIMITS -> None
+##           (out-of-range rejection preserved).
+##         - Cross-resource sanity: try_get_rlimit(AS) returns
+##           the default (RLIM_INFINITY, RLIM_INFINITY), proving
+##           the same accessor serves every resource index.
+##      Choice rationale:
+##         * try_lock with fall-through-on-contention is the
+##           conservative correct path for a #PF handler: worst
+##           case is "same as before this batch" (no rlimit
+##           term applied), best case is the limit is honored.
+##           Blocking on the lock would risk deadlock against
+##           any syscall that holds PROCESS_TABLE and faults its
+##           own stack while doing so.
+##         * Threading pid through as a third arg rather than
+##           re-looking-it-up inside try_grow_user_stack avoids
+##           a redundant sched::current_task_id() →
+##           thread::owner_process() pair on every #PF, and
+##           lets the existing pid == 0 (kernel/early-boot)
+##           check in the caller continue to gate the rlimit
+##           lookup.
+##         * Using saturating_sub keeps the math safe for soft
+##           limits larger than USER_STACK_TOP — they pin
+##           rlimit_guard to 0, which is never selected because
+##           USER_STACK_GUARD is always larger.
+##      Limitation: getrlimit(RLIMIT_STACK) still reports the
+##      pcb value, not the dynamic sysctl-derived limit.  glibc
+##      uses the rlimit for thread stack sizing; that's fine
+##      because the sysctl is meant to be a per-system cap and
+##      should be set high enough to accommodate the rlimit.
+##      If sysctl is *lower* than rlimit, the page fault handler
+##      will refuse to grow past the sysctl bound — that's the
+##      same behavior we had before this batch, and matches the
+##      Linux semantics of the sysctl as an administrative cap.
+##      Limitation: setrlimit(RLIMIT_STACK) doesn't shrink an
+##      already-grown stack.  Linux has the same behavior:
+##      lowering the limit only affects future growth, not
+##      pages that are already mapped.
+##      Limitation: RLIMIT_STACK does not yet trigger SIGSEGV
+##      on overflow with a meaningful si_code distinguishing
+##      stack-overflow from generic access-violation — the page
+##      fault handler falls through to the standard SEH /
+##      AccessViolation path when growth is refused.  Once
+##      Linux signal delivery lands, the si_code should be set
+##      to SEGV_BNDERR or similar for stack-overflow refusals.
+

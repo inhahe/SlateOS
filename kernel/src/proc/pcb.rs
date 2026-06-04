@@ -1021,6 +1021,41 @@ pub const RLIMIT_AS_INDEX: usize = 9;
 /// writes that would push a file past the per-process limit.
 pub const RLIMIT_FSIZE_INDEX: usize = 1;
 
+/// Index of `RLIMIT_STACK` (maximum stack size) in [`Process::rlimits`].
+///
+/// Consulted from the page-fault handler ([`crate::idt::try_grow_user_stack`])
+/// via [`try_get_rlimit`] to bound on-demand stack growth.  The page
+/// fault handler runs in interrupt context where the regular process
+/// table lock cannot be acquired safely; the `try_lock`-based accessor
+/// is the only path that should be used from that site.
+pub const RLIMIT_STACK_INDEX: usize = 3;
+
+/// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource` using
+/// `try_lock()`, returning `None` if the process table is currently held
+/// by another CPU or if `pid` is unknown.
+///
+/// This is the **only** safe accessor for callers that run with
+/// interrupts disabled or are themselves servicing an interrupt — most
+/// notably the page fault handler's stack-growth path
+/// ([`crate::idt::try_grow_user_stack`]).  A regular [`get_rlimit`] call
+/// from those contexts would deadlock if the interrupted code happened
+/// to hold the process table.
+///
+/// On lock contention the caller is expected to fall back to whatever
+/// behavior it had before this accessor existed (typically: allow the
+/// operation without enforcing the rlimit, matching pre-enforcement
+/// semantics).  The bound is best-effort and may occasionally let a
+/// stack page slip past the limit during a contended fork/exec, but
+/// will never wrongly *reject* a growth that would actually fit.
+#[must_use]
+pub fn try_get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
+    if resource >= NUM_RLIMITS {
+        return None;
+    }
+    let table = PROCESS_TABLE.try_lock()?;
+    table.get(&pid).map(|p| p.rlimits[resource as usize])
+}
+
 /// Charge `bytes` to the process's Linux address-space accounting and
 /// enforce [`RLIMIT_AS`] (resource index 9).
 ///

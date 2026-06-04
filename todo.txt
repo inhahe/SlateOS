@@ -3154,6 +3154,63 @@ Remaining net improvements (diminishing returns):
   REMAINING: awk, bc, ed, false, fetch, patch, sh, true.
   Continue in batches.
 
+  PROGRESS 2026-06-04 (batch 15): added 77 unit tests across 4 more
+  binaries (true, false, ed, patch).
+    * true.rs: wrapped the trivial exit in `fn exit_code() -> i32 { 0 }`
+      so the always-succeed contract is machine-checkable.  1 test
+      (always_zero).
+    * false.rs: same pattern returning 1, plus a sanity test asserting
+      the value is non-zero (so any future regression that turned it
+      into 0 fails both tests).  2 tests.
+    * ed.rs: substantial refactor.  Pulled the buffer-mutating parts
+      of the command loop out of `main` into pure helpers:
+      `nth_line(buffer, n)` (1-based lookup), `insert_lines_at(buffer,
+      insert_at, new_lines)` (clamped to len), `delete_lines(buffer,
+      addr_start, addr_end) -> usize` (returns new current address),
+      `change_lines(buffer, start, end, new_lines) -> usize`, and
+      `substitute_line(line, pat, repl, global)` with an empty-pattern
+      noop guard.  `parse_command` now returns a `ParsedCommand`
+      struct.  Hardened `parse_address` and `parse_substitute` to use
+      `.get()` / `.saturating_*` throughout (no direct indexing, no
+      raw `+=` on user-supplied addresses).  35 tests covering
+      parse_address (8 incl. dot, dollar, number, dot+N, dot-N,
+      whitespace, overflow), parse_command (7 incl. range, single,
+      no-addr, garbage), parse_substitute (4 incl. global, empty
+      pattern, delim escape, trailing-garbage), nth_line (3),
+      insert_lines_at (3), delete_lines (3), change_lines (2),
+      substitute_line (5 incl. no-match, global, empty-pattern noop).
+    * patch.rs: extracted `parse_args(args: &[String]) -> Result<
+      Options, String>` covering `-i FILE`, `-p N` and `-pN`,
+      `-R`/`--reverse`, `--dry-run`, `-s`/`--silent`/`--quiet`,
+      `-b`/`--backup`, target file, and an explicit error on unknown
+      flags / missing or non-numeric `-p` values.  Replaced the
+      hand-rolled argv loop in `main` with a call to `parse_args` so
+      the same parser is exercised by tests.  Hardened
+      `parse_hunk_header` (uses `strip_prefix("@@")`), `strip_path`
+      (`.get(num)` instead of `parts[num]`), `parse_file_path`
+      (`strip_prefix`), `parse_patch` (`lines.get(i).copied()`
+      throughout), `apply_hunk` (uses `i64::try_from`,
+      `.saturating_*`, `checked_sub` for fuzz offsets), and
+      `try_hunk_at` (`.get()` instead of direct indexing).  Added a
+      `#[derive(Default)]` on `Options` and test-only
+      `#[cfg_attr(test, derive(PartialEq, Eq))]` on `Hunk`, `HunkLine`,
+      `FilePatch`, `Options`.  39 tests covering parse_args (14 incl.
+      every flag, joined/separated -p, unknown-flag error, missing
+      -p value error, invalid -pN value error, bare-dash-as-target),
+      strip_path (5), parse_range (3), parse_hunk_header (4 incl.
+      trailing context, single-line implies count 1, garbage),
+      parse_file_path (2), parse_patch (3: no-diff returns empty,
+      simple one-file patch, two-file patch), reverse_hunk (1),
+      try_hunk_at (3: matches, mismatches, past-end), apply_hunk
+      (4 incl. fuzz-find and size-change offset propagation).
+  All tests pass; clippy clean on x86_64-pc-windows-gnu.
+
+  RUNNING TOTAL: 1301 tests across 81 binaries (whoami + batches 1-15).
+  ~4 binaries still pending.
+
+  REMAINING: awk, bc, fetch, sh.
+  Continue in batches.
+
 - (NOTED 2026-06-03) userspace/coreutils/src/bin/whoami.rs fails to
   link on the host target (x86_64-pc-windows-gnu) with "undefined
   reference to `geteuid'".  RESOLVED 2026-06-04.  Gated the `geteuid`

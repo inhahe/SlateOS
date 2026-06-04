@@ -10099,33 +10099,89 @@ fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `flock(fd, op)` — advisory whole-file lock.
+/// `flock(fd, op)` — advisory whole-file lock backed by the VFS lock table.
 ///
 /// op encodes a request via LOCK_SH=1, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8.
 /// Only the type bits (LOCK_SH|LOCK_EX|LOCK_UN) and the LOCK_NB modifier
-/// are accepted; anything else is EINVAL.  We don't yet track per-fd
-/// lock state, but flock is advisory by design — Linux only enforces it
-/// among programs that both opt in — so silently succeeding for the
-/// single-task case is semantically correct.  Programs that use flock
-/// to coordinate access on shared files (vim swap files, fcgi pidfiles,
-/// /etc/passwd updates) get the lock they asked for; programs that
-/// reuse the same fd to upgrade/downgrade between SH and EX get
-/// consistent success.
+/// are accepted; anything else is EINVAL.
 ///
-/// Limitation: in multi-process scenarios two callers will both observe
-/// "lock granted" simultaneously.  Until we add a real flock table this
-/// is the trade-off; ENOSYS would break every editor's lockfile probe.
+/// Each call resolves the fd through `lookup_caller_fd`, asks `fs::handle`
+/// for the underlying VFS path, then either acquires or releases an
+/// advisory lock via `Vfs::flock` / `Vfs::funlock` using the kernel
+/// handle ID as the owner.  That choice of owner makes auto-release on
+/// close cost-free — `fs::handle::close()` already calls `funlock(path,
+/// handle_id)` when the last reference goes away — and gives forked
+/// children that share an open file description a single shared lock,
+/// matching Linux's flock-on-OFD semantics.
+///
+/// Console / Pipe fds don't have a backing VFS path; we return EBADF
+/// for them (matches Linux's "flock on a non-file descriptor is not
+/// meaningful").
+///
+/// Errors:
+///   - EBADF   — fd not open, or it's a console/pipe fd.
+///   - EINVAL  — malformed op (mutually exclusive type bits, or unknown
+///                bits set).
+///   - EWOULDBLOCK — conflicting lock held by another owner.  Returned
+///                regardless of whether LOCK_NB was set; see the limitation
+///                below.
+///
+/// Limitation: real Linux blocks (sleeps) on a contended lock when
+/// LOCK_NB is absent.  Our IPC layer doesn't yet expose a wait queue
+/// hook for the VFS lock table, so we return EWOULDBLOCK for every
+/// conflict.  Editors and lockfile probes that already pass LOCK_NB get
+/// the correct answer; the (uncommon) blocking-flock case sees a
+/// premature failure that callers should retry.  This is tracked as a
+/// follow-up; the path is straightforward once `proc::wait_queue::flock`
+/// (or equivalent) lands.
 fn sys_flock(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let op = args.arg1 as u32;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
+
+    // Recognise LOCK_NB modifier and isolate the type bits.
+    const LOCK_SH: u32 = 1;
+    const LOCK_EX: u32 = 2;
+    const LOCK_NB: u32 = 4;
+    const LOCK_UN: u32 = 8;
+    const VALID: u32 = LOCK_SH | LOCK_EX | LOCK_NB | LOCK_UN;
+    if op & !VALID != 0 {
+        return linux_err(errno::EINVAL);
     }
-    // op = (type) | optional LOCK_NB(4).
-    let type_bits = op & !4;
-    match type_bits {
-        1 | 2 | 8 => SyscallResult::ok(0), // LOCK_SH / LOCK_EX / LOCK_UN
-        _ => linux_err(errno::EINVAL),
+    let type_bits = op & !LOCK_NB;
+    // Type bits must select exactly one of {SH, EX, UN}.
+    let lock_type = match type_bits {
+        LOCK_SH => Some(crate::fs::LockType::Shared),
+        LOCK_EX => Some(crate::fs::LockType::Exclusive),
+        LOCK_UN => None,
+        _ => return linux_err(errno::EINVAL),
+    };
+
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    if entry.kind != HandleKind::File {
+        // flock(2) on a non-file fd is not meaningful — return EBADF
+        // rather than silently succeeding.
+        return linux_err(errno::EBADF);
+    }
+    let handle = entry.raw_handle;
+    let path = match crate::fs::handle::handle_path(handle) {
+        Ok(p) => p,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    match lock_type {
+        Some(lt) => match crate::fs::Vfs::flock(&path, handle, lt) {
+            Ok(()) => SyscallResult::ok(0),
+            // EWOULDBLOCK == EAGAIN on Linux (same errno value).
+            Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+            Err(e) => linux_err(linux_errno_for(e)),
+        },
+        None => match crate::fs::Vfs::funlock(&path, handle) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => linux_err(linux_errno_for(e)),
+        },
     }
 }
 
@@ -17442,29 +17498,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let rusage_buf = [0u8; 144];
         let rusage_ptr = rusage_buf.as_ptr() as u64;
 
-        // flock LOCK_EX -> 0.
+        // flock LOCK_EX on a kernel-context fd -> EBADF (no fd table).
+        // After batch 38 this is a real fd lookup, so unknown fds fail
+        // rather than silently succeeding.
         let a = SyscallArgs { arg0: 3, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FLOCK, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: flock LOCK_EX not 0");
+        if dispatch_linux(nr::FLOCK, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: flock LOCK_EX not EBADF");
             return Err(KernelError::InternalError);
         }
-        // flock LOCK_SH | LOCK_NB -> 0.
+        // flock LOCK_SH | LOCK_NB -> EBADF for the same reason.
         let a = SyscallArgs { arg0: 3, arg1: 1 | 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FLOCK, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: flock LOCK_SH|LOCK_NB not 0");
+        if dispatch_linux(nr::FLOCK, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: flock LOCK_SH|LOCK_NB not EBADF");
             return Err(KernelError::InternalError);
         }
-        // flock LOCK_UN -> 0.
+        // flock LOCK_UN -> EBADF (kernel context, unknown fd).
         let a = SyscallArgs { arg0: 3, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FLOCK, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: flock LOCK_UN not 0");
+        if dispatch_linux(nr::FLOCK, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: flock LOCK_UN not EBADF");
             return Err(KernelError::InternalError);
         }
-        // flock invalid op -> EINVAL.
+        // flock invalid op -> EINVAL (checked before fd lookup).
         let a = SyscallArgs { arg0: 3, arg1: 0x10, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FLOCK, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: flock invalid op not EINVAL");
             return Err(KernelError::InternalError);
+        }
+        // flock LOCK_SH|LOCK_EX (both type bits) -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 1 | 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FLOCK, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: flock SH|EX not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // End-to-end: open a real file via fs::handle, then exercise the
+        // Vfs::flock backbone directly to prove the real lock table is
+        // populated.  (The fd path isn't reachable from kernel context;
+        // this is the closest stand-in.)
+        let flock_path = "/syscall_flock_test.txt";
+        if crate::fs::Vfs::write_file(flock_path, b"x").is_ok() {
+            let h = crate::fs::handle::open(
+                flock_path,
+                crate::fs::handle::OpenFlags::READ
+                    .union(crate::fs::handle::OpenFlags::WRITE),
+            );
+            if let Ok(h) = h {
+                // Acquire exclusive.
+                if crate::fs::Vfs::flock(flock_path, h, crate::fs::LockType::Exclusive).is_err() {
+                    serial_println!("[syscall/linux]   FAIL: flock real acquire failed");
+                    let _ = crate::fs::handle::close(h);
+                    return Err(KernelError::InternalError);
+                }
+                // A different owner conflicts.
+                if crate::fs::Vfs::flock(flock_path, h ^ 0xFFFF, crate::fs::LockType::Exclusive)
+                    != Err(KernelError::WouldBlock)
+                {
+                    serial_println!("[syscall/linux]   FAIL: flock conflict not WouldBlock");
+                    let _ = crate::fs::handle::close(h);
+                    return Err(KernelError::InternalError);
+                }
+                // close releases the lock as a side effect.
+                let _ = crate::fs::handle::close(h);
+                if crate::fs::Vfs::lock_query(flock_path) != Ok(None) {
+                    serial_println!("[syscall/linux]   FAIL: flock not released on close");
+                    return Err(KernelError::InternalError);
+                }
+            }
+            let _ = crate::fs::Vfs::remove(flock_path);
         }
 
         // getdents count=0 -> 0.

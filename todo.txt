@@ -7518,3 +7518,58 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      so this only affects static binaries from the early-2000s
 ##      era and the upgrade isn't worth the layout duplication.
 
+##  64. FLOCK (real Vfs::flock backend, was no-op) — DONE.
+##      Fourth "upgrade a stub" batch.  Replaces the previous
+##      "always succeed regardless of contention" behaviour with
+##      a real call into the Vfs lock table, so two processes
+##      that flock the same path actually see the conflict.
+##         - sys_flock now does fd→handle→path lookup via
+##           lookup_caller_fd + fs::handle::handle_path.
+##         - Console/Pipe fds → EBADF (no backing path).
+##         - Unknown op bits → EINVAL (matches Linux's "kernel
+##           refuses request it doesn't understand").
+##         - SH|EX combined → EINVAL.
+##         - LOCK_SH → Vfs::flock(path, handle_id, Shared).
+##         - LOCK_EX → Vfs::flock(path, handle_id, Exclusive).
+##         - LOCK_UN → Vfs::funlock(path, handle_id).
+##         - VFS WouldBlock → EAGAIN (== EWOULDBLOCK on Linux).
+##      Choice rationale:
+##         * Using the kernel handle id as the owner makes
+##           auto-release on close cost-free — fs::handle::close
+##           already invokes funlock(path, handle_id) when the
+##           final reference drops, so the lock dies with the
+##           description.  Forked children inheriting the
+##           description (dup_shared semantics) share the same
+##           owner id and thus the same lock, matching Linux's
+##           open-file-description semantics for flock.
+##         * EBADF for Console/Pipe rather than ENOTSUP because
+##           glibc / userspace probes treat "this fd has no
+##           lockable backing" identically to "bad fd" — both
+##           cause the caller to fall back to no locking — and
+##           EBADF is the conventional answer for flock-on-pty.
+##         * VFS already supports upgrade/downgrade and "owner
+##           already holds" — we just thread the call through.
+##           No new lock-table code needed for batch 38.
+##      Boot self-test exercises:
+##         - kernel-context unknown fd → EBADF for SH / EX /
+##           UN (validates the lookup_caller_fd path).
+##         - Bad op bits → EINVAL.
+##         - SH|EX combined → EINVAL.
+##         - End-to-end via Vfs::flock on a real handle:
+##             acquire EX, conflict with different owner →
+##             WouldBlock, release-on-close → lock_query None.
+##      Limitation: LOCK_NB (without it) is supposed to BLOCK on
+##      contention.  We don't yet have a wait queue hook in the
+##      VFS lock table, so we return EAGAIN regardless of LOCK_NB.
+##      Editors / lockfile probes that already pass LOCK_NB get
+##      the right answer; programs that rely on blocking flock
+##      see an early failure and must retry.  Fix path: add
+##      a wait_list: Vec<TaskId> to PathLockEntry, park the
+##      caller via proc::wait_queue when contended, and wake on
+##      funlock.  Tracked here for a follow-up batch.
+##      Limitation: Vfs::flock is whole-file only; flock(2) is
+##      whole-file by definition, so this is correct.  POSIX
+##      fcntl(F_SETLK) byte-range locking is a separate path
+##      (sys_fcntl currently stubs F_SETLK as 0) and would need
+##      a range-locking table; tracked separately.
+

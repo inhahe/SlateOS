@@ -4471,19 +4471,152 @@ fn sys_sched_getscheduler(args: &SyscallArgs) -> SyscallResult {
 /// `sched_setscheduler(pid, policy, sched_param)` — install a new
 /// scheduling policy.
 ///
-/// Accepts policy in 0..=7 as silent success; out-of-range -> EINVAL.
+/// Linux semantics that we honor:
+///   - `policy` must be one of {0,1,2,3,5,6,7}; 4 was historically
+///     reserved for SCHED_ISO and is rejected with EINVAL even
+///     on modern Linux.  Our previous stub allowed 0..=7 which would
+///     accept the reserved value; this revision tightens the check.
+///   - `sched_param` is a user pointer that must read at least `int
+///     sched_priority` (4 bytes).  NULL or an unreadable pointer
+///     returns EFAULT (or whatever `linux_errno_for` derives from the
+///     fault).
+///   - For SCHED_OTHER / SCHED_BATCH / SCHED_IDLE, `sched_priority`
+///     must be exactly 0; anything else returns EINVAL.
+///   - For SCHED_FIFO / SCHED_RR (real-time), `sched_priority` must be
+///     in `[1, 99]`; out of range returns EINVAL.
+///   - Real-time policies additionally require
+///     `sched_priority <= rlim_cur(RLIMIT_RTPRIO)` — non-zero by
+///     default would let any process become RT, which is exactly the
+///     privilege our default `(0, 0)` should deny.  Violation returns
+///     EPERM, matching Linux's `__sched_setscheduler` check.
+///   - SCHED_DEADLINE (6) is accepted at the policy-validation level
+///     but not actually wired up; we don't have RT support to back it.
+///     `sched_priority` for DEADLINE must be 0 in Linux too, so the
+///     same check applies.
+///
+/// Kernel-context callers (no `caller_pid()`) bypass the RTPRIO gate
+/// for the same reason every other rlimit gate in this file does:
+/// rlimits are a userspace policy, not a kernel boundary.
 fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
     let pid = args.arg0;
     let policy = args.arg1;
-    if policy > 7 {
-        return linux_err(errno::EINVAL);
+    let param_ptr = args.arg2;
+
+    // Validate policy first — cheaper than the pointer fetch.
+    // 4 is the deprecated SCHED_ISO slot; Linux rejects it.
+    match policy {
+        0 | 1 | 2 | 3 | 5 | 6 | 7 => {}
+        _ => return linux_err(errno::EINVAL),
     }
     if pid != 0 {
-        if crate::proc::pcb::state(pid).is_none() {
+        if pcb::state(pid).is_none() {
             return linux_err(errno::ESRCH);
         }
     }
+
+    // Fetch sched_priority from user memory.
+    let sched_prio = match read_user_sched_priority(param_ptr) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+
+    // Policy/priority compatibility check.
+    if let Err(e) = sched_priority_check_for_policy(policy, sched_prio) {
+        return linux_err(e);
+    }
+
+    // RTPRIO gate for real-time policies.
+    if policy == 1 || policy == 2 {
+        if let Err(e) = rlimit_rtprio_check_for_caller(sched_prio) {
+            return linux_err(e);
+        }
+    }
+
     SyscallResult::ok(0)
+}
+
+/// Read `struct sched_param { int sched_priority; }` from a user
+/// pointer.  We only consume the first 4 bytes; Linux's struct is
+/// `int`-aligned and 4 bytes wide for this field.
+///
+/// NULL pointer returns EFAULT (matching Linux's
+/// `copy_from_user(&lparam, param, sizeof(lparam))`).
+fn read_user_sched_priority(param_ptr: u64) -> Result<i32, i32> {
+    if param_ptr == 0 {
+        return Err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(param_ptr, 4) {
+        return Err(linux_errno_for(e));
+    }
+    let mut buf = [0u8; 4];
+    // SAFETY: validate_user_read above confirmed a 4-byte readable
+    // user range at param_ptr.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(param_ptr, buf.as_mut_ptr(), 4)
+    };
+    if let Err(e) = r {
+        return Err(linux_errno_for(e));
+    }
+    Ok(i32::from_ne_bytes(buf))
+}
+
+/// Validate that `sched_priority` is in the legal range for `policy`.
+///
+/// Linux rules (kernel/sched/core.c, `__sched_setscheduler`):
+///   - SCHED_FIFO / SCHED_RR: priority in `[1, 99]`.
+///   - SCHED_OTHER / SCHED_BATCH / SCHED_IDLE / SCHED_DEADLINE: priority
+///     must be exactly 0.  (DEADLINE uses the dl_attr struct via
+///     sched_setattr instead, not sched_param.)
+///   - Anything outside those windows -> EINVAL.
+fn sched_priority_check_for_policy(policy: u64, sched_prio: i32) -> Result<(), i32> {
+    match policy {
+        1 | 2 => {
+            if !(1..=99).contains(&sched_prio) {
+                return Err(errno::EINVAL);
+            }
+        }
+        0 | 3 | 5 | 6 | 7 => {
+            if sched_prio != 0 {
+                return Err(errno::EINVAL);
+            }
+        }
+        _ => return Err(errno::EINVAL),
+    }
+    Ok(())
+}
+
+/// Enforce `RLIMIT_RTPRIO` against a real-time policy request that
+/// would install priority `sched_prio`.
+///
+/// Looks up the caller's `RLIMIT_RTPRIO` soft limit and delegates to
+/// [`rlimit_rtprio_check_with`].  Kernel-context callers bypass.
+fn rlimit_rtprio_check_for_caller(sched_prio: i32) -> Result<(), i32> {
+    let Some(pid) = caller_pid() else { return Ok(()) };
+    let Some((soft, _)) = pcb::get_rlimit(pid, pcb::RLIMIT_RTPRIO_INDEX as u32) else {
+        return Ok(());
+    };
+    rlimit_rtprio_check_with(soft, sched_prio)
+}
+
+/// Pure-function form of [`rlimit_rtprio_check_for_caller`].
+///
+/// `RLIM_INFINITY` always allows.  Otherwise `sched_prio` must be
+/// `<= soft`; default `soft = 0` therefore forbids every legal RT
+/// priority (which all lie in `[1, 99]`), which is the privilege
+/// we want denied by default.  Returns `EPERM` on violation —
+/// the errno Linux reports for `__sched_setscheduler` when the
+/// requested priority exceeds RLIMIT_RTPRIO.
+fn rlimit_rtprio_check_with(soft: u64, sched_prio: i32) -> Result<(), i32> {
+    if soft == pcb::RLIM_INFINITY {
+        return Ok(());
+    }
+    // sched_prio is always >= 1 here (validated by
+    // sched_priority_check_for_policy for RT policies), so casting
+    // through i64 for the comparison is safe.
+    if i64::from(sched_prio) > soft as i64 {
+        return Err(errno::EPERM);
+    }
+    Ok(())
 }
 
 /// `sched_getparam(pid, param)` — write `struct sched_param { int
@@ -4518,13 +4651,31 @@ fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
 
 /// `sched_setparam(pid, param)` — install new sched parameters.
 ///
-/// Accepted silently; only the existence-of-pid gate applies.
+/// `sched_setparam` keeps the target's current scheduling policy and
+/// only updates the parameters; our model reports every process as
+/// SCHED_OTHER (see [`sys_sched_getscheduler`]), which has the rule
+/// `sched_priority == 0`.  Therefore any non-zero `sched_priority`
+/// request returns EINVAL.
+///
+/// `param` is a user pointer that must point to at least 4 bytes of
+/// readable memory (we only consume `sched_priority`).  NULL or
+/// unreadable -> EFAULT.
 fn sys_sched_setparam(args: &SyscallArgs) -> SyscallResult {
     let pid = args.arg0;
+    let param_ptr = args.arg1;
     if pid != 0 {
-        if crate::proc::pcb::state(pid).is_none() {
+        if pcb::state(pid).is_none() {
             return linux_err(errno::ESRCH);
         }
+    }
+    let sched_prio = match read_user_sched_priority(param_ptr) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    // Modelled current policy is SCHED_OTHER, which requires
+    // sched_priority == 0.
+    if sched_prio != 0 {
+        return linux_err(errno::EINVAL);
     }
     SyscallResult::ok(0)
 }
@@ -14870,6 +15021,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // sched_setscheduler(0, 8, NULL) -> EINVAL (policy out of range).
+        // Policy validation happens before the param pointer fetch, so
+        // this still returns EINVAL even with a NULL param.
         let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
@@ -14879,20 +15032,136 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // sched_setscheduler(0, 0, NULL) -> 0.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+        // sched_setscheduler(0, 4, NULL) -> EINVAL.  Policy 4 is the
+        // deprecated SCHED_ISO slot that Linux still rejects; we used
+        // to silently accept it (0..=7) but batch 49 tightened the
+        // whitelist to {0,1,2,3,5,6,7}.
+        let a = SyscallArgs { arg0: 0, arg1: 4, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: sched_setscheduler(OTHER) not 0"
+                "[syscall/linux]   FAIL: sched_setscheduler(4) not EINVAL (was: silent success)"
             );
             return Err(KernelError::InternalError);
         }
-        // sched_setparam(0, NULL) -> 0.
-        if dispatch_linux(nr::SCHED_SETPARAM, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: sched_setparam(0) not 0");
+        // sched_setscheduler(0, 0, NULL) -> EFAULT.  Param pointer is
+        // required even for SCHED_OTHER because the kernel needs to
+        // read sched_priority and validate it is 0.  Previously
+        // returned 0 because the stub ignored the pointer entirely.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(OTHER, NULL) expected EFAULT, got {}",
+                dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
+        // sched_setparam(0, NULL) -> EFAULT (same reason: needs to
+        // read sched_priority from the param pointer).
+        if dispatch_linux(nr::SCHED_SETPARAM, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setparam(0, NULL) expected EFAULT, got {}",
+                dispatch_linux(nr::SCHED_SETPARAM, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Pure-helper decision table for sched_priority_check_for_policy.
+        //   - SCHED_OTHER (0): only priority 0 is valid.
+        //   - SCHED_FIFO (1) / SCHED_RR (2): priority in [1, 99].
+        //   - SCHED_BATCH (3) / SCHED_IDLE (5) / SCHED_DEADLINE (6) /
+        //     SCHED_EXT (7): priority must be 0.
+        //   - Unknown policy: EINVAL.
+        assert_eq!(
+            sched_priority_check_for_policy(0, 0),
+            Ok(()),
+            "SCHED_OTHER prio=0 must be accepted",
+        );
+        assert_eq!(
+            sched_priority_check_for_policy(0, 1),
+            Err(errno::EINVAL),
+            "SCHED_OTHER prio=1 must EINVAL",
+        );
+        assert_eq!(
+            sched_priority_check_for_policy(1, 1),
+            Ok(()),
+            "SCHED_FIFO prio=1 (min) must be accepted",
+        );
+        assert_eq!(
+            sched_priority_check_for_policy(1, 99),
+            Ok(()),
+            "SCHED_FIFO prio=99 (max) must be accepted",
+        );
+        assert_eq!(
+            sched_priority_check_for_policy(1, 0),
+            Err(errno::EINVAL),
+            "SCHED_FIFO prio=0 (below RT range) must EINVAL",
+        );
+        assert_eq!(
+            sched_priority_check_for_policy(2, 100),
+            Err(errno::EINVAL),
+            "SCHED_RR prio=100 (above RT range) must EINVAL",
+        );
+        assert_eq!(
+            sched_priority_check_for_policy(3, 0),
+            Ok(()),
+            "SCHED_BATCH prio=0 must be accepted",
+        );
+        assert_eq!(
+            sched_priority_check_for_policy(3, 1),
+            Err(errno::EINVAL),
+            "SCHED_BATCH prio=1 must EINVAL",
+        );
+        assert_eq!(
+            sched_priority_check_for_policy(99, 0),
+            Err(errno::EINVAL),
+            "unknown policy must EINVAL even with prio=0",
+        );
+
+        // Pure-helper decision table for rlimit_rtprio_check_with.
+        //   - RLIM_INFINITY: any priority passes.
+        //   - soft = 0: every legal RT priority (1..=99) fails with
+        //     EPERM — the default-deny posture.
+        //   - soft = 50: priorities 1..=50 pass, 51..=99 fail.
+        assert_eq!(
+            rlimit_rtprio_check_with(pcb::RLIM_INFINITY, 99),
+            Ok(()),
+            "RLIM_INFINITY must allow max RT priority",
+        );
+        assert_eq!(
+            rlimit_rtprio_check_with(0, 1),
+            Err(errno::EPERM),
+            "soft=0 must reject even RT prio=1",
+        );
+        assert_eq!(
+            rlimit_rtprio_check_with(50, 50),
+            Ok(()),
+            "soft=50 with prio=50 must succeed (== ceiling)",
+        );
+        assert_eq!(
+            rlimit_rtprio_check_with(50, 51),
+            Err(errno::EPERM),
+            "soft=50 with prio=51 must EPERM",
+        );
+        assert_eq!(
+            rlimit_rtprio_check_with(99, 99),
+            Ok(()),
+            "soft=99 with prio=99 must succeed",
+        );
+
+        // Kernel-context bypass: rlimit_rtprio_check_for_caller in
+        // kernel context (caller_pid = None) must always succeed
+        // regardless of the requested priority.  Same rule as every
+        // other Linux-ABI rlimit gate.
+        assert_eq!(
+            rlimit_rtprio_check_for_caller(99),
+            Ok(()),
+            "kernel-context RTPRIO gate must pass through",
+        );
         // sched_getparam(0, NULL) -> EFAULT.
         if dispatch_linux(nr::SCHED_GETPARAM, &a).value
             != -i64::from(errno::EFAULT) {

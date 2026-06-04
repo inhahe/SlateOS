@@ -8251,4 +8251,100 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      RLIMIT_RTPRIO.  Same shape of fix — accept policy 1/2
 ##      (FIFO/RR) only if param.sched_priority <= rlim_cur
 ##      (RLIMIT_RTPRIO).  Tracked for a follow-up batch.
+##      Update: addressed in item 75 below.
+
+##  75. Validate sched_param + enforce RLIMIT_RTPRIO in
+##      sched_setscheduler / sched_setparam — DONE.
+##      Fifteenth "upgrade a stub" batch.  Tightens the
+##      policy-installation surface for Linux real-time
+##      scheduling syscalls.
+##         - sys_sched_setscheduler now:
+##              * Tightens the policy whitelist to
+##                {0,1,2,3,5,6,7}.  Policy 4 was historically
+##                SCHED_ISO (rejected even on modern Linux);
+##                our previous 0..=7 stub accepted it.
+##              * Reads sched_priority from the user-provided
+##                param pointer (NULL -> EFAULT, unreadable ->
+##                whatever linux_errno_for maps the
+##                page-fault to).
+##              * Validates priority/policy compatibility via
+##                a new sched_priority_check_for_policy
+##                helper: RT policies (FIFO=1, RR=2) require
+##                prio in [1,99]; OTHER/BATCH/IDLE/DEADLINE/
+##                EXT require prio == 0; anything else
+##                returns EINVAL.
+##              * For RT policies, enforces RLIMIT_RTPRIO via
+##                rlimit_rtprio_check_for_caller /
+##                rlimit_rtprio_check_with.  Default
+##                rlim_cur(RTPRIO) = 0 means no priority in
+##                [1,99] passes, so a fresh process cannot
+##                grant itself real-time scheduling — exactly
+##                the privilege the rlimit is supposed to
+##                gate.  Violation returns EPERM, matching
+##                Linux's __sched_setscheduler.
+##         - sys_sched_setparam:
+##              * Validates the user param pointer and reads
+##                sched_priority.
+##              * Since our modelled current policy is always
+##                SCHED_OTHER, any non-zero sched_priority
+##                returns EINVAL.
+##         - New named index pcb::RLIMIT_RTPRIO_INDEX = 14.
+##         - New helpers (mirroring the FSIZE/NICE pair shape):
+##              read_user_sched_priority(ptr) -> Result<i32, i32>
+##              sched_priority_check_for_policy(policy, prio)
+##              rlimit_rtprio_check_for_caller(prio)
+##              rlimit_rtprio_check_with(soft, prio)
+##      Coverage:
+##         - dispatch_linux: sched_setscheduler with policy 8,
+##           4 -> EINVAL; with valid policy + NULL param ->
+##           EFAULT; sched_setparam(0, NULL) -> EFAULT.
+##         - sched_priority_check_for_policy decision table:
+##              (OTHER, 0) -> Ok; (OTHER, 1) -> EINVAL
+##              (FIFO, 1)  -> Ok; (FIFO, 99) -> Ok
+##              (FIFO, 0)  -> EINVAL; (RR, 100) -> EINVAL
+##              (BATCH, 0) -> Ok; (BATCH, 1) -> EINVAL
+##              (99, 0)    -> EINVAL (unknown policy)
+##         - rlimit_rtprio_check_with decision table:
+##              (INF, 99)   -> Ok (always allow under INFINITY)
+##              (0,   1)    -> EPERM (default-deny)
+##              (50, 50)    -> Ok (== ceiling)
+##              (50, 51)    -> EPERM (above ceiling)
+##              (99, 99)    -> Ok (full RT range)
+##         - rlimit_rtprio_check_for_caller in kernel context
+##           always Ok (bypass rule).
+##      Choice rationale:
+##         * The Linux contract for sched_setscheduler is
+##           that the kernel returns specifically EPERM (not
+##           EACCES) for RLIMIT_RTPRIO violations because the
+##           rlimit-derived denial is treated as a privilege
+##           check.  We mirror that errno exactly so programs
+##           that distinguish EACCES vs EPERM (some service
+##           managers do) behave the same way as on Linux.
+##         * Param pointer validation is now required even
+##           for SCHED_OTHER.  Previously NULL was silently
+##           accepted, which was wrong; Linux always reads
+##           sched_priority from the struct and the field
+##           must be 0 for non-RT policies.  Programs that
+##           passed NULL "because OTHER doesn't need a
+##           priority" were relying on undocumented
+##           behavior; the new EFAULT matches what they'd
+##           see on Linux.
+##         * The kernel-context bypass for the rlimit gate
+##           is what lets the existing scheduler self-tests
+##           (run during boot before any real userspace
+##           process exists) continue to work without
+##           special-casing.
+##      Limitation: sched_setattr is still a stub.
+##      sched_setattr is the modern replacement for
+##      sched_setscheduler that takes a sched_attr struct
+##      (with separate fields for OTHER, FIFO/RR, and
+##      DEADLINE).  Wiring up DEADLINE parameter validation
+##      (runtime / deadline / period) is a separate batch.
+##      Limitation: sched_setscheduler still doesn't
+##      actually switch the target task to the requested
+##      policy — our scheduler is single-class round-robin
+##      and the Linux RT policies aren't honored beyond
+##      ABI-shape validation.  Setting SCHED_FIFO with a
+##      valid priority returns 0 but the task's actual
+##      scheduling behavior is unchanged.
 

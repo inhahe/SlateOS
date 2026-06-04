@@ -1041,6 +1041,19 @@ pub const RLIMIT_STACK_INDEX: usize = 3;
 /// Consulted by the Linux `setpriority` translation layer.
 pub const RLIMIT_NICE_INDEX: usize = 13;
 
+/// Index of `RLIMIT_RTPRIO` (real-time-priority ceiling) in
+/// [`Process::rlimits`].
+///
+/// Linux encodes the ceiling directly: `rlim_cur` is the maximum
+/// `sched_priority` the process may request when switching to a
+/// real-time scheduling policy (SCHED_FIFO or SCHED_RR).  `rlim_cur =
+/// 0` (our default) means real-time policies are forbidden entirely
+/// because every valid RT priority is in `[1, 99]`.
+///
+/// Consulted by the Linux `sched_setscheduler` / `sched_setparam`
+/// translation layers.
+pub const RLIMIT_RTPRIO_INDEX: usize = 14;
+
 /// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource` using
 /// `try_lock()`, returning `None` if the process table is currently held
 /// by another CPU or if `pid` is unknown.

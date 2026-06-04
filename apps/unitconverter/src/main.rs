@@ -14,6 +14,8 @@
 //! Uses the guitk library with Catppuccin Mocha theme.
 
 #![allow(dead_code)]
+// Widget-heavy GUI render helpers take many positional params.
+#![allow(clippy::too_many_arguments)]
 
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEventKind};
@@ -264,7 +266,7 @@ const AREA_UNITS: &[UnitDef] = &[
     UnitDef::linear("m\u{00B2}", "Square Meter", 1.0),
     UnitDef::linear("km\u{00B2}", "Square Kilometer", 1_000_000.0),
     UnitDef::linear("ha", "Hectare", 10_000.0),
-    UnitDef::linear("ac", "Acre", 4046.856_422_4),
+    UnitDef::linear("ac", "Acre", 4_046.856_422_4),
     UnitDef::linear("ft\u{00B2}", "Square Foot", 0.092_903_04),
     UnitDef::linear("in\u{00B2}", "Square Inch", 0.000_645_16),
     UnitDef::linear("mi\u{00B2}", "Square Mile", 2_589_988.110_336),
@@ -544,6 +546,12 @@ pub struct UnitConverterApp {
     pub show_favorites: bool,
     /// Which input is focused: true = from, false = to (for future bidirectional).
     pub from_focused: bool,
+}
+
+impl Default for UnitConverterApp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl UnitConverterApp {

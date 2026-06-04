@@ -1447,7 +1447,10 @@ impl RecoveryEngine {
             file.partition_name.clone_from(&partition.name);
             self.files.push(file);
         }
-        self.progress.bytes_scanned = partition.block_groups.len() as u64 * 8192 * 256; // Approximate bytes of inode table scanned.
+        // Approximate bytes of inode table scanned: block_groups * 8192 inodes/group * 256 B/inode.
+        self.progress.bytes_scanned = (partition.block_groups.len() as u64)
+            .saturating_mul(8192)
+            .saturating_mul(256);
     }
 
     fn scan_deep(&mut self, partition: &Partition) {
@@ -1590,9 +1593,12 @@ impl RecoveryEngine {
         let mut total_size: u64 = 0;
 
         for f in &self.files {
-            *by_confidence.entry(f.confidence).or_insert(0) += 1;
-            *by_category.entry(f.category()).or_insert(0) += 1;
-            *by_source.entry(f.source.display_name()).or_insert(0) += 1;
+            let c = by_confidence.entry(f.confidence).or_insert(0);
+            *c = c.saturating_add(1);
+            let c = by_category.entry(f.category()).or_insert(0);
+            *c = c.saturating_add(1);
+            let c = by_source.entry(f.source.display_name()).or_insert(0);
+            *c = c.saturating_add(1);
             total_size = total_size.saturating_add(f.file_size);
         }
 

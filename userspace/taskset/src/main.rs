@@ -7,6 +7,11 @@
 //   renice   - alter priority of running processes
 
 #![cfg_attr(not(test), no_main)]
+// IOPRIO_WHO_* constants and CpuSet helper methods are kept for the
+// future ionice-via-syscall path (currently we only emit the syscall
+// arg dispatch the other tools need). Allow dead_code so the layout
+// stays documented alongside the constants in use.
+#![allow(dead_code)]
 
 // ── Constants ──────────────────────────────────────────────────────────
 

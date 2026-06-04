@@ -734,12 +734,11 @@ impl GameState {
                 flipped,
             } => {
                 // Un-flip if needed.
-                if flipped {
-                    if let MoveSource::Tableau(col) = from {
-                        if let Some(top) = self.tableau[col].last_mut() {
-                            top.face_up = false;
-                        }
-                    }
+                if flipped
+                    && let MoveSource::Tableau(col) = from
+                    && let Some(top) = self.tableau[col].last_mut()
+                {
+                    top.face_up = false;
                 }
                 // Move cards back.
                 let cards: Vec<PileCard> = match to {
@@ -796,11 +795,9 @@ impl GameState {
                     match self.selection {
                         Some(Selection::Waste) => {
                             // Already selected waste, try auto-move to foundation.
-                            if !self.try_waste_to_foundation() {
-                                self.selection = None;
-                            } else {
-                                self.selection = None;
-                            }
+                            // Either way, clear the selection.
+                            let _ = self.try_waste_to_foundation();
+                            self.selection = None;
                         }
                         _ => {
                             self.selection = Some(Selection::Waste);
@@ -849,17 +846,13 @@ impl GameState {
                     }
                     Some(Selection::Tableau(from_col, from_idx)) => {
                         if from_col == col {
-                            // Same column — try to auto-move top card to foundation.
+                            // Same column — try to auto-move top card to foundation
+                            // when the selection is the top of the face-up run.
                             let fu = self.tableau_face_up_count(col);
                             if from_idx + 1 == fu {
-                                if self.try_tableau_to_foundation(col) {
-                                    self.selection = None;
-                                } else {
-                                    self.selection = None;
-                                }
-                            } else {
-                                self.selection = None;
+                                let _ = self.try_tableau_to_foundation(col);
                             }
+                            self.selection = None;
                         } else if self.try_tableau_to_tableau(from_col, from_idx, col) {
                             self.selection = None;
                         }

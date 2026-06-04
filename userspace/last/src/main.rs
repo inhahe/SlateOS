@@ -277,7 +277,7 @@ fn days_in_month(year: i64, month: u32) -> u32 {
 /// Day-of-week from epoch seconds (0=Thu for epoch, returns 0=Sun..6=Sat).
 fn day_of_week(epoch_secs: u64) -> u32 {
     // Jan 1, 1970 was a Thursday (index 4 if 0=Sun).
-    let days_since_epoch = (epoch_secs / 86400);
+    let days_since_epoch = epoch_secs / 86400;
     // (days + 4) % 7 gives 0=Sun.
     ((days_since_epoch + 4) % 7) as u32
 }
@@ -515,8 +515,8 @@ fn parse_wtmp_records(data: &[u8]) -> Vec<WtmpRecord> {
         let time_sec = read_u32_le(data, offset + UT_TV_SEC_OFFSET).unwrap_or(0);
         let time_usec = read_u32_le(data, offset + UT_TV_USEC_OFFSET).unwrap_or(0);
         let mut addr = [0u32; 4];
-        for i in 0..4 {
-            addr[i] = read_u32_le(data, offset + UT_ADDR_OFFSET + i * 4).unwrap_or(0);
+        for (i, slot) in addr.iter_mut().enumerate() {
+            *slot = read_u32_le(data, offset + UT_ADDR_OFFSET + i * 4).unwrap_or(0);
         }
 
         records.push(WtmpRecord {
@@ -696,9 +696,8 @@ fn filter_entries(entries: &[LoginEntry], filters: &[String]) -> Vec<LoginEntry>
 /// Print login entries in `last` format.
 fn print_last_entries(entries: &[LoginEntry], opts: &LastOptions) {
     let now = current_epoch_secs() as u32;
-    let mut printed = 0;
 
-    for entry in entries {
+    for (printed, entry) in entries.iter().enumerate() {
         if opts.count > 0 && printed >= opts.count {
             break;
         }
@@ -780,8 +779,6 @@ fn print_last_entries(entries: &[LoginEntry], opts: &LastOptions) {
                 host_width = host_width
             );
         }
-
-        printed += 1;
     }
 }
 
@@ -839,7 +836,7 @@ fn parse_lastlog_records(data: &[u8]) -> Vec<LastlogRecord> {
 }
 
 /// Resolve UIDs to usernames using /etc/passwd.
-fn resolve_usernames(records: &mut Vec<LastlogRecord>) {
+fn resolve_usernames(records: &mut [LastlogRecord]) {
     let passwd = match fs::read_to_string("/etc/passwd") {
         Ok(content) => content,
         Err(_) => {

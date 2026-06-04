@@ -857,14 +857,10 @@ fn run_join_text(
 
                 // Produce the cross product of matching ranges.
                 if !config.suppress_paired {
-                    for ii in i_start..i {
-                        let f1 =
-                            split_fields(&lines1[ii], config.separator);
-                        for jj in j_start..j {
-                            let f2 = split_fields(
-                                &lines2[jj],
-                                config.separator,
-                            );
+                    for l1 in &lines1[i_start..i] {
+                        let f1 = split_fields(l1, config.separator);
+                        for l2 in &lines2[j_start..j] {
+                            let f2 = split_fields(l2, config.separator);
                             let jk = get_field(&f1, config.field1);
                             if let Err(e) = write_paired_line(
                                 out, config, jk, &f1, &f2,
@@ -1048,14 +1044,10 @@ fn run_join_json(
                 }
 
                 if !config.suppress_paired {
-                    for ii in i_start..i {
-                        let f1 =
-                            split_fields(&lines1[ii], config.separator);
-                        for jj in j_start..j {
-                            let f2 = split_fields(
-                                &lines2[jj],
-                                config.separator,
-                            );
+                    for l1 in &lines1[i_start..i] {
+                        let f1 = split_fields(l1, config.separator);
+                        for l2 in &lines2[j_start..j] {
+                            let f2 = split_fields(l2, config.separator);
                             let jk = get_field(&f1, config.field1).to_string();
                             entries.push(JsonEntry::Paired {
                                 fields1: f1

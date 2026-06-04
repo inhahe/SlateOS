@@ -110,8 +110,12 @@ Roadmap: `roadmap.md` lines 1432–1433.
 - Bare-metal staticlib build (`x86_64-unknown-none`) clean
 - All four 2025-era kernel blockers cleared during 2026-Q1/Q2 work
 - Open known limitations / judgment calls are tracked in `todo.txt`:
-  - Host-side raw `syscall` instruction — gating attempted, reverted,
-    deferred with documented path forward (todo.txt L4628+).
+  - Host-side raw `syscall` instruction — gated (host returns
+    -ENOSYS sentinel from `posix/src/syscall.rs`); the 22 tests that
+    previously depended on UB return values were fixed individually
+    via a per-feature host eventfd simulation, `ensure_std_fds()`
+    setup, and narrowly-scoped `#[cfg(target_os = "none")]` gates on
+    3 OS-only tests (todo.txt 2026-06-04 entry).
   - `socketpair()` SOCK_DGRAM / SOCK_SEQPACKET / SCM_RIGHTS — easy
     to add when first user appears (todo.txt L4723+).
   - Signal-handling residuals: 64-signal cap, no sigaltstack, no host

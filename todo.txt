@@ -4642,70 +4642,74 @@ Remaining net improvements (diminishing returns):
   it returns a documented sentinel (e.g. -ENOSYS) instead of executing
   the instruction.
 
-  ATTEMPTED 2026-06-04 / REVERTED 2026-06-04: implemented the proper
-  fix (added `cfg(not(target_os = "none"))` host arms to all of
-  syscall0..syscall6 + syscall3_2ret returning -ENOSYS, plus 8 unit
-  tests pinning the host return value).  Bare-metal build was clean
-  and all new syscall::tests passed, BUT the gate broke 22 existing
-  posix tests across epoll (17), fdtable (1), ioctl (1), poll (1),
-  signal (1), and time (1) modules.  Failure modes observed:
-    * epoll::test_epoll_ctl_phase106_*, test_eventfd_*, test_timerfd_*,
-      test_signalfd_positive_fd — these tests call `eventfd(0,0)`,
-      `timerfd_create(...)`, `signalfd(...)` as scenario setup and
-      assume a positive fd is returned, then assert on a downstream
-      validator path (EBADF / EINVAL / EFAULT).  Before the gate, the
-      raw SYSCALL on Windows happened to return values that the wrapper
-      treated as a valid kernel handle, so an fd was allocated.  After
-      the gate, the wrapper short-circuits with errno=ENOSYS and the
-      setup assert (`assert!(efd >= 0)`) fails.
-    * fdtable::test_alloc_fd_uses_lowest_available — asserts
-      `alloc_fd(...) == 3`.  Fails because earlier tests in the same
-      process previously succeeded at allocating fake fds (3,4,...)
-      via UB SYSCALL returns and left them in the static FD_TABLE on
-      different paths than they leak now; with the gate, the leak
-      pattern changes and the lowest free fd is 7, not 3.  This test
-      is fragile against any change to the static-table leak pattern.
-    * ioctl::test_grantpt_succeeds, poll::test_check_readiness_udp_bound,
-      signal::test_phase203_kill_cap_restore,
-      time::test_clock_nanosleep_timer_abstime_alone_passes_mask — all
-      exercise wrappers whose happy path requires a working syscall.
+  RESOLVED 2026-06-04.  The gate is now in place
+  (syscall0..syscall6 + syscall3_2ret return native::NOT_SUPPORTED
+  via the HOST_ENOSYS sentinel on `not(target_os = "none")`).  Path
+  to landing it:
 
-  Root cause: ~22 tests had been silently depending on undefined
-  behavior from raw SYSCALL on the Windows host returning
-  positive-looking values that the wrappers accepted as kernel
-  handles.  These tests are testing validator/dispatch logic that
-  legitimately runs in the wrapper AFTER the syscall, but the only
-  way they could reach that logic on host was via the UB return.
+  1. Re-applied the cfg-gate added during the first attempt (raw
+     `syscall` only emitted on the OS target; host arm returns the
+     pinned -38 sentinel).  This change is in
+     `posix/src/syscall.rs`; 9 new host tests pin the sentinel and
+     ENOSYS module-constant match.
 
-  Properly fixing this requires one of:
-    (a) Per-syscall host stubs at the wrapper layer (eventfd/timerfd/
-        signalfd/kill/clock_nanosleep/grantpt/UDP-sock) that synthesize
-        fake kernel handles or return realistic success codes on host.
-        Estimated effort: 1-2 days; touches ~10 wrappers; introduces a
-        host-only simulated-kernel state shim.
-    (b) Move the 22 affected tests to integration tests run inside
-        QEMU against the real kernel, removing them from the host
-        `cargo test -p posix` suite.  Estimated effort: building the
-        QEMU userspace harness first, then porting tests.  Currently
-        no such harness exists; the 2026-05-29 signal-delivery note
-        already lists this as a "TODO when a QEMU userspace harness
-        exists".
-    (c) Custom `target_os = "none"` build attributes on each affected
-        test so they only compile on the OS target.  This effectively
-        deletes them from the active host test suite (since CI runs
-        on host), losing ~22 tests' worth of coverage.
+  2. Built a per-wrapper host shim for the eventfd family (the
+     largest cluster of broken tests).  `posix/src/epoll.rs` now
+     has a `host_eventfd_sim` module under `cfg(not(target_os = "none"))`
+     with a `Mutex<Vec<Entry>>` simulator of {handle, counter,
+     semaphore} entries, plus four `eventfd_kernel_*(create / read /
+     write / close)` thin dispatchers that route to either the
+     syscall (OS target) or the simulator (host).  `eventfd()`,
+     `eventfd_read()`, `eventfd_write()`, `file::read`/`write`/
+     `close` for `HandleKind::Eventfd` all go through the
+     dispatchers — wrappers behave end-to-end on host.  Importantly,
+     the host sim returns native kernel error codes (not POSIX
+     errno) so `errno::translate` produces the same observable
+     behaviour the kernel would.
 
-  DEFERRED.  The safety concern is theoretical — the tests do
-  successfully pass on the dev machine; "NT service returns
-  STATUS_INSUFFICIENT_RESOURCES" was only observed once for the
-  setsid flake and was resolved by the targeted getpid()/gettid() fix.
-  The test-coverage loss from gating the broken tests is concrete and
-  immediate.  Path forward: option (a) when there is dedicated time to
-  build the host-mock layer, OR option (b) when the QEMU userspace
-  harness lands.  Until then, do not add new posix tests that depend
-  on syscall happy paths — instead, test the validator logic in pure
-  helper functions (matches the pattern in signal::kill_target /
-  signal::signal_send_errno).
+  3. Made `test_grantpt_succeeds` / `test_unlockpt_succeeds`
+     call `ensure_std_fds()` themselves instead of relying on
+     a prior test having set them up (the new fd-allocation
+     pattern means fd 0 may not be open by the time these run).
+
+  4. Cfg-gated to `target_os = "none"` the three tests that
+     fundamentally need a working kernel:
+       - `poll::test_check_readiness_udp_bound` — depends on
+         SYS_UDP_RX_READY (matches the pre-existing precedent of
+         `test_check_readiness_tcp_connected`).
+       - `signal::test_phase203_kill_cap_restore` — the
+         CAP_KILL=present → kill(1, SIGCHLD) → 0 branch issues
+         SYS_SIGNAL_SEND and cannot succeed without a kernel.
+         The CAP_KILL=dropped → EPERM branch is pure-userspace
+         logic and continues to run on host.
+       - `time::test_clock_nanosleep_timer_abstime_alone_passes_mask`
+         — the abs-time branch calls `clock_gettime`, which on
+         host returns -1 because `SYS_CLOCK_REALTIME` is not
+         stubbed.
+
+  Result: full posix test suite passes (`cargo test -p posix
+  --target x86_64-pc-windows-gnu --lib` → 19968 pass / 0 fail /
+  ~1.9s) and is stable across 5 consecutive runs.  Bare-metal
+  staticlib build (`x86_64-unknown-none`) clean.  `cargo clippy`
+  on host target clean.
+
+  Coverage tradeoff: 3 tests are now OS-target-only (down from the
+  22 that would have been if the gate alone had been kept without
+  the host sim).  These three exercise UDP queue depth, real kill
+  delivery, and abs-time sleep — all fundamentally kernel concerns
+  with no useful host stub.  They'll come back when a QEMU userspace
+  test harness exists.
+
+  Follow-up notes if a future test hits another host-broken syscall:
+    * Prefer per-feature host sim (the eventfd-sim pattern) over
+      blanket `target_os = "none"` gating — keeps host coverage.
+    * `errno::native::*` constants are the contract between sim and
+      `errno::translate`; return those, not POSIX errno values.
+    * `clock_gettime` is the most-called bare syscall0 in posix
+      (~30 sites).  If/when more time tests need it on host, gate
+      `SYS_CLOCK_MONOTONIC`/`SYS_CLOCK_REALTIME` themselves to
+      `std::time::Instant::now()` / `SystemTime::now()` in a host
+      helper module rather than fixing 30 call sites individually.
 
 - (2026-06-03) clipmanager: full feature surface (ClipEntry, ClipTemplate,
   ClipboardStore, AppState, render_entry_row, render_history_panel,

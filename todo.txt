@@ -7618,3 +7618,64 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      is removed before the next openat will still see ENOENT
 ##      at the openat (no caching).  This matches Linux exactly.
 
+##  66. OPENAT dirfd resolution — DONE.
+##      Sixth "upgrade a stub" batch.  Closes the limitation
+##      flagged in item 65: openat(non-AT_FDCWD, relative_path)
+##      now honours the dirfd as the resolution root rather than
+##      silently falling through to AT_FDCWD.
+##         - sys_openat: branch on the first path byte.  AT_FDCWD
+##           → open_common (existing behaviour).  Absolute path
+##           (first byte '/') → open_common (POSIX: dirfd is
+##           ignored for absolute paths).  Empty path → ENOENT
+##           (no AT_EMPTY_PATH support yet — openat2 territory).
+##           Otherwise: lookup_caller_fd(dirfd), require
+##           HandleKind::File, recover the directory path via
+##           fs::handle::handle_path, stat-verify it's still a
+##           directory (ENOTDIR for regular files, ENOENT for
+##           rmdir-while-open races), concatenate dir_path + "/"
+##           + rel_bytes, ENAMETOOLONG on >4095 bytes, then route
+##           through the new open_kernel_path_install helper.
+##         - open_kernel_path_install(path, flags): new helper
+##           that bypasses the user-pointer copy stage of
+##           open_common.  Does cap check → translate_open_flags
+##           → fs::handle::open(path) → register_ipc_handle →
+##           build FdEntry with FD_CLOEXEC + status flags →
+##           pcb::linux_fd_install.  Rolls back both the IPC
+##           handle registration and the underlying file open on
+##           any install failure so we never leak the raw handle.
+##         - handlers::require_cap_type made pub(crate) so
+##           linux.rs can reuse the existing cap-check helper
+##           without duplicating the pid/kernel-bypass logic.
+##      Choice rationale:
+##         * The path lives in exactly one place (fs::handle
+##           OpenFile).  Borrowing it via handle_path keeps
+##           FdEntry a fixed-size Copy struct — no String fields
+##           bloating the [Option<FdEntry>; MAX_FDS] table.
+##         * Stat-verifying the dirfd at openat (rather than
+##           caching is-a-dir on FdEntry) catches the
+##           rmdir-while-fd-open race naturally.  Programs see
+##           ENOENT, matching Linux exactly.
+##         * Peeking only the first byte of the user path before
+##           the dirfd lookup keeps absolute-path opens cheap —
+##           we don't waste the lookup on requests that ignore
+##           dirfd anyway.
+##         * Empty path → ENOENT, not AT_EMPTY_PATH.  Honouring
+##           AT_EMPTY_PATH requires the openat2 flags path, which
+##           we deliberately ENOSYS today (callers fall back to
+##           openat).  Tracked separately.
+##      Limitation: O_NOFOLLOW on the dirfd is not enforced — if
+##      the dirfd was opened with O_NOFOLLOW but its underlying
+##      path contains symlinks elsewhere, the relative open will
+##      still resolve through them.  Symlink-safe resolution
+##      requires a dcache-walking primitive that we don't have
+##      yet.
+##      Limitation: AT_SYMLINK_NOFOLLOW / AT_EMPTY_PATH flags
+##      (passed via openat's mode argument in openat2) are not
+##      honoured — sys_openat only consumes the dirfd, path, and
+##      flags args.  Add when openat2 grows beyond ENOSYS.
+##      Limitation: We re-stat the dirfd's backing path at every
+##      openat call rather than caching directoriness in the
+##      FdEntry.  Correct under the rmdir-while-open race, but
+##      slower than Linux's dcache.  Acceptable until benchmarks
+##      flag it.
+

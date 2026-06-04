@@ -2429,15 +2429,166 @@ fn sys_open(args: &SyscallArgs) -> SyscallResult {
     open_common(args.arg0, 0, args.arg1 as u32)
 }
 
-/// `openat(dirfd, path, flags, mode)` — only `AT_FDCWD` is honoured.
+/// `openat(dirfd, path, flags, mode)` — opens a path relative to `dirfd`.
+///
+/// Resolution rules (matches Linux):
+///   - `path` is absolute → `dirfd` is ignored; behaves like `open()`.
+///   - `dirfd == AT_FDCWD` → relative path is resolved against the
+///     caller's cwd.  `open_common` already handles this via the
+///     userspace path string and the VFS dcache.
+///   - Otherwise, `dirfd` must refer to an open file handle whose
+///     backing path is a directory.  We recover that path via
+///     `fs::handle::handle_path`, stat-check it's still a directory,
+///     concatenate with the relative path, and open the result.
+///
+/// Errors:
+///   - EBADF   — `dirfd` is not open, or is a console/pipe.
+///   - ENOTDIR — `dirfd` refers to a regular file.
+///   - EFAULT  — path pointer is NULL or unreadable.
+///   - ENOENT / ENAMETOOLONG / EINVAL — from path validation.
 fn sys_openat(args: &SyscallArgs) -> SyscallResult {
     let dirfd = args.arg0 as i32;
-    if dirfd != AT_FDCWD {
-        // Directory-fd-relative opens require an `OpenFlags::DIRECTORY`
-        // VFS handle we don't have yet.
-        return linux_err(errno::ENOSYS);
+    let path_ptr = args.arg1;
+    let flags = args.arg2 as u32;
+
+    if dirfd == AT_FDCWD {
+        return open_common(path_ptr, 0, flags);
     }
-    open_common(args.arg1, 0, args.arg2 as u32)
+
+    // Peek at the first byte of the path: if it's '/', dirfd is ignored
+    // (POSIX rule).  Otherwise we need dirfd to be a directory handle.
+    if path_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let mut first = 0u8;
+    // SAFETY: validate-and-copy a single byte; copy_from_user does the SMAP dance.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(path_ptr, &raw mut first, 1)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    if first == b'/' {
+        // Absolute path — dirfd is ignored.
+        return open_common(path_ptr, 0, flags);
+    }
+    if first == 0 {
+        // Empty path under openat.  Linux's "empty path" semantics
+        // require O_PATH|AT_EMPTY_PATH which we don't expose — for
+        // openat without those, an empty path is ENOENT.
+        return linux_err(errno::ENOENT);
+    }
+
+    // Relative path: resolve dirfd to a VFS path and prepend.
+    let entry = match lookup_caller_fd(dirfd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    if entry.kind != HandleKind::File {
+        return linux_err(errno::ENOTDIR);
+    }
+    let dir_path = match crate::fs::handle::handle_path(entry.raw_handle) {
+        Ok(p) => p,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    match crate::fs::Vfs::stat(&dir_path) {
+        Ok(stat_entry) => {
+            if stat_entry.entry_type != crate::fs::EntryType::Directory {
+                return linux_err(errno::ENOTDIR);
+            }
+        }
+        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+
+    // Read the full relative path from userspace.
+    const MAX_REL: usize = 4096;
+    let rel_bytes = match read_user_cstr(path_ptr, MAX_REL) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    if rel_bytes.is_empty() {
+        return linux_err(errno::ENOENT);
+    }
+    if rel_bytes.iter().any(|&b| b == 0) {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Build combined path: dir_path + "/" + rel_bytes (avoiding the
+    // double slash if dir_path ends with '/').
+    let dir_bytes = dir_path.as_bytes();
+    let mut combined: alloc::vec::Vec<u8> =
+        alloc::vec::Vec::with_capacity(dir_bytes.len() + 1 + rel_bytes.len());
+    combined.extend_from_slice(dir_bytes);
+    if dir_bytes.last().copied() != Some(b'/') {
+        combined.push(b'/');
+    }
+    combined.extend_from_slice(&rel_bytes);
+    if combined.len() > 4095 {
+        return linux_err(errno::ENAMETOOLONG);
+    }
+    let path_str = match core::str::from_utf8(&combined) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+
+    open_kernel_path_install(path_str, flags)
+}
+
+/// Shared installer for "open by kernel-side absolute path".
+///
+/// Used by `openat(dirfd, relpath, ...)` after the dirfd has been
+/// resolved and `relpath` has been prepended with the dirfd's
+/// directory path.  Does the same per-process bookkeeping as
+/// `handlers::sys_fs_open` (capability check, IPC handle registration)
+/// plus the FdEntry install that `open_common` does — so the resulting
+/// fd is indistinguishable from one minted by plain `open()`.
+fn open_kernel_path_install(path: &str, flags: u32) -> SyscallResult {
+    if let Err(e) = handlers::require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::READ,
+    ) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let kernel_flags = crate::fs::handle::OpenFlags::from_bits(translate_open_flags(flags));
+    let raw_handle = match crate::fs::handle::open(path, kernel_flags) {
+        Ok(h) => h,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    // Mirror sys_fs_open: register the handle as a per-process IPC
+    // resource so exit-cleanup and fork-sharing see it.
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, crate::cap::ResourceType::File, raw_handle);
+    }
+
+    // Build FdEntry — same logic as open_common.
+    let mut status_flags = flags & (oflags::O_ACCMODE | oflags::O_APPEND | oflags::O_NONBLOCK);
+    if status_flags & oflags::O_ACCMODE > oflags::O_RDWR {
+        status_flags = (status_flags & !oflags::O_ACCMODE) | oflags::O_RDONLY;
+    }
+    let mut entry = FdEntry::file(raw_handle, status_flags);
+    if flags & oflags::O_CLOEXEC != 0 {
+        entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
+    }
+
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => {
+            // Kernel context — close the handle and report EBADF.
+            let _ = crate::fs::handle::close(raw_handle);
+            return linux_err(errno::EBADF);
+        }
+    };
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            // Roll back the open + handle registration on table failure.
+            pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::File, raw_handle);
+            let _ = crate::fs::handle::close(raw_handle);
+            linux_err(linux_errno_for(e))
+        }
+    }
 }
 
 /// Shared backend for `pipe(2)` / `pipe2(2)`.
@@ -12228,16 +12379,76 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // (7c) openat with a non-AT_FDCWD dirfd → -ENOSYS.
-    let openat_bad = SyscallArgs {
-        arg0: 7, arg1: 0x1000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::OPENAT, &openat_bad);
-    if r.value != -(errno::ENOSYS as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: openat(dirfd=7) → {} (expected -ENOSYS)", r.value
-        );
-        return Err(KernelError::InternalError);
+    // (7c) openat dirfd resolution (batch 40).
+    //
+    // The kernel self-test has no Linux fd table, so any path that
+    // requires looking up a non-AT_FDCWD dirfd must surface EBADF rather
+    // than panicking or falling into ENOSYS.  Absolute paths and the
+    // explicit error checks (NULL path, empty path) must short-circuit
+    // before the fd lookup.
+    {
+        // (7c1) openat(dirfd=7, path=NULL) → -EFAULT.  Explicit NULL
+        // check runs before the fd lookup.
+        let a = SyscallArgs { arg0: 7, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let r = dispatch_linux(nr::OPENAT, &a);
+        if r.value != -(errno::EFAULT as i64) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat(7, NULL) → {} (expected -EFAULT)", r.value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (7c2) openat(dirfd=7, path="/...") → absolute paths bypass the
+        // dirfd lookup entirely.  We use a guaranteed-nonexistent path
+        // so the request flows into `open_common`, succeeds the cap
+        // check, then surfaces ENOENT from the underlying VFS open
+        // (proving the dirfd was never looked up — otherwise we'd see
+        // EBADF first).
+        let abs: &[u8] = b"/__openat_b40_abs_probe_nonexistent__\0";
+        let a = SyscallArgs {
+            arg0: 7, arg1: abs.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::OPENAT, &a);
+        if r.value != -(errno::ENOENT as i64) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat(7, \"/__nonexistent__\") → {} (expected -ENOENT — absolute path must skip dirfd lookup)", r.value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (7c3) openat(dirfd=AT_FDCWD, path="") → -ENOENT (open_common
+        // path).  Confirms the AT_FDCWD branch routes through the
+        // existing relative-path handling.
+        let empty: &[u8] = b"\0";
+        let a = SyscallArgs {
+            arg0: AT_FDCWD as u64, arg1: empty.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::OPENAT, &a);
+        if r.value != -(errno::ENOENT as i64) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat(AT_FDCWD, \"\") → {} (expected -ENOENT)", r.value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (7c4) openat(dirfd=7, path="relative") → -EBADF.  Relative
+        // paths under a non-AT_FDCWD dirfd require the kernel to look
+        // the dirfd up in the caller's fd table.  Kernel context has
+        // no fd table, so lookup_caller_fd returns -EBADF.
+        let rel: &[u8] = b"relative_probe\0";
+        let a = SyscallArgs {
+            arg0: 7, arg1: rel.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::OPENAT, &a);
+        if r.value != -(errno::EBADF as i64) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat(7, \"relative\") → {} (expected -EBADF)", r.value
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     // (7d) translate_open_flags exhaustive cases.

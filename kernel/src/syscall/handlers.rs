@@ -112,7 +112,7 @@ fn require_cap(
 /// # Errors
 ///
 /// - `PermissionDenied` — the process lacks the required capability.
-fn require_cap_type(
+pub(crate) fn require_cap_type(
     resource_type: crate::cap::ResourceType,
     required_rights: crate::cap::Rights,
 ) -> Result<(), KernelError> {

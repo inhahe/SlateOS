@@ -454,6 +454,23 @@ pub mod nr {
     pub const RENAMEAT: u64 = 264;
     pub const RENAME: u64 = 82;
     pub const RENAMEAT2: u64 = 316;
+    pub const READLINKAT: u64 = 267;
+    pub const CHMOD: u64 = 90;
+    pub const FCHMOD: u64 = 91;
+    pub const FCHMODAT: u64 = 268;
+    pub const CHOWN: u64 = 92;
+    pub const FCHOWN: u64 = 93;
+    pub const LCHOWN: u64 = 94;
+    pub const FCHOWNAT: u64 = 260;
+    pub const TRUNCATE: u64 = 76;
+    pub const FTRUNCATE: u64 = 77;
+    pub const SYMLINK: u64 = 88;
+    pub const SYMLINKAT: u64 = 266;
+    pub const LINK: u64 = 86;
+    pub const LINKAT: u64 = 265;
+    pub const UTIMENSAT: u64 = 280;
+    pub const UTIMES: u64 = 235;
+    pub const UTIME: u64 = 132;
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,6 +1343,24 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::RENAME => sys_rename(args),
         nr::RENAMEAT => sys_renameat(args),
         nr::RENAMEAT2 => sys_renameat2(args),
+        nr::READLINK => sys_readlink(args),
+        nr::READLINKAT => sys_readlinkat(args),
+        nr::CHMOD => sys_chmod(args),
+        nr::FCHMOD => sys_fchmod(args),
+        nr::FCHMODAT => sys_fchmodat(args),
+        nr::CHOWN => sys_chown(args),
+        nr::FCHOWN => sys_fchown(args),
+        nr::LCHOWN => sys_lchown(args),
+        nr::FCHOWNAT => sys_fchownat(args),
+        nr::TRUNCATE => sys_truncate(args),
+        nr::FTRUNCATE => sys_ftruncate(args),
+        nr::SYMLINK => sys_symlink(args),
+        nr::SYMLINKAT => sys_symlinkat(args),
+        nr::LINK => sys_link(args),
+        nr::LINKAT => sys_linkat(args),
+        nr::UTIMENSAT => sys_utimensat(args),
+        nr::UTIMES => sys_utimes(args),
+        nr::UTIME => sys_utime(args),
         _ => linux_err(errno::ENOSYS),
     }
 }
@@ -5184,6 +5219,361 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
     rename_impl(args.arg1, args.arg3)
 }
 
+// ---------------------------------------------------------------------------
+// readlink / readlinkat
+//
+// We have no symlinks in our FS so the truthful answer for any path is
+// EINVAL (Linux: "named file is not a symbolic link") — and Linux callers
+// reliably handle EINVAL on readlink as "not a symlink, treat as plain
+// file".  Validate the path pointer first so NULL surfaces as EFAULT.
+//
+// Special case the `/proc/self/exe` path?  Even ld.so probes it and a
+// truthful ENOENT (path does not exist) is acceptable.  We do not want
+// to fake a result here because the wrong result would silently confuse
+// pathname-relative library loaders.
+// ---------------------------------------------------------------------------
+
+/// `readlink(path, buf, bufsiz)`.
+fn sys_readlink(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg0;
+    let buf_ptr = args.arg1;
+    let bufsiz = args.arg2 as usize;
+    if path_ptr == 0 || buf_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if bufsiz == 0 {
+        // Linux: bufsiz <= 0 -> EINVAL.
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EINVAL)
+}
+
+/// `readlinkat(dirfd, path, buf, bufsiz)`.
+fn sys_readlinkat(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg1;
+    let buf_ptr = args.arg2;
+    let bufsiz = args.arg3 as usize;
+    if path_ptr == 0 || buf_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if bufsiz == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EINVAL)
+}
+
+// ---------------------------------------------------------------------------
+// chmod / fchmod / fchmodat / chown / lchown / fchown / fchownat
+//
+// Without a writable backing FS or any concept of ownership, all attempts
+// to alter mode or owner are refused with EROFS for path-based variants
+// (the FS itself is read-only) and EROFS after fd validation for the
+// fd-based variants.  Validate inputs first so EFAULT and EBADF surface
+// truthfully.
+// ---------------------------------------------------------------------------
+
+/// `chmod(path, mode)`.
+fn sys_chmod(args: &SyscallArgs) -> SyscallResult {
+    match validate_user_str(args.arg0) {
+        Ok(()) => linux_err(errno::EROFS),
+        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `fchmod(fd, mode)`.
+fn sys_fchmod(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EROFS),
+    };
+    if pcb::linux_fd_lookup(pid, fd).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    linux_err(errno::EROFS)
+}
+
+/// `fchmodat(dirfd, path, mode, flags)`.
+fn sys_fchmodat(args: &SyscallArgs) -> SyscallResult {
+    // Linux: only AT_SYMLINK_NOFOLLOW (0x100) is valid.  Some glibc
+    // versions also pass AT_EMPTY_PATH (0x1000).
+    const VALID_FLAGS: u64 = 0x100 | 0x1000;
+    if args.arg3 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    match validate_user_str(args.arg1) {
+        Ok(()) => linux_err(errno::EROFS),
+        Err(KernelError::InvalidAddress) if args.arg1 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `chown(path, uid, gid)`.
+fn sys_chown(args: &SyscallArgs) -> SyscallResult {
+    match validate_user_str(args.arg0) {
+        Ok(()) => linux_err(errno::EROFS),
+        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `fchown(fd, uid, gid)`.
+fn sys_fchown(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EROFS),
+    };
+    if pcb::linux_fd_lookup(pid, fd).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    linux_err(errno::EROFS)
+}
+
+/// `lchown(path, uid, gid)` — identical to chown without symlink
+/// follow; same answer for us.
+fn sys_lchown(args: &SyscallArgs) -> SyscallResult {
+    match validate_user_str(args.arg0) {
+        Ok(()) => linux_err(errno::EROFS),
+        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `fchownat(dirfd, path, uid, gid, flags)`.
+fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
+    // Linux: AT_SYMLINK_NOFOLLOW (0x100) | AT_EMPTY_PATH (0x1000).
+    const VALID_FLAGS: u64 = 0x100 | 0x1000;
+    if args.arg4 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // AT_EMPTY_PATH may pass an empty path with a valid dirfd; in that
+    // case the operation targets dirfd directly.  Even then we have no
+    // writable FS, so EROFS once dirfd is validated.
+    if args.arg4 & 0x1000 != 0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let dirfd = args.arg0 as i32;
+        // AT_FDCWD == -100; accept it without validation.
+        if dirfd != -100 {
+            let pid = match caller_pid() {
+                Some(p) => p,
+                None => return linux_err(errno::EROFS),
+            };
+            if pcb::linux_fd_lookup(pid, dirfd).is_none() {
+                return linux_err(errno::EBADF);
+            }
+        }
+        return linux_err(errno::EROFS);
+    }
+    match validate_user_str(args.arg1) {
+        Ok(()) => linux_err(errno::EROFS),
+        Err(KernelError::InvalidAddress) if args.arg1 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// truncate / ftruncate
+//
+// truncate refuses with EROFS after path validation: there is no file
+// to truncate anyway, and EROFS is the truthful answer in the absence
+// of a writable FS.  ftruncate validates the fd; if it refers to a
+// Pipe or Console it returns EINVAL (truthful: not a regular file);
+// if it is a File it returns EROFS.
+// ---------------------------------------------------------------------------
+
+/// `truncate(path, length)`.
+fn sys_truncate(args: &SyscallArgs) -> SyscallResult {
+    // Negative length -> EINVAL per POSIX.
+    #[allow(clippy::cast_possible_wrap)]
+    let length = args.arg1 as i64;
+    if length < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    match validate_user_str(args.arg0) {
+        Ok(()) => linux_err(errno::EROFS),
+        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `ftruncate(fd, length)`.
+fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_wrap)]
+    let length = args.arg1 as i64;
+    if length < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EROFS),
+    };
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    use crate::proc::linux_fd::HandleKind;
+    match entry.kind {
+        HandleKind::File => linux_err(errno::EROFS),
+        // Pipes and consoles cannot be truncated.
+        HandleKind::Pipe | HandleKind::Console => linux_err(errno::EINVAL),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// symlink / symlinkat / link / linkat
+//
+// All create-link operations refuse with EROFS after pointer validation.
+// EROFS is the truthful answer: even if the source paths existed, the
+// destination cannot be created.  For the *at variants we validate the
+// new-path pointer (the one we'd be writing) and the old-path pointer
+// (the target, even if our representation is by-value).
+// ---------------------------------------------------------------------------
+
+/// `symlink(target, linkpath)`.
+fn sys_symlink(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 || args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EROFS)
+}
+
+/// `symlinkat(target, newdirfd, linkpath)`.
+fn sys_symlinkat(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 || args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EROFS)
+}
+
+/// `link(oldpath, newpath)`.
+fn sys_link(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 || args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EROFS)
+}
+
+/// `linkat(olddirfd, oldpath, newdirfd, newpath, flags)`.
+fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
+    // Linux: AT_SYMLINK_FOLLOW (0x400) | AT_EMPTY_PATH (0x1000).
+    const VALID_FLAGS: u64 = 0x400 | 0x1000;
+    if args.arg4 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg1 == 0 || args.arg3 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    linux_err(errno::EROFS)
+}
+
+// ---------------------------------------------------------------------------
+// utimensat / utimes / utime
+//
+// Timestamp-update syscalls.  Without a writable FS we cannot persist any
+// change, so each refuses with EROFS after pointer validation.  utimensat
+// has a special case where path may be NULL (operate on dirfd) and times
+// may be NULL (use current time) — neither makes a write succeed for us,
+// but we honour the input-shape rules so callers see the correct errno.
+// ---------------------------------------------------------------------------
+
+/// `utimensat(dirfd, path, times[2], flags)`.
+fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const VALID_FLAGS: u64 = AT_SYMLINK_NOFOLLOW;
+    if args.arg3 & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // path may legitimately be NULL: operate on dirfd directly.
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // times may legitimately be NULL (use current time).  When non-NULL
+    // it points at two timespecs = 32 bytes.
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 32) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EROFS)
+}
+
+/// `utimes(path, times[2])` — two `struct timeval` = 32 bytes.
+fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 32) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EROFS)
+}
+
+/// `utime(path, buf)` — `struct utimbuf { time_t actime; time_t modtime; }`
+/// = 16 bytes.
+fn sys_utime(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    linux_err(errno::EROFS)
+}
+
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
 ///
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
@@ -8318,6 +8708,287 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::RENAMEAT2, &a).value
             != -i64::from(errno::ENOENT) {
             serial_println!("[syscall/linux]   FAIL: renameat2 not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // readlink / readlinkat / chmod family / chown family / truncate /
+    // ftruncate / symlink / link / utime family — pointer validation
+    // plus principled errno.
+    {
+        // readlink(NULL,_,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 16, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::READLINK, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: readlink(NULL,_,_) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // readlink(_,NULL,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 16, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::READLINK, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: readlink(_,NULL,_) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // readlink(_,_,0) -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::READLINK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlink(_,_,0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // readlink(path, buf, 16) -> EINVAL ("not a symlink").
+        let mut linkbuf = [0u8; 16];
+        let a = SyscallArgs {
+            arg0: 0x1000,
+            arg1: linkbuf.as_mut_ptr() as u64,
+            arg2: 16, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::READLINK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlink not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // readlinkat(_,path,buf,16) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: linkbuf.as_mut_ptr() as u64,
+            arg3: 16, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::READLINKAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlinkat not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // chmod(NULL,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHMOD, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: chmod(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // chmod(path,_) -> EROFS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHMOD, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: chmod not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // fchmod in kernel context -> EROFS (caller_pid None branch).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMOD, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: fchmod not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // fchmodat with bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0x800_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fchmodat(_, path, _, 0) -> EROFS.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // chown / lchown(path,_,_) -> EROFS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHOWN, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: chown not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::LCHOWN, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: lchown not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // chown(NULL,_,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHOWN, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: chown(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // fchown in kernel context -> EROFS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHOWN, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: fchown not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // fchownat bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0x800_0000, arg5: 0 };
+        if dispatch_linux(nr::FCHOWNAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fchownat(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fchownat(_, path, _, _, 0) -> EROFS.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHOWNAT, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: fchownat not EROFS");
+            return Err(KernelError::InternalError);
+        }
+
+        // truncate(NULL,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TRUNCATE, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: truncate(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // truncate(path, -1) -> EINVAL.
+        // (Constructed as u64::MAX for "negative" semantics.)
+        let a = SyscallArgs { arg0: 0x1000, arg1: u64::MAX, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TRUNCATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: truncate(_,-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // truncate(path, 0) -> EROFS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TRUNCATE, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: truncate not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // ftruncate(_, -1) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FTRUNCATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ftruncate(-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // ftruncate(0, 0) in kernel context -> EROFS (kctx → no pid →
+        // EROFS short-circuit, matching the read-only-FS answer).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FTRUNCATE, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: ftruncate not EROFS");
+            return Err(KernelError::InternalError);
+        }
+
+        // symlink(NULL,_) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYMLINK, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: symlink(NULL,_) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // symlink(x, y) -> EROFS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYMLINK, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: symlink not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // symlinkat(x, _, y) -> EROFS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0x2000, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYMLINKAT, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: symlinkat not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // link(x, y) -> EROFS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LINK, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: link not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // linkat bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x800_0000, arg5: 0 };
+        if dispatch_linux(nr::LINKAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: linkat(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // linkat with valid AT_SYMLINK_FOLLOW (0x400) -> EROFS.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x400, arg5: 0 };
+        if dispatch_linux(nr::LINKAT, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: linkat not EROFS");
+            return Err(KernelError::InternalError);
+        }
+
+        // utimensat bogus flag -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0x800_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UTIMENSAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: utimensat(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // utimensat(_, NULL, NULL, 0) -> EROFS (NULL path is legal).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UTIMENSAT, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: utimensat NULL/NULL not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // utimes(NULL, _) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UTIMES, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: utimes(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // utimes(path, NULL) -> EROFS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UTIMES, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: utimes not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // utime(NULL, _) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UTIME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: utime(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // utime(path, NULL) -> EROFS.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::UTIME, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: utime not EROFS");
             return Err(KernelError::InternalError);
         }
     }

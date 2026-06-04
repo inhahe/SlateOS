@@ -6195,3 +6195,57 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      rename's many edge cases (EXDEV across mounts,
 ##      EXCHANGE atomicity, NOREPLACE conflict detection) must
 ##      be implemented in the VFS layer.
+##  42. READLINK / READLINKAT / CHMOD family / CHOWN family /
+##      TRUNCATE / FTRUNCATE / SYMLINK / SYMLINKAT / LINK /
+##      LINKAT / UTIMENSAT / UTIMES / UTIME — DONE as
+##      pointer-validated principled-errno stubs.
+##         - readlink / readlinkat: validate path and out-buf
+##           pointers, then return -EINVAL ("not a symbolic
+##           link") since we have no symlinks anywhere.  This
+##           is the answer ld.so and friends know how to handle
+##           for paths like `/proc/self/exe` that they probe
+##           opportunistically.  bufsiz == 0 -> EINVAL per Linux.
+##         - chmod / fchmod / fchmodat / chown / lchown /
+##           fchown / fchownat: validate path / fd, then return
+##           -EROFS (read-only filesystem).  Path-NULL surfaces
+##           as EFAULT; bad AT_* flag bits surface as EINVAL;
+##           unknown fds surface as EBADF.  fchownat honours
+##           AT_EMPTY_PATH (0x1000) by validating dirfd before
+##           refusing.
+##         - truncate / ftruncate: negative length -> EINVAL
+##           (POSIX).  truncate(path, 0) returns EROFS; ftruncate
+##           validates fd and returns EROFS for File handles,
+##           EINVAL for Pipe/Console (truthful: not a regular
+##           file).  ftruncate in kernel context returns EROFS
+##           since there is no real FS to mutate.
+##         - symlink / symlinkat / link / linkat: validate both
+##           pointer operands (NULL on either -> EFAULT), reject
+##           unknown linkat flag bits with EINVAL (valid =
+##           AT_SYMLINK_FOLLOW | AT_EMPTY_PATH), then return
+##           -EROFS.
+##         - utimensat / utimes / utime: utimensat tolerates a
+##           NULL path (operate on dirfd) and a NULL times
+##           array (use current time); utimes/utime require a
+##           non-NULL path.  Validate every non-NULL pointer
+##           (16B for utimbuf, 32B for the two-timespec array
+##           or two-timeval array), reject unknown utimensat
+##           flag bits with EINVAL (only AT_SYMLINK_NOFOLLOW
+##           is valid), then return -EROFS.
+##      EROFS is preferred over ENOSYS for the create / mutate
+##      operations because POSIX-correct callers handle EROFS as
+##      "FS is read-only; back off" while ENOSYS can force a
+##      hard-failure path.  EINVAL for readlink is what every
+##      modern loader treats as "this path is not a symlink";
+##      lying with ENOENT would suggest the path is just missing
+##      and might invite retries.
+##      Limitation: when a real VFS lands, these must route
+##      through it.  In particular truncate, ftruncate(File),
+##      and all chmod/chown variants must honour real
+##      permissions and EROFS only when the underlying mount is
+##      read-only; readlink/readlinkat must read real symlink
+##      targets where they exist; the utime family must persist
+##      timestamps in inode metadata.  When a CAP_FOWNER /
+##      CAP_CHOWN check is added, chown/fchown/lchown/fchownat
+##      should also return EPERM when the calling process lacks
+##      the capability and the operation would otherwise have
+##      succeeded.

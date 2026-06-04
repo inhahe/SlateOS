@@ -1612,6 +1612,12 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -1640,7 +1646,7 @@ mod tests {
         let dyn_entsz: usize = 16;
         let mut dynamic: Vec<u8> = vec![0u8; n_dyn_entries * dyn_entsz];
 
-        let mut write_dyn = |data: &mut Vec<u8>, i: usize, tag: i64, val: u64| {
+        let write_dyn = |data: &mut Vec<u8>, i: usize, tag: i64, val: u64| {
             let base = i * 16;
             data[base..base + 8].copy_from_slice(&(tag as u64).to_le_bytes());
             data[base + 8..base + 16].copy_from_slice(&val.to_le_bytes());
@@ -1679,8 +1685,7 @@ mod tests {
         let n_shdrs: usize = 4;
         let shdr_sz: usize = 64;
 
-        // Name offsets in .shstrtab
-        let sh_name_null: u32 = 0;
+        // Name offsets in .shstrtab (offset 0 is the null section name)
         let sh_name_dynamic: u32 = 1; // ".dynamic" at offset 1
         let sh_name_dynstr: u32 = 10; // ".dynstr" at offset 10
         let sh_name_shstrtab: u32 = 18; // ".shstrtab" at offset 18

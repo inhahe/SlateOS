@@ -28,6 +28,7 @@
 //! as a fallback.
 
 #![cfg_attr(not(test), no_main)]
+#![cfg_attr(test, allow(dead_code))]
 
 use std::collections::HashMap;
 use std::env;

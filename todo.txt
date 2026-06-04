@@ -5295,3 +5295,52 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ## Future batch commits should `git status --short` immediately
 ## before `git add` so any pre-staged files are visible and can be
 ## kept in a separate commit.
+
+## PROGRESS (2026-06-04): fastpy integration investigation — BLOCKED upstream.
+##
+## Picked roadmap line 24 ("integrate fastpy as a primary userspace
+## compiler") as a candidate major undertaking. Investigated the fastpy
+## repo at `D:/visual studio projects/fastpy`:
+##
+##   - fastpy works on host: built and ran `print("hello from fastpy")`
+##     successfully.  It is an AOT Python compiler going through
+##     llvmlite → LLVM IR → native exe.  Implementation lives in
+##     ~16,424 lines of C runtime across 7 .c + 4 .h files plus
+##     cpython_bridge.c (2737 lines, optional, only needed for .pyd
+##     module bridging).
+##
+##   - The fastpy CLI has NO `--target` flag.  It always builds for
+##     the host triple.  There is no plumbing to forward an alternate
+##     target into the llvmlite ModuleRef.target_data step nor into
+##     the host C compiler invocation that links the runtime.
+##
+##   - The runtime C sources unconditionally `#include` both POSIX
+##     headers (fcntl.h, dirent.h, sys/stat.h, unistd.h) and Windows-
+##     specific headers (windows.h, direct.h, io.h, intrin.h).  None
+##     of the Windows-specific includes are `#ifdef _WIN32`-gated, so
+##     cross-compiling the runtime to x86_64-unknown-linux-musl (our
+##     x86_64-ouros target) would fail to compile on the very first
+##     translation unit.
+##
+##   - There is no x86_64-unknown-linux-musl support in fastpy's
+##     build config and no cross-compile recipe in the README.
+##
+## CONCLUSION: integrating fastpy into the OS build system requires
+## prerequisite work that belongs in the fastpy repo, not this one:
+##   1. Add `--target` flag to fastpy CLI; forward to llvmlite and to
+##      the link step.
+##   2. Add `#ifdef _WIN32` gates around all Windows-specific includes
+##      and helper code in the runtime; provide POSIX equivalents on
+##      non-Windows targets.
+##   3. Add a cross-compile recipe / CI matrix for at least one Linux
+##      musl target so portability doesn't regress.
+##   4. Decide what cpython_bridge.c does in a Linux build (probably
+##      same #ifdef pattern around it, or split into its own optional
+##      object).
+##
+## Since this is "make fastpy itself portable" — work that doesn't
+## belong in the OS repo — I am NOT pursuing fastpy integration in
+## this session.  Pivoting to roadmap line 5089: Linux syscall ABI
+## translation layer (the prerequisite for Linuxulator/WINE-style
+## binary compatibility), which lives entirely in this repo and
+## builds on freshly-loaded kernel + POSIX context.

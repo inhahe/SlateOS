@@ -544,8 +544,8 @@ fn parse_object(input: &str) -> Result<(JsonValue, &str), String> {
     let mut entries = Vec::new();
 
     s = s.trim_start();
-    if s.starts_with('}') {
-        return Ok((JsonValue::Object(entries), &s[1..]));
+    if let Some(rest) = s.strip_prefix('}') {
+        return Ok((JsonValue::Object(entries), rest));
     }
 
     loop {
@@ -556,20 +556,20 @@ fn parse_object(input: &str) -> Result<(JsonValue, &str), String> {
             _ => return Err("object key must be string".to_string()),
         };
         s = rest.trim_start();
-        if !s.starts_with(':') {
+        let Some(after_colon) = s.strip_prefix(':') else {
             return Err("expected ':'".to_string());
-        }
-        s = &s[1..];
+        };
+        s = after_colon;
         let (val, rest) = parse_value(s)?;
         entries.push((key, val));
         s = rest.trim_start();
-        if s.starts_with('}') {
-            return Ok((JsonValue::Object(entries), &s[1..]));
+        if let Some(rest) = s.strip_prefix('}') {
+            return Ok((JsonValue::Object(entries), rest));
         }
-        if !s.starts_with(',') {
+        let Some(after_comma) = s.strip_prefix(',') else {
             return Err("expected ',' or '}'".to_string());
-        }
-        s = &s[1..];
+        };
+        s = after_comma;
     }
 }
 
@@ -578,37 +578,37 @@ fn parse_array(input: &str) -> Result<(JsonValue, &str), String> {
     let mut items = Vec::new();
 
     s = s.trim_start();
-    if s.starts_with(']') {
-        return Ok((JsonValue::Array(items), &s[1..]));
+    if let Some(rest) = s.strip_prefix(']') {
+        return Ok((JsonValue::Array(items), rest));
     }
 
     loop {
         let (val, rest) = parse_value(s)?;
         items.push(val);
         s = rest.trim_start();
-        if s.starts_with(']') {
-            return Ok((JsonValue::Array(items), &s[1..]));
+        if let Some(rest) = s.strip_prefix(']') {
+            return Ok((JsonValue::Array(items), rest));
         }
-        if !s.starts_with(',') {
+        let Some(after_comma) = s.strip_prefix(',') else {
             return Err("expected ',' or ']'".to_string());
-        }
-        s = &s[1..];
+        };
+        s = after_comma;
     }
 }
 
 fn parse_bool(input: &str) -> Result<(JsonValue, &str), String> {
-    if input.starts_with("true") {
-        Ok((JsonValue::Bool(true), &input[4..]))
-    } else if input.starts_with("false") {
-        Ok((JsonValue::Bool(false), &input[5..]))
+    if let Some(rest) = input.strip_prefix("true") {
+        Ok((JsonValue::Bool(true), rest))
+    } else if let Some(rest) = input.strip_prefix("false") {
+        Ok((JsonValue::Bool(false), rest))
     } else {
         Err("expected 'true' or 'false'".to_string())
     }
 }
 
 fn parse_null(input: &str) -> Result<(JsonValue, &str), String> {
-    if input.starts_with("null") {
-        Ok((JsonValue::Null, &input[4..]))
+    if let Some(rest) = input.strip_prefix("null") {
+        Ok((JsonValue::Null, rest))
     } else {
         Err("expected 'null'".to_string())
     }
@@ -934,16 +934,16 @@ impl Progress {
     }
 
     fn report(&self) {
-        let file_pct = if self.total_files > 0 {
-            (self.processed_files * 100) / self.total_files
-        } else {
-            0
-        };
-        let byte_pct = if self.total_bytes > 0 {
-            (self.processed_bytes * 100) / self.total_bytes
-        } else {
-            0
-        };
+        let file_pct = self
+            .processed_files
+            .checked_mul(100)
+            .and_then(|n| n.checked_div(self.total_files))
+            .unwrap_or(0);
+        let byte_pct = self
+            .processed_bytes
+            .checked_mul(100)
+            .and_then(|n| n.checked_div(self.total_bytes))
+            .unwrap_or(0);
         eprintln!(
             "  [{}/{}] files ({}%) | [{}/{}] bytes ({}%) | {}",
             self.processed_files,
@@ -2115,7 +2115,7 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     if !by_ext.is_empty() {
         println!("  File types:");
         let mut sorted: Vec<_> = by_ext.into_iter().collect();
-        sorted.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        sorted.sort_by_key(|item| std::cmp::Reverse(item.1 .1));
         for (ext, (count, size)) in sorted.iter().take(10) {
             println!("    .{:<12} {:>6} files  {:>12}", ext, count, format_size(*size));
         }

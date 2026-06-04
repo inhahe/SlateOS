@@ -115,7 +115,7 @@ impl CellAddr {
             return None;
         }
         let col_char = bytes[0];
-        if !(b'A'..=b'Z').contains(&col_char) {
+        if !col_char.is_ascii_uppercase() {
             return None;
         }
         let col = (col_char - b'A') as usize;
@@ -580,6 +580,12 @@ pub enum UndoAction {
 pub struct UndoManager {
     undo_stack: Vec<UndoAction>,
     redo_stack: Vec<UndoAction>,
+}
+
+impl Default for UndoManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl UndoManager {
@@ -1313,7 +1319,7 @@ impl<'a> FormulaEvaluator<'a> {
                 let val = self.parse_comparison()?;
                 self.expect_token(&FormulaToken::RightParen)?;
                 let n = require_number(&val)?;
-                return Ok(CellValue::Number(n.abs()));
+                Ok(CellValue::Number(n.abs()))
             }
             "ROUND" => {
                 let val = self.parse_comparison()?;
@@ -1327,28 +1333,28 @@ impl<'a> FormulaEvaluator<'a> {
                 self.expect_token(&FormulaToken::RightParen)?;
                 let n = require_number(&val)?;
                 let factor = 10f64.powi(places);
-                return Ok(CellValue::Number((n * factor).round() / factor));
+                Ok(CellValue::Number((n * factor).round() / factor))
             }
             "CONCATENATE" | "CONCAT" => self.eval_concatenate_func(),
             "LEN" => {
                 let val = self.parse_comparison()?;
                 self.expect_token(&FormulaToken::RightParen)?;
                 let s = value_to_string(&val);
-                return Ok(CellValue::Number(s.len() as f64));
+                Ok(CellValue::Number(s.len() as f64))
             }
             "UPPER" => {
                 let val = self.parse_comparison()?;
                 self.expect_token(&FormulaToken::RightParen)?;
                 let s = value_to_string(&val);
-                return Ok(CellValue::Text(s.to_uppercase()));
+                Ok(CellValue::Text(s.to_uppercase()))
             }
             "LOWER" => {
                 let val = self.parse_comparison()?;
                 self.expect_token(&FormulaToken::RightParen)?;
                 let s = value_to_string(&val);
-                return Ok(CellValue::Text(s.to_lowercase()));
+                Ok(CellValue::Text(s.to_lowercase()))
             }
-            _ => return Err(CellError::NameError),
+            _ => Err(CellError::NameError),
         }
     }
 
@@ -1615,6 +1621,12 @@ pub struct FindReplace {
     pub active: bool,
     pub results: Vec<CellAddr>,
     pub current_result: usize,
+}
+
+impl Default for FindReplace {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FindReplace {
@@ -2895,7 +2907,10 @@ impl SpreadsheetApp {
         self.render_toolbar_button(cmds, bx, btn_y, btn_w + 4.0, btn_h, "Z-A", false, false);
     }
 
-    /// Render a single toolbar button.
+    /// Render a single toolbar button. Nine parameters reflect the per-button
+    /// rendering primitive (canvas, position, size, label, two state flags) —
+    /// bundling them into a struct would just push the same data around.
+    #[allow(clippy::too_many_arguments)]
     fn render_toolbar_button(
         &self,
         cmds: &mut Vec<RenderCommand>,

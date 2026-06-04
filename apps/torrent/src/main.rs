@@ -23,6 +23,16 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
+// torrent parses BEP 3 bencode and renders progress UI — bencode parse
+// indices come from explicit length-prefix decoding; UI math is on
+// bounded widget dimensions. Allow defensive lints file-wide; allow
+// dead_code for the SURFACE2/LAVENDER palette constants kept for theme
+// future-proofing.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    dead_code,
+)]
 
 use std::collections::BTreeMap;
 use std::fmt;

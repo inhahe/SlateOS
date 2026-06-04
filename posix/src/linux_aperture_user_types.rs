@@ -36,10 +36,10 @@ pub const DRM_SYSFS_VERSION_ATTR: &str = "version";
 // PCI class codes that own framebuffer apertures (DRM matches against these)
 // ---------------------------------------------------------------------------
 
-pub const PCI_CLASS_DISPLAY_VGA: u32 = 0x0300_00;
-pub const PCI_CLASS_DISPLAY_XGA: u32 = 0x0301_00;
-pub const PCI_CLASS_DISPLAY_3D: u32 = 0x0302_00;
-pub const PCI_CLASS_DISPLAY_OTHER: u32 = 0x0380_00;
+pub const PCI_CLASS_DISPLAY_VGA: u32 = 0x0003_0000;
+pub const PCI_CLASS_DISPLAY_XGA: u32 = 0x0003_0100;
+pub const PCI_CLASS_DISPLAY_3D: u32 = 0x0003_0200;
+pub const PCI_CLASS_DISPLAY_OTHER: u32 = 0x0003_8000;
 
 // ---------------------------------------------------------------------------
 // Tests

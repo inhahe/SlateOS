@@ -18,9 +18,9 @@ pub const CLOCK_REALTIME_ALARM: u32 = 8;
 
 pub const DEV_ALARM: &str = "/dev/alarm";
 
-pub const ANDROID_ALARM_CLEAR_BASE: u32 = 0x40_4061_06;
-pub const ANDROID_ALARM_WAIT: u32 = 0x40_4061_01;
-pub const ANDROID_ALARM_SET_RTC: u32 = 0x40_4061_05;
+pub const ANDROID_ALARM_CLEAR_BASE: u32 = 0x4040_6106;
+pub const ANDROID_ALARM_WAIT: u32 = 0x4040_6101;
+pub const ANDROID_ALARM_SET_RTC: u32 = 0x4040_6105;
 
 // ---------------------------------------------------------------------------
 // Android alarm types

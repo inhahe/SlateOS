@@ -4,7 +4,13 @@
 //   mkswap  - create swap area on device/file
 //   swapon  - enable swap on device/file
 //   swapoff - disable swap on device/file
-
+//
+// SwapHeader / SwapEntry / verify_swap_signature / read_swap_header /
+// parse_proc_swaps / format_size_kb and a few struct fields are
+// declared for the Linux swap on-disk + /proc/swaps ABI but are not
+// yet invoked. Allow dead_code file-wide so the protocol surface stays
+// visible without warning spam.
+#![allow(dead_code)]
 #![cfg_attr(not(test), no_main)]
 
 use std::fmt;

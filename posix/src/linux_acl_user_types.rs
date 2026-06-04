@@ -55,10 +55,9 @@ pub const POSIX_ACL_XATTR_HEADER_SIZE: usize = 4;
 /// ACL count from byte length: `(len - header) / entry`.
 #[must_use]
 pub const fn acl_entry_count_from_len(len: usize) -> Option<usize> {
-    if len < POSIX_ACL_XATTR_HEADER_SIZE {
+    let Some(body) = len.checked_sub(POSIX_ACL_XATTR_HEADER_SIZE) else {
         return None;
-    }
-    let body = len - POSIX_ACL_XATTR_HEADER_SIZE;
+    };
     if body % POSIX_ACL_XATTR_ENTRY_SIZE != 0 {
         return None;
     }

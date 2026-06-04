@@ -61,7 +61,10 @@ pub const CMSG_ALIGN_BYTES: usize = core::mem::size_of::<usize>();
 
 #[must_use]
 pub const fn cmsg_align(n: usize) -> usize {
-    (n + CMSG_ALIGN_BYTES - 1) & !(CMSG_ALIGN_BYTES - 1)
+    // CMSG_ALIGN_BYTES is sizeof(usize) (>=4), so CMSG_ALIGN_BYTES - 1 cannot underflow.
+    // n is bounded by control-message buffer sizes set by callers; saturating_add
+    // protects against pathological inputs without changing the alignment semantics.
+    n.saturating_add(CMSG_ALIGN_BYTES - 1) & !(CMSG_ALIGN_BYTES - 1)
 }
 
 // ---------------------------------------------------------------------------

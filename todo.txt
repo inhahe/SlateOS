@@ -4293,3 +4293,24 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   any startup sequence, so the only observable consequence of the old
 ##   stub was that `openssl-tool help` printed nothing useful — now it
 ##   prints a real help screen.
+
+## Bug observed (posix-batch sessions, 2026-06-03):
+##
+## Commit 15cc6b35 ("posix: add 6 Linux header constant modules (batch
+## 336)") unexpectedly contains 150 files instead of the 7 it should
+## have. The 6 new `linux_*_user_types.rs` files and the `lib.rs`
+## edit are present, but the commit also swept up ~143 unrelated
+## modifications under `apps/` and `gui/desktop/` that were already
+## staged in the index when `git add posix/src/...` ran. (`git add`
+## with explicit paths does not unstage other paths.)
+##
+## Per CLAUDE.md ("never amend"), the commit was left intact rather
+## than rewritten. Consequences:
+##   - The commit message under-describes the contents.
+##   - Reviewers grepping `git log --grep=apps/` won't find an entry
+##     for those changes.
+##   - The 7 batch-336 paths are still correct in-tree.
+##
+## Future batch commits should `git status --short` immediately
+## before `git add` so any pre-staged files are visible and can be
+## kept in a separate commit.

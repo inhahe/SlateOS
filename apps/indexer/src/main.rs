@@ -1500,10 +1500,12 @@ exclude_extensions = .o, .tmp
 
     #[test]
     fn test_config_roundtrip() {
-        let mut cfg = Config::default();
-        cfg.enabled = true;
-        cfg.index_paths = vec!["/home".into(), "/srv".into()];
-        cfg.max_file_size = 100_000_000;
+        let cfg = Config {
+            enabled: true,
+            index_paths: vec!["/home".into(), "/srv".into()],
+            max_file_size: 100_000_000,
+            ..Config::default()
+        };
 
         let serialized = cfg.serialize();
         let parsed = Config::parse(&serialized);
@@ -1922,9 +1924,9 @@ exclude_extensions = .o, .tmp
         let trigrams = extract_trigrams("hello");
         // "hel", "ell", "llo"
         assert_eq!(trigrams.len(), 3);
-        assert!(trigrams.contains(&[b'h', b'e', b'l']));
-        assert!(trigrams.contains(&[b'e', b'l', b'l']));
-        assert!(trigrams.contains(&[b'l', b'l', b'o']));
+        assert!(trigrams.contains(b"hel"));
+        assert!(trigrams.contains(b"ell"));
+        assert!(trigrams.contains(b"llo"));
     }
 
     #[test]
@@ -1984,7 +1986,7 @@ exclude_extensions = .o, .tmp
         let excluded = config
             .exclude_extensions
             .iter()
-            .any(|e| e.to_ascii_lowercase() == ext.to_ascii_lowercase());
+            .any(|e| e.eq_ignore_ascii_case(ext));
         assert!(excluded);
     }
 
@@ -1998,7 +2000,7 @@ exclude_extensions = .o, .tmp
         let included = config
             .include_extensions
             .as_ref()
-            .map(|exts| exts.iter().any(|e| e.to_ascii_lowercase() == ext.to_ascii_lowercase()))
+            .map(|exts| exts.iter().any(|e| e.eq_ignore_ascii_case(ext)))
             .unwrap_or(true);
         assert!(included);
 
@@ -2006,7 +2008,7 @@ exclude_extensions = .o, .tmp
         let included2 = config
             .include_extensions
             .as_ref()
-            .map(|exts| exts.iter().any(|e| e.to_ascii_lowercase() == ext2.to_ascii_lowercase()))
+            .map(|exts| exts.iter().any(|e| e.eq_ignore_ascii_case(ext2)))
             .unwrap_or(true);
         assert!(!included2);
     }

@@ -9372,3 +9372,58 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     after the fix.
 
 
+## 92. Linux ABI batch 64: validate ARCH_SET_FS address
+##     against the x86_64 user-space ceiling.
+##
+##     Before this batch, `sys_arch_prctl(ARCH_SET_FS, addr)`
+##     blindly forwarded `addr` to
+##     `WRMSR(IA32_FS_BASE, addr)`.  Two real bugs:
+##
+##       (a) Non-canonical addresses (anything where bits
+##           63..47 are not a sign-extension of bit 47, e.g.
+##           u64::MAX, or any value in 0x0000_8000_0000_0000
+##           ..0xffff_7fff_ffff_ffff) cause WRMSR to raise
+##           #GP per Intel SDM Vol 3A §4.4.  Since we entered
+##           via a syscall the #GP fires in kernel mode and
+##           panics the kernel — a one-line userspace
+##           denial-of-service.
+##
+##       (b) Canonical kernel addresses (the high half) were
+##           accepted.  They can't be dereferenced from user
+##           mode (would page-fault on first use), but
+##           letting userspace install a kernel pointer into
+##           FS is the kind of thing that turns a future
+##           leak primitive into a privilege probe.  Linux
+##           closes this with the same TASK_SIZE_MAX check;
+##           we now mirror it.
+##
+##     Fix: introduce
+##     `const USER_FS_BASE_MAX: u64 = 1u64 << 47;` and
+##     `if addr >= USER_FS_BASE_MAX { return -EPERM; }`
+##     before the `WRMSR`.  This matches Linux's behaviour
+##     and is the value of TASK_SIZE_MAX on 4-level paging
+##     vintage x86_64 (which is what we boot under).
+##
+##     Self-tests cover four cases via dispatch_linux:
+##       * addr == 1 << 47          → -EPERM (boundary)
+##       * addr == 0xffff_ffff_8000_0000 → -EPERM (kernel)
+##       * addr == u64::MAX         → -EPERM (non-canonical)
+##       * addr == (1 << 47) - 0x1000 → 0 (valid user)
+##
+##     Because the success case actually clobbers
+##     IA32_FS_BASE — which the kernel can rely on for FS-
+##     relative state — the test saves the MSR with RDMSR
+##     before the sequence and restores it after each
+##     branch.
+##
+##     Known follow-up (deferred): the CLONE_SETTLS path in
+##     `kernel/src/proc/thread_clone.rs` (where a new thread
+##     gets its FS base set from the clone3 args) does not
+##     yet apply the same validation.  An attacker calling
+##     clone3 with a non-canonical `tls` could crash the
+##     kernel on the new thread's first dispatch.  Should be
+##     a small follow-up batch — extract the validation into
+##     a helper (`is_canonical_user_fs_base`) in syscall::
+##     linux and reuse it from thread_clone.
+
+

@@ -13354,14 +13354,33 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
 
     const IA32_FS_BASE: u32 = 0xC000_0100;
 
+    // The userspace ceiling on x86_64 with classic 4-level paging:
+    // the top canonical user address is just below 1 << 47.  Linux
+    // rejects any ARCH_SET_FS value >= TASK_SIZE_MAX with EPERM; we
+    // mirror that exactly.  This both (a) refuses to install kernel
+    // addresses or attacker-controlled non-canonical values that
+    // would #GP on `WRMSR` (the IA32_FS_BASE MSR requires canonical
+    // form on write per Intel SDM Vol 3A §4.4 — a non-canonical
+    // input would crash the kernel synchronously), and (b) keeps
+    // userspace from setting FS to a kernel pointer.  The latter
+    // can't be dereferenced from user mode (would page-fault on
+    // first use), but it sidesteps a tiny info-disclosure / privilege
+    // probe so we close it as defence in depth.
+    const USER_FS_BASE_MAX: u64 = 1u64 << 47;
+
     let code = args.arg0;
     let addr = args.arg1;
 
     match code {
         ARCH_SET_FS => {
+            if addr >= USER_FS_BASE_MAX {
+                return linux_err(errno::EPERM);
+            }
             // SAFETY: IA32_FS_BASE is a documented architectural MSR;
             // writing the caller's chosen FS base is exactly what Linux
-            // does in glibc startup.
+            // does in glibc startup.  `addr` has been validated to be
+            // strictly below 1 << 47, so it is a canonical user
+            // address and `WRMSR` will not raise #GP.
             unsafe { crate::cpu::wrmsr(IA32_FS_BASE, addr); }
             SyscallResult::ok(0)
         }
@@ -13837,6 +13856,90 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
+
+    // (9a) arch_prctl(ARCH_SET_FS, addr) validates the address against the
+    // x86_64 user-space ceiling (1 << 47).  We test the three rejection
+    // boundaries (exactly at, kernel half, top of 64-bit space) AND a
+    // valid mid-range user address.  Because a successful ARCH_SET_FS
+    // call clobbers the IA32_FS_BASE MSR — which the kernel may rely on
+    // for FS-relative kernel data — we read the current FS base before
+    // the test and restore it after.  This is the same RDMSR/WRMSR pair
+    // used by sys_arch_prctl itself.
+    const ARCH_SET_FS_CODE: u64 = 0x1002;
+    const IA32_FS_BASE_MSR: u32 = 0xC000_0100;
+    // SAFETY: RDMSR on IA32_FS_BASE is side-effect-free and the MSR is
+    // architecturally defined on every x86_64 CPU we boot on.
+    let saved_fs = unsafe { crate::cpu::rdmsr(IA32_FS_BASE_MSR) };
+
+    // Address exactly at the boundary: must be rejected with -EPERM.
+    let set_fs_boundary = SyscallArgs {
+        arg0: ARCH_SET_FS_CODE, arg1: 1u64 << 47, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_boundary);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring the value we read above.
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, 1<<47) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // High-canonical kernel address: must be rejected.
+    let set_fs_kernel = SyscallArgs {
+        arg0: ARCH_SET_FS_CODE, arg1: 0xffff_ffff_8000_0000, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_kernel);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring saved value.
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, kernel-addr) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Top of the 64-bit address space (non-canonical): must be rejected
+    // before reaching WRMSR (where it would #GP).
+    let set_fs_top = SyscallArgs {
+        arg0: ARCH_SET_FS_CODE, arg1: u64::MAX, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_top);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring saved value.
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, u64::MAX) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Just below the boundary: valid canonical user address, must succeed.
+    let set_fs_just_below = SyscallArgs {
+        arg0: ARCH_SET_FS_CODE, arg1: (1u64 << 47) - 0x1000, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_just_below);
+    if r.value != 0 {
+        // SAFETY: restoring saved value.
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, (1<<47)-0x1000) → {} (expected 0)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Restore the original FS base before continuing the rest of the
+    // self-test sequence — anything FS-relative the kernel touches
+    // between here and a real context switch would otherwise read
+    // garbage.
+    // SAFETY: writing back the exact value we sampled above.
+    unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
 
     // (10) LinuxTimespec round-trip.
     let ts = LinuxTimespec { tv_sec: 5, tv_nsec: 123_456_789 };

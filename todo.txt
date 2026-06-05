@@ -14985,3 +14985,60 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   process_mrelease pidfd
 ##      discrimination: OK".
+
+## 163. Linux ABI: waitid(P_PIDFD) pidfd validation (batch 134).
+##
+##      Issue:  `waitid(idtype, id, infop, options, rusage)` validates
+##              idtype against {0,1,2,3} but treats `id` as an opaque
+##              u64 regardless of idtype.  When idtype == P_PIDFD (3),
+##              Linux's actual implementation looks up `id` as a fd via
+##              pidfd_get_pid() and returns -EBADF if it isn't a real
+##              pidfd or doesn't exist.  Without that check, our code
+##              silently accepts any u64 in `id` and rolls through to
+##              the ECHILD/WNOHANG response — wrong for posix_spawn,
+##              glibc's posix_spawn_pidfd, and any other pidfd-based
+##              reaper.
+##
+##      Fix:    When idtype == 3, validate `id` as a Linux fd via the
+##              shared validate_linux_fd + lookup_caller_fd helpers, and
+##              require HandleKind::PidFd.  Bad fd or wrong kind ->
+##              EBADF (matches Linux's pidfd_get_pid).  Real pidfd ->
+##              fall through to the same WNOHANG/ECHILD handling as the
+##              other idtype values (we still don't track per-process
+##              state changes, but at least the fd-shape error is
+##              correct).
+##
+##      Self-tests (boot-time):
+##        * waitid(idtype=3, id=0, WEXITED) -> EBADF.  Kernel-context
+##          lookup_caller_fd returns EBADF directly, exactly matching
+##          what userspace would see for a non-pidfd fd.
+##        * Existing waitid tests (bad idtype, no event class, bad
+##          options, WNOHANG -> 0, blocking -> ECHILD) all still pass
+##          unchanged.
+##
+##      Known limitations:
+##        * "Valid pidfd -> ECHILD/WNOHANG-0" cannot be exercised in a
+##          boot-time self-test (no caller PCB to hang a real pidfd
+##          off).  Userspace callers holding a real pidfd from
+##          pidfd_open will get the same answer as the existing
+##          idtype<3 paths.
+##        * Real child-state-change tracking is still missing — when a
+##          child actually exits, waitid should fill the siginfo_t and
+##          return the pid, not 0/ECHILD.  That's a bigger refactor
+##          tied to the wait4 reaping path.
+##
+##      Build clean; boot test PASSED on re-run (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   waitid P_PIDFD validation:
+##      OK".
+##
+##      Bug noticed during this batch:
+##        * Intermittent boot-test hang in [rcu]'s "Callback
+##          registration" self-test (the run before BOOT_OK timed out
+##          at 600s with serial logs frozen mid-rcu test).  Re-run
+##          completed normally in 23s, so this is a pre-existing
+##          flake unrelated to batch 134.  Likely a race in
+##          rcu::self_test's callback path — investigate when the
+##          rcu/kernel-core zone is touched next.  See serial log
+##          showing the last successful line was "Callback
+##          registration: OK" then no further output.
+

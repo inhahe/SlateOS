@@ -17564,7 +17564,7 @@ fn synth_inode(dir_path: &str, name: &str) -> u64 {
 /// children.
 fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
     let idtype = args.arg0 as i32;
-    let _id = args.arg1;
+    let id = args.arg1;
     let infop = args.arg2;
     let options = args.arg3 as i32;
     let rusage = args.arg4;
@@ -17591,6 +17591,26 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
     if rusage != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(rusage, 144) {
             return linux_err(linux_errno_for(e));
+        }
+    }
+    // P_PIDFD (idtype=3): `id` is a pidfd; Linux's waitid path calls
+    // pidfd_get_pid() and returns -EBADF if it isn't a pidfd or the fd
+    // doesn't exist.  Match that — without this check we'd silently
+    // accept any u64 in `id` as a "pidfd" and roll through to the
+    // ECHILD/WNOHANG response, which is wrong for callers using pidfd-
+    // based reapers (posix_spawn, glibc's posix_spawn_pidfd).
+    if idtype == 3 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let pidfd = id as i32;
+        if let Err(r) = validate_linux_fd(pidfd) {
+            return r;
+        }
+        let entry = match lookup_caller_fd(pidfd) {
+            Ok(e) => e,
+            Err(r) => return r,
+        };
+        if entry.kind != HandleKind::PidFd {
+            return linux_err(errno::EBADF);
         }
     }
     // WNOHANG: report "no state change" with 0 (Linux convention).
@@ -34595,6 +34615,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: waitid blocking not ECHILD");
             return Err(KernelError::InternalError);
         }
+        // waitid P_PIDFD(3) with fd=0 (stdin) and WEXITED — stdin is a
+        // Console handle in the kernel-context fd table layout, not a
+        // pidfd, so the new pidfd-discrimination check must surface
+        // EBADF before the ECHILD blocking path.  (In kernel context
+        // lookup_caller_fd returns EBADF directly anyway — same answer,
+        // matches Linux's pidfd_get_pid semantics.)
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 4, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::WAITID, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: waitid P_PIDFD not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   waitid P_PIDFD validation: OK");
 
         // preadv negative offset -> EINVAL.
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: u64::MAX, arg4: 0, arg5: 0 };

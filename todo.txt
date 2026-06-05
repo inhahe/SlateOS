@@ -14269,3 +14269,65 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
 
+## 155. Linux ABI: pidfd_getfd cross-process fd duplication (batch 126).
+##
+##      Builds on batches 124 / 125.  pidfd_getfd now performs the full
+##      cross-process fd copy:
+##
+##      1. Validate flags == 0 (Linux's "reserved").
+##      2. Resolve pidfd in the caller's Linux fd table; require
+##         HandleKind::PidFd (Linux 5.6+ surfaces EBADF for non-pidfd).
+##      3. ESRCH if the target pid is gone (pcb::name probe).
+##      4. Look up `target_fd` in the target's Linux fd table via
+##         pcb::linux_fd_lookup(target_pid, target_fd) — already
+##         pid-parameterised, no new helper needed.
+##      5. Bump the per-kind refcount on the underlying kernel
+##         resource so both processes own one ref each:
+##            * Console / PidFd: no resource (no-op).
+##            * File:    fs::handle::dup_shared (refcount += 1).
+##            * Pipe:    ipc::pipe::dup (per-end refcount += 1).
+##            * EventFd: ipc::eventfd::dup (refcount += 1).
+##         All three subsystem dup paths are pre-existing and were
+##         designed for fork() — pidfd_getfd is the second consumer.
+##      6. Force FD_CLOEXEC on the duplicate (Linux always sets it on
+##         the new fd regardless of the source's per-fd flags).
+##      7. Install the entry at the caller's lowest free fd via
+##         pcb::linux_fd_install(caller_pid, entry, 0).
+##         Failure (table full / kernel context) ROLLS BACK the
+##         refcount we bumped, via the new `release_handle_ref`
+##         helper that mirrors `dup` with the per-kind `close` so the
+##         refcount is correct on every exit path.
+##
+##      Self-tests (boot-time dispatch layer):
+##         * flags != 0 -> EINVAL (preserved).
+##         * target_fd < 0 (passed as u64::MAX) -> EBADF (new).
+##         * Valid-shape args in kernel context -> EBADF (no caller
+##           PCB; new).
+##
+##      Cross-process happy-path coverage is deferred to a Linux-ELF
+##      integration test because:
+##         * Boot self-test has no caller_pid → install always EBADF.
+##         * Even with a synthetic caller we'd need a second PCB with
+##           a populated fd table; the PCB module's test scaffolding
+##           is not exposed at the syscall-self-test layer.
+##
+##      Known limitations:
+##
+##      * No syscall-level audit / LSM hook is invoked when copying a
+##         fd across processes.  Linux runs each operation through
+##         security_file_open + landlock.  Our security model is
+##         capability-based and the caller already holds the pidfd
+##         (which itself is unforgeable); the cross-PCB fd copy is
+##         currently unconditionally allowed.  This is a deliberate
+##         simplification.
+##
+##      * EFAULT for unreadable user buffers is N/A — pidfd_getfd
+##         takes no user pointers.
+##
+##      * The new fd is FD_CLOEXEC by default (matches Linux).  No way
+##         yet to override (Linux 6.1+ added a flag for that; we
+##         reject all nonzero flags).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
+

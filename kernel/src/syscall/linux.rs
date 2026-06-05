@@ -10646,17 +10646,148 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `pidfd_getfd(pidfd, targetfd, flags)`.
+///
+/// Duplicate file descriptor `targetfd` from the process referenced
+/// by `pidfd` into the caller's Linux fd table, applying the
+/// per-kind refcount bump on the underlying kernel resource:
+///
+///   * `Console`/`PidFd` — no kernel resource, the FdEntry copy is
+///     all that's needed.
+///   * `File`           — `fs::handle::dup_shared` bumps the open-file
+///                        refcount; the new fd shares offset + flags
+///                        with the target's fd.
+///   * `Pipe`           — `ipc::pipe::dup` bumps the per-end refcount.
+///   * `EventFd`        — `ipc::eventfd::dup` bumps the counter
+///                        refcount.
+///
+/// Linux defaults the new fd to `FD_CLOEXEC` regardless of the
+/// target's setting; we mirror that.
+///
+/// Errors:
+///   * `EINVAL` — `flags != 0`.
+///   * `EBADF`  — `pidfd` closed / not a PidFd, `targetfd` < 0, or
+///                kernel-context invocation (no caller PCB).
+///   * `ESRCH`  — target process no longer exists.
+///   * `EBADF`  — target's fd table does not contain `targetfd`
+///                (Linux returns EBADF here as well).
+///   * `EMFILE` — caller's fd table is full
+///                (propagated from `linux_fd_install`).
 fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
     // flags reserved.
     if args.arg2 != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = validate_linux_fd(fd) {
+    let pidfd_i32 = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(pidfd_i32) {
         return r;
     }
-    linux_err(errno::EINVAL)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let target_fd = args.arg1 as i32;
+    if target_fd < 0 {
+        return linux_err(errno::EBADF);
+    }
+
+    // Look up the pidfd; require kind == PidFd to surface EBADF for
+    // non-pidfd descriptors (matches Linux 5.6+ behaviour).
+    let pidfd_entry = match lookup_caller_fd(pidfd_i32) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    if pidfd_entry.kind != HandleKind::PidFd {
+        return linux_err(errno::EBADF);
+    }
+    let target_pid: crate::proc::pcb::ProcessId = pidfd_entry.raw_handle;
+
+    // Confirm the target still exists — Linux returns ESRCH if the
+    // process is gone, prior to any fd-table lookup.
+    if crate::proc::pcb::name(target_pid).is_none() {
+        return linux_err(errno::ESRCH);
+    }
+
+    // Reach into the target's Linux fd table.
+    let mut entry = match pcb::linux_fd_lookup(target_pid, target_fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // Bump the per-kind refcount on the underlying kernel resource so
+    // both processes own one ref each.  Failure here surfaces as
+    // EBADF (the target's fd just lost its backing — race with target
+    // closing the fd) and we have NOT yet allocated anything in the
+    // caller's table, so there's no rollback to do.
+    match entry.kind {
+        HandleKind::Console | HandleKind::PidFd => {
+            // No kernel resource to refcount.
+        }
+        HandleKind::File => {
+            if crate::fs::handle::dup_shared(entry.raw_handle).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
+        HandleKind::Pipe => {
+            let h = crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle);
+            if crate::ipc::pipe::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
+        HandleKind::EventFd => {
+            let h = crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle);
+            if crate::ipc::eventfd::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
+    }
+
+    // Linux always sets FD_CLOEXEC on the new fd, regardless of the
+    // target's per-fd flags.  We follow.
+    entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
+
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => {
+            // Roll back the refcount we just bumped — kernel-context
+            // has no caller to install into.
+            release_handle_ref(entry.kind, entry.raw_handle);
+            return linux_err(errno::EBADF);
+        }
+    };
+    match pcb::linux_fd_install(caller, entry, 0) {
+        Ok(new_fd) => SyscallResult::ok(i64::from(new_fd)),
+        Err(e) => {
+            // Install failed (table full) — roll back the refcount.
+            release_handle_ref(entry.kind, entry.raw_handle);
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// Drop one reference to a handle obtained via the per-kind `dup`
+/// helper.  Used by `sys_pidfd_getfd` to roll back a successful
+/// refcount bump when the subsequent table install fails.
+///
+/// `Console` and `PidFd` have no kernel resource, so this is a no-op
+/// for them.  The other kinds delegate to their subsystem's `close`,
+/// which is the matching half of `dup` / `dup_shared`.
+fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
+    match kind {
+        HandleKind::Console | HandleKind::PidFd => {}
+        HandleKind::File => {
+            let a = SyscallArgs {
+                arg0: raw_handle,
+                arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            let _ = handlers::sys_fs_close(&a);
+        }
+        HandleKind::Pipe => {
+            let h = crate::ipc::pipe::PipeHandle::from_raw(raw_handle);
+            crate::ipc::pipe::close(h);
+        }
+        HandleKind::EventFd => {
+            let h = crate::ipc::eventfd::EventFdHandle::from_raw(raw_handle);
+            crate::ipc::eventfd::close(h);
+        }
+    }
 }
 
 /// `process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)`.
@@ -28839,6 +28970,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::PIDFD_GETFD, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: pidfd_getfd(flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_getfd negative target_fd (after flag/pidfd validation)
+        // -> EBADF.  In kernel context validate_linux_fd is a no-op
+        // (no PCB), so the target_fd < 0 check is what fires.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_GETFD, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_getfd(neg targetfd) -> {} (want EBADF)",
+                dispatch_linux(nr::PIDFD_GETFD, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_getfd valid-shape args in kernel context -> EBADF: the
+        // lookup_caller_fd path has no PCB so it surfaces EBADF before
+        // reaching the kind-check / dup branches.  (Same gate as
+        // pidfd_open / pidfd_send_signal.)
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_GETFD, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_getfd kernel-ctx -> {} (want EBADF)",
+                dispatch_linux(nr::PIDFD_GETFD, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
 

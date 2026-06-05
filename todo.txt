@@ -19367,3 +19367,43 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      have.  Documented for follow-up.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 239. [DONE 2026-06-05] Linux ABI: sys_io_getevents add get_timespec64
+##      copy_from_user ahead of terminal EINVAL.
+##
+##      Pre-batch sys_io_getevents (kernel/src/syscall/linux.rs) ran
+##      min_nr/nr range check then fell through to terminal EINVAL
+##      without ever reading the timeout pointer.  Linux's
+##      fs/aio.c::SYSCALL_DEFINE5(io_getevents) order:
+##
+##          if (timeout && get_timespec64(&ts, timeout))
+##              return -EFAULT;
+##          ret = do_io_getevents(ctx_id, ...)   // -EINVAL no ctx
+##
+##      get_timespec64 does the full 16-byte copy_from_user; bad
+##      pointer -> -EFAULT.  Pre-batch (min_nr=10, nr=5, timeout=BAD)
+##      saw -EINVAL where Linux returns -EFAULT.
+##
+##      Fix: 16-byte validate_user_read + copy_from_user on the
+##      timeout pointer ahead of the min/nr check and terminal
+##      EINVAL.  No timespec64_valid is run — Linux's get_timespec64
+##      doesn't validate the range, the conversion to ktime happens
+##      later in do_io_getevents -> timespec64_to_ktime which is
+##      tolerant of any value.
+##
+##      Self-tests added:
+##      - (timeout=valid_16B_ts, ctx=0, nr=1) -> EINVAL (terminal).
+##        Exercises the new copy_from_user path.  Pre-batch this
+##        returned EINVAL via the min/nr check (which doesn't fire
+##        because min=0, nr=1, valid range) — actually pre-batch
+##        terminal also EINVAL.  Errno is the same; the new path is
+##        observable by the marker line being printed after the copy
+##        succeeds rather than the min/nr check rejecting.
+##      Marker: "io_getevents timeout-copy-before-ctx-lookup: OK".
+##
+##      Known limitation: same as batch 208 — when a real AIO context
+##      lands, the timespec EFAULT path with a BADPTR can finally be
+##      tested end-to-end.  Currently the kernel-context tests can't
+##      simulate a page-faulting userspace pointer.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

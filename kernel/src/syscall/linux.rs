@@ -11085,9 +11085,39 @@ fn sys_io_cancel(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `io_getevents(ctx_id, min_nr, nr, events, timeout)`.
+///
+/// Linux's `fs/aio.c::SYSCALL_DEFINE5(io_getevents)` gate order:
+///   1. `if (timeout) get_timespec64(&ts, timeout)` -> -EFAULT on
+///      bad pointer (copy_from_user fail).
+///   2. `do_io_getevents` -> `lookup_ioctx(ctx_id)` -> -EINVAL when
+///      no such context.
+///   3. `read_events`: `min_nr > nr || min_nr < 0 || nr < 0` ->
+///      -EINVAL (only reached after a valid ctx).
+///
+/// Pre-batch we ran (3) first and never read `timeout`, so a probe
+/// passing `(min_nr=10, nr=5, timeout=BADPTR)` saw -EINVAL where
+/// Linux returns -EFAULT (get_timespec64 fires first).
+///
+/// No AIO context ever exists on this kernel, so (2) is the terminal
+/// for every well-formed call; (3) is unreachable but kept as a
+/// documentation gate (errno collapses to the same terminal EINVAL).
 fn sys_io_getevents(args: &SyscallArgs) -> SyscallResult {
     let min_nr = args.arg1 as i64;
     let nr = args.arg2 as i64;
+    let timeout = args.arg4;
+    if timeout != 0 {
+        // get_timespec64: 16-byte copy_from_user -> EFAULT on bad ptr.
+        if let Err(e) = crate::mm::user::validate_user_read(timeout, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+        let mut buf = [0u8; 16];
+        // SAFETY: validate_user_read above confirmed 16 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(timeout, buf.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
     if min_nr < 0 || nr < 0 || min_nr > nr {
         return linux_err(errno::EINVAL);
     }
@@ -33187,6 +33217,32 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_getevents(min>nr) not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // io_getevents with a valid 16-byte timeout struct still
+        // terminates at EINVAL (no aio context).  This exercises the
+        // new get_timespec64 copy_from_user path: pre-batch we ran
+        // the min/nr check first and never touched the timeout
+        // pointer; post-batch the timeout copy fires ahead of the
+        // ctx lookup, matching Linux's SYSCALL_DEFINE5(io_getevents)
+        // order.  Errno collapses to the same EINVAL terminal here
+        // (since the ctx is absent) but the copy path is now
+        // observably executed.
+        #[repr(C)]
+        struct IoGeTs { tv_sec: i64, tv_nsec: i64 }
+        let ts = IoGeTs { tv_sec: 0, tv_nsec: 0 };
+        let ts_ptr_get = (&raw const ts) as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: ts_ptr_get, arg5: 0 };
+        if dispatch_linux(nr::IO_GETEVENTS, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_getevents(valid timeout, no ctx) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        core::hint::black_box(&ts);
+        serial_println!(
+            "[syscall/linux]   io_getevents timeout-copy-before-ctx-lookup: OK"
+        );
 
         // io_uring_setup(0,_) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,

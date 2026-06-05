@@ -17223,3 +17223,78 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   lsm_get_self_attr
 ##      UNDEF/SINGLE gating: OK" in build/serial-test.txt.
+
+## 196. syscall/linux: lsm_set_self_attr flags-first / size /
+##      PAGE_SIZE gating (batch 167).
+##
+##      Symptom: Pre-batch sys_lsm_set_self_attr diverged from
+##               Linux in four ways:
+##                1. Rejected attr outside [100, 105] with EINVAL.
+##                   Linux does no range check on attr — out-of-
+##                   range attrs walk the setselfattr hook list
+##                   and return LSM_RET_DEFAULT (EOPNOTSUPP).
+##                2. Checked NULL ctx -> EFAULT *before* the size
+##                   gates.  Linux runs size < sizeof(lsm_ctx)
+##                   -> EINVAL first, so NULL ctx with size=0
+##                   returns EINVAL, not EFAULT.
+##                3. Accepted any nonzero size.  Linux requires
+##                   `size >= sizeof(struct lsm_ctx)` (32 bytes)
+##                   and `size <= PAGE_SIZE` (16 KiB on our
+##                   target).  Sizes below 32 return EINVAL; sizes
+##                   above PAGE_SIZE return E2BIG.
+##                4. Checked flags last.  Linux checks flags
+##                   first, so flags!=0 with absurd size still
+##                   returns EINVAL, not E2BIG.
+##
+##      Fix:    Reordered gates to match Linux's
+##              security/lsm_syscalls.c::lsm_setselfattr exactly:
+##                - flags != 0 -> EINVAL (first)
+##                - size < 32 -> EINVAL
+##                - size > 16384 -> E2BIG
+##                - ctx == NULL -> EFAULT (explicit; kernel-context
+##                  validate_user_read bypasses NULL)
+##                - validate_user_read(ctx, size) -> EFAULT
+##                - terminal EOPNOTSUPP (LSM_RET_DEFAULT(setselfattr))
+##              Removed the attr range check entirely.
+##
+##      Self-tests (boot-time):
+##        * lsm_set_self_attr(attr=100, ctx=lsm_ctx, size=32,
+##          flags=1) -> EINVAL  (flags first).
+##        * lsm_set_self_attr(attr=100, ctx=lsm_ctx, size=100_000,
+##          flags=1) -> EINVAL  (flags wins over E2BIG).
+##        * lsm_set_self_attr(attr=100, ctx=NULL, size=0, flags=0)
+##          -> EINVAL  (size gate fires before NULL check).
+##        * lsm_set_self_attr(attr=100, ctx=lsm_ctx, size=16,
+##          flags=0) -> EINVAL  (was EOPNOTSUPP pre-batch; below
+##          sizeof(lsm_ctx)).
+##        * lsm_set_self_attr(attr=100, ctx=lsm_ctx, size=31,
+##          flags=0) -> EINVAL  (off-by-one boundary).
+##        * lsm_set_self_attr(attr=100, ctx=lsm_ctx, size=16385,
+##          flags=0) -> E2BIG  (new gate; pre-batch returned
+##          EOPNOTSUPP after a successful validate_user_read of
+##          16385 bytes from a 64-byte buffer would have failed
+##          with EFAULT under a user context).
+##        * lsm_set_self_attr(attr=100, ctx=NULL, size=32, flags=0)
+##          -> EFAULT  (kept; explicit NULL check after size gate).
+##        * lsm_set_self_attr(attr=50, ctx=lsm_ctx, size=32,
+##          flags=0) -> EOPNOTSUPP  (new; was EINVAL pre-batch
+##          due to range check).
+##        * lsm_set_self_attr(attr=100, ctx=lsm_ctx, size=32,
+##          flags=0) -> EOPNOTSUPP  (happy path).
+##        * Emits "[syscall/linux]   lsm_set_self_attr
+##          flags/size/E2BIG gating: OK".
+##
+##      Known limitations:
+##        * The ctx contents are not validated.  Linux's
+##          memdup_user followed by `size < lctx->ctx_len ||
+##          lctx->ctx_len > size - sizeof(*lctx)` -> EINVAL is
+##          not implemented because no LSM module is loaded; the
+##          check would just lead to EOPNOTSUPP regardless.  When
+##          real LSM lands, add the lctx.ctx_len bounds check.
+##        * PAGE_SIZE here is hard-coded 16384 to match our 16 KiB
+##          base page.  If we ever support multiple page sizes,
+##          this needs to track the current page size.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   lsm_set_self_attr
+##      flags/size/E2BIG gating: OK" in build/serial-test.txt.

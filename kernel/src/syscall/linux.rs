@@ -17403,24 +17403,62 @@ fn sys_lsm_get_self_attr(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `lsm_set_self_attr(attr, ctx*, size, flags)`.
+///
+/// Linux's `security/lsm_syscalls.c::lsm_setselfattr` gates (in
+/// order, ahead of the per-LSM dispatch):
+///   if (flags) return -EINVAL;
+///   if (size < sizeof(*lctx)) return -EINVAL;
+///   if (size > PAGE_SIZE) return -E2BIG;
+///   lctx = memdup_user(ctx, size);  /* EFAULT on NULL/bad ctx */
+///   ...
+///
+/// `struct lsm_ctx` is 4×u64 (id, flags, len, ctx_len) = 32 bytes,
+/// and `PAGE_SIZE` here is our 16 KiB base page (16384).  Crucially,
+/// Linux does *not* range-check `attr` against the documented
+/// LSM_ATTR_* constants — it walks the setselfattr hook list and
+/// returns the LSM_RET_DEFAULT(setselfattr) value (EOPNOTSUPP) when
+/// no LSM provides the attr.  Linux also checks `flags` first, so a
+/// caller passing flags!=0 with an absurd size gets EINVAL, not
+/// E2BIG.
+///
+/// Pre-batch our stub:
+///   * rejected attr outside [100, 105] with EINVAL (Linux: no
+///     range check; out-of-range falls through to EOPNOTSUPP),
+///   * checked `ctx == NULL -> EFAULT` ahead of the size gates
+///     (Linux: size gates fire first; size=0 with NULL ctx returns
+///     EINVAL, not EFAULT),
+///   * accepted any size > 0 (no minimum, no PAGE_SIZE ceiling),
+///   * checked `flags != 0 -> EINVAL` last instead of first.
 fn sys_lsm_set_self_attr(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation)]
-    let attr = args.arg0 as u32;
-    if !(100..=105).contains(&attr) {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if args.arg2 == 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, args.arg2 as usize) {
-        return linux_err(linux_errno_for(e));
-    }
+    const LSM_CTX_SIZE: u64 = 32; // sizeof(struct lsm_ctx)
+    const LSM_MAX_CTX_SIZE: u64 = 16384; // PAGE_SIZE on 16 KiB target
+    // 1. flags first.  Only 0 is currently valid; LSM_FLAG_SINGLE
+    //    is a get-side flag, not honored on set.
     if args.arg3 != 0 {
         return linux_err(errno::EINVAL);
     }
+    // 2. size < sizeof(lsm_ctx) -> EINVAL (includes size == 0).
+    if args.arg2 < LSM_CTX_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+    // 3. size > PAGE_SIZE -> E2BIG.
+    if args.arg2 > LSM_MAX_CTX_SIZE {
+        return linux_err(errno::E2BIG);
+    }
+    // 4. NULL ctx -> EFAULT (Linux: memdup_user(NULL) fails the
+    //    access_ok check and returns EFAULT).  Explicit because
+    //    kernel-context validate_user_read bypasses NULL.
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // 5. ctx buffer must be readable for `size` bytes.
+    #[allow(clippy::cast_possible_truncation)]
+    let size = args.arg2 as usize;
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, size) {
+        return linux_err(linux_errno_for(e));
+    }
+    // 6. No LSM provides setselfattr -> LSM_RET_DEFAULT(setselfattr)
+    //    = EOPNOTSUPP.
     linux_err(errno::EOPNOTSUPP)
 }
 
@@ -35864,6 +35902,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let size_ptr = size_buf.as_ptr() as u64;
         let ctx_buf = [0u8; 16];
         let ctx_ptr = ctx_buf.as_ptr() as u64;
+        // LSM ctx buffer must be >= sizeof(struct lsm_ctx) = 32
+        // bytes for lsm_set_self_attr to clear the size gate.
+        let lsm_ctx_buf = [0u8; 64];
+        let lsm_ctx_ptr = lsm_ctx_buf.as_ptr() as u64;
         let cmdline_buf = [0u8; 16];
         let cmdline_ptr = cmdline_buf.as_ptr() as u64;
 
@@ -36189,18 +36231,88 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   lsm_get_self_attr UNDEF/SINGLE gating: OK"
         );
-        // lsm_set_self_attr NULL ctx -> EFAULT.
-        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        // lsm_set_self_attr flags=1 (nonzero) -> EINVAL even with
+        // otherwise valid args.  Linux checks flags first.
+        let a = SyscallArgs { arg0: 100, arg1: lsm_ctx_ptr, arg2: 32, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: lsm_set_self_attr flags=1 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr flags wins over E2BIG: huge size with
+        // flags=1 still returns EINVAL (flags is checked first).
+        let a = SyscallArgs {
+            arg0: 100, arg1: lsm_ctx_ptr, arg2: 100_000, arg3: 1, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr flags wins over E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr size=0 -> EINVAL (size < sizeof(lsm_ctx)).
+        // Notably, NULL ctx with size=0 still returns EINVAL, not
+        // EFAULT — the size gate fires first.
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr size=0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr size < 32 -> EINVAL (was accepted
+        // pre-batch; Linux requires at least sizeof(struct lsm_ctx)).
+        let a = SyscallArgs { arg0: 100, arg1: lsm_ctx_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr size=16 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr size = 31 (one byte short) -> EINVAL.
+        let a = SyscallArgs { arg0: 100, arg1: lsm_ctx_ptr, arg2: 31, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr size=31 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr size > PAGE_SIZE (16384) -> E2BIG.  New
+        // gate; pre-batch accepted arbitrarily large sizes and only
+        // failed on the validate_user_read for the (nonexistent)
+        // buffer.
+        let a = SyscallArgs {
+            arg0: 100, arg1: lsm_ctx_ptr, arg2: 16385, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr size>PAGE_SIZE not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr NULL ctx with valid size -> EFAULT.
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 32, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: lsm_set_self_attr NULL ctx not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // lsm_set_self_attr valid -> EOPNOTSUPP.
-        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        // lsm_set_self_attr out-of-range attr (50) -> EOPNOTSUPP
+        // (was EINVAL pre-batch; Linux does not range-check attr).
+        let a = SyscallArgs { arg0: 50, arg1: lsm_ctx_ptr, arg2: 32, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr attr=50 not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_set_self_attr valid attr+size -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 100, arg1: lsm_ctx_ptr, arg2: 32, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
             serial_println!("[syscall/linux]   FAIL: lsm_set_self_attr valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   lsm_set_self_attr flags/size/E2BIG gating: OK"
+        );
         // lsm_list_modules NULL size -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EFAULT) {

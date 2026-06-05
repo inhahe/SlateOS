@@ -15644,3 +15644,77 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   userfaultfd privilege gate:
 ##      OK" at line 439 of build/serial-test.txt.
 
+## 176. Linux ABI: io_submit(2) / io_cancel(2) pointer validation
+##      (Batch 147, 2026-06-05)
+##
+##      Issue:  sys_io_submit checked nr < 0 and (iocbpp == NULL when
+##              nr > 0) but skipped the full access_ok check on the
+##              iocbpp array.  sys_io_cancel had NO validation at all —
+##              it returned EINVAL for every shape, hiding the EFAULT
+##              gates Linux applies to iocb and result pointers.
+##              fs/aio.c::do_io_submit checks
+##              `access_ok(iocbpp, nr * sizeof(struct iocb *))` before
+##              the context lookup, and fs/aio.c::SYSCALL_DEFINE3(
+##              io_cancel) reads through `iocb->aio_key` (EFAULT) and
+##              later writes through `result` (EFAULT) before the
+##              context lookup.  Probes passing NULL iocb / NULL result
+##              into io_cancel saw EINVAL where Linux gives EFAULT.
+##
+##      Fix:    sys_io_submit:
+##                * nr < 0 -> EINVAL (unchanged).
+##                * nr > 0 + arg2 == 0 -> EFAULT (unchanged).
+##                * nr > 0 + nr*8 overflow -> EINVAL.
+##                * nr > 0 -> validate_user_read(iocbpp, nr*8) before
+##                  the EINVAL terminal answer.
+##                * nr == 0 -> fall through to EINVAL (Linux's context
+##                  lookup happens regardless).
+##              sys_io_cancel:
+##                * iocb == 0 -> EFAULT.
+##                * validate_user_read(iocb, 1) -> EFAULT on failure
+##                  (1 byte is enough to detect NULL/unmapped; the
+##                  full 64-byte iocb layout isn't committed to).
+##                * result == 0 -> EFAULT.
+##                * validate_user_write(result, 32) (sizeof io_event)
+##                  -> EFAULT on failure.
+##                * Otherwise -> EINVAL (no context exists).
+##
+##      Self-tests (boot-time):
+##        * io_submit(_, -1, _) -> EINVAL (unchanged).
+##        * io_submit(_, 1, NULL) -> EFAULT (new).
+##        * io_submit(_, 0, _) -> EINVAL (new positive coverage).
+##        * io_cancel(_, NULL, _) -> EFAULT (new).
+##        * io_cancel(_, valid iocb, NULL result) -> EFAULT (new).
+##        * io_cancel(_, valid iocb, valid result) -> EINVAL (new
+##          positive coverage; no AIO context exists).
+##        * Emits "[syscall/linux]   io_submit/io_cancel pointer
+##          validation: OK".
+##
+##      Implementation notes:
+##        * Uses core::hint::black_box(&iocb) and (&result_buf)
+##          between dispatch_linux calls so the optimizer doesn't
+##          recycle the backing stack slot before dispatch_linux
+##          reads through the opaque u64 pointer.  Same pattern as
+##          io_uring_setup (todo 170 / batch 141).
+##
+##      Known limitations:
+##        * validate_user_read / validate_user_write are no-ops in
+##          kernel-context, so the boot self-tests can only exercise
+##          the explicit NULL check, not the full mapping validation
+##          gate.  When a real userspace caller hits these syscalls,
+##          the mapping check will fire correctly.  The same pattern
+##          applies to every Linux ABI gate that uses validate_user_*.
+##        * AIO contexts themselves remain unimplemented — io_setup
+##          returns ENOSYS, so any valid-shaped io_cancel still
+##          terminates at EINVAL (no context to look up).  Once we
+##          add a real fs/aio.c equivalent, the EINVAL terminal in
+##          io_cancel will switch to the actual cancel path.
+##        * struct iocb is 64 bytes on Linux x86_64, but we only
+##          validate 1 byte — that's enough to catch NULL / unmapped
+##          and matches what Linux's `get_user(key, &iocb->aio_key)`
+##          actually touches.  When we read the full iocb we'll
+##          extend the validation accordingly.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).
+##      Serial confirms "[syscall/linux]   io_submit/io_cancel pointer
+##      validation: OK" at line 432 of build/serial-test.txt.
+

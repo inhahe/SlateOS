@@ -10601,19 +10601,72 @@ fn sys_io_destroy(_args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `io_submit(ctx_id, nr, iocbpp)`.
+///
+/// Linux's `fs/aio.c::do_io_submit` validates, in this order, ahead of
+/// looking up the AIO context:
+///
+///   1. `nr < 0` -> `-EINVAL`.
+///   2. `!access_ok(iocbpp, nr * sizeof(struct iocb *))` -> `-EFAULT`.
+///      The check uses the full `nr * 8` byte span; a NULL iocbpp with
+///      nr > 0 fails this gate.
+///   3. context lookup fails -> `-EINVAL`.
+///
+/// We have no AIO context implementation, so any context id we're
+/// asked about is invalid — gate (3) is implicit.  Add (2) so a probe
+/// passing iocbpp into an unmapped range sees -EFAULT instead of the
+/// unrelated -EINVAL.
 fn sys_io_submit(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_wrap)]
     let nr = args.arg1 as i64;
     if nr < 0 {
         return linux_err(errno::EINVAL);
     }
-    if nr > 0 && args.arg2 == 0 {
-        return linux_err(errno::EFAULT);
+    if nr > 0 {
+        if args.arg2 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // Each entry is a `struct iocb *` (8 bytes on x86_64).
+        #[allow(clippy::cast_sign_loss)]
+        let total = match (nr as u64).checked_mul(8) {
+            Some(v) => v as usize,
+            None => return linux_err(errno::EINVAL),
+        };
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, total) {
+            return linux_err(linux_errno_for(e));
+        }
     }
+    // nr == 0 with valid iocbpp falls through to the context lookup,
+    // which yields EINVAL because we hold no contexts.
     linux_err(errno::EINVAL)
 }
 
 /// `io_cancel(ctx_id, iocb, result)`.
-fn sys_io_cancel(_args: &SyscallArgs) -> SyscallResult {
+///
+/// Linux's `fs/aio.c::SYSCALL_DEFINE3(io_cancel)` reads
+/// `iocb->aio_key` first (which faults `-EFAULT` if `iocb` is NULL or
+/// unmapped), then looks up the AIO context (`-EINVAL` on failure),
+/// then writes the cancelled event to `*result` (`-EFAULT` on bad
+/// write).  We have no contexts, so the context lookup is the
+/// terminal -EINVAL; the pointer-validity gates run ahead of it so a
+/// probe passing iocb=NULL sees -EFAULT instead of EINVAL.
+fn sys_io_cancel(args: &SyscallArgs) -> SyscallResult {
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct iocb is 64 bytes; the aio_key field is at offset 4 (after
+    // aio_data).  Validating a single byte is enough to catch NULL /
+    // unmapped iocb pointers without committing to the full struct
+    // layout.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    if args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // struct io_event is 32 bytes.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 32) {
+        return linux_err(linux_errno_for(e));
+    }
     linux_err(errno::EINVAL)
 }
 
@@ -30264,6 +30317,66 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_submit(-1) not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // io_submit(_, 1, NULL) -> EFAULT (Linux's access_ok gate;
+        // see todo 176).  Note: validate_user_read bypasses in
+        // kernel-context, so this test exercises only the explicit
+        // NULL check, not the full mapping validation.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_SUBMIT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: io_submit(NULL iocbpp) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // io_submit(_, 0, _) -> EINVAL (no context exists; nr=0 skips
+        // the iocbpp validation and falls through to context lookup).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_SUBMIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_submit(nr=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // io_cancel(_, NULL, _) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x2000, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_CANCEL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: io_cancel(NULL iocb) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // io_cancel(_, valid iocb, NULL result) -> EFAULT.
+        let iocb = [0u8; 64];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: iocb.as_ptr() as u64,
+            arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_CANCEL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: io_cancel(NULL result) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // io_cancel(_, valid iocb, valid result) -> EINVAL (no context).
+        let mut result_buf = [0u8; 32];
+        let a = SyscallArgs {
+            arg0: 0xdeadbeef,
+            arg1: iocb.as_ptr() as u64,
+            arg2: result_buf.as_mut_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_CANCEL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_cancel(valid) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Keep the buffers alive so the optimizer doesn't recycle the
+        // backing stack slot before dispatch_linux reads through the
+        // opaque u64 pointers.
+        core::hint::black_box(&iocb);
+        core::hint::black_box(&result_buf);
+        serial_println!("[syscall/linux]   io_submit/io_cancel pointer validation: OK");
         // io_getevents with min_nr > nr -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 10, arg2: 5, arg3: 0,
             arg4: 0, arg5: 0 };

@@ -13113,3 +13113,77 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
+## 144. [LINUX ABI BATCH 115 - DONE] Two truth-of-the-kernel errno
+##      upgrades that close the gap between this file's section
+##      header comments and the actual code:
+##
+##        (a) pkey_alloc(2): ENOSYS -> ENOSPC.
+##            File: kernel/src/syscall/linux.rs, sys_pkey_alloc
+##            (~line 13984).
+##            The section header at ~line 13907 already documents
+##            "pkey_alloc returns ENOSPC (no keys available) which
+##            is the documented 'PKU disabled' answer", but the code
+##            still returned ENOSYS with an inline TODO ("we don't
+##            have ENOSPC defined yet").  ENOSPC has been defined at
+##            line 935 for a while, so the discrepancy is resolved.
+##            ENOSPC is the truthful answer: PKU is not initialised
+##            in this kernel (no PKU CR4 bit, no per-process PKRU
+##            save/restore), so there are no keys to allocate; on
+##            Linux ENOSPC is the documented "no keys available"
+##            answer that glibc / libpkey treat as "MPK unavailable,
+##            fall back to plain mprotect."
+##
+##        (b) set_mempolicy_home_node(2): ENOSYS -> 0 (success).
+##            File: kernel/src/syscall/linux.rs,
+##            sys_set_mempolicy_home_node (~line 14113).
+##            The kernel has a single NUMA node (node 0).  After
+##            the existing validation (home_node == 0, flags == 0,
+##            len > 0, 16 KiB-aligned start), the requested policy
+##            -- pin the home node of [start, start+len) to node 0
+##            -- is necessarily already in effect because no other
+##            node exists.  Linux returns 0 for this call on a
+##            single-node system once the range has a valid MBIND
+##            policy (default MPOL_DEFAULT covers all anonymous /
+##            file mappings).  Returning 0 is therefore the truthful
+##            "applied, no-op" answer, not a placeholder.  The
+##            previous ENOSYS forced glibc numa_set_localalloc()
+##            callers to log a "kernel lacks home-node API" warning
+##            even though our single-node topology means they got
+##            exactly the behaviour they asked for.  Section header
+##            comment at ~line 13918 also updated to reflect the
+##            new "validate and return 0" semantics.
+##
+##      Self-tests (extend the existing blocks in linux.rs):
+##        * pkey_alloc valid (flags=0, rights=0) -> -ENOSPC.
+##        * pkey_alloc with PKEY_DISABLE_WRITE rights -> -ENOSPC.
+##        * pkey_alloc bad flags -> -EINVAL (unchanged).
+##        * pkey_alloc bad rights -> -EINVAL (unchanged).
+##        * pkey_free in-range key -> -EINVAL (unchanged; no
+##          allocated keys exist).
+##        * set_mempolicy_home_node valid (home=0, range aligned,
+##          len > 0) -> 0.
+##        * Idempotent (same call again) -> 0.
+##        * Different valid range -> 0.
+##        * Non-zero node, flags, len=0, misaligned start: all
+##          unchanged at -EINVAL.
+##
+##      Known limitations / documented for follow-on work:
+##        * pkey_mprotect with a non-default key still returns
+##          -EINVAL because no keys can be allocated; this matches
+##          a real Linux on a non-PKU CPU.  When PKU is wired into
+##          the page tables, pkey_alloc switches to handing out
+##          real keys [0..15] and pkey_free / pkey_mprotect gain
+##          real meaning.
+##        * set_mempolicy_home_node doesn't actually record the
+##          policy because there is no MBIND policy storage yet
+##          (the existing mbind syscall is also a validate-and-0
+##          stub).  When MBIND lands, both sites will need to read
+##          back the recorded policy when get_mempolicy is called;
+##          today neither read path exists, so the missing storage
+##          is invisible.
+##        * sys_pkey_alloc still ignores the access_rights bits
+##          beyond validation.  When PKU is wired in, the bits
+##          will need to be programmed into the initial PKRU.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).
+

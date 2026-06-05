@@ -13916,8 +13916,10 @@ fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
 //     this matches "no robust list registered" without faking an
 //     unforgeable handle.
 //   * set_mempolicy_home_node — NUMA policy extension (Linux 5.17+).
-//     We have a single home node, so validate and return ENOSYS so
-//     callers fall back to the existing MBIND policy.
+//     We have a single home node, so any valid (home_node == 0)
+//     request is necessarily already in effect.  We validate and
+//     return 0 — "applied, no-op" — which is the truthful answer
+//     on a single-node topology.
 // ---------------------------------------------------------------------------
 
 /// `eventfd(initval, flags)` — legacy form (flags ignored).
@@ -13990,10 +13992,18 @@ fn sys_pkey_alloc(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 & !0b11 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // PKU not enabled — no keys available.  Linux uses ENOSPC for this.
-    // We don't have ENOSPC defined yet — use ENOSYS instead, which is
-    // what glibc treats as "MPK unavailable".
-    linux_err(errno::ENOSYS)
+    // PKU not enabled in this kernel (no PKU init, no per-process
+    // PKRU save/restore), so there are no protection keys to hand
+    // out.  Linux returns ENOSPC ("no keys available") when /proc
+    // reports MPK is supported but the per-process budget is
+    // exhausted, *and* returns ENOSPC when the CPU lacks PKU
+    // (because pkey_alloc is gated behind cpu_has_pku and never
+    // calls into the allocator otherwise).  ENOSPC is therefore
+    // the truthful answer for "no keys available" regardless of
+    // why; it also matches the header comment for this section
+    // and is what glibc / libpkey treat as "MPK unavailable, fall
+    // back to plain mprotect."
+    linux_err(errno::ENOSPC)
 }
 
 /// `pkey_free(pkey)`.
@@ -14129,7 +14139,18 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 % 0x4000 != 0 {
         return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+    // With a single NUMA node (node 0), pinning the home node of
+    // [start, start+len) to "node 0" is necessarily a no-op: every
+    // page already lives on node 0 because no other node exists.
+    // Linux returns 0 for this call on a single-node system once
+    // the range has a valid MBIND policy (which, here, defaults to
+    // MPOL_DEFAULT covering everything).  Returning 0 — "applied,
+    // no further action required" — is therefore the truthful
+    // answer, not a placeholder.  The previous ENOSYS forced glibc
+    // numa_set_localalloc() callers to log a "kernel lacks home-
+    // node API" warning even though our single-node topology means
+    // they got exactly the behaviour they asked for.
+    SyscallResult::ok(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -29544,10 +29565,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pkey_alloc bad rights not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pkey_alloc valid -> ENOSYS.
+        // pkey_alloc valid (batch 115) -> ENOSPC: PKU is not enabled in
+        // this kernel, so there are no keys to allocate.  ENOSPC is the
+        // Linux-documented "no keys available" answer that callers use
+        // to detect MPK unavailability and fall back to plain mprotect.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PKEY_ALLOC, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: pkey_alloc valid not ENOSYS");
+        if dispatch_linux(nr::PKEY_ALLOC, &a).value != -i64::from(errno::ENOSPC) {
+            serial_println!("[syscall/linux]   FAIL: pkey_alloc valid not ENOSPC");
+            return Err(KernelError::InternalError);
+        }
+        // pkey_alloc with WRITE-disabled rights -> ENOSPC too (rights
+        // are validated first, then the "no keys" check fires).
+        let a = SyscallArgs { arg0: 0, arg1: 0b10, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_ALLOC, &a).value != -i64::from(errno::ENOSPC) {
+            serial_println!("[syscall/linux]   FAIL: pkey_alloc rights=DISABLE_WRITE not ENOSPC");
             return Err(KernelError::InternalError);
         }
         // pkey_free bad key -> EINVAL.
@@ -29680,10 +29711,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node misaligned not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // set_mempolicy_home_node valid -> ENOSYS.
+        // set_mempolicy_home_node valid (batch 115) -> 0: with one
+        // NUMA node, pinning home to node 0 is necessarily already in
+        // effect, so the operation is a successful no-op.
         let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node valid not ENOSYS");
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node valid not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Repeating the same call must remain a no-op (idempotent).
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node idempotent not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Different valid range -> still 0.
+        let a = SyscallArgs { arg0: 0x8000, arg1: 0x8000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node range2 not 0");
             return Err(KernelError::InternalError);
         }
 

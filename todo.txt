@@ -15296,3 +15296,48 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   add_key payload/plen
 ##      validation: OK" at line 436 of build/serial-test.txt.
 
+## 169. Linux ABI: request_key(2) callout_info validation
+##      (Batch 140, 2026-06-05)
+##
+##      Issue:  sys_request_key validated only type & description and
+##              fell through to ENOSYS without checking callout_info.
+##              Linux's security/keys/keyctl.c::sys_request_key reads
+##              callout_info with strndup_user when it's non-NULL,
+##              which returns EFAULT for an unmapped range.  Probes
+##              passing a bogus callout_info saw ENOSYS where Linux
+##              gives EFAULT, masking real callout_info pointer bugs
+##              in userspace.
+##
+##      Fix:    When `args.arg2 != 0`, validate it as a readable C
+##              string (validate_user_read with len=1, matching the
+##              validate_user_str helper) before falling through to
+##              ENOSYS.  callout_info == NULL stays valid ("no callout").
+##
+##      Self-tests (boot-time):
+##        * request_key(t,d,callout_info,_) -> ENOSYS (positive: new
+##          gate doesn't reject a valid callout pointer; in kernel
+##          context validate_user_read is permissive).
+##        * request_key(t,d,NULL,_) -> ENOSYS (NULL callout skips gate).
+##        * request_key(NULL,d,...) -> EFAULT (type required; unchanged).
+##        * request_key(t,NULL,_,_) -> EFAULT (desc required; unchanged).
+##        * Emits "[syscall/linux]   request_key callout/type/desc
+##          validation: OK".
+##
+##      Known limitations:
+##        * Same kernel-context permissive-validate_user_read note as
+##          batches 161/165/166: the "bad callout_info pointer ->
+##          EFAULT" path only fires from real userspace.  In the boot
+##          self-test, any non-NULL pointer falls through the gate
+##          successfully and we test for ENOSYS instead.
+##        * Linux's strndup_user caps the string at PAGE_SIZE; we
+##          only verify byte 0 is readable, matching the validate_user_str
+##          pattern used elsewhere in this file.  An attacker-shaped
+##          callout_info that's readable at offset 0 but unmapped past
+##          PAGE_SIZE would fail Linux's full copy but pass our gate;
+##          the keyring backend (when it lands) would catch this when
+##          it actually reads the full string.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   request_key callout/type/desc
+##      validation: OK" at line 437 of build/serial-test.txt.
+

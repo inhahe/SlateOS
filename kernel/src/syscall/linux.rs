@@ -10937,6 +10937,17 @@ fn sys_add_key(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `request_key(type, description, callout_info, keyring)`.
+///
+/// Linux's `security/keys/keyctl.c::sys_request_key` validates the
+/// three string pointers before ever consulting the keyring backend:
+///   * `type` and `description` are required, non-NULL C strings.
+///   * `callout_info` is optional — NULL means "no callout".  When
+///     non-NULL it must point at a readable C string; Linux's
+///     `strndup_user` returns EFAULT for an unmapped range.
+///
+/// We don't have a keyring backend, so the operation itself returns
+/// ENOSYS; the gates above must fire ahead of that so probes see the
+/// same errno shape they would on Linux.
 fn sys_request_key(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 == 0 || args.arg1 == 0 {
         return linux_err(errno::EFAULT);
@@ -10946,6 +10957,13 @@ fn sys_request_key(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
         return linux_err(linux_errno_for(e));
+    }
+    // callout_info: optional.  NULL is "no callout"; when present it
+    // must be a readable C string (Linux's strndup_user behaviour).
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+            return linux_err(linux_errno_for(e));
+        }
     }
     linux_err(errno::ENOSYS)
 }
@@ -30435,12 +30453,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   add_key payload/plen validation: OK");
-        // request_key(t,d,_,_) -> ENOSYS.
+        // request_key(t,d,callout_info,_) -> ENOSYS (`a` still has the
+        // 0x1000/0x2000/0x3000 pointers from the last add_key test; for
+        // request_key those are type/description/callout_info, all
+        // non-NULL — exercises the new callout_info validation gate).
         if dispatch_linux(nr::REQUEST_KEY, &a).value
             != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: request_key not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // request_key(t,d,NULL,_) -> ENOSYS (callout_info is optional;
+        // NULL means "no callout" and must skip the validation gate).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: request_key(NULL callout) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // request_key(NULL,...) -> EFAULT (type pointer required).
+        let a = SyscallArgs { arg0: 0, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: request_key(NULL type) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // request_key(t,NULL,_,_) -> EFAULT (description required).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: request_key(NULL desc) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   request_key callout/type/desc validation: OK");
 
         // userfaultfd with bogus flag -> EINVAL.
         let a = SyscallArgs { arg0: 0x8000_0000, arg1: 0, arg2: 0, arg3: 0,

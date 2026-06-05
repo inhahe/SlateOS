@@ -10623,13 +10623,100 @@ fn sys_io_uring_setup(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `io_uring_enter(fd, to_submit, min_complete, flags, sig, sigsz)`.
-fn sys_io_uring_enter(_args: &SyscallArgs) -> SyscallResult {
-    linux_err(errno::ENOSYS)
+///
+/// Pre-batch this was a bare ENOSYS with no argument validation, which
+/// meant callers probing the syscall by passing deliberately-invalid
+/// flag bits got the same answer as callers passing a wrong fd type:
+/// callers couldn't distinguish "kernel doesn't support io_uring" from
+/// "you handed me a non-ring fd."  We now match the rest of this file's
+/// hygiene: validate the flag mask, the optional sig pointer, and the
+/// fd itself.  Since no io_uring fd can exist in this kernel (the
+/// `_setup` call also returns ENOSYS), the answer for any otherwise-
+/// valid fd is EBADF — same pattern as the socket family.  This mirrors
+/// what Linux gives a caller who passes a non-io_uring fd today.
+fn sys_io_uring_enter(args: &SyscallArgs) -> SyscallResult {
+    // Linux 6.10: IORING_ENTER_GETEVENTS=0x01, SQ_WAKEUP=0x02,
+    // SQ_WAIT=0x04, EXT_ARG=0x08, REGISTERED_RING=0x10,
+    // ABS_TIMER=0x20, EXT_ARG_REG=0x40.  Higher bits are unused.
+    const IORING_ENTER_GETEVENTS: u64 = 0x01;
+    const IORING_ENTER_EXT_ARG: u64 = 0x08;
+    const VALID_FLAGS: u64 = 0x7F;
+    let flags = args.arg3;
+    if flags & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // sig pointer:
+    //   - EXT_ARG bit set: sig is `struct io_uring_getevents_arg *`
+    //     (24 bytes: sigmask, sigmask_sz, ts).
+    //   - EXT_ARG bit clear: sig is `sigset_t *` (8 bytes on x86_64).
+    // Either form is optional (NULL = no signal mask change).
+    if args.arg4 != 0 {
+        let need = if flags & IORING_ENTER_EXT_ARG != 0 { 24 } else { 8 };
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, need) {
+            return linux_err(linux_errno_for(e));
+        }
+        // When EXT_ARG is clear, sigsz must equal sizeof(sigset_t)==8 —
+        // Linux returns EINVAL otherwise (kernel/io_uring.c).
+        if flags & IORING_ENTER_EXT_ARG == 0 && args.arg5 != 8 {
+            return linux_err(errno::EINVAL);
+        }
+        // EXT_ARG without GETEVENTS is a Linux error too — the extended
+        // arg only makes sense when actually reaping completions.
+        if flags & IORING_ENTER_EXT_ARG != 0 && flags & IORING_ENTER_GETEVENTS == 0 {
+            return linux_err(errno::EINVAL);
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Even an existing fd isn't an io_uring fd, so the truthful answer
+    // is EBADF (matches Linux for io_uring ops on non-ring fds).
+    linux_err(errno::EBADF)
 }
 
 /// `io_uring_register(fd, opcode, arg, nr_args)`.
-fn sys_io_uring_register(_args: &SyscallArgs) -> SyscallResult {
-    linux_err(errno::ENOSYS)
+///
+/// Same rationale as `io_uring_enter`: validate inputs so callers see
+/// Linux-shaped errnos, then return EBADF on the fd (no io_uring rings
+/// can exist).
+fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
+    // Linux 6.10 has opcodes 0..=31 (REGISTER_PBUF_RING=22, etc.) plus
+    // bit 31 (`IORING_REGISTER_USE_REGISTERED_RING = 1u32 << 31`) which
+    // OR's onto the opcode to indicate `fd` refers to a registered-ring
+    // index instead of a raw fd.  The opcode "id" itself is bits 0..=29
+    // — we cap at 31 to leave a small forward-compat buffer without
+    // accepting wildly-bogus values.
+    const IORING_REGISTER_USE_REGISTERED_RING: u32 = 1u32 << 31;
+    #[allow(clippy::cast_possible_truncation)]
+    let raw_op = args.arg1 as u32;
+    let opcode = raw_op & !IORING_REGISTER_USE_REGISTERED_RING;
+    if opcode > 31 {
+        return linux_err(errno::EINVAL);
+    }
+    // arg pointer must be readable when nr_args > 0.  We can't gate by
+    // opcode (the per-opcode struct sizes vary), so use a minimum of 1
+    // byte to surface EFAULT on bogus pointers; opcode-specific size
+    // checks are deferred to the (future) real implementation.
+    if args.arg3 > 0 && args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // nr_args==0 with arg!=NULL: Linux ignores arg in that case, no
+    // pointer check needed.  nr_args>0 with arg==NULL: Linux returns
+    // EFAULT for most opcodes — match that.
+    if args.arg3 > 0 && args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Same reasoning as io_uring_enter — no ring can exist.
+    linux_err(errno::EBADF)
 }
 
 // ---------------------------------------------------------------------------
@@ -29815,19 +29902,110 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_uring_setup not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // io_uring_enter / register -> ENOSYS.
+        // io_uring_enter — input validation + EBADF (no ring fds exist).
+        //
+        // Pre-batch-132 these returned bare ENOSYS with no input
+        // validation; now they match the rest of this file's hygiene
+        // policy: bad flag bits / bad sigsz / bad EXT_ARG combos surface
+        // EINVAL, bad sig pointer surfaces EFAULT, then the fd check
+        // falls through to EBADF (Linux returns EBADF for io_uring ops
+        // on a non-io_uring fd, which is what every fd in this kernel
+        // currently is).
+        //
+        // (a) Baseline: fd=0, flags=0, sig=NULL -> EBADF.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IO_URING_ENTER, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: io_uring_enter not ENOSYS");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_enter(fd=0) not EBADF");
             return Err(KernelError::InternalError);
         }
+        // (b) Unknown flag bit -> EINVAL.  Bit 7 (0x80) is reserved.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x80,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_enter(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // (c) sig=non-NULL, EXT_ARG clear, sigsz != 8 -> EINVAL.
+        let mut sigbuf = [0u8; 8];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: sigbuf.as_mut_ptr() as u64,
+            arg5: 7,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_enter(sigsz!=8) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // (d) EXT_ARG without GETEVENTS -> EINVAL.  Need a 24-byte
+        // readable region so the read-validate doesn't trip first.
+        let mut extarg = [0u8; 24];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0x08,
+            arg4: extarg.as_mut_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_enter(EXT_ARG w/o GETEVENTS) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // (e) sig=NULL but with EXT_ARG|GETEVENTS — no pointer to
+        // validate, fd=0 falls through -> EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x09,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_enter(NULL ext_arg) not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // (validate_user_read is permissive in kernel context, so we
+        // cannot exercise the EFAULT-on-bogus-sig-pointer gate from a
+        // self-test — only userspace callers see that check fire.)
+
+        // io_uring_register — input validation + EBADF.
+        //
+        // (g) Baseline: fd=0, opcode=0, arg=NULL, nr_args=0 -> EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IO_URING_REGISTER, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: io_uring_register not ENOSYS");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_register(fd=0) not EBADF");
             return Err(KernelError::InternalError);
         }
+        // (h) Opcode out of range (32+, after masking the
+        // USE_REGISTERED_RING flag) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 64, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_register(opcode=64) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // (i) Opcode with USE_REGISTERED_RING bit set, base op valid
+        // (op=2) -> falls through, fd=0 -> EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: (1u64 << 31) | 2, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_register(REGISTERED_RING) not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // (j) nr_args > 0 with NULL arg -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 4,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_register(nr>0,NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // (Same kernel-context caveat as above: bogus non-NULL arg
+        // pointer cannot be tested here — only the explicit NULL
+        // EFAULT check fires inside the kernel.)
+        serial_println!("[syscall/linux]   io_uring_enter/register validation: OK");
     }
 
     // BPF / perf_event_open / keyring / userfaultfd / memfd / pidfd /

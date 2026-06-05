@@ -14841,3 +14841,86 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          pass.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 161. Linux ABI: io_uring_enter(2) / io_uring_register(2) input
+##      validation (batch 132).
+##
+##      Issue:  Both syscalls were bare ENOSYS stubs with zero input
+##              validation.  Two problems: (1) inconsistent with the
+##              rest of this file's hygiene policy (every other
+##              syscall validates inputs before deciding the truthful
+##              errno); (2) it hides "no io_uring rings exist" from
+##              feature-detection libraries.  Linux's actual answer
+##              for an io_uring op on a non-ring fd is EBADF (the fd
+##              does exist, it just isn't a ring); we should match
+##              that to distinguish "ring file not supported" from
+##              "kernel doesn't know this syscall."
+##
+##      Fix:    Replace the ENOSYS stubs with proper Linux 6.10-style
+##              validation:
+##
+##              sys_io_uring_enter(fd, to_submit, min_complete,
+##                                 flags, sig, sigsz):
+##                * Flag bits outside 0x7F (GETEVENTS|SQ_WAKEUP|
+##                  SQ_WAIT|EXT_ARG|REGISTERED_RING|ABS_TIMER|
+##                  EXT_ARG_REG) -> EINVAL.
+##                * sig != NULL: validate the pointer for 24 bytes
+##                  when EXT_ARG set (struct io_uring_getevents_arg),
+##                  8 bytes otherwise (sigset_t).  Faulting -> EFAULT.
+##                * EXT_ARG clear + sig != NULL: require sigsz == 8.
+##                  Mismatch -> EINVAL.
+##                * EXT_ARG set without GETEVENTS -> EINVAL.
+##                * Fall through to validate_linux_fd then EBADF.
+##
+##              sys_io_uring_register(fd, opcode, arg, nr_args):
+##                * Strip USE_REGISTERED_RING (1<<31) from opcode
+##                  before range-checking.
+##                * Opcode > 31 -> EINVAL (forward-compat buffer over
+##                  Linux 6.10's 0..=22).
+##                * nr_args > 0 and arg != NULL: validate arg for 1
+##                  byte (per-opcode sizes vary).
+##                * nr_args > 0 and arg == NULL -> EFAULT.
+##                * Fall through to validate_linux_fd then EBADF.
+##
+##      Self-tests (boot-time):
+##        (a) io_uring_enter(fd=0, flags=0, sig=NULL) -> EBADF.
+##        (b) io_uring_enter(flags=0x80) -> EINVAL (reserved bit).
+##        (c) io_uring_enter(sig != NULL, EXT_ARG clear, sigsz=7) ->
+##            EINVAL.
+##        (d) io_uring_enter(EXT_ARG, !GETEVENTS, ptr-valid 24-byte
+##            extarg) -> EINVAL.
+##        (e) io_uring_enter(EXT_ARG|GETEVENTS, sig=NULL) -> EBADF.
+##        (g) io_uring_register(fd=0, opcode=0, arg=NULL, nr_args=0)
+##            -> EBADF.
+##        (h) io_uring_register(opcode=64) -> EINVAL.
+##        (i) io_uring_register(opcode=(1<<31)|2) -> EBADF (proves the
+##            USE_REGISTERED_RING bit is masked off before range check).
+##        (j) io_uring_register(opcode=0, arg=NULL, nr_args=4) -> EFAULT.
+##
+##      Known limitations:
+##        * `validate_user_read` is permissive in kernel context
+##          (`is_kernel_context()` short-circuits to Ok), so the
+##          "bogus non-NULL pointer -> EFAULT" gates for both sig
+##          (io_uring_enter) and arg (io_uring_register) can't be
+##          exercised from a boot-time self-test.  Userspace callers
+##          will still see those checks fire when the pointer is
+##          genuinely unmapped.
+##        * Returning EBADF for *every* fd is correct only as long as
+##          no io_uring rings exist.  When sys_io_uring_setup is
+##          implemented, both routines need a HandleKind::IoUring
+##          dispatch arm before the EBADF fallback.
+##        * The opcode cap of 31 is a soft forward-compat buffer,
+##          not a Linux contract.  When new opcodes are added in
+##          Linux 6.11+, raise the cap rather than turning it into an
+##          allowlist — Linux returns EOPNOTSUPP from the dispatch
+##          layer for unknown opcodes, not EINVAL.  Match more
+##          precisely when there's a real implementation behind these
+##          calls.
+##        * EXT_ARG_REG (bit 6, Linux 6.10+) is accepted by the flag
+##          mask but not interpreted — it implies a registered-ring
+##          extended-arg lookup which needs the registered-ring table
+##          to exist first.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   io_uring_enter/register
+##      validation: OK".

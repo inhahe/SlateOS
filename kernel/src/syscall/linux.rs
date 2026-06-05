@@ -4439,6 +4439,29 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         // No per-PCB storage: the kernel offers only one timing mode,
         // so the return value is a constant.
         13 => SyscallResult::ok(0),
+        // PR_GET_SECCOMP (21) — return the calling task's current
+        // seccomp mode.  Linux defines:
+        //   * SECCOMP_MODE_DISABLED = 0 (no filter / not in strict mode)
+        //   * SECCOMP_MODE_STRICT   = 1 (read/write/exit/sigreturn only)
+        //   * SECCOMP_MODE_FILTER   = 2 (BPF filter active)
+        // Linux's `prctl_get_seccomp` is a one-line read of
+        // `current->seccomp.mode` with no argument validation;
+        // arg2..arg5 are ignored entirely.  It cannot fail.
+        //
+        // We do not implement seccomp, so the mode is always 0
+        // (DISABLED).  This is truthful: a probe from any sandbox
+        // library (libseccomp, audit-libs, container runtimes,
+        // python's `pyseccomp` startup check) gets the answer
+        // "no seccomp policy is active" rather than EINVAL, which
+        // matches what a non-seccomp Linux build would report.
+        //
+        // PR_SET_SECCOMP (22) is intentionally left at the EINVAL
+        // catch-all for now: pretending to install a seccomp filter
+        // would be a security lie (the sandbox would believe its
+        // syscall whitelist was active).  ENOSYS is the truthful
+        // answer but changing it from EINVAL would also be visible
+        // — tracked as a separate decision in todo.txt.
+        21 => SyscallResult::ok(0),
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -17762,6 +17785,54 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             if dispatch_linux(nr::PRCTL, &a).value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: prctl(PR_GET_TIMING, garbage…) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Batch 78: PR_GET_SECCOMP — Linux returns the current
+        // seccomp mode (0/1/2).  We don't implement seccomp so
+        // the answer is always 0 (DISABLED).  Linux ignores
+        // arg1..arg5 entirely.
+        //
+        // Verifications:
+        //   1. PR_GET_SECCOMP with arg1..arg5 == 0 -> 0.
+        //   2. PR_GET_SECCOMP with garbage arg1..arg5 -> 0
+        //      (Linux ignores; we mirror exactly).
+        //   3. PR_SET_SECCOMP (22) STILL falls through to EINVAL
+        //      — this batch deliberately leaves the set side
+        //      untouched (see todo.txt 107).  Verify the
+        //      regression hasn't snuck in.
+        {
+            // PR_GET_SECCOMP -> 0.
+            let a = SyscallArgs { arg0: 21, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_SECCOMP) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_GET_SECCOMP with garbage arg1..arg5 -> still 0.
+            let a = SyscallArgs { arg0: 21, arg1: 0xaaaa, arg2: 0xbbbb,
+                arg3: 0xcccc, arg4: 0xdddd, arg5: 0xeeee };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_SECCOMP, garbage…) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_SECCOMP still EINVAL (intentional non-change).
+            let a = SyscallArgs { arg0: 22, arg1: 2, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_SECCOMP, FILTER) unexpectedly not EINVAL ({})",
                     dispatch_linux(nr::PRCTL, &a).value
                 );
                 return Err(KernelError::InternalError);

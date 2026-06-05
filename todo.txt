@@ -10193,3 +10193,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
 
+## 107. Linux ABI batch 78: PR_GET_SECCOMP — truthful "no
+##      seccomp installed" report.
+##
+##      Before this batch option 21 fell through to the
+##      generic EINVAL catch-all in sys_prctl.  Every sandbox
+##      library (libseccomp, audit-libs, container runtimes,
+##      python's pyseccomp startup check, golang's seccomp
+##      bindings) probes PR_GET_SECCOMP at startup to learn
+##      whether a filter is already installed (e.g. by a
+##      parent process) before deciding what to install.
+##      EINVAL there looks like a kernel bug because Linux
+##      `prctl_get_seccomp` cannot fail.
+##
+##      Linux semantics: returns `current->seccomp.mode`
+##      (0=DISABLED, 1=STRICT, 2=FILTER) with no argument
+##      validation.  arg1..arg5 are ignored entirely.  Cannot
+##      fail.  We mirror exactly and always return 0
+##      (DISABLED) because we have no seccomp infrastructure.
+##
+##      No per-PCB storage: until we actually implement
+##      seccomp, the answer is a constant.
+##
+##      Companion PR_SET_SECCOMP (22) is INTENTIONALLY left at
+##      the EINVAL catch-all.  Pretending to install a seccomp
+##      filter would be an active security lie: the sandbox
+##      would believe its syscall whitelist was enforced when
+##      it isn't.  The correct answer for PR_SET_SECCOMP is
+##      ENOSYS ("kernel does not implement this feature") so
+##      sandboxes can fall back to weaker hardening rather
+##      than crash on EINVAL, but changing the errno is a
+##      behavioural change with its own ABI surface area
+##      (sandbox-init code paths that distinguish EINVAL vs
+##      ENOSYS) — defer to a future batch where the change can
+##      be paired with audits of the major sandbox callers we
+##      care about (chromium renderer, firefox content
+##      process, systemd-nspawn).
+##
+##      Known limitation (deferred): PR_SET_SECCOMP still
+##      returns EINVAL; should be ENOSYS once we've decided
+##      the migration story for the few callers that probe
+##      via PR_SET with a NULL filter to feature-detect.  We
+##      should NEVER return success from PR_SET_SECCOMP until
+##      we have a real BPF interpreter — that would be a
+##      security regression.
+##
+##      Self-tests cover:
+##        * PR_GET_SECCOMP with zero arg1..arg5 -> 0.
+##        * PR_GET_SECCOMP with garbage arg1..arg5 -> 0
+##          (mirroring Linux's ignore-extra-args).
+##        * PR_SET_SECCOMP(FILTER, NULL, 0, 0, 0) STILL ->
+##          EINVAL (anti-regression: ensure we haven't
+##          accidentally started lying about seccomp support).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+

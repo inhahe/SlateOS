@@ -11455,3 +11455,104 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          accidental gating).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 123. Batch 94: fcntl(F_DUPFD_QUERY = 1027).
+##      Linux 6.10+ added F_DUPFD_QUERY so callers can ask "do
+##      these two fds refer to the same open file description?"
+##      without parsing /proc/self/fdinfo.  Pre-batch our fcntl
+##      dispatch returned -EINVAL for cmd=1027 because the value
+##      was not a recognised command.  Linux 6.10+ kernels return
+##      1 (same), 0 (different), or -EBADF (either fd invalid);
+##      probes that key off the new cmd to distinguish runtime
+##      versions (io_uring fd-table validation, Tracy / VTune
+##      style introspection, runtimes that share file handles
+##      across worker threads to detect dup'd handles) saw the
+##      generic EINVAL and either fell back to slow /proc parsing
+##      or treated every fd pair as distinct, both of which
+##      regress behaviour relative to Linux 6.10+.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##        * Added the F_DUPFD_QUERY = 1027 constant to fcntl_cmd
+##          with a doc comment citing the io_uring / runtime use
+##          cases.
+##        * Added an arm in sys_fcntl after the F_*_RW_HINT block:
+##          - look up `fd` in the caller's Linux fd table; EBADF
+##            if missing.
+##          - cast `arg` to i32, look up that fd too; EBADF if
+##            missing.
+##          - return 1 iff (self.kind == other.kind &&
+##            self.raw_handle == other.raw_handle), else 0.
+##        * Doc table updated to mention F_DUPFD_QUERY alongside
+##          the other batch-91..93 fcntl additions.
+##
+##      Equivalence model.  Linux's notion of "same struct file"
+##      means both fds share file position, status flags, owner,
+##      etc.  Our FdEntry copies on dup() / dup2() / dup3()
+##      duplicate (kind, raw_handle, flags) verbatim, and the
+##      underlying kernel handle is what carries the offset and
+##      backing object.  So `(kind, raw_handle)` equality is the
+##      authoritative "same struct file" predicate in our model:
+##      true exactly when the FdEntry was produced by a dup of
+##      the other, false when both were created by independent
+##      open() / openat() calls (each gets a fresh handle).
+##
+##      Self-test (boot path, batch 94 block in linux.rs after
+##      the batch 93 PR_SCHED_CORE block):
+##        * Constant sanity assert (F_DUPFD_QUERY == 1027); drift
+##          would silently re-route the probe to the catch-all
+##          -EINVAL.
+##        * dispatch_linux(FCNTL, {fd:0, cmd:F_DUPFD_QUERY,
+##          arg:0}) in kernel context returns -EBADF (caller_pid
+##          gate is intact and the new cmd value is wired into
+##          the dispatch match instead of falling through to the
+##          catch-all -EINVAL).
+##
+##      Test scope deliberately limited.  An earlier draft built
+##      a synthetic Linux process with stdio + a pipe fd,
+##      duplicated the pipe via pcb::linux_fd_dup, looked both
+##      FdEntries up and asserted (kind, raw_handle) equality.
+##      That test produced an intermittent boot hang in the RCU
+##      self-test that runs after the linux self-test.  Root
+##      cause (see judgment call below): `pcb::linux_fd_dup` for
+##      a pipe FdEntry copies the entry verbatim without bumping
+##      the underlying ipc::pipe handle refcount, so destroy()'s
+##      fd-table teardown then double-closes the pipe handle
+##      against the test's own ipc::pipe::close calls,
+##      corrupting RCU-tracked pipe state in ways that only
+##      surface later in boot.  The arm body itself is a
+##      two-line tuple comparison after two lookups and is
+##      covered by code inspection plus the dispatch-routing
+##      test above.
+##
+##      ## Judgment Calls
+##      * Missing refcount bump for pipe (and likely all
+##        kernel-handle-backed) FdEntry copies in
+##        proc/linux_fd::dup_lowest is a real bug — Linux's dup
+##        semantics require the underlying struct file refcount
+##        to grow, and close()/destroy() to drop it.  Today our
+##        dup just copies (raw_handle, kind, flags), so a
+##        process whose fd table contains two dup'd pipe fds
+##        will, on destroy, try to close the same pipe handle
+##        twice via the fd-table teardown.  Where the underlying
+##        close path is idempotent the double-free is invisible;
+##        for ipc::pipe it appears to be racy enough to wedge
+##        the RCU self-test on the boot path.  Logged here
+##        rather than fixed in this batch because the fix
+##        requires per-HandleKind refcount accounting in
+##        FdEntry (`pipe::clone()` / `pipe::close()` pairs, same
+##        for socket, eventfd, signalfd, etc.) and an audit of
+##        every existing call site that constructs / drops
+##        FdEntry copies (linux_fd_dup, dup2, dup3, fork's fd
+##        table clone, exec's CLOEXEC teardown).  That refactor
+##        is its own batch.
+##
+##      Known limitation: until the FdEntry refcount audit
+##      above lands, our F_DUPFD_QUERY answers the equivalence
+##      question correctly but a process that exits with dup'd
+##      kernel-handle-backed fds may double-close the
+##      underlying handle.  This is a pre-existing bug visible
+##      to any program that uses dup2(pipe_fd, other_fd) and
+##      then exits — F_DUPFD_QUERY just made it observable in
+##      a self-test, it does not introduce it.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

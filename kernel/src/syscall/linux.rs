@@ -58,6 +58,7 @@
 //! |          |                   | / F_GET_RW_HINT / F_SET_RW_HINT    |
 //! |          |                   | / F_GET_FILE_RW_HINT               |
 //! |          |                   | / F_SET_FILE_RW_HINT               |
+//! |          |                   | / F_DUPFD_QUERY                    |
 //! | 257      | openat            | only AT_FDCWD; routes to VFS open  |
 //! | 292      | dup3              | via per-process Linux fd table     |
 //! | 293      | pipe2             | pipe with O_CLOEXEC / O_NONBLOCK   |
@@ -766,6 +767,14 @@ pub mod fcntl_cmd {
     /// if none).
     pub const F_GETLEASE: u32 = 1025;
     pub const F_DUPFD_CLOEXEC: u32 = 1030;
+    /// Linux 6.10+: query whether `fd` and `arg` (also an fd) refer
+    /// to the same open file description.  Returns 1 if same, 0 if
+    /// different, EBADF if either fd is invalid.  io_uring fd-table
+    /// validation, runtime introspection (Tracy, dtrace-equivalents),
+    /// and language runtimes that share file handles across worker
+    /// threads probe this to detect dup'd fds without resorting to
+    /// /proc/self/fdinfo parsing.
+    pub const F_DUPFD_QUERY: u32 = 1027;
 
     /// Per-open-fd write-life hint (`RWH_WRITE_LIFE_*`).  rocksdb /
     /// postgres / leveldb use this to advise the I/O layer of the
@@ -2765,6 +2774,32 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
             // / per-inode storage when the I/O layer learns to
             // honour it.
             SyscallResult::ok(0)
+        }
+        fcntl_cmd::F_DUPFD_QUERY => {
+            // Linux 6.10+: return 1 iff `fd` and `arg` (also an fd in
+            // the caller's table) refer to the same open file
+            // description, 0 otherwise.  EBADF if either fd is
+            // invalid.  Our equivalence proxy is (kind, raw_handle):
+            // dup() / dup2() / dup3() copy the FdEntry verbatim so
+            // both fds share the underlying handle (and thus the
+            // file offset, status flags, owner bookkeeping), which
+            // is exactly the "same struct file" relationship Linux's
+            // F_DUPFD_QUERY tests.  Two fds opened via separate
+            // open()/openat() calls get distinct kernel handles —
+            // distinguishable here even when they point at the same
+            // inode, matching Linux exactly.
+            let other_fd = arg as i32;
+            let self_entry = match pcb::linux_fd_lookup(pid, fd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            };
+            let other_entry = match pcb::linux_fd_lookup(pid, other_fd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            };
+            let same = self_entry.kind == other_entry.kind
+                && self_entry.raw_handle == other_entry.raw_handle;
+            SyscallResult::ok(if same { 1 } else { 0 })
         }
         // Linux `kernel/fcntl.c` returns -EINVAL (not -ENOSYS) for
         // unknown `cmd` values.  Match the reference behaviour so
@@ -20876,6 +20911,60 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let r = dispatch_linux(nr::PRCTL, &a);
         assert_eq!(r.value, -i64::from(errno::ENODEV));
+    }
+
+    // Batch 94: fcntl(F_DUPFD_QUERY = 1027) — Linux 6.10+ query of
+    // whether two fds refer to the same open file description.
+    // io_uring fd-table validation, Tracy / VTune introspection,
+    // and language runtimes that share file handles across worker
+    // threads probe this to detect dup'd fds without parsing
+    // /proc/self/fdinfo.  Pre-batch cmd 1027 fell into the
+    // catch-all -> EINVAL.
+    //
+    // Our equivalence proxy is (HandleKind, raw_handle): dup() /
+    // dup2() / dup3() copy the FdEntry verbatim so both fds share
+    // the underlying handle (and thus file offset, owner
+    // bookkeeping, etc.) — which is exactly Linux's "same struct
+    // file" relationship.  Two fds opened via separate
+    // open()/openat() calls get distinct raw_handle values even
+    // when they point at the same inode, matching Linux's
+    // distinguishability requirement.
+    //
+    // Coverage: constant sanity + the kernel-context EBADF gate
+    // via dispatch_linux.  The arm body itself is a two-line
+    // tuple comparison `(self.kind, self.raw_handle) == (other.kind,
+    // other.raw_handle)` after both lookups succeed — direct
+    // inspection covers correctness.  We deliberately do NOT
+    // build a synthetic Linux process and dup a pipe fd here:
+    // FdEntry copies via pcb::linux_fd_dup do not bump the
+    // underlying ipc::pipe handle refcount, so destroying a
+    // test process whose fd table holds two FdEntry copies of
+    // the same pipe handle racing against explicit
+    // ipc::pipe::close calls produced an intermittent hang
+    // later in the RCU self-test on the boot path.  The
+    // missing refcount bump in linux_fd_dup for pipe entries
+    // is its own bug logged in todo.txt and out of scope here.
+    {
+        // Constant sanity — drift would silently re-route to the
+        // catch-all (-EINVAL).
+        assert_eq!(fcntl_cmd::F_DUPFD_QUERY, 1027);
+
+        // Kernel-context routing: short-circuits to EBADF before
+        // the arm body executes (caller_pid gate intact).  This
+        // confirms the new cmd value is wired into the dispatch
+        // match instead of falling through to the catch-all.
+        let a = SyscallArgs {
+            arg0: 0, arg1: u64::from(fcntl_cmd::F_DUPFD_QUERY), arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::FCNTL, &a);
+        if r.value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fcntl(0, F_DUPFD_QUERY) kernel-ctx → {} (expected -EBADF)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     // personality dispatch validation.

@@ -4373,6 +4373,15 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
 ///     name pointer (if non-NULL) and return 0 — the name is dropped
 ///     but the caller continues.  Unrecognised sub-options return
 ///     `-EINVAL` exactly as Linux does.
+///   - `PR_SET_PTRACER` (0x5961_6d61 = "Yama"): Yama LSM's
+///     per-process ptrace allow-list pin.  gdb-attach, lldb-server,
+///     strace, perf-record, and Chromium's renderer crash handler
+///     all call this at startup to declare which PID is allowed to
+///     ptrace them (or `PR_SET_PTRACER_ANY = u64::MAX` for "any").
+///     We have no Yama policy and no ptrace_scope sysctl, so the
+///     request is informational only; we validate the auxiliaries
+///     and return 0 (silent success), matching what a Yama-enabled
+///     kernel with the default `ptrace_scope = 1` returns.
 ///
 /// Everything else: `-EINVAL`.
 ///
@@ -5742,6 +5751,67 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 // observable behaviour matches Linux for callers
                 // that don't read /proc/<pid>/maps.
             }
+            SyscallResult::ok(0)
+        }
+        // PR_SET_PTRACER (0x5961_6d61 = ASCII "Yama", little-endian
+        // representation of the four-byte "Yama" magic — see
+        // security/yama/yama_lsm.c and the PR_SET_PTRACER define in
+        // include/uapi/linux/prctl.h).  Per-process pin of who is
+        // allowed to ptrace this task, used by gdb/lldb/strace and
+        // any sandboxed app (Chromium renderer crash handler,
+        // Firefox content process, browser-tab-attached debugger
+        // helpers) to grant their debugger access in environments
+        // with `kernel.yama.ptrace_scope >= 1`.
+        //
+        // Linux semantics (security/yama/yama_lsm.c::yama_task_prctl):
+        //   * arg2 (our arg1) is the pid that may ptrace us.  Special
+        //     values: 0 = clear (only parent), PR_SET_PTRACER_ANY
+        //     (-1, encoded as u64::MAX in our wire encoding) = any
+        //     process may attach.  Any other value is treated as a
+        //     pid; Linux validates it via find_pid_ns() and returns
+        //     -EINVAL on a missing pid (only when
+        //     ptrace_scope == 1; under stricter modes Yama itself
+        //     rejects regardless of pid).
+        //   * arg3 (our arg2), arg4 (our arg3), arg5 (our arg4) are
+        //     not documented; Yama doesn't read them.  Other prctl
+        //     arms in this file enforce zero-tail for ABI hygiene,
+        //     so we do the same here.
+        //   * On Yama-disabled kernels (CONFIG_SECURITY_YAMA=n or
+        //     ptrace_scope=0), the option falls through the LSM
+        //     chain and prctl()'s catch-all returns -EINVAL.
+        //
+        // Our stance: we have no Yama LSM, no ptrace_scope sysctl,
+        // and no per-process ptrace allow-list to maintain.  The
+        // friendliest answer for gdb/lldb/strace/Chromium is to
+        // accept the call (so they don't log "ptrace_scope
+        // restricted, attach may fail" warnings) and silently drop
+        // the pid hint.  Actual ptrace attach permission is enforced
+        // at the ptrace boundary; the absence of Yama here means
+        // every attach is implicitly permitted, which is the
+        // friendlier (less restrictive) end of the Linux config
+        // spectrum.
+        //
+        // Validation we do perform:
+        //   * arg3/arg4/arg5 (our arg2/arg3/arg4) must all be 0 —
+        //     -EINVAL otherwise.  Catches caller bugs that would
+        //     pass through silently on real Yama.
+        //   * arg1 may be any value: PID_ANY (u64::MAX), 0, or a pid.
+        //     We do not validate the pid (we have no pid namespace
+        //     query that distinguishes "missing pid" from "real
+        //     userspace pid" cheaply, and Yama itself only checks
+        //     under restricted modes anyway).  Documented limitation.
+        //
+        // Limitation tracked in todo.txt: if we ever add a Yama-like
+        // ptrace-scope policy, this arm should validate the pid and
+        // persist the allow-list pin on the PCB.
+        0x5961_6d61 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // arg1 (the ptracer pid) is informational; we don't
+            // validate or store it.  All values map to "silent
+            // success", same as a Yama LSM with ptrace_scope = 1
+            // returns for any well-formed call.
             SyscallResult::ok(0)
         }
         _ => linux_err(errno::EINVAL),
@@ -21653,6 +21723,109 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 dispatch_linux(nr::PRCTL, &a).value,
             );
             return Err(KernelError::InternalError);
+        }
+    }
+
+    // Batch 98: prctl(PR_SET_PTRACER = 0x5961_6d61) — Yama LSM's
+    // per-process pin of which PID may ptrace this task.
+    // gdb-attach, lldb-server, strace, perf-record, and Chromium's
+    // renderer crash handler all probe it on startup.  Pre-batch
+    // they hit the prctl catch-all -EINVAL and either logged a
+    // warning or skipped the pin.  We accept it as silent success
+    // after enforcing the zero-tail auxiliary contract — same
+    // shape Linux returns when Yama is loaded with the default
+    // ptrace_scope.
+    //
+    // Coverage from dispatch_linux (kernel context):
+    //   1. Constant sanity (option == 0x5961_6d61).
+    //   2. PR_SET_PTRACER with arg1 = 0 (clear) and zero
+    //      auxiliaries -> 0.
+    //   3. PR_SET_PTRACER with arg1 = u64::MAX
+    //      (PR_SET_PTRACER_ANY = -1 sign-extended) -> 0.
+    //   4. PR_SET_PTRACER with arg1 = some plausible pid -> 0.
+    //   5. PR_SET_PTRACER with non-zero arg2 / arg3 / arg4 -> EINVAL
+    //      (the zero-tail gate).
+    {
+        // 1. Constant sanity (asserts the literal value used in the
+        // arm head — drift would re-route to the -EINVAL catch-all
+        // and the success tests below would fail noisily).
+        //
+        // The 0x5961_6d61 magic spells "Yama" when bytes are laid
+        // out MSB-first: 'Y'=0x59 | 'a'=0x61 | 'm'=0x6d | 'a'=0x61.
+        // Verify by reconstructing the constant from the ASCII bytes
+        // via from_be_bytes on a 4-byte slice (zero-extended into u64).
+        const PR_SET_PTRACER: u64 = 0x5961_6d61;
+        assert_eq!(
+            PR_SET_PTRACER,
+            u64::from(u32::from_be_bytes(*b"Yama")),
+        );
+
+        // 2. arg1 = 0 (clear pin) -> 0.
+        let a = SyscallArgs {
+            arg0: PR_SET_PTRACER, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_PTRACER, 0) not 0 ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // 3. arg1 = u64::MAX (PR_SET_PTRACER_ANY) -> 0.
+        let a = SyscallArgs {
+            arg0: PR_SET_PTRACER, arg1: u64::MAX, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_PTRACER, ANY) not 0 ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // 4. arg1 = 1234 (a plausible pid) -> 0.  We don't validate
+        // the pid in the kernel — the arm body documents this — so
+        // any pid value succeeds.
+        let a = SyscallArgs {
+            arg0: PR_SET_PTRACER, arg1: 1234, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_PTRACER, 1234) not 0 ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // 5. Non-zero auxiliary slot -> EINVAL.  Exercise each of
+        // arg2 / arg3 / arg4 in turn to prove the gate covers all
+        // three (the catch-all also returns EINVAL but only via the
+        // unrecognised-option arm, so we test the success path
+        // first to disambiguate).
+        for (slot, name) in &[
+            (2u8, "arg3"),
+            (3, "arg4"),
+            (4, "arg5"),
+        ] {
+            let mut a = SyscallArgs {
+                arg0: PR_SET_PTRACER, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            match slot {
+                2 => a.arg2 = 1,
+                3 => a.arg3 = 1,
+                4 => a.arg4 = 1,
+                _ => unreachable!(),
+            }
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_PTRACER, 0, …{}=1) not EINVAL ({})",
+                    name, dispatch_linux(nr::PRCTL, &a).value,
+                );
+                return Err(KernelError::InternalError);
+            }
         }
     }
 

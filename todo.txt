@@ -11793,3 +11793,78 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      parity for fault semantics.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##
+## 127. Batch 98 — prctl(PR_SET_PTRACER) Yama-LSM ptracer pin
+##      (no-op accept).  COMPLETED 2026-06-05.
+##
+##      Motivation:
+##      prctl(PR_SET_PTRACER = 0x5961_6d61, pid) is the Yama LSM's
+##      per-process pin of which PID is allowed to ptrace this task.
+##      Probed by gdb-attach (every `gdb -p <pid>` chain), lldb-server,
+##      strace, perf record, and Chromium's renderer crash handler at
+##      startup so that their debugger / parent process can attach
+##      under restricted ptrace_scope sysctl values.  Pre-batch
+##      sys_prctl returned -EINVAL via the catch-all, so each probing
+##      caller either logged a warning ("ptrace_scope is restricted,
+##      attach may fail") or skipped the pin entirely.  Accepting it
+##      silences that noise and matches the friendliest
+##      Yama-configured Linux behaviour.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##        * New 0x5961_6d61 arm in sys_prctl, placed just before the
+##          catch-all default.  Body:
+##          - Enforce zero-tail auxiliaries: args.arg2 / arg3 / arg4
+##            must all be 0; otherwise -EINVAL.
+##          - Accept any args.arg1 value (PID_ANY = u64::MAX, 0
+##            = "clear pin", or an arbitrary pid).  We do NOT
+##            validate the pid against pcb existence — we have no
+##            Yama policy that would enforce it.
+##          - Return 0 (silent success) — the pin is informational
+##            only; the actual ptrace-permission check (currently
+##            wide-open) lives at the ptrace boundary.
+##        * Top-of-function sys_prctl doc table updated with a
+##          PR_SET_PTRACER bullet explaining the no-Yama stance and
+##          citing gdb / lldb / strace / Chromium as primary callers.
+##
+##      Self-test (boot path, batch 98 block in linux.rs after the
+##      batch 97 PR_SET_VMA block):
+##        1. Constant sanity: PR_SET_PTRACER == 0x5961_6d61, with a
+##           secondary cross-check that the value spells "Yama" when
+##           bytes are laid out MSB-first (via from_be_bytes on the
+##           4-byte ASCII slice).  Drift would re-route to the
+##           -EINVAL catch-all and the success tests below would
+##           fail noisily.
+##        2. arg1 = 0 (clear) + all-zero auxiliaries -> 0.
+##        3. arg1 = u64::MAX (PR_SET_PTRACER_ANY = -1) + all-zero
+##           auxiliaries -> 0.
+##        4. arg1 = 1234 (arbitrary plausible pid) + all-zero
+##           auxiliaries -> 0.  Exercises the "we don't validate pid"
+##           contract.
+##        5. Non-zero arg2 / arg3 / arg4 individually -> -EINVAL.
+##           Iterates all three auxiliary slots to prove the gate
+##           covers each independently.
+##
+##      Caught-in-self-test bug (fixed within this batch): the
+##      first-draft self-test included
+##      `assert_eq!(PR_SET_PTRACER,
+##                  u64::from_le_bytes(*b"Yama\0\0\0\0"))`
+##      which fired in early boot (1499557217 != 1634558297) because
+##      "Yama" packs into 0x5961_6d61 only when interpreted big-endian
+##      ('Y' is the MSB).  Replaced with from_be_bytes on a 4-byte
+##      slice (zero-extended into u64).  Documented as a reminder
+##      that 4-byte prctl-magic constants in include/uapi/linux/prctl.h
+##      use the big-endian / ASCII-reading-order convention; the same
+##      pattern holds for PR_SET_VMA (0x5356_4d41 = "SVMA" big-endian)
+##      and PR_GET_AUXV (0x4155_5856 = "AUXV" big-endian).
+##
+##      Known limitation: the requested ptracer pid is silently
+##      dropped — we have no Yama-like ptrace_scope sysctl and no
+##      per-process allow-list.  All ptrace attaches currently
+##      succeed regardless of this pin (the friendlier end of the
+##      Linux spectrum), so the discarded pin has no observable
+##      effect except in distributed-tracing scenarios that expect
+##      to be denied attach by a non-listed PID.  If we ever add a
+##      ptrace-scope policy, this arm should persist the pid on the
+##      PCB and the ptrace-attach path should consult it.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

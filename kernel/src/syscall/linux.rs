@@ -17094,14 +17094,47 @@ fn sys_iopl(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `ioperm(from, num, turn_on)`.
+///
+/// Linux's `arch/x86/kernel/ioport.c::ksys_ioperm`:
+///   if ((from + num <= from) || (from + num > IO_BITMAP_BITS))
+///       return -EINVAL;
+///   if (turn_on && !capable(CAP_SYS_RAWIO))
+///       return -EPERM;
+///   ...modify per-task TSS I/O bitmap...
+///
+/// `IO_BITMAP_BITS = 65536`.  Critically, `turn_on == 0` ("give up
+/// previously held permission") skips the CAP check entirely: revoking
+/// a permission you never had is a no-op success.  Our pre-batch stub
+/// returned EPERM unconditionally, which broke glibc's iopl-bypass
+/// teardown idiom (`ioperm(port, n, 0)` to release after use) and
+/// libpam's port-relinquish helper.
+///
+/// Match Linux's ordering: range checks first, then `turn_on == 0
+/// -> success(0)` (no bitmap to modify, but the right errno),
+/// otherwise terminal EPERM.
 fn sys_ioperm(args: &SyscallArgs) -> SyscallResult {
-    // I/O port range is 0..=0xFFFF; from + num must not exceed.
-    if args.arg0 > 0xFFFF || args.arg1 > 0xFFFF {
+    // Linux: `(from + num) > IO_BITMAP_BITS (=65536)` OR overflow ->
+    // EINVAL.  Don't pre-cap `from` or `num` individually — the full
+    // range `from=0, num=65536` is a valid revoke target.
+    let from = args.arg0;
+    let num = args.arg1;
+    let end = match from.checked_add(num) {
+        Some(v) => v,
+        None => return linux_err(errno::EINVAL),
+    };
+    if end > 0x1_0000 {
         return linux_err(errno::EINVAL);
     }
-    if args.arg0.saturating_add(args.arg1) > 0x1_0000 {
-        return linux_err(errno::EINVAL);
+    // turn_on field is a C int; only the low 32 bits matter and Linux
+    // tests it for non-zero.  We never allocated an I/O bitmap for this
+    // task, so "revoke" is trivially complete.
+    #[allow(clippy::cast_possible_truncation)]
+    let turn_on = args.arg2 as u32;
+    if turn_on == 0 {
+        return SyscallResult::ok(0);
     }
+    // Direct I/O port access is not granted to userspace — drivers run
+    // as IPC servers behind capabilities.
     linux_err(errno::EPERM)
 }
 
@@ -35815,12 +35848,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: ioperm span not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // ioperm valid -> EPERM.
+        // ioperm valid turn_on=1 -> EPERM.
         let a = SyscallArgs { arg0: 0x100, arg1: 4, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IOPERM, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: ioperm valid not EPERM");
             return Err(KernelError::InternalError);
         }
+        // ioperm turn_on=0 -> 0 (revoking permission you never had is a
+        // no-op success).  Pre-batch returned EPERM here, which broke
+        // glibc's iopl-bypass teardown idiom.
+        let a = SyscallArgs { arg0: 0x100, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPERM, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: ioperm turn_on=0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // ioperm turn_on=0 with full range -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPERM, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: ioperm full-range revoke not 0");
+            return Err(KernelError::InternalError);
+        }
+        // ioperm turn_on=0 still EINVAL on bad range — gates fire ahead
+        // of the turn_on short-circuit.
+        let a = SyscallArgs { arg0: 0xFFF0, arg1: 0x20, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPERM, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: ioperm bad-range turn_on=0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   ioperm turn_on=0 revoke path: OK"
+        );
 
         // set_thread_area NULL -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

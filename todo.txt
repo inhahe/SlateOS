@@ -16938,3 +16938,84 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   settimeofday
 ##      timeval_valid: OK" in build/serial-test.txt.
+
+
+## 192. Linux ABI: ioperm turn_on=0 revoke + tightened range check.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_ioperm.
+##
+##      Problem: sys_ioperm returned EPERM unconditionally after the
+##              range checks.  Linux's ksys_ioperm
+##              (arch/x86/kernel/ioport.c) gates the CAP_SYS_RAWIO
+##              check on `turn_on != 0`:
+##                if (turn_on && !capable(CAP_SYS_RAWIO))
+##                    return -EPERM;
+##              Revoking permission you never held is a no-op success
+##              (0).  glibc's iopl-bypass teardown idiom
+##              `ioperm(port, n, 0)` runs after the protected I/O
+##              block to release the port grant; our pre-batch stub
+##              made that teardown fail with EPERM, which propagates
+##              through libpam and inetutils' rsh as a misleading
+##              "I/O permission denied" error from a path that's
+##              actually just resetting state.
+##
+##              Bonus: the range gate was too tight.  Pre-batch
+##              rejected `num > 0xFFFF` and `from > 0xFFFF`
+##              individually, but Linux's check is `(from + num) >
+##              IO_BITMAP_BITS (=65536)` — `from=0, num=65536` is
+##              the full-range revoke and should be valid, not
+##              EINVAL.  Glibc's port-reset helpers actually use the
+##              full range.
+##
+##      Fix:    Two changes:
+##                1. Range check: `from.checked_add(num)` for
+##                   overflow detection, then `end > 0x1_0000`
+##                   rejects.  Allows from=0, num=65536 (end=
+##                   65536, <= IO_BITMAP_BITS).  Still rejects
+##                   from=65536 (end=65537 > 65536) and from=
+##                   0xFFF0, num=0x20 (end=0x10010 > 0x10000).
+##                2. After range checks pass, `turn_on == 0` ->
+##                   SyscallResult::ok(0).  Only `turn_on != 0`
+##                   falls through to the terminal EPERM (we don't
+##                   grant direct port access; drivers run as IPC
+##                   servers behind capabilities).
+##
+##      Self-tests (boot-time):
+##        * ioperm(from=0x1_0000, num=1, on=1) -> EINVAL  (kept).
+##        * ioperm(from=0xFFF0, num=0x20, on=1) -> EINVAL  (kept;
+##          end > 0x10000).
+##        * ioperm(from=0x100, num=4, on=1) -> EPERM  (kept;
+##          renamed marker to clarify on=1 path).
+##        * ioperm(from=0x100, num=4, on=0) -> 0  (new; revoke
+##          succeeds without CAP_SYS_RAWIO).
+##        * ioperm(from=0, num=0x1_0000, on=0) -> 0  (new; full-
+##          range revoke — this case was EINVAL pre-batch because
+##          of the `num > 0xFFFF` cap).
+##        * ioperm(from=0xFFF0, num=0x20, on=0) -> EINVAL  (new;
+##          range gate fires ahead of the turn_on=0 short-circuit,
+##          matches Linux ordering).
+##        * Emits "[syscall/linux]   ioperm turn_on=0 revoke path:
+##          OK".
+##
+##      Known limitations:
+##        * The turn_on=0 success path does not actually clear any
+##          I/O bitmap — we never allocate one because we never
+##          grant access in the first place.  This is fine
+##          semantically (revoking permission you never held is a
+##          no-op success), but if real ioperm support lands the
+##          syscall has to walk the per-task TSS I/O bitmap and
+##          clear the bits.
+##        * `turn_on` is taken as u32 (low 32 bits of arg2); Linux
+##          uses `int turn_on`.  A negative C int casts to a u32
+##          with the top bit set, which is non-zero — same EPERM
+##          path.  A future "explicit -1 means something" extension
+##          would need an i32 cast and a signed check.
+##        * No per-port granularity surface yet — we treat the
+##          whole [0, 65536) range as "no access," same EPERM
+##          either way.  Real driver allocation will need a finer
+##          policy (e.g., a driver IPC server holding ioperm caps
+##          for the legacy keyboard ports only).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).
+##      Serial confirms "[syscall/linux]   ioperm turn_on=0 revoke
+##      path: OK" in build/serial-test.txt.

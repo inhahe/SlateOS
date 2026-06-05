@@ -3789,17 +3789,56 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
 /// BSD, SVR4, etc.).
 ///
 /// The argument `persona == 0xffff_ffff` is the canonical "query
-/// current personality" call; libc startup uses this to verify we're
-/// PER_LINUX before doing anything Linux-ABI-specific.  Any other value
-/// is "set to this personality"; we accept and ignore (Linux ignores
-/// most personality bits anyway).
+/// current personality" call: libc startup and gdb both use it to
+/// learn the current personality without changing it.  Any other value
+/// is "set to this personality and return the old one".
 ///
-/// Returns the previous personality, which is always 0 (PER_LINUX) for
-/// us.
-fn sys_personality(_args: &SyscallArgs) -> SyscallResult {
-    // PER_LINUX == 0; we never had any other personality so the
-    // "previous" value is also 0.
-    SyscallResult::ok(0)
+/// Linux's `personality(2)` validates only that the low byte (the
+/// `PER_*` persona) is one it knows about — and since the only persona
+/// we model is `PER_LINUX` (0), we reject any non-zero persona with
+/// `EINVAL`.  The upper bits (`ADDR_NO_RANDOMIZE`, `READ_IMPLIES_EXEC`,
+/// `MMAP_PAGE_ZERO`, etc.) we accept and *store* verbatim: we don't
+/// actually act on any of them (we don't randomize addresses, and our
+/// mmap flags ignore READ_IMPLIES_EXEC), but storing the value lets
+/// programs round-trip persona+flags through
+/// `personality(persona)` followed by `personality(0xffffffff)`, which
+/// gdb's "show personality" relies on for its own bookkeeping.
+///
+/// Errors:
+///   - `-EINVAL` if the persona low byte is not `PER_LINUX` (0).
+fn sys_personality(args: &SyscallArgs) -> SyscallResult {
+    // Linux takes the persona as an `unsigned long` but only the low
+    // 32 bits are meaningful — the persona field is 1 byte and the
+    // flags occupy the remaining 24 bits of the lower word.
+    let persona = args.arg0 as u32;
+
+    // Read the caller's current personality.  Kernel context (no
+    // live PCB) falls back to PER_LINUX/0, matching what a fresh
+    // userspace process would observe.
+    let current = match caller_pid() {
+        Some(pid) => pcb::get_personality(pid).unwrap_or(0),
+        None => 0,
+    };
+
+    // 0xffff_ffff is the canonical "query only" sentinel.  Glibc and
+    // gdb both poke this before they ever set anything to learn what
+    // persona they were started with.
+    if persona == u32::MAX {
+        return SyscallResult::ok(i64::from(current));
+    }
+
+    // The persona is the low byte; flags are the upper 24 bits.  We
+    // only model PER_LINUX (0), so any other persona is rejected.
+    if (persona & 0xff) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Persist the new value and return the old one.  Kernel context
+    // (no PCB) is a no-op that still returns the "current" value of 0.
+    if let Some(pid) = caller_pid() {
+        let _ = pcb::set_personality(pid, persona);
+    }
+    SyscallResult::ok(i64::from(current))
 }
 
 /// `getresuid(ruid, euid, suid)` — fetch real/effective/saved user IDs.
@@ -15766,6 +15805,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     .map(|c| c.groups.len()),
                 Some(0),
             );
+
+            pcb::destroy(test_pid);
+        }
+
+        // Batch 55: personality dispatch and PCB round-trip.
+        //   - personality(0xffffffff) from kernel context returns the
+        //     fall-back value (0/PER_LINUX).
+        //   - personality(0x00010000) from kernel context (non-zero
+        //     persona-flag bits, but the persona low byte is still
+        //     PER_LINUX) succeeds and returns the previous personality
+        //     (0).  Kernel context has no PCB so the stored side-
+        //     effect is a no-op; the return value still demonstrates
+        //     the dispatcher reached the set-path rather than the
+        //     EINVAL path.
+        //   - personality(0x00000001) returns EINVAL because the low
+        //     byte is not PER_LINUX (any non-zero persona is rejected).
+        //   - PCB round-trip on a real dummy PID via the get/set
+        //     helpers — verifies that the storage path actually
+        //     persists the value across reads.
+        {
+            let a_query = SyscallArgs {
+                arg0: 0xffff_ffff, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERSONALITY, &a_query).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: personality(0xffffffff) kernel-ctx not 0 ({})",
+                    dispatch_linux(nr::PERSONALITY, &a_query).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            let a_flags = SyscallArgs {
+                arg0: 0x0001_0000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERSONALITY, &a_flags).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: personality(0x10000) kernel-ctx not 0 (prev) ({})",
+                    dispatch_linux(nr::PERSONALITY, &a_flags).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            let a_bad = SyscallArgs {
+                arg0: 0x0000_0001, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERSONALITY, &a_bad).value
+                != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: personality(non-PER_LINUX) not EINVAL ({})",
+                    dispatch_linux(nr::PERSONALITY, &a_bad).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            let test_pid = pcb::create("persona-self-test", 0);
+            // Fresh PCB defaults to PER_LINUX (0).
+            assert_eq!(pcb::get_personality(test_pid), Some(0));
+            // Store ADDR_NO_RANDOMIZE flag (0x00040000); persona byte
+            // remains PER_LINUX.  Expect the previous value (0) back.
+            let prev = pcb::set_personality(test_pid, 0x0004_0000).expect("set");
+            assert_eq!(prev, 0);
+            // Round-trip: the new value is now observable via get.
+            assert_eq!(pcb::get_personality(test_pid), Some(0x0004_0000));
+            // Restore to 0 and confirm the previous returns the
+            // stored flagged value.
+            let prev = pcb::set_personality(test_pid, 0).expect("restore");
+            assert_eq!(prev, 0x0004_0000);
+            assert_eq!(pcb::get_personality(test_pid), Some(0));
 
             pcb::destroy(test_pid);
         }

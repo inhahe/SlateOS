@@ -8707,4 +8707,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           into linux_errno_for, which currently maps
 ##           InvalidAddress -> EFAULT.  No special
 ##           handling for partial reads.
+##
+##   81. personality() wired to per-process storage
+##      (batch 55).
+##      Status: dispatch contract correct.  Storage real
+##              but flags are not yet acted on.
+##
+##      Before batch 55, sys_personality was a hard-coded
+##      "return 0" stub that ignored its argument entirely.
+##      A program that did
+##           old = personality(ADDR_NO_RANDOMIZE);
+##           personality(old);
+##      would see ADDR_NO_RANDOMIZE silently dropped and
+##      its subsequent query return 0 — which gdb in
+##      particular treats as a configuration error.
+##
+##      What was done:
+##        - Added pub linux_personality: u32 to pcb::Process
+##          with default 0 (PER_LINUX).  Inherited verbatim
+##          across fork_create (Linux propagates personality
+##          across fork; only execve resets it).
+##        - Added pcb::get_personality / pcb::set_personality
+##          helpers (parallel to get_umask / set_umask) for
+##          callers outside the syscall path.
+##        - Rewrote sys_personality:
+##           * arg0 == 0xffffffff is the canonical "query
+##             only" sentinel — return current personality
+##             unchanged.  Glibc startup and gdb both poke
+##             this to learn the starting personality.
+##           * arg0 with a non-zero low byte (any persona
+##             other than PER_LINUX) is rejected with
+##             EINVAL.  This matches Linux's behaviour when
+##             the personality is one it doesn't know.
+##           * arg0 with persona byte 0 and arbitrary flag
+##             bits is accepted, the value stored on the
+##             PCB verbatim, and the previous value
+##             returned.
+##           * Kernel context (caller_pid() == None) falls
+##             back to a query that returns 0 and a set
+##             that no-ops but still returns 0 — matching
+##             what userspace would see if started from
+##             init with no parent persona override.
+##
+##      Self-test coverage:
+##        - personality(0xffffffff) kernel-ctx -> 0.
+##        - personality(0x10000) kernel-ctx -> 0 (the
+##          flag-bits-only set path that succeeds).
+##        - personality(0x00000001) -> EINVAL (non-PER_LINUX
+##          persona byte rejected).
+##        - PCB round-trip on a dummy PID: fresh PCB reads
+##          back 0; set(0x40000) returns 0; subsequent get
+##          returns 0x40000; set(0) returns 0x40000.
+##
+##      Known limitations:
+##        - The flag bits are stored but the kernel does
+##          not act on any of them.  ADDR_NO_RANDOMIZE is
+##          a no-op because we don't randomize address
+##          space.  READ_IMPLIES_EXEC is a no-op because
+##          our mmap flags don't grant exec implicitly for
+##          read mappings.  MMAP_PAGE_ZERO is a no-op
+##          because we don't map page 0 at all.  When
+##          those subsystems grow ASLR / mmap-flag
+##          handling, route the relevant decisions through
+##          pcb::get_personality.
+##        - execve does not currently reset personality to
+##          0.  Linux resets persona at execve unless
+##          PER_LINUX2 is set; we'll need to add a
+##          set_personality(pid, 0) call to the ELF loader
+##          path when we get exec wired up properly.
+##          Track separately when execve grows real
+##          semantics.
 

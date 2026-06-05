@@ -379,6 +379,22 @@ pub struct Process {
     /// kernel's actual default-mode behaviour is unaffected.  Real
     /// VFS plumbing is tracked separately in todo.txt.
     pub linux_umask: u16,
+    /// Per-process Linux `personality(2)` value.
+    ///
+    /// The default is `0` (`PER_LINUX`, no personality flags).
+    /// Programs set it via the Linux `personality` syscall — most
+    /// commonly to enable `ADDR_NO_RANDOMIZE` (gdb's reproducible-
+    /// build sequence) or `READ_IMPLIES_EXEC` (legacy binaries).
+    ///
+    /// Inherited verbatim across `fork_create` (Linux propagates
+    /// personality across fork).  The kernel does not yet *act* on
+    /// any of the flags — we don't randomize address space, so
+    /// ADDR_NO_RANDOMIZE is a no-op; we don't honour
+    /// READ_IMPLIES_EXEC at mmap time either.  But persisting the
+    /// value lets programs round-trip it correctly through
+    /// `personality(persona)` followed by `personality(0xffffffff)`,
+    /// which gdb in particular relies on for its own bookkeeping.
+    pub linux_personality: u32,
 }
 
 impl Process {
@@ -416,6 +432,9 @@ impl Process {
             // De-facto Linux distro default — what programs expect
             // when they query a freshly-spawned process's umask.
             linux_umask: 0o022,
+            // PER_LINUX (no personality flags) — what every modern
+            // Linux process inherits from init.
+            linux_personality: 0,
         }
     }
 }
@@ -515,7 +534,7 @@ pub fn fork_create(
     // path, this keeps the refcount at exactly "one per process that
     // holds at least one fd referencing the handle", which is what
     // fork's `dup_one` per-process bump preserves.
-    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd, rlimits, linux_as_bytes, linux_umask) = {
+    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd, rlimits, linux_as_bytes, linux_umask, linux_personality) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
             let mut copy = super::linux_fd::KernelFdTable::new();
@@ -537,6 +556,7 @@ pub fn fork_create(
             parent.rlimits,
             parent.linux_as_bytes,
             parent.linux_umask,
+            parent.linux_personality,
         )
     };
 
@@ -613,6 +633,10 @@ pub fn fork_create(
         // of fork.  Subsequent umask calls in either process are
         // independent.
         linux_umask,
+        // Linux: personality() flags propagate verbatim across fork.
+        // execve resets persona to PER_LINUX (0), but fork preserves
+        // whatever the parent had set.
+        linux_personality,
     };
 
     table.insert(pid, child);
@@ -1056,6 +1080,30 @@ pub fn set_umask(pid: ProcessId, new: u16) -> Option<u16> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_umask;
     proc.linux_umask = new & 0o777;
+    Some(old)
+}
+
+/// Read the current Linux personality flags for `pid`.
+///
+/// Returns `None` if `pid` is unknown.  Callers in kernel context (no
+/// live PCB) should fall back to `0` (`PER_LINUX`).
+#[must_use]
+pub fn get_personality(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_personality)
+}
+
+/// Install a new Linux personality value for `pid`, returning the old
+/// one.
+///
+/// Linux stores the full 32-bit value (low byte = persona, upper bytes
+/// = flags) verbatim; range validation (e.g. rejecting non-PER_LINUX
+/// personae) is the caller's responsibility.  Returns `None` if `pid`
+/// is unknown.
+pub fn set_personality(pid: ProcessId, new: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_personality;
+    proc.linux_personality = new;
     Some(old)
 }
 

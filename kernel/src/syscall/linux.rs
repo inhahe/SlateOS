@@ -8837,10 +8837,14 @@ fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     //   1. `kc = clockid_to_kclock(which_clock); if (!kc) return -EINVAL;`
     //   2. `if (!kc->clock_set) return -EOPNOTSUPP;`
     //   3. `if (get_timespec64(...)) return -EFAULT;`
-    //   4. `return kc->clock_set(...)` — capability/PERM check inside.
-    // Pre-batch we skipped (1) and (2), so any clockid (even garbage
-    // ones like 99 or SGI_CYCLE(10)) returned EFAULT/EPERM where Linux
-    // returns EINVAL/EOPNOTSUPP.
+    //   4. `kc->clock_set(...)` — for REALTIME this is
+    //      `posix_clock_realtime_set` -> `do_sys_settimeofday64`:
+    //        a. `timespec64_valid_settod(tv)` -> EINVAL on bad shape.
+    //        b. `security_settime64(...)` -> capability check (EPERM).
+    // Pre-batch we skipped (4a), so a probe passing
+    // `(clockid=REALTIME, tp={tv_nsec=2e9})` saw -EPERM where Linux
+    // returns -EINVAL.  Batch 205 adds the timespec64_valid gate ahead
+    // of the EPERM.
     let clockid = args.arg0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid_i32 = clockid as i32;
@@ -8859,9 +8863,19 @@ fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     if tp == 0 {
         return linux_err(errno::EFAULT);
     }
+    // (3) get_timespec64: pointer must be readable (16 bytes).
     if let Err(e) = crate::mm::user::validate_user_read(tp, 16) {
         return linux_err(linux_errno_for(e));
     }
+    // (4a) timespec64_valid: tv_sec >= 0 AND tv_nsec in
+    //      [0, NSEC_PER_SEC).  Linux's settod variant additionally
+    //      rejects tv_sec >= TIME_SETTOD_RESTRICT_MAX, but we only
+    //      model the base validity here — the upper bound is a
+    //      year-2486 safety cap that no realistic probe exercises.
+    if let Err(r) = validate_user_timespec64(tp) {
+        return r;
+    }
+    // (4b) Capability check — we have no userspace with CAP_SYS_TIME.
     linux_err(errno::EPERM)
 }
 
@@ -31022,9 +31036,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // clock_settime(CLOCK_REALTIME, 0x1000) in kernel context
-        // (validate bypass) -> EPERM.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+        // Batch 205 adds a timespec64_valid gate between the EFAULT
+        // and the EPERM, so the tests that exercise the EPERM path
+        // must supply a content-valid timespec.  Use a real stack
+        // value (kernel pointer; copy_from_user in kernel context
+        // tolerates it).
+        #[repr(C)]
+        struct CtsTs { tv_sec: i64, tv_nsec: i64 }
+        let cts_ok = CtsTs { tv_sec: 1, tv_nsec: 500_000_000 };
+        let cts_ok_ptr = (&raw const cts_ok) as u64;
+        // clock_settime(CLOCK_REALTIME, ts_ok) -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
             != -i64::from(errno::EPERM) {
@@ -31044,8 +31066,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // clock_settime(CLOCK_SGI_CYCLE=10, valid ptr) -> EINVAL.
-        let a = SyscallArgs { arg0: 10, arg1: 0x1000, arg2: 0, arg3: 0,
+        // clock_settime(CLOCK_SGI_CYCLE=10, anything) -> EINVAL (clockid
+        // gate fires first; ts content irrelevant).
+        let a = SyscallArgs { arg0: 10, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
             != -i64::from(errno::EINVAL) {
@@ -31054,9 +31077,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // clock_settime(CLOCK_MONOTONIC=1, valid ptr) -> EOPNOTSUPP
+        // clock_settime(CLOCK_MONOTONIC=1, ts_ok) -> EOPNOTSUPP
         // (no .clock_set in Linux's clock_monotonic table entry).
-        let a = SyscallArgs { arg0: 1, arg1: 0x1000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 1, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
             != -i64::from(errno::EOPNOTSUPP) {
@@ -31076,9 +31099,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // clock_settime(CLOCK_TAI=11, 0x1000) -> EPERM (TAI has .clock_set
+        // clock_settime(CLOCK_TAI=11, ts_ok) -> EPERM (TAI has .clock_set
         // in Linux, so falls through past EOPNOTSUPP gate).
-        let a = SyscallArgs { arg0: 11, arg1: 0x1000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 11, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
             != -i64::from(errno::EPERM) {
@@ -31087,8 +31110,64 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 205: timespec64_valid gate between EFAULT and EPERM.
+        //   * tv_nsec = 2e9 (>= NSEC_PER_SEC) -> EINVAL (was EPERM).
+        let cts_bad_nsec = CtsTs { tv_sec: 1, tv_nsec: 2_000_000_000 };
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const cts_bad_nsec) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime tv_nsec=2e9 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * tv_sec = -1 -> EINVAL (was EPERM).
+        let cts_neg_sec = CtsTs { tv_sec: -1, tv_nsec: 0 };
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const cts_neg_sec) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime tv_sec=-1 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * tv_nsec = -1 -> EINVAL (Linux rejects negative nsec via
+        //     timespec64_valid's lower bound).
+        let cts_neg_nsec = CtsTs { tv_sec: 1, tv_nsec: -1 };
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const cts_neg_nsec) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime tv_nsec=-1 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * EOPNOTSUPP gate STILL beats timespec64_valid (Linux's
+        //     order: clockid -> !clock_set -> EFAULT -> validity).
+        //     clockid=MONOTONIC (1) with junk ts -> EOPNOTSUPP, not
+        //     EINVAL.
+        let a = SyscallArgs {
+            arg0: 1, arg1: (&raw const cts_bad_nsec) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime MONOTONIC+bad ts not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall/linux]   clock_settime clockid/EOPNOTSUPP gating: OK"
+            "[syscall/linux]   clock_settime clockid/EOPNOTSUPP/timespec64_valid: OK"
         );
         // clock_getres — Linux gates on clockid first; we then return
         // 1ns for any valid clockid. NULL res ptr is OK (no write).

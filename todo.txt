@@ -19157,3 +19157,47 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          come from the IPC namespace when namespaces land.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 234. [DONE 2026-06-05] Linux ABI: clock_settime timespec64_valid gate.
+##      sys_clock_settime validated clockid, !clock_set (EOPNOTSUPP),
+##      and pointer EFAULT — but fell through to EPERM with no
+##      content check on the timespec.  Linux's
+##      SYSCALL_DEFINE2(clock_settime) ->
+##      kc->clock_set(REALTIME) -> posix_clock_realtime_set ->
+##      do_sys_settimeofday64 runs timespec64_valid_settod ahead of
+##      the security_settime64 capability check.  Pre-batch a probe
+##      passing (clockid=REALTIME, tp={tv_nsec=2e9}) saw -EPERM where
+##      Linux returns -EINVAL.
+##
+##      Fix: after the validate_user_read pointer check, run
+##      validate_user_timespec64 (batch 198 helper) before falling
+##      through to EPERM.  Linux's settod variant additionally
+##      rejects tv_sec >= TIME_SETTOD_RESTRICT_MAX (year-2486 cap);
+##      we model only the base validity since no realistic probe
+##      exercises the upper bound.
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * (clockid=REALTIME, ts={tv_nsec=2e9}) -> EINVAL (was EPERM).
+##        * (clockid=REALTIME, ts={tv_sec=-1})   -> EINVAL.
+##        * (clockid=REALTIME, ts={tv_nsec=-1})  -> EINVAL.
+##        * (clockid=MONOTONIC, ts={tv_nsec=2e9})-> EOPNOTSUPP
+##          (proves the EOPNOTSUPP gate still beats timespec validity,
+##          matching Linux's order).
+##      Existing tests rewritten to use a stack #[repr(C)] CtsTs
+##      struct instead of bare 0x1000 pointers — needed because the
+##      new content gate actually reads bytes from the supplied
+##      address (in kernel context copy_from_user tolerates kernel
+##      pointers, but unmapped userspace-looking addresses still
+##      page-fault).
+##      Marker renamed:
+##        "clock_settime clockid/EOPNOTSUPP/timespec64_valid: OK".
+##
+##      Known limitations:
+##        * TIME_SETTOD_RESTRICT_MAX upper bound (year-2486 cap) not
+##          modelled.  Add when realistic.
+##        * sys_clock_adjtime / sys_adjtimex don't have analogous
+##          content gates yet — they validate clockid + tx pointer
+##          then return TIME_ERROR.  modes-bit validation might be
+##          worth a future batch.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

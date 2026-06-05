@@ -19069,3 +19069,38 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          (any byte unreadable -> EFAULT, just like Linux).
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 232. [DONE 2026-06-05] Linux ABI: sys_mq_getsetattr mq_flags gate.
+##      sys_mq_getsetattr only validated pointer accessibility then fell
+##      through to the fd lookup.  Linux's
+##      ipc/mqueue.c::SYSCALL_DEFINE3(mq_getsetattr) -> do_mq_getsetattr
+##      gates ahead of the fd lookup:
+##        (1) copy_from_user the newattr (struct mq_attr, 64 bytes) -> EFAULT
+##        (2) `new->mq_flags & ~O_NONBLOCK` must be zero -> EINVAL
+##        (3) fdget(mqdes) -> EBADF
+##      Pre-batch a probe passing (newattr.mq_flags=0x1234, fd=-1) saw
+##      -EBADF where Linux returns -EINVAL.
+##
+##      Fix: in sys_mq_getsetattr, after the validate_user_read(64),
+##      copy_from_user the leading 8 bytes (mq_flags), check
+##      `mq_flags & !O_NONBLOCK == 0` (O_NONBLOCK = 0o4000 on x86_64),
+##      otherwise EINVAL — all ahead of the fd lookup.
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * mq_flags = O_NONBLOCK (0o4000)        -> EBADF (still falls
+##          through; proves the gate accepts the allowed bit).
+##        * mq_flags = 0x1234 (junk)              -> EINVAL.
+##        * mq_flags = O_NONBLOCK | 1 (extra bit) -> EINVAL.
+##        * mq_flags = -1 (all bits set)          -> EINVAL.
+##        * newattr = NULL, fd = -1               -> EBADF (gate ONLY
+##          fires when newattr is non-NULL).
+##      Marker emitted: "mq_getsetattr mq_flags & ~O_NONBLOCK: OK".
+##
+##      Known limitations:
+##        * O_NONBLOCK = 0o4000 is hardcoded.  When fcntl.h flag
+##          constants are centralised, link this against them.
+##        * No real mq inode backing yet, so the fdget branch always
+##          falls through to EBADF.  When mqueue lands, do_mq_getsetattr
+##          must read old attrs and copy_to_user when oldattr is set.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

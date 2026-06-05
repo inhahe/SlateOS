@@ -13303,10 +13303,46 @@ fn sys_mq_notify(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `mq_getsetattr(mqd, newattr, oldattr)`.
+///
+/// Linux's `ipc/mqueue.c::SYSCALL_DEFINE3(mq_getsetattr)` gate order:
+///   1. If `u_mqstat != NULL`:
+///      `copy_from_user(&mqstat, u_mqstat, sizeof(struct mq_attr))`
+///      -> EFAULT on unreadable.
+///   2. `do_mq_getsetattr`: if `new` set,
+///      `new->mq_flags & ~O_NONBLOCK` must be zero
+///      -> EINVAL otherwise.
+///   3. `fdget(mqdes)` -> EBADF.
+///   4. If `u_omqstat != NULL`:
+///      `copy_to_user(u_omqstat, &omqstat, sizeof(struct mq_attr))`
+///      -> EFAULT on unwritable.
+///
+/// `struct mq_attr` is 64 bytes:
+///   `mq_flags` (8) | `mq_maxmsg` (8) | `mq_msgsize` (8) |
+///   `mq_curmsgs` (8) | `__reserved[4]` (32).
+///
+/// Pre-batch we only validated pointer accessibility then fell through
+/// to the fd lookup.  A probe passing `(newattr.mq_flags = 0x1234,
+/// fd = -1)` saw -EBADF where Linux returns -EINVAL.  Batch 203 adds
+/// the `mq_flags & ~O_NONBLOCK` gate ahead of the fd lookup.
 fn sys_mq_getsetattr(args: &SyscallArgs) -> SyscallResult {
+    // Linux O_NONBLOCK on x86_64 = 04000 (octal) = 0x800.
+    const O_NONBLOCK: i64 = 0o4000;
+
     if args.arg1 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 64) {
             return linux_err(linux_errno_for(e));
+        }
+        // Inspect mq_flags (offset 0, 8 bytes).
+        let mut buf = [0u8; 8];
+        // SAFETY: validate_user_read above confirmed 64 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg1, buf.as_mut_ptr(), 8)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let mq_flags = i64::from_ne_bytes(buf);
+        if mq_flags & !O_NONBLOCK != 0 {
+            return linux_err(errno::EINVAL);
         }
     }
     if args.arg2 != 0 {
@@ -35198,6 +35234,112 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mq_getsetattr not EBADF");
             return Err(KernelError::InternalError);
         }
+        // Batch 203: mq_getsetattr mq_flags gate.
+        //   * mq_flags & ~O_NONBLOCK == 0 -> falls through to EBADF.
+        //   * Any other bit set -> EINVAL, ahead of the fd lookup.
+        #[repr(C)]
+        struct MqAttr {
+            mq_flags: i64,
+            mq_maxmsg: i64,
+            mq_msgsize: i64,
+            mq_curmsgs: i64,
+            _reserved: [i64; 4],
+        }
+        // (a) mq_flags = O_NONBLOCK (0o4000) -> falls through to EBADF.
+        let mq_ok = MqAttr {
+            mq_flags: 0o4000,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _reserved: [0; 4],
+        };
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX),
+            arg1: (&raw const mq_ok) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_getsetattr O_NONBLOCK not EBADF ({})",
+                dispatch_linux(nr::MQ_GETSETATTR, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) mq_flags = 0x1234 (junk) -> EINVAL ahead of fd lookup.
+        let mq_bad = MqAttr {
+            mq_flags: 0x1234,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _reserved: [0; 4],
+        };
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX),
+            arg1: (&raw const mq_bad) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_getsetattr junk mq_flags not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) mq_flags = O_NONBLOCK | 1 (extra bit set) -> EINVAL.
+        //     Catches probes that test "extra bit beside O_NONBLOCK".
+        let mq_extra = MqAttr {
+            mq_flags: 0o4000 | 1,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _reserved: [0; 4],
+        };
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX),
+            arg1: (&raw const mq_extra) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_getsetattr O_NONBLOCK|1 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) mq_flags negative (sign bit set) -> EINVAL.  Catches
+        //     probes that pass -1 / I64_MIN expecting an "all bits"
+        //     short-circuit.
+        let mq_neg = MqAttr {
+            mq_flags: -1,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _reserved: [0; 4],
+        };
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX),
+            arg1: (&raw const mq_neg) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_getsetattr mq_flags=-1 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (e) NULL newattr, NULL oldattr, junk fd -> EBADF.  Proves
+        //     the gate ONLY fires when newattr is non-NULL.
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX),
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_GETSETATTR, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_getsetattr NULL newattr not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mq_getsetattr mq_flags & ~O_NONBLOCK: OK"
+        );
     }
 
     // -----------------------------------------------------------------

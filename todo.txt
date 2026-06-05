@@ -11015,3 +11015,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##            - stdio fd != Pipe (sanity for the kind-gate).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##
+## 118. Linux ABI batch 89: prctl(PR_GET_AUXV) — saved auxiliary
+##      vector query (Linux 6.4+; glibc getauxval() probes it).
+##      Pre-batch, prctl option 0x4155_5856 ("AUXV" packed big-
+##      endian: 'A'=0x41 'U'=0x55 'X'=0x58 'V'=0x56) fell into
+##      the catch-all -> EINVAL.  That breaks glibc 2.39+ which
+##      tries this option before falling back to /proc/self/auxv,
+##      and perf / BPF exporters that use it to read the auxv
+##      without proc-mount.
+##
+##      Why it matters:
+##        * glibc 2.39+ getauxval() probes PR_GET_AUXV first so
+##          that capability-restricted processes (no /proc, no
+##          ptrace) can still see the auxv.  Without this arm,
+##          getauxval falls through silently — works on the
+##          common path but ENOENT on the no-/proc path.
+##        * perf, BPF CO-RE loaders, and crash-reporting tools
+##          probe PR_GET_AUXV directly to grab AT_BASE,
+##          AT_RANDOM, AT_HWCAP without parsing /proc/<pid>/auxv.
+##        * Forwarding EINVAL here makes them think the kernel
+##          is < 6.4, which is the wrong negotiation signal.
+##
+##      Wiring:
+##        - syscall/linux.rs sys_prctl gains arm at option
+##          0x4155_5856:
+##            arg3 != 0 || arg4 != 0 -> EINVAL (Linux's NULL-
+##              tail invariant — see kernel/sys.c::
+##              prctl_get_auxv).
+##            arg1 = user buffer, arg2 = buffer length.
+##            buf_len == 0 -> return 16, copy nothing.
+##            buf_len > 0 && buf_ptr == 0 -> EFAULT (matches
+##              Linux's copy_to_user fault path).
+##            else validate_user_write(buf_ptr, min(len, 16))
+##              and copy_to_user that many zero bytes.
+##            Return value is always 16 — the "full saved_auxv
+##              size" Linux contract so callers can detect a
+##              short write by comparing return vs len.
+##
+##      Linux semantics matched:
+##        * EINVAL on non-zero arg3/arg4 (the prctl tail
+##          arguments).
+##        * EFAULT on NULL buffer with non-zero length.
+##        * Return value = full saved_auxv size, NOT bytes
+##          copied; truncation detected via vs-len compare.
+##        * Partial copy fills the prefix and leaves the
+##          suffix untouched.
+##
+##      Linux semantics deliberately NOT matched (yet):
+##        * Linux returns the *real* saved auxv (AT_PHDR,
+##          AT_BASE, AT_RANDOM, AT_HWCAP, ...) captured at
+##          exec time.  We don't yet store a kernel-side
+##          copy — the ELF loader writes the auxv onto the
+##          user stack and forgets it.  The truthful response
+##          is therefore a single AT_NULL terminator (16 zero
+##          bytes), which a conforming caller treats as an
+##          empty vector and falls back to its user-stack
+##          auxv (which our ELF loader does populate).
+##
+##      Known limitation:
+##        * Auxv contents are empty — only the AT_NULL
+##          terminator is delivered.  When the ELF loader gains
+##          per-process saved_auxv storage, this arm will
+##          return the real vector with no surface change.
+##          Tracked here.
+##
+##      Self-test (boot path, batch 89 block in linux.rs after
+##      batch 88's fcntl pipe block):
+##        * Constant sanity: u32::from_be_bytes(b"AUXV") ==
+##          0x4155_5856 (the option encodes the chars big-
+##          endian; from_le_bytes would give 0x5658_5541, a
+##          DIFFERENT value and an easy regression hazard).
+##        * arg3 = 1 -> EINVAL.
+##        * arg4 = 1 -> EINVAL.
+##        * buf_ptr = 0, buf_len = 0 -> return 16, no copy.
+##        * buf_ptr = 0, buf_len = 16 -> EFAULT.
+##        * 32-byte kernel-stack buf, prepoisoned 0xAA:
+##          - return 16; first 16 bytes are zero; bytes 16..32
+##            still 0xAA (proves we don't over-copy past the
+##            terminator).
+##        * 16-byte kernel-stack buf, prepoisoned 0xAA, len=8:
+##          - return 16 (NOT 8); bytes 0..8 zero; bytes 8..16
+##            still 0xAA (proves partial-copy semantics + the
+##            "size, not copied" return contract).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

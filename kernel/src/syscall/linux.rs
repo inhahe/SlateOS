@@ -4894,6 +4894,82 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 _ => linux_err(errno::EINVAL),
             }
         }
+        // PR_GET_AUXV (0x4155_5856) — Linux 6.4+: copy the saved
+        // auxiliary vector into a user buffer and return its total
+        // byte length.  glibc's `getauxval(3)` from 2.39 onward
+        // probes this before falling back to parsing
+        // /proc/self/auxv; performance tools (perf, BPF
+        // exporters) probe it too.
+        //
+        // Linux semantics (kernel/sys.c::prctl_get_auxv):
+        //   * arg4 (our arg3) and arg5 (our arg4) must both be 0
+        //     or the call returns -EINVAL.
+        //   * arg2 (our arg1) is a user buffer; arg3 (our arg2) is
+        //     its length in bytes.
+        //   * `size = min(sizeof(saved_auxv), len)` bytes are
+        //     copied to the buffer; a bad pointer faults with
+        //     EFAULT (Linux's `copy_to_user` path).
+        //   * The return value is `sizeof(saved_auxv)` — the
+        //     *full* auxv length on this kernel, regardless of
+        //     how much fit in the buffer.  Callers detect a
+        //     short read by comparing the return value against
+        //     the buffer length.
+        //
+        // Our stance: we do not yet populate a per-process saved
+        // auxv (the ELF loader writes the auxv onto the user
+        // stack at exec time but doesn't keep a kernel-side
+        // copy).  The truthful answer is therefore "an auxv
+        // consisting of a single AT_NULL terminator" — 16 bytes
+        // of zeros (one elf_auxv_t with a_type = AT_NULL = 0,
+        // a_un.a_val = 0).  A caller that walks the result sees
+        // an immediately-terminated vector and uses its fallback
+        // (getauxval-via-aux-on-stack), which DOES work because
+        // the ELF loader still populates the user stack the
+        // normal way.
+        //
+        // Known limitation: tracked in todo.txt — when the ELF
+        // loader gains kernel-side auxv storage, this arm will
+        // return the real saved_auxv instead of just the
+        // terminator.  No surface change required at that point.
+        0x4155_5856 => {
+            if args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            let buf_ptr = args.arg1;
+            let buf_len = args.arg2 as usize;
+
+            // Single AT_NULL entry = 2 * sizeof(unsigned long) =
+            // 16 bytes of zeros on x86_64.  This is the minimum
+            // valid auxv: a_type = AT_NULL, a_val = 0.
+            const AUXV_TERMINATOR_LEN: usize = 16;
+            let auxv: [u8; AUXV_TERMINATOR_LEN] = [0; AUXV_TERMINATOR_LEN];
+
+            if buf_len > 0 {
+                // Linux's copy_to_user faults on a NULL buf when
+                // len > 0; we surface EFAULT the same way.
+                if buf_ptr == 0 {
+                    return linux_err(errno::EFAULT);
+                }
+                let to_copy = buf_len.min(AUXV_TERMINATOR_LEN);
+                if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, to_copy) {
+                    return linux_err(linux_errno_for(e));
+                }
+                // SAFETY: validate_user_write above confirmed a
+                // `to_copy`-byte writable range at `buf_ptr`; we
+                // copy exactly that many bytes from a stack-local
+                // zero array.
+                let r = unsafe {
+                    crate::mm::user::copy_to_user(auxv.as_ptr(), buf_ptr, to_copy)
+                };
+                if let Err(e) = r {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+            // Linux returns the full saved_auxv length regardless
+            // of the buffer size — callers detect truncation by
+            // comparing this return value against `buf_len`.
+            SyscallResult::ok(AUXV_TERMINATOR_LEN as i64)
+        }
         // PR_GET_SECUREBITS (27) — return the per-task securebits
         // word.  capsh, libcap, and hardened-container init code
         // poll this before mutating the credential block.  No
@@ -19734,6 +19810,154 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::ipc::pipe::close(rh);
         crate::ipc::pipe::close(wh);
         pcb::destroy(test_pid);
+    }
+
+    // Batch 89: prctl(PR_GET_AUXV) — Linux 6.4+ glibc/perf/BPF
+    // probes the saved auxiliary vector via prctl option
+    // 0x4155_5856 ("AUXV").  We don't yet store a kernel-side
+    // auxv copy, so the truthful answer is a single AT_NULL
+    // terminator (16 zero bytes).  Coverage:
+    //   - constant sanity for 0x4155_5856;
+    //   - arg3 != 0 or arg4 != 0 -> EINVAL (matches Linux's
+    //     prctl_get_auxv NULL-tail check);
+    //   - buf_len = 0 succeeds, returns 16, copies nothing;
+    //   - buf_ptr = NULL with buf_len > 0 -> EFAULT;
+    //   - buf >= 16 receives 16 zero bytes and returns 16;
+    //   - buf < 16 receives a partial zero-fill and still
+    //     returns 16 (the "full saved_auxv size" Linux
+    //     contract, so callers can detect truncation).
+    {
+        // PR_GET_AUXV constant sanity — Linux spells the option
+        // as the ASCII bytes "AUXV" packed big-endian:
+        // 'A'=0x41, 'U'=0x55, 'X'=0x58, 'V'=0x56.
+        assert_eq!(0x4155_5856_u32, u32::from_be_bytes(*b"AUXV"));
+
+        // arg3 != 0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4155_5856, arg1: 0, arg2: 0,
+            arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value
+            != -i64::from(errno::EINVAL)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_GET_AUXV, arg3=1) not EINVAL ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // arg4 != 0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4155_5856, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 1, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value
+            != -i64::from(errno::EINVAL)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_GET_AUXV, arg4=1) not EINVAL ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // buf_len = 0 -> return 16, no copy attempted.
+        let a = SyscallArgs { arg0: 0x4155_5856, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value != 16 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_GET_AUXV, buf=NULL, len=0) not 16 ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // buf_ptr = NULL with buf_len > 0 -> EFAULT.
+        let a = SyscallArgs { arg0: 0x4155_5856, arg1: 0, arg2: 16,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PRCTL, &a).value
+            != -i64::from(errno::EFAULT)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_GET_AUXV, buf=NULL, len=16) not EFAULT ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Full-size buffer (>= 16) receives the AT_NULL
+        // terminator and returns 16.  Pre-poison the buffer
+        // with 0xAA so we can verify it was actually written.
+        let mut full_buf: [u8; 32] = [0xAA; 32];
+        let a = SyscallArgs {
+            arg0: 0x4155_5856,
+            arg1: full_buf.as_mut_ptr() as u64,
+            arg2: 32,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != 16 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_GET_AUXV, full) not 16 ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // First 16 bytes must be zero (AT_NULL terminator).
+        for i in 0..16 {
+            if full_buf[i] != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: PR_GET_AUXV byte {} not zero ({:#x})",
+                    i, full_buf[i]
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Bytes 16..32 must remain untouched (0xAA poison).
+        // Linux copies min(saved_auxv_size, buf_len) bytes; we
+        // expose a 16-byte auxv so anything beyond that should
+        // be preserved.
+        for i in 16..32 {
+            if full_buf[i] != 0xAA {
+                serial_println!(
+                    "[syscall/linux]   FAIL: PR_GET_AUXV overwrote byte {} ({:#x})",
+                    i, full_buf[i]
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Short buffer (8 bytes < 16) receives a partial copy
+        // and the call STILL returns 16 — Linux's
+        // "full saved_auxv size, not copied size" contract.
+        let mut short_buf: [u8; 16] = [0xAA; 16];
+        let a = SyscallArgs {
+            arg0: 0x4155_5856,
+            arg1: short_buf.as_mut_ptr() as u64,
+            arg2: 8,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != 16 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_GET_AUXV, len=8) not 16 ({})",
+                dispatch_linux(nr::PRCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        for i in 0..8 {
+            if short_buf[i] != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: PR_GET_AUXV short byte {} not zero ({:#x})",
+                    i, short_buf[i]
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        for i in 8..16 {
+            if short_buf[i] != 0xAA {
+                serial_println!(
+                    "[syscall/linux]   FAIL: PR_GET_AUXV short overwrote byte {} ({:#x})",
+                    i, short_buf[i]
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
     }
 
     // personality dispatch validation.

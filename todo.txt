@@ -11556,3 +11556,85 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      a self-test, it does not introduce it.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 124. Batch 95: ioctl(FIOCLEX = 0x5451) / ioctl(FIONCLEX = 0x5450).
+##      Linux's FIOCLEX / FIONCLEX are the original fd-control
+##      ioctls (predating fcntl): set / clear the per-fd
+##      FD_CLOEXEC bit on ANY open fd, with no argument and no
+##      driver dispatch.  They are still emitted by
+##      BSD-derived musl bootstrap paths, busybox, perl's
+##      IO::Handle->close_on_exec, bash's "exec n<&-" handling,
+##      and some Lua-luaposix builds.  Pre-batch sys_ioctl was a
+##      one-liner returning -ENOTTY for every request, so all
+##      of those calls failed; callers either fell back to a
+##      slower fcntl(F_SETFD) path or — in some perl IO and
+##      bash close-on-exec paths — aborted with confusing
+##      "operation not permitted" errors.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##        * Added `ioctl_cmd` module with FIOCLEX = 0x5451 and
+##          FIONCLEX = 0x5450 doc comments explaining the
+##          "works on any fd" semantics.
+##        * Rewrote sys_ioctl to gate on caller_pid() (so the
+##          arm body can identify the caller's fd table), then
+##          dispatch on request:
+##          - FIOCLEX  -> pcb::linux_fd_set_fd_flags(pid, fd,
+##                        FD_CLOEXEC)
+##          - FIONCLEX -> pcb::linux_fd_set_fd_flags(pid, fd, 0)
+##          - everything else -> -ENOTTY (unchanged).
+##          EBADF if the fd isn't open (returned by
+##          linux_fd_set_fd_flags via KernelError::InvalidHandle).
+##        * Doc table updated to mention FIOCLEX / FIONCLEX
+##          alongside the catch-all -ENOTTY behaviour.
+##
+##      Behavioural note: in kernel context (no caller PCB) the
+##      caller_pid() gate now returns EBADF for every ioctl,
+##      including TCGETS and unknown requests.  Pre-batch
+##      everything returned ENOTTY because there was no gate.
+##      EBADF is the correct Linux answer when the fd lookup
+##      fails (Linux returns EBADF, not ENOTTY, for ioctls on
+##      closed fds), so the new behaviour is strictly more
+##      Linux-faithful — the pre-batch ENOTTY-everywhere
+##      response was a side-effect of the unconditional stub.
+##      The existing self-test that expected ENOTTY for TCGETS
+##      in kernel context has been updated; the ENOTTY
+##      fall-through is now covered indirectly by code
+##      inspection (the catch-all arm is a single
+##      `linux_err(errno::ENOTTY)` line) and by the constant
+##      check that confirms FIOCLEX/FIONCLEX route to the
+##      specialised arms instead of the catch-all.
+##
+##      Self-test (boot path, batch 95 block in linux.rs after
+##      the batch 94 F_DUPFD_QUERY block):
+##        * Constant sanity asserts (FIOCLEX == 0x5451,
+##          FIONCLEX == 0x5450); drift would silently re-route
+##          to the catch-all -ENOTTY.
+##        * dispatch_linux(IOCTL, FIOCLEX/FIONCLEX, fd=0) in
+##          kernel context returns -EBADF (caller_pid gate
+##          fires before the arm body).  An unknown request
+##          (0xDEAD_BEEF) on the same fd also returns -EBADF,
+##          confirming the gate is uniform.
+##        * Synthetic Linux process with stdio installed:
+##          - Initial state: FD_CLOEXEC clear on fd 0.
+##          - Apply the FIOCLEX arm body
+##            (linux_fd_set_fd_flags(FD_CLOEXEC)) and confirm
+##            fd 0's fd_flags now have FD_CLOEXEC set.
+##          - Apply the FIONCLEX arm body
+##            (linux_fd_set_fd_flags(0)) and confirm fd_flags
+##            return to 0.
+##          - linux_fd_set_fd_flags(fd=99, FD_CLOEXEC) fails
+##            (Err) — proves the helper actually rejects
+##            invalid fds, so the EBADF guarantee isn't
+##            vacuous.
+##
+##      Known limitation: FIONBIO (set/clear O_NONBLOCK via
+##      ioctl) and FIONREAD (bytes available) are still
+##      catch-all -ENOTTY.  Wiring FIONBIO requires the
+##      status-flags helper and an O_NONBLOCK arg parse from
+##      a user pointer; FIONREAD requires per-handle-kind
+##      bytes-available accounting (pipe::available,
+##      socket::available, etc.).  Both are follow-on batches.
+##      TIOCGWINSZ (terminal size) also remains -ENOTTY since
+##      we have no terminal device with column/row state yet.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

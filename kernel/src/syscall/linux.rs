@@ -2383,6 +2383,11 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::ipc::eventfd::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::PidFd => {
+            // No kernel-side resource — pidfd merely tracks a target
+            // pid.  The fd slot has already been freed by the caller.
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -2439,6 +2444,7 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_write(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
+        HandleKind::PidFd => linux_err(errno::EINVAL),
     }
 }
 
@@ -2548,6 +2554,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_read(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
+        HandleKind::PidFd => linux_err(errno::EINVAL),
     }
 }
 
@@ -3265,7 +3272,7 @@ fn fcntl_flock_apply(
     // way Linux does for unsupported fd types.
     match entry.kind {
         HandleKind::File => {}
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => {
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => {
             return linux_err(errno::EBADF);
         }
     }
@@ -3360,7 +3367,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
             };
             linux_from_native(handlers::sys_fs_seek(&a))
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -7991,7 +7998,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::EINVAL),
     }
 }
 
@@ -9113,6 +9120,10 @@ fn fill_stat_for_fd(
         // Linux exposes eventfd via anon_inode: stat reports a regular
         // file with 0600 perms (the inode's i_mode), blocksize 4096.
         HandleKind::EventFd => (S_IFREG | 0o600, 4096),
+        // pidfd is also an anon_inode — same mode/blksize signature
+        // glibc and procps rely on for "is this pollable / regular?"
+        // checks.
+        HandleKind::PidFd => (S_IFREG | 0o600, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -9341,6 +9352,9 @@ fn fill_statx_for_fd(
         HandleKind::File => ((S_IFREG | 0o644) as u16, 16 * 1024),
         // anon_inode S_IFREG | 0600 — matches Linux's eventfd stat.
         HandleKind::EventFd => ((S_IFREG | 0o600) as u16, 4096),
+        // anon_inode S_IFREG | 0600 — same shape as pidfd's
+        // /proc/self/fdinfo/<N> exposes on Linux.
+        HandleKind::PidFd => ((S_IFREG | 0o600) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     let now_ns = crate::timekeeping::clock_realtime();
@@ -9813,8 +9827,8 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
             }
             linux_err(errno::EROFS)
         }
-        // Pipes, consoles and eventfds cannot be truncated.
-        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd => linux_err(errno::EINVAL),
+        // Pipes, consoles, eventfds, pidfds cannot be truncated.
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::EINVAL),
     }
 }
 
@@ -10520,6 +10534,16 @@ fn sys_memfd_secret(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `pidfd_open(pid, flags)`.
+///
+/// Allocates a `HandleKind::PidFd` slot in the caller's Linux fd table
+/// pointing at the requested target pid.  Linux returns the fd; we do
+/// the same.  Read/write/seek on the fd are EINVAL/ESPIPE (matching
+/// Linux); poll signals POLLIN once the target process has exited.
+///
+/// Errors:
+///   * `EINVAL` — invalid flags / non-positive pid.
+///   * `ESRCH`  — no process with that pid is currently alive.
+///   * `EBADF`  — kernel-context invocation (no caller PCB).
 fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
     // PIDFD_NONBLOCK = O_NONBLOCK = 0o4000.
     const VALID_FLAGS: u64 = 0o4000;
@@ -10527,14 +10551,31 @@ fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let pid = args.arg0 as i32;
-    if pid <= 0 {
+    let pid_i32 = args.arg0 as i32;
+    if pid_i32 <= 0 {
         return linux_err(errno::EINVAL);
     }
-    // ESRCH would be the truthful answer if pidfd existed but the pid is
-    // gone; without pidfd support, ENOSYS lets callers fall back to
-    // /proc/PID lookup.
-    linux_err(errno::ENOSYS)
+    #[allow(clippy::cast_sign_loss)]
+    let target: crate::proc::pcb::ProcessId = pid_i32 as u64;
+    // ESRCH if the target is gone — Linux's truthful answer.  We use
+    // `pcb::name(target).is_some()` as the existence probe.
+    if crate::proc::pcb::name(target).is_none() {
+        return linux_err(errno::ESRCH);
+    }
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    let nonblock = (args.arg1 & 0o4000) != 0;
+    let mut status = oflags::O_RDWR;
+    if nonblock {
+        status |= oflags::O_NONBLOCK;
+    }
+    let entry = FdEntry::pidfd(target, status);
+    match pcb::linux_fd_install(caller, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `pidfd_send_signal(pidfd, sig, info, flags)`.
@@ -11575,6 +11616,20 @@ fn poll_revents_from_entry(entry: crate::proc::linux_fd::FdEntry, events: u16) -
                 r |= poll_bits::POLLWRNORM;
             }
             r
+        }
+        HandleKind::PidFd => {
+            // Linux pidfd signals POLLIN once the target process has
+            // exited (waitable/zombie).  Until then poll returns 0 on
+            // a pidfd.  We approximate "process exists" by consulting
+            // the PCB name table — a None result means the entry has
+            // been reaped (or never existed).  Until per-pid exit
+            // tracking lands, this is the readiness signal we have.
+            let target: crate::proc::pcb::ProcessId = entry.raw_handle;
+            if crate::proc::pcb::name(target).is_none() {
+                poll_bits::POLLIN
+            } else {
+                0
+            }
         }
     };
 
@@ -13821,6 +13876,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::File => 1,
         HandleKind::Pipe => 2,
         HandleKind::EventFd => 3,
+        HandleKind::PidFd => 4,
     }
 }
 
@@ -14329,7 +14385,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
         if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
             match entry.kind {
                 HandleKind::File => {}
-                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -15981,7 +16037,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16024,7 +16080,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16845,7 +16901,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16871,7 +16927,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16919,7 +16975,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16953,7 +17009,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -28686,12 +28742,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pidfd_open(0) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pidfd_open(1,_) -> ENOSYS.
-        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+        // pidfd_open with invalid flags -> EINVAL.  PIDFD_NONBLOCK=0o4000
+        // is the only accepted flag.
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_OPEN, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: pidfd_open not ENOSYS");
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pidfd_open bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_open(pid that does not exist) -> ESRCH.  Pick a positive
+        // pid well beyond anything the boot path could have allocated
+        // (i32::MAX - 1 stays positive when reinterpreted as i32).
+        let a = SyscallArgs { arg0: 0x7FFF_FFFE, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_OPEN, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: pidfd_open(missing pid) not ESRCH");
             return Err(KernelError::InternalError);
         }
         // pidfd_send_signal bogus sig -> EINVAL.
@@ -31760,6 +31827,99 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // poll_status on a now-closed (removed) handle -> POLLERR.
             if efd::poll_status(sem) != 0x0008 {
                 serial_println!("[syscall/linux]   FAIL: eventfd poll_status closed not POLLERR");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // pidfd: HandleKind::PidFd dispatch arms exercised against
+        // synthetic FdEntry::pidfd entries.  caller_pid() is None in this
+        // kernel-boot context, so dispatch_linux(PIDFD_OPEN, ...) for a
+        // would-be-successful pid surfaces EBADF (verified above via the
+        // ESRCH path for a guaranteed-missing pid).  The direct helper
+        // tests below verify the per-arm behaviour for an installed
+        // pidfd slot without needing a real fd table.
+        {
+            // FdEntry::pidfd stores target pid in raw_handle, kind=PidFd.
+            let target_pid: crate::proc::pcb::ProcessId = 0x7FFF_FFFE;
+            let entry = FdEntry::pidfd(target_pid, oflags::O_RDWR);
+            if entry.kind != HandleKind::PidFd {
+                serial_println!("[syscall/linux]   FAIL: FdEntry::pidfd kind != PidFd");
+                return Err(KernelError::InternalError);
+            }
+            if entry.raw_handle != target_pid {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FdEntry::pidfd raw_handle={} want {}",
+                    entry.raw_handle, target_pid,
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // close_handle on a PidFd is a pure ok(0) — no kernel resource.
+            let r = close_handle(entry);
+            if r.value != 0 {
+                serial_println!("[syscall/linux]   FAIL: close_handle(PidFd) -> {} (want 0)", r.value);
+                return Err(KernelError::InternalError);
+            }
+
+            // dispatch_write on a PidFd is EINVAL regardless of buffer.
+            let scratch = [0u8; 8];
+            let r = dispatch_write(entry, scratch.as_ptr() as u64, 8);
+            if r.value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: dispatch_write(PidFd) -> {} (want EINVAL)", r.value);
+                return Err(KernelError::InternalError);
+            }
+
+            // dispatch_read on a PidFd is EINVAL regardless of buffer.
+            let mut rbuf = [0u8; 8];
+            let r = dispatch_read(entry, rbuf.as_mut_ptr() as u64, 8);
+            if r.value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: dispatch_read(PidFd) -> {} (want EINVAL)", r.value);
+                return Err(KernelError::InternalError);
+            }
+
+            // poll on a PidFd whose target is gone -> POLLIN.
+            // (pid 0x7FFF_FFFE was never allocated.)
+            let revents = poll_revents_from_entry(entry, poll_bits::POLLIN);
+            if revents & poll_bits::POLLIN == 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pidfd poll missing-pid revents={:#x} (want POLLIN)",
+                    revents,
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // fill_stat: PidFd reports as anon_inode (S_IFREG | 0o600, 4096).
+            let mut sbuf = [0u8; STAT_SIZE];
+            fill_stat_for_fd(&mut sbuf, &entry);
+            // st_mode is at offset 24 (u32).
+            let mode = u32::from_le_bytes([sbuf[24], sbuf[25], sbuf[26], sbuf[27]]);
+            if mode != (S_IFREG | 0o600) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pidfd fill_stat mode={:#o} (want S_IFREG|0600)",
+                    mode,
+                );
+                return Err(KernelError::InternalError);
+            }
+            // st_blksize is at offset 56 (u64).
+            let blksize = u64::from_le_bytes([
+                sbuf[56], sbuf[57], sbuf[58], sbuf[59],
+                sbuf[60], sbuf[61], sbuf[62], sbuf[63],
+            ]);
+            if blksize != 4096 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pidfd fill_stat blksize={} (want 4096)",
+                    blksize,
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // handle_kind_ord(PidFd) == 4 (after EventFd=3).
+            if handle_kind_ord(HandleKind::PidFd) != 4 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: handle_kind_ord(PidFd) = {} (want 4)",
+                    handle_kind_ord(HandleKind::PidFd),
+                );
                 return Err(KernelError::InternalError);
             }
         }

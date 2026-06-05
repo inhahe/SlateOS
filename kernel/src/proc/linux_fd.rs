@@ -100,6 +100,12 @@ pub enum HandleKind {
     /// exactly 8 bytes against the in-kernel `ipc::eventfd` table.
     /// Close releases the entry from that table.
     EventFd,
+    /// pidfd — opaque reference to a target process.  `raw_handle`
+    /// holds the target PID as a `u64`.  There is no kernel-side
+    /// resource to release on close (the PCB lifetime is independent),
+    /// so `needs_kernel_close()` returns `false`.  Read/write return
+    /// `EINVAL`; poll returns POLLIN once the target process is gone.
+    PidFd,
 }
 
 impl HandleKind {
@@ -108,7 +114,7 @@ impl HandleKind {
     #[must_use]
     pub const fn needs_kernel_close(self) -> bool {
         match self {
-            Self::Console => false,
+            Self::Console | Self::PidFd => false,
             Self::File | Self::Pipe | Self::EventFd => true,
         }
     }
@@ -199,6 +205,22 @@ impl FdEntry {
         Self {
             kind: HandleKind::EventFd,
             raw_handle: handle,
+            fd_flags: 0,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct a pidfd entry referencing process `target_pid`.
+    /// `raw_handle` stores the PID as a u64 so the Linux dispatch
+    /// layer can recover it for `pidfd_send_signal`, `pidfd_getfd`,
+    /// poll-on-exit, and any future helpers.
+    #[must_use]
+    pub const fn pidfd(target_pid: u64, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::PidFd,
+            raw_handle: target_pid,
             fd_flags: 0,
             status_flags,
             f_owner: 0,

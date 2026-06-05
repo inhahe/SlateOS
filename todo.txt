@@ -14117,3 +14117,103 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
 
+## 153. Linux ABI: pidfd_open + HandleKind::PidFd dispatch plumbing
+##      (batch 124).
+##
+##      Linux pidfd_open(pid, flags) allocates a kernel-managed fd
+##      that opaquely references a process.  Glibc's CLONE_PIDFD path,
+##      systemd, and the modern "process FD" idiom rely on it.
+##      Previously we validated the args and returned ENOSYS — callers
+##      then either fell back to /proc/PID lookup or refused to start.
+##
+##      This batch wires the full fd lifecycle:
+##
+##      * kernel/src/proc/linux_fd.rs:
+##          - HandleKind::PidFd variant added.
+##          - needs_kernel_close() returns false for PidFd: there is no
+##            kernel-side resource to release — pidfd just holds a
+##            target PID (raw_handle stores the pid as u64).  PCB
+##            lifetime is independent of the pidfd lifetime.
+##          - FdEntry::pidfd(target_pid, status_flags) constructor.
+##
+##      * kernel/src/syscall/linux.rs:
+##          - sys_pidfd_open implements the real path:
+##              * EINVAL on invalid flags / pid <= 0.
+##              * ESRCH if pcb::name(target).is_none() (no such pid).
+##              * EBADF in kernel-context (no caller PCB) — same gate
+##                as every other fd-installing Linux syscall.
+##              * Otherwise installs FdEntry::pidfd into the caller's
+##                Linux fd table via pcb::linux_fd_install(..., 0).
+##          - All ~14 dispatch sites that match on HandleKind now
+##            include a PidFd arm:
+##              * close_handle → ok(0) (no resource).
+##              * dispatch_write / dispatch_read → EINVAL.
+##              * sys_lseek + the 6 preadv/pwritev variants → ESPIPE.
+##              * fcntl_flock_apply → EBADF (pidfd is not lockable).
+##              * sys_fsync → EINVAL.
+##              * sys_ftruncate → EINVAL.
+##              * sys_cachestat → EOPNOTSUPP.
+##              * fill_stat_for_fd / fill_statx_for_fd →
+##                (S_IFREG | 0o600, blksize 4096) — Linux anon_inode
+##                shape, same as eventfd / signalfd.
+##              * poll_revents_from_entry → POLLIN if
+##                pcb::name(target_pid).is_none() (target gone),
+##                else 0.  Matches Linux pidfd's "POLLIN when waitable"
+##                semantic, approximated against our PCB existence
+##                probe.  Per-pid exit tracking is a follow-up.
+##              * handle_kind_ord(PidFd) = 4 (after EventFd=3) for
+##                kcmp KCMP_FILE ordering.
+##
+##      Self-tests (replaces the previous "pidfd_open(1) -> ENOSYS"
+##      stub-check; adds 7 new direct-dispatch assertions):
+##          1. pidfd_open(pid=0) -> EINVAL.
+##          2. pidfd_open(pid=1, flags=1) -> EINVAL (only
+##             PIDFD_NONBLOCK=0o4000 is valid).
+##          3. pidfd_open(pid=0x7FFFFFFE) -> ESRCH (no such pid).
+##          4. FdEntry::pidfd(pid, flags) stores kind=PidFd,
+##             raw_handle=pid.
+##          5. close_handle on a PidFd returns ok(0).
+##          6. dispatch_write on a PidFd returns EINVAL.
+##          7. dispatch_read on a PidFd returns EINVAL.
+##          8. poll_revents_from_entry on a PidFd for a nonexistent
+##             pid sets POLLIN.
+##          9. fill_stat_for_fd writes mode = S_IFREG|0o600,
+##             blksize = 4096.
+##         10. handle_kind_ord(PidFd) == 4.
+##
+##      Existing flag-validation tests for pidfd_send_signal and
+##      pidfd_getfd are preserved unchanged.
+##
+##      Known limitations carried into follow-up batches:
+##
+##      * pidfd_send_signal still returns EINVAL after fd validation
+##         — the routing from PidFd entry → handlers::sys_signal_send
+##         is the next batch, but it requires the native signal
+##         delivery path to accept a (target_pid, sig) tuple.
+##
+##      * pidfd_getfd still returns EBADF after fd validation — needs
+##         cross-process fd copy via a target-process Linux fd lookup,
+##         which in turn needs a way to enumerate another process's
+##         fd table (no inter-PCB fd enumeration helper yet).
+##
+##      * POLLIN-on-exit uses pcb::name(pid).is_none() as the
+##         existence probe.  Once a pid has been reaped this is
+##         correct, but a still-running zombie that has not been
+##         waited on yet may also report None (PCB scrubbing) or may
+##         report Some(...) depending on the reap path — we accept
+##         this approximation until a dedicated process_state_for_pid
+##         lookup distinguishing Alive/Zombie/Gone lands.
+##
+##      * Read/write/seek are EINVAL/ESPIPE (matches Linux).  No
+##         data path on a pidfd.
+##
+##      * The fd is not yet poll-on-CLOSE inheritable across exec —
+##         we treat it as a regular CLOEXEC-honoring fd, which
+##         matches Linux's PIDFD_NONBLOCK-respecting default but does
+##         not yet plumb FD_CLOEXEC on flags=0 (Linux sets CLOEXEC by
+##         default on pidfd_open since v5.10 — this is a minor ABI
+##         drift to fix next batch alongside pidfd_send_signal).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
+

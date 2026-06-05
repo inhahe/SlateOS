@@ -14932,21 +14932,42 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `landlock_create_ruleset(attr*, size, flags)`.
+///
+/// Linux's `security/landlock/syscalls.c::SYSCALL_DEFINE3` treats
+/// `flags` as a small dispatch token, not a bitmask:
+///   * `flags == 0` enters the real-ruleset construction path.
+///   * `flags == LANDLOCK_CREATE_RULESET_VERSION (0x1)` with
+///     `attr == NULL && size == 0` returns the Landlock ABI version.
+///   * `flags == LANDLOCK_CREATE_RULESET_ERRATA (0x2)` (Linux 6.10+)
+///     with `attr == NULL && size == 0` returns the errata bitmap.
+///   * Any other `flags` value — including combinations like
+///     `VERSION | ERRATA` — returns `EINVAL`.
+///
+/// We honestly report ABI version 0 ("Landlock is not available") and
+/// an empty errata bitmap (no errata to surface for a Landlock that
+/// doesn't exist), so callers skip rule construction without hitting
+/// ENOSYS surprises on subsequent calls.
 fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
     const LANDLOCK_CREATE_RULESET_VERSION: u32 = 0x1;
+    const LANDLOCK_CREATE_RULESET_ERRATA: u32 = 0x2;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg2 as u32;
-    if flags & !LANDLOCK_CREATE_RULESET_VERSION != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if flags & LANDLOCK_CREATE_RULESET_VERSION != 0 {
-        // Version-query path.  attr/size must be 0/0 in this mode.  We
-        // honestly report ABI version 0 — "Landlock is not available" —
-        // so callers skip rule construction.
-        if args.arg0 != 0 || args.arg1 != 0 {
-            return linux_err(errno::EINVAL);
+    if flags != 0 {
+        if flags == LANDLOCK_CREATE_RULESET_VERSION
+            && args.arg0 == 0
+            && args.arg1 == 0
+        {
+            // ABI version 0 — Landlock not available.
+            return SyscallResult::ok(0);
         }
-        return SyscallResult::ok(0);
+        if flags == LANDLOCK_CREATE_RULESET_ERRATA
+            && args.arg0 == 0
+            && args.arg1 == 0
+        {
+            // No errata to surface — empty bitmap.
+            return SyscallResult::ok(0);
+        }
+        return linux_err(errno::EINVAL);
     }
     // Real-ruleset path requires a non-NULL attr of at least sizeof
     // landlock_ruleset_attr = 8 (u64 handled_access_fs).
@@ -33545,12 +33566,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock version-query not 0");
             return Err(KernelError::InternalError);
         }
+        // landlock_create_ruleset errata-query (flags=ERRATA=0x2) -> 0
+        // (no errata bitmap to surface for a non-existent Landlock).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: landlock errata-query not 0");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_create_ruleset VERSION|ERRATA (0x3) -> EINVAL
+        // (Linux requires flags to be exactly one dispatch value, not
+        // a bit-OR combination).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 3, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock VERSION|ERRATA not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_create_ruleset VERSION with non-NULL attr -> EINVAL
+        // (Linux requires attr=NULL,size=0 for query paths).
+        let a = SyscallArgs { arg0: 8, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock VERSION+attr not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_create_ruleset ERRATA with non-zero size -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock ERRATA+size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
         // landlock_create_ruleset bad flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0xff, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: landlock bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   landlock_create_ruleset flag dispatch: OK");
         // landlock_create_ruleset real path with NULL attr -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EFAULT) {

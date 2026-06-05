@@ -16538,3 +16538,79 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   open_by_handle_at
 ##      handle validation: OK" in build/serial-test.txt.
 
+
+## 187. Linux ABI: landlock_create_ruleset ERRATA flag + dispatch.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_landlock_create_ruleset.
+##
+##      Problem: sys_landlock_create_ruleset treated `flags` as a
+##              bitmask masking against LANDLOCK_CREATE_RULESET_VERSION
+##              (0x1) only.  Linux 6.10 added
+##              LANDLOCK_CREATE_RULESET_ERRATA (0x2) for the errata-
+##              bitmap query path; we returned EINVAL for that flag,
+##              so probes calling `landlock_create_ruleset(NULL, 0,
+##              ERRATA)` to discover known errata couldn't even tell
+##              whether the kernel knew about errata at all (they
+##              had to guess between "unsupported flag" and "no
+##              errata to report").  Also, Linux's real check is an
+##              equality dispatch — `flags == VERSION`, `flags == ERRATA`,
+##              or `flags == 0` — not a bitmask, so the combination
+##              `VERSION | ERRATA = 0x3` should EINVAL but we never
+##              tested it.
+##
+##      Fix:    Rewrote the flag handling to match Linux's
+##              security/landlock/syscalls.c::SYSCALL_DEFINE3 dispatch:
+##                * `flags == 0`: enter real-ruleset construction path
+##                  (kept; same EFAULT/EINVAL/ENOSYS terminals).
+##                * `flags == VERSION (0x1)` with `attr == NULL` and
+##                  `size == 0`: return ABI version 0 (kept).
+##                * `flags == ERRATA (0x2)` with `attr == NULL` and
+##                  `size == 0`: return errata bitmap 0 (new).
+##                * Anything else (including `VERSION | ERRATA`,
+##                  `VERSION` with non-NULL attr, `ERRATA` with
+##                  non-zero size, undefined high bits): EINVAL.
+##
+##      Self-tests (boot-time):
+##        * landlock_create_ruleset(NULL, 0, VERSION=1) -> 0  (kept).
+##        * landlock_create_ruleset(NULL, 0, ERRATA=2) -> 0  (new).
+##        * landlock_create_ruleset(NULL, 0, 3=VERSION|ERRATA)
+##          -> EINVAL  (combinations not allowed; new).
+##        * landlock_create_ruleset(attr=8, 0, VERSION) -> EINVAL
+##          (query needs NULL attr; new).
+##        * landlock_create_ruleset(NULL, 8, ERRATA) -> EINVAL
+##          (query needs size=0; new).
+##        * landlock_create_ruleset(NULL, 0, 0xff) -> EINVAL  (kept).
+##        * landlock_create_ruleset(NULL, 0, 0) [flags=0 NULL attr]
+##          -> EFAULT  (real path NULL attr; kept).
+##        * landlock_create_ruleset(attr=8, 8, 0) -> ENOSYS  (real
+##          path; kept).
+##        * Emits "[syscall/linux]   landlock_create_ruleset flag
+##          dispatch: OK".
+##
+##      Known limitations:
+##        * `handled_access_fs` (first u64 of struct
+##          landlock_ruleset_attr) is not bit-validated against
+##          LANDLOCK_ACCESS_FS_MASK (0xffff in 6.10+).  Linux's
+##          build_check_abi rejects unknown bits.  Since we always
+##          return ENOSYS for the real-ruleset path, an
+##          unvalidated handled_access_fs only matters for hostile
+##          probes that walk the bits to find the kernel's supported
+##          set — they'll see ENOSYS and infer "no Landlock"
+##          regardless.  When real Landlock lands, this needs the
+##          per-bit mask check.
+##        * `handled_access_net` (Linux 6.7, second u64) and
+##          `scoped` (Linux 6.10, third u64) extensions to the
+##          attr struct are not validated either, for the same
+##          reason.
+##        * `landlock_abi_errata` constant is reported as 0 — no
+##          errata.  Real Linux 6.12 reports a non-zero bitmap with
+##          known errata flags; we don't have any to surface
+##          because we don't have Landlock.  Userspace should
+##          interpret "0 errata" as "no errata-affected behaviors
+##          present," which is truthful for a kernel without
+##          Landlock at all.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   landlock_create_ruleset
+##      flag dispatch: OK" in build/serial-test.txt.
+

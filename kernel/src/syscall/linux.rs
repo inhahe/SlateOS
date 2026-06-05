@@ -12414,7 +12414,45 @@ fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
-/// `cachestat(fd, cstat_range*, cstat*, flags)`.
+/// `cachestat(fd, cstat_range*, cstat*, flags)` — query page-cache
+/// residency for a file range.
+///
+/// Pre-batch this validated args and returned -ENOSYS.  glibc /
+/// systemd-resolved / systemd-journald / postgres call cachestat at
+/// startup to opportunistically prefetch hot files; -ENOSYS made them
+/// disable the optimization entirely.
+///
+/// Linux's cachestat reports five u64 counters for a file range:
+///
+///   * `nr_cache`            — pages currently resident in the page cache
+///   * `nr_dirty`            — pages in cache that are dirty
+///   * `nr_writeback`        — pages currently being written back
+///   * `nr_evicted`          — pages evicted from cache (with workingset
+///                             tracking)
+///   * `nr_recently_evicted` — pages recently evicted (last refault
+///                             interval)
+///
+/// We have no page cache: every write is written through to the
+/// backing store synchronously and reads come straight off the
+/// device.  All five counters are therefore *honestly* zero — the
+/// answer is not a placeholder, it is the truth of this kernel's I/O
+/// model.  When a real page cache lands, this is the place to surface
+/// per-range statistics from it.
+///
+/// Layout & validation:
+///   * flags != 0 -> -EINVAL (Linux reserves the field for future use).
+///   * cstat_range or cstat NULL -> -EFAULT.
+///   * struct cachestat_range is 16 bytes (u64 off, u64 len).
+///   * struct cachestat is **40 bytes** (5 * u64).  The previous
+///     -ENOSYS stub claimed "32 bytes (5 * u64 + padding)" which was
+///     wrong and would have under-validated the destination buffer
+///     once this stub was actually filled in.
+///   * fd must be open in the caller's table -> -EBADF.
+///   * fd must refer to a regular file (`HandleKind::File`).  Linux
+///     itself rejects sockets, pipes, character devices, and
+///     directories with -EOPNOTSUPP because none of them have page
+///     cache pages; we mirror that for the console pseudo-handle and
+///     for pipes.
 fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
     if args.arg3 != 0 {
         return linux_err(errno::EINVAL);
@@ -12426,8 +12464,12 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 16) {
         return linux_err(linux_errno_for(e));
     }
-    // struct cachestat is 32 bytes (5 * u64 + padding).
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 32) {
+    // struct cachestat is 40 bytes (5 * u64).  Bug fix vs the previous
+    // -ENOSYS stub which validated only 32 bytes — that would have
+    // allowed a 32-byte-only writable user buffer to pass the gate and
+    // then taken a page fault on the 33rd byte once we started writing
+    // the answer.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 40) {
         return linux_err(linux_errno_for(e));
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -12435,7 +12477,34 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    linux_err(errno::ENOSYS)
+    // Only regular files have page-cache pages.  Console / pipe fds
+    // are rejected with -EOPNOTSUPP the same way Linux rejects
+    // socket / chardev / pipe fds.  When the caller is a real Linux
+    // process we know its fd kind; in bare-kernel context (no caller
+    // PCB) we skip the kind check because there is no fd table to
+    // consult — matching `validate_linux_fd`'s own kernel-context
+    // bypass above.
+    if let Some(pid) = caller_pid() {
+        if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
+            match entry.kind {
+                HandleKind::File => {}
+                HandleKind::Console | HandleKind::Pipe => {
+                    return linux_err(errno::EOPNOTSUPP);
+                }
+            }
+        }
+    }
+    // We have no page cache — every counter is honestly zero.
+    let zeros = [0u8; 40];
+    // SAFETY: validate_user_write above confirmed the full 40-byte
+    // destination buffer is writable for the caller.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(zeros.as_ptr(), args.arg2, 40)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 /// `mseal(addr, len, flags)`.
@@ -27654,10 +27723,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: cachestat NULL range not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // cachestat valid -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: buf_ptr, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: cachestat valid not ENOSYS");
+        // cachestat valid -> 0 with 40 bytes of zeros written
+        // (batch 108 upgrade: was unconditional -ENOSYS, now returns
+        // the honest "no page cache, all counters zero" answer for a
+        // writable destination).  In kernel context there is no PCB
+        // to consult so the kind-based EOPNOTSUPP gate is skipped and
+        // we fall through to the success path; the userspace path
+        // sees Console / Pipe fds rejected with -EOPNOTSUPP and File
+        // fds answered with zeros.  See sys_cachestat doc comment.
+        //
+        // Prepare a 40-byte destination prefilled with 0xCC; verify
+        // the syscall returns 0 and all 40 bytes were overwritten
+        // with zeros, while the trailing sentinel at byte 40 is
+        // untouched.
+        let mut cstat_buf = [0xCCu8; 48];
+        let cstat_ptr = cstat_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: buf_ptr, arg2: cstat_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: cachestat valid not 0");
+            return Err(KernelError::InternalError);
+        }
+        if cstat_buf[..40].iter().any(|&b| b != 0) {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat did not zero-fill 40 bytes",
+            );
+            return Err(KernelError::InternalError);
+        }
+        if cstat_buf[40..].iter().any(|&b| b != 0xCC) {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat over-wrote past 40 bytes",
+            );
             return Err(KernelError::InternalError);
         }
 

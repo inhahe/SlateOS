@@ -12486,3 +12486,77 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          credentials model.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 25s).
+
+## 137. Batch 108: sys_cachestat upgraded from -ENOSYS stub to an
+##      honest all-zero answer
+##      ---------------------------------------------------------------
+##      Pre-batch: validated args (flags/range/cstat/fd) and then
+##      returned -ENOSYS.  glibc, systemd-resolved, systemd-journald,
+##      and PostgreSQL call cachestat at startup to opportunistically
+##      prefetch hot pages; -ENOSYS made them disable the optimization
+##      entirely (a correctness-preserving fallback but a perf loss).
+##
+##      Post-batch: sys_cachestat returns the five page-cache counters
+##      (nr_cache, nr_dirty, nr_writeback, nr_evicted,
+##      nr_recently_evicted) all as 0 — which is the *truth* of our
+##      I/O model, not a placeholder.  This kernel has no page cache:
+##      writes are written through to the backing store synchronously
+##      and reads come straight off the device.  No pages are cached,
+##      none are dirty, none are in writeback, none have been evicted.
+##      When a real page cache lands, this is where to surface
+##      per-range residency statistics from it.
+##
+##      Wire layout written: struct cachestat { __u64 nr_cache,
+##      nr_dirty, nr_writeback, nr_evicted, nr_recently_evicted }
+##      = 40 bytes (5 * u64).
+##
+##      Validation gates:
+##        * flags != 0 -> -EINVAL.
+##        * cstat_range == NULL or cstat == NULL -> -EFAULT.
+##        * non-readable cstat_range (16 bytes) -> -EFAULT.
+##        * non-writable cstat (40 bytes) -> -EFAULT.  Pre-batch this
+##          validated only 32 bytes, which is the wrong size — see
+##          the bug-fix bundle below.
+##        * fd not open in caller's table -> -EBADF (via
+##          validate_linux_fd).
+##        * fd refers to Console or Pipe -> -EOPNOTSUPP.  Mirrors
+##          Linux's rejection of sockets / char-devs / pipes — none
+##          of those file types have page-cache pages.
+##
+##      Bundled bug fix: the previous -ENOSYS stub called
+##      validate_user_write(cstat, 32) with the comment
+##      "32 bytes (5 * u64 + padding)".  That arithmetic is wrong:
+##      5 * 8 = 40, there is no padding, and the actual Linux ABI
+##      struct cachestat is 40 bytes.  Had the stub ever been wired
+##      up without fixing this, a destination buffer of exactly 32
+##      writable bytes would have passed the gate and then page-
+##      faulted on bytes 33..40 inside copy_to_user.  Fixed in the
+##      same batch alongside the upgrade.
+##
+##      Boot self-test "(updated existing) cachestat valid -> 0":
+##        1. flags != 0 -> -EINVAL (unchanged).
+##        2. NULL range -> -EFAULT (unchanged).
+##        3. valid 40-byte writable cstat -> 0, first 40 bytes of the
+##           destination are zero-filled, byte 40 onwards retains its
+##           0xCC sentinel (proves we don't write past the struct).
+##           Pre-batch this case expected -ENOSYS.
+##
+##      Note on kernel-context behavior: the cachestat self-test runs
+##      from a bare kernel task with no caller PCB.  caller_pid()
+##      returns None, so the kind-based EOPNOTSUPP check is skipped
+##      (there's no fd table to consult) and we fall through to the
+##      success path.  validate_linux_fd has the same bypass.  Real
+##      Linux processes do have a caller PCB, so userspace sees the
+##      full Console/Pipe -> -EOPNOTSUPP rejection.
+##
+##      Known limitations:
+##        * Per-fd-type accuracy depends on the caller having a real
+##          PCB and fd table.  Bare-kernel test callers see the
+##          success path for any fd value; real Linux userspace sees
+##          the EOPNOTSUPP gate.
+##        * cachestat_range.off and .len are read but ignored — the
+##          answer is identically zero for any range, so the fields
+##          don't influence the result.  When a real page cache
+##          lands, range-aware accounting goes here.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

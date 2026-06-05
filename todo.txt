@@ -10451,3 +10451,105 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 21s).
 
 
+## 111. Linux ABI batch 82: per-PCB PR_CAP_AMBIENT
+##      round-trip with strict argument validation matching
+##      Linux.
+##
+##      Before this batch option 47 fell through to the
+##      generic EINVAL catch-all in sys_prctl.  systemd
+##      (every service unit with `AmbientCapabilities=`),
+##      container runtimes (podman, docker, runc), and
+##      `capsh --addamb` userspace tooling probe this
+##      option to install ambient capabilities — the only
+##      capability set that a non-setuid, non-file-cap
+##      execve preserves across the binary boundary.  EINVAL
+##      there makes systemd refuse to start any unit that
+##      relies on ambient caps (e.g. nm-online with
+##      CAP_NET_ADMIN).
+##
+##      Fix: add `linux_ambient_caps: u64` (default 0 = empty
+##      set) to the PCB, indexed bitwise by capability number.
+##      Inherited verbatim across fork (Linux: `cred->ambient`
+##      is copied by `prepare_cred`).  Preserved across exec
+##      — this is the defining property of the ambient set
+##      vs the inheritable set.
+##
+##      Added `LINUX_CAP_LAST_CAP = 40`
+##      (`CAP_CHECKPOINT_RESTORE`, added in Linux 5.9) as a
+##      public constant.  Any cap number above 40 is EINVAL
+##      at the syscall surface.  The storage helper accepts
+##      arbitrary u64 masks so test fixtures can probe
+##      boundary cases.
+##
+##      Five storage helpers:
+##        get_ambient_caps(pid) -> Option<u64>
+##        set_ambient_caps(pid, val) -> Option<u64>
+##        raise_ambient_cap(pid, cap) -> Option<u32>
+##        lower_ambient_cap(pid, cap) -> Option<u32>
+##        is_ambient_cap_set(pid, cap) -> Option<u32>
+##
+##      PR_CAP_AMBIENT (47) — Linux semantics, sub-op via
+##      arg2 (our arg1):
+##        * PR_CAP_AMBIENT_IS_SET (1):
+##          - arg3/arg4 (our arg3/arg4) must be 0 -> EINVAL.
+##          - arg2 (our arg2) = cap; > CAP_LAST_CAP -> EINVAL.
+##          - Returns 0 or 1 directly.
+##        * PR_CAP_AMBIENT_RAISE (2):
+##          - Same arg validation.
+##          - Linux additionally checks the cap is in both
+##            permitted AND inheritable, and that
+##            SECURE_NO_CAP_AMBIENT_RAISE is unset.  We
+##            don't enforce capabilities anywhere, so we
+##            skip both checks and grant — known limitation,
+##            tracked here.
+##          - Returns 0.
+##        * PR_CAP_AMBIENT_LOWER (3):
+##          - Same arg validation.
+##          - Returns 0.
+##        * PR_CAP_AMBIENT_CLEAR_ALL (4):
+##          - arg2/arg3/arg4 must all be 0 -> EINVAL.
+##          - Returns 0.
+##        * Any other op (including 0) -> EINVAL.
+##
+##      Known limitations (deferred):
+##        1. We do not enforce capabilities anywhere; every
+##           process effectively has all caps in permitted
+##           and effective.  PR_CAP_AMBIENT_RAISE therefore
+##           grants without checking permitted /
+##           inheritable — when the capability framework
+##           lands, this surface MUST verify the cap is in
+##           both sets and return EPERM otherwise.
+##        2. We do not model securebits, so we do not
+##           enforce SECURE_NO_CAP_AMBIENT_RAISE.  When
+##           securebits land (likely paired with PR_GET/SET
+##           SECUREBITS), this check must gate RAISE too.
+##        3. The stored ambient mask has no effect on
+##           anything yet — it's pure round-trip.  When
+##           capability enforcement lands, every privilege-
+##           bearing syscall (mount, kexec_load, reboot, …)
+##           must consult both the ambient and effective
+##           sets to decide whether to permit the call.
+##
+##      Self-tests cover:
+##        * op == 0 or > 4 -> EINVAL (incl. u64::MAX).
+##        * RAISE/LOWER/IS_SET with cap > 40 (41, 0xff,
+##          u64::MAX) -> EINVAL.
+##        * RAISE/LOWER/IS_SET with arg3 / arg4 != 0 ->
+##          EINVAL.
+##        * CLEAR_ALL with arg2 / arg3 / arg4 != 0 ->
+##          EINVAL.
+##        * Kernel context: every op returns 0 (IS_SET
+##          unwrap_or(0) path).
+##        * pcb storage round-trip:
+##          - get returns Some(0) initially.
+##          - raise CAP_NET_ADMIN twice: was-set
+##            transitions 0 -> 1; second raise reports 1.
+##          - get returns the union of raised bits.
+##          - lower returns was-set; double-lower returns 0.
+##          - set_ambient_caps accepts arbitrary u64 bits
+##            (helper bypasses cap-validity check).
+##          - destroy -> all helpers return None.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+

@@ -4627,6 +4627,98 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             let v = caller_pid().and_then(pcb::get_memory_merge).unwrap_or(0);
             SyscallResult::ok(i64::from(v))
         }
+        // PR_CAP_AMBIENT (47) — manipulate the per-task ambient
+        // capability set.  systemd (every unit with
+        // `AmbientCapabilities=`), container runtimes (podman,
+        // docker, runc), and the `capsh --addamb` userspace tool
+        // all hit this option.  EINVAL there means systemd refuses
+        // to start units that depend on ambient caps.
+        //
+        // Linux semantics (kernel/sys.c prctl + cap_prctl_drop):
+        //   * arg2 (our arg1) selects the operation:
+        //       PR_CAP_AMBIENT_IS_SET    = 1
+        //       PR_CAP_AMBIENT_RAISE     = 2
+        //       PR_CAP_AMBIENT_LOWER     = 3
+        //       PR_CAP_AMBIENT_CLEAR_ALL = 4
+        //   * For CLEAR_ALL: arg3/arg4/arg5 (our arg2/arg3/arg4)
+        //     must all be 0 -> EINVAL otherwise.
+        //   * For RAISE/LOWER/IS_SET: arg4/arg5 (our arg3/arg4)
+        //     must be 0; arg3 (our arg2) is the capability number
+        //     and must satisfy cap_valid(cap) == cap <= CAP_LAST_CAP
+        //     (40 in current Linux); else EINVAL.
+        //   * RAISE additionally requires the cap to be in both
+        //     the permitted and inheritable sets, and that
+        //     `SECURE_NO_CAP_AMBIENT_RAISE` is not set in
+        //     securebits; else EPERM.
+        //
+        // Our stance: we have no capability enforcement, so every
+        // process effectively has all caps in both permitted and
+        // inheritable.  RAISE succeeds.  We do not yet model
+        // securebits either, so the SECURE_NO_CAP_AMBIENT_RAISE
+        // check is a no-op — track in todo.txt for when securebits
+        // land.
+        //
+        // The ambient set is round-tripped per-PCB so probes work
+        // (IS_SET after RAISE returns 1) and exec preserves the
+        // mask (when we get an exec hook).
+        47 => {
+            #[allow(clippy::cast_possible_truncation)]
+            match args.arg1 {
+                // PR_CAP_AMBIENT_IS_SET
+                1 => {
+                    if args.arg3 != 0 || args.arg4 != 0 {
+                        return linux_err(errno::EINVAL);
+                    }
+                    if args.arg2 > u64::from(pcb::LINUX_CAP_LAST_CAP) {
+                        return linux_err(errno::EINVAL);
+                    }
+                    let cap = args.arg2 as u32;
+                    let v = caller_pid()
+                        .and_then(|pid| pcb::is_ambient_cap_set(pid, cap))
+                        .unwrap_or(0);
+                    SyscallResult::ok(i64::from(v))
+                }
+                // PR_CAP_AMBIENT_RAISE
+                2 => {
+                    if args.arg3 != 0 || args.arg4 != 0 {
+                        return linux_err(errno::EINVAL);
+                    }
+                    if args.arg2 > u64::from(pcb::LINUX_CAP_LAST_CAP) {
+                        return linux_err(errno::EINVAL);
+                    }
+                    let cap = args.arg2 as u32;
+                    if let Some(pid) = caller_pid() {
+                        let _ = pcb::raise_ambient_cap(pid, cap);
+                    }
+                    SyscallResult::ok(0)
+                }
+                // PR_CAP_AMBIENT_LOWER
+                3 => {
+                    if args.arg3 != 0 || args.arg4 != 0 {
+                        return linux_err(errno::EINVAL);
+                    }
+                    if args.arg2 > u64::from(pcb::LINUX_CAP_LAST_CAP) {
+                        return linux_err(errno::EINVAL);
+                    }
+                    let cap = args.arg2 as u32;
+                    if let Some(pid) = caller_pid() {
+                        let _ = pcb::lower_ambient_cap(pid, cap);
+                    }
+                    SyscallResult::ok(0)
+                }
+                // PR_CAP_AMBIENT_CLEAR_ALL
+                4 => {
+                    if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                        return linux_err(errno::EINVAL);
+                    }
+                    if let Some(pid) = caller_pid() {
+                        let _ = pcb::set_ambient_caps(pid, 0);
+                    }
+                    SyscallResult::ok(0)
+                }
+                _ => linux_err(errno::EINVAL),
+            }
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -18322,6 +18414,165 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             pcb::destroy(test_pid);
             assert_eq!(pcb::get_memory_merge(test_pid), None);
             assert_eq!(pcb::set_memory_merge(test_pid, 1), None);
+        }
+
+        // Batch 82: PR_CAP_AMBIENT — ambient capability set
+        // round-trip with strict Linux argument validation.
+        // Verifications:
+        //   1. PR_CAP_AMBIENT op == 0 or > 4 -> EINVAL.
+        //   2. RAISE/LOWER/IS_SET with cap > CAP_LAST_CAP -> EINVAL.
+        //   3. RAISE/LOWER/IS_SET with arg3/arg4 != 0 -> EINVAL.
+        //   4. CLEAR_ALL with arg2/arg3/arg4 != 0 -> EINVAL.
+        //   5. Kernel context: every op returns 0 / IS_SET == 0
+        //      because there's no PCB to read from.
+        //   6. pcb-layer round-trip: raise / lower / clear /
+        //      is_set return correct prior values.
+        {
+            // op == 0 -> EINVAL.
+            let a = SyscallArgs { arg0: 47, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op=0) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // op > 4 -> EINVAL.
+            for op in [5u64, 0xff, u64::MAX] {
+                let a = SyscallArgs { arg0: 47, arg1: op, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}) not EINVAL ({})",
+                        op,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // RAISE / LOWER / IS_SET with cap > CAP_LAST_CAP (40)
+            // -> EINVAL.
+            for op in [1u64, 2, 3] {
+                for cap in [41u64, 0xff, u64::MAX] {
+                    let a = SyscallArgs { arg0: 47, arg1: op,
+                        arg2: cap, arg3: 0, arg4: 0, arg5: 0 };
+                    if dispatch_linux(nr::PRCTL, &a).value
+                        != -i64::from(errno::EINVAL)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, cap={}) not EINVAL ({})",
+                            op, cap,
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+            }
+            // RAISE / LOWER / IS_SET with arg3 or arg4 != 0 ->
+            // EINVAL.  arg2 must be a valid cap; pick 0 (CAP_CHOWN).
+            for op in [1u64, 2, 3] {
+                for (idx, a) in [
+                    SyscallArgs { arg0: 47, arg1: op, arg2: 0,
+                        arg3: 1, arg4: 0, arg5: 0 },
+                    SyscallArgs { arg0: 47, arg1: op, arg2: 0,
+                        arg3: 0, arg4: 1, arg5: 0 },
+                ].iter().enumerate() {
+                    if dispatch_linux(nr::PRCTL, a).value
+                        != -i64::from(errno::EINVAL)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, …{}=1) not EINVAL ({})",
+                            op, idx + 3,
+                            dispatch_linux(nr::PRCTL, a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+            }
+            // CLEAR_ALL with arg2 / arg3 / arg4 != 0 -> EINVAL.
+            for (idx, a) in [
+                SyscallArgs { arg0: 47, arg1: 4, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 47, arg1: 4, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 47, arg1: 4, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT_CLEAR_ALL, …{}=1) not EINVAL ({})",
+                        idx + 2,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Kernel context: RAISE/LOWER/CLEAR_ALL -> 0.
+            // IS_SET -> 0 (no PCB, unwrap_or(0) path).
+            for (op, cap) in [(1u64, 0u64), (2, 5), (3, 12), (4, 0)] {
+                let a = SyscallArgs { arg0: 47, arg1: op, arg2: cap,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, cap={}) kernel-ctx not 0 ({})",
+                        op, cap,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // pcb storage round-trip.
+            let test_pid = pcb::create("ambient-cap-test", 0);
+            // Default empty mask.
+            assert_eq!(pcb::get_ambient_caps(test_pid), Some(0));
+            assert_eq!(pcb::is_ambient_cap_set(test_pid, 0), Some(0));
+            assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(0));
+            // Raise CAP_NET_ADMIN (12) — was-set is 0.
+            assert_eq!(pcb::raise_ambient_cap(test_pid, 12), Some(0));
+            assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(1));
+            assert_eq!(pcb::get_ambient_caps(test_pid), Some(1u64 << 12));
+            // Re-raising returns was-set=1.
+            assert_eq!(pcb::raise_ambient_cap(test_pid, 12), Some(1));
+            // Raise CAP_CHOWN (0) too.
+            assert_eq!(pcb::raise_ambient_cap(test_pid, 0), Some(0));
+            assert_eq!(
+                pcb::get_ambient_caps(test_pid),
+                Some((1u64 << 12) | (1u64 << 0))
+            );
+            // Lower CAP_NET_ADMIN.
+            assert_eq!(pcb::lower_ambient_cap(test_pid, 12), Some(1));
+            assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(0));
+            assert_eq!(pcb::get_ambient_caps(test_pid), Some(1u64 << 0));
+            // Lowering already-clear bit returns was-set=0.
+            assert_eq!(pcb::lower_ambient_cap(test_pid, 12), Some(0));
+            // Helper bypass: install arbitrary mask (even high bits).
+            assert_eq!(
+                pcb::set_ambient_caps(test_pid, 0xdead_beef_dead_beef),
+                Some(1u64 << 0)
+            );
+            assert_eq!(
+                pcb::get_ambient_caps(test_pid),
+                Some(0xdead_beef_dead_beef)
+            );
+            // Clear via helper.
+            assert_eq!(
+                pcb::set_ambient_caps(test_pid, 0),
+                Some(0xdead_beef_dead_beef)
+            );
+            pcb::destroy(test_pid);
+            assert_eq!(pcb::get_ambient_caps(test_pid), None);
+            assert_eq!(pcb::set_ambient_caps(test_pid, 1), None);
+            assert_eq!(pcb::raise_ambient_cap(test_pid, 0), None);
+            assert_eq!(pcb::lower_ambient_cap(test_pid, 0), None);
+            assert_eq!(pcb::is_ambient_cap_set(test_pid, 0), None);
         }
     }
 

@@ -696,7 +696,44 @@ pub struct Process {
     /// must consult `get_memory_merge(pid)` and queue mergeable
     /// anonymous regions onto the KSM scanner's worklist.
     pub linux_memory_merge: u32,
+    /// Linux `prctl(PR_CAP_AMBIENT, RAISE/LOWER/…)` per-task ambient
+    /// capability set.  This is a bitmask of POSIX capability
+    /// numbers (CAP_CHOWN=0, CAP_KILL=5, CAP_NET_ADMIN=12, …).  The
+    /// ambient set is the only capability set that a non-root,
+    /// non-file-capability execve preserves: systemd uses it to
+    /// give services like `nm-online` CAP_NET_ADMIN without making
+    /// the binary setuid.  Container runtimes use it to drop all
+    /// caps and then re-add a hand-picked few.
+    ///
+    /// Stored as a u64 bitmask, indexed by capability number.
+    /// Default 0 (empty set).  Inherited verbatim across fork
+    /// (Linux: `cred->ambient` is copied by `prepare_cred`).
+    /// Preserved across exec — this is the defining property of
+    /// the ambient set (compare to `cred->cap_inheritable`, which
+    /// is also preserved across exec but is gated by file
+    /// capabilities).
+    ///
+    /// Last valid cap (CAP_LAST_CAP) is fixed at 40
+    /// (CAP_CHECKPOINT_RESTORE in Linux 5.9+).  Any cap number
+    /// above 40 is rejected with EINVAL by the syscall surface;
+    /// the storage helper accepts arbitrary u64 masks so tests
+    /// can probe boundaries.
+    ///
+    /// Known limitation: we do not actually enforce capabilities
+    /// anywhere — all processes have effective root anyway.  The
+    /// ambient set is round-tripped for ABI compatibility only.
+    /// When capability enforcement lands, every syscall that
+    /// currently grants implicit privilege (mount, kexec_load,
+    /// reboot, …) must consult both the ambient and effective
+    /// sets to decide whether to permit the call.
+    pub linux_ambient_caps: u64,
 }
+
+/// Highest valid Linux capability number — fixed at
+/// `CAP_CHECKPOINT_RESTORE` (40), added in Linux 5.9.  Any cap
+/// number above this is `EINVAL` for the `PR_CAP_AMBIENT`
+/// surface and for any future cap-bearing prctl options.
+pub const LINUX_CAP_LAST_CAP: u32 = 40;
 
 /// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
 /// value every fresh `task_struct` starts with on Linux (and which
@@ -795,6 +832,9 @@ impl Process {
             // Linux default: KSM merging off.  VM hosts and large
             // language runtimes opt in via PR_SET_MEMORY_MERGE.
             linux_memory_merge: 0,
+            // Linux default: empty ambient set.  systemd /
+            // container runtimes populate via PR_CAP_AMBIENT_RAISE.
+            linux_ambient_caps: 0,
         }
     }
 }
@@ -949,6 +989,7 @@ pub fn fork_create(
         linux_mdwe_bits,
         linux_io_flusher,
         linux_memory_merge,
+        linux_ambient_caps,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -986,6 +1027,7 @@ pub fn fork_create(
             parent.linux_mdwe_bits,
             parent.linux_io_flusher,
             parent.linux_memory_merge,
+            parent.linux_ambient_caps,
         )
     };
 
@@ -1147,6 +1189,11 @@ pub fn fork_create(
         // (flush_old_exec keeps the mm flags subset that
         // includes MMF_VM_MERGE_ANY).
         linux_memory_merge,
+        // Linux: `cred->ambient` is copied by `prepare_cred` so
+        // the ambient cap set propagates verbatim across fork.
+        // Preserved across exec — this is the defining property
+        // of the ambient set vs the inheritable set.
+        linux_ambient_caps,
     };
 
     table.insert(pid, child);
@@ -1967,6 +2014,63 @@ pub fn set_memory_merge(pid: ProcessId, val: u32) -> Option<u32> {
     let old = proc.linux_memory_merge;
     proc.linux_memory_merge = val;
     Some(old)
+}
+
+/// Read the full `PR_CAP_AMBIENT` mask for `pid` (bitmask indexed
+/// by capability number).  Returns `None` if `pid` is unknown;
+/// `Some(0)` is the default (empty set).
+#[must_use]
+pub fn get_ambient_caps(pid: ProcessId) -> Option<u64> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_ambient_caps)
+}
+
+/// Install the full `PR_CAP_AMBIENT` mask for `pid`, returning
+/// the prior value.  Returns `None` if `pid` is unknown.  Bypasses
+/// the syscall surface's cap-validity check so test fixtures can
+/// install arbitrary masks (including bits beyond
+/// [`LINUX_CAP_LAST_CAP`]).
+pub fn set_ambient_caps(pid: ProcessId, val: u64) -> Option<u64> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_ambient_caps;
+    proc.linux_ambient_caps = val;
+    Some(old)
+}
+
+/// Raise (set to 1) the bit for capability `cap` in the ambient
+/// set of `pid`.  Returns the prior value of the bit (0 or 1), or
+/// `None` if `pid` is unknown.  Does not validate `cap` — caller
+/// (syscall surface) must verify `cap <= LINUX_CAP_LAST_CAP`.
+pub fn raise_ambient_cap(pid: ProcessId, cap: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let bit: u64 = 1 << cap;
+    let was_set = u32::from((proc.linux_ambient_caps & bit) != 0);
+    proc.linux_ambient_caps |= bit;
+    Some(was_set)
+}
+
+/// Lower (set to 0) the bit for capability `cap` in the ambient
+/// set of `pid`.  Returns the prior value of the bit (0 or 1), or
+/// `None` if `pid` is unknown.
+pub fn lower_ambient_cap(pid: ProcessId, cap: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let bit: u64 = 1 << cap;
+    let was_set = u32::from((proc.linux_ambient_caps & bit) != 0);
+    proc.linux_ambient_caps &= !bit;
+    Some(was_set)
+}
+
+/// Query whether capability `cap` is in the ambient set of `pid`.
+/// Returns `Some(0)` or `Some(1)` if `pid` exists; `None` if not.
+#[must_use]
+pub fn is_ambient_cap_set(pid: ProcessId, cap: u32) -> Option<u32> {
+    let bit: u64 = 1 << cap;
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| u32::from((p.linux_ambient_caps & bit) != 0))
 }
 
 /// Index of `RLIMIT_AS` (resident *address space* size) in [`Process::rlimits`].

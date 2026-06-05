@@ -16929,6 +16929,55 @@ fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
     if matches!(clockid, 4 | 5 | 6) {
         return linux_err(errno::EOPNOTSUPP);
     }
+    // Batch 206: good_sigevent content validation.  Linux's
+    // do_timer_create allocates a posix timer, then calls
+    // good_sigevent(event) which returns NULL (-> EINVAL) when:
+    //   * sigev_notify ∉ {SIGEV_SIGNAL=0, SIGEV_NONE=1, SIGEV_THREAD=2,
+    //                     SIGEV_SIGNAL|SIGEV_THREAD_ID=4}
+    //   * For sigev_notify != SIGEV_NONE: sigev_signo ∉ 1..=SIGRTMAX (64
+    //     on x86_64).
+    // Pre-batch we returned ENOSYS for any bad-shape sigevent; Linux
+    // returns EINVAL.  Apply the check ahead of the timerid EFAULT
+    // gate so probes that pass (sevp={bad}, timerid=NULL) see EINVAL
+    // first — Linux's order is good_sigevent (EINVAL) followed by
+    // copy_to_user(timerid) (EFAULT).
+    if args.arg1 != 0 {
+        // SIGEV_* constants (include/uapi/asm-generic/siginfo.h).
+        const SIGEV_SIGNAL: i32 = 0;
+        const SIGEV_NONE: i32 = 1;
+        const SIGEV_THREAD: i32 = 2;
+        const SIGEV_THREAD_ID_BIT: i32 = 4;
+        // x86_64 SIGRTMAX = 64.
+        const SIGRTMAX: i32 = 64;
+
+        let mut buf = [0u8; 16];
+        // SAFETY: validate_user_read above confirmed 64 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg1, buf.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let read_i32 = |o: usize| -> i32 {
+            match <[u8; 4]>::try_from(&buf[o..o + 4]) {
+                Ok(b) => i32::from_ne_bytes(b),
+                Err(_) => 0,
+            }
+        };
+        let sigev_signo = read_i32(8);
+        let sigev_notify = read_i32(12);
+        let notify_ok = matches!(
+            sigev_notify,
+            SIGEV_SIGNAL | SIGEV_NONE | SIGEV_THREAD
+        ) || sigev_notify == (SIGEV_SIGNAL | SIGEV_THREAD_ID_BIT);
+        if !notify_ok {
+            return linux_err(errno::EINVAL);
+        }
+        if sigev_notify != SIGEV_NONE
+            && !(1..=SIGRTMAX).contains(&sigev_signo)
+        {
+            return linux_err(errno::EINVAL);
+        }
+    }
     // timerid_t output ptr is required (4 bytes for a kernel_timer_t).
     // Linux only touches it via copy_to_user after creation succeeds, so
     // a NULL/bad ptr surfaces as EFAULT only when everything above passes.
@@ -37693,8 +37742,108 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: timer_create TAI NULL timerid not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // Batch 206: good_sigevent content validation.
+        //   * sigev_notify=99 (junk)   -> EINVAL (was ENOSYS).
+        //   * SIGEV_SIGNAL + signo=99  -> EINVAL.
+        //   * SIGEV_SIGNAL + signo=0   -> EINVAL.
+        //   * SIGEV_NONE   + signo=99  -> ENOSYS (signo not checked).
+        //   * SIGEV_THREAD + signo=99  -> EINVAL.
+        //   * SIGEV_THREAD_ID (=4) + signo=10 -> ENOSYS (4 accepted).
+        //   * (sevp={bad notify}, timerid=NULL) -> EINVAL not EFAULT
+        //     (Linux's good_sigevent EINVAL beats copy_to_user EFAULT).
+        #[repr(C)]
+        struct TimerSigev {
+            sival_ptr: u64,
+            sigev_signo: i32,
+            sigev_notify: i32,
+            _pad: [u8; 48],
+        }
+        let mk = |signo: i32, notify: i32| TimerSigev {
+            sival_ptr: 0,
+            sigev_signo: signo,
+            sigev_notify: notify,
+            _pad: [0u8; 48],
+        };
+        let sev_bad = mk(0, 99);
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const sev_bad) as u64,
+            arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create bad sigev_notify not EINVAL ({})",
+                dispatch_linux(nr::TIMER_CREATE, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let sev_sig_bad = mk(99, 0); // SIGEV_SIGNAL, signo out of range.
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const sev_sig_bad) as u64,
+            arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create SIGEV_SIGNAL bad signo not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let sev_sig_zero = mk(0, 0); // SIGEV_SIGNAL, signo=0.
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const sev_sig_zero) as u64,
+            arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create SIGEV_SIGNAL signo=0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let sev_none = mk(99, 1); // SIGEV_NONE, signo unchecked.
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const sev_none) as u64,
+            arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create SIGEV_NONE+junk signo not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let sev_thread_bad = mk(99, 2); // SIGEV_THREAD, signo out of range.
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const sev_thread_bad) as u64,
+            arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create SIGEV_THREAD bad signo not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let sev_tid = mk(10, 4); // SIGEV_SIGNAL|SIGEV_THREAD_ID, signo=10.
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const sev_tid) as u64,
+            arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create SIGEV_THREAD_ID not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (sevp={bad}, timerid=NULL) -> EINVAL beats EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: (&raw const sev_bad) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create bad notify+NULL timerid not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall/linux]   timer_create sigevent/clockid/EOPNOTSUPP gating: OK"
+            "[syscall/linux]   timer_create sigevent/clockid/EOPNOTSUPP/good_sigevent: OK"
         );
         // timer_delete -> EINVAL (no timers).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

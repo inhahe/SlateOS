@@ -19201,3 +19201,52 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          worth a future batch.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 235. [DONE 2026-06-05] Linux ABI: sys_timer_create good_sigevent gate.
+##      sys_timer_create validated clockid + EOPNOTSUPP + timerid
+##      output ptr but never content-validated the sigevent.  Linux's
+##      do_timer_create (kernel/time/posix-timers.c) calls
+##      good_sigevent(event) after the timer is allocated:
+##        * sigev_notify must be SIGEV_SIGNAL (0), SIGEV_NONE (1),
+##          SIGEV_THREAD (2), or SIGEV_SIGNAL|SIGEV_THREAD_ID (4) —
+##          otherwise the helper returns NULL -> EINVAL.
+##        * For sigev_notify != SIGEV_NONE: sigev_signo must be in
+##          1..=SIGRTMAX (64 on x86_64) — otherwise NULL -> EINVAL.
+##      The EINVAL fires AFTER the EOPNOTSUPP gate but BEFORE the
+##      copy_to_user(timer_id) EFAULT.
+##      Pre-batch a probe passing (sigev_notify=99, timerid=valid) saw
+##      our terminal -ENOSYS where Linux returns -EINVAL; with
+##      (sigev_notify=99, timerid=NULL) we saw -EFAULT where Linux
+##      returns -EINVAL.
+##
+##      Fix: in sys_timer_create, after the clockid/EOPNOTSUPP gates
+##      and before the timerid-ptr check, copy the leading 16 bytes
+##      of the sigevent (sival_ptr + sigev_signo + sigev_notify) and
+##      apply the good_sigevent gates.
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * sigev_notify=99                  -> EINVAL.
+##        * SIGEV_SIGNAL + signo=99          -> EINVAL.
+##        * SIGEV_SIGNAL + signo=0           -> EINVAL.
+##        * SIGEV_NONE   + signo=99          -> ENOSYS (signo skipped
+##          for SIGEV_NONE).
+##        * SIGEV_THREAD + signo=99          -> EINVAL.
+##        * SIGEV_THREAD_ID(4) + signo=10    -> ENOSYS (value 4 is
+##          accepted by good_sigevent's case fallthrough).
+##        * (sevp={bad}, timerid=NULL)       -> EINVAL (gate-order
+##          discriminator: EINVAL beats EFAULT, matching Linux).
+##      Marker renamed:
+##        "timer_create sigevent/clockid/EOPNOTSUPP/good_sigevent: OK".
+##
+##      Note this differs from mq_notify (batch 202) where SIGEV_THREAD_ID
+##      (4) was REJECTED: do_mq_notify only accepts SIGEV_NONE/SIGNAL/
+##      THREAD, while do_timer_create's good_sigevent additionally
+##      accepts SIGEV_SIGNAL|SIGEV_THREAD_ID.
+##
+##      Known limitations:
+##        * SIGRTMAX = 64 hardcoded; same as mq_notify (batch 202).
+##        * The SIGEV_THREAD_ID tgid validation
+##          (find_get_task_by_vpid + same_thread_group) isn't modelled.
+##          Add when proper threads/PIDs land.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

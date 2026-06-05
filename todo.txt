@@ -16863,3 +16863,78 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   io_pgetevents sigset
 ##      validation: OK" in build/serial-test.txt.
+
+
+## 191. Linux ABI: settimeofday timeval_valid gate.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_settimeofday.
+##
+##      Problem: sys_settimeofday validated only the tv/tz pointer
+##              shapes (16-byte and 8-byte struct reads) before
+##              returning the terminal EPERM.  Linux's
+##              SYSCALL_DEFINE2(settimeofday) in kernel/time.c does
+##              copy_from_user the tv, calls timeval_valid() on it,
+##              and returns -EINVAL if the values are out of range —
+##              ahead of CAP_SYS_TIME / do_sys_settimeofday64.
+##              timeval_valid:
+##                tv_sec  >= 0
+##                tv_usec >= 0
+##                tv_usec <  USEC_PER_SEC (1_000_000)
+##              Probes calling settimeofday({-1, 0}, NULL) to test
+##              "what does the kernel do with a malformed tv" saw
+##              EPERM and concluded the values were accepted (just
+##              that the privilege check failed) — when in reality
+##              even a privileged caller would have seen EINVAL.
+##
+##      Fix:    After validate_user_read of the 16-byte tv, copy the
+##              struct in, parse tv_sec (i64 LE@0) and tv_usec
+##              (i64 LE@8).  Reject:
+##                tv_sec  <  0          -> EINVAL
+##                tv_usec <  0          -> EINVAL
+##                tv_usec >= 1_000_000  -> EINVAL
+##              Then continue to the tz validation and the terminal
+##              EPERM.  tz alone (NULL tv) still EPERMs because
+##              setting just the timezone is also CAP_SYS_TIME-gated.
+##
+##      Self-tests (boot-time):
+##        * settimeofday(tv={0,0}, NULL) -> EPERM  (kept; zero is
+##          a valid timeval).
+##        * settimeofday(tv={0,0}, tz) -> EPERM  (kept).
+##        * settimeofday(tv={-1, 0}, NULL) -> EINVAL  (new;
+##          tv_sec<0 gate).
+##        * settimeofday(tv={0, -1}, NULL) -> EINVAL  (new;
+##          tv_usec<0 gate).
+##        * settimeofday(tv={0, 1_000_000}, NULL) -> EINVAL  (new;
+##          tv_usec >= USEC_PER_SEC gate; exact boundary).
+##        * settimeofday(tv={0, 999_999}, NULL) -> EPERM  (new;
+##          boundary just inside valid — confirms 999999 *is*
+##          accepted as a microsecond value, not folded as "1
+##          second minus 1 us").
+##        * settimeofday(NULL, tz) -> EPERM  (new; tz-only path
+##          still privilege-gated).
+##        * Emits "[syscall/linux]   settimeofday timeval_valid: OK".
+##
+##      Known limitations:
+##        * tz_minuteswest range (Linux conventionally [-720, 720]
+##          for -12h..+12h) is not validated.  Linux itself does
+##          not enforce this range in the syscall path either —
+##          do_sys_settimeofday64 accepts any i32 — so leaving this
+##          unvalidated matches Linux behaviour.  warn_bad_tz used
+##          to fire on dsttime != 0 in much older kernels (pre-2.6
+##          DST support), but modern Linux silently ignores tz_dsttime.
+##        * The 16-byte tv layout (i64 sec + i64 usec) is the
+##          x86_64 native struct timeval.  glibc's
+##          __kernel_old_timeval and __kernel_sock_timeval on 32-bit
+##          archs differ; when COMPAT lands, the compat wrapper
+##          must use i32 sec + i32 usec (matching old_timeval32) for
+##          x86_32 callers.
+##        * timeval_valid in Linux also rejects tv_sec > KTIME_SEC_MAX
+##          (~292 billion years).  We don't enforce that upper bound;
+##          even tv_sec = i64::MAX is currently accepted and reaches
+##          the terminal EPERM.  When real settimeofday lands, the
+##          upper bound must come in alongside the do_sys_settimeofday64
+##          range check.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   settimeofday
+##      timeval_valid: OK" in build/serial-test.txt.

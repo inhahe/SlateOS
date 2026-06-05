@@ -17340,9 +17340,33 @@ fn sys_lsm_set_self_attr(args: &SyscallArgs) -> SyscallResult {
 /// `settimeofday(tv*, tz*)`.
 fn sys_settimeofday(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 != 0 {
-        // struct timeval is 16 bytes.
+        // struct timeval is 16 bytes: tv_sec (i64 LE) + tv_usec (i64 LE).
         if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 16) {
             return linux_err(linux_errno_for(e));
+        }
+        // Linux's SYSCALL_DEFINE2(settimeofday) calls timeval_valid() on
+        // the copied-in tv ahead of do_sys_settimeofday64:
+        //   tv_sec >= 0 && tv_usec >= 0 && tv_usec < USEC_PER_SEC
+        // (USEC_PER_SEC = 1_000_000).  Reject malformed tv with EINVAL
+        // ahead of the EPERM so probes can distinguish
+        // "I sent a garbage struct" from "I don't have CAP_SYS_TIME."
+        let mut buf = [0u8; 16];
+        // SAFETY: validate_user_read above confirmed 16 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg0, buf.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let tv_sec = i64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
+            Ok(b) => b,
+            Err(_) => return linux_err(errno::EINVAL),
+        });
+        let tv_usec = i64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[8..16]) {
+            Ok(b) => b,
+            Err(_) => return linux_err(errno::EINVAL),
+        });
+        if tv_sec < 0 || !(0..1_000_000).contains(&tv_usec) {
+            return linux_err(errno::EINVAL);
         }
     }
     if args.arg1 != 0 {
@@ -36005,7 +36029,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let name_buf = b"/var/log/acct\0";
         let name_ptr = name_buf.as_ptr() as u64;
 
-        // settimeofday with tv -> EPERM.
+        // settimeofday with tv -> EPERM (tv_buf is zeroed: tv_sec=0,
+        // tv_usec=0, both pass timeval_valid).
         let a = SyscallArgs { arg0: tv_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: settimeofday valid not EPERM");
@@ -36017,6 +36042,83 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: settimeofday both not EPERM");
             return Err(KernelError::InternalError);
         }
+        // settimeofday timeval_valid gate: tv_sec < 0 -> EINVAL ahead
+        // of EPERM.  Build a dedicated 16-byte tv with sec=-1, usec=0.
+        let tv_neg_sec: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&(-1i64).to_ne_bytes());
+            b
+        };
+        let tv_neg_sec_ptr = tv_neg_sec.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: tv_neg_sec_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: settimeofday tv_sec<0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tv_usec < 0 -> EINVAL.
+        let tv_neg_usec: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[8..16].copy_from_slice(&(-1i64).to_ne_bytes());
+            b
+        };
+        let tv_neg_usec_ptr = tv_neg_usec.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: tv_neg_usec_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: settimeofday tv_usec<0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tv_usec == USEC_PER_SEC (1_000_000) -> EINVAL.
+        let tv_usec_overflow: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[8..16].copy_from_slice(&1_000_000i64.to_ne_bytes());
+            b
+        };
+        let tv_usec_overflow_ptr = tv_usec_overflow.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: tv_usec_overflow_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: settimeofday tv_usec=1e6 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tv_usec == 999_999 -> EPERM (boundary just inside valid).
+        let tv_usec_max: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[8..16].copy_from_slice(&999_999i64.to_ne_bytes());
+            b
+        };
+        let tv_usec_max_ptr = tv_usec_max.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: tv_usec_max_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: settimeofday tv_usec=999999 not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // NULL tv + non-NULL tz -> EPERM (tz alone is "set timezone only",
+        // and we don't have CAP_SYS_TIME).
+        let a = SyscallArgs { arg0: 0, arg1: tz_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: settimeofday tz-only not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   settimeofday timeval_valid: OK"
+        );
 
         // mincore misaligned -> EINVAL.
         let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: vec_ptr, arg3: 0, arg4: 0, arg5: 0 };

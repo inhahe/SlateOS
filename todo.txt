@@ -14715,3 +14715,129 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          does) and merging them would require new flags.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 160. Linux ABI: futex_waitv(2) nr=1 fast path (batch 131).
+##
+##      Status: DONE.
+##
+##      Pre-batch shape: `sys_futex_waitv` (linux.rs:15737) validated
+##      every argument shape Linux requires — nr range, flags==0,
+##      user-pointer readability for the waitv array, timespec
+##      readability when non-NULL, clockid in [0, 1] — and then
+##      always returned ENOSYS.  This is correct in the literal sense
+##      (we don't multiplex on multiple futex keys), but the
+##      overwhelmingly common caller pattern is `nr == 1`: glibc /
+##      musl / Rust std use futex_waitv as a "wait with one of
+##      CLOCK_REALTIME or CLOCK_MONOTONIC selectable" primitive on a
+##      single futex word, since the legacy SYS_FUTEX FUTEX_WAIT op
+##      ties you to CLOCK_MONOTONIC.  Falling through to ENOSYS in
+##      that case prevented these runtimes from ever making forward
+##      progress and forced a fallback to the legacy futex API (or
+##      worse, a hard syscall error).
+##
+##      Fix: implement the nr=1 case as a single FUTEX_WAIT_BITSET-
+##      style wait on the one entry, using the same handler routing
+##      and timeout semantics as `sys_futex`'s FUTEX_WAIT_BITSET arm
+##      (linux.rs:19010).  The implementation:
+##
+##        1. Reads the single `struct futex_waitv` (24 bytes) from
+##           userspace via `copy_from_user`.  The validate_user_read
+##           call upstream of the dispatch already proved the range
+##           readable; copy_from_user re-validates under SMAP.
+##        2. Rejects non-zero `__reserved` with EINVAL (matches Linux).
+##        3. Validates per-entry flags:
+##             - FUTEX2_SIZE_MASK = 0x03; only FUTEX2_SIZE_U32 (=2)
+##               is implemented.  U8/U16/U64 sizes return EINVAL.
+##             - FUTEX2_NUMA (0x04) is rejected (we don't expose NUMA
+##               keys).
+##             - FUTEX2_PRIVATE (0x80) is accepted as a no-op hint
+##               (all our futexes are process-private; we don't
+##               support cross-process named futexes yet).
+##             - Any other bit -> EINVAL (matches Linux's FUTEX2_MASK
+##               gate).
+##        4. SIZE_U32 means the futex word is 32 bits, so only the
+##           low 32 bits of the 64-bit `val` field participate in the
+##           value compare (cast `entry.val as u32`).
+##        5. If `args.arg3 == 0` (no timespec), dispatches to
+##           `handlers::sys_futex_wait`.  Otherwise reads the absolute
+##           timespec on the selected clock, computes
+##           `rel_ns = abs_ns.saturating_sub(now_ns)`, and dispatches
+##           to `handlers::sys_futex_wait_timeout`.  This mirrors the
+##           FUTEX_WAIT_BITSET pattern exactly so the underlying
+##           futex behavior stays identical.
+##        6. Maps the native return into the Linux futex_waitv
+##           contract:
+##             - Ok(1) → SyscallResult::ok(0)  (index of woken waiter;
+##               for nr=1 that's always 0).
+##             - Ok(0) → -EAGAIN  (value mismatch, per Linux).
+##             - Native error → mapped via linux_from_native
+##               (TimedOut → -ETIMEDOUT, InvalidAddress → -EFAULT,
+##               etc.).
+##
+##      For `nr > 1` the implementation still returns ENOSYS — we
+##      need a futex waitqueue that can park on N keys simultaneously
+##      and atomically unpark from any one of them.  Our futex
+##      subsystem (`crate::futex`) only supports one key per parker.
+##      Multi-key wait is tracked here as a known limitation.
+##
+##      Self-tests (syscall::linux::self_test, in the existing
+##      futex_waitv block circa line 33227):
+##
+##        Updated existing test: the old "nr=1 valid -> ENOSYS"
+##        assertion (against an all-zero waitv buffer) was wrong
+##        post-fix.  An all-zero waitv has `flags=0` which decodes as
+##        FUTEX2_SIZE_U8 — unsupported — so the new expected result
+##        is EINVAL.  Updated accordingly.
+##
+##        New: `nr=2` against the same all-zero waitv -> ENOSYS.
+##        Verifies the multi-key path still returns the honest
+##        unsupported answer.
+##
+##        New: six nr=1 fast-path gates using stack-allocated
+##        `WaitvEntry` structs:
+##          (a) flags=1 (SIZE_U16) -> EINVAL
+##          (b) flags=2, __reserved=1 -> EINVAL
+##          (c) flags=2|0x40 (unknown bit) -> EINVAL
+##          (d) flags=2|0x04 (NUMA) -> EINVAL
+##          (e) flags=2 (SIZE_U32), uaddr=0 -> EFAULT
+##              (validates that dispatch reaches
+##              handlers::sys_futex_wait and the page-validation gate
+##              fires)
+##          (f) flags=2|0x80 (SIZE_U32 | PRIVATE), uaddr=0 -> EFAULT
+##              (validates PRIVATE is accepted as a no-op hint and
+##              the dispatch still reaches the handler)
+##
+##      Known limitations / follow-ups:
+##        * Multi-key wait (nr > 1) still returns ENOSYS.  Adding
+##          true multi-key wait requires extending `crate::futex` so
+##          a single parker can be queued on multiple keys with
+##          atomic unpark-from-any.  This is the same waitqueue
+##          design problem Linux solved with the futex2 series in
+##          5.16; we'd port the same pattern when there's a concrete
+##          caller demanding it.
+##        * The `clockid` field of futex_waitv selects CLOCK_REALTIME
+##          (0) or CLOCK_MONOTONIC (1) for the *timeout* clock, but
+##          our underlying `handlers::sys_futex_wait_timeout` takes a
+##          relative nanosecond delta.  We compute the relative delta
+##          ourselves via saturating_sub against the current clock
+##          reading.  A more faithful implementation would carry the
+##          absolute deadline + clockid into the futex parker and
+##          re-check on spurious wake, but the saturating_sub pattern
+##          matches what FUTEX_WAIT_BITSET already does and is good
+##          enough for all real-world callers we've observed.
+##        * The `val` field is 64-bit in the futex_waitv ABI but the
+##          futex word is 32-bit when SIZE_U32 is in effect.  We
+##          truncate `val` to u32 for the compare.  Linux does the
+##          same — the upper 32 bits are unused for SIZE_U32 entries.
+##          When other size classes are eventually implemented, the
+##          dispatch will need per-size compare helpers.
+##        * The boot-test harness can't exercise the actual block /
+##          wake path because there's no scheduler context in the
+##          self-test (handlers::sys_futex_wait would deadlock
+##          waiting for a wake that can never arrive).  Coverage is
+##          limited to the validation gates and the dispatch-reaches-
+##          handlers proof via EFAULT on uaddr=0.  Full block/wake
+##          coverage is deferred to the Linux-ELF integration test
+##          pass.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

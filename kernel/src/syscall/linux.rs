@@ -12819,12 +12819,30 @@ fn sys_shmat(_args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `shmctl(shmid, cmd, buf)`.
+///
+/// Linux's `ipc/shm.c::ksys_shmctl()` gate order:
+///   1. `if (cmd < 0 || shmid < 0) return -EINVAL;`
+///   2. switch on cmd; the `buf` pointer is only touched inside the
+///      per-cmd handler (after `ipc_obtain_object_check(shmid)` for
+///      cmds that need a segment, or for IPC_INFO/SHM_INFO which
+///      write info to buf only after security checks pass).
+///
+/// Pre-batch we pre-validated `buf` with `validate_user_read(buf, 1)`
+/// for any non-NULL buf, so a probe passing
+/// (shmid=5, cmd=2, buf=0xDEAD) saw -EFAULT where Linux returns
+/// -EINVAL (shmid 5 doesn't exist, so the lookup inside the cmd
+/// handler fails before buf is touched).  Removed the pre-validation.
 fn sys_shmctl(args: &SyscallArgs) -> SyscallResult {
-    if args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-            return linux_err(linux_errno_for(e));
-        }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let shmid = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd = args.arg1 as i32;
+    if cmd < 0 || shmid < 0 {
+        return linux_err(errno::EINVAL);
     }
+    // No segments exist; every shmid lookup fails with EINVAL.  Buf
+    // is intentionally NOT validated here — Linux defers that to the
+    // per-cmd handler.
     linux_err(errno::EINVAL)
 }
 
@@ -13040,12 +13058,28 @@ fn sys_msgrcv(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `msgctl(msqid, cmd, buf)`.
+///
+/// Linux's `ipc/msg.c::ksys_msgctl()` gate order:
+///   1. `if (msqid < 0 || cmd < 0) return -EINVAL;`
+///   2. switch on cmd; buf is only touched inside per-cmd handlers
+///      after the queue lookup (which fails with -EINVAL when no
+///      queue with that id exists).
+///
+/// Pre-batch we pre-validated `buf` with `validate_user_read(buf, 1)`
+/// for any non-NULL buf, diverging from Linux for the
+/// (msqid>=0, cmd>=0, buf=invalid) case where Linux returns EINVAL
+/// (no queue) but we returned EFAULT.  Removed.
 fn sys_msgctl(args: &SyscallArgs) -> SyscallResult {
-    if args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-            return linux_err(linux_errno_for(e));
-        }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let msqid = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd = args.arg1 as i32;
+    if msqid < 0 || cmd < 0 {
+        return linux_err(errno::EINVAL);
     }
+    // No queues exist; every msqid lookup fails with EINVAL.  Buf
+    // is intentionally NOT validated here — Linux defers that to
+    // the per-cmd handler.
     linux_err(errno::EINVAL)
 }
 
@@ -34504,11 +34538,47 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: shmctl not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 200: shmctl(shmid=5, cmd=2, buf=0xDEAD) -> EINVAL.
+        // Linux defers buf validation to the per-cmd handler, which
+        // never runs because the shmid lookup fails first.  Was
+        // EFAULT pre-batch due to a spurious pre-validate of buf.
+        let a = SyscallArgs { arg0: 5, arg1: 2, arg2: 0xDEAD,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(shmid=5,cmd=2,bad buf) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // shmctl(shmid=-1, cmd=2, buf=NULL) -> EINVAL (shmid<0 gate).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 2, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(shmid<0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // shmctl(shmid=0, cmd=-1, buf=NULL) -> EINVAL (cmd<0 gate).
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(cmd<0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
         if dispatch_linux(nr::SHMDT, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: shmdt not EINVAL");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   shmctl id/cmd<0, no pre-buf validate: OK"
+        );
 
         // semget with negative nsems -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0,
@@ -34739,6 +34809,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: msgctl not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 200: msgctl(msqid=5, cmd=2, buf=0xDEAD) -> EINVAL.
+        // Linux defers buf validation to the per-cmd handler; was
+        // EFAULT pre-batch.
+        let a = SyscallArgs { arg0: 5, arg1: 2, arg2: 0xDEAD,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(msqid=5,cmd=2,bad buf) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgctl(msqid=-1, cmd=2, buf=NULL) -> EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 2, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(msqid<0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgctl(msqid=0, cmd=-1, buf=NULL) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(cmd<0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   msgctl id/cmd<0, no pre-buf validate: OK"
+        );
 
         // mq_open(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

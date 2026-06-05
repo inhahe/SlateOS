@@ -18935,3 +18935,52 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          as i64 little-endian.  Same wire format.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 229. Linux ABI: shmctl/msgctl id<0/cmd<0 gate +
+##      no pre-lookup buf validation (batch 200).
+##
+##      Linux's ipc/shm.c::ksys_shmctl and ipc/msg.c::ksys_msgctl
+##      both have the same shape:
+##        if ({sh,msq}id < 0 || cmd < 0) return -EINVAL;
+##        switch (cmd) { ... }
+##      where buf is only touched inside per-cmd handlers, AFTER the
+##      ipc_obtain_object_check({sh,msq}id) lookup (which fails with
+##      -EINVAL when no segment / queue exists).
+##
+##      Pre-batch both syscalls did a blanket validate_user_read on
+##      buf (1 byte) if non-NULL, returning -EFAULT on unmapped buf.
+##      A probe passing ({sh,msq}id=5, cmd=2, buf=0xDEAD) saw -EFAULT
+##      where Linux returns -EINVAL (the id lookup fails first,
+##      before buf is touched).
+##
+##      Fix:
+##        1. Explicit shmid<0 / msqid<0 / cmd<0 gate -> EINVAL.
+##        2. Removed the pre-lookup validate_user_read(buf, 1).  Buf
+##           is no longer touched at the gate level.
+##        3. Terminal EINVAL still applies (no segments / queues
+##           exist in this kernel; every id lookup fails).
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * shmctl(shmid=5, cmd=2, buf=0xDEAD)   -> EINVAL (was EFAULT
+##          pre-batch — this is the EFAULT-vs-EINVAL discriminator).
+##        * shmctl(shmid=-1, cmd=2, buf=NULL)    -> EINVAL.
+##        * shmctl(shmid=0, cmd=-1, buf=NULL)    -> EINVAL.
+##        * msgctl(msqid=5, cmd=2, buf=0xDEAD)   -> EINVAL (was EFAULT).
+##        * msgctl(msqid=-1, cmd=2, buf=NULL)    -> EINVAL.
+##        * msgctl(msqid=0, cmd=-1, buf=NULL)    -> EINVAL.
+##      Markers emitted:
+##        "shmctl id/cmd<0, no pre-buf validate: OK"
+##        "msgctl id/cmd<0, no pre-buf validate: OK"
+##
+##      Known limitations:
+##        * We still don't implement IPC_INFO / SHM_INFO / MSG_INFO,
+##          which on Linux succeed with the kernel namespace info
+##          written to buf.  A probe issuing shmctl(_, IPC_INFO, buf)
+##          sees -EINVAL here vs. success on Linux.  When real
+##          SysV IPC support lands, these handlers must write the
+##          namespace info and return 0.
+##        * The IPC_STAT / IPC_SET / IPC_RMID handlers also need a
+##          real ipc_obtain_object path before they can produce
+##          anything but -EINVAL.  Same condition.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

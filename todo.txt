@@ -15892,3 +15892,85 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   semget/semop SEMMSL/SEMOPM
 ##      validation: OK" in build/serial-test.txt.
 
+## 180. Linux ABI: kexec_load / kexec_file_load flag validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_kexec_load,
+##              kernel/src/syscall/linux.rs::sys_kexec_file_load.
+##
+##      Problem: kexec_load and kexec_file_load accepted any `flags`
+##              value and returned EPERM unconditionally — the
+##              terminal "we don't load replacement kernels" answer.
+##              That hid the EINVAL Linux returns for malformed flag
+##              bits and for foreign-architecture requests.  A probe
+##              passing `flags = 0x4` (reserved low bit) or `flags =
+##              0x0001_0000` (foreign arch e_machine) saw EPERM and
+##              concluded "permission, not validity" — a feature-
+##              detection probe would then try a different code path
+##              after dropping privileges, only to hit the real
+##              EINVAL on the second attempt.
+##
+##      Fix:    Added Linux's documented gates from
+##              kernel/kexec.c::kexec_load_check() and
+##              kernel/kexec_file.c::SYSCALL_DEFINE5(kexec_file_load),
+##              run ahead of the EPERM terminal so visibility extends
+##              to unprivileged callers:
+##                kexec_load:
+##                  if ((flags & ~KEXEC_ARCH_MASK) & ~KEXEC_FLAGS) != 0
+##                      -> EINVAL  (reserved low bit)
+##                  arch = flags & KEXEC_ARCH_MASK
+##                  if arch != 0 && arch != KEXEC_ARCH_X86_64
+##                      -> EINVAL  (foreign arch)
+##                  (existing nr_segments / segments-pointer gates,
+##                   then EPERM)
+##                kexec_file_load:
+##                  if flags & ~KEXEC_FILE_FLAGS != 0  -> EINVAL
+##                  (existing fd / cmdline gates, then EPERM)
+##              Constants:
+##                KEXEC_FLAGS = KEXEC_ON_CRASH | KEXEC_PRESERVE_CONTEXT
+##                             = 0x3
+##                KEXEC_ARCH_MASK = 0xffff_0000
+##                KEXEC_ARCH_X86_64 = EM_X86_64 << 16 = 62 << 16
+##                                  = 0x003e_0000
+##                KEXEC_FILE_FLAGS = UNLOAD | ON_CRASH | NO_INITRAMFS
+##                                  | DEBUG = 0xf  (Linux 6.10)
+##
+##      Self-tests (boot-time):
+##        * kexec_load with reserved low bit (flags=0x4) -> EINVAL
+##          (new; previously EPERM).
+##        * kexec_load with foreign arch (flags=0x0001_0000) ->
+##          EINVAL (new; previously EPERM).
+##        * kexec_load with valid flags (ON_CRASH | X86_64 arch) ->
+##          EPERM (new; verifies the gates allow legitimate flags
+##          through to the terminal answer).
+##        * kexec_file_load with reserved flag (0x10) -> EINVAL
+##          (new; previously EPERM).
+##        * kexec_file_load with KEXEC_FILE_DEBUG (0x8) -> EPERM
+##          (new; verifies a legitimate flag is accepted by the
+##          gate).
+##        * All pre-existing kexec tests still pass (nr_segments>16,
+##          NULL segments with nr>0, bad kernel_fd, NULL cmdline,
+##          valid -> EPERM).
+##        * Emits "[syscall/linux]   kexec_load/kexec_file_load flag
+##          validation: OK".
+##
+##      Known limitations:
+##        * KEXEC_FILE_FLAGS is hard-coded to 0xf, the Linux 6.10
+##          value.  When KEXEC_FILE_OK_TO_LOAD_OLD or other new flag
+##          bits land in upstream Linux, this cap will need to
+##          widen.  Documented here so the next maintainer knows to
+##          re-check against the current Linux UAPI when raising
+##          our minimum target kernel version.
+##        * KEXEC_ARCH_X86_64 is the only non-zero arch we accept.
+##          When 32-bit x86 compatibility lands (KEXEC_ARCH_386),
+##          this list should grow.  For an x86_64-only OS the
+##          current list is exhaustive.
+##        * The terminal answer remains EPERM for every valid call
+##          — we don't load replacement kernels from userspace.
+##          That's the same answer Linux gives an unprivileged
+##          caller, and matches the design (kexec is a root-only
+##          operation we won't grant access to).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   kexec_load/kexec_file_load
+##      flag validation: OK" in build/serial-test.txt.
+

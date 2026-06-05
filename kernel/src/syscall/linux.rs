@@ -8778,18 +8778,37 @@ fn sys_fstatfs(args: &SyscallArgs) -> SyscallResult {
 // continues to drift.
 // ---------------------------------------------------------------------------
 
-/// `clock_settime(clk_id, timespec*)` — refuse with EPERM.
+/// `clock_settime(clk_id, timespec*)` — refuse with EPERM after Linux
+/// gate ordering.
 fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
-    // Validate the user pointer so callers passing garbage still see
-    // EFAULT (Linux validates before the privilege check on some
-    // codepaths).  Then return EPERM.
+    // Linux's `SYSCALL_DEFINE2(clock_settime)` (kernel/time/posix-timers.c):
+    //   1. `kc = clockid_to_kclock(which_clock); if (!kc) return -EINVAL;`
+    //   2. `if (!kc->clock_set) return -EOPNOTSUPP;`
+    //   3. `if (get_timespec64(...)) return -EFAULT;`
+    //   4. `return kc->clock_set(...)` — capability/PERM check inside.
+    // Pre-batch we skipped (1) and (2), so any clockid (even garbage
+    // ones like 99 or SGI_CYCLE(10)) returned EFAULT/EPERM where Linux
+    // returns EINVAL/EOPNOTSUPP.
+    let clockid = args.arg0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid_i32 = clockid as i32;
+    if !(0..=11).contains(&clockid_i32) || clockid_i32 == 10 {
+        return linux_err(errno::EINVAL);
+    }
+    // Linux clocks whose k_clock entry has .clock_set == NULL:
+    //   MONOTONIC(1), THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
+    //   REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
+    //   REALTIME_ALARM(8), BOOTTIME_ALARM(9).
+    // Clocks with .clock_set: REALTIME(0), PROCESS_CPUTIME_ID(2), TAI(11).
+    if matches!(clockid_i32, 1 | 3..=9) {
+        return linux_err(errno::EOPNOTSUPP);
+    }
     let tp = args.arg1;
-    if tp != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(tp, 16) {
-            return linux_err(linux_errno_for(e));
-        }
-    } else {
+    if tp == 0 {
         return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(tp, 16) {
+        return linux_err(linux_errno_for(e));
     }
     linux_err(errno::EPERM)
 }
@@ -30155,9 +30174,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    // clock_settime / clock_adjtime / adjtimex — NULL EFAULT then EPERM.
+    // clock_settime / clock_adjtime / adjtimex — Linux gate order:
+    // clockid -> EINVAL/EOPNOTSUPP, then EFAULT, then EPERM.
     {
-        // clock_settime(0, NULL) -> EFAULT.
+        // clock_settime(CLOCK_REALTIME, NULL) -> EFAULT (clockid OK, no
+        // EOPNOTSUPP, then NULL ptr check fires).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
@@ -30167,7 +30188,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // clock_settime(0, 0x1000) in kernel context (validate bypass) -> EPERM.
+        // clock_settime(CLOCK_REALTIME, 0x1000) in kernel context
+        // (validate bypass) -> EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
@@ -30177,6 +30199,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // clock_settime(99, NULL) -> EINVAL (bad clockid first, beats
+        // the NULL ptr EFAULT).
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime bad clockid not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_SGI_CYCLE=10, valid ptr) -> EINVAL.
+        let a = SyscallArgs { arg0: 10, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime SGI_CYCLE not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_MONOTONIC=1, valid ptr) -> EOPNOTSUPP
+        // (no .clock_set in Linux's clock_monotonic table entry).
+        let a = SyscallArgs { arg0: 1, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime MONOTONIC not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_BOOTTIME=7, NULL) -> EOPNOTSUPP
+        // (EOPNOTSUPP gate beats NULL ptr EFAULT).
+        let a = SyscallArgs { arg0: 7, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime BOOTTIME not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_TAI=11, 0x1000) -> EPERM (TAI has .clock_set
+        // in Linux, so falls through past EOPNOTSUPP gate).
+        let a = SyscallArgs { arg0: 11, arg1: 0x1000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime TAI not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   clock_settime clockid/EOPNOTSUPP gating: OK"
+        );
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read
         // path used by chrony / ntpd / timedatectl.  Non-zero modes
         // still returns EPERM (no CAP_SYS_TIME).

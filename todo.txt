@@ -17778,3 +17778,49 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 ##      Serial confirms marker in build/serial-test.txt.
+
+## 207. Batch 178: sys_clock_settime clockid/EOPNOTSUPP gating
+##      ------------------------------------------------------
+##      Tightened sys_clock_settime to match Linux's
+##      SYSCALL_DEFINE2(clock_settime) gate order
+##      (kernel/time/posix-timers.c):
+##        1. clockid_to_kclock NULL -> EINVAL
+##        2. !kc->clock_set -> EOPNOTSUPP
+##        3. get_timespec64 -> EFAULT
+##        4. kc->clock_set -> per-impl result (EPERM in our case)
+##      Pre-batch we skipped (1) and (2) — any clockid (even garbage
+##      99 or SGI_CYCLE) returned EFAULT/EPERM where Linux returns
+##      EINVAL/EOPNOTSUPP.
+##
+##      Implementation:
+##        * clockid in [0..=11] AND != 10 -> else EINVAL.
+##        * clockid in {1,3,4,5,6,7,8,9} -> EOPNOTSUPP (clocks whose
+##          k_clock table entry has .clock_set == NULL in Linux:
+##          MONOTONIC, THREAD_CPUTIME_ID, MONOTONIC_RAW,
+##          REALTIME_COARSE, MONOTONIC_COARSE, BOOTTIME,
+##          REALTIME_ALARM, BOOTTIME_ALARM).
+##        * NULL tp -> EFAULT, validate_user_read(16) -> EFAULT.
+##        * Terminal EPERM (no CAP_SYS_TIME).
+##
+##      Self-tests added (5 new + 2 updated):
+##        * clock_settime(CLOCK_REALTIME=0, NULL) -> EFAULT (unchanged).
+##        * clock_settime(CLOCK_REALTIME=0, 0x1000) -> EPERM (unchanged).
+##        * clock_settime(99, NULL) -> EINVAL (was EFAULT pre-batch).
+##        * clock_settime(SGI_CYCLE=10, valid) -> EINVAL.
+##        * clock_settime(MONOTONIC=1, valid) -> EOPNOTSUPP.
+##        * clock_settime(BOOTTIME=7, NULL) -> EOPNOTSUPP
+##          (proves EOPNOTSUPP beats NULL ptr EFAULT).
+##        * clock_settime(TAI=11, valid) -> EPERM
+##          (TAI has .clock_set, falls through to EPERM).
+##        * Emits "[syscall/linux]   clock_settime
+##          clockid/EOPNOTSUPP gating: OK".
+##
+##      Known limitations:
+##        * PROCESS_CPUTIME_ID=2 has .clock_set in Linux but always
+##          returns EINVAL for non-current PID; we return EPERM
+##          instead (no per-process cputime accounting yet).
+##          Acceptable as a stronger refusal than Linux's EINVAL
+##          since CAP_SYS_TIME would be checked first anyway.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms marker in build/serial-test.txt.

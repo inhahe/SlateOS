@@ -10649,4 +10649,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
+## 113. Linux ABI batch 84: per-PCB capability bounding set
+##      (PR_CAPBSET_READ / PR_CAPBSET_DROP) replacing constant
+##      stubs with real round-trip storage and validation.
+##
+##      Motivation: pre-batch PR_CAPBSET_READ always returned 1
+##      and PR_CAPBSET_DROP always returned 0, regardless of the
+##      cap argument or the auxiliary args.  systemd's
+##      CapabilityBoundingSet=, libcap's capng_apply, capsh
+##      --drop, runc's OCI bounding-set support, and every
+##      container init script all expect PR_CAPBSET_DROP to
+##      actually clear a bit they then verify with
+##      PR_CAPBSET_READ — observing "still set" after a drop
+##      makes them log a hard failure and refuse to start.  Also
+##      the stubs accepted out-of-range cap numbers (no EINVAL),
+##      diverging from Linux on the obvious negative cases.
+##
+##      Wired up:
+##        * pcb::Process gains `linux_cap_bset: u64`.
+##        * Default LINUX_CAP_FULL_SET = (1 << 41) - 1 — every
+##          bit 0..=40 set, mirroring Linux's `init_cred.cap_bset`
+##          / `CAP_FULL_SET`.  Tracks LINUX_CAP_LAST_CAP so any
+##          future bump (cap 41+) updates automatically.
+##        * Fork inheritance: verbatim copy (Linux prepare_cred
+##          copies cred->cap_bset).  Bounding set is
+##          monotone-shrinking by definition, so a child can only
+##          ever narrow what the parent installed.
+##        * Helpers: get_cap_bset, set_cap_bset (test bypass),
+##          is_cap_in_bset, drop_cap_from_bset.
+##
+##      Syscall surface (sys_prctl):
+##        PR_CAPBSET_READ (23) — was `SyscallResult::ok(1)`:
+##          - arg2..arg4 must be 0 -> EINVAL otherwise.
+##          - arg1 > LINUX_CAP_LAST_CAP (40) -> EINVAL.
+##          - Returns the bit (0 or 1) for the requested cap.
+##          - Kernel context (no PCB) -> 1 (default full set).
+##        PR_CAPBSET_DROP (24) — was `SyscallResult::ok(0)`:
+##          - arg2..arg4 must be 0 -> EINVAL otherwise.
+##          - arg1 > LINUX_CAP_LAST_CAP -> EINVAL.
+##          - Clears the bit and returns 0.
+##          - Kernel context: passes validation but mutates
+##            nothing (no PCB).
+##
+##      Known limitations:
+##        * Linux additionally requires CAP_SETPCAP for
+##          PR_CAPBSET_DROP; we don't enforce caps yet.  Same
+##          deferral as the rest of the prctl surface.
+##        * The bounding set is stored only — no exec path
+##          consults it to clip the permitted set yet.  This is
+##          ABI round-trip plumbing; real semantics would need
+##          an exec hook and a credential block.
+##
+##      Self-test (boot path):
+##        Dispatch layer:
+##          - PR_CAPBSET_READ with cap in {41, 0xff, u64::MAX}
+##            -> EINVAL.
+##          - PR_CAPBSET_READ with any of arg2..arg4 != 0
+##            -> EINVAL.
+##          - PR_CAPBSET_READ kernel context for caps
+##            {0, 1, 12, 21, 40} -> 1.
+##          - PR_CAPBSET_DROP with cap in {41, 0xff, u64::MAX}
+##            -> EINVAL.
+##          - PR_CAPBSET_DROP with any of arg2..arg4 != 0
+##            -> EINVAL.
+##          - PR_CAPBSET_DROP kernel context for caps
+##            {0, 5, 12, 40} -> 0.
+##        Storage layer:
+##          - get returns Some(CAP_FULL_SET) initially.
+##          - is_cap_in_bset reports 1 for every cap 0..=40.
+##          - drop CAP_NET_ADMIN once: was-set=1, then 0 on
+##            re-drop.  Neighbouring caps untouched.
+##          - set bypass installs arbitrary bits (including
+##            high bits beyond CAP_LAST_CAP).
+##          - destroy -> every helper returns None.
+##        Constant sanity:
+##          - CAP_FULL_SET == (1 << 41) - 1.
+##          - Bit 40 set; bit 41 clear; popcount == 41.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
 

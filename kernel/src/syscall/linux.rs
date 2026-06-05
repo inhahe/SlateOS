@@ -3939,13 +3939,73 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             }
             SyscallResult::ok(0)
         }
-        // PR_CAPBSET_READ — Linux returns 1 if the cap is in the
-        // bounding set, 0 if not.  We don't track POSIX caps; report
-        // "in set" so systemd doesn't refuse to start because it
-        // thinks a capability it wants to drop isn't available.
-        23 => SyscallResult::ok(1),
-        // PR_CAPBSET_DROP — silent success.
-        24 => SyscallResult::ok(0),
+        // PR_CAPBSET_READ (23) — query the per-task capability
+        // bounding set.  systemd, capsh, container runtimes, and
+        // libcap's capng_get_caps_process all hit this at startup
+        // to learn which caps are still available before they
+        // start dropping things via PR_CAPBSET_DROP.
+        //
+        // Linux semantics (security/commoncap.c cap_task_prctl
+        // PR_CAPBSET_READ):
+        //   * arg2 (our arg1) is the capability number, must
+        //     satisfy cap_valid(cap) (cap <= CAP_LAST_CAP) else
+        //     EINVAL.
+        //   * Returns 0 or 1 — the bit's current state in
+        //     cred->cap_bset.
+        //   * arg3/arg4/arg5 are documented as "must be 0".
+        //     Linux does not actually police them, but we do for
+        //     ABI hygiene (matches every other strict prctl arm).
+        //
+        // Kernel context (no PCB): report the default
+        // CAP_FULL_SET, so any cap_valid number returns 1 —
+        // mirrors what a fresh process would observe.
+        23 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            if args.arg1 > u64::from(pcb::LINUX_CAP_LAST_CAP) {
+                return linux_err(errno::EINVAL);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let cap = args.arg1 as u32;
+            let v = match caller_pid() {
+                Some(pid) => pcb::is_cap_in_bset(pid, cap).unwrap_or(1),
+                None => 1,
+            };
+            SyscallResult::ok(i64::from(v))
+        }
+        // PR_CAPBSET_DROP (24) — permanently remove `cap` from
+        // the bounding set.  Monotone-shrinking: once dropped a
+        // cap cannot be reinstated even by uid 0.  systemd, runc,
+        // container init code, and capsh --drop all hit this to
+        // build a least-privilege set before exec.
+        //
+        // Linux semantics (security/commoncap.c cap_prctl_drop):
+        //   * Requires CAP_SETPCAP in the current credential's
+        //     effective set, else EPERM.  We don't enforce
+        //     capabilities yet (documented).
+        //   * arg2 (our arg1) is the capability number, must
+        //     satisfy cap_valid(cap) else EINVAL.
+        //   * arg3/arg4/arg5 must be 0 (policed here for ABI
+        //     hygiene; Linux does not check).
+        //   * Returns 0 on success.
+        //
+        // Kernel context (no PCB): nothing to mutate; the
+        // validation arms still apply.
+        24 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            if args.arg1 > u64::from(pcb::LINUX_CAP_LAST_CAP) {
+                return linux_err(errno::EINVAL);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let cap = args.arg1 as u32;
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::drop_cap_from_bset(pid, cap);
+            }
+            SyscallResult::ok(0)
+        }
         // PR_SET_NO_NEW_PRIVS (38) — install the sticky NNP flag.
         // Linux enforces a strict argument shape: arg2 (== arg1
         // here) MUST be 1, and arg3, arg4, arg5 (== arg2, arg3,
@@ -18823,6 +18883,172 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
                 pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE << 1
             );
+        }
+
+        // Batch 84: PR_CAPBSET_READ (23) / PR_CAPBSET_DROP (24)
+        // — per-task capability bounding set, replacing the
+        // previous always-1 / always-0 stubs.
+        // Verifications:
+        //   1. PR_CAPBSET_READ cap > CAP_LAST_CAP -> EINVAL.
+        //   2. PR_CAPBSET_READ arg2..arg4 != 0 -> EINVAL.
+        //   3. PR_CAPBSET_READ kernel context (no PCB) returns 1
+        //      for every valid cap (default CAP_FULL_SET).
+        //   4. PR_CAPBSET_DROP cap > CAP_LAST_CAP -> EINVAL.
+        //   5. PR_CAPBSET_DROP arg2..arg4 != 0 -> EINVAL.
+        //   6. PR_CAPBSET_DROP kernel context valid cap -> 0.
+        //   7. pcb storage round-trip: default full set, drop
+        //      one cap, drop same again (was-set 1 then 0),
+        //      set/get arbitrary mask, destroy returns None.
+        //   8. LINUX_CAP_FULL_SET sanity: every bit 0..=40 set,
+        //      no bit 41+ set.
+        {
+            // PR_CAPBSET_READ cap > CAP_LAST_CAP (40) -> EINVAL.
+            for bad_cap in [41u64, 0xff, u64::MAX] {
+                let a = SyscallArgs { arg0: 23, arg1: bad_cap, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, cap={}) not EINVAL ({})",
+                        bad_cap,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_CAPBSET_READ arg2..arg4 != 0 -> EINVAL.
+            // arg1 = 0 (CAP_CHOWN) is otherwise valid.
+            for (idx, a) in [
+                SyscallArgs { arg0: 23, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 23, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 23, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, …{}=1) not EINVAL ({})",
+                        idx + 2,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_CAPBSET_READ kernel context: every valid cap -> 1.
+            for cap in [0u64, 1, 12, 21, 40] {
+                let a = SyscallArgs { arg0: 23, arg1: cap, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != 1 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, cap={}) kernel-ctx not 1 ({})",
+                        cap,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_CAPBSET_DROP cap > CAP_LAST_CAP -> EINVAL.
+            for bad_cap in [41u64, 0xff, u64::MAX] {
+                let a = SyscallArgs { arg0: 24, arg1: bad_cap, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, cap={}) not EINVAL ({})",
+                        bad_cap,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_CAPBSET_DROP arg2..arg4 != 0 -> EINVAL.
+            for (idx, a) in [
+                SyscallArgs { arg0: 24, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 24, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 24, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, …{}=1) not EINVAL ({})",
+                        idx + 2,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_CAPBSET_DROP kernel context with valid cap -> 0.
+            for cap in [0u64, 5, 12, 40] {
+                let a = SyscallArgs { arg0: 24, arg1: cap, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, cap={}) kernel-ctx not 0 ({})",
+                        cap,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // pcb storage round-trip.
+            let test_pid = pcb::create("capbset-test", 0);
+            // Default full set.
+            assert_eq!(
+                pcb::get_cap_bset(test_pid),
+                Some(pcb::LINUX_CAP_FULL_SET)
+            );
+            // Every cap 0..=40 reads 1; bits 41+ would be outside
+            // the surface but the helper does not validate.
+            for cap in 0u32..=40 {
+                assert_eq!(pcb::is_cap_in_bset(test_pid, cap), Some(1));
+            }
+            // Drop CAP_NET_ADMIN (12) — prior value 1.
+            assert_eq!(pcb::drop_cap_from_bset(test_pid, 12), Some(1));
+            assert_eq!(pcb::is_cap_in_bset(test_pid, 12), Some(0));
+            // Other caps unaffected.
+            assert_eq!(pcb::is_cap_in_bset(test_pid, 11), Some(1));
+            assert_eq!(pcb::is_cap_in_bset(test_pid, 13), Some(1));
+            // Re-dropping reports 0 (was already cleared).
+            assert_eq!(pcb::drop_cap_from_bset(test_pid, 12), Some(0));
+            // Helper bypass: install arbitrary mask.
+            assert_eq!(
+                pcb::set_cap_bset(test_pid, 0xdead_beef_dead_beef),
+                Some(pcb::LINUX_CAP_FULL_SET & !(1u64 << 12))
+            );
+            assert_eq!(
+                pcb::get_cap_bset(test_pid),
+                Some(0xdead_beef_dead_beef)
+            );
+            // Restore full set via helper.
+            assert_eq!(
+                pcb::set_cap_bset(test_pid, pcb::LINUX_CAP_FULL_SET),
+                Some(0xdead_beef_dead_beef)
+            );
+            pcb::destroy(test_pid);
+            assert_eq!(pcb::get_cap_bset(test_pid), None);
+            assert_eq!(pcb::set_cap_bset(test_pid, 0), None);
+            assert_eq!(pcb::drop_cap_from_bset(test_pid, 0), None);
+            assert_eq!(pcb::is_cap_in_bset(test_pid, 0), None);
+
+            // Constant sanity: CAP_FULL_SET has every bit 0..=40
+            // set and no bit 41+ set.
+            assert_eq!(
+                pcb::LINUX_CAP_FULL_SET,
+                (1u64 << 41) - 1
+            );
+            assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 40), 1u64 << 40);
+            assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 41), 0);
+            assert_eq!(pcb::LINUX_CAP_FULL_SET.count_ones(), 41);
         }
     }
 

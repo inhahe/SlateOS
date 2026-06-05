@@ -762,6 +762,32 @@ pub struct Process {
     /// bit that is currently set -> EPERM, (c) attempting to flip
     /// a bit whose lock is set -> EPERM.
     pub linux_securebits: u32,
+    /// Linux `prctl(PR_CAPBSET_READ)` / `PR_CAPBSET_DROP`
+    /// per-task capability bounding set.  Bit `n` corresponds to
+    /// capability number `n` (`CAP_CHOWN = 0`, …,
+    /// `CAP_CHECKPOINT_RESTORE = 40`).  A set bit means the cap
+    /// *may* appear in the permitted set of any execve'd binary;
+    /// dropping a bit permanently removes that capability from
+    /// the bounding set for this process and all descendants
+    /// (the bounding set is monotone-shrinking by design).
+    ///
+    /// Default: [`LINUX_CAP_FULL_SET`] — all caps 0..=40 set,
+    /// matching Linux's `init_cred.cap_bset` and the value every
+    /// uid-0 process starts with.
+    ///
+    /// Fork inheritance: verbatim copy (Linux `prepare_cred`
+    /// copies `cred->cap_bset` along with the rest of the
+    /// credential block).
+    ///
+    /// Exec semantics on Linux: the bounding set is preserved
+    /// across exec — it's the whole point.  We have no exec hook
+    /// yet but the storage helper does the right thing
+    /// automatically: PCB-level state survives.
+    ///
+    /// The storage helpers bypass cap-validity checks so test
+    /// fixtures can install arbitrary masks.  The syscall surface
+    /// enforces `cap <= LINUX_CAP_LAST_CAP`.
+    pub linux_cap_bset: u64,
 }
 
 /// Highest valid Linux capability number — fixed at
@@ -769,6 +795,16 @@ pub struct Process {
 /// number above this is `EINVAL` for the `PR_CAP_AMBIENT`
 /// surface and for any future cap-bearing prctl options.
 pub const LINUX_CAP_LAST_CAP: u32 = 40;
+
+/// Linux `CAP_FULL_SET` — every defined capability bit set
+/// (bits 0..=40).  Matches `init_cred.cap_bset`; this is the
+/// value every fresh task observes from `PR_CAPBSET_READ`
+/// before anyone drops anything.
+///
+/// Expressed as `(1 << 41) - 1` so the constant tracks
+/// `LINUX_CAP_LAST_CAP + 1` automatically if Linux extends the
+/// capability range.
+pub const LINUX_CAP_FULL_SET: u64 = (1u64 << (LINUX_CAP_LAST_CAP + 1)) - 1;
 
 /// Securebit: uid 0 does not grant capabilities (bit 0).
 pub const LINUX_SECBIT_NOROOT: u32 = 1 << 0;
@@ -911,6 +947,10 @@ impl Process {
             // containers (LXC, Docker --security-opt) flip
             // SECBIT_NOROOT and friends at startup.
             linux_securebits: 0,
+            // Linux default: every capability present in the
+            // bounding set (CAP_FULL_SET).  Userspace narrows
+            // this by calling PR_CAPBSET_DROP at startup.
+            linux_cap_bset: LINUX_CAP_FULL_SET,
         }
     }
 }
@@ -1067,6 +1107,7 @@ pub fn fork_create(
         linux_memory_merge,
         linux_ambient_caps,
         linux_securebits,
+        linux_cap_bset,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1106,6 +1147,7 @@ pub fn fork_create(
             parent.linux_memory_merge,
             parent.linux_ambient_caps,
             parent.linux_securebits,
+            parent.linux_cap_bset,
         )
     };
 
@@ -1281,6 +1323,12 @@ pub fn fork_create(
         // (which Linux clears on exec); we don't yet have an exec
         // hook so KEEP_CAPS survives too (todo).
         linux_securebits,
+        // Linux: `cred->cap_bset` is copied by `prepare_cred`.
+        // Bounding set is monotone-shrinking — child inherits
+        // the parent's current set and can only narrow it.
+        // Preserved across exec (that is the bounding set's
+        // defining property).
+        linux_cap_bset,
     };
 
     table.insert(pid, child);
@@ -2158,6 +2206,58 @@ pub fn is_ambient_cap_set(pid: ProcessId, cap: u32) -> Option<u32> {
         .lock()
         .get(&pid)
         .map(|p| u32::from((p.linux_ambient_caps & bit) != 0))
+}
+
+/// Read the full capability bounding set for `pid`.  Returns
+/// `None` if `pid` is unknown; `Some(LINUX_CAP_FULL_SET)` is the
+/// default for a fresh process.
+#[must_use]
+pub fn get_cap_bset(pid: ProcessId) -> Option<u64> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_cap_bset)
+}
+
+/// Install the full capability bounding set for `pid`, returning
+/// the prior value.  Returns `None` if `pid` is unknown.  Bypasses
+/// the syscall surface's cap-validity check so test fixtures can
+/// install arbitrary masks (including bits beyond
+/// [`LINUX_CAP_LAST_CAP`]).  Does NOT enforce monotonicity — the
+/// caller (or a future setter wired to a sandbox) must keep the
+/// bounding set monotone-shrinking; the unrestricted helper exists
+/// for test setup.
+pub fn set_cap_bset(pid: ProcessId, val: u64) -> Option<u64> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_cap_bset;
+    proc.linux_cap_bset = val;
+    Some(old)
+}
+
+/// Query whether capability `cap` is in the bounding set of
+/// `pid`.  Returns `Some(0)` or `Some(1)` if `pid` exists; `None`
+/// if not.  Does not validate `cap` — caller must verify
+/// `cap <= LINUX_CAP_LAST_CAP`.
+#[must_use]
+pub fn is_cap_in_bset(pid: ProcessId, cap: u32) -> Option<u32> {
+    let bit: u64 = 1 << cap;
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| u32::from((p.linux_cap_bset & bit) != 0))
+}
+
+/// Drop capability `cap` from the bounding set of `pid`.  Returns
+/// the prior value of the bit (0 or 1), or `None` if `pid` is
+/// unknown.  The bounding set is monotone-shrinking so this is
+/// the only mutator besides [`set_cap_bset`] (which exists for
+/// test setup).  Does not validate `cap` — caller must verify
+/// `cap <= LINUX_CAP_LAST_CAP`.
+pub fn drop_cap_from_bset(pid: ProcessId, cap: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let bit: u64 = 1 << cap;
+    let was_set = u32::from((proc.linux_cap_bset & bit) != 0);
+    proc.linux_cap_bset &= !bit;
+    Some(was_set)
 }
 
 /// Read the `PR_GET_SECUREBITS` value for `pid`.  Returns `None` if

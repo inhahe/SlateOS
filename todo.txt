@@ -18864,3 +18864,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          not for a real wait.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 228. Linux ABI: msgsnd EFAULT-first / mtype<1 gate,
+##      msgrcv no-MSGMAX / deferred buf (batch 199).
+##
+##      sys_msgsnd:
+##        Linux's ipc/msg.c::SYSCALL_DEFINE4(msgsnd) is:
+##          if (get_user(mtype, &msgp->mtype))
+##              return -EFAULT;
+##          return do_msgsnd(msqid, mtype, &msgp->mtext, msgsz, msgflg);
+##        and do_msgsnd starts with:
+##          if (msgsz > ns->msg_ctlmax || (long) msgsz < 0 || msqid < 0)
+##              return -EINVAL;
+##          if (mtype < 1)
+##              return -EINVAL;
+##        Pre-batch we ran size/qid checks BEFORE the msgp readability
+##        check, so a probe passing (msqid=-1, msgp=NULL, msgsz=8) saw
+##        -EINVAL where Linux returns -EFAULT.  We also never checked
+##        mtype < 1.
+##
+##        Post-batch order matches Linux exactly:
+##          1. msgp == 0 / unreadable -> EFAULT.
+##          2. msgsz > MSGMAX -> EINVAL.
+##          3. (long) msgsz < 0 -> EINVAL.
+##          4. msqid < 0 -> EINVAL.
+##          5. copy_from_user the 8-byte mtype.
+##          6. mtype < 1 -> EINVAL.
+##          7. validate payload (msgp + 8 .. msgp + 8 + msgsz).
+##
+##      sys_msgrcv:
+##        Linux's ipc/msg.c::do_msgrcv has NO MSGMAX gate — only
+##        send is rate-limited.  Linux's pre-lookup checks are just:
+##          if (msqid < 0 || (long) bufsz < 0)
+##              return -EINVAL;
+##        and the destination buffer is only touched after a message
+##        is dequeued (store_msg).  Pre-batch we mirrored msgsnd's
+##        gates (MSGMAX check, NULL-msgp EFAULT, validate_user_write
+##        of msgp before any lookup) — all three diverged from Linux.
+##
+##        Post-batch:
+##          1. (long) bufsz < 0 -> EINVAL.
+##          2. msqid < 0 -> EINVAL.
+##          3. Terminal EINVAL (no queue exists, matches Linux's
+##             "queue not found" path).
+##        Removed the MSGMAX gate, the NULL-msgp EFAULT, and the
+##        pre-lookup validate_user_write.
+##
+##      Self-tests updated/added in dispatch_linux self-test:
+##        * msgsnd(msqid=0, NULL, size=8)        -> EFAULT (unchanged).
+##        * msgsnd(msqid=-1, NULL, size=8)       -> EFAULT (was EINVAL
+##          pre-batch; this is the EFAULT-vs-EINVAL discriminator).
+##        * msgsnd(_, good_msg, size>MSGMAX, _)  -> EINVAL.
+##        * msgsnd(_, good_msg, (size_t)-1, _)   -> EINVAL.
+##        * msgsnd(msqid=-1, good_msg, valid, _) -> EINVAL.
+##        * msgsnd(_, mtype=0 msg, valid, _)     -> EINVAL (NEW gate).
+##        * msgrcv(NULL, size=8)                 -> EINVAL (was EFAULT).
+##        * msgrcv(_, _, size>MSGMAX, _, _)      -> EINVAL.
+##        * msgrcv(_, _, (size_t)-1, _, _)       -> EINVAL.
+##        * msgrcv(msqid=-1, _, valid, _, _)     -> EINVAL.
+##      Marker emitted:
+##        "msgsnd EFAULT-first / mtype<1 / msgrcv no-MSGMAX: OK".
+##
+##      Known limitations:
+##        * We still don't have any actual msg queues, so every
+##          msgsnd / msgrcv on a queue that "exists" can't actually
+##          deliver — the terminal EINVAL is "no queue with that id",
+##          not "send/receive failed".  When real msg queue support
+##          lands, the post-gate path must do the actual send/recv.
+##        * Linux's mtype is `long` (8 bytes on x86_64); we treat it
+##          as i64 little-endian.  Same wire format.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

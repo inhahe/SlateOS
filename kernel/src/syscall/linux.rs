@@ -12933,21 +12933,36 @@ fn sys_msgget(_args: &SyscallArgs) -> SyscallResult {
 
 /// `msgsnd(msqid, msgp, msgsz, msgflg)`.
 ///
-/// Linux's `ipc/msg.c::do_msgsnd()` validates, ahead of the queue
-/// lookup and any pointer touch:
-///
-///   `if (msgsz > ns->msg_ctlmax || (long) msgsz < 0 || msqid < 0)
-///        return -EINVAL;`
+/// Linux's `ipc/msg.c::SYSCALL_DEFINE4(msgsnd)` gate order:
+///   1. `get_user(mtype, &msgp->mtype)` -> EFAULT on unreadable
+///      msgp (8 bytes at offset 0 must be readable).
+///   2. `do_msgsnd`:
+///      a. `msgsz > ns->msg_ctlmax || (long) msgsz < 0 || msqid < 0`
+///         -> EINVAL.
+///      b. `mtype < 1` -> EINVAL.
+///   3. `load_msg(mtext, msgsz)` -> EFAULT on unreadable payload.
 ///
 /// `msg_ctlmax` defaults to `MSGMAX = 8192`.  The `(long) msgsz < 0`
-/// cast catches `size_t` values above `LONG_MAX` (i.e. callers who
-/// pass `(size_t)-1` hoping to overflow downstream).
+/// cast catches `size_t` values above `LONG_MAX`.  The `mtype < 1`
+/// check rejects callers passing mtype = 0 or negative (mtype is a
+/// signed `long`).
 ///
-/// Re-ordering the checks so the size/qid gates fire before the NULL
-/// pointer gate matches Linux exactly and surfaces -EINVAL to probes
-/// that fuzz the size argument.
+/// Pre-batch we ran size/qid checks BEFORE msgp validation, so a
+/// probe passing (msqid=-1, msgp=NULL, msgsz=100) saw -EINVAL where
+/// Linux returns -EFAULT.  We also did not validate `mtype >= 1`.
 fn sys_msgsnd(args: &SyscallArgs) -> SyscallResult {
     const MSGMAX: u64 = 8192;
+
+    // 1. get_user(mtype, &msgp->mtype): EFAULT on unreadable msgp.
+    let msgp = args.arg1;
+    if msgp == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(msgp, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // 2a. Size / qid gates.
     if args.arg2 > MSGMAX {
         return linux_err(errno::EINVAL);
     }
@@ -12961,26 +12976,52 @@ fn sys_msgsnd(args: &SyscallArgs) -> SyscallResult {
     if msqid < 0 {
         return linux_err(errno::EINVAL);
     }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    let sz = args.arg2 as usize;
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, sz.saturating_add(8)) {
+
+    // 2b. mtype < 1 -> EINVAL.  Read the 8-byte signed long at
+    //     offset 0 of msgp.
+    let mut mtype_buf = [0u8; 8];
+    // SAFETY: validate_user_read above confirmed 8 bytes readable.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(msgp, mtype_buf.as_mut_ptr(), 8) }
+    {
         return linux_err(linux_errno_for(e));
+    }
+    let mtype = i64::from_ne_bytes(mtype_buf);
+    if mtype < 1 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // 3. Payload validation (Linux's load_msg).
+    let sz = args.arg2 as usize;
+    if sz > 0 {
+        if let Err(e) =
+            crate::mm::user::validate_user_read(msgp.saturating_add(8), sz)
+        {
+            return linux_err(linux_errno_for(e));
+        }
     }
     linux_err(errno::EINVAL)
 }
 
 /// `msgrcv(msqid, msgp, msgsz, msgtyp, msgflg)`.
 ///
-/// Same shape as `msgsnd(2)`: Linux validates `msgsz > MSGMAX`,
-/// `(long) msgsz < 0`, and `msqid < 0` ahead of the queue lookup and
-/// the destination-buffer access.  Mirror that order here.
+/// Linux's `ipc/msg.c::do_msgrcv()` gate order:
+///   1. `if (msqid < 0 || (long) bufsz < 0) return -EINVAL;`
+///   2. Lookup the queue -> -EINVAL if it doesn't exist.
+///   3. Find a matching message (or block / return -ENOMSG).
+///   4. `store_msg(buf, msg, msgsz)` -> -EFAULT on unwritable buf.
+///
+/// Critically, Linux's receive path has **no MSGMAX gate** on the
+/// caller's buffer size — only msgsnd is rate-limited by MSGMAX.
+/// And the destination buffer is only touched AFTER a message is
+/// successfully dequeued; an unmapped buf with no matching message
+/// sees the no-message errno, not EFAULT.
+///
+/// Pre-batch we mirrored msgsnd's gates (MSGMAX check, NULL-msgp
+/// EFAULT, pre-lookup buf validation) — all three diverged from
+/// Linux.  Removed.
 fn sys_msgrcv(args: &SyscallArgs) -> SyscallResult {
-    const MSGMAX: u64 = 8192;
-    if args.arg2 > MSGMAX {
-        return linux_err(errno::EINVAL);
-    }
+    // 1. msqid / bufsz EINVAL gate.
     #[allow(clippy::cast_possible_wrap)]
     let msgsz_signed = args.arg2 as i64;
     if msgsz_signed < 0 {
@@ -12991,13 +13032,10 @@ fn sys_msgrcv(args: &SyscallArgs) -> SyscallResult {
     if msqid < 0 {
         return linux_err(errno::EINVAL);
     }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    let sz = args.arg2 as usize;
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, sz.saturating_add(8)) {
-        return linux_err(linux_errno_for(e));
-    }
+    // We have no real msg queues, so every msqid lookup fails with
+    // EINVAL (matches Linux's "queue not found" path).  Linux would
+    // only validate the destination buffer once a message was found,
+    // which never happens here.
     linux_err(errno::EINVAL)
 }
 
@@ -34572,7 +34610,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: msgget not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // msgsnd(NULL) -> EFAULT.
+        // Batch 199 reorders msgsnd to match Linux's
+        // SYSCALL_DEFINE4(msgsnd), where get_user(mtype, &msgp->mtype)
+        // runs FIRST and EFAULTs on unreadable msgp ahead of any
+        // size/qid check.  msgrcv has its MSGMAX gate removed
+        // (Linux only rate-limits send, not receive) and no longer
+        // touches the destination buffer pre-lookup.
+
+        // Build a valid msgbuf on the stack so msgsnd tests that
+        // exercise the size/qid gates aren't tripped up by the
+        // EFAULT-on-msgp gate that now runs first.  Layout:
+        //   long mtype; char mtext[16];
+        #[repr(C)]
+        struct MsgBuf { mtype: i64, mtext: [u8; 16] }
+        let good_msg = MsgBuf { mtype: 1, mtext: [0u8; 16] };
+        let good_msg_ptr = (&raw const good_msg).cast::<u8>() as u64;
+        let zero_msg = MsgBuf { mtype: 0, mtext: [0u8; 16] };
+        let zero_msg_ptr = (&raw const zero_msg).cast::<u8>() as u64;
+
+        // msgsnd(msqid=0, msgp=NULL, size=8) -> EFAULT (msgp gate
+        // fires before the size/qid checks; Linux's get_user
+        // would EFAULT first).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MSGSND, &a).value
@@ -34580,44 +34638,86 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: msgsnd(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // msgsnd(_, _, MSGMAX+1, _) -> EINVAL (size cap; see todo 178).
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8193, arg3: 0,
+        // msgsnd(msqid=-1, msgp=NULL, size=8) -> EFAULT (was EINVAL
+        // pre-batch because msqid<0 fired first; Linux returns
+        // EFAULT because get_user on NULL msgp runs first).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 8, arg3: 0,
             arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGSND, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgsnd(msqid<0,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgsnd(_, valid_msg, MSGMAX+1, _) -> EINVAL (size cap).
+        let a = SyscallArgs { arg0: 0, arg1: good_msg_ptr, arg2: 8193,
+            arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MSGSND, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: msgsnd(size>MSGMAX) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // msgsnd(_, _, (size_t)-1, _) -> EINVAL ((long) msgsz < 0 check).
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: u64::MAX, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // msgsnd(_, valid_msg, (size_t)-1, _) -> EINVAL ((long) msgsz < 0).
+        let a = SyscallArgs { arg0: 0, arg1: good_msg_ptr, arg2: u64::MAX,
+            arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MSGSND, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: msgsnd(size=-1) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // msgsnd(msqid=-1, _, valid size, _) -> EINVAL.
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 8, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // msgsnd(msqid=-1, valid_msg, valid size, _) -> EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: good_msg_ptr,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MSGSND, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: msgsnd(msqid<0) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // msgrcv(NULL) -> EFAULT.
+        // msgsnd(_, mtype=0 msg, valid size, _) -> EINVAL (mtype < 1
+        // gate; new in batch 199).
+        let a = SyscallArgs { arg0: 0, arg1: zero_msg_ptr, arg2: 8,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGSND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgsnd(mtype=0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgrcv(NULL, size=8) -> EINVAL (terminal; Linux defers
+        // buffer access until after queue lookup, which fails with
+        // EINVAL because no queue exists).  Was EFAULT pre-batch.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MSGRCV, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: msgrcv(NULL) not EFAULT");
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgrcv(NULL) not EINVAL"
+            );
             return Err(KernelError::InternalError);
         }
-        // msgrcv(_, _, MSGMAX+1, _, _) -> EINVAL.
+        // msgrcv(_, _, size>MSGMAX, _, _) -> EINVAL (terminal; Linux
+        // has NO MSGMAX gate on receive.  We return EINVAL because
+        // the queue doesn't exist, matching Linux's behaviour for a
+        // valid bufsz with no queue.  Pre-batch we returned EINVAL
+        // from our spurious MSGMAX check — same errno, different
+        // gate; the discriminator is bufsz<MSGMAX with msqid>=0).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8193, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MSGRCV, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: msgrcv(size>MSGMAX) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // msgrcv(_, _, (size_t)-1, _, _) -> EINVAL ((long) bufsz < 0).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: u64::MAX, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGRCV, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgrcv(bufsz=-1) not EINVAL"
+            );
             return Err(KernelError::InternalError);
         }
         // msgrcv(msqid=-1, _, valid size, _, _) -> EINVAL.
@@ -34628,7 +34728,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: msgrcv(msqid<0) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   msgsnd/msgrcv size/qid validation: OK");
+        serial_println!(
+            "[syscall/linux]   msgsnd EFAULT-first / mtype<1 / msgrcv no-MSGMAX: OK"
+        );
         // msgctl(_,_,NULL) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

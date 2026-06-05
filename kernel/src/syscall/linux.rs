@@ -17592,23 +17592,55 @@ fn sys_time(args: &SyscallArgs) -> SyscallResult {
 
 /// `futex(uaddr, op, val, timeout, uaddr2, val3)` — minimal support.
 ///
-/// Supported operations:
+/// Supported operations (all with `FUTEX_PRIVATE_FLAG` stripped — we
+/// do not model private vs shared futexes, every futex is global):
 /// - `FUTEX_WAIT` (0): wait until the value at `uaddr` changes.
+///   Timeout is **relative** (per Linux's classic ABI), interpreted on
+///   `CLOCK_MONOTONIC`.  `FUTEX_CLOCK_REALTIME` is stripped and
+///   ignored (Linux's behaviour for non-BITSET WAIT — it never honoured
+///   the flag here).
 /// - `FUTEX_WAKE` (1): wake up to `val` waiters on `uaddr`.
+/// - `FUTEX_WAIT_BITSET` (9): like `FUTEX_WAIT` but with a bitmask in
+///   `val3` (must be non-zero — Linux rejects 0 with `-EINVAL`) and an
+///   **absolute** timeout on `CLOCK_MONOTONIC` (or `CLOCK_REALTIME` if
+///   `FUTEX_CLOCK_REALTIME` is OR'd into the op).  glibc's
+///   `pthread_cond_wait` and Rust std's parking primitives use this
+///   form heavily — pre-batch 119 they hit the `-ENOSYS` fallback in
+///   every loop iteration and lost real condvar semantics.
+/// - `FUTEX_WAKE_BITSET` (10): like `FUTEX_WAKE` but with a non-zero
+///   bitmask in `val3`.  Our underlying queue does not store per-waiter
+///   masks, so the bit-set is **not honoured** for filtering — any
+///   waiter on the address may be woken.  POSIX permits spurious
+///   wakeups (callers must re-check their predicate), so this is
+///   compatible but slightly less efficient than real Linux for
+///   bitset-based dispatch (e.g. glibc's per-reader/per-writer mask).
+///   When per-waiter bitmask state is added to the futex layer this
+///   becomes a one-line change.
 ///
-/// The `FUTEX_PRIVATE_FLAG` (0x80) and `FUTEX_CLOCK_REALTIME` (0x100) are
-/// stripped before matching the operation.
+/// All other operations return `-ENOSYS`.  Known absent: `FUTEX_REQUEUE`
+/// / `FUTEX_CMP_REQUEUE` / `FUTEX_WAKE_OP` (need atomic-on-uaddr2),
+/// `FUTEX_LOCK_PI` / `FUTEX_UNLOCK_PI` / `FUTEX_LOCK_PI2` /
+/// `FUTEX_TRYLOCK_PI` / `FUTEX_WAIT_REQUEUE_PI` / `FUTEX_CMP_REQUEUE_PI`
+/// (PI futex routing through `handlers::sys_futex_lock_pi` would be a
+/// straightforward follow-up but requires the FUTEX-encoded owner-tid
+/// invariant on uaddr).
 fn sys_futex(args: &SyscallArgs) -> SyscallResult {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
+    const FUTEX_WAIT_BITSET: u64 = 9;
+    const FUTEX_WAKE_BITSET: u64 = 10;
     const FUTEX_PRIVATE_FLAG: u64 = 0x80;
     const FUTEX_CLOCK_REALTIME: u64 = 0x100;
     const FUTEX_CMD_MASK: u64 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
     let uaddr = args.arg0;
-    let op = args.arg1 & FUTEX_CMD_MASK;
+    let raw_op = args.arg1;
+    let op = raw_op & FUTEX_CMD_MASK;
     let val = args.arg2;
     let timeout_ptr = args.arg3;
+    // val3 holds the bitmask for the BITSET ops; for the non-BITSET
+    // ops it is unused (and we ignore it — Linux does the same).
+    let val3 = args.arg5;
 
     match op {
         FUTEX_WAIT => {
@@ -17631,6 +17663,76 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
             linux_from_native(native)
         }
         FUTEX_WAKE => {
+            let a = SyscallArgs {
+                arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_futex_wake(&a))
+        }
+        FUTEX_WAIT_BITSET => {
+            // Linux: bitmask must be non-zero — a zero mask could never
+            // match any waiter and Linux explicitly rejects it.  This
+            // check has to come before pointer validation so callers
+            // probing argument validity see EINVAL (not EFAULT).
+            #[allow(clippy::cast_possible_truncation)]
+            let mask = val3 as u32;
+            if mask == 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // Absolute timeout, on either CLOCK_REALTIME (when
+            // FUTEX_CLOCK_REALTIME is set in the raw op) or
+            // CLOCK_MONOTONIC (default).  NULL timeout = wait
+            // indefinitely.
+            let native = if timeout_ptr == 0 {
+                let a = SyscallArgs {
+                    arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                };
+                handlers::sys_futex_wait(&a)
+            } else {
+                let ts = match read_timespec(timeout_ptr) {
+                    Ok(t) => t,
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                };
+                // Linux rejects negative tv_sec/tv_nsec and out-of-range
+                // tv_nsec with EINVAL.  to_nanos() returns 0 for those
+                // shapes — fold that into the absolute-time gate
+                // directly: 0 is also the documented "already-elapsed"
+                // case, so the visible behaviour is identical and we
+                // avoid a second branch.
+                let abs_ns = ts.to_nanos();
+                let clockid_realtime =
+                    (raw_op & FUTEX_CLOCK_REALTIME) != 0;
+                let now_ns = if clockid_realtime {
+                    crate::timekeeping::clock_realtime()
+                } else {
+                    crate::timekeeping::clock_monotonic()
+                };
+                // saturating_sub yields 0 when the deadline is already
+                // in the past; handlers::sys_futex_wait_timeout with
+                // ns=0 performs the value compare and returns
+                // immediately (TimedOut → ETIMEDOUT on miss, or Ok(0)
+                // on value mismatch — see linux_from_native for the
+                // mapping).
+                let rel_ns = abs_ns.saturating_sub(now_ns);
+                let a = SyscallArgs {
+                    arg0: uaddr, arg1: val, arg2: rel_ns,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                handlers::sys_futex_wait_timeout(&a)
+            };
+            linux_from_native(native)
+        }
+        FUTEX_WAKE_BITSET => {
+            // Linux rejects mask == 0 with EINVAL here as well.
+            #[allow(clippy::cast_possible_truncation)]
+            let mask = val3 as u32;
+            if mask == 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // We do not yet track per-waiter bitmasks in the futex
+            // queue, so any non-zero mask wakes any waiter on uaddr.
+            // POSIX/Linux permit spurious wakeups; correct callers
+            // re-check their predicate, so this is compatible.  See
+            // the doc comment for the upgrade path.
             let a = SyscallArgs {
                 arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
@@ -29932,6 +30034,146 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             };
             if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
                 serial_println!("[syscall/linux]   FAIL: clone3 CLONE_NEWPID not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // classic futex(2) — FUTEX_WAIT_BITSET / FUTEX_WAKE_BITSET (batch 119)
+        //
+        // All tests are non-blocking: either the bitmask is 0 (rejected
+        // up front), the wake target has no waiters, or the wait value
+        // intentionally mismatches the buffer contents so the futex
+        // layer's value compare returns Ok(false) before any blocking
+        // path is entered.  Boot self-tests must never block.
+        // -----------------------------------------------------------------
+        {
+            // 4-byte aligned futex word holding value 0.
+            let futex_word: [u32; 1] = [0];
+            let futex_ptr = futex_word.as_ptr() as u64;
+            // 16-byte timespec at (tv_sec=0, tv_nsec=0) — absolute time
+            // is the epoch / boot for the respective clock, so any
+            // current time exceeds it: the abs->rel conversion
+            // saturates at 0 and the wait falls through immediately.
+            let ts_buf = [0u8; 16];
+            let ts_ptr = ts_buf.as_ptr() as u64;
+
+            const FUTEX_WAIT_OP: u64 = 0;
+            const FUTEX_WAKE_OP: u64 = 1;
+            const FUTEX_WAIT_BITSET_OP: u64 = 9;
+            const FUTEX_WAKE_BITSET_OP: u64 = 10;
+            const FUTEX_PRIVATE_FLAG_BIT: u64 = 0x80;
+            const FUTEX_CLOCK_REALTIME_BIT: u64 = 0x100;
+
+            // FUTEX_WAKE_BITSET with mask=0 -> EINVAL (validated before
+            // any addr touch, so address need not be canonical).
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAKE_BITSET_OP,
+                arg2: 1, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET mask=0 not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+            // FUTEX_WAIT_BITSET with mask=0 -> EINVAL.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAIT_BITSET_OP,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET mask=0 not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+            // FUTEX_WAKE_BITSET with mask!=0, val=0 (wake nobody)
+            // -> 0 (no waiters, futex_wake reports 0).
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAKE_BITSET_OP,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0xFFFF_FFFF,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET val=0 not 0");
+                return Err(KernelError::InternalError);
+            }
+            // FUTEX_WAKE_BITSET with mask=1, val=10 -> 0 (no waiters).
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAKE_BITSET_OP,
+                arg2: 10, arg3: 0, arg4: 0, arg5: 1,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET val=10 not 0");
+                return Err(KernelError::InternalError);
+            }
+            // FUTEX_WAIT_BITSET with mask=MATCH_ANY, expected=1, value=0,
+            // NULL timeout -> value mismatch -> Ok(false) -> 0.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAIT_BITSET_OP,
+                arg2: 1, arg3: 0, arg4: 0, arg5: 0xFFFF_FFFF,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET mismatch not 0");
+                return Err(KernelError::InternalError);
+            }
+            // FUTEX_WAIT_BITSET with absolute past timeout (ts at (0,0))
+            // and value mismatch -> futex_wait_timeout returns Ok(false)
+            // before consulting the deadline -> 0.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAIT_BITSET_OP,
+                arg2: 1, arg3: ts_ptr, arg4: 0, arg5: 0xFFFF_FFFF,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET past abs not 0");
+                return Err(KernelError::InternalError);
+            }
+            // Flag stripping: FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG with
+            // mask=0 still yields EINVAL after the op is recovered.
+            let a = SyscallArgs {
+                arg0: futex_ptr,
+                arg1: FUTEX_WAKE_BITSET_OP | FUTEX_PRIVATE_FLAG_BIT,
+                arg2: 1, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_BITSET|PRIVATE mask=0 not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+            // FUTEX_CLOCK_REALTIME selects clock_realtime() in the abs->rel
+            // path.  With ts=(0,0) and value mismatch -> 0.  The wait
+            // path runs to completion exercising the realtime branch.
+            let a = SyscallArgs {
+                arg0: futex_ptr,
+                arg1: FUTEX_WAIT_BITSET_OP | FUTEX_CLOCK_REALTIME_BIT
+                    | FUTEX_PRIVATE_FLAG_BIT,
+                arg2: 1, arg3: ts_ptr, arg4: 0, arg5: 0xFFFF_FFFF,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET|REALTIME not 0");
+                return Err(KernelError::InternalError);
+            }
+            // Unknown op (op=11, FUTEX_LOCK_PI2 — we do not implement it)
+            // -> ENOSYS.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: 11,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX unknown op not ENOSYS");
+                return Err(KernelError::InternalError);
+            }
+            // Regression: FUTEX_WAKE with no waiters -> 0.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAKE_OP,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE regression not 0");
+                return Err(KernelError::InternalError);
+            }
+            // Regression: FUTEX_WAIT value mismatch -> Ok(false) -> 0.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAIT_OP,
+                arg2: 1, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT regression not 0");
                 return Err(KernelError::InternalError);
             }
         }

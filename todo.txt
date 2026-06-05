@@ -13549,4 +13549,124 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
+## 148. [LINUX ABI BATCH 119 - DONE] Add FUTEX_WAIT_BITSET (op=9) and
+##      FUTEX_WAKE_BITSET (op=10) to the classic futex(2) syscall, on
+##      top of the existing single-futex wait/wake handlers.  These two
+##      ops are what glibc's pthread_cond_wait (Linux 2.6.25+) and Rust
+##      std's thread parking primitives actually use — pre-batch they
+##      hit the `_ => linux_err(errno::ENOSYS)` default in sys_futex
+##      and glibc fell back to either a sched_yield spin (very bad on
+##      a desktop) or the unmasked FUTEX_WAIT path that gives up the
+##      whole point of bitsets (avoiding spurious cross-condvar
+##      wakeups).  Wiring the BITSET ops makes pthread condvars and
+##      Rust parking work end-to-end against the same futex bucket
+##      table that batch 22 set up.
+##
+##      Files: kernel/src/syscall/linux.rs (sys_futex extended;
+##      handlers untouched), boot-time self-tests in the same file.
+##
+##      Implementation:
+##        * Two new op codes added inside sys_futex.  FUTEX_PRIVATE_FLAG
+##          (0x80) and FUTEX_CLOCK_REALTIME (0x100) are now sampled from
+##          the raw op *before* the FUTEX_CMD_MASK strip — the raw bit
+##          for CLOCK_REALTIME selects the clock used to convert the
+##          absolute deadline into a relative ns count for the existing
+##          handlers::sys_futex_wait_timeout helper.
+##        * FUTEX_WAKE_BITSET: val3 (args.arg5, low 32 bits) is the
+##          mask.  Linux rejects mask==0 with -EINVAL up front; we
+##          mirror that exactly.  Any non-zero mask forwards to
+##          handlers::sys_futex_wake(addr, val) — we do NOT yet filter
+##          per-waiter bitmasks, so the mask is best-effort (any waiter
+##          on the same address may be woken).  POSIX/Linux allow
+##          spurious wakeups; correct callers re-check their predicate,
+##          so this is compatible with pthread_cond / Rust park.
+##        * FUTEX_WAIT_BITSET: same mask validation.  Timeout is an
+##          ABSOLUTE deadline on either CLOCK_REALTIME or
+##          CLOCK_MONOTONIC depending on the FUTEX_CLOCK_REALTIME bit.
+##          We read the timespec, compute now_ns from
+##          crate::timekeeping::{clock_realtime, clock_monotonic}, take
+##          saturating_sub(abs_ns, now_ns) to derive a relative ns,
+##          then dispatch to handlers::sys_futex_wait_timeout.  When
+##          the deadline is in the past the saturating_sub yields 0
+##          which the futex layer treats as "value-compare only" — the
+##          right semantics for an expired absolute timeout.  NULL
+##          timeout routes to handlers::sys_futex_wait (no deadline).
+##
+##      Boot-time self-tests (kernel/src/syscall/linux.rs, 11 cases
+##      total).  All run in the bare kernel task: there is no PCB, so
+##      the mm::user::validate_user_* gates bypass.  The tests are
+##      carefully crafted to NEVER block — either mask=0 short-circuits
+##      with EINVAL, the wake target has no waiters (futex_wake returns
+##      0), or the wait value (=1) intentionally mismatches the kernel
+##      buffer's value (=0) so futex_wait/futex_wait_timeout returns
+##      Ok(false) at the value-compare step *before* reaching the
+##      block-current path:
+##
+##        * FUTEX_WAKE_BITSET with val3=0 -> EINVAL.
+##        * FUTEX_WAIT_BITSET with val3=0 -> EINVAL.
+##        * FUTEX_WAKE_BITSET mask=MATCH_ANY, val=0 -> 0 (no waiters).
+##        * FUTEX_WAKE_BITSET mask=1, val=10 -> 0 (no waiters).
+##        * FUTEX_WAIT_BITSET mask=MATCH_ANY, NULL timeout, value
+##          mismatch -> 0 (Ok(false)).
+##        * FUTEX_WAIT_BITSET mask=MATCH_ANY, absolute ts=(0,0)
+##          (always past), value mismatch -> 0.
+##        * FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG with val3=0 ->
+##          EINVAL (verifies private flag is stripped before op match).
+##        * FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME | FUTEX_PRIVATE_FLAG
+##          with mask=MATCH_ANY, ts=(0,0), value mismatch -> 0
+##          (exercises the clock_realtime() branch of the abs->rel
+##          conversion).
+##        * Unknown op (op=11, which would be FUTEX_LOCK_PI2) ->
+##          ENOSYS — verifies the unknown-op default is preserved.
+##        * Regression: FUTEX_WAKE with no waiters -> 0.
+##        * Regression: FUTEX_WAIT with value mismatch -> 0.
+##
+##      Known limitations / documented for follow-on work:
+##        * Per-waiter bitmask filtering is not implemented.  The
+##          FUTEX_WAKE_BITSET mask is consulted only to reject 0; any
+##          non-zero mask is treated as MATCH_ANY at the queue layer.
+##          Real Linux walks the wait queue and skips waiters whose
+##          stored bitmask doesn't intersect.  Fixing this requires
+##          adding a `bitmask: u32` field to the Waiter struct in
+##          kernel/src/ipc/futex.rs and threading it through
+##          futex_wait_with_mask / futex_wake_with_mask.  Practical
+##          impact is bounded: callers see at-most-spurious wakeups,
+##          which they already handle for POSIX correctness.  This is
+##          a follow-up batch.
+##        * Pre-existing translation gap: handlers::sys_futex_wait
+##          returns Ok(false) (= SyscallResult::ok(0)) on value
+##          mismatch, but Linux returns -EAGAIN for the same condition.
+##          linux_from_native passes 0 through unchanged because
+##          value >= 0 is the success branch.  Callers that strictly
+##          check for -EAGAIN to detect "the futex word changed under
+##          us" will instead see a successful return and re-loop —
+##          equivalent to an instant spurious wakeup.  pthread_cond
+##          and Rust park both handle spurious wakeups, so this is
+##          benign in practice.  Documented for a future cleanup batch
+##          that adds an EAGAIN translation in the linux_from_native
+##          path (or in a futex-specific result wrapper).
+##        * FUTEX_REQUEUE / FUTEX_CMP_REQUEUE (used by
+##          pthread_cond_broadcast for the optimized requeue-batch path)
+##          still return -ENOSYS.  Implementing them needs a
+##          futex_requeue helper that atomically transfers waiters from
+##          one bucket to another while running the cmpval check.  The
+##          futex.rs bucket layout already supports this; what's
+##          missing is the requeue routine and its handler.  Deferred
+##          to a future batch focused on pthread_cond_broadcast
+##          throughput.
+##        * FUTEX_WAKE_OP (atomic op-then-wake) still ENOSYS — used by
+##          glibc's older condvar implementation but not by current
+##          glibc (>= 2.25 dropped it).  Low-value to add.
+##        * FUTEX_LOCK_PI / FUTEX_UNLOCK_PI / FUTEX_TRYLOCK_PI /
+##          FUTEX_LOCK_PI2 / FUTEX_WAIT_REQUEUE_PI /
+##          FUTEX_CMP_REQUEUE_PI: native handlers exist
+##          (handlers::sys_futex_lock_pi, sys_futex_unlock_pi) but
+##          require the FUTEX-encoded owner-tid invariant on the
+##          uaddr word (low bits hold the owner's TID, high bit is
+##          FUTEX_WAITERS).  Wiring them through sys_futex needs the
+##          owner-tid layout adapter; doable but cross-cutting enough
+##          to warrant its own batch.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
 

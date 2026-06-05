@@ -15825,3 +15825,70 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   msgsnd/msgrcv size/qid
 ##      validation: OK" at line 445 of build/serial-test.txt.
 
+## 179. Linux ABI: semget/semop/semtimedop SEMMSL/SEMOPM gates.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_semget,
+##              kernel/src/syscall/linux.rs::sys_semop,
+##              kernel/src/syscall/linux.rs::sys_semtimedop.
+##
+##      Problem: SysV semaphore stubs were terminating too coarsely.
+##              sys_semget only rejected nsems<0 — a probe asking for
+##              33000 semaphores (above SEMMSL) saw ENOSYS instead of
+##              the documented EINVAL.  sys_semop / sys_semtimedop did
+##              not check `semid < 0` ahead of the NULL pointer test
+##              (so a caller passing semid=-1 + valid sops would see
+##              EINVAL only after the namespace lookup, instead of
+##              the early Linux gate), and did not check `nsops >
+##              SEMOPM` at all (so an oversized batch saw EFAULT or
+##              EINVAL instead of the distinct E2BIG that Linux uses
+##              to mean "too many ops").
+##
+##      Fix:    Added Linux's documented gate order, per
+##              ipc/sem.c::SYSCALL_DEFINE3(semget) and
+##              ipc/sem.c::do_semtimedop():
+##                semget:
+##                  if (nsems < 0 || nsems > SEMMSL) return EINVAL;
+##                semop / semtimedop:
+##                  if (nsops < 1) return EINVAL;
+##                  if (semid < 0) return EINVAL;
+##                  if (nsops > SEMOPM) return E2BIG;
+##                  if (sops == NULL) return EFAULT;
+##                  validate_user_read(sops, nsops*6) ...
+##              SEMMSL = 32000, SEMOPM = 500 — kernel-namespace
+##              defaults.  Note the distinct errno: E2BIG, not EINVAL,
+##              for too-many-ops.
+##
+##      Self-tests (boot-time):
+##        * semget(_, -1, 0) -> EINVAL (unchanged).
+##        * semget(_, 4, 0) -> ENOSYS (unchanged; 4 <= SEMMSL).
+##        * semget(_, 32001, 0) -> EINVAL (SEMMSL cap; new).
+##        * semop(_, _, 0) -> EINVAL (unchanged; nsops==0).
+##        * semop(0, NULL, 1) -> EFAULT (unchanged).
+##        * semop(semid=-1, NULL, 1) -> EINVAL (new; semid<0 gate
+##          ordered before NULL-pointer check).
+##        * semop(_, _, 501) -> E2BIG (new; SEMOPM cap, distinct
+##          errno).
+##        * semtimedop(0, NULL, 1, _) -> EFAULT (unchanged).
+##        * semtimedop(semid=-1, NULL, 1, _) -> EINVAL (new).
+##        * semtimedop(_, _, 501, _) -> E2BIG (new).
+##        * Emits "[syscall/linux]   semget/semop SEMMSL/SEMOPM
+##          validation: OK".
+##
+##      Known limitations:
+##        * SEMMSL / SEMOPM are hard-coded to Linux's kernel-namespace
+##          defaults (32000 / 500).  Real Linux exposes both via
+##          /proc/sys/kernel/sem (and per-IPC-namespace).  When sysctl
+##          support for IPC namespaces lands, these gates switch to
+##          the per-ns values.
+##        * sys_semctl is still a single-line EINVAL stub — the full
+##          cmd-dispatch (IPC_STAT/IPC_SET/GETALL/SETVAL/...) is
+##          deferred until we have a real semaphore set table.
+##        * No semaphore-set table yet — every valid-shaped semop
+##          terminates at EINVAL.  This is correct shape but not
+##          functional; a full SysV semaphore implementation is on
+##          the longer roadmap.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   semget/semop SEMMSL/SEMOPM
+##      validation: OK" in build/serial-test.txt.
+

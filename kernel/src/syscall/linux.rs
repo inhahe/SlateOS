@@ -12220,20 +12220,48 @@ fn sys_shmdt(_args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `semget(key, nsems, semflg)`.
+///
+/// Linux's `ipc/sem.c::SYSCALL_DEFINE3(semget)` rejects unreasonable
+/// nsems ahead of the namespace lookup:
+///
+///   `if (nsems < 0 || nsems > ns->sc_semmsl) return -EINVAL;`
+///
+/// `sc_semmsl` defaults to `SEMMSL = 32000`.  `nsems == 0` is allowed
+/// for `IPC_PRIVATE` lookups of an existing semset, which is why the
+/// lower bound is exclusive.
 fn sys_semget(args: &SyscallArgs) -> SyscallResult {
+    const SEMMSL: i32 = 32000;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let nsems = args.arg1 as i32;
-    if nsems < 0 {
+    if nsems < 0 || nsems > SEMMSL {
         return linux_err(errno::EINVAL);
     }
-    // SEMMSL upper-bound check (Linux default 32000) would belong here.
     linux_err(errno::ENOSYS)
 }
 
 /// `semop(semid, sops, nsops)`.
+///
+/// Linux's `ipc/sem.c::do_semtimedop()` (the worker for both semop and
+/// semtimedop) validates ahead of the namespace lookup:
+///
+///   `if (nsops < 1 || semid < 0) return -EINVAL;`
+///   `if (nsops > ns->sc_semopm) return -E2BIG;`
+///
+/// `sc_semopm` defaults to `SEMOPM = 500`.  Note the distinct errno:
+/// "too many ops" is `-E2BIG`, not `-EINVAL`.
 fn sys_semop(args: &SyscallArgs) -> SyscallResult {
+    const SEMOPM: usize = 500;
     let nsops = args.arg2 as usize;
     if nsops == 0 {
         return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let semid = args.arg0 as i32;
+    if semid < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if nsops > SEMOPM {
+        return linux_err(errno::E2BIG);
     }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
@@ -12251,10 +12279,23 @@ fn sys_semctl(_args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `semtimedop(semid, sops, nsops, timeout)`.
+///
+/// Same `nsops`/`semid`/SEMOPM gates as `semop(2)` — see
+/// [`sys_semop`].  `timeout` is an optional pointer to a timespec
+/// (16 bytes); when NULL the call behaves like `semop`.
 fn sys_semtimedop(args: &SyscallArgs) -> SyscallResult {
+    const SEMOPM: usize = 500;
     let nsops = args.arg2 as usize;
     if nsops == 0 {
         return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let semid = args.arg0 as i32;
+    if semid < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if nsops > SEMOPM {
+        return linux_err(errno::E2BIG);
     }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
@@ -31836,6 +31877,49 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: semtimedop(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // semget(_, 32001, 0) -> EINVAL (SEMMSL cap; see todo 179).
+        let a = SyscallArgs { arg0: 0, arg1: 32001, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: semget(32001) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // semop(semid=-1, nsops=1, NULL) -> EINVAL (semid<0 ordered before
+        // NULL pointer check).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMOP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: semop(semid=-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // semop(_, _, nsops=501, _) -> E2BIG (SEMOPM cap, distinct from
+        // EINVAL — see Linux ipc/sem.c::do_semtimedop()).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 501, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMOP, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: semop(nsops=501) not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        // semtimedop(semid=-1, nsops=1, NULL, _) -> EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMTIMEDOP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: semtimedop(semid=-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // semtimedop(_, _, nsops=501, _) -> E2BIG.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 501, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMTIMEDOP, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: semtimedop(nsops=501) not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   semget/semop SEMMSL/SEMOPM validation: OK");
 
         // msgget -> ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

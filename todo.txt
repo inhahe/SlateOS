@@ -17471,3 +17471,58 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   xattr set
 ##      flags/E2BIG gating: OK" in build/serial-test.txt.
+
+## 200. syscall/linux: quotactl_fd type / cmds whitelist gating
+##      (batch 171).
+##
+##      Symptom: sys_quotactl_fd only checked the fd argument and
+##               returned EPERM unconditionally for any cmd.  A
+##               libquota / setquota probe walking cmd values to
+##               discover which ops the kernel implements saw
+##               EPERM for everything — including obvious garbage
+##               like cmd=0xdeadbeef00 — defeating the probe.
+##               This is the same divergence sys_quotactl had
+##               before its whitelist batch.
+##
+##      Fix:    Mirror Linux's quota.c gate order:
+##                1. type = cmd & 0xff;  if type >= MAXQUOTAS (3)
+##                   -> EINVAL  (ahead of fd lookup)
+##                2. fd validation (-> EBADF in real user context)
+##                3. cmds = cmd >> 8;  if not in {Q_SYNC..
+##                   Q_GETNEXTQUOTA (0x800001..0x800009)} U
+##                   {Q_XQUOTAON..Q_XGETNEXTQUOTA (0x5801..0x5809)}
+##                   -> EINVAL
+##                4. terminal EPERM (CAP_SYS_ADMIN required)
+##
+##      Self-tests (boot-time):
+##        * quotactl_fd(fd=0, cmd=Q_SYNC<<8|USRQUOTA=0x80000100,
+##          ...) -> EPERM  (kept happy path; pre-batch passed
+##          cmd=0 expecting EPERM, but cmd=0 now hits the cmds
+##          whitelist gate and returns EINVAL).
+##        * quotactl_fd(fd=0, cmd=0x800003 (type=3), ...) ->
+##          EINVAL  (new; type gate fires before fd lookup).
+##        * quotactl_fd(fd=0, cmd=0xdeadbeef00, ...) -> EINVAL
+##          (new; cmds not in whitelist).
+##        * quotactl_fd(fd=0, cmd=Q_XQUOTAON<<8|USRQUOTA=0x580100)
+##          -> EPERM  (new; XFS variant whitelisted; terminal CAP).
+##        * Emits "[syscall/linux]   quotactl_fd type/cmds
+##          gating: OK".
+##
+##      Known limitations:
+##        * The addr (arg3) user pointer is not validated.  Some
+##          cmds use it (Q_GETQUOTA writes struct dqblk, Q_SETQUOTA
+##          reads it, Q_GETINFO/SETINFO similar).  Linux's dispatch
+##          does access_ok + copy_from_user/put_user per cmd; we'd
+##          need to know which cmds use addr to gate it.  Carried
+##          for the future quota implementation batch.
+##        * id (arg2) is not range-checked.  Linux treats qid_t as
+##          opaque at this layer; the per-FS dispatch validates it.
+##          Acceptable to leave alone.
+##        * The cmd whitelist duplicates the sys_quotactl one
+##          inline.  Worth factoring into a shared helper in a
+##          follow-up batch once additional quota-related syscalls
+##          are added — three uses warrants a helper, two doesn't.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).  Serial
+##      confirms "[syscall/linux]   quotactl_fd type/cmds gating:
+##      OK" in build/serial-test.txt.

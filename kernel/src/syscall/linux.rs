@@ -12189,12 +12189,43 @@ fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `quotactl_fd(fd, cmd, id, addr)`.
+///
+/// Linux's `kernel/quota/quota.c::SYSCALL_DEFINE4(quotactl_fd)`
+/// shares the cmd encoding with `quotactl` — high 24 bits are the
+/// generic/XFS opcode, low 8 bits are the quota type — and gates:
+///   1. type < MAXQUOTAS (3)            ahead of fd lookup -> EINVAL
+///   2. fdget_raw(fd)                                       -> EBADF
+///   3. cmds dispatch (default arm)                         -> EINVAL
+///
+/// Pre-batch our stub only checked the fd and went straight to
+/// EPERM, so a probe walking cmd values to discover which ops are
+/// implemented (matching the equivalent quotactl probe) got EPERM
+/// for everything, defeating the probe.
 fn sys_quotactl_fd(args: &SyscallArgs) -> SyscallResult {
+    const SUBCMDMASK: u64 = 0xff;
+    const SUBCMDSHIFT: u32 = 8;
+    // 1. type check before fd lookup.  Linux gates this first;
+    //    matches the existing sys_quotactl behaviour.
+    let typ = (args.arg1 & SUBCMDMASK) as u32;
+    if typ >= 3 {
+        return linux_err(errno::EINVAL);
+    }
+    // 2. fd validation.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
+    // 3. cmds whitelist.  Same generic + XFS ranges as sys_quotactl;
+    //    Q_SYNC..Q_GETNEXTQUOTA + Q_X variants.
+    let cmds = args.arg1 >> SUBCMDSHIFT;
+    let generic_ok = (0x800001..=0x800009).contains(&cmds);
+    let xfs_ok = (0x5801..=0x5809).contains(&cmds);
+    if !generic_ok && !xfs_ok {
+        return linux_err(errno::EINVAL);
+    }
+    // Terminal: even a valid cmd needs CAP_SYS_ADMIN per Linux's
+    // quotactl path; our kernel-context tests treat this as EPERM.
     linux_err(errno::EPERM)
 }
 
@@ -32607,14 +32638,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   quotactl cmd validation: OK");
-        // quotactl_fd in kernel context -> EPERM.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+        // quotactl_fd(fd=0, cmd=Q_SYNC<<8|USRQUOTA) -> EPERM (valid
+        // cmd, terminal CAP check).  Pre-batch this test passed
+        // cmd=0 expecting EPERM, but cmd=0 now hits the new cmds
+        // whitelist gate (cmds=0 not in 0x800001..0x800009 nor
+        // 0x5801..0x5809) and returns EINVAL.  Updated to a real
+        // Q_SYNC cmd.
+        let a = SyscallArgs { arg0: 0, arg1: 0x8000_0100, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::QUOTACTL_FD, &a).value
             != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: quotactl_fd not EPERM");
             return Err(KernelError::InternalError);
         }
+        // quotactl_fd with type=3 (>= MAXQUOTAS) -> EINVAL.  Type
+        // check fires ahead of the fd lookup; the choice of cmds
+        // here is irrelevant.
+        let a = SyscallArgs { arg0: 0, arg1: 0x800003, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL_FD, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: quotactl_fd(type=3) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // quotactl_fd with garbage cmds (0xdeadbeef00) -> EINVAL.
+        // Pre-batch returned EPERM for any cmd, masking the probe
+        // signal that says "the kernel doesn't implement this op."
+        let a = SyscallArgs { arg0: 0, arg1: 0xdead_beef_00, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL_FD, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: quotactl_fd(cmds=0xdeadbe) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // quotactl_fd with a valid XFS cmd (Q_XQUOTAON = 0x5801) ->
+        // EPERM (cmd whitelisted but terminal CAP check).
+        let a = SyscallArgs { arg0: 0, arg1: 0x5801_00, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL_FD, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: quotactl_fd(XQ_XQUOTAON) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   quotactl_fd type/cmds gating: OK"
+        );
 
         // init_module(NULL,_,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0,

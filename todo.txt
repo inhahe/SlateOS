@@ -17298,3 +17298,65 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 ##      Serial confirms "[syscall/linux]   lsm_set_self_attr
 ##      flags/size/E2BIG gating: OK" in build/serial-test.txt.
+
+## 197. syscall/linux: lsm_list_modules flags-first / size_t
+##      width gating (batch 168).
+##
+##      Symptom: Pre-batch sys_lsm_list_modules diverged from
+##               Linux in two ways:
+##                1. Checked NULL size *before* flags, so a caller
+##                   passing flags=1 with size=NULL got EFAULT
+##                   instead of Linux's EINVAL.
+##                2. Validated the size pointer for 4 bytes, but
+##                   the Linux signature is `size_t __user *size`
+##                   which is 8 bytes on x86_64.  The 4-byte
+##                   probe would let a user pass a pointer to the
+##                   last 4 bytes of a mapped region while the
+##                   high 4 bytes of size_t lived in unmapped
+##                   memory — silent truncation.
+##
+##      Fix:    Reordered gates to match Linux's
+##              security/lsm_syscalls.c::lsm_list_modules exactly:
+##                - flags != 0 -> EINVAL (first)
+##                - size == NULL -> EFAULT (explicit; kernel-context
+##                  validate_user_read bypasses NULL)
+##                - validate_user_read(size, 8) -> EFAULT
+##                - validate_user_write(size, 8) -> EFAULT
+##                - terminal EOPNOTSUPP (no LSM infrastructure)
+##              Also widened the shared size_buf test fixture
+##              from 4 to 8 bytes so future user-context probes
+##              don't hit truncation themselves.
+##
+##      Self-tests (boot-time):
+##        * lsm_list_modules(ids=NULL, size=NULL, flags=0) ->
+##          EFAULT  (kept; NULL size gate).
+##        * lsm_list_modules(ids=NULL, size=NULL, flags=1) ->
+##          EINVAL  (new; flags wins over NULL size — was EFAULT
+##          pre-batch).
+##        * lsm_list_modules(ids=NULL, size=valid, flags=1) ->
+##          EINVAL  (kept).
+##        * lsm_list_modules(ids=NULL, size=valid,
+##          flags=0xFFFF_FFFF) -> EINVAL  (new; bit-precise
+##          flags rejection).
+##        * lsm_list_modules(ids=NULL, size=valid, flags=0) ->
+##          EOPNOTSUPP  (happy path).
+##        * Emits "[syscall/linux]   lsm_list_modules flags-first
+##          gating: OK".
+##
+##      Known limitations:
+##        * Terminal is EOPNOTSUPP, not the Linux "success with
+##          *size=total_size, return lsm_active_cnt" path.  This
+##          is intentional — we have no LSM infrastructure at
+##          all, so reporting "0 modules active" as a successful
+##          enumeration would mislead a probe that needs to
+##          distinguish "kernel built without LSM" from "LSM
+##          active but zero modules registered."  EOPNOTSUPP
+##          puts us in the former bucket.
+##        * The lsm_get_self_attr code at line 17347 still
+##          validates 4 bytes for its size_t pointer.  Same
+##          bug, separate fix-up batch (carried in todo entry
+##          195's "size validation uses 4 bytes" limitation).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   lsm_list_modules
+##      flags-first gating: OK" in build/serial-test.txt.

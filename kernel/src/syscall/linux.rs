@@ -19787,24 +19787,48 @@ fn sys_futex2_requeue(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `lsm_list_modules(ids*, size*, flags)`.
+///
+/// Linux's `security/lsm_syscalls.c::lsm_list_modules` gate order:
+///   if (flags) return -EINVAL;
+///   if (get_user(usize, size)) return -EFAULT;
+///   if (put_user(total_size, size)) return -EFAULT;
+///   if (usize < total_size) return -E2BIG;
+///   /* enumerate */
+///   return lsm_active_cnt;
+///
+/// The `size` parameter is a `size_t __user *` (8 bytes on x86_64),
+/// not a u32.  Pre-batch we validated 4 bytes which is fine on
+/// 32-bit but truncates on 64-bit.
+///
+/// Pre-batch our stub checked NULL size *before* flags, so a caller
+/// passing flags=1 with size=NULL got EFAULT instead of Linux's
+/// EINVAL.  This batch reorders to put flags first, widens the
+/// size-pointer probe to 8 bytes, and keeps the terminal
+/// EOPNOTSUPP (we have no LSM infrastructure at all; a probe
+/// reading EOPNOTSUPP knows the kernel doesn't expose LSM IDs and
+/// will fall back to /proc/sys/kernel/lsm parsing, which is the
+/// correct behavior).
 fn sys_lsm_list_modules(args: &SyscallArgs) -> SyscallResult {
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 4) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 4) {
-        return linux_err(linux_errno_for(e));
-    }
+    // 1. flags first.  No flags are defined for lsm_list_modules.
     if args.arg2 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // No LSM modules → success with zero count.  We can't actually
-    // write 0 to *size from kernel context, but glibc treats E2BIG
-    // followed by *size of 0 the same way; and EOPNOTSUPP is
-    // documented as "this build of the kernel doesn't have LSM
-    // self-attr support" which is exactly our case.
+    // 2. size pointer NULL -> EFAULT (Linux: get_user faults).
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // 3. size pointer must be readable and writable for size_t
+    //    (8 bytes on x86_64).
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    // 4. No LSM modules registered → no IDs to report.  Returning
+    //    EOPNOTSUPP keeps probes from interpreting a success-with-
+    //    zero-count as "this kernel has LSM but no modules active"
+    //    when actually we have no LSM infrastructure at all.
     linux_err(errno::EOPNOTSUPP)
 }
 
@@ -35898,7 +35922,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let mnt_req_ptr = mnt_req_buf.as_ptr() as u64;
         let mnt_outbuf = [0u8; 128];
         let mnt_outbuf_ptr = mnt_outbuf.as_ptr() as u64;
-        let size_buf = [16u8, 0, 0, 0];
+        // Sized for size_t (8 bytes on x86_64); lsm_list_modules
+        // validates 8 bytes here.
+        let size_buf = [16u8, 0, 0, 0, 0, 0, 0, 0];
         let size_ptr = size_buf.as_ptr() as u64;
         let ctx_buf = [0u8; 16];
         let ctx_ptr = ctx_buf.as_ptr() as u64;
@@ -36313,16 +36339,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   lsm_set_self_attr flags/size/E2BIG gating: OK"
         );
-        // lsm_list_modules NULL size -> EFAULT.
+        // lsm_list_modules NULL size, flags=0 -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: lsm_list_modules NULL size not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // lsm_list_modules bad flags -> EINVAL.
+        // lsm_list_modules NULL size with flags=1 -> EINVAL (flags
+        // first; pre-batch returned EFAULT because NULL size was
+        // checked before flags).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_list_modules flags=1 wins over NULL size"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_list_modules valid size, flags=1 -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: lsm_list_modules bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // lsm_list_modules huge flags (any nonzero) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 0xFFFF_FFFF, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_list_modules huge flags not EINVAL"
+            );
             return Err(KernelError::InternalError);
         }
         // lsm_list_modules valid -> EOPNOTSUPP.
@@ -36331,6 +36375,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: lsm_list_modules valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   lsm_list_modules flags-first gating: OK"
+        );
     }
 
     // -----------------------------------------------------------------

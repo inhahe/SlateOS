@@ -12560,3 +12560,72 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          lands, range-aware accounting goes here.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 138. Batch 109: sys_mincore upgraded from -ENOSYS stub to an
+##      honest "all pages resident" answer
+##      ---------------------------------------------------------------
+##      Pre-batch: validated args (alignment / length / vec / range)
+##      and then returned -ENOSYS.  The justification in the old code
+##      ("we don't track resident-vs-swapped state; without a
+##      user-write copy path we can't fill `vec`") was obsolete on
+##      both halves — we *do* have copy_to_user (sys_cachestat,
+##      sys_sched_getattr, and friends use it) and we have no swap
+##      anyway, so every mapped page is unconditionally resident.
+##
+##      Post-batch: sys_mincore writes one 0x01 byte per page in the
+##      requested range (bit 0 = resident, bits 1..7 = reserved-zero)
+##      and returns 0.  This isn't a placeholder — it's the truth of
+##      this kernel: there is no demand paging, no swap, no eviction,
+##      so any page that lives in a successfully-validated mapping is
+##      always physically present.  glibc's malloc trim heuristics,
+##      Boehm GC's heap-scan optimizer, and PostgreSQL's pg_prewarm
+##      all use mincore for "should I touch this range" decisions —
+##      pre-batch they assumed every page was non-resident (the
+##      -ENOSYS fallback path) which is the worst-case for those
+##      heuristics.
+##
+##      Validation gates:
+##        * addr % 16384 != 0 -> -EINVAL (16 KiB page size).
+##        * length == 0 -> 0 (vacuous success).
+##        * vec == NULL -> -EFAULT.
+##        * non-writable `vec` of `ceil(length / 16384)` bytes
+##          -> -EFAULT.
+##        * non-readable `[addr, addr+length)` -> -ENOMEM (Linux's
+##          documented "address range spans unmapped region" error).
+##
+##      Write path: streams 0x01 bytes through copy_to_user in
+##      256-byte chunks (`const RESIDENT_CHUNK: [u8; 256]`).  Even
+##      a pathological 1 TiB query is only 64 MiB of `vec` bytes
+##      which streams without heap allocation.
+##
+##      Boot self-test "(updated existing) mincore valid":
+##        1. 1-page query at addr=0x4000, length=16384 -> 0, with
+##           vec[0] == 0x01 and vec[1..] retaining the 0xCC
+##           sentinel (proves single-byte write, no over-write).
+##        2. 5-page query at addr=0x4000, length=5*16384 -> 0, with
+##           vec[0..5] all 0x01 and vec[5..] retaining 0xCC.
+##        Pre-batch this slot expected -ENOSYS.
+##
+##      Bug fix bundled with this batch: the self-test buffer
+##      `vec_buf` was previously `let vec_buf = [0u8; 16]` — an
+##      immutable binding.  The pre-batch -ENOSYS stub never
+##      actually wrote to it, so this was silently fine; the
+##      upgraded mincore *does* write, and writing through an
+##      immutable binding's data pointer is undefined behavior in
+##      Rust even when the underlying memory is physically
+##      writable.  Promoted to `let mut vec_buf = [0xCCu8; 16]` so
+##      the writes are well-formed and the post-condition check is
+##      meaningful.
+##
+##      Known limitations:
+##        * Bits 1..7 of each vec byte are zero — we don't model
+##          any of the Linux 6.x bits (MM_INCORE_PAGE_FILE,
+##          MM_INCORE_PAGE_LOCKED, etc.).  Linux callers treat the
+##          high bits as reserved and ignore them anyway.
+##        * Length is unbounded other than by the vec-writability
+##          check.  Callers asking about extremely large ranges
+##          (e.g. several GB) will get a long-running syscall;
+##          mincore is documented as not preemptible on Linux
+##          either, so this matches behavior.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

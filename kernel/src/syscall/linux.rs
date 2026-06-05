@@ -13705,7 +13705,23 @@ fn sys_settimeofday(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `mincore(addr, length, vec*)`.
+/// `mincore(addr, length, vec*)` — report which pages of the mapping
+/// at `[addr, addr+length)` are resident in physical memory.
+///
+/// Pre-batch this validated args and returned -ENOSYS.  The old
+/// comment justified that with "we don't track resident-vs-swapped
+/// state; without a user-write copy path we can't fill `vec`."  Both
+/// halves of that excuse are obsolete: we *do* have copy_to_user
+/// (used by sys_cachestat, sys_sched_getattr, and friends), and we
+/// have no swap or demand paging, so every mapped page is *always*
+/// resident.  The honest mincore answer is therefore one byte of
+/// 0x01 (bit 0 set = resident) for every page in the range.
+///
+/// Linux's mincore vec layout: one byte per page, where bit 0 set
+/// means the page is in core (resident) and the remaining bits are
+/// reserved (zero).  Callers (libgc, glibc malloc trim heuristics,
+/// PostgreSQL's pg_prewarm) use the bit-0 information; bits 1..7
+/// must be zero to avoid future-reservation surprises.
 fn sys_mincore(args: &SyscallArgs) -> SyscallResult {
     let addr = args.arg0;
     let length = args.arg1;
@@ -13731,11 +13747,35 @@ fn sys_mincore(args: &SyscallArgs) -> SyscallResult {
     if let Err(_e) = crate::mm::user::validate_user_read(addr, length as usize) {
         return linux_err(errno::ENOMEM);
     }
-    // We don't track resident-vs-swapped state; without a user-write
-    // copy path we can't fill `vec`.  Return ENOSYS so callers (libgc,
-    // glibc malloc trim heuristics) fall back to assuming "everything
-    // resident" which is true in our non-swapping kernel anyway.
-    linux_err(errno::ENOSYS)
+    // Write one byte of 0x01 (bit 0 = resident, bits 1..7 = reserved)
+    // per page.  We have no swap and no demand paging, so every page
+    // in a validated mapping is unconditionally resident — that's the
+    // truth of this kernel, not a heuristic.  Use a 256-byte stack
+    // chunk to bound the per-call kernel-stack footprint; the largest
+    // realistic call (a 4 GiB mapping) is 256 KiB of `vec` bytes
+    // which we stream in 256-byte writes.
+    const RESIDENT_CHUNK: [u8; 256] = [0x01u8; 256];
+    let mut written: u64 = 0;
+    while written < pages {
+        let remaining = pages - written;
+        #[allow(clippy::cast_possible_truncation)]
+        let n = core::cmp::min(remaining, RESIDENT_CHUNK.len() as u64) as usize;
+        // SAFETY: validate_user_write above confirmed the full
+        // `pages`-byte user buffer is writable.  We are writing a
+        // sub-range of that confirmed window.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(
+                RESIDENT_CHUNK.as_ptr(),
+                vec_ptr + written,
+                n,
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        written += n as u64;
+    }
+    SyscallResult::ok(0)
 }
 
 /// `mremap(old_addr, old_size, new_size, flags, new_addr)`.
@@ -28724,8 +28764,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let tv_ptr = tv_buf.as_ptr() as u64;
         let tz_buf = [0u8; 8];
         let tz_ptr = tz_buf.as_ptr() as u64;
-        let vec_buf = [0u8; 16];
-        let vec_ptr = vec_buf.as_ptr() as u64;
+        // mincore (batch 109 upgrade) actually writes one byte per
+        // page into this buffer; declare mutable so the writes are
+        // well-formed in Rust semantics, and verify the contents
+        // afterwards.
+        let mut vec_buf = [0xCCu8; 16];
+        let vec_ptr = vec_buf.as_mut_ptr() as u64;
         let ustat_buf = [0u8; 32];
         let ustat_ptr = ustat_buf.as_ptr() as u64;
         let name_buf = b"/var/log/acct\0";
@@ -28762,10 +28806,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mincore NULL vec not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // mincore valid -> ENOSYS.
+        // mincore(addr, 1 page, vec) -> 0 with vec[0] == 0x01
+        // (batch 109 upgrade: pre-batch returned -ENOSYS
+        // unconditionally; post-batch returns "page resident" because
+        // this kernel has no swap and no demand paging so every
+        // mapped page is unconditionally resident).  We also assert
+        // the bytes beyond the single requested page retain the
+        // 0xCC sentinel — proves we didn't overwrite past the vec.
         let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: vec_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MINCORE, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: mincore valid not ENOSYS");
+        if dispatch_linux(nr::MINCORE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mincore valid not 0");
+            return Err(KernelError::InternalError);
+        }
+        if vec_buf[0] != 0x01 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mincore did not mark page resident (vec[0]={})",
+                vec_buf[0],
+            );
+            return Err(KernelError::InternalError);
+        }
+        if vec_buf[1..].iter().any(|&b| b != 0xCC) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mincore wrote past requested page count",
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mincore(addr, 5 pages, vec) -> 0 with vec[0..5] all 0x01.
+        // Reset the sentinel first.
+        vec_buf = [0xCCu8; 16];
+        let a = SyscallArgs {
+            arg0: 0x4000,
+            arg1: 5 * 0x4000,
+            arg2: vec_ptr,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::MINCORE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mincore 5-page not 0");
+            return Err(KernelError::InternalError);
+        }
+        if vec_buf[..5].iter().any(|&b| b != 0x01) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mincore 5-page didn't fill all 5 bytes",
+            );
+            return Err(KernelError::InternalError);
+        }
+        if vec_buf[5..].iter().any(|&b| b != 0xCC) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mincore 5-page over-wrote",
+            );
             return Err(KernelError::InternalError);
         }
 

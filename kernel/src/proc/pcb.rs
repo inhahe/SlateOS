@@ -404,6 +404,38 @@ pub struct Process {
     /// because we don't yet have user-signal infrastructure with the
     /// required lifecycle hooks.  See todo.txt entry for batch 61.
     pub linux_pdeathsig: u32,
+    /// Linux `sched_setscheduler(2)` policy ID for the process.
+    ///
+    /// Values match Linux's `SCHED_*` constants:
+    ///   - 0 = `SCHED_OTHER` (the default for every freshly-created
+    ///     task on Linux and what every shell-spawned process
+    ///     inherits)
+    ///   - 1 = `SCHED_FIFO` (real-time)
+    ///   - 2 = `SCHED_RR` (real-time)
+    ///   - 3 = `SCHED_BATCH`
+    ///   - 5 = `SCHED_IDLE`
+    ///   - 6 = `SCHED_DEADLINE`
+    ///   - 7 = `SCHED_EXT`
+    ///
+    /// We store the value purely for ABI round-trip — our actual
+    /// scheduler is a single priority-round-robin and does not honour
+    /// real-time policies.  Programs that query the policy after
+    /// setting it (and many do, as a sanity check) will at least see
+    /// their request reflected back, instead of always observing
+    /// `SCHED_OTHER`.  See todo.txt entry for batch 62.
+    pub linux_sched_policy: u32,
+    /// Static priority for the process, as set via
+    /// `sched_setscheduler` / `sched_setparam` and read via
+    /// `sched_getparam`.
+    ///
+    /// Range constraints are enforced at the syscall surface (the
+    /// pure helper `sched_priority_check_for_policy`):
+    ///   - `SCHED_FIFO` / `SCHED_RR`: 1..=99
+    ///   - everything else: must be exactly 0
+    ///
+    /// Storing it per-PCB lets the get-side report the value the
+    /// caller actually installed, instead of always 0.
+    pub linux_sched_priority: i32,
 }
 
 impl Process {
@@ -450,6 +482,10 @@ impl Process {
             // (children of a forked task do not inherit the
             // parent's death signal).
             linux_pdeathsig: 0,
+            // Default to SCHED_OTHER, priority 0 — what every freshly
+            // exec'd binary inherits on stock Linux.
+            linux_sched_policy: 0,
+            linux_sched_priority: 0,
         }
     }
 }
@@ -549,7 +585,21 @@ pub fn fork_create(
     // path, this keeps the refcount at exactly "one per process that
     // holds at least one fd referencing the handle", which is what
     // fork's `dup_one` per-process bump preserves.
-    let (name, cap_table, credentials, vmas, abi_mode, linux_fd_table, cwd, rlimits, linux_as_bytes, linux_umask, linux_personality) = {
+    let (
+        name,
+        cap_table,
+        credentials,
+        vmas,
+        abi_mode,
+        linux_fd_table,
+        cwd,
+        rlimits,
+        linux_as_bytes,
+        linux_umask,
+        linux_personality,
+        linux_sched_policy,
+        linux_sched_priority,
+    ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
             let mut copy = super::linux_fd::KernelFdTable::new();
@@ -572,6 +622,8 @@ pub fn fork_create(
             parent.linux_as_bytes,
             parent.linux_umask,
             parent.linux_personality,
+            parent.linux_sched_policy,
+            parent.linux_sched_priority,
         )
     };
 
@@ -658,6 +710,12 @@ pub fn fork_create(
         // re-arm via prctl(PR_SET_PDEATHSIG) itself.  Same rule
         // applies across exec.  Match Linux exactly.
         linux_pdeathsig: 0,
+        // Linux: scheduling policy and priority are inherited
+        // verbatim across fork.  (SCHED_RESET_ON_FORK is opt-in via
+        // OR'ing 0x40000000 into the policy at set time; we do not
+        // implement that flag yet — see todo entry.)
+        linux_sched_policy,
+        linux_sched_priority,
     };
 
     table.insert(pid, child);
@@ -1147,6 +1205,48 @@ pub fn set_pdeathsig(pid: ProcessId, sig: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_pdeathsig;
     proc.linux_pdeathsig = sig;
+    Some(old)
+}
+
+/// Read the recorded `sched_setscheduler` policy for `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
+/// default (SCHED_OTHER) for every newly-created process that has
+/// not yet called `sched_setscheduler`.
+#[must_use]
+pub fn get_sched_policy(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_sched_policy)
+}
+
+/// Install a new scheduling policy for `pid`, returning the prior
+/// value.  Caller is responsible for policy validation (this helper
+/// stores whatever value it is given).  Returns `None` if `pid` is
+/// unknown.
+pub fn set_sched_policy(pid: ProcessId, policy: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_sched_policy;
+    proc.linux_sched_policy = policy;
+    Some(old)
+}
+
+/// Read the recorded `sched_priority` for `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
+/// default (SCHED_OTHER demands priority 0).
+#[must_use]
+pub fn get_sched_priority(pid: ProcessId) -> Option<i32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_sched_priority)
+}
+
+/// Install a new sched priority for `pid`, returning the prior
+/// value.  Caller is responsible for range validation against the
+/// process's current policy.  Returns `None` if `pid` is unknown.
+pub fn set_sched_priority(pid: ProcessId, prio: i32) -> Option<i32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_sched_priority;
+    proc.linux_sched_priority = prio;
     Some(old)
 }
 

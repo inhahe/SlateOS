@@ -9188,4 +9188,94 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##         dedicated exec PCB-reset block is touched
 ##         next.
 
+## 89. Linux ABI batch 62: real per-PCB sched_policy /
+##     sched_priority storage with full round-trip
+##     across sched_(get|set)scheduler / sched_(get|set)param.
+##
+##     Background: sched_setscheduler previously validated
+##     a request (policy whitelist, priority range,
+##     RLIMIT_RTPRIO gate) and then silently discarded the
+##     result.  Subsequent sched_getscheduler always
+##     reported SCHED_OTHER (0) and sched_getparam always
+##     wrote priority 0 back to the user buffer.  Programs
+##     that round-trip their scheduling parameters (a
+##     common sanity check immediately after a setter
+##     call, performed e.g. by glibc's nptl bootstrap and
+##     by every RT-aware runtime such as PulseAudio,
+##     JACK, the Real-Time Java VM and ROS) would see a
+##     mismatch between "the value I just set" and "the
+##     value the kernel reports back" and either log a
+##     spurious error or fall into a retry loop.
+##
+##     What was done:
+##       - Added `linux_sched_policy: u32` (default 0 =
+##         SCHED_OTHER) and `linux_sched_priority: i32`
+##         (default 0) to the Process struct in
+##         kernel/src/proc/pcb.rs.
+##       - Both fields are inherited verbatim across fork
+##         in fork_create — matching Linux's default
+##         behaviour (SCHED_RESET_ON_FORK is opt-in, see
+##         limitation below).
+##       - Added pcb::{get,set}_sched_policy and
+##         pcb::{get,set}_sched_priority helpers.
+##       - sys_sched_setscheduler now stores the validated
+##         (policy, priority) tuple via the helpers after
+##         the existing whitelist + range + RTPRIO
+##         checks pass.  Kernel-context callers with no
+##         caller_pid() skip the store (consistent with
+##         every other per-PCB linux ABI write).
+##       - sys_sched_getscheduler now resolves pid==0 to
+##         the caller, reads the stored policy via
+##         pcb::get_sched_policy, and returns it (default
+##         0 if no PCB).
+##       - sys_sched_getparam now reads the stored
+##         priority via pcb::get_sched_priority and writes
+##         it to the user's struct sched_param.
+##       - sys_sched_setparam now looks up the target's
+##         current policy, validates the requested
+##         priority against it (so e.g. updating only the
+##         priority of an existing SCHED_FIFO task works,
+##         instead of always EINVAL'ing on non-zero), and
+##         stores the new priority.  Also runs the RTPRIO
+##         gate when the current policy is RT.
+##       - Self-tests exercise:
+##           * Storage helpers: defaults are (0, 0);
+##             set/get round-trips for SCHED_FIFO@50,
+##             SCHED_RR@99, back to SCHED_OTHER@0; after
+##             destroy all four helpers return None.
+##           * sys_sched_getscheduler on a freshly-stored
+##             SCHED_FIFO PCB reports 1 (not 0).
+##           * sys_sched_getparam writes the stored
+##             priority (42) to a kernel-stack scratch
+##             buffer.
+##           * sys_sched_getscheduler on a bogus pid
+##             returns ESRCH (unchanged).
+##           * sys_sched_setparam on a SCHED_OTHER PCB
+##             with prio 0 succeeds; with prio 5 returns
+##             EINVAL (validates against the current
+##             stored policy, not always against
+##             SCHED_OTHER).
+##
+##     Known limitations:
+##       - SCHED_RESET_ON_FORK (bit 0x40000000 OR'd into
+##         the policy at sched_setscheduler time) is not
+##         honoured.  Linux clears the RT policy/priority
+##         in fork'd children of a task that has set this
+##         flag, instead of inheriting.  Wiring it would
+##         require detecting the bit in the setter,
+##         masking it out before storing, and recording
+##         it in a separate per-PCB boolean that
+##         fork_create consults.  Documented as a small
+##         follow-up.
+##       - The stored policy/priority do NOT influence
+##         actual scheduling decisions yet — our scheduler
+##         is single priority-round-robin and ignores
+##         SCHED_FIFO / SCHED_RR semantics entirely.  This
+##         is the same situation as before this batch
+##         (the ABI was always advisory at the behavioural
+##         level); what changed is that the ABI now
+##         round-trips honestly.  Real RT scheduling is
+##         tracked under the scheduler roadmap and is the
+##         right place for that work.
+
 

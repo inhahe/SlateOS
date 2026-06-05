@@ -5033,12 +5033,20 @@ fn sys_capset(args: &SyscallArgs) -> SyscallResult {
 /// We always return 0 (SCHED_OTHER); ESRCH for non-existent pids.
 fn sys_sched_getscheduler(args: &SyscallArgs) -> SyscallResult {
     let pid = args.arg0;
-    if pid != 0 {
-        if crate::proc::pcb::state(pid).is_none() {
+    // Resolve target pid: 0 means "caller".  Kernel-context callers
+    // (no caller_pid) on pid==0 fall through to SCHED_OTHER (0).
+    let target_pid = if pid == 0 {
+        caller_pid()
+    } else {
+        if pcb::state(pid).is_none() {
             return linux_err(errno::ESRCH);
         }
-    }
-    SyscallResult::ok(0)
+        Some(pid)
+    };
+    let policy = target_pid
+        .and_then(pcb::get_sched_policy)
+        .unwrap_or(0);
+    SyscallResult::ok(i64::from(policy))
 }
 
 /// `sched_setscheduler(pid, policy, sched_param)` — install a new
@@ -5105,6 +5113,17 @@ fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
+    // Resolve target pid for the per-PCB store: 0 means caller.
+    // Kernel-context callers on pid==0 silently skip the store (no
+    // PCB to write into); on an explicit pid we already verified
+    // it exists via pcb::state() above.
+    let target_pid = if pid == 0 { caller_pid() } else { Some(pid) };
+    if let Some(tp) = target_pid {
+        #[allow(clippy::cast_possible_truncation)]
+        let policy_u32 = policy as u32;
+        let _ = pcb::set_sched_policy(tp, policy_u32);
+        let _ = pcb::set_sched_priority(tp, sched_prio);
+    }
     SyscallResult::ok(0)
 }
 
@@ -5195,15 +5214,21 @@ fn rlimit_rtprio_check_with(soft: u64, sched_prio: i32) -> Result<(), i32> {
 /// `sched_getparam(pid, param)` — write `struct sched_param { int
 /// sched_priority; }` to `param`.
 ///
-/// We report priority 0 (the SCHED_OTHER default).
+/// We read the stored priority installed via the most recent
+/// `sched_setscheduler` / `sched_setparam` call on the target.  A
+/// process that has never set a priority observes 0 (the
+/// SCHED_OTHER default).
 fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
     let pid = args.arg0;
     let param_ptr = args.arg1;
-    if pid != 0 {
-        if crate::proc::pcb::state(pid).is_none() {
+    let target_pid = if pid == 0 {
+        caller_pid()
+    } else {
+        if pcb::state(pid).is_none() {
             return linux_err(errno::ESRCH);
         }
-    }
+        Some(pid)
+    };
     if param_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -5213,9 +5238,12 @@ fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(param_ptr, 4) {
         return linux_err(linux_errno_for(e));
     }
-    let zero = [0u8; 4];
+    let prio: i32 = target_pid
+        .and_then(pcb::get_sched_priority)
+        .unwrap_or(0);
+    let bytes = prio.to_ne_bytes();
     // SAFETY: validated 4-byte writable user range.
-    let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), param_ptr, 4) };
+    let r = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), param_ptr, 4) };
     if let Err(e) = r {
         return linux_err(linux_errno_for(e));
     }
@@ -5225,10 +5253,11 @@ fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
 /// `sched_setparam(pid, param)` — install new sched parameters.
 ///
 /// `sched_setparam` keeps the target's current scheduling policy and
-/// only updates the parameters; our model reports every process as
-/// SCHED_OTHER (see [`sys_sched_getscheduler`]), which has the rule
-/// `sched_priority == 0`.  Therefore any non-zero `sched_priority`
-/// request returns EINVAL.
+/// only updates the priority.  We read the current policy from the
+/// per-PCB store (set by an earlier `sched_setscheduler` or default
+/// SCHED_OTHER) and validate the requested priority against it:
+///   - SCHED_FIFO / SCHED_RR (1, 2): priority in 1..=99.
+///   - everything else: priority must be exactly 0.
 ///
 /// `param` is a user pointer that must point to at least 4 bytes of
 /// readable memory (we only consume `sched_priority`).  NULL or
@@ -5236,19 +5265,34 @@ fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
 fn sys_sched_setparam(args: &SyscallArgs) -> SyscallResult {
     let pid = args.arg0;
     let param_ptr = args.arg1;
-    if pid != 0 {
+    let target_pid = if pid == 0 {
+        caller_pid()
+    } else {
         if pcb::state(pid).is_none() {
             return linux_err(errno::ESRCH);
         }
-    }
+        Some(pid)
+    };
     let sched_prio = match read_user_sched_priority(param_ptr) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
     };
-    // Modelled current policy is SCHED_OTHER, which requires
-    // sched_priority == 0.
-    if sched_prio != 0 {
-        return linux_err(errno::EINVAL);
+    // Look up the target's current policy; default SCHED_OTHER if
+    // unknown (kernel-context caller, no PCB).
+    let current_policy = target_pid
+        .and_then(pcb::get_sched_policy)
+        .unwrap_or(0);
+    if let Err(e) = sched_priority_check_for_policy(u64::from(current_policy), sched_prio) {
+        return linux_err(e);
+    }
+    // RTPRIO gate when changing priority within an RT policy.
+    if current_policy == 1 || current_policy == 2 {
+        if let Err(e) = rlimit_rtprio_check_for_caller(sched_prio) {
+            return linux_err(e);
+        }
+    }
+    if let Some(tp) = target_pid {
+        let _ = pcb::set_sched_priority(tp, sched_prio);
     }
     SyscallResult::ok(0)
 }
@@ -16636,6 +16680,143 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: sched_rr_get_interval(0, NULL) not EFAULT"
             );
             return Err(KernelError::InternalError);
+        }
+
+        // Batch 62: per-PCB sched_policy / sched_priority round-trip.
+        //
+        // Storage-layer round-trip via the pcb helpers directly.  We
+        // can't drive caller_pid() from the test context so we cover
+        // the syscall dispatch paths separately (kernel-context
+        // SCHED_GETSCHEDULER/0 returns SCHED_OTHER, and the validation
+        // checks are exercised in the dispatch validations above).
+        //
+        // What this test proves:
+        //   - Fresh PCB starts at SCHED_OTHER (0), priority 0.
+        //   - set_sched_policy installs a value and returns the
+        //     previous one.
+        //   - set_sched_priority installs a value and returns the
+        //     previous one.
+        //   - get_* returns whatever set_* last installed.
+        //   - After destroy, helpers all return None (no leak).
+        {
+            let test_pid = pcb::create("sched-test", 0);
+            // Defaults.
+            assert_eq!(pcb::get_sched_policy(test_pid), Some(0));
+            assert_eq!(pcb::get_sched_priority(test_pid), Some(0));
+            // Install SCHED_FIFO @ prio 50.
+            assert_eq!(pcb::set_sched_policy(test_pid, 1), Some(0));
+            assert_eq!(pcb::set_sched_priority(test_pid, 50), Some(0));
+            assert_eq!(pcb::get_sched_policy(test_pid), Some(1));
+            assert_eq!(pcb::get_sched_priority(test_pid), Some(50));
+            // Replace with SCHED_RR @ prio 99.
+            assert_eq!(pcb::set_sched_policy(test_pid, 2), Some(1));
+            assert_eq!(pcb::set_sched_priority(test_pid, 99), Some(50));
+            assert_eq!(pcb::get_sched_policy(test_pid), Some(2));
+            assert_eq!(pcb::get_sched_priority(test_pid), Some(99));
+            // Drop back to SCHED_OTHER @ prio 0 (the only legal combo).
+            assert_eq!(pcb::set_sched_policy(test_pid, 0), Some(2));
+            assert_eq!(pcb::set_sched_priority(test_pid, 0), Some(99));
+            assert_eq!(pcb::get_sched_policy(test_pid), Some(0));
+            assert_eq!(pcb::get_sched_priority(test_pid), Some(0));
+            pcb::destroy(test_pid);
+            // After destroy, helpers return None.
+            assert_eq!(pcb::get_sched_policy(test_pid), None);
+            assert_eq!(pcb::get_sched_priority(test_pid), None);
+            assert_eq!(pcb::set_sched_policy(test_pid, 1), None);
+            assert_eq!(pcb::set_sched_priority(test_pid, 50), None);
+        }
+
+        // Dispatch-side coverage: sched_getscheduler on an explicit
+        // pid we have just created — we can drive arg0 directly so
+        // caller_pid is irrelevant.  Install a non-default policy
+        // via the storage helper, then call dispatch and verify it
+        // reports the same value (proving the read path is wired).
+        {
+            let test_pid = pcb::create("sched-dispatch", 0);
+            // Pre-install SCHED_FIFO @ prio 42.
+            let _ = pcb::set_sched_policy(test_pid, 1);
+            let _ = pcb::set_sched_priority(test_pid, 42);
+            let a = SyscallArgs { arg0: test_pid, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value != 1 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getscheduler(real_pid) not SCHED_FIFO ({})",
+                    dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sched_getparam on the same pid with a kernel-stack
+            // scratch buffer — must write back the stored priority
+            // (42).  copy_to_user in kernel context bypasses SMAP.
+            let mut prio_out: i32 = -1;
+            let a = SyscallArgs {
+                arg0: test_pid,
+                arg1: (&raw mut prio_out) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SCHED_GETPARAM, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getparam(real_pid, &buf) not 0 ({})",
+                    dispatch_linux(nr::SCHED_GETPARAM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            if prio_out != 42 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getparam buf not 42 ({})",
+                    prio_out
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Bogus pid for ESRCH.
+            let a = SyscallArgs { arg0: 0xdead_beef, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value
+                != -i64::from(errno::ESRCH) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getscheduler(bogus) not ESRCH"
+                );
+                return Err(KernelError::InternalError);
+            }
+            pcb::destroy(test_pid);
+        }
+
+        // sched_setparam with kernel-stack param: priority 0 against
+        // a freshly-created test PCB (default SCHED_OTHER) must
+        // succeed and store 0 (which is already the default — we
+        // verify the call routes correctly).  Non-zero priority
+        // against SCHED_OTHER must EINVAL.
+        {
+            let test_pid = pcb::create("sched-param-test", 0);
+            let zero: i32 = 0;
+            let a = SyscallArgs {
+                arg0: test_pid,
+                arg1: (&raw const zero) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SCHED_SETPARAM, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_setparam(OTHER, 0) not 0 ({})",
+                    dispatch_linux(nr::SCHED_SETPARAM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Non-zero priority against SCHED_OTHER -> EINVAL.
+            let bad: i32 = 5;
+            let a = SyscallArgs {
+                arg0: test_pid,
+                arg1: (&raw const bad) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SCHED_SETPARAM, &a).value
+                != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_setparam(OTHER, 5) not EINVAL ({})",
+                    dispatch_linux(nr::SCHED_SETPARAM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            pcb::destroy(test_pid);
         }
     }
 

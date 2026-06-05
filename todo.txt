@@ -19695,3 +19695,39 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      (compiled-out class) so the EPERM gate is unreachable.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 247. [DONE 2026-06-05] Linux ABI: sys_sched_getattr combined
+##      !uattr | pid<0 | usize-range | flags EINVAL gate.
+##
+##      Linux `kernel/sched/syscalls.c::SYSCALL_DEFINE4(
+##      sched_getattr)` opens with a single combined gate:
+##         if (!uattr || pid < 0 || usize > PAGE_SIZE
+##             || usize < SCHED_ATTR_SIZE_VER0 || flags)
+##             return -EINVAL;
+##      All five failure modes share EINVAL — including:
+##         * NULL uattr (no EFAULT, despite user-pointer param)
+##         * usize > PAGE_SIZE (no E2BIG)
+##         * pid<0 (no ESRCH; bypasses find_process_by_pid path)
+##      Pre-batch sys_sched_getattr (kernel/src/syscall/linux.rs):
+##         * flags != 0 -> EINVAL (correct).
+##         * size < 48 -> EINVAL (correct).
+##         * size > 2^20 -> E2BIG (diverges; Linux EINVAL).
+##         * attr_ptr == 0 -> EFAULT (diverges; Linux EINVAL).
+##         * pid<0 not validated up-front; the later pcb::state
+##           lookup gave ESRCH for unknown pids and 0 for an
+##           accidentally-matched cast.
+##      PAGE_SIZE here is pegged at Linux x86_64 4096 (the ABI
+##      consumers' expectation), NOT our internal 16 KiB frame
+##      size.  Companion to batch 246 (sched_setattr).
+##
+##      Fix: collapse the five failure modes into one EINVAL gate
+##      at the top of the function, matching Linux's literal
+##      conjunction.
+##
+##      Self-tests updated/added:
+##      - sched_getattr(usize=2M) -> EINVAL (was E2BIG).
+##      - sched_getattr(NULL uattr) -> EINVAL (was EFAULT).
+##      - sched_getattr(pid=u64::MAX, valid uattr) -> EINVAL (new).
+##      Marker: "sched_getattr combined !uattr|pid<0|size|flags EINVAL: OK".
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

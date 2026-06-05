@@ -15674,19 +15674,33 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
 /// `sched_getparam`.  Kernel-context callers (no current task) and
 /// pid==0 fall back to (SCHED_OTHER, 0).
 fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
-    if args.arg3 != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    let size = args.arg2;
-    if size < 48 {
-        return linux_err(errno::EINVAL);
-    }
-    if size > (1 << 20) {
-        return linux_err(errno::E2BIG);
-    }
+    // Linux kernel/sched/syscalls.c::SYSCALL_DEFINE4(sched_getattr)
+    // opens with a single combined gate:
+    //   if (!uattr || pid < 0 || usize > PAGE_SIZE
+    //       || usize < SCHED_ATTR_SIZE_VER0 || flags)
+    //       return -EINVAL;
+    // All five failure modes share EINVAL — including a NULL uattr
+    // (no EFAULT) and an oversized usize (no E2BIG).  Pre-batch we
+    // returned EFAULT for NULL uattr, E2BIG for size>2^20, and did
+    // not validate pid<0 at the top of the function.  Probes saw:
+    //   (uattr=NULL)            -> EFAULT vs Linux EINVAL
+    //   (usize=2M)              -> E2BIG  vs Linux EINVAL
+    //   (pid<0, valid uattr)    -> 0      vs Linux EINVAL
+    // PAGE_SIZE is pegged at Linux x86_64 4096 here (the ABI
+    // consumers' expectation), not our internal 16 KiB frame.
+    const LINUX_PAGE_SIZE: u64 = 4096;
+    const SCHED_ATTR_SIZE_VER0: u64 = 48;
     let attr_ptr = args.arg1;
-    if attr_ptr == 0 {
-        return linux_err(errno::EFAULT);
+    let size = args.arg2;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = args.arg0 as i32;
+    if args.arg3 != 0
+        || attr_ptr == 0
+        || pid_i32 < 0
+        || size > LINUX_PAGE_SIZE
+        || size < SCHED_ATTR_SIZE_VER0
+    {
+        return linux_err(errno::EINVAL);
     }
     if let Err(e) = crate::mm::user::validate_user_write(attr_ptr, size as usize) {
         return linux_err(linux_errno_for(e));
@@ -37000,18 +37014,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: sched_getattr small size not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // sched_getattr huge size -> E2BIG.
+        // sched_getattr huge size -> EINVAL (was E2BIG).  Linux
+        // combines `usize > PAGE_SIZE` into the top-of-function EINVAL
+        // gate; the standalone E2BIG path doesn't exist.  PAGE_SIZE
+        // is Linux x86_64 4096, not our internal 16 KiB frame.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: (1 << 21), arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::E2BIG) {
-            serial_println!("[syscall/linux]   FAIL: sched_getattr huge size not E2BIG");
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sched_getattr huge size not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // sched_getattr NULL attr -> EFAULT.
+        // sched_getattr NULL attr -> EINVAL (was EFAULT).  Linux folds
+        // !uattr into the same combined EINVAL gate.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 48, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: sched_getattr NULL not EFAULT");
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sched_getattr NULL not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // sched_getattr neg pid + valid attr -> EINVAL.  Linux's
+        // combined gate rejects pid<0 ahead of any task lookup, so a
+        // probe walking the ladder sees EINVAL where pre-batch we
+        // proceeded into the find-task path and returned ESRCH (or 0
+        // on an accidental match).
+        let mut sga_attr = [0u8; 64];
+        let sga_ptr = sga_attr.as_mut_ptr() as u64;
+        let a = SyscallArgs { arg0: u64::MAX, arg1: sga_ptr, arg2: 48, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sched_getattr neg pid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_getattr combined !uattr|pid<0|size|flags EINVAL: OK"
+        );
         // sched_getattr(pid=0, attr, size=48) -> 0 (batch 106 upgrade:
         // was ENOSYS, now writes a v0-shaped sched_attr from PCB).
         let mut big_buf = [0xCCu8; 64];

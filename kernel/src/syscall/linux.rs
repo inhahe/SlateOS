@@ -16045,16 +16045,46 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
     const KCMP_FILE: u64 = 0;
     const KCMP_EPOLL_TFD: u64 = 7;
 
-    let typ = args.arg2;
-    if typ > 7 {
-        return linux_err(errno::EINVAL);
-    }
+    // Linux gate order (kernel/kcmp.c::SYSCALL_DEFINE5):
+    //   1. find_task_by_vpid(pid1) / find_task_by_vpid(pid2)
+    //                                      -> -ESRCH if either fails
+    //                                         (NULL task; negative pids
+    //                                         and unknown positive pids
+    //                                         both land here).
+    //   2. ptrace_may_access(both tasks)   -> -EPERM
+    //   3. switch (type) default arm        -> -EINVAL (LAST)
+    //
+    // Pre-batch we checked `typ > 7 -> EINVAL` ahead of the pid lookup,
+    // so a probe with `(pid=-1, type=99)` saw `EINVAL` where Linux
+    // returns `ESRCH` (the pid lookup fires first).  Hoist the pid /
+    // task-liveness gate ahead of the type-range gate so probes see
+    // the Linux-shaped errno discriminator.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid1_i32 = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid2_i32 = args.arg1 as i32;
     if pid1_i32 < 0 || pid2_i32 < 0 {
         return linux_err(errno::ESRCH);
+    }
+
+    let tid1: u64 = args.arg0;
+    let tid2: u64 = args.arg1;
+    let owner1 = crate::proc::thread::owner_process(tid1);
+    let owner2 = crate::proc::thread::owner_process(tid2);
+    let kernel_ctx = caller_pid().is_none();
+
+    // Linux's find_task_by_vpid covers both negative and unknown
+    // positive pids with the same ESRCH discriminator, ahead of the
+    // type switch's EINVAL default.  In kernel context the thread
+    // table is empty, so skip the liveness gate to let the boot
+    // self-test exercise the comparator paths.
+    if !kernel_ctx && (owner1.is_none() || owner2.is_none()) {
+        return linux_err(errno::ESRCH);
+    }
+
+    let typ = args.arg2;
+    if typ > 7 {
+        return linux_err(errno::EINVAL);
     }
 
     // KCMP_EPOLL_TFD: idx2 is a pointer to struct kcmp_epoll_slot
@@ -16069,16 +16099,6 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
         return SyscallResult::ok(3);
-    }
-
-    let tid1: u64 = args.arg0;
-    let tid2: u64 = args.arg1;
-    let owner1 = crate::proc::thread::owner_process(tid1);
-    let owner2 = crate::proc::thread::owner_process(tid2);
-    let kernel_ctx = caller_pid().is_none();
-
-    if !kernel_ctx && (owner1.is_none() || owner2.is_none()) {
-        return linux_err(errno::ESRCH);
     }
 
     // Same-process predicate: in our model, threads share a PCB so
@@ -37350,16 +37370,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   landlock_restrict_self log flags: OK");
 
-        // kcmp bad type -> EINVAL.
+        // kcmp bad type, valid pids -> EINVAL.  Type validation lives
+        // in Linux's switch-default arm, so it fires only after the
+        // pid lookup succeeds.  In kernel context our liveness check
+        // is bypassed so the type gate is reached for any non-negative
+        // pid pair.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: kcmp bad type not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // kcmp negative pid -> ESRCH.
+        // kcmp negative pid, valid type -> ESRCH.
         let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
             serial_println!("[syscall/linux]   FAIL: kcmp neg pid not ESRCH");
+            return Err(KernelError::InternalError);
+        }
+        // kcmp negative pid AND bad type -> ESRCH (pid lookup fires
+        // ahead of the switch-default's EINVAL).  Pre-batch this
+        // returned EINVAL because the type gate fired first.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: kcmp neg pid + bad type not ESRCH");
+            return Err(KernelError::InternalError);
+        }
+        // kcmp valid pid1, negative pid2, bad type -> ESRCH (either
+        // negative pid is enough to discriminate ahead of EINVAL).
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: kcmp pid2-neg + bad type not ESRCH");
             return Err(KernelError::InternalError);
         }
         // Batch 111: kcmp upgraded from -ENOSYS to a real comparator.
@@ -37414,6 +37453,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: kcmp EPOLL_TFD valid not 3");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   kcmp pid-ESRCH-ahead-of-type-EINVAL gate order: OK"
+        );
 
         // restart_syscall -> EINTR.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

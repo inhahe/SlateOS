@@ -19838,3 +19838,46 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
+## 250. [DONE 2026-06-05] Linux ABI: sys_kcmp pid-ESRCH ahead of type-EINVAL.
+##
+##      Linux gate order (kernel/kcmp.c::SYSCALL_DEFINE5):
+##         1. find_task_by_vpid(pid1) / find_task_by_vpid(pid2)
+##                                          -> -ESRCH if either fails
+##                                             (negative pids and
+##                                             unknown positive pids
+##                                             both land in this arm).
+##         2. ptrace_may_access(task1, task2) -> -EPERM
+##         3. switch (type) default arm        -> -EINVAL (LAST)
+##
+##      Pre-batch divergence in sys_kcmp:
+##      - `typ > 7 -> EINVAL` was the FIRST gate, ahead of the
+##        `pid < 0 -> ESRCH` arm and ahead of the kernel-vs-user
+##        task-liveness gate.  A probe with `(pid=-1, type=99)`
+##        saw `EINVAL` where Linux returns `ESRCH` (the
+##        find_task_by_vpid step fires first and discriminates
+##        the pid argument before the switch sees `type`).
+##
+##      Fix: hoist the pid<0 ESRCH gate and the (non-kernel-ctx)
+##      owner-liveness ESRCH gate ahead of the `typ > 7 -> EINVAL`
+##      gate, mirroring Linux's source order.  The EPOLL_TFD pointer
+##      validation and the type-specific comparator paths continue
+##      to run after the type gate as before.
+##
+##      Self-tests updated/added (~line 37353):
+##      - kcmp(pid=0, pid=0, type=99) -> EINVAL (kept; valid pids
+##        reach the switch-default).
+##      - kcmp(pid=-1, pid=0, type=0) -> ESRCH (kept; pid lookup).
+##      - kcmp(pid=-1, pid=0, type=99) -> ESRCH (NEW; pre-batch
+##        returned EINVAL via the now-removed type-first gate).
+##      - kcmp(pid=0, pid=-1, type=99) -> ESRCH (NEW; either neg
+##        pid is enough to discriminate ahead of EINVAL).
+##      Marker: "kcmp pid-ESRCH-ahead-of-type-EINVAL gate order: OK".
+##
+##      Known limitations: we don't model per-resource sharing
+##      (CLONE_VM without CLONE_FILES, unshare(2), etc.) — the PCB
+##      remains monolithic.  CRIU is the main caller that would
+##      observe this; documented in earlier todo entries.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+

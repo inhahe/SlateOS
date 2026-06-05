@@ -13443,3 +13443,110 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
+## 147. [LINUX ABI BATCH 118 - DONE] Implement clone3(2) on top of the
+##      existing clone(2) machinery.  Before this batch, clone3 returned
+##      ENOSYS after a thin validation gate (size >= 88, ptr non-NULL,
+##      readable).  glibc 2.34+ and modern Rust std prefer clone3 over
+##      clone() when libc reports linux >= 5.3, so leaving clone3 ENOSYS
+##      added a wasted syscall per thread/process spawn (the kernel says
+##      ENOSYS, the libc caches the answer and falls back to clone()).
+##      Wiring clone3 through to the same code path clone() uses makes
+##      the modern API a first-class citizen at no marginal kernel cost.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##
+##      * Extracted `linux_clone_inner(flags, child_stack, parent_tid,
+##        child_tid, new_tls, &mut frame) -> i64` from `linux_clone` so
+##        clone3 can dispatch through the same thread-creation /
+##        fork-equivalent split without going through the SyscallFrame
+##        arg-register convention twice.  `linux_clone` is now a 6-line
+##        wrapper that just unpacks frame.arg0..arg4 and calls inner.
+##      * New `validate_clone3_args(cl_args_ptr, size) -> Result<
+##        ClonedArgs, errno>` shared helper.  It:
+##          - Rejects NULL with EFAULT.
+##          - Rejects size < 64 (CLONE_ARGS_SIZE_VER0) or > 4096 with
+##            EINVAL.  Linux's PAGE_SIZE cap is 4 KiB on x86; we keep
+##            the same cap even though our base page is 16 KiB.
+##          - Rejects misaligned ptr or size with EINVAL (every field
+##            is __u64; the struct must be 8-byte aligned).
+##          - validate_user_read for `size` bytes.
+##          - copy_from_user into a stack `[u64; 11]` array; fields
+##            past the user-supplied size are implicitly zero, matching
+##            Linux's copy_struct_from_user zero-extension semantics.
+##          - Reads 11 fields: flags, pidfd_out, child_tid, parent_tid,
+##            exit_signal, stack_base, stack_size, tls, set_tid,
+##            set_tid_size, cgroup.
+##          - Rejects exit_signal > 0xFF (Linux constrains it to the
+##            CSIGNAL byte).
+##          - Rejects flags with any CSIGNAL bit set (the byte lives
+##            in exit_signal alone in clone3).
+##          - Rejects features we don't support: CLONE_PIDFD,
+##            CLONE_INTO_CGROUP, CLONE_CLEAR_SIGHAND, set_tid_size>0,
+##            non-zero cgroup fd, any CLONE_NEW* namespace flag.
+##          - Rejects lopsided stack (base != 0 XOR size != 0).
+##          - Computes child_stack = stack_base + stack_size (clone(2)
+##            ABI wants the *top* of the stack; x86_64 stacks grow
+##            down).  Detects overflow with checked_add -> EINVAL.
+##          - Returns ClonedArgs with the flags+exit_signal byte
+##            recombined into clone(2)'s flags-word layout.
+##      * New `linux_clone3(&mut frame)` calls validate_clone3_args,
+##        then forwards through `linux_clone_inner` with the translated
+##        args.  Wired into `dispatch_linux_with_frame` so real
+##        userspace clone3 calls take this path.
+##      * `sys_clone3` (the args-only dispatch entry) was rewritten to
+##        call validate_clone3_args and return ENOSYS on success — it
+##        has no frame to fork from, so it can't actually clone.  This
+##        is the path the boot self-test hits; real Linux callers
+##        never reach it because dispatch_linux_with_frame intercepts
+##        nr::CLONE3 first.
+##      * Added 13 new CLONE_* constants the validation needs:
+##        CLONE_PIDFD (0x1000, bit 12), CLONE_NEWTIME (0x80, bit 7),
+##        CLONE_NEWCGROUP/UTS/IPC/USER/PID/NET (bits 25-30), CLONE_IO
+##        (bit 31), CLONE_CLEAR_SIGHAND (bit 32), CLONE_INTO_CGROUP
+##        (bit 33).  Source: include/uapi/linux/sched.h.
+##
+##      Boot-time self-tests (kernel/src/syscall/linux.rs, expanded
+##      from 3 cases to 13):
+##
+##        * clone3(NULL, 88) -> EFAULT.
+##        * clone3(buf, 32) -> EINVAL (below VER0=64).
+##        * clone3(buf, 8192) -> EINVAL (above 4 KiB cap).
+##        * clone3(buf|1, 64) -> EINVAL (unaligned ptr).
+##        * clone3(buf, 65) -> EINVAL (size not multiple of 8).
+##        * clone3(buf, 64) all-zero -> ENOSYS (VER0 path, valid).
+##        * clone3(buf, 88) all-zero -> ENOSYS (VER2 path, valid).
+##        * clone3 with CLONE_PIDFD in flags -> EINVAL.
+##        * clone3 with CSIGNAL bit (SIGCHLD=17) in flags -> EINVAL.
+##        * clone3 with exit_signal=0x100 -> EINVAL.
+##        * clone3 with stack_base set, stack_size=0 -> EINVAL.
+##        * clone3 with set_tid_size=1 -> EINVAL.
+##        * clone3 with CLONE_NEWPID -> EINVAL.
+##
+##      Known limitations / documented for follow-on work:
+##        * CLONE_PIDFD requires a new HandleKind::Pidfd plus the
+##          fd-allocation plumbing that goes with it.  Deferred until
+##          we have a real pidfd subsystem (which also lets us implement
+##          pidfd_open, pidfd_send_signal, pidfd_getfd).
+##        * CLONE_INTO_CGROUP / cgroup field require a cgroup subsystem
+##          which the microkernel doesn't have (and per design.txt
+##          probably never will in the Linux sense — control groups are
+##          a Linux-specific abstraction).  Reject with EINVAL.
+##        * set_tid (manual TID assignment in a PID namespace
+##          hierarchy) requires PID namespaces; deferred.
+##        * CLONE_CLEAR_SIGHAND requires per-thread signal handler
+##          tables independent from the PCB.  Our signal model still
+##          shares handlers PCB-wide.
+##        * Namespace clones (CLONE_NEW{NS,CGROUP,UTS,IPC,USER,PID,NET,
+##          TIME}) all rejected — no namespace subsystem.  This is a
+##          deliberate microkernel design choice (containers will be
+##          built differently per design.txt).
+##        * In kernel context (no frame available) sys_clone3 returns
+##          ENOSYS after full validation rather than actually cloning;
+##          this is the boot-self-test code path.  Real userspace
+##          clone3 always goes through linux_clone3 which has the
+##          frame and routes to either thread_clone::clone_thread or
+##          fork::fork_process.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+

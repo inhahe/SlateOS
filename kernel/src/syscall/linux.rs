@@ -1092,10 +1092,14 @@ pub const fn linux_err(errno_val: i32) -> SyscallResult {
 /// Source: `include/uapi/linux/sched.h`.
 pub mod clone_flags {
     pub const CSIGNAL: u64 = 0x0000_00ff;
+    pub const CLONE_NEWTIME: u64 = 0x0000_0080;
     pub const CLONE_VM: u64 = 0x0000_0100;
     pub const CLONE_FS: u64 = 0x0000_0200;
     pub const CLONE_FILES: u64 = 0x0000_0400;
     pub const CLONE_SIGHAND: u64 = 0x0000_0800;
+    /// CLONE_PIDFD — allocate a pidfd referring to the new task.
+    /// clone3-only (overloads the parent_tid slot in clone(2)).
+    pub const CLONE_PIDFD: u64 = 0x0000_1000;
     pub const CLONE_PTRACE: u64 = 0x0000_2000;
     pub const CLONE_VFORK: u64 = 0x0000_4000;
     pub const CLONE_PARENT: u64 = 0x0000_8000;
@@ -1108,6 +1112,19 @@ pub mod clone_flags {
     pub const CLONE_DETACHED: u64 = 0x0040_0000;
     pub const CLONE_UNTRACED: u64 = 0x0080_0000;
     pub const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    pub const CLONE_NEWCGROUP: u64 = 0x0200_0000;
+    pub const CLONE_NEWUTS: u64 = 0x0400_0000;
+    pub const CLONE_NEWIPC: u64 = 0x0800_0000;
+    pub const CLONE_NEWUSER: u64 = 0x1000_0000;
+    pub const CLONE_NEWPID: u64 = 0x2000_0000;
+    pub const CLONE_NEWNET: u64 = 0x4000_0000;
+    pub const CLONE_IO: u64 = 0x8000_0000;
+    /// CLONE_CLEAR_SIGHAND — reset signal handlers in the child.
+    /// clone3-only, bit 32.
+    pub const CLONE_CLEAR_SIGHAND: u64 = 0x1_0000_0000;
+    /// CLONE_INTO_CGROUP — place the new task in the cgroup whose fd
+    /// is given in `clone_args.cgroup`.  clone3-only, bit 33.
+    pub const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
     /// SIGCHLD is the conventional CSIGNAL byte for fork-equivalent
     /// `clone()` calls.
     pub const SIGCHLD: u64 = 17;
@@ -1136,10 +1153,244 @@ pub fn dispatch_linux_with_frame(
     match frame.syscall_nr {
         nr::FORK | nr::VFORK => Some(linux_fork(frame)),
         nr::CLONE => Some(linux_clone(frame)),
+        nr::CLONE3 => Some(linux_clone3(frame)),
         nr::EXECVE => Some(linux_execve(frame)),
         nr::RT_SIGRETURN => Some(linux_rt_sigreturn(frame)),
         _ => None,
     }
+}
+
+/// Linux `clone3(cl_args*, size)` translation.
+///
+/// `clone3` (Linux 5.3+) is the modern replacement for `clone(2)`:
+/// instead of passing five register arguments (flags, stack, ptid,
+/// ctid, tls), the caller hands in a pointer to `struct clone_args`
+/// plus its byte length.  This lets the ABI evolve by appending
+/// fields without burning new syscall numbers.
+///
+/// `struct clone_args` (uapi `<linux/sched.h>`):
+///
+/// ```c
+/// struct clone_args {
+///     __u64 flags;        // CLONE_* bits (no CSIGNAL byte here)
+///     __u64 pidfd;        // out: pidfd if CLONE_PIDFD
+///     __u64 child_tid;    // CLONE_CHILD_SETTID / CLONE_CHILD_CLEARTID target
+///     __u64 parent_tid;   // CLONE_PARENT_SETTID target
+///     __u64 exit_signal;  // CSIGNAL byte (lives here, not OR'd into flags)
+///     __u64 stack;        // child stack *base* (not top, unlike clone(2))
+///     __u64 stack_size;   // child stack size; new RSP = stack + stack_size
+///     __u64 tls;          // CLONE_SETTLS payload
+///     /* added Linux 5.5: */
+///     __u64 set_tid;      // userspace TID array (CLONE_NEWPID hierarchy)
+///     __u64 set_tid_size; // number of u32 entries in set_tid
+///     /* added Linux 5.7: */
+///     __u64 cgroup;       // cgroup fd (used with CLONE_INTO_CGROUP)
+/// };
+/// ```
+///
+/// The size argument distinguishes ABI versions: the kernel reads
+/// only as many fields as the user supplied (zero-extending the rest).
+/// Three valid sizes match the three additions above:
+///
+///   * `CLONE_ARGS_SIZE_VER0 = 64` — original clone3 (Linux 5.3).
+///   * `CLONE_ARGS_SIZE_VER1 = 80` — adds set_tid + set_tid_size.
+///   * `CLONE_ARGS_SIZE_VER2 = 88` — adds cgroup.
+///
+/// Anything smaller than 64, or larger than `PAGE_SIZE`, or that
+/// names a field we don't recognise, is rejected with EINVAL.
+///
+/// ## Mapping clone3 onto clone()
+///
+/// `clone_args.exit_signal` is OR'd into the low byte of `flags` so
+/// the rest of the kernel sees the same `CSIGNAL`-byte convention
+/// `clone(2)` uses.  `clone_args.stack + clone_args.stack_size` is
+/// the value `clone(2)` callers would have computed in userspace
+/// before invoking the syscall (Linux's clone(2) wants the stack
+/// *top* in `rsi`; clone3 carries base + size separately so the
+/// kernel can do the arithmetic, freeing userspace from having to
+/// know which direction the stack grows).  The other four fields
+/// (pidfd, child_tid, parent_tid, tls) line up with clone(2)'s
+/// arg slots and forward unchanged through `linux_clone_inner`.
+///
+/// ## What we explicitly reject
+///
+/// Features beyond what `linux_clone` already supports get EINVAL
+/// or ENOSYS up front so callers fall back to clone() (which they
+/// must already support — glibc's `__clone3_internal` always has a
+/// `__clone_wrapper` shim).
+///
+///   * `CLONE_PIDFD` — we don't have a pidfd HandleKind yet.
+///   * `CLONE_INTO_CGROUP` or `cgroup != 0` — no cgroup subsystem.
+///   * `set_tid_size > 0` — we don't honour manual TID assignment.
+///   * `CLONE_CLEAR_SIGHAND` — our signal-handler model doesn't yet
+///     track per-thread handler tables independently from the PCB.
+///   * Any namespace flag (`CLONE_NEWNS`, `CLONE_NEWPID`, etc.) —
+///     these need a namespace subsystem (deferred per `design.txt`).
+///   * `exit_signal` outside the low byte — Linux constrains this
+///     to a single u8 signal number; any value > 0xFF would round
+///     into the flag bits of the constructed clone() call.
+fn linux_clone3(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    let translated = match validate_clone3_args(frame.arg0, frame.arg1) {
+        Ok(t) => t,
+        Err(e) => return -i64::from(e),
+    };
+    linux_clone_inner(
+        translated.flags,
+        translated.child_stack,
+        translated.parent_tid,
+        translated.child_tid,
+        translated.tls,
+        frame,
+    )
+}
+
+/// Decoded `struct clone_args` after validation and translation to
+/// `clone(2)`'s register-arg layout.
+struct ClonedArgs {
+    flags: u64,
+    child_stack: u64,
+    parent_tid: u64,
+    child_tid: u64,
+    tls: u64,
+}
+
+/// Validate a `clone3` `clone_args*` plus its declared size, returning
+/// either the decoded arguments in `clone(2)`-shaped form or the errno
+/// to fail with.  Shared between the real `linux_clone3` frame path
+/// and the args-only `sys_clone3` dispatch site used by the boot
+/// self-test.
+fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> {
+    /// VER0 from `<linux/sched.h>` — original clone3 ABI (Linux 5.3).
+    const CLONE_ARGS_SIZE_VER0: u64 = 64;
+    /// Hard cap on `size`.  Linux uses `PAGE_SIZE` (4 KiB on x86); our
+    /// base page is 16 KiB but a 4-KiB cap is still ample headroom for
+    /// any plausible future extension of `struct clone_args`.
+    const CLONE_ARGS_SIZE_MAX: u64 = 4096;
+
+    if cl_args_ptr == 0 {
+        return Err(errno::EFAULT);
+    }
+    if size < CLONE_ARGS_SIZE_VER0 || size > CLONE_ARGS_SIZE_MAX {
+        return Err(errno::EINVAL);
+    }
+    // The struct must be 8-byte aligned (every field is __u64) and
+    // size must itself be a multiple of 8 — Linux rounds up but we
+    // reject so callers see their bug.
+    if cl_args_ptr & 0x7 != 0 || size & 0x7 != 0 {
+        return Err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(cl_args_ptr, size as usize) {
+        return Err(linux_errno_for(e));
+    }
+
+    // Read the whole struct in one copy_from_user, then index into
+    // it as a u64 array.  Any field past `size` is implicitly zero
+    // (zero-extending the user struct, matching Linux's
+    // `copy_struct_from_user` behaviour).
+    let mut buf = [0u64; 11];
+    #[allow(clippy::cast_possible_truncation)]
+    let nwords = (size as usize) / 8;
+    let nwords = core::cmp::min(nwords, buf.len());
+    // SAFETY: validated above.  We read at most `nwords` * 8 bytes,
+    // never exceeding the user-supplied size.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(
+            cl_args_ptr,
+            buf.as_mut_ptr().cast::<u8>(),
+            nwords * 8,
+        )
+    };
+    if let Err(e) = r {
+        return Err(linux_errno_for(e));
+    }
+
+    let flags_user = buf[0];
+    let _pidfd_out = buf[1];
+    let child_tid = buf[2];
+    let parent_tid = buf[3];
+    let exit_signal = buf[4];
+    let stack_base = buf[5];
+    let stack_size = buf[6];
+    let tls = buf[7];
+    let set_tid = if nwords > 8 { buf[8] } else { 0 };
+    let set_tid_size = if nwords > 9 { buf[9] } else { 0 };
+    let cgroup = if nwords > 10 { buf[10] } else { 0 };
+
+    // exit_signal must fit in the CSIGNAL byte; Linux rejects
+    // anything else with EINVAL.
+    if exit_signal & !clone_flags::CSIGNAL != 0 {
+        return Err(errno::EINVAL);
+    }
+    // Linux semantics: passing flags that overlap the CSIGNAL byte
+    // is also rejected (the byte is supposed to live in exit_signal
+    // alone in clone3).
+    if flags_user & clone_flags::CSIGNAL != 0 {
+        return Err(errno::EINVAL);
+    }
+
+    // Reject clone3-only features we don't implement.  Linux
+    // returns EINVAL for any combination it doesn't honour, and so
+    // do we — that's the documented "try clone() instead" hint.
+    if flags_user & clone_flags::CLONE_PIDFD != 0 {
+        return Err(errno::EINVAL);
+    }
+    if flags_user & clone_flags::CLONE_INTO_CGROUP != 0 {
+        return Err(errno::EINVAL);
+    }
+    if flags_user & clone_flags::CLONE_CLEAR_SIGHAND != 0 {
+        return Err(errno::EINVAL);
+    }
+    if set_tid_size != 0 || set_tid != 0 {
+        return Err(errno::EINVAL);
+    }
+    if cgroup != 0 {
+        return Err(errno::EINVAL);
+    }
+
+    // Reject any namespace clone.  Linux's clone3 honours these but
+    // we have no namespace subsystem.
+    const NAMESPACE_BITS: u64 = clone_flags::CLONE_NEWNS
+        | clone_flags::CLONE_NEWCGROUP
+        | clone_flags::CLONE_NEWUTS
+        | clone_flags::CLONE_NEWIPC
+        | clone_flags::CLONE_NEWUSER
+        | clone_flags::CLONE_NEWPID
+        | clone_flags::CLONE_NEWNET
+        | clone_flags::CLONE_NEWTIME;
+    if flags_user & NAMESPACE_BITS != 0 {
+        return Err(errno::EINVAL);
+    }
+
+    // Translate stack base + size to clone(2)'s "stack top" register.
+    // clone(2) wants the value of the new RSP at child entry; on x86_64
+    // the stack grows down, so RSP starts at the high end of the
+    // allocated region.  A NULL stack means "share the parent's stack"
+    // (fork-style).  Both stack and stack_size must be zero, or both
+    // non-zero — a NULL stack with non-zero size, or vice versa, is a
+    // userspace bug Linux rejects with EINVAL.
+    if (stack_base == 0) != (stack_size == 0) {
+        return Err(errno::EINVAL);
+    }
+    let child_stack = if stack_base == 0 {
+        0
+    } else {
+        match stack_base.checked_add(stack_size) {
+            Some(top) => top,
+            None => return Err(errno::EINVAL),
+        }
+    };
+
+    // Reassemble the clone()-shaped flags word: high 56 bits are the
+    // sharing/notification flags, low byte is the exit signal.
+    let flags = flags_user | exit_signal;
+
+    Ok(ClonedArgs {
+        flags,
+        child_stack,
+        parent_tid,
+        child_tid,
+        tls,
+    })
 }
 
 /// Linux `rt_sigreturn(2)` translation.
@@ -1256,8 +1507,6 @@ fn linux_fork(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
 ///      ptrace, partial-share flag sets that don't match (1) or
 ///      (2)) — return `-ENOSYS`.
 fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
-    use crate::proc::{thread, thread_clone};
-
     let flags = frame.arg0;
     let child_stack = frame.arg1;
     let parent_tid_ptr = frame.arg2;
@@ -1266,6 +1515,28 @@ fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     // (arg0, arg1, arg2, arg3, arg4).
     let child_tid_ptr = frame.arg3;
     let new_tls = frame.arg4;
+    linux_clone_inner(flags, child_stack, parent_tid_ptr, child_tid_ptr, new_tls, frame)
+}
+
+/// Shared inner of `linux_clone` and `linux_clone3` — does the actual
+/// flag/stack dispatch into either the thread-creation path or
+/// fork-equivalent path.  All five Linux-ABI clone() args are passed
+/// explicitly so clone3 can translate from its `struct clone_args`
+/// layout (separate stack base + size, separate pidfd / set_tid /
+/// cgroup fields) without having to scribble on `frame`.
+///
+/// The frame is still needed so the new task can inherit the parent's
+/// register state — both `thread_clone::clone_thread` and
+/// `fork::fork_process` read it for the child's saved-context image.
+fn linux_clone_inner(
+    flags: u64,
+    child_stack: u64,
+    parent_tid_ptr: u64,
+    child_tid_ptr: u64,
+    new_tls: u64,
+    frame: &mut crate::syscall::entry::SyscallFrame,
+) -> i64 {
+    use crate::proc::{thread, thread_clone};
 
     // (1) Thread-creation path: requires CLONE_VM | CLONE_THREAD AND
     //     a non-zero child_stack.  glibc's pthread_create wrapper
@@ -13372,20 +13643,22 @@ fn sys_ptrace(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `clone3(cl_args*, size)` — modern clone with an explicit args struct.
+/// `clone3(cl_args*, size)` — frameless dispatch path.
+///
+/// At runtime the syscall always lands in [`linux_clone3`] via
+/// [`dispatch_linux_with_frame`], because clone3 needs access to the
+/// caller's saved register frame to seed the new task's GPRs.  This
+/// args-only entry point exists for direct callers of
+/// [`dispatch_linux`] — chiefly the boot self-test — and shares all
+/// validation with the frame path via [`validate_clone3_args`].  On
+/// success we return ENOSYS because, without a frame, there is no
+/// register state to fork from; real Linux callers never reach this
+/// arm.
 fn sys_clone3(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
+    match validate_clone3_args(args.arg0, args.arg1) {
+        Ok(_) => linux_err(errno::ENOSYS),
+        Err(e) => linux_err(e),
     }
-    // struct clone_args is 88 bytes minimum in current Linux; reject
-    // anything smaller.  Cap at 1 MiB.
-    if args.arg1 < 88 || args.arg1 > (1 << 20) {
-        return linux_err(errno::EINVAL);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, args.arg1 as usize) {
-        return linux_err(linux_errno_for(e));
-    }
-    linux_err(errno::ENOSYS)
 }
 
 /// `membarrier(cmd, flags, cpu_id)` — issue a memory barrier across
@@ -29554,17 +29827,113 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: clone3 NULL not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // clone3 small size -> EINVAL.
+        // clone3 sub-VER0 size (32) -> EINVAL.
         let a = SyscallArgs { arg0: buf_ptr, arg1: 32, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: clone3 small size not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // clone3 valid -> ENOSYS.
+        // clone3 huge size (8192) -> EINVAL (above 4 KiB cap).
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 8192, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: clone3 huge size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 unaligned ptr -> EINVAL.
+        let a = SyscallArgs { arg0: buf_ptr | 0x1, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: clone3 unaligned ptr not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 size not multiple of 8 -> EINVAL.
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 65, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: clone3 odd size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 VER0 (size=64) all-zero -> ENOSYS (validated, no frame).
+        let a = SyscallArgs { arg0: buf_ptr, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: clone3 VER0 zero not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 VER2 (size=88) all-zero -> ENOSYS.
         let a = SyscallArgs { arg0: buf_ptr, arg1: 88, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: clone3 valid not ENOSYS");
             return Err(KernelError::InternalError);
+        }
+        // clone3 with CLONE_PIDFD set in flags -> EINVAL (no pidfd kind yet).
+        {
+            let mut ca = [0u64; 8];
+            ca[0] = 0x1000; // CLONE_PIDFD
+            let a = SyscallArgs {
+                arg0: (&raw const ca[0]) as u64, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: clone3 CLONE_PIDFD not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // clone3 with CSIGNAL bits in flags -> EINVAL (must go in exit_signal).
+        {
+            let mut ca = [0u64; 8];
+            ca[0] = 17; // SIGCHLD in low byte of flags — illegal in clone3.
+            let a = SyscallArgs {
+                arg0: (&raw const ca[0]) as u64, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: clone3 CSIGNAL-in-flags not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // clone3 with exit_signal > 0xFF -> EINVAL.
+        {
+            let mut ca = [0u64; 8];
+            ca[4] = 0x100; // exit_signal out of CSIGNAL byte.
+            let a = SyscallArgs {
+                arg0: (&raw const ca[0]) as u64, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: clone3 huge exit_signal not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // clone3 with stack_base set but stack_size=0 -> EINVAL.
+        {
+            let mut ca = [0u64; 8];
+            ca[5] = 0x1000_0000; // stack_base only.
+            let a = SyscallArgs {
+                arg0: (&raw const ca[0]) as u64, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: clone3 lopsided stack not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // clone3 with set_tid_size != 0 -> EINVAL (no manual TID assignment).
+        {
+            let mut ca = [0u64; 10];
+            ca[9] = 1; // set_tid_size = 1
+            let a = SyscallArgs {
+                arg0: (&raw const ca[0]) as u64, arg1: 80, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: clone3 set_tid_size not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // clone3 with CLONE_NEWPID -> EINVAL (no namespace subsystem).
+        {
+            let mut ca = [0u64; 8];
+            ca[0] = 0x2000_0000; // CLONE_NEWPID
+            let a = SyscallArgs {
+                arg0: (&raw const ca[0]) as u64, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: clone3 CLONE_NEWPID not EINVAL");
+                return Err(KernelError::InternalError);
+            }
         }
 
         // membarrier (batch 114): full cmd set.

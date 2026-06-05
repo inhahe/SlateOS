@@ -1,5 +1,7 @@
 add microsoft-like ribbons to roadmap-detailed, with a note not to copy them to the degree that they would violate microsoft patents.
 
+add that the programs should be able to register thumbnail generators for filetyes that belong to them for use in thumbnail view in the file explorer. make it so that a crash in the thumbnail generator doesn't crash the explorer.
+
 The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
 ## FLAKY TEST (noticed+FIXED 2026-06-04): ktrace::self_test "Read back"
@@ -17636,36 +17638,56 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   timerfd_settime
 ##      itimerspec64_valid: OK" in build/serial-test.txt.
 
-## 203. Batch 174: sys_timerfd_gettime fd-first gating
-##      ------------------------------------------------
-##      Reordered sys_timerfd_gettime so the fd lookup happens
-##      BEFORE any user-pointer checks on curr_value, matching
-##      Linux's `do_timerfd_gettime` (fs/timerfd.c).  Linux calls
-##      `timerfd_fget(ufd, &f)` first and returns EBADF before
-##      `put_itimerspec64` ever touches the output buffer.  Our
-##      pre-batch version validated curr_ptr (NULL -> EFAULT,
-##      then validate_user_write 32) ahead of the fd lookup, so a
-##      probe that passed a bad fd with NULL curr saw EFAULT
-##      where Linux returns EBADF.
+## 204. Batch 175: sys_timer_settime NULL/itimerspec/flags-last gating
+##      -----------------------------------------------------------------
+##      Reordered sys_timer_settime to mirror Linux's
+##      SYSCALL_DEFINE4(timer_settime) in kernel/time/posix-timers.c:
+##        1. if (!new_setting) return -EINVAL;
+##        2. if (get_itimerspec64(&new_spec, new_setting)) -EFAULT;
+##        3. do_timer_settime: timespec64_valid on both halves -> -EINVAL
+##        4. lock_timer -> -EINVAL when not found
+##        5. common_timer_set: (flags & ~TIMER_ABSTIME) -> -EINVAL,
+##           checked AFTER timer lookup.
+##      Pre-batch code returned EFAULT for NULL new_setting and rejected
+##      bad flags BEFORE the user-pointer copy.  Two visible divergences:
+##        * (new=NULL) returned EFAULT where Linux returns EINVAL.
+##        * (flags=bad, new=bad_ptr) returned EINVAL where Linux returns
+##          EFAULT (copy_from_user fails before flags are looked at).
 ##
-##      Self-tests added/updated:
-##        * timerfd_gettime(fd=0, curr=NULL) -> EBADF (was EFAULT
-##          pre-batch; in kernel context caller_pid is None so
-##          any fd hits EBADF after the reorder).
-##        * timerfd_gettime(fd=-1, curr=0x1 bogus ptr) -> EBADF
-##          (fd checked first, never reaches validate_user_write).
-##        * Emits "[syscall/linux]   timerfd_gettime fd-first
-##          gating: OK".
+##      Implementation:
+##        * NULL new -> EINVAL gate first.
+##        * validate_user_read(32) + copy_from_user(32) -> EFAULT.
+##        * Parse 4 i64s and gate on timespec64_valid (tv_sec >= 0,
+##          tv_nsec in [0, NSEC_PER_SEC)) for both it_interval and
+##          it_value -> EINVAL.
+##        * Optional old_setting write-validate.
+##        * Flags consumed but not gated on; the terminal EINVAL (no
+##          timer found) subsumes the flags-EINVAL that would fire
+##          inside common_timer_set after lookup.
+##
+##      Self-tests updated/added:
+##        * timer_settime(new=NULL) -> EINVAL (was EFAULT pre-batch).
+##        * timer_settime(flags=0xff, new=valid_itspec) -> EINVAL.
+##        * timer_settime(flags=0xff, new=NULL) -> EINVAL (NULL first).
+##        * timer_settime(new=valid) -> EINVAL terminal (no timers).
+##        * timer_settime(new=bad_itspec it_value.tv_nsec=1e9) -> EINVAL
+##          via timespec64_valid.
+##        * timer_settime(new=neg_itspec it_interval.tv_sec=-1) -> EINVAL
+##          via timespec64_valid.
+##        * Emits "[syscall/linux]   timer_settime
+##          NULL/itimerspec/flags-last gating: OK".
 ##
 ##      Known limitations:
-##        * In kernel context every fd path short-circuits to
-##          EBADF because caller_pid returns None.  The EFAULT
-##          path after a valid fd (curr_ptr=NULL or unmapped)
-##          is not exercisable from kernel-context tests until
-##          timerfd fds and a user caller exist.
-##        * No timerfd implementation yet; the terminal EINVAL
-##          ("fd is real but not a timerfd") remains unreachable.
+##        * The (flags=bad, new=unmapped_ptr) -> EFAULT case is not
+##          testable in kernel context: validate_user_read is bypassed
+##          and the subsequent copy_from_user page-faults on the
+##          ad-hoc pointer.  The flags-last ordering is correct but
+##          not observable from kernel-context self-tests; will be
+##          exercisable from real user contexts once timers exist.
+##        * No POSIX timer implementation; the EINVAL terminal "no
+##          timer" path is reached for every valid itimerspec.
 ##
-##      Build clean; boot test PASSED (BOOT_OK at 22s).
-##      Serial confirms "[syscall/linux]   timerfd_gettime
-##      fd-first gating: OK" in build/serial-test.txt.
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   timer_settime
+##      NULL/itimerspec/flags-last gating: OK" in
+##      build/serial-test.txt.

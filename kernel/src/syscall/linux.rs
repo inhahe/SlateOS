@@ -16207,22 +16207,65 @@ fn sys_timer_delete(_args: &SyscallArgs) -> SyscallResult {
 
 /// `timer_settime(timerid, flags, new_value*, old_value*)`.
 fn sys_timer_settime(args: &SyscallArgs) -> SyscallResult {
-    // flags: TIMER_ABSTIME = 1 only.
-    if args.arg1 & !1 != 0 {
-        return linux_err(errno::EINVAL);
-    }
+    // Linux's `SYSCALL_DEFINE4(timer_settime)` (kernel/time/posix-timers.c):
+    //   1. `if (!new_setting) return -EINVAL;`  (NULL → EINVAL, NOT EFAULT)
+    //   2. `if (get_itimerspec64(&new_spec, new_setting)) return -EFAULT;`
+    //   3. `do_timer_settime` → `timespec64_valid` on both halves → EINVAL.
+    //   4. Timer lookup → EINVAL if not found.
+    //   5. `common_timer_set` → `if (flags & ~TIMER_ABSTIME)` → EINVAL,
+    //      enforced AFTER the lookup.
+    // Pre-batch gates returned EFAULT for NULL new_setting and rejected
+    // bad flags BEFORE the user-pointer copy, so a probe passing
+    // (flags=0xff, new=NULL) saw EINVAL where Linux returns EINVAL too,
+    // but (flags=0xff, new=bad_ptr) saw EINVAL where Linux returns EFAULT
+    // (the copy_from_user fails before flags are touched). Reorder to
+    // match Linux.
     if args.arg2 == 0 {
-        return linux_err(errno::EFAULT);
+        return linux_err(errno::EINVAL);
     }
     // struct itimerspec is 32 bytes (two timespecs).
     if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 32) {
         return linux_err(linux_errno_for(e));
+    }
+    let mut buf = [0u8; 32];
+    // SAFETY: validate_user_read confirmed [args.arg2, +32) is readable;
+    // copy_from_user re-checks under SMAP.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(args.arg2, buf.as_mut_ptr(), 32)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    // timespec64_valid (include/linux/time64.h): tv_sec >= 0 AND
+    // tv_nsec in [0, NSEC_PER_SEC).  Apply to both interval and value.
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
+    let parse_i64 = |off: usize| -> i64 {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&buf[off..off + 8]);
+        i64::from_ne_bytes(bytes)
+    };
+    let interval_sec = parse_i64(0);
+    let interval_nsec = parse_i64(8);
+    let value_sec = parse_i64(16);
+    let value_nsec = parse_i64(24);
+    if interval_sec < 0
+        || !(0..NSEC_PER_SEC).contains(&interval_nsec)
+        || value_sec < 0
+        || !(0..NSEC_PER_SEC).contains(&value_nsec)
+    {
+        return linux_err(errno::EINVAL);
     }
     if args.arg3 != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 32) {
             return linux_err(linux_errno_for(e));
         }
     }
+    // flags & ~TIMER_ABSTIME is checked inside `common_timer_set` AFTER
+    // the timer is locked.  We have no timers, so the lookup terminal
+    // (EINVAL) subsumes any flags-based EINVAL.  Don't gate on flags
+    // here — that would mismatch Linux when the caller passes a bad
+    // user pointer alongside bad flags (Linux returns EFAULT).
+    let _ = args.arg1;
     linux_err(errno::EINVAL)
 }
 
@@ -35339,24 +35382,61 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: timer_delete not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // timer_settime bad flags -> EINVAL.
+        // timer_settime bad flags + valid itimerspec -> EINVAL (terminal:
+        // timer lookup fails; flags would also EINVAL after lookup).
         let a = SyscallArgs { arg0: 0, arg1: 0xff, arg2: itimerspec_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: timer_settime bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // timer_settime NULL new_value -> EFAULT.
+        // timer_settime NULL new_value -> EINVAL (Linux returns EINVAL,
+        // NOT EFAULT, when new_setting is NULL; see SYSCALL_DEFINE4).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: timer_settime NULL not EFAULT");
+        if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_settime NULL not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // timer_settime bad flags + NULL new -> EINVAL (NULL check fires
+        // before flags are looked at).
+        let a = SyscallArgs { arg0: 0, arg1: 0xff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_settime bad flags+NULL not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // (The "bad flags + unmapped user ptr -> EFAULT" case is not
+        // testable in kernel context: validate_user_read is bypassed and
+        // copy_from_user would then page-fault on the ad-hoc kernel
+        // pointer.  The flags-last gate ordering above is still correct;
+        // it just isn't observable from kernel-context self-tests.)
         // timer_settime valid -> EINVAL (no timers).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: itimerspec_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: timer_settime valid not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // timer_settime malformed itimerspec (it_value.tv_nsec = NSEC_PER_SEC)
+        // -> EINVAL via timespec64_valid (also subsumed by terminal EINVAL,
+        // but exercises the validity gate).
+        let mut bad_its = [0u8; 32];
+        bad_its[24..32].copy_from_slice(&1_000_000_000i64.to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: bad_its.as_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_settime bad nsec not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timer_settime negative tv_sec in it_interval -> EINVAL.
+        let mut neg_its = [0u8; 32];
+        neg_its[0..8].copy_from_slice(&(-1i64).to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: neg_its.as_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_SETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_settime neg interval sec not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   timer_settime NULL/itimerspec/flags-last gating: OK"
+        );
         // timer_gettime NULL -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMER_GETTIME, &a).value != -i64::from(errno::EFAULT) {

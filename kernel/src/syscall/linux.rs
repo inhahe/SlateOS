@@ -16638,6 +16638,21 @@ fn sys_sync_file_range(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `process_madvise(pidfd, iov*, iovcnt, advice, flags)`.
+///
+/// Linux's `mm/madvise.c::SYSCALL_DEFINE5(process_madvise)` walks the
+/// gates in this order:
+///   1. `flags != 0`                          -> -EINVAL
+///   2. `import_iovec` (vlen, vec)            -> -EFAULT / -EINVAL
+///   3. `pidfd_get_task(pidfd)`               -> -EBADF / -ESRCH
+///   4. `mm_access(PTRACE_MODE_READ_FSCREDS)` -> -EPERM
+///   5. per-iov `do_madvise(advice)` checked via
+///      `madvise_behavior_valid(behavior)`    -> -EINVAL
+///
+/// Crucially the `advice` validity check is the LAST gate — it fires
+/// after the pidfd lookup and ptrace permission gate.  Pre-batch our
+/// stub ran `advice > 100 -> EINVAL` BEFORE the fd lookup, so probes
+/// passing a junk-advice value with a closed-but-shaped-like-an-fd
+/// pidfd saw EINVAL where Linux returns EBADF.
 fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
     if args.arg4 != 0 {
         return linux_err(errno::EINVAL);
@@ -16656,11 +16671,6 @@ fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    // Common advice values: MADV_NORMAL(0)..MADV_PAGEOUT(21).  Just
-    // sanity-cap.
-    if args.arg3 > 100 {
-        return linux_err(errno::EINVAL);
-    }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
@@ -16677,6 +16687,13 @@ fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
     };
     if entry.kind != HandleKind::PidFd {
         return linux_err(errno::EBADF);
+    }
+    // Common advice values: MADV_NORMAL(0)..MADV_PAGEOUT(21).  Sanity-
+    // cap LAST, after the pidfd lookup, to match Linux's gate order
+    // (madvise_behavior_valid runs inside do_madvise, after the task
+    // has been resolved).
+    if args.arg3 > 100 {
+        return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
 }
@@ -37955,6 +37972,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: process_madvise valid not EBADF");
             return Err(KernelError::InternalError);
         }
+        // process_madvise: closed pidfd + junk advice -> EBADF, not
+        // EINVAL.  Linux runs the pidfd lookup BEFORE the advice
+        // validity check (madvise_behavior_valid lives inside
+        // do_madvise, behind pidfd_get_task).  Pre-batch our stub
+        // had advice>100 firing ahead of the fd lookup, so probes
+        // saw EINVAL where Linux returns EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 200, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_MADVISE, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_madvise(closed,advice=200) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // process_madvise: flags wins over advice (flags fires
+        // first per Linux gate order).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 200, arg4: 1, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_MADVISE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_madvise(flags,advice=200) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   process_madvise advice-last gate order: OK"
+        );
 
         // cachestat non-zero flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 1, arg4: 0, arg5: 0 };

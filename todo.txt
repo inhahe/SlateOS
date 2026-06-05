@@ -19622,3 +19622,39 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      the "task exists but can't be inspected" path.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 245. [DONE 2026-06-05] Linux ABI: sys_process_madvise advice-last
+##      gate order (advice validation after pidfd lookup).
+##
+##      Pre-batch sys_process_madvise (kernel/src/syscall/linux.rs)
+##      validated the advice value (`advice > 100 -> EINVAL`) BEFORE
+##      the fd lookup.  Linux `mm/madvise.c::SYSCALL_DEFINE5(
+##      process_madvise)` walks the gates in this order:
+##         1. flags != 0                          -> EINVAL
+##         2. import_iovec                        -> EFAULT/EINVAL
+##         3. pidfd_get_task                      -> EBADF/ESRCH
+##         4. mm_access(PTRACE_MODE_READ_FSCREDS) -> EPERM
+##         5. madvise_behavior_valid (per-iov)    -> EINVAL
+##      The advice check is the LAST gate — it fires inside
+##      do_madvise after the pidfd has been resolved to a task and
+##      ptrace has been cleared.  So a probe passing a junk advice
+##      with a closed-but-shaped-like-an-fd pidfd saw EINVAL where
+##      Linux returns EBADF.
+##
+##      Fix: move the `advice > 100` check past the lookup_caller_fd
+##      + HandleKind::PidFd check, so it fires only when we'd
+##      otherwise have returned ENOSYS.
+##
+##      Self-tests added (continuing process_madvise block):
+##      - (closed pidfd, advice=200) -> EBADF (was EINVAL).
+##      - (flags=1, advice=200)      -> EINVAL (flags still first).
+##      Marker: "process_madvise advice-last gate order: OK".
+##
+##      Known limitation: ESRCH (pidfd to dead task) and EPERM
+##      (ptrace_may_access fail) aren't tested — neither path
+##      exists yet in our pidfd subsystem.  When pidfd_open
+##      can produce a task ref and ptrace creds land, add (valid
+##      pidfd, advice=200) -> EINVAL covering madvise_behavior_valid
+##      firing AFTER the EPERM gate.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

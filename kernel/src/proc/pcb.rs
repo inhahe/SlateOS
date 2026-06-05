@@ -659,6 +659,25 @@ pub struct Process {
     /// return `EACCES` on a forbidden combination.  Tracked in
     /// todo.txt.
     pub linux_mdwe_bits: u32,
+    /// Linux `prctl(PR_SET_IO_FLUSHER)` bit — the calling task is
+    /// part of the I/O flushing path (e.g. `drbd-worker`,
+    /// `multipathd`, `nbd-client`, `dm_crypt_write` worker).  Linux
+    /// uses this to mark tasks that must be allowed to make memory
+    /// reclaim progress even while the writeback path is congested
+    /// (avoids a self-deadlock where the flusher needs free pages to
+    /// flush, but reclaim is waiting for the flusher to finish).
+    ///
+    /// Stored as 0/1.  Default 0.  Inherited verbatim across fork
+    /// (Linux: `PR_IO_FLUSHER` is a `task->flags` bit copied by
+    /// `copy_process`).  Preserved across exec (`flush_thread` does
+    /// not touch it).
+    ///
+    /// Known limitation: we do not implement memory reclaim or
+    /// writeback at all yet, so the flag is round-tripped for ABI
+    /// compatibility only.  When reclaim lands it should check
+    /// `get_io_flusher(pid)` and grant the same `__GFP_MEMALLOC`
+    /// fast-path that Linux uses for these tasks.
+    pub linux_io_flusher: u32,
 }
 
 /// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
@@ -751,6 +770,10 @@ impl Process {
             // Linux default: MDWE off (0).  Sandboxes opt in via
             // PR_SET_MDWE.  Once non-zero, sticky monotone.
             linux_mdwe_bits: 0,
+            // Linux default: not an I/O flusher.  Storage daemons
+            // (drbd-worker, multipathd, nbd-client, dm_crypt_write)
+            // set PR_SET_IO_FLUSHER on themselves at init.
+            linux_io_flusher: 0,
         }
     }
 }
@@ -903,6 +926,7 @@ pub fn fork_create(
         linux_tsc_mode,
         linux_mce_kill_policy,
         linux_mdwe_bits,
+        linux_io_flusher,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -938,6 +962,7 @@ pub fn fork_create(
             parent.linux_tsc_mode,
             parent.linux_mce_kill_policy,
             parent.linux_mdwe_bits,
+            parent.linux_io_flusher,
         )
     };
 
@@ -1088,6 +1113,11 @@ pub fn fork_create(
         // set; we preserve unconditionally for now — exec-hook
         // limitation tracked in todo.txt.
         linux_mdwe_bits,
+        // Linux: `PR_IO_FLUSHER` is a `task->flags` bit copied by
+        // `copy_process`, so the flag propagates verbatim across
+        // fork.  Preserved across exec (flush_thread does not
+        // touch it).
+        linux_io_flusher,
     };
 
     table.insert(pid, child);
@@ -1869,6 +1899,25 @@ pub fn set_mdwe_bits(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_mdwe_bits;
     proc.linux_mdwe_bits = val;
+    Some(old)
+}
+
+/// Read the `PR_GET_IO_FLUSHER` bit for `pid` (0 or 1).  Returns
+/// `None` if `pid` is unknown; `Some(0)` is the default.
+#[must_use]
+pub fn get_io_flusher(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_io_flusher)
+}
+
+/// Install the `PR_SET_IO_FLUSHER` bit (must be 0 or 1) for `pid`,
+/// returning the prior value.  Returns `None` if `pid` is unknown.
+/// The helper does not validate the value — the syscall surface
+/// rejects anything outside {0, 1}.
+pub fn set_io_flusher(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_io_flusher;
+    proc.linux_io_flusher = val;
     Some(old)
 }
 

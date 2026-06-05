@@ -10249,3 +10249,76 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
 
+## 108. Linux ABI batch 79: per-PCB PR_SET_IO_FLUSHER /
+##      PR_GET_IO_FLUSHER round-trip with strict argument
+##      validation matching Linux.
+##
+##      Before this batch options 57 and 58 fell through to
+##      the generic EINVAL catch-all in sys_prctl.  Storage
+##      daemons (drbd-worker, multipathd, nbd-client,
+##      dm_crypt_write) call PR_SET_IO_FLUSHER on themselves
+##      at init.  Linux uses the PR_IO_FLUSHER bit in
+##      task->flags to grant `__GFP_MEMALLOC`-style fast-path
+##      access in the memory-reclaim path — without this
+##      mark, a flusher can self-deadlock by needing free
+##      pages to make writeback progress while reclaim is
+##      waiting for writeback to finish.  EINVAL there made
+##      every storage daemon log a startup warning.
+##
+##      Fix: add `linux_io_flusher: u32` (default 0, only
+##      values 0 and 1 are legal) to the PCB.  Inherited
+##      verbatim across fork (Linux: `PR_IO_FLUSHER` is a
+##      `task->flags` bit copied by `copy_process`).
+##      Preserved across exec (flush_thread does not touch
+##      it).
+##
+##      PR_SET_IO_FLUSHER (57) — strict Linux semantics:
+##        * arg3 / arg4 / arg5 must all be 0 or EINVAL.
+##        * arg2 (our arg1) must be 0 or 1; anything else
+##          (including out-of-range u64 values like
+##          u64::MAX) returns EINVAL.
+##        * Returns 0 on success.
+##
+##      Linux also requires CAP_SYS_RESOURCE; we don't
+##      enforce capabilities at all yet, so any caller can
+##      set the flag.  When the capability framework lands,
+##      this surface should consult it.  Tracked as a known
+##      limitation here.
+##
+##      PR_GET_IO_FLUSHER (58) — returns the flag value (0
+##      or 1) DIRECTLY as the syscall return (no user
+##      pointer).  Linux requires CAP_SYS_RESOURCE; we don't
+##      enforce.  arg1..arg5 must all be 0 or EINVAL.
+##      Kernel context reports 0 (the default).
+##
+##      Known limitation (deferred): we have no memory
+##      reclaim or writeback path yet, so the flag is
+##      round-tripped for ABI compatibility only and has no
+##      effect on what actually happens under memory
+##      pressure.  When reclaim lands it must consult
+##      get_io_flusher(pid) and grant the GFP_MEMALLOC fast
+##      path for tasks with the flag set, else flushers will
+##      deadlock under pressure just like a Linux build with
+##      this feature disabled.
+##
+##      Storage layer (get_io_flusher / set_io_flusher) does
+##      not validate values — the helper accepts arbitrary
+##      u32s so test fixtures can manipulate freely.  The
+##      syscall surface is the validation site.
+##
+##      Self-tests cover:
+##        * PR_SET_IO_FLUSHER arg3/arg4/arg5 != 0 -> EINVAL.
+##        * arg1 not in {0, 1} -> EINVAL (2, 3, 0xff,
+##          u64::MAX).
+##        * (0) / (1) -> 0 in kernel context.
+##        * PR_GET_IO_FLUSHER arg1..arg5 != 0 -> EINVAL.
+##        * Kernel context PR_GET_IO_FLUSHER -> 0.
+##        * pcb storage round-trip:
+##          0 -> 1 -> 0 -> destroy -> None.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s) on
+##      retry after one flake at RCU 'Callback invoked: OK'
+##      boundary (the same RCU flake region documented in
+##      todo 101).
+
+

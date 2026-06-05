@@ -4462,6 +4462,56 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         // answer but changing it from EINVAL would also be visible
         // — tracked as a separate decision in todo.txt.
         21 => SyscallResult::ok(0),
+        // PR_SET_IO_FLUSHER (57) — mark the calling task as a member
+        // of the I/O flush path (drbd-worker, multipathd, nbd-client,
+        // dm_crypt_write).  Linux's `prctl_set_io_flusher` sets the
+        // `PR_IO_FLUSHER` bit in `task->flags`, which the memory
+        // reclaim path consults to grant `__GFP_MEMALLOC`-style
+        // fast-path access — without this, a flusher can self-deadlock
+        // by needing free pages to make writeback progress while
+        // reclaim is waiting for writeback to finish.
+        //
+        // Linux semantics:
+        //   * Requires CAP_SYS_RESOURCE; we don't enforce caps yet,
+        //     so any caller may set it (matches kernel-mode caller).
+        //   * arg3/arg4/arg5 must be 0 or EINVAL.
+        //   * arg2 (our arg1) must be 0 or 1; anything else is EINVAL.
+        //
+        // Known limitation: we have no memory reclaim or writeback
+        // path yet, so the flag is round-tripped for ABI compatibility
+        // only.  When reclaim lands it must consult
+        // `get_io_flusher(pid)` and grant the GFP_MEMALLOC fast path
+        // for tasks with the flag set.
+        57 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            if args.arg1 != 0 && args.arg1 != 1 {
+                return linux_err(errno::EINVAL);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let new_val = args.arg1 as u32;
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_io_flusher(pid, new_val);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_IO_FLUSHER (58) — return the I/O-flusher flag value
+        // (0 or 1) DIRECTLY as the syscall return value (no user
+        // pointer).  Linux's `prctl_get_io_flusher` requires
+        // CAP_SYS_RESOURCE; we don't enforce caps.  arg1..arg5 must
+        // all be 0 or EINVAL.  Kernel context reports 0 (the default).
+        58 => {
+            if args.arg1 != 0
+                || args.arg2 != 0
+                || args.arg3 != 0
+                || args.arg4 != 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            let v = caller_pid().and_then(pcb::get_io_flusher).unwrap_or(0);
+            SyscallResult::ok(i64::from(v))
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -17837,6 +17887,109 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+        }
+
+        // Batch 79: PR_GET_IO_FLUSHER / PR_SET_IO_FLUSHER round-trip
+        // with strict argument validation matching Linux.
+        // Verifications:
+        //   1. PR_SET_IO_FLUSHER arg3/arg4/arg5 != 0 -> EINVAL.
+        //   2. PR_SET_IO_FLUSHER arg1 not in {0, 1} -> EINVAL.
+        //   3. PR_SET_IO_FLUSHER(0) / (1) -> 0 in kernel context.
+        //   4. PR_GET_IO_FLUSHER arg1..arg5 != 0 -> EINVAL.
+        //   5. PR_GET_IO_FLUSHER in kernel context -> 0 (default).
+        //   6. pcb storage round-trip via direct helpers.
+        {
+            // arg3 / arg4 / arg5 != 0 -> EINVAL on PR_SET_IO_FLUSHER.
+            for (idx, a) in [
+                SyscallArgs { arg0: 57, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 57, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 57, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, …{}=1) not EINVAL ({})",
+                        idx + 3,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // arg1 not in {0, 1} -> EINVAL.
+            for v in [2u64, 3, 0xff, u64::MAX] {
+                let a = SyscallArgs { arg0: 57, arg1: v, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, {}) not EINVAL ({})",
+                        v,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET_IO_FLUSHER(0) / (1) -> 0 in kernel context.
+            for v in [0u64, 1] {
+                let a = SyscallArgs { arg0: 57, arg1: v, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, {}) not 0 ({})",
+                        v,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET_IO_FLUSHER arg1..arg5 != 0 -> EINVAL.
+            for (idx, a) in [
+                SyscallArgs { arg0: 58, arg1: 1, arg2: 0, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 58, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 58, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 58, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_IO_FLUSHER, …{}=1) not EINVAL ({})",
+                        idx + 2,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Kernel context PR_GET_IO_FLUSHER -> 0.
+            let a = SyscallArgs { arg0: 58, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_IO_FLUSHER) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("io-flusher-test", 0);
+            assert_eq!(pcb::get_io_flusher(test_pid), Some(0));
+            assert_eq!(pcb::set_io_flusher(test_pid, 1), Some(0));
+            assert_eq!(pcb::get_io_flusher(test_pid), Some(1));
+            assert_eq!(pcb::set_io_flusher(test_pid, 0), Some(1));
+            assert_eq!(pcb::get_io_flusher(test_pid), Some(0));
+            pcb::destroy(test_pid);
+            assert_eq!(pcb::get_io_flusher(test_pid), None);
+            assert_eq!(pcb::set_io_flusher(test_pid, 1), None);
         }
     }
 

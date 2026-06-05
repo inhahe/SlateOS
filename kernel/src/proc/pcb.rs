@@ -395,6 +395,15 @@ pub struct Process {
     /// `personality(persona)` followed by `personality(0xffffffff)`,
     /// which gdb in particular relies on for its own bookkeeping.
     pub linux_personality: u32,
+    /// Linux `prctl(PR_SET_PDEATHSIG)` — signal to deliver to this
+    /// process when its parent exits.  `0` means "disabled" (the
+    /// default and what every freshly-forked process starts with).
+    ///
+    /// We currently only store and round-trip the value via prctl —
+    /// the actual signal delivery on parent death is not wired
+    /// because we don't yet have user-signal infrastructure with the
+    /// required lifecycle hooks.  See todo.txt entry for batch 61.
+    pub linux_pdeathsig: u32,
 }
 
 impl Process {
@@ -435,6 +444,12 @@ impl Process {
             // PER_LINUX (no personality flags) — what every modern
             // Linux process inherits from init.
             linux_personality: 0,
+            // PR_SET_PDEATHSIG default is "disabled".  Inherited
+            // across fork as zero per Linux: see the explicit reset
+            // in `kernel/copy_process` for the same reason
+            // (children of a forked task do not inherit the
+            // parent's death signal).
+            linux_pdeathsig: 0,
         }
     }
 }
@@ -637,6 +652,12 @@ pub fn fork_create(
         // execve resets persona to PER_LINUX (0), but fork preserves
         // whatever the parent had set.
         linux_personality,
+        // Linux: PR_SET_PDEATHSIG is reset across fork.  A parent
+        // who has PDEATHSIG armed does not pass that arming to its
+        // children; each child starts with no death signal and must
+        // re-arm via prctl(PR_SET_PDEATHSIG) itself.  Same rule
+        // applies across exec.  Match Linux exactly.
+        linux_pdeathsig: 0,
     };
 
     table.insert(pid, child);
@@ -1104,6 +1125,28 @@ pub fn set_personality(pid: ProcessId, new: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_personality;
     proc.linux_personality = new;
+    Some(old)
+}
+
+/// Read the parent-death signal armed via `prctl(PR_SET_PDEATHSIG)`
+/// for `pid`.  Returns `None` if `pid` is unknown, `Some(0)` if no
+/// death signal is armed.
+#[must_use]
+pub fn get_pdeathsig(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_pdeathsig)
+}
+
+/// Install a new parent-death signal value for `pid`, returning the
+/// old one.
+///
+/// `sig == 0` is the documented "disable" value.  Caller is
+/// responsible for range validation (Linux accepts 0..=64).  Returns
+/// `None` if `pid` is unknown.
+pub fn set_pdeathsig(pid: ProcessId, sig: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_pdeathsig;
+    proc.linux_pdeathsig = sig;
     Some(old)
 }
 

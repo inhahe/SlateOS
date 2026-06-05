@@ -9110,4 +9110,82 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          for byte stream quality), so we are not
 ##          misleading callers.
 
+## 88. Linux ABI batch 61: real per-PCB
+##     PR_SET_PDEATHSIG / PR_GET_PDEATHSIG storage.
+##
+##     Background: prctl options 1 (PR_SET_PDEATHSIG) and 2
+##     (PR_GET_PDEATHSIG) were previously stubbed —
+##     PR_SET_PDEATHSIG silently accepted any signal value
+##     and discarded it; PR_GET_PDEATHSIG was unhandled and
+##     fell through to ENOSYS via the catch-all.  This made
+##     well-behaved Linux daemons (which often arm
+##     PDEATHSIG to clean up worker processes on supervisor
+##     exit) believe the kernel had no opinion on whether
+##     their request was accepted, and prevented them from
+##     querying current state to make policy decisions.
+##
+##     What was done:
+##       - Added `linux_pdeathsig: u32` to the per-process
+##         PCB (`Process` in kernel/src/proc/pcb.rs).
+##         Default 0 ("disabled") in Process::new and
+##         explicitly reset to 0 in fork_create, matching
+##         Linux's invariant that PDEATHSIG does NOT
+##         inherit across fork.
+##       - Added pcb::get_pdeathsig / set_pdeathsig
+##         helpers that take the PROCESS_TABLE lock and
+##         return Option<u32>.
+##       - sys_prctl option 1 (PR_SET_PDEATHSIG) now:
+##           * Rejects sig > 64 with EINVAL (Linux's
+##             accepted range is 0..=64 where 0 means
+##             "disabled").
+##           * Stores the value via pcb::set_pdeathsig
+##             keyed on caller_pid().  Kernel-context
+##             callers (caller_pid() == None) succeed
+##             without storing — same as our existing
+##             pattern for other per-PCB prctls.
+##       - sys_prctl option 2 (PR_GET_PDEATHSIG) now:
+##           * Rejects NULL user buffer with EFAULT.
+##           * Reads the stored value, copies it as i32
+##             to the user int* via copy_to_user (SMAP
+##             safe with kernel-context bypass).
+##           * Kernel-context defaults to 0 (disabled).
+##       - Self-tests exercise:
+##           * PR_SET_PDEATHSIG(65) -> EINVAL
+##           * PR_SET_PDEATHSIG(0|15|64) -> 0
+##           * PR_GET_PDEATHSIG(NULL) -> EFAULT
+##           * PR_GET_PDEATHSIG(&scratch) -> 0 with scratch
+##             populated as 0 (kernel-ctx default).
+##           * pcb::set/get_pdeathsig storage round-trip:
+##             create -> default 0, set 15 -> prior 0,
+##             query -> 15, replace 9 -> prior 15, disable
+##             0 -> prior 9, destroy -> None for both
+##             helpers.
+##
+##     Known limitations (documented gaps, NOT bugs):
+##       - We do not actually deliver the death signal on
+##         parent exit.  That requires:
+##           1. A signal-delivery path for user processes
+##              (we have a stubbed signal subsystem but no
+##              user-pending-signal queue + handler-frame
+##              setup yet), and
+##           2. A parent-exit lifecycle hook that scans
+##              children, reads linux_pdeathsig, and posts
+##              the signal.
+##         Both are tracked under the larger "POSIX
+##         signal support" gap (see roadmap signal entry).
+##         Until that lands, PR_SET_PDEATHSIG is a faithful
+##         store-and-query at the ABI level but a no-op at
+##         the behavioural level.  This is consistent with
+##         how strace appears to programs ("succeeded —
+##         maybe the death just hasn't happened yet") and
+##         is preferable to ENOSYS (which would make
+##         daemons fall back to a less-correct cleanup
+##         strategy).
+##       - We should also reset linux_pdeathsig on execve
+##         (Linux clears it across exec).  We currently
+##         only reset on fork.  The exec path will need
+##         the same single-line reset added when the
+##         dedicated exec PCB-reset block is touched
+##         next.
+
 

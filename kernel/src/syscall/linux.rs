@@ -3741,9 +3741,55 @@ fn sys_ioctl(_args: &SyscallArgs) -> SyscallResult {
 fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
     let option = args.arg0;
     match option {
-        // PR_SET_PDEATHSIG, PR_SET_DUMPABLE, PR_SET_KEEPCAPS —
-        // accept silently.
-        1 | 4 | 8 => SyscallResult::ok(0),
+        // PR_SET_PDEATHSIG (1) — install the signal to deliver when
+        // the parent process exits.  Linux validates 0..=64 and
+        // stores it per-task; we store it per-PCB instead (one death
+        // signal per process, not per thread — fine for our model
+        // where threads share a PCB).  sig == 0 disables.
+        //
+        // Limitation: we do NOT actually deliver the signal on parent
+        // death yet (no signal infrastructure for that lifecycle
+        // hook).  Documented as a known gap.
+        1 => {
+            let sig = args.arg1;
+            if sig > 64 {
+                return linux_err(errno::EINVAL);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let sig_u32 = sig as u32;
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_pdeathsig(pid, sig_u32);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_PDEATHSIG (2) — copy the recorded death signal
+        // value into the user int* at args.arg1.  NULL pointer ->
+        // EFAULT.  Kernel context (no PCB) reports 0 (disabled).
+        2 => {
+            let user_buf = args.arg1;
+            if user_buf == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let sig: i32 = caller_pid()
+                .and_then(pcb::get_pdeathsig)
+                .map(|v| v as i32)
+                .unwrap_or(0);
+            // SAFETY: copy_to_user validates the destination range
+            // and uses STAC/CLAC for SMAP-safe access.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(
+                    (&raw const sig).cast::<u8>(),
+                    user_buf,
+                    core::mem::size_of::<i32>(),
+                )
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_SET_DUMPABLE, PR_SET_KEEPCAPS — accept silently.
+        4 | 8 => SyscallResult::ok(0),
         // PR_GET_DUMPABLE — not dumpable.
         3 => SyscallResult::ok(0),
         // PR_GET_KEEPCAPS — we don't track it.
@@ -15554,6 +15600,125 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::name(test_pid).as_deref(), Some("abcdefghijklmno"));
 
             pcb::destroy(test_pid);
+        }
+
+        // Batch 61: PR_SET_PDEATHSIG / PR_GET_PDEATHSIG.
+        //
+        // We exercise three things:
+        //   1. Range validation at the syscall surface — signal
+        //      numbers > 64 must return EINVAL before touching any
+        //      PCB.  In-range values (including the boundaries 0 and
+        //      64) must return 0.
+        //   2. PR_GET_PDEATHSIG NULL pointer is EFAULT.
+        //   3. PR_GET_PDEATHSIG with a kernel-stack scratch buffer
+        //      returns 0 (kernel context has no PCB so the recorded
+        //      death signal defaults to 0).
+        //   4. The pcb::{set,get}_pdeathsig storage layer round-trips
+        //      cleanly: install, query, disable, query.
+        //
+        // Note: the prctl(1, …) dispatch in kernel context CANNOT
+        // observe pcb-level storage updates because caller_pid()
+        // returns None and the per-PCB store is skipped on the
+        // ok-but-no-PCB path.  We exercise the storage layer via
+        // direct helper calls below instead.
+        {
+            // Out-of-range signal -> EINVAL.
+            let a = SyscallArgs { arg0: 1, arg1: 65, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 65) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sig == 0 (disable) is valid -> 0.
+            let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 0) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sig == 64 (upper boundary) is valid -> 0.
+            let a = SyscallArgs { arg0: 1, arg1: 64, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 64) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Mid-range signal (SIGTERM == 15) is valid -> 0.
+            let a = SyscallArgs { arg0: 1, arg1: 15, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 15) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // PR_GET_PDEATHSIG with NULL -> EFAULT.
+            let a = SyscallArgs { arg0: 2, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, NULL) not EFAULT ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // PR_GET_PDEATHSIG with a kernel-stack scratch buffer —
+            // succeeds and copy_to_user in kernel context bypasses
+            // validation, so the buffer gets written with the
+            // current value.  In kernel context caller_pid() is
+            // None, so the value reported is 0 (disabled).
+            let mut sig_out: i32 = 0x7f;
+            let a = SyscallArgs {
+                arg0: 2,
+                arg1: (&raw mut sig_out) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, &buf) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            if sig_out != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, &buf) buf not 0 ({})",
+                    sig_out
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via the pcb helpers directly.
+            // We can't drive caller_pid() from this context so we
+            // verify the underlying store-and-query independently.
+            let test_pid = pcb::create("pdeathsig-test", 0);
+            // Default is disabled.
+            assert_eq!(pcb::get_pdeathsig(test_pid), Some(0));
+            // Install SIGTERM (15).  set returns the prior value.
+            assert_eq!(pcb::set_pdeathsig(test_pid, 15), Some(0));
+            assert_eq!(pcb::get_pdeathsig(test_pid), Some(15));
+            // Replace with SIGKILL (9).
+            assert_eq!(pcb::set_pdeathsig(test_pid, 9), Some(15));
+            assert_eq!(pcb::get_pdeathsig(test_pid), Some(9));
+            // Disable.
+            assert_eq!(pcb::set_pdeathsig(test_pid, 0), Some(9));
+            assert_eq!(pcb::get_pdeathsig(test_pid), Some(0));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_pdeathsig(test_pid), None);
+            assert_eq!(pcb::set_pdeathsig(test_pid, 1), None);
         }
     }
 

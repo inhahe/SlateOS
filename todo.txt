@@ -15341,3 +15341,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   request_key callout/type/desc
 ##      validation: OK" at line 437 of build/serial-test.txt.
 
+## 170. Linux ABI: io_uring_setup(2) entries/flags/resv validation
+##      (Batch 141, 2026-06-05)
+##
+##      Issue:  sys_io_uring_setup validated only entries != 0 and a
+##              non-NULL params pointer.  Linux's io_uring/io_uring.c
+##              has more gates that probes rely on:
+##                * entries > IORING_MAX_ENTRIES (32768) -> EINVAL
+##                  (without IORING_SETUP_CLAMP).
+##                * params.flags must contain only valid bits;
+##                  anything else -> EINVAL.
+##                * params.resv[3] (offset 28..40) must be all zeros;
+##                  Linux returns -EINVAL so the reserved space can be
+##                  repurposed by future ABI extensions.
+##              Without these gates a probe passing entries=999_999 or
+##              params.flags=0x8000_0000 saw ENOSYS where Linux gives
+##              EINVAL.
+##
+##      Fix:    Added the gate ladder to sys_io_uring_setup:
+##                * entries > 32768 -> EINVAL.
+##                * Read first 40 bytes via copy_from_user.
+##                * flags & !0xF_FFFF -> EINVAL (Linux 6.10 uses bits
+##                  0..=16; cap at bit 19 for forward-compat buffer).
+##                * Any non-zero byte in resv[3] (28..40) -> EINVAL.
+##                * Otherwise -> ENOSYS (preserved).
+##
+##      Self-tests (boot-time):
+##        * io_uring_setup(0,_) -> EINVAL (unchanged).
+##        * io_uring_setup(65536, params) -> EINVAL (entries > cap).
+##        * io_uring_setup(8, NULL) -> EFAULT (unchanged).
+##        * io_uring_setup(8, params with flags bit 31 set) -> EINVAL.
+##        * io_uring_setup(8, params with resv[0]=0xff) -> EINVAL.
+##        * io_uring_setup(8, zeroed params) -> ENOSYS.
+##        * Emits "[syscall/linux]   io_uring_setup entries/flags/resv
+##          validation: OK".
+##
+##      Implementation notes:
+##        * Uses core::hint::black_box(&params) around the post-
+##          dispatch reset of params[28] = 0 — without the hint the
+##          compiler treats the reset as a dead store, since
+##          dispatch_linux reads `params` through an opaque u64
+##          pointer the optimizer can't see.  black_box stops the
+##          unused_assignments lint and keeps the self-test honest.
+##
+##      Known limitations:
+##        * The forward-compat cap for flags (bit 19) is a soft buffer,
+##          not a hard spec.  When real io_uring lands we'll switch to
+##          an exact per-flag dispatch; until then 0xF_FFFF keeps any
+##          conformance probe happy while still rejecting trash.
+##        * sq_thread_cpu, sq_thread_idle, wq_fd, and the sq_off /
+##          cq_off submembers are not validated — they only matter
+##          once a real ring exists.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   io_uring_setup entries/flags/
+##      resv validation: OK" at line 432 of build/serial-test.txt.
+

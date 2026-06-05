@@ -10633,7 +10633,17 @@ fn sys_io_getevents(args: &SyscallArgs) -> SyscallResult {
 
 /// `io_uring_setup(entries, params)`.
 fn sys_io_uring_setup(args: &SyscallArgs) -> SyscallResult {
+    // entries: 1..=IORING_MAX_ENTRIES.  Linux's IORING_MAX_ENTRIES is
+    // 32768 (io_uring/io_uring.c); a value above that produces EINVAL
+    // unless IORING_SETUP_CLAMP is set, in which case Linux clamps
+    // silently.  We return ENOSYS for every setup, so the cap is
+    // useful purely as a probe gate — match the hard EINVAL response
+    // without trying to peek at CLAMP first.
+    const IORING_MAX_ENTRIES: u64 = 32768;
     if args.arg0 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if args.arg0 > IORING_MAX_ENTRIES {
         return linux_err(errno::EINVAL);
     }
     if args.arg1 == 0 {
@@ -10642,6 +10652,37 @@ fn sys_io_uring_setup(args: &SyscallArgs) -> SyscallResult {
     // struct io_uring_params is 120 bytes on x86_64.
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 120) {
         return linux_err(linux_errno_for(e));
+    }
+    // Read enough of the struct to mirror Linux's input gates:
+    //   params.flags  at offset 8..12 — must only contain valid flag
+    //                  bits (0..=16 in Linux 6.10, plus a forward-
+    //                  compat buffer to bit 19).
+    //   params.resv[3] at offset 28..40 — must be all zeros so future
+    //                  ABI extensions can repurpose the fields.
+    let mut header = [0u8; 40];
+    // SAFETY: validate_user_read above checked 120 bytes are readable,
+    // so the 40-byte prefix is in-range.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg1, header.as_mut_ptr(), 40)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let flags = u32::from_ne_bytes(match <[u8; 4]>::try_from(&header[8..12]) {
+        Ok(b) => b,
+        // Unreachable: 4-byte slice.  Surface as EINVAL rather than
+        // panic so the path stays warning-free.
+        Err(_) => return linux_err(errno::EINVAL),
+    });
+    // Linux 6.10 occupies bits 0..=16; we cap at bit 19 (0xF_FFFF) so
+    // 6.11+ flags don't pre-reject here while still flagging trash.
+    const IORING_SETUP_VALID_FLAGS: u32 = 0xF_FFFF;
+    if flags & !IORING_SETUP_VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // resv[3] (offset 28..40) — Linux: -EINVAL if any reserved field
+    // is non-zero.  Match.
+    if header[28..40].iter().any(|&b| b != 0) {
+        return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
 }
@@ -30151,18 +30192,55 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_uring_setup(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // io_uring_setup(8, params) in kernel context -> ENOSYS.
+        // io_uring_setup(entries > IORING_MAX_ENTRIES, params) -> EINVAL.
+        // Use 65536 (= 2 * 32768) to land cleanly above the cap.
         let mut params = [0u8; 120];
+        let a = SyscallArgs {
+            arg0: 65_536,
+            arg1: params.as_mut_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_setup(entries>cap) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // io_uring_setup(8, params with bad flag bit) -> EINVAL.
+        // Set bit 31 in the flags field (offset 8..12).
+        params[8..12].copy_from_slice(&0x8000_0000u32.to_ne_bytes());
         let a = SyscallArgs {
             arg0: 8,
             arg1: params.as_mut_ptr() as u64,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_setup(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // io_uring_setup(8, params with non-zero resv) -> EINVAL.  Clear
+        // flags first so the bad-flag gate doesn't shadow the resv gate.
+        params[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        params[28] = 0xff;
+        // black_box() prevents the compiler from optimising away the
+        // post-dispatch reset below: dispatch_linux reads params through
+        // a raw u64 pointer the compiler can't see, so without the
+        // hint the reset `params[28] = 0` looks like a dead store.
+        core::hint::black_box(&params);
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_setup(non-zero resv) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        params[28] = 0;
+        core::hint::black_box(&params);
+        // io_uring_setup(8, params) in kernel context -> ENOSYS.
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
             != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: io_uring_setup not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   io_uring_setup entries/flags/resv validation: OK");
         // io_uring_enter — input validation + EBADF (no ring fds exist).
         //
         // Pre-batch-132 these returned bare ENOSYS with no input

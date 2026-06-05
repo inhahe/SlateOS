@@ -727,6 +727,41 @@ pub struct Process {
     /// reboot, …) must consult both the ambient and effective
     /// sets to decide whether to permit the call.
     pub linux_ambient_caps: u64,
+    /// Linux `prctl(PR_SET_SECUREBITS)` per-task securebits
+    /// bitfield.  Eight bits in four (flag, locked) pairs that
+    /// modify how the kernel handles uid 0 and capability
+    /// inheritance:
+    ///
+    /// | Bit | Constant                       | Effect                           |
+    /// |-----|--------------------------------|----------------------------------|
+    /// | 0   | SECBIT_NOROOT                  | uid 0 doesn't grant caps         |
+    /// | 1   | SECBIT_NOROOT_LOCKED           | bit 0 frozen                     |
+    /// | 2   | SECBIT_NO_SETUID_FIXUP         | no cap reset across setuid       |
+    /// | 3   | SECBIT_NO_SETUID_FIXUP_LOCKED  | bit 2 frozen                     |
+    /// | 4   | SECBIT_KEEP_CAPS               | retain caps over setuid (legacy) |
+    /// | 5   | SECBIT_KEEP_CAPS_LOCKED        | bit 4 frozen                     |
+    /// | 6   | SECBIT_NO_CAP_AMBIENT_RAISE    | block PR_CAP_AMBIENT_RAISE       |
+    /// | 7   | SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED | bit 6 frozen                 |
+    ///
+    /// Once a `_LOCKED` bit is set, its companion flag bit and the
+    /// lock bit itself become immutable for the lifetime of the
+    /// process (and any forked children that inherit it).  This
+    /// gives a hardened process a way to permanently relinquish
+    /// privilege transitions.
+    ///
+    /// Default 0 (all bits clear).  Inherited verbatim across fork
+    /// (Linux: `cred->securebits` is copied by `prepare_cred`).
+    /// Preserved across exec (Linux clears KEEP_CAPS on exec but
+    /// leaves the other bits — caveat: we don't have an exec hook
+    /// yet, so we preserve everything, including KEEP_CAPS.  Same
+    /// limitation pattern as MDWE/IO_FLUSHER; tracked in todo.txt).
+    ///
+    /// The storage helper bypasses lock validation so test fixtures
+    /// can probe boundary cases.  The syscall surface enforces:
+    /// (a) unknown bits -> EINVAL, (b) attempting to clear a lock
+    /// bit that is currently set -> EPERM, (c) attempting to flip
+    /// a bit whose lock is set -> EPERM.
+    pub linux_securebits: u32,
 }
 
 /// Highest valid Linux capability number — fixed at
@@ -734,6 +769,43 @@ pub struct Process {
 /// number above this is `EINVAL` for the `PR_CAP_AMBIENT`
 /// surface and for any future cap-bearing prctl options.
 pub const LINUX_CAP_LAST_CAP: u32 = 40;
+
+/// Securebit: uid 0 does not grant capabilities (bit 0).
+pub const LINUX_SECBIT_NOROOT: u32 = 1 << 0;
+/// Securebit lock: freeze [`LINUX_SECBIT_NOROOT`] (bit 1).
+pub const LINUX_SECBIT_NOROOT_LOCKED: u32 = 1 << 1;
+/// Securebit: no capability reset across setuid (bit 2).
+pub const LINUX_SECBIT_NO_SETUID_FIXUP: u32 = 1 << 2;
+/// Securebit lock: freeze [`LINUX_SECBIT_NO_SETUID_FIXUP`] (bit 3).
+pub const LINUX_SECBIT_NO_SETUID_FIXUP_LOCKED: u32 = 1 << 3;
+/// Securebit: retain caps over setuid — legacy "keep caps" (bit 4).
+pub const LINUX_SECBIT_KEEP_CAPS: u32 = 1 << 4;
+/// Securebit lock: freeze [`LINUX_SECBIT_KEEP_CAPS`] (bit 5).
+pub const LINUX_SECBIT_KEEP_CAPS_LOCKED: u32 = 1 << 5;
+/// Securebit: block `PR_CAP_AMBIENT_RAISE` (bit 6).
+pub const LINUX_SECBIT_NO_CAP_AMBIENT_RAISE: u32 = 1 << 6;
+/// Securebit lock: freeze [`LINUX_SECBIT_NO_CAP_AMBIENT_RAISE`]
+/// (bit 7).
+pub const LINUX_SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED: u32 = 1 << 7;
+
+/// All defined "flag" securebits (the even-numbered bits) — bits
+/// that toggle a behaviour.
+pub const LINUX_SECURE_ALL_BITS: u32 = LINUX_SECBIT_NOROOT
+    | LINUX_SECBIT_NO_SETUID_FIXUP
+    | LINUX_SECBIT_KEEP_CAPS
+    | LINUX_SECBIT_NO_CAP_AMBIENT_RAISE;
+
+/// All defined "lock" securebits (the odd-numbered bits) — bits
+/// that freeze their paired flag bit.
+pub const LINUX_SECURE_ALL_LOCKS: u32 = LINUX_SECBIT_NOROOT_LOCKED
+    | LINUX_SECBIT_NO_SETUID_FIXUP_LOCKED
+    | LINUX_SECBIT_KEEP_CAPS_LOCKED
+    | LINUX_SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED;
+
+/// Union of all defined securebits — any bit outside this mask in
+/// `PR_SET_SECUREBITS arg2` is `EINVAL`.
+pub const LINUX_SECURE_ALL_FLAGS: u32 =
+    LINUX_SECURE_ALL_BITS | LINUX_SECURE_ALL_LOCKS;
 
 /// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
 /// value every fresh `task_struct` starts with on Linux (and which
@@ -835,6 +907,10 @@ impl Process {
             // Linux default: empty ambient set.  systemd /
             // container runtimes populate via PR_CAP_AMBIENT_RAISE.
             linux_ambient_caps: 0,
+            // Linux default: securebits cleared.  Hardened
+            // containers (LXC, Docker --security-opt) flip
+            // SECBIT_NOROOT and friends at startup.
+            linux_securebits: 0,
         }
     }
 }
@@ -990,6 +1066,7 @@ pub fn fork_create(
         linux_io_flusher,
         linux_memory_merge,
         linux_ambient_caps,
+        linux_securebits,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1028,6 +1105,7 @@ pub fn fork_create(
             parent.linux_io_flusher,
             parent.linux_memory_merge,
             parent.linux_ambient_caps,
+            parent.linux_securebits,
         )
     };
 
@@ -1194,6 +1272,15 @@ pub fn fork_create(
         // Preserved across exec — this is the defining property
         // of the ambient set vs the inheritable set.
         linux_ambient_caps,
+        // Linux: `cred->securebits` is copied by `prepare_cred`
+        // alongside the rest of the credential block, so
+        // securebits (including any locks) propagate verbatim
+        // across fork.  Lock bits in the parent stay locked in
+        // the child — child has no way to clear what parent
+        // froze.  Preserved across exec aside from KEEP_CAPS
+        // (which Linux clears on exec); we don't yet have an exec
+        // hook so KEEP_CAPS survives too (todo).
+        linux_securebits,
     };
 
     table.insert(pid, child);
@@ -2071,6 +2158,26 @@ pub fn is_ambient_cap_set(pid: ProcessId, cap: u32) -> Option<u32> {
         .lock()
         .get(&pid)
         .map(|p| u32::from((p.linux_ambient_caps & bit) != 0))
+}
+
+/// Read the `PR_GET_SECUREBITS` value for `pid`.  Returns `None` if
+/// `pid` is unknown; `Some(0)` is the default (all bits clear).
+#[must_use]
+pub fn get_securebits(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_securebits)
+}
+
+/// Install the `PR_SET_SECUREBITS` value for `pid`, returning the
+/// prior value.  Returns `None` if `pid` is unknown.  Bypasses lock
+/// validation so test fixtures can install arbitrary masks — the
+/// syscall surface enforces the Linux rules (no unknown bits, no
+/// clearing a set lock, no flipping a locked flag).
+pub fn set_securebits(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_securebits;
+    proc.linux_securebits = val;
+    Some(old)
 }
 
 /// Index of `RLIMIT_AS` (resident *address space* size) in [`Process::rlimits`].

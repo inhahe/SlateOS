@@ -10552,4 +10552,101 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
+## 112. Linux ABI batch 83: per-PCB PR_GET_SECUREBITS /
+##      PR_SET_SECUREBITS round-trip with strict Linux
+##      argument validation and lock-bit enforcement at the
+##      syscall surface.
+##
+##      Motivation: capsh, libcap, hardened-container init
+##      (LXC, Docker --security-opt), systemd `SecureBits=`,
+##      and runc with an OCI spec carrying a securebits stanza
+##      all hit PR_GET_SECUREBITS at startup to learn the
+##      current word, then PR_SET_SECUREBITS to install the
+##      desired bits.  Pre-batch we returned EINVAL on both,
+##      which broke every one of those paths.
+##
+##      Wired up:
+##        * pcb::Process gains `linux_securebits: u32`.
+##        * Default 0 (matches `init_cred.securebits = 0`).
+##        * Fork inheritance: verbatim copy of
+##          `parent.linux_securebits` into the child (Linux
+##          `prepare_cred` copies the full credential block
+##          including securebits; lock bits in the parent
+##          stay locked in the child).
+##        * Constants exported from pcb.rs:
+##          LINUX_SECBIT_NOROOT (1<<0) / _LOCKED (1<<1),
+##          LINUX_SECBIT_NO_SETUID_FIXUP (1<<2) / _LOCKED (1<<3),
+##          LINUX_SECBIT_KEEP_CAPS (1<<4) / _LOCKED (1<<5),
+##          LINUX_SECBIT_NO_CAP_AMBIENT_RAISE (1<<6) / _LOCKED (1<<7),
+##          LINUX_SECURE_ALL_BITS = 0x55 (the flag bits),
+##          LINUX_SECURE_ALL_LOCKS = 0xaa (the lock bits),
+##          LINUX_SECURE_ALL_FLAGS = 0xff (union).
+##        * pcb::get_securebits / set_securebits: storage
+##          helpers.  Set accepts arbitrary u32 — lock policy
+##          lives at the syscall surface so test fixtures can
+##          probe boundary cases.
+##
+##      Syscall surface (sys_prctl):
+##        PR_GET_SECUREBITS (27):
+##          - arg1..arg4 must all be 0 -> EINVAL otherwise.
+##            (Linux does not police these, but every other
+##            getter in this file does; we match the strict
+##            contract for ABI hygiene.)
+##          - Returns the securebits word directly as the
+##            syscall return value (no user pointer).
+##          - Kernel context (no PCB): returns 0.
+##        PR_SET_SECUREBITS (28):
+##          - arg2..arg4 must all be 0 -> EINVAL otherwise.
+##          - arg1 > u32::MAX -> EINVAL (rejected before
+##            truncation so we never silently drop bits).
+##          - arg1 with bits outside SECURE_ALL_FLAGS -> EINVAL.
+##          - Any currently-set lock bit must remain set in
+##            the new word -> EPERM if cleared (matches
+##            Linux's `(unlocked_changes & LOCK_MASK)` check).
+##          - Any currently-set lock bit means its paired
+##            flag bit cannot flip -> EPERM if it does.
+##            (Lock bits are odd; the paired flag bit is
+##            `lock >> 1`.)
+##          - Kernel context: passes value validation but has
+##            no PCB to read/write — returns 0.
+##
+##      Known limitations:
+##        * Linux additionally requires CAP_SETPCAP for
+##          PR_SET_SECUREBITS; we don't enforce capabilities
+##          yet (consistent with the rest of the prctl
+##          surface).
+##        * Securebits are stored only — none of the bits
+##          actually affect uid 0 / setuid / ambient-raise
+##          behaviour anywhere else in the kernel.  This is
+##          ABI round-trip plumbing; real semantics would
+##          need a credential block and a setuid path.
+##        * Linux clears KEEP_CAPS on exec; we have no exec
+##          hook, so KEEP_CAPS survives across exec.  Same
+##          deferral as MDWE/IO_FLUSHER; tracked alongside
+##          those.
+##
+##      Self-test (boot path):
+##        Dispatch layer:
+##          - PR_GET_SECUREBITS with any of arg1..arg4 != 0
+##            -> EINVAL.
+##          - PR_GET_SECUREBITS kernel context -> 0.
+##          - PR_SET_SECUREBITS with arg2..arg4 != 0 -> EINVAL.
+##          - PR_SET_SECUREBITS with arg1 outside the low
+##            byte (0x100, 0xffff_0000, 0x8000_0000) -> EINVAL.
+##          - PR_SET_SECUREBITS with arg1 > u32::MAX -> EINVAL.
+##          - PR_SET_SECUREBITS kernel context with all valid
+##            masks {0, 1, 0x55, 0xaa, 0xff} -> 0.
+##        Storage layer:
+##          - get returns Some(0) initially.
+##          - set/get round-trip 0x55, 0xff, arbitrary high bits
+##            (helper bypasses surface policy).
+##          - destroy -> get/set return None.
+##        Constant sanity:
+##          - BITS & LOCKS == 0 (no overlap).
+##          - BITS | LOCKS == FLAGS == 0xff.
+##          - Each flag bit sits exactly one position below
+##            its lock bit.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
 

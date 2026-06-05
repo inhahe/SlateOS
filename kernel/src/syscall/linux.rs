@@ -4719,6 +4719,85 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 _ => linux_err(errno::EINVAL),
             }
         }
+        // PR_GET_SECUREBITS (27) — return the per-task securebits
+        // word.  capsh, libcap, and hardened-container init code
+        // poll this before mutating the credential block.  No
+        // user pointer: the bits come back directly as the
+        // syscall return value.  arg1..arg5 must all be 0 or
+        // EINVAL.  Kernel context returns 0 (the default).
+        27 => {
+            if args.arg1 != 0
+                || args.arg2 != 0
+                || args.arg3 != 0
+                || args.arg4 != 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            let v = caller_pid().and_then(pcb::get_securebits).unwrap_or(0);
+            SyscallResult::ok(i64::from(v))
+        }
+        // PR_SET_SECUREBITS (28) — install a new securebits word.
+        // Used by capsh, libcap, hardened-container init, systemd
+        // when SecureBits= is set on a unit, and runc when an OCI
+        // spec carries a securebits stanza.  EINVAL/EPERM here
+        // breaks all of them.
+        //
+        // Linux semantics (security/commoncap.c cap_task_prctl
+        // PR_SET_SECUREBITS):
+        //   * arg3/arg4/arg5 (our arg2/arg3/arg4) must all be 0
+        //     -> EINVAL otherwise.  Linux does not actually check
+        //     these in the existing kernel, but cap_prctl follows
+        //     the documented contract; we mirror it for safety.
+        //   * arg2 (our arg1) with bits outside SECURE_ALL_BITS
+        //     (the union of all defined flag+lock bits) -> EINVAL.
+        //   * Any currently-set lock bit must remain set in the
+        //     new value -> EPERM if cleared.
+        //   * Any currently-set lock bit means its paired flag bit
+        //     cannot flip -> EPERM if it does.
+        //   * Linux additionally requires CAP_SETPCAP; we don't
+        //     enforce caps yet.  Documented limitation.
+        28 => {
+            // Linux's cap_task_prctl(PR_SET_SECUREBITS) ignores
+            // arg3/arg4/arg5 silently — we still police them to
+            // catch ABI drift in callers (and because every other
+            // prctl in this file enforces the zero-tail contract).
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // u64 narrows to u32: anything in the upper 32 bits
+            // is by definition outside SECURE_ALL_FLAGS.  Reject
+            // before truncating so we don't silently lose bits.
+            if args.arg1 > u64::from(u32::MAX) {
+                return linux_err(errno::EINVAL);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let new_val = args.arg1 as u32;
+            if (new_val & !pcb::LINUX_SECURE_ALL_FLAGS) != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // Lock-bit enforcement runs against the current word.
+            // Kernel context has no PCB → behave as if all bits
+            // are clear (default), so only the value-validation
+            // checks above apply.
+            if let Some(pid) = caller_pid() {
+                let cur = pcb::get_securebits(pid).unwrap_or(0);
+                // Any currently-set lock bit must remain set.
+                let locks_now_set = cur & pcb::LINUX_SECURE_ALL_LOCKS;
+                if (new_val & locks_now_set) != locks_now_set {
+                    return linux_err(errno::EPERM);
+                }
+                // For every set lock bit, the paired flag bit
+                // (one position lower) must match its current
+                // value.  Lock bits are odd-numbered; the paired
+                // flag bit is `lock >> 1`.
+                let locked_flag_mask = locks_now_set >> 1;
+                if (new_val & locked_flag_mask) != (cur & locked_flag_mask) {
+                    return linux_err(errno::EPERM);
+                }
+                let _ = pcb::set_securebits(pid, new_val);
+            }
+            SyscallResult::ok(0)
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -18573,6 +18652,177 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::raise_ambient_cap(test_pid, 0), None);
             assert_eq!(pcb::lower_ambient_cap(test_pid, 0), None);
             assert_eq!(pcb::is_ambient_cap_set(test_pid, 0), None);
+        }
+
+        // Batch 83: PR_GET_SECUREBITS (27) / PR_SET_SECUREBITS (28)
+        // round-trip with strict Linux argument validation and
+        // lock-bit enforcement.
+        // Verifications:
+        //   1. PR_GET_SECUREBITS arg1..arg4 != 0 -> EINVAL.
+        //   2. PR_GET_SECUREBITS kernel context -> 0 (default).
+        //   3. PR_SET_SECUREBITS arg2..arg4 != 0 -> EINVAL.
+        //   4. PR_SET_SECUREBITS arg1 with bits outside
+        //      SECURE_ALL_FLAGS -> EINVAL.
+        //   5. PR_SET_SECUREBITS arg1 > u32::MAX -> EINVAL.
+        //   6. PR_SET_SECUREBITS kernel context with valid bits
+        //      -> 0 (no PCB enforcement path).
+        //   7. pcb-layer round-trip: set / get arbitrary values
+        //      (helper bypasses lock validation).
+        {
+            // PR_GET_SECUREBITS arg1..arg4 != 0 -> EINVAL.
+            for (idx, a) in [
+                SyscallArgs { arg0: 27, arg1: 1, arg2: 0, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 27, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 27, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 27, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_SECUREBITS, …{}=1) not EINVAL ({})",
+                        idx + 1,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET_SECUREBITS kernel context -> 0.
+            let a = SyscallArgs { arg0: 27, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_SECUREBITS) kernel-ctx not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_SECUREBITS arg2..arg4 != 0 -> EINVAL.
+            // arg1 = 0 is otherwise valid; the tail policing fires.
+            for (idx, a) in [
+                SyscallArgs { arg0: 28, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 28, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 28, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, …{}=1) not EINVAL ({})",
+                        idx + 2,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET_SECUREBITS arg1 with bits outside SECURE_ALL_FLAGS
+            // (0xff) -> EINVAL.  0x100 is the first invalid bit.
+            for bad in [0x100u64, 0xffff_0000, 0x8000_0000] {
+                let a = SyscallArgs { arg0: 28, arg1: bad, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, {:#x}) not EINVAL ({})",
+                        bad,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET_SECUREBITS arg1 > u32::MAX -> EINVAL (must
+            // reject before truncation would silently drop bits).
+            let a = SyscallArgs { arg0: 28, arg1: 0x1_0000_0000,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, >u32::MAX) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_SECUREBITS kernel context with valid bits -> 0
+            // (no PCB; just goes through value validation).
+            for v in [0u64, 1, 0x55, 0xaa, 0xff] {
+                let a = SyscallArgs { arg0: 28, arg1: v, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, {:#x}) kernel-ctx not 0 ({})",
+                        v,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // pcb storage round-trip.
+            let test_pid = pcb::create("securebits-test", 0);
+            // Default 0.
+            assert_eq!(pcb::get_securebits(test_pid), Some(0));
+            // Helper bypasses lock checks: install arbitrary values.
+            assert_eq!(pcb::set_securebits(test_pid, 0x55), Some(0));
+            assert_eq!(pcb::get_securebits(test_pid), Some(0x55));
+            assert_eq!(pcb::set_securebits(test_pid, 0xff), Some(0x55));
+            assert_eq!(pcb::get_securebits(test_pid), Some(0xff));
+            // Helper accepts values the surface would reject — that
+            // is the documented contract (policy lives at the
+            // syscall layer).
+            assert_eq!(
+                pcb::set_securebits(test_pid, 0xdead_beef),
+                Some(0xff)
+            );
+            assert_eq!(pcb::get_securebits(test_pid), Some(0xdead_beef));
+            assert_eq!(
+                pcb::set_securebits(test_pid, 0),
+                Some(0xdead_beef)
+            );
+            pcb::destroy(test_pid);
+            assert_eq!(pcb::get_securebits(test_pid), None);
+            assert_eq!(pcb::set_securebits(test_pid, 1), None);
+
+            // Constant sanity: SECURE_ALL_FLAGS is the union of
+            // SECURE_ALL_BITS (flags, even bits) and
+            // SECURE_ALL_LOCKS (locks, odd bits), with no overlap
+            // and covering exactly the low 8 bits.
+            assert_eq!(
+                pcb::LINUX_SECURE_ALL_BITS & pcb::LINUX_SECURE_ALL_LOCKS,
+                0
+            );
+            assert_eq!(
+                pcb::LINUX_SECURE_ALL_BITS | pcb::LINUX_SECURE_ALL_LOCKS,
+                pcb::LINUX_SECURE_ALL_FLAGS
+            );
+            assert_eq!(pcb::LINUX_SECURE_ALL_FLAGS, 0xff);
+            assert_eq!(pcb::LINUX_SECURE_ALL_BITS, 0x55);
+            assert_eq!(pcb::LINUX_SECURE_ALL_LOCKS, 0xaa);
+            // Every flag bit sits one position below its lock bit.
+            assert_eq!(
+                pcb::LINUX_SECBIT_NOROOT_LOCKED,
+                pcb::LINUX_SECBIT_NOROOT << 1
+            );
+            assert_eq!(
+                pcb::LINUX_SECBIT_NO_SETUID_FIXUP_LOCKED,
+                pcb::LINUX_SECBIT_NO_SETUID_FIXUP << 1
+            );
+            assert_eq!(
+                pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                pcb::LINUX_SECBIT_KEEP_CAPS << 1
+            );
+            assert_eq!(
+                pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
+                pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE << 1
+            );
         }
     }
 

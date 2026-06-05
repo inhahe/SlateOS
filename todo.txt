@@ -9911,3 +9911,43 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      should land in `kernel/src/rcu/` with the test logic.
 
 
+## 102. Linux ABI batch 73: real PR_GET_TID_ADDRESS round-trip.
+##
+##      Before this batch, option 40 fell through to the
+##      generic `_ => EINVAL` catch-all in sys_prctl.  gdb's
+##      `info threads` and a couple of thread-debugging
+##      libraries call this on attach to find the
+##      clear-child-tid futex for each thread; EINVAL makes
+##      gdb fall back to a coarser detection path and emit
+##      "couldn't get tid address" warnings.
+##
+##      Fix: wire option 40 to `lookup_clear_child_tid(task)`
+##      (already exists in thread_clone.rs — was previously
+##      gated `#[cfg(test)]`, now always available with a
+##      doc comment explaining the user).  Returns 0 when no
+##      address has been registered (i.e., no prior
+##      `set_tid_address` and no `CLONE_CHILD_CLEARTID`),
+##      which matches Linux's behaviour of returning the
+##      zero-initialised slot.
+##
+##      arg3/arg4/arg5 must all be 0 or EINVAL.  arg2 (our
+##      arg1) is the user `void**` to write the 8-byte
+##      address into; NULL is EFAULT.
+##
+##      Known limitation (deferred): Linux gates this option
+##      on CAP_SYS_ADMIN-or-PTRACE permission for non-self
+##      queries; gdb attaches with PTRACE so the check is
+##      trivially satisfied in practice.  We do not enforce
+##      capabilities at all yet; revisit when the capability
+##      framework lands.
+##
+##      Self-tests cover:
+##        * arg3/arg4/arg5 != 0 -> EINVAL (each in turn).
+##        * NULL pointer -> EFAULT.
+##        * Scratch buffer pre-filled with sentinel; after
+##          dispatch the buffer reads 0 (kernel context: no
+##          set_tid_address registration).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 25s).
+
+

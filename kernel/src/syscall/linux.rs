@@ -4166,6 +4166,51 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             }
             SyscallResult::ok(0)
         }
+        // PR_GET_TID_ADDRESS (40) — copy the address registered by
+        // `set_tid_address` (the clear-child-tid futex address) into
+        // the user `void**` at arg2 (our arg1).  Linux writes a
+        // pointer-sized slot (8 bytes on x86_64).  NULL is EFAULT.
+        // arg3/arg4/arg5 must all be 0 or EINVAL.  Kernel context
+        // (no task) reports 0 (no address registered).
+        //
+        // Linux gates this option on CAP_SYS_ADMIN-or-PTRACE; gdb
+        // and a couple of thread-debugging libraries are the usual
+        // callers.  We do not enforce that capability yet (no caps
+        // wired up); revisit when the capability framework lands.
+        40 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            let user_buf = args.arg1;
+            if user_buf == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            // Linux reports the per-thread clear_child_tid address.
+            // In kernel context there is no "current task" with a
+            // userspace address, so we report 0.
+            let v: u64 = {
+                let task_id = crate::sched::current_task_id();
+                if task_id == 0 {
+                    0
+                } else {
+                    crate::proc::thread_clone::lookup_clear_child_tid(task_id)
+                        .unwrap_or(0)
+                }
+            };
+            // SAFETY: copy_to_user validates the destination range
+            // and uses STAC/CLAC for SMAP-safe access.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(
+                    (&raw const v).cast::<u8>(),
+                    user_buf,
+                    core::mem::size_of::<u64>(),
+                )
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            SyscallResult::ok(0)
+        }
         // PR_GET_TSC (25) — copy the mode into the user int* at
         // arg2 (Linux's `arg2`, our `arg1`).  NULL is EFAULT
         // (consistent with every other PR_GET_* pointer surface).
@@ -17090,6 +17135,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_tsc_mode(test_pid), None);
             assert_eq!(pcb::set_tsc_mode(test_pid, 1), None);
+        }
+
+        // Batch 73: PR_GET_TID_ADDRESS round-trip with strict
+        // argument validation matching Linux.
+        //
+        //   1. PR_GET_TID_ADDRESS arg3/arg4/arg5 != 0 -> EINVAL.
+        //   2. PR_GET_TID_ADDRESS NULL pointer -> EFAULT.
+        //   3. PR_GET_TID_ADDRESS with scratch buffer -> writes 0
+        //      (kernel-context: no `set_tid_address` registration
+        //      for the boot-time bootstrap task).
+        {
+            // arg3/arg4/arg5 != 0 -> EINVAL.
+            for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                let mut a = SyscallArgs { arg0: 40, arg1: 0, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // NULL pointer -> EFAULT.
+            let a = SyscallArgs { arg0: 40, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, NULL) not EFAULT ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Scratch buffer pre-filled with a sentinel to confirm
+            // we actually wrote (and not just left the prior bytes).
+            let mut tid_addr_out: u64 = 0xdead_beef_cafe_babe;
+            let a = SyscallArgs {
+                arg0: 40,
+                arg1: (&raw mut tid_addr_out) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, &buf) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Kernel context (no registration) -> 0.
+            if tid_addr_out != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, &buf) buf not 0 (0x{:x})",
+                    tid_addr_out
+                );
+                return Err(KernelError::InternalError);
+            }
         }
     }
 

@@ -130,10 +130,14 @@ pub fn register_clear_child_tid(task_id: TaskId, ctid_ptr: u64) {
     }
 }
 
-/// Look up (without removing) a task's registered `ctid` address —
-/// for self-test only.
-#[cfg(test)]
-#[allow(dead_code)]
+/// Look up (without removing) a task's registered `ctid` address.
+///
+/// Used by `prctl(PR_GET_TID_ADDRESS)` to report the address of the
+/// clear-child-tid futex back to userspace (gdb and a couple of
+/// thread-debugging libraries call this).  Returns `None` if the
+/// task has not called `set_tid_address` (or registered via
+/// `CLONE_CHILD_CLEARTID`); callers should report 0 in that case to
+/// match Linux, which returns the zero-initialised slot.
 pub fn lookup_clear_child_tid(task_id: TaskId) -> Option<u64> {
     CLEAR_CHILD_TID.lock().get(&task_id).copied()
 }

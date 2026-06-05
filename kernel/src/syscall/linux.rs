@@ -14984,7 +14984,24 @@ fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `landlock_add_rule(ruleset_fd, rule_type, rule_attr*, flags)`.
+///
+/// Mirrors Linux's `security/landlock/syscalls.c::SYSCALL_DEFINE4` gates
+/// ahead of the privilege/fd-kind check:
+///   * `flags == 0` (currently no defined bits).
+///   * `rule_type ∈ {1=PATH_BENEATH, 2=NET_PORT}`.
+///   * `rule_attr` is a non-NULL, 16-byte readable buffer.
+///   * The `allowed_access` (first u64) must be non-zero — Linux's
+///     `add_rule_path_beneath` and `add_rule_net_port` both return
+///     `ENOMSG` for an empty access mask.
+///   * `allowed_access` must be a subset of the per-rule-type mask:
+///       - PATH_BENEATH: `LANDLOCK_ACCESS_FS_MASK = 0xffff`
+///         (EXECUTE..IOCTL_DEV inclusive, Linux 6.10).
+///       - NET_PORT:     `LANDLOCK_ACCESS_NET_MASK = 0x3`
+///         (BIND_TCP | CONNECT_TCP, Linux 6.7).
+///   * NET_PORT additionally requires `port <= 65535` (u16 range).
 fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
+    const LANDLOCK_ACCESS_FS_MASK: u64 = 0xffff;
+    const LANDLOCK_ACCESS_NET_MASK: u64 = 0x3;
     if args.arg3 != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -14999,6 +15016,44 @@ fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
     // padded to 16), NET_PORT = 16 (u64 allowed_access + u16 port padded).
     if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 16) {
         return linux_err(linux_errno_for(e));
+    }
+    let mut buf = [0u8; 16];
+    // SAFETY: validate_user_read above confirmed 16 bytes readable.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg2, buf.as_mut_ptr(), 16)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let allowed_access = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
+        Ok(b) => b,
+        Err(_) => return linux_err(errno::EINVAL),
+    });
+    if allowed_access == 0 {
+        // Linux returns ENOMSG for a zero access mask — "no rule body."
+        return linux_err(errno::ENOMSG);
+    }
+    match args.arg1 {
+        1 => {
+            // PATH_BENEATH: allowed_access must be subset of FS mask.
+            if allowed_access & !LANDLOCK_ACCESS_FS_MASK != 0 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        2 => {
+            // NET_PORT: allowed_access must be subset of NET mask.
+            if allowed_access & !LANDLOCK_ACCESS_NET_MASK != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // port is at offset 8 as u64; must be <= 65535 (u16 range).
+            let port = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[8..16]) {
+                Ok(b) => b,
+                Err(_) => return linux_err(errno::EINVAL),
+            });
+            if port > 65535 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        _ => unreachable!("matches! above limited args.arg1 to 1 or 2"),
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
@@ -33646,12 +33701,82 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock_add_rule NULL not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // landlock_add_rule valid -> EBADF.
-        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: big_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        // landlock_add_rule valid PATH_BENEATH (allowed_access=EXECUTE=0x1,
+        // parent_fd=0) -> EBADF (terminal — ruleset_fd never real).
+        let lpb_attr: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+            b
+        };
+        let lpb_attr_ptr = lpb_attr.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: lpb_attr_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid not EBADF");
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid PATH_BENEATH not EBADF");
             return Err(KernelError::InternalError);
         }
+        // landlock_add_rule PATH_BENEATH with allowed_access=0 -> ENOMSG
+        // (Linux's "empty rule body" path).
+        let lpb_empty: [u8; 16] = [0u8; 16];
+        let lpb_empty_ptr = lpb_empty.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: lpb_empty_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::ENOMSG) {
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule empty PATH_BENEATH not ENOMSG");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_add_rule PATH_BENEATH with allowed_access bit
+        // outside LANDLOCK_ACCESS_FS_MASK (bit 0x10000) -> EINVAL.
+        let lpb_bad_access: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&0x10000u64.to_ne_bytes());
+            b
+        };
+        let lpb_bad_access_ptr = lpb_bad_access.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: lpb_bad_access_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule PATH_BENEATH bad access not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_add_rule valid NET_PORT (allowed_access=BIND_TCP=0x1,
+        // port=8080) -> EBADF.
+        let lnp_attr: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+            b[8..16].copy_from_slice(&8080u64.to_ne_bytes());
+            b
+        };
+        let lnp_attr_ptr = lnp_attr.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: lnp_attr_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid NET_PORT not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_add_rule NET_PORT with allowed_access bit outside
+        // LANDLOCK_ACCESS_NET_MASK (0x4) -> EINVAL.
+        let lnp_bad_access: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&0x4u64.to_ne_bytes());
+            b
+        };
+        let lnp_bad_access_ptr = lnp_bad_access.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: lnp_bad_access_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule NET_PORT bad access not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_add_rule NET_PORT with port > 65535 -> EINVAL.
+        let lnp_bad_port: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+            b[8..16].copy_from_slice(&65536u64.to_ne_bytes());
+            b
+        };
+        let lnp_bad_port_ptr = lnp_bad_port.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: lnp_bad_port_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule NET_PORT port>65535 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   landlock_add_rule attr validation: OK");
         // landlock_restrict_self undefined flag bit (0x8) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {

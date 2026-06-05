@@ -16681,3 +16681,108 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   landlock_restrict_self
 ##      log flags: OK" in build/serial-test.txt.
 
+
+
+## 189. Linux ABI: landlock_add_rule rule_attr validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_landlock_add_rule.
+##
+##      Problem: sys_landlock_add_rule accepted any non-NULL
+##              rule_attr pointer and went straight to the
+##              terminal EBADF on validate_linux_fd(ruleset_fd).
+##              Linux gates rule_attr fields ahead of the ruleset
+##              capability check:
+##                * `flags` (arg3) must be 0 — reserved.
+##                * `rule_type` (arg1) must be PATH_BENEATH (1) or
+##                  NET_PORT (2); other values -> EINVAL.
+##                * `rule_attr` (arg2) must be non-NULL and
+##                  readable for 16 bytes.
+##                * `allowed_access` (first u64) must not be zero —
+##                  Linux returns ENOMSG ("Empty rule body").
+##                * For PATH_BENEATH: allowed_access bits outside
+##                  LANDLOCK_ACCESS_FS_MASK (0xffff) -> EINVAL.
+##                * For NET_PORT: allowed_access bits outside
+##                  LANDLOCK_ACCESS_NET_MASK (0x3) -> EINVAL, and
+##                  port (second u64) > 65535 -> EINVAL.
+##              Probes walking allowed_access bits to find the
+##              kernel's supported FS rights, or trying NET_PORT
+##              with a stray bit, saw uniform EBADF instead of
+##              the proper parse errors and concluded the rule
+##              shape itself was rejected.
+##
+##      Fix:    Added the gating layer in order:
+##                1. flags != 0 -> EINVAL.
+##                2. rule_type not in {1, 2} -> EINVAL.
+##                3. rule_attr == 0 -> EFAULT.
+##                4. validate_user_read(rule_attr, 16) ->
+##                   linux_errno_for on failure.
+##                5. copy_from_user 16 bytes; parse allowed_access
+##                   (u64 LE at offset 0) and port (u64 LE at 8).
+##                6. allowed_access == 0 -> ENOMSG.
+##                7. PATH_BENEATH: allowed_access & ~0xffff != 0
+##                   -> EINVAL.
+##                8. NET_PORT: allowed_access & ~0x3 != 0 -> EINVAL;
+##                   port > 65535 -> EINVAL.
+##                9. Fall through to validate_linux_fd(ruleset_fd)
+##                   and the terminal EBADF.
+##
+##      Self-tests (boot-time):
+##        * landlock_add_rule(fd=0, type=1, attr=NULL, flags=0)
+##          -> EFAULT  (kept; rule_attr NULL is the early
+##          EFAULT after the type gate).
+##        * landlock_add_rule(fd=0, type=99, attr=big_ptr, flags=0)
+##          -> EINVAL  (unknown rule_type; kept).
+##        * landlock_add_rule(fd=0, type=1, attr=NULL, flags=1)
+##          -> EINVAL  (flags != 0 short-circuits before
+##          EFAULT — new ordering).
+##        * landlock_add_rule(fd=0, type=1, attr=lpb_attr, flags=0)
+##          where lpb_attr = {allowed=0x1, parent_fd=0} -> EBADF
+##          (new; valid PATH_BENEATH rule, falls through to
+##          ruleset_fd check).
+##        * landlock_add_rule(fd=0, type=1, attr=lpb_empty, flags=0)
+##          where lpb_empty = {allowed=0, parent_fd=0} -> ENOMSG
+##          (new; Linux's "empty rule body").
+##        * landlock_add_rule(fd=0, type=1, attr=lpb_bad_access,
+##          flags=0) where allowed=0x10000 (bit outside FS mask)
+##          -> EINVAL  (new).
+##        * landlock_add_rule(fd=0, type=2, attr=lnp_attr, flags=0)
+##          where lnp_attr = {allowed=0x1, port=8080} -> EBADF
+##          (new; valid NET_PORT rule).
+##        * landlock_add_rule(fd=0, type=2, attr=lnp_bad_access,
+##          flags=0) where allowed=0x4 (outside NET mask 0x3)
+##          -> EINVAL  (new).
+##        * landlock_add_rule(fd=0, type=2, attr=lnp_bad_port,
+##          flags=0) where allowed=0x1, port=65536 -> EINVAL
+##          (new).
+##        * Emits "[syscall/linux]   landlock_add_rule attr
+##          validation: OK".
+##
+##      Known limitations:
+##        * `ruleset_fd` is not validated against
+##          HandleKind::Landlock — we have no real Landlock
+##          object, and validate_linux_fd's kernel-context EBADF
+##          is the terminal regardless.  When real Landlock lands,
+##          the type check needs to follow:
+##          add_rule on a non-Landlock fd should be EBADFD, not
+##          EBADF.
+##        * The FS / NET access mask is global (0xffff and 0x3),
+##          not per-ruleset.  Linux checks that the rule's
+##          allowed_access is a *subset* of the ruleset's
+##          declared handled_access.  Since we don't carry a real
+##          ruleset, the global-mask check is the strictest gate
+##          we can apply; it correctly rejects truly-undefined
+##          bits but accepts bits that a specific ruleset would
+##          have excluded from its handled set.  Real Landlock
+##          must compare against the bound ruleset's
+##          handled_access_fs / handled_access_net.
+##        * Linux 6.7 added `parent_fd` semantics for PATH_BENEATH
+##          (open dirfd whose subtree the rule covers); we don't
+##          validate parent_fd at all because the terminal EBADF
+##          on ruleset_fd preempts that check.  When real
+##          Landlock lands, parent_fd needs O_PATH-dirfd
+##          validation between the access-mask check and the
+##          ruleset-fd check.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   landlock_add_rule
+##      attr validation: OK" in build/serial-test.txt.

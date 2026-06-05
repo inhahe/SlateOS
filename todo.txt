@@ -20337,5 +20337,47 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 260. [DONE 2026-06-05] Linux ABI: sys_sched_setattr forward-compat trailing-
+##      zero E2BIG check — extends the pattern from batches
+##      227/228/229/230 to kernel/sched/syscalls.c.
+##
+##      Linux's sched_copy_attr (called from
+##      SYSCALL_DEFINE3(sched_setattr)) calls copy_struct_from_user with
+##      ksize = sizeof(struct sched_attr).  When usize > ksize, the
+##      wrapper walks bytes [ksize, usize) and returns -E2BIG on the
+##      first non-zero byte so probes can detect what kernel features
+##      are available (e.g. sched_util_min/max appeared in 5.14).
+##
+##      Pre-batch divergence:
+##      - (uattr=64-byte buffer with byte[48]=1, size=64) returned
+##        0 (success — policy SCHED_OTHER + priority 0 accepted)
+##        where Linux returns -E2BIG.  Same shape as the openat2/
+##        clone3/mount_setattr/landlock_create_ruleset limitations
+##        closed in batches 227-230.
+##
+##      Fix: after the existing validate_user_read(attr_ptr, size),
+##      when `size > SCHED_ATTR_KSIZE (48)` walk the trailing
+##      `size - 48` bytes in 64-byte chunks via copy_from_user and
+##      return E2BIG on the first non-zero byte.  Insertion point is
+##      right after the readable-range check, before the v0 copy and
+##      policy/priority parsing — matches Linux's sched_copy_attr
+##      order.  Kernel-known size = 48 (matches the v0 fields we
+##      actually parse: size/policy/flags/nice/priority/runtime/
+##      deadline/period).
+##
+##      Self-tests added (after the OTHER/5-EINVAL test):
+##      - sched_setattr size=64, zero pad -> 0 (passes zero-check,
+##                                              SCHED_OTHER + prio 0
+##                                              accepted).
+##      - sched_setattr size=64, byte[48]=1 -> E2BIG (was 0).
+##      Marker: "sched_setattr forward-compat trailing-zero E2BIG: OK".
+##
+##      Known limitations: trailing bytes are read in 64-byte chunks
+##      via copy_from_user.  Worst case (size = 1 MiB) is ~16384
+##      STAC/CLAC pairs.  Same shape as openat2/clone3/mount_setattr/
+##      landlock_create_ruleset — see entries 256/257/258/259.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

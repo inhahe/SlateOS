@@ -15810,6 +15810,40 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(attr_ptr, size as usize) {
         return linux_err(linux_errno_for(e));
     }
+    // Forward-compat trailing-zero check (Linux's sched_copy_attr in
+    // kernel/sched/syscalls.c).  When `size > sizeof(*attr)`, walk the
+    // unknown trailing bytes and return -E2BIG on the first non-zero
+    // byte so probes can detect what the kernel knows.  Our kernel-
+    // known size matches the v0 fields we actually parse below
+    // (sched_attr v0 = 48 bytes).  Without this, a userspace probe
+    // passing size=64 with non-zero garbage at byte 48 would silently
+    // succeed where Linux returns -E2BIG.
+    const SCHED_ATTR_KSIZE: u64 = 48;
+    if u64::from(size) > SCHED_ATTR_KSIZE {
+        let excess_addr = attr_ptr.wrapping_add(SCHED_ATTR_KSIZE);
+        let excess_len = (u64::from(size) - SCHED_ATTR_KSIZE) as usize;
+        let mut chunk = [0u8; 64];
+        let mut off: usize = 0;
+        while off < excess_len {
+            let take = core::cmp::min(64, excess_len - off);
+            // SAFETY: validate_user_read above covers the full
+            // [attr_ptr, attr_ptr+size) range; the excess sub-range is
+            // contained within it.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_from_user(
+                    excess_addr.wrapping_add(off as u64),
+                    chunk.as_mut_ptr(),
+                    take,
+                )
+            } {
+                return linux_err(linux_errno_for(e));
+            }
+            if chunk[..take].iter().any(|&b| b != 0) {
+                return linux_err(errno::E2BIG);
+            }
+            off += take;
+        }
+    }
 
     // Read the v0 fields we care about.  Sizes are little-endian on
     // x86_64 — the platform Linux ABI we target.
@@ -37562,6 +37596,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: sched_setattr OTHER/5 not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 231 forward-compat trailing-zero E2BIG check.  Linux's
+        // sched_copy_attr (kernel/sched/syscalls.c) walks bytes
+        // [sizeof(*attr), size) and returns -E2BIG on the first non-
+        // zero byte so probes can detect what the kernel knows.  Our
+        // kernel-known size = 48 (the v0 fields we parse).
+        //
+        // Case A: size=64 with zero tail -> 0 (passes zero-check,
+        // SCHED_OTHER policy + zero priority accepted).
+        let mut sched_pad_zero = [0u8; 64];
+        sched_pad_zero[0..4].copy_from_slice(&64u32.to_le_bytes()); // size = 64
+        // sched_policy @ 4..8 = 0 (SCHED_OTHER), priority @ 20..24 = 0.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sched_pad_zero.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr (size=64, zero-pad) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case B: size=64 with non-zero byte at offset 48 -> E2BIG.
+        let mut sched_pad_nonzero = [0u8; 64];
+        sched_pad_nonzero[0..4].copy_from_slice(&64u32.to_le_bytes());
+        sched_pad_nonzero[48] = 1;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sched_pad_nonzero.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr (size=64, nonzero-pad) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setattr forward-compat trailing-zero E2BIG: OK"
+        );
         // sched_getattr size < 48 -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 32, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::EINVAL) {

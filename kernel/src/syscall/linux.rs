@@ -10464,8 +10464,26 @@ fn sys_pkey_mprotect(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EINVAL)
 }
 
-/// `get_robust_list(pid, head_ptr*, len_ptr*)`.
+/// `get_robust_list(pid, head_ptr*, len_ptr*)` — read back the
+/// robust-list registration for `pid` (a TID; 0 means self).
+///
+/// On success writes the recorded head pointer to `*head_ptr` and the
+/// recorded length to `*len_ptr`, returning 0.  An unregistered task
+/// reports `head == NULL` and `len == sizeof(struct robust_list_head)`,
+/// which is what Linux returns for a task that never called
+/// `set_robust_list(2)`.
+///
+/// Inspecting another task requires `PTRACE_MODE_READ_REALCREDS` on
+/// Linux (waivable by `CAP_SYS_PTRACE`).  We have neither the ptrace
+/// infrastructure nor a way to grant that capability yet, so we accept
+/// `pid == 0` and `pid == gettid()` only and refuse everything else
+/// with EPERM.  This matches the conservative behaviour a glibc
+/// runtime sees on a system without ptrace: it asks only about its
+/// own threads, so the syscall succeeds.
 fn sys_get_robust_list(args: &SyscallArgs) -> SyscallResult {
+    // sizeof(struct robust_list_head) on x86_64.
+    const ROBUST_LIST_HEAD_SIZE: u64 = 24;
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid = args.arg0 as i32;
     if pid < 0 {
@@ -10482,13 +10500,47 @@ fn sys_get_robust_list(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 8) {
         return linux_err(linux_errno_for(e));
     }
-    // No robust list registered for any pid in this kernel.  Without
-    // a user-context write path we can't zero the outputs, but the
-    // documented contract permits the kernel to leave them untouched
-    // and return ENOSYS when the feature isn't available; glibc's
-    // pthread_atfork handler treats that as "no robust list" and
-    // skips cleanup, which is correct for us.
-    linux_err(errno::ENOSYS)
+
+    let current_tid = crate::sched::current_task_id();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let current_tid_i32 = current_tid as i32;
+    let target_task = if pid == 0 || pid == current_tid_i32 {
+        current_tid
+    } else {
+        // No ptrace cap: refuse cross-task inspection.
+        return linux_err(errno::EPERM);
+    };
+
+    let (head, len) = crate::proc::thread_clone::lookup_robust_list(target_task)
+        .unwrap_or((0, ROBUST_LIST_HEAD_SIZE));
+
+    // Write head pointer.
+    // SAFETY: validate_user_write above confirmed the destination is
+    // an 8-byte writable user range; copy_to_user re-validates and
+    // performs the SMAP-bracketed store.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(
+            (&raw const head).cast::<u8>(),
+            args.arg1,
+            core::mem::size_of::<u64>(),
+        )
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    // Write len.
+    // SAFETY: as above.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(
+            (&raw const len).cast::<u8>(),
+            args.arg2,
+            core::mem::size_of::<u64>(),
+        )
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 /// `set_mempolicy_home_node(start, len, home_node, flags)`.
@@ -13150,8 +13202,29 @@ fn sys_set_tid_address(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(task_id as i64)
 }
 
-/// `set_robust_list(head, len)` — robust-mutex cleanup.  Stubbed.
-fn sys_set_robust_list(_args: &SyscallArgs) -> SyscallResult {
+/// `set_robust_list(head, len)` — register the calling thread's
+/// robust-mutex list head.
+///
+/// Linux requires `len == sizeof(struct robust_list_head)` (24 bytes
+/// on x86_64); any other length is rejected with EINVAL.  `head` is
+/// stored verbatim — including NULL, which unregisters any prior
+/// entry — and is **not** dereferenced here.  The userspace robust-
+/// mutex protocol places the responsibility for keeping the list
+/// well-formed on glibc / the libpthread runtime.
+///
+/// Limitation: we do not walk the list on thread exit to wake its
+/// futexes (`PTHREAD_MUTEX_ROBUST_NP` semantics).  See todo.txt for
+/// the deferred robust-mutex cleanup work; the registration itself is
+/// still useful so that `get_robust_list(2)` returns the recorded
+/// pointer (glibc reads it back during ABI compatibility checks).
+fn sys_set_robust_list(args: &SyscallArgs) -> SyscallResult {
+    // sizeof(struct robust_list_head) on x86_64.
+    const ROBUST_LIST_HEAD_SIZE: u64 = 24;
+    if args.arg1 != ROBUST_LIST_HEAD_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+    let task_id = crate::sched::current_task_id();
+    crate::proc::thread_clone::register_robust_list(task_id, args.arg0, args.arg1);
     SyscallResult::ok(0)
 }
 
@@ -19801,10 +19874,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: get_robust_list NULL head not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // get_robust_list valid -> ENOSYS.
+        // Batch 59: get_robust_list for self (pid=0) now succeeds and
+        // reports head=NULL / len=24 when nothing was registered.
         let a = SyscallArgs { arg0: 0, arg1: head_ptr, arg2: len_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: get_robust_list valid not ENOSYS");
+        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_robust_list valid not 0 ({})",
+                dispatch_linux(nr::GET_ROBUST_LIST, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // set_robust_list bad length -> EINVAL.
+        let a = SyscallArgs { arg0: head_ptr, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_ROBUST_LIST, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_robust_list bad len not EINVAL ({})",
+                dispatch_linux(nr::SET_ROBUST_LIST, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 59: set_robust_list valid length -> 0, and a subsequent
+        // get_robust_list reports back the same head pointer + len.
+        let a = SyscallArgs { arg0: head_ptr, arg1: 24, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_ROBUST_LIST, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_robust_list valid not 0 ({})",
+                dispatch_linux(nr::SET_ROBUST_LIST, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // After registration, lookup_robust_list reports it via the
+        // storage layer.  We confirm the storage round-trip directly
+        // because the syscall write back to head_ptr would overwrite
+        // our own kernel-stack scratch buffer.
+        {
+            let tid = crate::sched::current_task_id();
+            let recorded = crate::proc::thread_clone::lookup_robust_list(tid);
+            assert_eq!(recorded, Some((head_ptr, 24)),
+                "robust_list registration not stored");
+            // Re-registering with NULL clears the entry.
+            let a = SyscallArgs { arg0: 0, arg1: 24, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SET_ROBUST_LIST, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: set_robust_list(NULL) not 0");
+                return Err(KernelError::InternalError);
+            }
+            assert_eq!(
+                crate::proc::thread_clone::lookup_robust_list(tid),
+                None,
+                "robust_list NULL registration did not clear entry"
+            );
+        }
+        // Cross-task inspection (pid != 0 and != self) -> EPERM.
+        // u32::MAX as i32 is negative, so use a clearly-non-self positive
+        // TID instead (i32::MAX is far from any real task id we spawn).
+        let a = SyscallArgs { arg0: u64::from(i32::MAX as u32), arg1: head_ptr, arg2: len_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_robust_list cross-task not EPERM ({})",
+                dispatch_linux(nr::GET_ROBUST_LIST, &a).value
+            );
             return Err(KernelError::InternalError);
         }
 

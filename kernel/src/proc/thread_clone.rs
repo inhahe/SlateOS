@@ -138,6 +138,50 @@ pub fn lookup_clear_child_tid(task_id: TaskId) -> Option<u64> {
     CLEAR_CHILD_TID.lock().get(&task_id).copied()
 }
 
+// ---------------------------------------------------------------------------
+// Robust futex list registration (set_robust_list / get_robust_list)
+// ---------------------------------------------------------------------------
+
+/// Map from task → (`head` userspace pointer, `len` in bytes) recorded
+/// by `set_robust_list(2)`.  `head` is a `struct robust_list_head*` in
+/// the calling task's address space; `len` is required by Linux to equal
+/// `sizeof(struct robust_list_head)` (24 bytes on x86_64) — we store
+/// whatever the caller supplied after validating the length so
+/// `get_robust_list(2)` can return it verbatim.
+///
+/// Entries are removed in [`on_thread_exit_hook`] so the table does not
+/// grow without bound across the lifetime of the system.
+///
+/// What we deliberately do NOT do here: walk the robust list on thread
+/// exit and wake the recorded futexes.  glibc's robust-mutex protocol
+/// expects the kernel to run that walk when the owner dies abruptly,
+/// and we do not yet implement it.  This is recorded in todo.txt; the
+/// limitation only matters once we ship pthread mutex types that opt
+/// into `PTHREAD_MUTEX_ROBUST_NP`, which we do not.
+static ROBUST_LIST: Mutex<BTreeMap<TaskId, (u64, u64)>> = Mutex::new(BTreeMap::new());
+
+/// Register `head` and `len` as the task's robust-list head pointer.
+/// `head == 0` is a legal request — it unregisters any prior entry
+/// (matches Linux, where storing NULL means "no robust list").
+pub fn register_robust_list(task_id: TaskId, head: u64, len: u64) {
+    if head == 0 {
+        ROBUST_LIST.lock().remove(&task_id);
+    } else {
+        ROBUST_LIST.lock().insert(task_id, (head, len));
+    }
+}
+
+/// Look up the robust-list registration for `task_id`.  Returns
+/// `(head, len)` if one is registered, `None` otherwise.
+///
+/// The caller of `get_robust_list(2)` always wants *something* back
+/// (Linux returns NULL/`sizeof(robust_list_head)` for an unregistered
+/// task), so the syscall layer fills in the default — this getter
+/// reports the raw state.
+pub fn lookup_robust_list(task_id: TaskId) -> Option<(u64, u64)> {
+    ROBUST_LIST.lock().get(&task_id).copied()
+}
+
 /// Called from [`super::thread::on_thread_exit`] BEFORE the thread is
 /// detached from its process — at this point CR3 still points at the
 /// dying thread's address space, so `copy_to_user` against the
@@ -149,6 +193,14 @@ pub fn lookup_clear_child_tid(task_id: TaskId) -> Option<u64> {
 ///   2. Wakes one waiter on the futex at `ctid` so a `pthread_join`
 ///      caller spinning on it observes the zero and proceeds.
 pub fn on_thread_exit_hook(task_id: TaskId) {
+    // Drop any robust-list registration so the table does not grow
+    // across thread lifetimes.  We do NOT walk the list and wake its
+    // futexes here — that is documented as a known gap (see todo.txt
+    // entry for batch 59).  Removal happens unconditionally, before
+    // the CLEAR_CHILD_TID handling, because robust-list cleanup is
+    // independent of CLONE_CHILD_CLEARTID.
+    ROBUST_LIST.lock().remove(&task_id);
+
     let ctid_ptr = match CLEAR_CHILD_TID.lock().remove(&task_id) {
         Some(p) => p,
         None => return,

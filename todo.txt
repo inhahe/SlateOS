@@ -8995,5 +8995,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        - If the JFI assertion is the issue, widen
 ##          the tolerance window from ~500..520 to
 ##          ~480..540 or similar.
+##
+##   86. set_robust_list / get_robust_list backed by
+##      per-task storage (batch 59).
+##      Status: registration + read-back are real.
+##              On-exit robust-mutex walk is NOT
+##              implemented and is documented below.
+##
+##      Before batch 59:
+##        - sys_set_robust_list ignored the head pointer
+##          entirely and returned 0 (head was never
+##          recorded), so any later get_robust_list
+##          would not have been able to honour glibc's
+##          ABI-compat check even in principle.
+##        - sys_get_robust_list validated its user
+##          pointers and then returned ENOSYS, which
+##          glibc treats as "no robust list" — fine for
+##          a workload that doesn't use robust mutexes,
+##          but it precludes ever shipping them.
+##
+##      What was done:
+##        - thread_clone now owns a ROBUST_LIST map keyed
+##          by TaskId, with register_robust_list /
+##          lookup_robust_list helpers symmetric with the
+##          existing CLEAR_CHILD_TID map.
+##        - sys_set_robust_list rejects len != 24 with
+##          EINVAL (sizeof(struct robust_list_head) on
+##          x86_64) and otherwise stores (head, len) for
+##          the calling task.  head == 0 unregisters.
+##        - sys_get_robust_list now: writes head (or NULL
+##          if unregistered) to *head_ptr and len (or 24)
+##          to *len_ptr, then returns 0; refuses cross-
+##          task inspection with EPERM (no ptrace
+##          capability).  pid == 0 and pid == gettid()
+##          both resolve to the current task.
+##        - on_thread_exit_hook drops the robust-list
+##          entry unconditionally so the table does not
+##          grow across thread lifetimes.
+##        - Self-tests exercise: bad pid -> EINVAL,
+##          NULL head_ptr -> EFAULT, set_robust_list
+##          bad len -> EINVAL, valid set+lookup round
+##          trip via the storage layer, NULL re-register
+##          clears the entry, cross-task get -> EPERM.
+##
+##      Known limitations:
+##        - We do NOT walk the robust list on thread
+##          exit and wake its futexes.  That is the
+##          PTHREAD_MUTEX_ROBUST_NP cleanup protocol; a
+##          program that opts into robust mutexes today
+##          will see those mutexes stay locked when an
+##          owning thread dies abruptly.  Fix requires
+##          (a) a user-pointer-readable context at the
+##          point of on_thread_exit_hook and (b) the
+##          actual list walk + futex_wake loop, neither
+##          of which is hard but both of which need
+##          their own self-test for the walk's bounded-
+##          iteration guard.  We have no current
+##          consumer of robust mutexes, so it stays
+##          here as a documented gap.
+##        - EPERM for cross-task get_robust_list is
+##          strictly stricter than Linux (Linux allows
+##          it with PTRACE_MODE_READ_REALCREDS or
+##          CAP_SYS_PTRACE).  Until we have a ptrace
+##          cap and a way for trusted debuggers to
+##          present it, refusing is the safe answer —
+##          but if a system monitor turns up that needs
+##          to inspect other tasks, this gate is the
+##          place to relax.
+##        - ESRCH-vs-EPERM ordering: Linux distinguishes
+##          "task does not exist" (ESRCH) from "task
+##          exists but we can't see it" (EPERM).  We
+##          collapse both into EPERM today.  A future
+##          refinement could check pcb / task tables and
+##          return ESRCH for truly-missing TIDs, which
+##          would let strace surface a more accurate
+##          message.
 
 

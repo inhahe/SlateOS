@@ -15585,5 +15585,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 ##      Serial confirms "[syscall/linux]   mseal addr/len validation:
-##      OK" at line 443 of build/serial-test.txt.
+##      OK" at line 444 of build/serial-test.txt.
+
+## 175. Linux ABI: userfaultfd(2) CAP_SYS_PTRACE privilege gate
+##      (Batch 146, 2026-06-05)
+##
+##      Issue:  sys_userfaultfd validated only the flags mask and
+##              returned ENOSYS for any otherwise-valid call shape.
+##              Linux's fs/userfaultfd.c::SYSCALL_DEFINE1(userfaultfd)
+##              has a privilege gate that depends on the flags:
+##                * UFFD_USER_MODE_ONLY (bit 0) NOT set -> caller must
+##                  hold CAP_SYS_PTRACE; unprivileged callers see
+##                  -EPERM before the open-file allocation.
+##                * UFFD_USER_MODE_ONLY set -> privilege check skipped;
+##                  the caller is asking for the user-mode-only
+##                  restricted variant.
+##              Returning ENOSYS for userfaultfd(0) made every
+##              userfaultfd-detection probe (CRIU, postcopy migration
+##              tooling, the kernel test suite) believe userfaultfd
+##              is unavailable on this system, when in Linux the
+##              probe would see EPERM and immediately try
+##              UFFD_USER_MODE_ONLY as a fallback.
+##
+##      Fix:    Added the privilege gate after the flag-mask check:
+##                let flags = args.arg0;
+##                if flags & !VALID_FLAGS != 0 { return EINVAL; }
+##                if flags & UFFD_USER_MODE_ONLY == 0 {
+##                    return EPERM;  // CAP_SYS_PTRACE unavailable
+##                }
+##                ENOSYS
+##              No caller in this kernel can hold CAP_SYS_PTRACE
+##              today (we have no ptrace capability nor a way to
+##              grant it), so every caller is unprivileged in Linux's
+##              model and EPERM is the truthful answer.
+##
+##      Self-tests (boot-time):
+##        * userfaultfd(0x8000_0000) -> EINVAL (unchanged).
+##        * userfaultfd(0) -> EPERM (was ENOSYS; new).
+##        * userfaultfd(UFFD_USER_MODE_ONLY) -> ENOSYS (was effectively
+##          unreachable before since flags=0 used to pass; now this is
+##          the only flag-valid shape that reaches the stub).
+##        * userfaultfd(UFFD_USER_MODE_ONLY | O_CLOEXEC) -> ENOSYS.
+##        * Emits "[syscall/linux]   userfaultfd privilege gate: OK".
+##
+##      Known limitations:
+##        * The userfaultfd implementation itself remains absent —
+##          UFFDIO_API, UFFDIO_REGISTER, the read() loop returning
+##          struct uffd_msg, and the page-fault handler interposition
+##          are all unimplemented.  Until those land, the
+##          UFFD_USER_MODE_ONLY shape stays ENOSYS.
+##        * Once we have a real CAP_SYS_PTRACE capability, this gate
+##          will switch from "always EPERM if !USER_MODE_ONLY" to
+##          "check the cap and proceed".  The flag mask itself is
+##          already complete (UFFD_USER_MODE_ONLY | O_CLOEXEC |
+##          O_NONBLOCK).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 25s).
+##      Serial confirms "[syscall/linux]   userfaultfd privilege gate:
+##      OK" at line 439 of build/serial-test.txt.
 

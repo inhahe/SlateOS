@@ -11010,11 +11010,38 @@ fn sys_request_key(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `userfaultfd(flags)`.
+///
+/// Linux's `fs/userfaultfd.c::SYSCALL_DEFINE1(userfaultfd)` enforces an
+/// extra privilege gate that depends on the flags:
+///
+///   * If `UFFD_USER_MODE_ONLY` (bit 0) is **not** set, the caller
+///     must hold `CAP_SYS_PTRACE` — i.e. it is asking for the
+///     traditional kernel-fault handler that can observe page faults
+///     from kernel-mode accesses to userspace addresses.  Unprivileged
+///     callers see `-EPERM` ahead of any further check.
+///   * If `UFFD_USER_MODE_ONLY` is set, the caller wants the
+///     user-mode-only restricted variant and the privilege check is
+///     skipped.
+///
+/// We have no way to grant `CAP_SYS_PTRACE` from userspace yet, so
+/// every caller is effectively unprivileged in Linux's model.  Reflect
+/// that order here: invalid-flag callers see EINVAL, then unprivileged
+/// kernel-fault-mode callers see EPERM, then the privileged shape (or
+/// the restricted-mode shape) falls through to ENOSYS because we do
+/// not have a real userfaultfd implementation.
 fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
+    const UFFD_USER_MODE_ONLY: u64 = 1;
     // UFFD_USER_MODE_ONLY = 1, plus O_CLOEXEC | O_NONBLOCK.
-    const VALID_FLAGS: u64 = 1 | 0o4000 | 0o2_000_000;
-    if args.arg0 & !VALID_FLAGS != 0 {
+    const VALID_FLAGS: u64 = UFFD_USER_MODE_ONLY | 0o4000 | 0o2_000_000;
+    let flags = args.arg0;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
+    }
+    // Kernel-fault mode requires CAP_SYS_PTRACE, which no caller can
+    // currently hold — Linux returns EPERM in that case before the
+    // open-file allocation.
+    if flags & UFFD_USER_MODE_ONLY == 0 {
+        return linux_err(errno::EPERM);
     }
     linux_err(errno::ENOSYS)
 }
@@ -30645,14 +30672,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: userfaultfd(bad flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // userfaultfd(0) -> ENOSYS.
+        // userfaultfd(0) -> EPERM.  Linux requires CAP_SYS_PTRACE when
+        // UFFD_USER_MODE_ONLY is not set, and we have no way to grant
+        // that capability — every caller is unprivileged in Linux's
+        // model.  See todo 175.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::USERFAULTFD, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: userfaultfd not ENOSYS");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: userfaultfd(0) not EPERM");
             return Err(KernelError::InternalError);
         }
+        // userfaultfd(UFFD_USER_MODE_ONLY) -> ENOSYS (passes the
+        // privilege gate; no userfaultfd impl yet).
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USERFAULTFD, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: userfaultfd(USER_MODE_ONLY) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // userfaultfd(USER_MODE_ONLY | O_CLOEXEC) -> ENOSYS (valid
+        // combined flags still pass the gate).
+        let a = SyscallArgs { arg0: 1 | 0o2_000_000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USERFAULTFD, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: userfaultfd(USER_MODE_ONLY|CLOEXEC) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   userfaultfd privilege gate: OK");
 
         // memfd_create(NULL,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

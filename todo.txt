@@ -12223,3 +12223,60 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      (get_mempolicy), 131 (set_mempolicy).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 27s).
+##
+##  133. Linux ABI: sys_migrate_pages upgraded from -ENOSYS stub
+##      to UMA-aware no-op (batch 104).
+##
+##      migrate_pages(pid, maxnode, old_nodes, new_nodes) migrates
+##      every page of `pid` from any node in `old_nodes` to any
+##      node in `new_nodes`.  Returns the number of pages that
+##      could NOT be migrated (>= 0), or -errno on failure.
+##
+##      numactl(8) and libnuma's numa_migrate_pages call this
+##      whenever a task's allowed-nodes mask changes (cpuset
+##      reassignment, cgroup migration); they expect 0 from a
+##      UMA kernel.  Pre-batch this returned -ENOSYS after
+##      pointer validation, which broke numactl on UMA setups.
+##
+##      The arm now mirrors Linux's do_migrate_pages for the
+##      single-node case:
+##        * pid < 0 -> -EINVAL.
+##        * maxnode == 0 -> -EINVAL (empty target set).
+##        * maxnode > (1 << 23) -> -EINVAL.
+##        * NULL mask pointer with maxnode > 0 -> -EFAULT.
+##        * Both masks are copy_from_user'd into heap Vec<u8>.
+##        * new_nodes ∩ {0}: if bit 0 cleared -> -EINVAL
+##          (target intersects mems_allowed to empty).
+##        * old_nodes bit 0 set OR cleared: irrelevant on UMA
+##          (every page lives on node 0; either the source
+##          includes it or it doesn't, no page actually moves).
+##        * Return 0 (zero unmoved pages).
+##
+##      Extra bits > 0 in either mask are silently ignored, which
+##      matches Linux's "intersect with mems_allowed before
+##      computing the migration plan" approach.
+##
+##      Boot self-test "(9h) Batch 104" covers six cases:
+##        1. migrate_pages({0}, {0})          -> 0
+##        2. migrate_pages({0}, empty)        -> -EINVAL
+##        3. migrate_pages({0}, {1})          -> -EINVAL
+##        4. migrate_pages(empty, {0})        -> 0
+##        5. migrate_pages(NULL, {0}, 64)     -> -EFAULT
+##        6. migrate_pages(maxnode = 1<<24)   -> -EINVAL
+##
+##      Also updated the pre-existing legacy test: was
+##      "migrate_pages(pid=1, maxnode=0) -> -ENOSYS"; now
+##      "migrate_pages(pid=1, maxnode=0) -> -EINVAL" because the
+##      empty-target rejection happens before the old ENOSYS
+##      site.
+##
+##      Known limitation: we don't iterate the target process's
+##      VMAs or count actually-resident pages — we just claim
+##      "zero pages unmoved".  On UMA this is correct (no page
+##      can move between nodes when there's only one node).  If
+##      multi-node support is ever added, this arm becomes the
+##      place to walk the target's VMA list, count pages by
+##      node, and report the unmovable subset.  Cross-reference
+##      entries 130, 131, 132.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 25s).

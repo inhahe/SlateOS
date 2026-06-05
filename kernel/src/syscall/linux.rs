@@ -11663,8 +11663,31 @@ fn sys_get_mempolicy(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `migrate_pages(pid, maxnode, old_nodes*, new_nodes*)` — migrate all
-/// pages of a process to a new set of nodes.
+/// `migrate_pages(pid, maxnode, old_nodes*, new_nodes*)` — migrate every
+/// page of a process that currently lives on a node in `old_nodes` to
+/// a node in `new_nodes`.  Returns the number of pages that could not
+/// be migrated, or -errno on failure.
+///
+/// Pre-batch this returned -ENOSYS after pointer validation, leaving an
+/// asymmetry with the set/get/mbind family that now accepts UMA cases.
+/// numactl(8), libnuma's `numa_migrate_pages`, and the cpuset / cgroup
+/// migration code path call migrate_pages whenever a task's memory
+/// node mask changes, and expect 0 from a UMA kernel.
+///
+/// Linux's `do_migrate_pages` semantics for a single-node system:
+///   * If new_nodes ∩ mems_allowed is empty -> -EINVAL.
+///   * If old_nodes ∩ mems_allowed is empty -> 0 (nothing to migrate).
+///   * Otherwise migrate every page on `old_nodes ∩ mems_allowed` to
+///     `new_nodes ∩ mems_allowed`.  Return count of pages that could
+///     not be moved.
+///
+/// On UMA with mems_allowed == {0}:
+///   * new_nodes must contain bit 0 (or be empty — Linux treats an
+///     empty target as -EINVAL because no target is valid; we follow).
+///   * old_nodes ∩ {0}: if old_nodes has bit 0 set, the source includes
+///     node 0; otherwise the source is the empty set and nothing is
+///     migrated.  Either way no pages actually move (every page is
+///     already on node 0).  Return 0.
 fn sys_migrate_pages(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid = args.arg0 as i32;
@@ -11675,19 +11698,63 @@ fn sys_migrate_pages(args: &SyscallArgs) -> SyscallResult {
     if maxnode > (1 << 23) {
         return linux_err(errno::EINVAL);
     }
-    if maxnode > 0 {
-        let bytes = ((maxnode + 7) / 8) as usize;
-        if args.arg2 == 0 || args.arg3 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, bytes) {
-            return linux_err(linux_errno_for(e));
-        }
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, bytes) {
-            return linux_err(linux_errno_for(e));
-        }
+    if maxnode == 0 {
+        // No mask supplied: target is the empty set, which Linux
+        // rejects as "no valid target node".
+        return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+    let bytes = ((maxnode + 7) / 8) as usize;
+    if args.arg2 == 0 || args.arg3 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, bytes) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg3, bytes) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Read both masks into heap Vec<u8>; cap by the existing
+    // maxnode > (1 << 23) check above.
+    let mut old_mask = alloc::vec![0u8; bytes];
+    let mut new_mask = alloc::vec![0u8; bytes];
+    // SAFETY: validate_user_read above confirmed both buffers are
+    // readable; copy_from_user does the SMAP-safe transfer.
+    let r1 = unsafe {
+        crate::mm::user::copy_from_user(
+            args.arg2,
+            old_mask.as_mut_ptr(),
+            bytes,
+        )
+    };
+    if let Err(e) = r1 {
+        return linux_err(linux_errno_for(e));
+    }
+    // SAFETY: as above for the second buffer.
+    let r2 = unsafe {
+        crate::mm::user::copy_from_user(
+            args.arg3,
+            new_mask.as_mut_ptr(),
+            bytes,
+        )
+    };
+    if let Err(e) = r2 {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // new_nodes ∩ {0}: bit 0 must be set (or the target is empty).
+    let new_has_node0 = (new_mask[0] & 1) != 0;
+    if !new_has_node0 {
+        return linux_err(errno::EINVAL);
+    }
+    // We intentionally ignore extra bits in new_mask (Linux ignores
+    // bits outside mems_allowed for the intersection computation).
+    // Same for old_mask — bits > 0 are irrelevant on UMA.
+    // Suppress unused-variable warnings for the read buffer.
+    let _ = old_mask;
+
+    // Nothing actually moves: every page is already on node 0.
+    SyscallResult::ok(0)
 }
 
 /// `move_pages(pid, count, pages*, nodes*, status*, flags)`.
@@ -17302,6 +17369,111 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if r.value != -i64::from(errno::EFAULT) {
             serial_println!(
                 "[syscall/linux]   FAIL: mbind(BIND,NULL,64) -> {} (expected -EFAULT)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (9h) Batch 104: migrate_pages upgraded from -ENOSYS stub to
+    // UMA-aware no-op.  Every page is already on node 0 so the
+    // migration is trivially a success that moves zero pages.
+    {
+        // Case 1: both masks contain node 0 -> 0 (zero unmoved).
+        let mask: u64 = 0x1;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 64,
+            arg2: (&raw const mask).addr() as u64,
+            arg3: (&raw const mask).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: migrate_pages({{0}},{{0}}) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 2: target mask empty -> -EINVAL.
+        let empty: u64 = 0x0;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 64,
+            arg2: (&raw const mask).addr() as u64,
+            arg3: (&raw const empty).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: migrate_pages({{0}},empty) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 3: target mask = {bit 1} (no node 0) -> -EINVAL.
+        let bad: u64 = 0x2;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 64,
+            arg2: (&raw const mask).addr() as u64,
+            arg3: (&raw const bad).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: migrate_pages({{0}},{{1}}) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 4: source mask empty, target = {0} -> 0 (nothing
+        // to move on UMA either way).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 64,
+            arg2: (&raw const empty).addr() as u64,
+            arg3: (&raw const mask).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: migrate_pages(empty,{{0}}) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 5: maxnode > 0 but old_nodes NULL -> -EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 64,
+            arg2: 0,
+            arg3: (&raw const mask).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+        if r.value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: migrate_pages(NULL,{{0}}) -> {} (expected -EFAULT)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 6: maxnode too large -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: (1 << 24),
+            arg2: (&raw const mask).addr() as u64,
+            arg3: (&raw const mask).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: migrate_pages(huge maxnode) -> {} (expected -EINVAL)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -26684,10 +26856,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: migrate_pages neg pid not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // migrate_pages valid -> ENOSYS.
+        // migrate_pages(pid=1, maxnode=0, NULL, NULL) -> -EINVAL
+        // (batch 104 upgrade: maxnode==0 is now rejected as an
+        // empty-target-set error; pre-batch returned -ENOSYS).
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MIGRATE_PAGES, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: migrate_pages valid not ENOSYS");
+        if dispatch_linux(nr::MIGRATE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: migrate_pages maxnode=0 not EINVAL");
             return Err(KernelError::InternalError);
         }
         // move_pages bad flags -> EINVAL.

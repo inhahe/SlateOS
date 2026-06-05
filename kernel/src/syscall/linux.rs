@@ -17342,29 +17342,63 @@ fn sys_listmount(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `lsm_get_self_attr(attr, ctx*, size*, flags)`.
+///
+/// Linux's `security/lsm_syscalls.c::lsm_getselfattr` gates (in
+/// order, ahead of the per-LSM dispatch):
+///   if (attr == LSM_ATTR_UNDEF) return -EINVAL;
+///   if (size == NULL) return -EINVAL;
+///   if (get_user(left, size)) return -EFAULT;
+///   if (flags) {
+///       if (flags != LSM_FLAG_SINGLE) return -EINVAL;
+///       if (uctx == NULL) return -EINVAL;
+///       ...
+///   }
+///
+/// LSM_ATTR_UNDEF is 0 and LSM_FLAG_SINGLE is 1.  Crucially, Linux
+/// does *not* range-check `attr` against the known LSM_ATTR_*
+/// constants — it walks the security hook list and returns the
+/// default (EOPNOTSUPP) when no LSM provides the attr.  Our
+/// pre-batch stub rejected attr outside [100, 105] with EINVAL,
+/// which masked the EOPNOTSUPP signal a probe expects for "valid
+/// attr index, no LSM module loaded."  We also returned EFAULT
+/// for NULL `size` where Linux returns EINVAL, and did not check
+/// the SINGLE-without-ctx case at all.
 fn sys_lsm_get_self_attr(args: &SyscallArgs) -> SyscallResult {
-    // attr: LSM_ATTR_CURRENT=100 / EXEC=101 / FSCREATE=102 /
-    // KEYCREATE=103 / PREV=104 / SOCKCREATE=105.
+    const LSM_ATTR_UNDEF: u32 = 0;
+    const LSM_FLAG_SINGLE: u64 = 1;
+
     #[allow(clippy::cast_possible_truncation)]
     let attr = args.arg0 as u32;
-    if !(100..=105).contains(&attr) {
+    if attr == LSM_ATTR_UNDEF {
         return linux_err(errno::EINVAL);
     }
+    // size pointer NULL -> EINVAL (Linux: explicit check, not via
+    // get_user faulting).
     if args.arg2 == 0 {
-        return linux_err(errno::EFAULT);
+        return linux_err(errno::EINVAL);
     }
-    // size* is a u32 (size_t in some ABIs) read-modify-write.
+    // size* is a size_t read-modify-write.  Linux issues get_user
+    // first; the corresponding fault is EFAULT.  We also need to be
+    // able to write back the resolved size, hence the write check.
     if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 4) {
         return linux_err(linux_errno_for(e));
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 4) {
         return linux_err(linux_errno_for(e));
     }
-    // flags: LSM_FLAG_SINGLE (1) only.
-    if args.arg3 & !1 != 0 {
+    // flags: only LSM_FLAG_SINGLE (1) is defined.  Any other bit
+    // pattern is EINVAL.
+    if args.arg3 != 0 && args.arg3 != LSM_FLAG_SINGLE {
         return linux_err(errno::EINVAL);
     }
-    // No LSM module stacked → no attributes to report.
+    // SINGLE requested but no ctx supplied -> EINVAL.  Linux's check
+    // fires after the get_user but before the copy_from_user(uctx).
+    if args.arg3 == LSM_FLAG_SINGLE && args.arg1 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // No LSM module stacked → no attributes to report.  This is the
+    // LSM_RET_DEFAULT(getselfattr) path on a kernel with no LSM
+    // hooks providing the attr.
     linux_err(errno::EOPNOTSUPP)
 }
 
@@ -36077,30 +36111,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // lsm_get_self_attr bad attr -> EINVAL.
-        let a = SyscallArgs { arg0: 50, arg1: ctx_ptr, arg2: size_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        // lsm_get_self_attr attr=0 (LSM_ATTR_UNDEF) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: ctx_ptr, arg2: size_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr bad attr not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr attr=0 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // lsm_get_self_attr NULL size -> EFAULT.
+        // lsm_get_self_attr unknown-but-nonzero attr -> EOPNOTSUPP
+        // (Linux's LSM_RET_DEFAULT(getselfattr) path; pre-batch was
+        // EINVAL because of the over-tight 100..=105 range check).
+        let a = SyscallArgs { arg0: 50, arg1: ctx_ptr, arg2: size_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr attr=50 not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr attr above the documented range still
+        // falls through to EOPNOTSUPP (no LSM declares attr=200).
+        let a = SyscallArgs { arg0: 200, arg1: ctx_ptr, arg2: size_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr attr=200 not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr NULL size -> EINVAL (Linux: explicit
+        // NULL check, not EFAULT-from-get_user).  Pre-batch was
+        // EFAULT.
         let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr NULL size not EFAULT");
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr NULL size not EINVAL"
+            );
             return Err(KernelError::InternalError);
         }
-        // lsm_get_self_attr bad flags -> EINVAL.
+        // lsm_get_self_attr bad flags (2) -> EINVAL.  Linux's mask
+        // is "flags != 0 && flags != LSM_FLAG_SINGLE" — bit-precise.
         let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 2, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // lsm_get_self_attr valid -> EOPNOTSUPP.
+        // lsm_get_self_attr flags has SINGLE bit + extra bit -> EINVAL.
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 3, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr flags=3 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr SINGLE without ctx -> EINVAL (new gate).
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: size_ptr, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr SINGLE+NULL ctx not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr SINGLE with ctx -> EOPNOTSUPP (falls
+        // through; ctx is accepted because Linux only validates
+        // it via copy_from_user, and on our kernel-context test
+        // the kernel-stack ctx_ptr is trusted).
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr SINGLE+ctx not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr valid attr (no flags) -> EOPNOTSUPP.
         let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
             serial_println!("[syscall/linux]   FAIL: lsm_get_self_attr valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   lsm_get_self_attr UNDEF/SINGLE gating: OK"
+        );
         // lsm_set_self_attr NULL ctx -> EFAULT.
         let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EFAULT) {

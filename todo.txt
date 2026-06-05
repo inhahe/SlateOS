@@ -17140,3 +17140,86 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 ##      Serial confirms "[syscall/linux]   acct CAP_SYS_PACCT
 ##      first: OK" in build/serial-test.txt.
+
+
+## 195. Linux ABI: lsm_get_self_attr UNDEF / SINGLE gates.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_lsm_get_self_attr.
+##
+##      Problem: sys_lsm_get_self_attr's gates didn't match Linux's
+##              security/lsm_syscalls.c::lsm_getselfattr.  Three
+##              specific divergences:
+##                1. attr range: pre-batch required attr in
+##                   100..=105 (the known LSM_ATTR_CURRENT..
+##                   SOCKCREATE constants).  Linux only checks
+##                   `attr == LSM_ATTR_UNDEF (=0) -> EINVAL`; any
+##                   other value walks the security hook list and
+##                   returns the per-hook default (EOPNOTSUPP when
+##                   no LSM declares the attr).  Our over-tight
+##                   check returned EINVAL for attr=50 and attr=200,
+##                   which a probe interprets as "syscall rejected
+##                   the attr index" rather than "no LSM provides
+##                   that attribute."  Distinguishing those two is
+##                   how a tool like libapparmor's feature probe
+##                   decides whether to fall back to /proc/*/attr.
+##                2. size == NULL: Linux returns EINVAL via an
+##                   explicit `if (size == NULL) return -EINVAL;`
+##                   ahead of get_user.  We returned EFAULT.
+##                3. flags == LSM_FLAG_SINGLE (1) but ctx (arg1) ==
+##                   NULL: Linux returns EINVAL.  We accepted any
+##                   non-NULL or NULL ctx and fell through to
+##                   EOPNOTSUPP, missing the "SINGLE without ctx
+##                   is malformed" check.
+##
+##      Fix:    Three gate changes in order:
+##                - `attr == 0 -> EINVAL` (replaces 100..=105 range
+##                  check; any non-zero attr falls through).
+##                - `args.arg2 == 0 -> EINVAL` (replaces EFAULT).
+##                - `args.arg3 != 0 && args.arg3 != 1 -> EINVAL`
+##                  (already there, kept; bit-precise on flags).
+##                - `args.arg3 == 1 && args.arg1 == 0 -> EINVAL`
+##                  (new).
+##              Terminal remains EOPNOTSUPP (LSM_RET_DEFAULT
+##              (getselfattr) for no providers).
+##
+##      Self-tests (boot-time):
+##        * lsm_get_self_attr(attr=0, ctx, size) -> EINVAL  (kept,
+##          reason changed: explicit LSM_ATTR_UNDEF check).
+##        * lsm_get_self_attr(attr=50, ctx, size) -> EOPNOTSUPP
+##          (new; was EINVAL pre-batch).
+##        * lsm_get_self_attr(attr=200, ctx, size) -> EOPNOTSUPP
+##          (new; was EINVAL pre-batch).
+##        * lsm_get_self_attr(attr=100, ctx, size=NULL) -> EINVAL
+##          (new errno; was EFAULT pre-batch).
+##        * lsm_get_self_attr(attr=100, ctx, size, flags=2) ->
+##          EINVAL  (kept).
+##        * lsm_get_self_attr(attr=100, ctx, size, flags=3) ->
+##          EINVAL  (new; SINGLE + extra bit).
+##        * lsm_get_self_attr(attr=100, ctx=NULL, size, flags=1)
+##          -> EINVAL  (new; SINGLE-without-ctx gate).
+##        * lsm_get_self_attr(attr=100, ctx, size, flags=1) ->
+##          EOPNOTSUPP  (new; SINGLE valid happy path).
+##        * lsm_get_self_attr(attr=100, ctx, size) -> EOPNOTSUPP
+##          (kept; bare valid attr).
+##        * Emits "[syscall/linux]   lsm_get_self_attr
+##          UNDEF/SINGLE gating: OK".
+##
+##      Known limitations:
+##        * The SINGLE+ctx path doesn't validate ctx contents (Linux
+##          does copy_from_user(&lctx, uctx, sizeof(lctx)) then
+##          checks lctx.id != LSM_ID_UNDEF).  We don't have any
+##          LSM module so even the lctx.id check would just lead
+##          back to EOPNOTSUPP; the read isn't observable.  When
+##          real LSM lands, add the 32-byte lsm_ctx copy_from_user
+##          and the lctx.id check.
+##        * size validation reads/writes 4 bytes but on x86_64
+##          size_t is 8 bytes.  The Linux header declares it as
+##          `size_t __user *` so the buffer should be 8.  This was
+##          set to 4 pre-batch (likely a 32-bit oversight) and we
+##          haven't touched it here — fixing the size_t width is
+##          a separate batch since changing it might surface
+##          downstream alignment assumptions.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   lsm_get_self_attr
+##      UNDEF/SINGLE gating: OK" in build/serial-test.txt.

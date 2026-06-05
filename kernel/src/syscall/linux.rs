@@ -17927,11 +17927,42 @@ fn sys_get_robust_list(args: &SyscallArgs) -> SyscallResult {
     // sizeof(struct robust_list_head) on x86_64.
     const ROBUST_LIST_HEAD_SIZE: u64 = 24;
 
+    // Linux's `kernel/futex/core.c::SYSCALL_DEFINE3(get_robust_list)`
+    // gate order:
+    //   1. if (pid == 0) p = current;
+    //      else { p = find_task_by_vpid(pid); if (!p) -> ESRCH; }
+    //      find_task_by_vpid returns NULL for negative pid_vnrs, so
+    //      pid < 0 surfaces ESRCH, not EINVAL.
+    //   2. ptrace_may_access(p, PTRACE_MODE_READ_REALCREDS) -> EPERM.
+    //   3. put_user(len_ptr); put_user(head_ptr) -> EFAULT.
+    //
+    // Pre-batch:
+    //   * (pid=-1, ...) returned -EINVAL where Linux returns -ESRCH.
+    //   * (pid=other_tid, head=NULL, len=NULL) returned -EFAULT where
+    //     Linux returns -EPERM (the ptrace gate fires before put_user
+    //     because head/len are only consulted after the task is
+    //     accessible).
+    //
+    // Reorder to match.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid = args.arg0 as i32;
-    if pid < 0 {
-        return linux_err(errno::EINVAL);
-    }
+    let current_tid = crate::sched::current_task_id();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let current_tid_i32 = current_tid as i32;
+    let target_task = if pid == 0 || pid == current_tid_i32 {
+        current_tid
+    } else if pid < 0 {
+        // find_task_by_vpid(pid<0) fails -> ESRCH.
+        return linux_err(errno::ESRCH);
+    } else {
+        // Cross-task without ptrace -> EPERM.  We don't distinguish
+        // "task exists, no ptrace" from "no such task" for positive
+        // bogus pids; either is observably non-EFAULT, which is what
+        // matters relative to Linux's gate ordering.
+        return linux_err(errno::EPERM);
+    };
+
+    // put_user gates (run only after the task lookup + ptrace pass).
     if args.arg1 == 0 || args.arg2 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -17943,16 +17974,6 @@ fn sys_get_robust_list(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 8) {
         return linux_err(linux_errno_for(e));
     }
-
-    let current_tid = crate::sched::current_task_id();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let current_tid_i32 = current_tid as i32;
-    let target_task = if pid == 0 || pid == current_tid_i32 {
-        current_tid
-    } else {
-        // No ptrace cap: refuse cross-task inspection.
-        return linux_err(errno::EPERM);
-    };
 
     let (head, len) = crate::proc::thread_clone::lookup_robust_list(target_task)
         .unwrap_or((0, ROBUST_LIST_HEAD_SIZE));
@@ -38779,16 +38800,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // get_robust_list bad pid -> EINVAL.
+        // get_robust_list negative pid -> ESRCH.
+        // Linux's find_task_by_vpid rejects pid<0 with NULL; the
+        // syscall surfaces -ESRCH ahead of any ptrace or put_user
+        // gate.  Pre-batch we returned -EINVAL on pid<0.
+        // (u32::MAX as i32 == -1.)
         let a = SyscallArgs { arg0: u64::from(u32::MAX), arg1: head_ptr, arg2: len_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: get_robust_list bad pid not EINVAL");
+        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: get_robust_list neg pid not ESRCH");
             return Err(KernelError::InternalError);
         }
-        // get_robust_list NULL head -> EFAULT.
+        // get_robust_list (pid=0, head=NULL) -> EFAULT.
+        // pid=0 resolves to current, so the task-lookup/ptrace gates
+        // pass; put_user(len_ptr or head_ptr) then fires EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: len_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: get_robust_list NULL head not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // get_robust_list (pid=positive_non_self, head=NULL, len=NULL)
+        // -> EPERM.  Pre-batch the NULL pointer check fired first and
+        // produced EFAULT; Linux's ptrace_may_access runs ahead of
+        // put_user, so EPERM is the correct discriminator.  Uses
+        // i32::MAX as a positive TID we're guaranteed not to be.
+        let a = SyscallArgs { arg0: u64::from(i32::MAX as u32), arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GET_ROBUST_LIST, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_robust_list cross-task+NULL not EPERM ({})",
+                dispatch_linux(nr::GET_ROBUST_LIST, &a).value
+            );
             return Err(KernelError::InternalError);
         }
         // Batch 59: get_robust_list for self (pid=0) now succeeds and

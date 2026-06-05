@@ -19325,3 +19325,45 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      tests.  Currently unreachable.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 238. [DONE 2026-06-05] Linux ABI: sys_get_robust_list neg pid -> ESRCH;
+##      cross-task EPERM ahead of put_user EFAULT.
+##
+##      Pre-batch sys_get_robust_list (kernel/src/syscall/linux.rs)
+##      ran:
+##        1. pid < 0 -> EINVAL
+##        2. head_ptr == NULL || len_ptr == NULL -> EFAULT
+##        3. validate_user_write -> EFAULT
+##        4. pid != current -> EPERM
+##        5. copy_to_user
+##
+##      Linux's kernel/futex/core.c SYSCALL_DEFINE3(get_robust_list)
+##      runs find_task_by_vpid first (rejecting pid<0 with ESRCH, not
+##      EINVAL), then ptrace_may_access (EPERM), then the put_user
+##      writes at the very end (EFAULT).  So:
+##        * (pid=-1, *)                            -> ESRCH on Linux,
+##                                                    EINVAL pre-batch.
+##        * (pid=other_tid, head=NULL, len=NULL)   -> EPERM on Linux
+##                                                    (ptrace fires
+##                                                    ahead of put_user),
+##                                                    EFAULT pre-batch.
+##
+##      Fix: reorder to task-lookup -> ptrace gate -> NULL/EFAULT ->
+##      copy_to_user.  Negative pid maps to ESRCH; positive non-self
+##      maps to EPERM; pid==0 or pid==current_tid_i32 proceeds to the
+##      put_user writes.
+##
+##      Self-tests updated/added:
+##      - (pid=-1, valid head+len) -> ESRCH (was EINVAL).
+##      - (pid=0, head=NULL, len=valid) -> EFAULT (unchanged).
+##      - (pid=i32::MAX, head=NULL, len=NULL) -> EPERM (was EFAULT).
+##      - Existing self-success test (pid=0, head_ptr, len_ptr) -> 0
+##        still passes.
+##
+##      Known limitation: for positive bogus pids we collapse "no such
+##      task -> ESRCH" with "task exists, no ptrace -> EPERM" into
+##      EPERM uniformly.  Adding ptrace plumbing to distinguish would
+##      require a task-existence query the futex core doesn't yet
+##      have.  Documented for follow-up.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

@@ -14217,3 +14217,55 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
 
+## 154. Linux ABI: pidfd_send_signal routes through native signal-send
+##      (batch 125).
+##
+##      Builds on batch 124 (HandleKind::PidFd).  pidfd_send_signal now
+##      looks up the pidfd in the caller's Linux fd table, extracts the
+##      target PID from the entry's raw_handle, and delegates to
+##      sys_kill — which itself dispatches sig==0 as an existence probe
+##      and sig>0 through handlers::sys_signal_send.  Authority,
+##      termination, and ESRCH/EPERM/EBADF errno mapping all come "for
+##      free" from the shared kill path.
+##
+##      Errno surface (matches Linux pidfd_send_signal(2)):
+##          * EINVAL — flags != 0 or sig not in [0, 64].
+##          * EFAULT — info != NULL but siginfo_t buffer unreadable.
+##          * EBADF  — fd not open, kind != PidFd, or kernel-ctx.
+##          * ESRCH  — target gone (propagated from sys_kill probe path).
+##          * EPERM  — caller lacks parent / capability authority
+##                     (propagated from sys_kill / sys_signal_send).
+##
+##      Self-tests added at the dispatch layer (boot self-test):
+##          1. pidfd_send_signal sig=999 (bogus) -> EINVAL.  (preserved)
+##          2. pidfd_send_signal flags!=0 -> EINVAL.  (new)
+##          3. pidfd_send_signal valid args, kernel context -> EBADF
+##             (no caller PCB to lookup fd table).  (new)
+##
+##      The "real" valid-PidFd path is exercised the same way kill(2)
+##      is: a Linux process would call pidfd_open, then
+##      pidfd_send_signal — at which point lookup_caller_fd returns
+##      the FdEntry::pidfd we installed in batch 124, extracts the
+##      target pid, and the existing sys_kill / sys_signal_send chain
+##      handles the rest.  We don't have a Linux process running in
+##      the boot self-test environment, so end-to-end coverage waits
+##      for a Linux-ELF integration test harness.
+##
+##      Known limitations:
+##
+##      * siginfo_t buffer (arg2) is validated for readability but its
+##         contents are discarded.  Our native signal-send path only
+##         takes (pid, sig); user-supplied si_code etc. are not
+##         honored.  This matches the limited shape Linux allows
+##         non-CAP_SYS_ADMIN processes to forge, but a future Linux
+##         libc-compat tightening may need siginfo_t.si_code / si_uid
+##         passthrough.
+##
+##      * pidfd_getfd still returns EBADF after fd validation —
+##         cross-process fd copy is the next missing piece.  It
+##         requires an inter-PCB fd enumeration helper that we don't
+##         yet have.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
+

@@ -10579,6 +10579,23 @@ fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `pidfd_send_signal(pidfd, sig, info, flags)`.
+///
+/// Looks up `pidfd` in the caller's Linux fd table, requires
+/// `HandleKind::PidFd`, then delivers signal `sig` to the target pid
+/// stored in the entry by delegating to the same native signal-send
+/// path that `kill(2)` uses (via [`sys_kill`]).  This preserves the
+/// existence-probe behaviour for `sig == 0` and reuses the
+/// parent/capability authority checks built into
+/// [`handlers::sys_signal_send`].
+///
+/// Errors:
+///   * `EINVAL` — `flags != 0`, signal number out of `[0, 64]`.
+///   * `EFAULT` — `info != NULL` but the pointed-to siginfo_t is not
+///     readable.
+///   * `EBADF`  — fd is not open, or the entry's kind is not `PidFd`,
+///     or kernel-context invocation (no caller PCB).
+///   * `ESRCH` / `EPERM` — propagated from the underlying signal send
+///     (target gone, or caller lacks authority).
 fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
     // flags must be 0 per current Linux.
     if args.arg3 != 0 {
@@ -10600,7 +10617,32 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    linux_err(errno::EINVAL)
+    // Now look up the entry — kernel-context (no caller PCB) surfaces
+    // EBADF here, matching the eventfd / pidfd_open install paths.
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    if entry.kind != HandleKind::PidFd {
+        // Linux returns EBADF when pidfd_send_signal is called on a
+        // non-pidfd file descriptor.
+        return linux_err(errno::EBADF);
+    }
+    // entry.raw_handle holds the target PID as a u64 (set by
+    // `FdEntry::pidfd`).  Hand off to sys_kill, which dispatches the
+    // sig==0 existence probe locally and routes sig>0 through
+    // `handlers::sys_signal_send`.  The siginfo_t buffer is ignored
+    // (we've already validated readability above) — our native send
+    // path only takes (pid, sig) and synthesises a kernel-internal
+    // si_code; user-supplied siginfo is silently discarded, matching
+    // the limited shape Linux allows non-CAP_SYS_ADMIN processes to
+    // forge.
+    let kill_args = SyscallArgs {
+        arg0: entry.raw_handle,
+        arg1: args.arg1,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    sys_kill(&kill_args)
 }
 
 /// `pidfd_getfd(pidfd, targetfd, flags)`.
@@ -28767,6 +28809,28 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: pidfd_send_signal(bad sig) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_send_signal nonzero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 9, arg2: 0, arg3: 1,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pidfd_send_signal(flags) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_send_signal valid args in kernel context -> EBADF: no
+        // caller PCB means lookup_caller_fd fails before we ever look
+        // at the PidFd entry.  This is the same kernel-context gate
+        // that pidfd_open uses to bail on install.
+        let a = SyscallArgs { arg0: 3, arg1: 9, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_send_signal kernel-ctx -> {} (want EBADF)",
+                dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
         // pidfd_getfd nonzero flag -> EINVAL.

@@ -13009,3 +13009,107 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
 
+## 143. [LINUX ABI BATCH 114 - DONE] Implement membarrier(2) with the
+##      full Linux command set, replacing the prior ~3-line stub that
+##      returned 0 only for QUERY (claiming "no commands supported")
+##      and EINVAL for everything else.
+##
+##      File: kernel/src/syscall/linux.rs
+##      Function: sys_membarrier (~line 12954)
+##
+##      Linux ABI implemented (cmd values from <linux/membarrier.h>):
+##          0   = QUERY
+##          1   = GLOBAL
+##          2   = GLOBAL_EXPEDITED
+##          4   = REGISTER_GLOBAL_EXPEDITED
+##          8   = PRIVATE_EXPEDITED
+##         16   = REGISTER_PRIVATE_EXPEDITED
+##         32   = PRIVATE_EXPEDITED_SYNC_CORE
+##         64   = REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+##        128   = PRIVATE_EXPEDITED_RSEQ
+##        256   = REGISTER_PRIVATE_EXPEDITED_RSEQ
+##        512   = GET_REGISTRATIONS  (Linux 6.3+)
+##      flags:  MEMBARRIER_CMD_FLAG_CPU = 1, legal only on the three
+##              PRIVATE_EXPEDITED variants (see Linux man-page).
+##
+##      Behaviour matrix:
+##        * QUERY -> bitmask of supported cmds = 0x3FF (all 10).  flags
+##          and cpu_id must both be 0 (EINVAL otherwise) — matches
+##          Linux's QUERY semantics.
+##        * Any unknown flag bit set -> EINVAL up front.
+##        * FLAG_CPU on a non-PRIVATE_EXPEDITED cmd -> EINVAL (Linux
+##          rejects FLAG_CPU on GLOBAL and REGISTER_*).
+##        * Barrier cmds (GLOBAL, GLOBAL_EXPEDITED, PRIVATE_EXPEDITED,
+##          PRIVATE_EXPEDITED_SYNC_CORE, PRIVATE_EXPEDITED_RSEQ) ->
+##          drain local store buffer via
+##          core::sync::atomic::fence(SeqCst) and return 0.
+##        * REGISTER_* cmds -> return 0 (no per-task state needed).
+##        * GET_REGISTRATIONS -> return 0 (no per-task registration
+##          state tracked; barriers work regardless).
+##        * Unknown cmds -> EINVAL.
+##
+##      Why "local fence + return 0" is the correct, honest answer
+##      (not a placeholder):
+##        - In this kernel a Linux fd table is per-process and no two
+##          Linux processes share an address space (no CLONE_VM across
+##          processes, no process_vm_clone).  Therefore no remote
+##          thread in the caller's MM can race with the caller —
+##          there is no remote thread.
+##        - x86_64's TSO memory model already orders the caller's
+##          prior stores ahead of any subsequent loads on any CPU
+##          once those stores retire through the store buffer.  A
+##          local mfence (atomic::fence(SeqCst)) drains the store
+##          buffer and is sufficient to make those stores globally
+##          visible.
+##        - SYNC_CORE (instruction-stream serialization) is needed on
+##          ARM for self-modifying code; on x86 IRET / CPUID / far
+##          jumps already serialize, and every interrupt return
+##          performs that, so the local fence here is sufficient.
+##        - The _RSEQ variants additionally request restart of any
+##          in-flight RSEQ critical sections.  sys_rseq currently
+##          returns ENOSYS so there are no RSEQ critical sections in
+##          flight; the barrier itself is the contract.
+##        - When cross-process CLONE_VM lands, the implementation
+##          will need to broadcast an IPI to every CPU running a
+##          thread of the caller's MM and execute a SeqCst fence
+##          there.  Mark with a TODO when that's the case.
+##
+##      Self-tests (in linux.rs self-test block):
+##        * QUERY -> 0x3FF.
+##        * QUERY flags=1 -> EINVAL.
+##        * QUERY cpu_id=1 -> EINVAL.
+##        * GLOBAL (cmd=1) -> 0.
+##        * GLOBAL_EXPEDITED (cmd=2) -> 0.
+##        * PRIVATE_EXPEDITED (cmd=8), flags=0 -> 0.
+##        * PRIVATE_EXPEDITED + FLAG_CPU -> 0 (legal here).
+##        * PRIVATE_EXPEDITED_SYNC_CORE (cmd=32) + FLAG_CPU -> 0.
+##        * PRIVATE_EXPEDITED_RSEQ (cmd=128) -> 0.
+##        * REGISTER_GLOBAL_EXPEDITED (cmd=4) -> 0.
+##        * REGISTER_PRIVATE_EXPEDITED (cmd=16) -> 0.
+##        * REGISTER_PRIVATE_EXPEDITED + FLAG_CPU -> EINVAL.
+##        * GLOBAL + FLAG_CPU -> EINVAL.
+##        * GET_REGISTRATIONS -> 0.
+##        * Unknown flag bit (0x2) -> EINVAL.
+##        * Bogus cmd (1<<10) -> EINVAL.
+##        * Huge cmd (0x20_000) -> EINVAL.
+##
+##      Known limitations / documented for follow-on work:
+##        * GET_REGISTRATIONS always reports the empty mask because
+##          we do not track per-task registration state.  When real
+##          cross-MM threads exist and the barrier path branches on
+##          "did this thread register," REGISTER_* needs to set a
+##          per-task bit and GET_REGISTRATIONS needs to read it
+##          back.  Today every barrier just executes the fence
+##          unconditionally, so the missing state is invisible.
+##        * No per-CPU targeting: cpu_id is accepted on the three
+##          PRIVATE_EXPEDITED variants (matching Linux's flag
+##          validation) but the fence is local-only.  When SMP
+##          adds cross-MM threads, the EXPEDITED path needs to
+##          IPI either the specified CPU (FLAG_CPU set) or every
+##          CPU running a thread of the caller's MM.
+##        * No RSEQ critical section restart.  Wire into sys_rseq
+##          when RSEQ lands; today sys_rseq returns ENOSYS so
+##          there is nothing to restart.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+

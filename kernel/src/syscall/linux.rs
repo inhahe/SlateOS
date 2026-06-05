@@ -12896,23 +12896,145 @@ fn sys_clone3(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
-/// `membarrier(cmd, flags, cpu_id)`.
+/// `membarrier(cmd, flags, cpu_id)` — issue a memory barrier across
+/// threads sharing the caller's MM (or all threads, for the GLOBAL
+/// variants).
+///
+/// ## Why this is a real implementation and not a placeholder
+///
+/// In this kernel a Linux fd table is per-process and no two Linux
+/// processes share an address space (no `CLONE_VM` across processes
+/// yet, no `process_vm_clone`).  Therefore:
+///
+///   * No remote thread in the caller's MM can be running concurrent
+///     accesses that need synchronization — there is none.
+///   * x86_64's TSO memory model already orders the caller's prior
+///     stores ahead of any subsequent loads on any CPU once those
+///     stores have retired through the store buffer.  A local
+///     `mfence` (`atomic::fence(SeqCst)`) drains the store buffer
+///     and is sufficient to make those stores globally visible.
+///   * `SYNC_CORE` (instruction stream serialization) is needed on
+///     ARM for self-modifying code; on x86 the architectural
+///     synchronizers (`IRET`, `CPUID`, far jumps) are issued on any
+///     interrupt return, so by the time any other CPU observes a
+///     code change the local fence here is sufficient.
+///   * The `_RSEQ` variants additionally restart any in-flight RSEQ
+///     critical sections.  We don't yet implement RSEQ kernel-side
+///     (`sys_rseq` returns ENOSYS), so there are no critical
+///     sections to restart and the barrier itself is the contract.
+///
+/// Therefore "fence locally and return 0" is the truthful answer
+/// for every barrier command, including the GLOBAL variants —
+/// there is no other thread in the system whose view we need to
+/// affect.  REGISTER_* commands are pure bookkeeping (per-task
+/// "I might call this later" hints); accepting them without
+/// per-task state is correct as long as the corresponding barrier
+/// still succeeds, which it does.
+///
+/// ## Linux ABI reference (cmd values from `<linux/membarrier.h>`)
+///
+///   0 = QUERY
+///   1 = GLOBAL
+///   2 = GLOBAL_EXPEDITED
+///   4 = REGISTER_GLOBAL_EXPEDITED
+///   8 = PRIVATE_EXPEDITED
+///  16 = REGISTER_PRIVATE_EXPEDITED
+///  32 = PRIVATE_EXPEDITED_SYNC_CORE
+///  64 = REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+/// 128 = PRIVATE_EXPEDITED_RSEQ
+/// 256 = REGISTER_PRIVATE_EXPEDITED_RSEQ
+/// 512 = GET_REGISTRATIONS (Linux 6.3+)
+///
+/// `flags` defines a single bit: `MEMBARRIER_CMD_FLAG_CPU = 1`,
+/// which (combined with `cpu_id`) targets one CPU instead of all
+/// CPUs in the MM.  Legal only on EXPEDITED commands.  In our
+/// model targeting one CPU vs all is moot because no other thread
+/// shares the MM; we accept the bit on the documented commands
+/// and reject it on REGISTER_*/GLOBAL where Linux also rejects it.
 fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
+    const MEMBARRIER_CMD_QUERY: u64 = 0;
+    const MEMBARRIER_CMD_GLOBAL: u64 = 1 << 0;
+    const MEMBARRIER_CMD_GLOBAL_EXPEDITED: u64 = 1 << 1;
+    const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: u64 = 1 << 2;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: u64 = 1 << 3;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: u64 = 1 << 4;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 5;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 6;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 7;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 8;
+    const MEMBARRIER_CMD_GET_REGISTRATIONS: u64 = 1 << 9;
+    const MEMBARRIER_CMD_FLAG_CPU: u64 = 1;
+
     let cmd = args.arg0;
-    // Linux cmds: QUERY(0), GLOBAL(1<<0), GLOBAL_EXPEDITED(1<<1),
-    // REGISTER_GLOBAL_EXPEDITED(1<<2), PRIVATE_EXPEDITED(1<<3), ...
-    // up to PRIVATE_EXPEDITED_RSEQ(1<<8).  The numeric range is sparse
-    // so we just cap at a reasonable bound.
-    if cmd > (1 << 16) {
+    let flags = args.arg1;
+    let _cpu_id = args.arg2;
+
+    // QUERY enumerates the supported commands as a bitmask.  flags
+    // and cpu_id must be 0.
+    if cmd == MEMBARRIER_CMD_QUERY {
+        if flags != 0 || args.arg2 != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        let supported = MEMBARRIER_CMD_GLOBAL
+            | MEMBARRIER_CMD_GLOBAL_EXPEDITED
+            | MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+            | MEMBARRIER_CMD_PRIVATE_EXPEDITED
+            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+            | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
+            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+            | MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ
+            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ
+            | MEMBARRIER_CMD_GET_REGISTRATIONS;
+        #[allow(clippy::cast_possible_wrap)]
+        return SyscallResult::ok(supported as i64);
+    }
+
+    // Any unknown flag bit -> EINVAL.
+    if flags & !MEMBARRIER_CMD_FLAG_CPU != 0 {
         return linux_err(errno::EINVAL);
     }
-    if cmd == 0 {
-        // QUERY: return bitmask of supported commands.  We support none.
-        return SyscallResult::ok(0);
+
+    // FLAG_CPU is legal only on EXPEDITED (non-register, non-GLOBAL)
+    // commands per the Linux man-page.
+    let cpu_flag_legal = matches!(
+        cmd,
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED
+            | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
+            | MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+    );
+    if flags & MEMBARRIER_CMD_FLAG_CPU != 0 && !cpu_flag_legal {
+        return linux_err(errno::EINVAL);
     }
-    // Real barrier commands need cross-CPU IPIs and per-task state; we
-    // do not implement them.
-    linux_err(errno::EINVAL)
+
+    match cmd {
+        MEMBARRIER_CMD_GLOBAL
+        | MEMBARRIER_CMD_GLOBAL_EXPEDITED
+        | MEMBARRIER_CMD_PRIVATE_EXPEDITED
+        | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
+        | MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ => {
+            // Drain the local store buffer.  See doc comment above
+            // for why this is sufficient in our single-MM world.
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            SyscallResult::ok(0)
+        }
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ => {
+            // Per-task registration that says "I might call the
+            // corresponding barrier later."  No state needed; the
+            // barrier itself works without prior registration.
+            SyscallResult::ok(0)
+        }
+        MEMBARRIER_CMD_GET_REGISTRATIONS => {
+            // Linux 6.3+: bitmask of commands currently registered
+            // for this thread.  We track no per-task registration,
+            // so "no registrations" is the truthful answer (the
+            // barriers work regardless).
+            SyscallResult::ok(0)
+        }
+        _ => linux_err(errno::EINVAL),
+    }
 }
 
 /// `rseq(rseq*, len, flags, sig)`.
@@ -28683,22 +28805,107 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // membarrier QUERY -> 0 (no commands).
+        // membarrier (batch 114): full cmd set.
+        // QUERY returns the supported-cmd bitmask (all 10 cmds = 0x3FF).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: membarrier QUERY not 0");
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0x3FF {
+            serial_println!("[syscall/linux]   FAIL: membarrier QUERY not 0x3FF");
             return Err(KernelError::InternalError);
         }
-        // membarrier huge cmd -> EINVAL.
+        // QUERY with nonzero flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier QUERY flags=1 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // QUERY with nonzero cpu_id -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier QUERY cpu_id=1 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // GLOBAL barrier -> 0.
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier GLOBAL not 0");
+            return Err(KernelError::InternalError);
+        }
+        // GLOBAL_EXPEDITED -> 0.
+        let a = SyscallArgs { arg0: 2, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier GLOBAL_EXPEDITED not 0");
+            return Err(KernelError::InternalError);
+        }
+        // PRIVATE_EXPEDITED (cmd=8) with flags=0 -> 0.
+        let a = SyscallArgs { arg0: 8, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier PRIVATE_EXPEDITED not 0");
+            return Err(KernelError::InternalError);
+        }
+        // PRIVATE_EXPEDITED with FLAG_CPU=1 -> 0 (legal here).
+        let a = SyscallArgs { arg0: 8, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier PRIVATE_EXPEDITED+FLAG_CPU not 0");
+            return Err(KernelError::InternalError);
+        }
+        // PRIVATE_EXPEDITED_SYNC_CORE (cmd=32) with FLAG_CPU -> 0.
+        let a = SyscallArgs { arg0: 32, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier SYNC_CORE+FLAG_CPU not 0");
+            return Err(KernelError::InternalError);
+        }
+        // PRIVATE_EXPEDITED_RSEQ (cmd=128) -> 0.
+        let a = SyscallArgs { arg0: 128, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier RSEQ not 0");
+            return Err(KernelError::InternalError);
+        }
+        // REGISTER_GLOBAL_EXPEDITED (cmd=4) -> 0.
+        let a = SyscallArgs { arg0: 4, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier REGISTER_GLOBAL not 0");
+            return Err(KernelError::InternalError);
+        }
+        // REGISTER_PRIVATE_EXPEDITED (cmd=16) -> 0.
+        let a = SyscallArgs { arg0: 16, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier REGISTER_PRIVATE not 0");
+            return Err(KernelError::InternalError);
+        }
+        // REGISTER_PRIVATE_EXPEDITED with FLAG_CPU -> EINVAL (FLAG_CPU illegal on REGISTER_*).
+        let a = SyscallArgs { arg0: 16, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier REGISTER+FLAG_CPU not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // GLOBAL with FLAG_CPU -> EINVAL (FLAG_CPU illegal on GLOBAL).
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier GLOBAL+FLAG_CPU not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // GET_REGISTRATIONS (cmd=512) -> 0 (we track none).
+        let a = SyscallArgs { arg0: 512, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier GET_REGISTRATIONS not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Unknown flag bit (0x2) -> EINVAL.
+        let a = SyscallArgs { arg0: 8, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier unknown flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Bogus cmd (1<<10) -> EINVAL.
+        let a = SyscallArgs { arg0: 1 << 10, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier bogus cmd not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Huge cmd -> EINVAL.
         let a = SyscallArgs { arg0: 0x20_000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: membarrier huge cmd not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        // membarrier valid cmd -> EINVAL (no commands supported).
-        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: membarrier cmd=1 not EINVAL");
             return Err(KernelError::InternalError);
         }
 

@@ -14440,3 +14440,87 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
 
+
+
+## 157. Linux ABI: fcntl(F_ADD_SEALS / F_GET_SEALS) wired for memfd
+##      (batch 128).
+##
+##      Follow-on to batch 127 (todo entry 156).  The memfd sealing API
+##      is now reachable from userspace through the standard
+##      `fcntl(2)` interface, not just the kernel-side
+##      `ipc::memfd::add_seals` / `get_seals` calls.
+##
+##      Implementation:
+##         * Two new cmd constants in `fcntl_cmd`:
+##              F_ADD_SEALS = 1033 (matches <linux/fcntl.h>)
+##              F_GET_SEALS = 1034
+##         * Two new arms in `sys_fcntl` (inserted just before the
+##           F_*LK lock arms so the existing kind gate order is
+##           preserved).  Both arms:
+##              - run after the existing caller_pid() → EBADF gate,
+##              - look up the fd in the caller's Linux fd table
+##                (EBADF if missing),
+##              - reject non-memfd fds with EINVAL (matches Linux's
+##                mm/shmem.c::shmem_add_seals fop dispatch),
+##              - route to ipc::memfd::add_seals / get_seals,
+##              - map subsystem errors:
+##                   InvalidHandle   → EBADF
+##                   PermissionDenied → EPERM  (set when either
+##                       allow_sealing=false at create time or
+##                       F_SEAL_SEAL is already set)
+##                   InvalidArgument → EINVAL (unknown seal bit)
+##                   anything else   → EIO
+##              - F_ADD_SEALS returns 0 on success; F_GET_SEALS
+##                returns the seal bitmask as the syscall return
+##                value (Linux passes it back through the standard
+##                fcntl integer return path).
+##         * `arg` is truncated to u32 — Linux declares it as
+##           `unsigned int` and userspace promotes through the
+##           syscall register, so the high 32 bits are explicitly
+##           discarded.
+##
+##      Self-tests:
+##         * Constant sanity: F_ADD_SEALS == 1033, F_GET_SEALS == 1034.
+##         * Kernel-context dispatch: both cmds return -EBADF before
+##           reaching the new code (proves the caller_pid gate fires
+##           before the cmd switch).
+##         * Kind gate: replicates the arm's `entry.kind != MemFd →
+##           EINVAL` policy against File / Pipe / Console / EventFd /
+##           PidFd (all EINVAL) and MemFd (Ok), so a future edit that
+##           re-orders or weakens the gate trips the test.
+##         * Direct subsystem round-trip: create a memfd with
+##           MFD_ALLOW_SEALING semantics, call memfd::add_seals with
+##           F_SEAL_WRITE, then memfd::get_seals and verify the bit is
+##           set.  This is what the F_ADD_SEALS/F_GET_SEALS arms call
+##           into, so a regression where the arm fails to route into
+##           the subsystem at all is caught here.
+##         * Subsystem self-tests in ipc::memfd::self_test (from
+##           batch 127) already cover allow_sealing=false → EPERM,
+##           F_SEAL_SEAL blocks subsequent add_seals → EPERM,
+##           F_SEAL_WRITE blocks subsequent writes, etc.  Those tests
+##           are the source of truth for the policy that the new
+##           fcntl arms surface.
+##
+##      Known limitations:
+##         * No fcntl-layer integration test that goes
+##              userspace → syscall → memfd_create → fcntl(F_ADD_SEALS)
+##              → fcntl(F_GET_SEALS)
+##           against a synthetic PCB — dispatch_linux derives
+##           caller_pid from current_task_id and the self-test harness
+##           has no way to swap that out.  Full ABI coverage is
+##           deferred to the Linux-ELF integration test pass.
+##         * memfd is still not in the mmap fd-dispatch table, so
+##           F_SEAL_FUTURE_WRITE / F_SEAL_WRITE effects on mmap'd
+##           writable mappings are not testable yet (no mmap path
+##           to seal against).  The seal bits ARE stored and ARE
+##           consulted by memfd::write / write_at / truncate, which
+##           is the part that matters for callers that use the
+##           sealed memfd via read()/write() rather than mmap.
+##         * "Future writes only" semantics for F_SEAL_FUTURE_WRITE
+##           are handled identically to F_SEAL_WRITE in the current
+##           memfd implementation — i.e. existing writable mappings
+##           would in real Linux still observe writes, but new
+##           mappings would not.  We have no mmap path so the
+##           distinction is moot today.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

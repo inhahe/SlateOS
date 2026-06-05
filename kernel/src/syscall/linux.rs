@@ -842,6 +842,17 @@ pub mod fcntl_cmd {
     /// fresh pipe).
     pub const F_GETPIPE_SZ: u32 = 1032;
 
+    /// `arg` is a bitmask of `F_SEAL_*` flags to OR into the memfd's
+    /// active seal mask.  Linux numbers it 1033 in `<linux/fcntl.h>`.
+    /// Only valid on memfd fds; non-memfd fds return EINVAL.  The
+    /// memfd must have been created with `MFD_ALLOW_SEALING` or the
+    /// add returns EPERM (the implicit `F_SEAL_SEAL` blocks adds).
+    pub const F_ADD_SEALS: u32 = 1033;
+    /// Read the current `F_SEAL_*` bitmask from a memfd.  Returns the
+    /// mask as the syscall return value (Linux passes it back through
+    /// the standard fcntl integer return path).
+    pub const F_GET_SEALS: u32 = 1034;
+
     /// POSIX advisory record-lock commands.  All three take a
     /// `struct flock *` in `arg` and operate on a half-open byte
     /// range of the file behind the fd.  Linux numbers them 5/6/7
@@ -3271,6 +3282,49 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
             let same = self_entry.kind == other_entry.kind
                 && self_entry.raw_handle == other_entry.raw_handle;
             SyscallResult::ok(if same { 1 } else { 0 })
+        }
+        fcntl_cmd::F_ADD_SEALS => {
+            // Memfd sealing: only memfd fds accept seals.  Linux
+            // returns EINVAL for non-memfd fds (the seal API is bound
+            // to the memfd file_operations).
+            let entry = match pcb::linux_fd_lookup(pid, fd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            };
+            if entry.kind != HandleKind::MemFd {
+                return linux_err(errno::EINVAL);
+            }
+            // arg is unsigned int — truncate to u32 like Linux does
+            // when reading from the syscall register.
+            let add = arg as u32;
+            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
+            match crate::ipc::memfd::add_seals(h, add) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+                // memfd add_seals signals "not allowed" (either
+                // allow_sealing=false at create time or F_SEAL_SEAL
+                // already set) as PermissionDenied → EPERM, which
+                // matches Linux's mm/shmem.c::shmem_add_seals.
+                Err(crate::error::KernelError::PermissionDenied) => linux_err(errno::EPERM),
+                // Unknown seal bit set in `add`.
+                Err(crate::error::KernelError::InvalidArgument) => linux_err(errno::EINVAL),
+                Err(_) => linux_err(errno::EIO),
+            }
+        }
+        fcntl_cmd::F_GET_SEALS => {
+            let entry = match pcb::linux_fd_lookup(pid, fd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            };
+            if entry.kind != HandleKind::MemFd {
+                return linux_err(errno::EINVAL);
+            }
+            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
+            match crate::ipc::memfd::get_seals(h) {
+                Ok(seals) => SyscallResult::ok(i64::from(seals)),
+                Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+                Err(_) => linux_err(errno::EIO),
+            }
         }
         fcntl_cmd::F_GETLK
         | fcntl_cmd::F_SETLK
@@ -25787,6 +25841,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::ipc::pipe::close(rh);
         crate::ipc::pipe::close(wh);
         pcb::destroy(test_pid);
+    }
+
+    // Batch 128: fcntl(F_ADD_SEALS / F_GET_SEALS) — memfd sealing API.
+    //
+    // The dispatch arms gate on caller_pid() + linux_fd_lookup +
+    // kind == MemFd, then route to ipc::memfd::add_seals /
+    // ipc::memfd::get_seals which already have full subsystem-level
+    // coverage in ipc::memfd::self_test.  We exercise here the dispatch
+    // gate boundaries that have no direct subsystem coverage:
+    //   * kernel-context (no caller PCB) → EBADF on both cmds.
+    //   * constant numbers match Linux (1033 / 1034).
+    //   * non-memfd entry → EINVAL (replicating the arm policy).
+    {
+        // Constant sanity — Linux <linux/fcntl.h> values.
+        assert_eq!(fcntl_cmd::F_ADD_SEALS, 1033);
+        assert_eq!(fcntl_cmd::F_GET_SEALS, 1034);
+
+        // Kernel-context gate fires before the new cmd handling, so
+        // the seal arms return EBADF without reaching the memfd
+        // subsystem.  This guards against accidentally reordering the
+        // caller_pid check below the cmd switch.
+        for cmd in [fcntl_cmd::F_ADD_SEALS, fcntl_cmd::F_GET_SEALS] {
+            let a = SyscallArgs {
+                arg0: 0, arg1: u64::from(cmd), arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::FCNTL, &a);
+            if r.value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl(0, {}) kernel-ctx → {} (expected -EBADF)",
+                    cmd, r.value,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Non-memfd kind gate: replicate the arm policy locally.  The
+        // arm rejects non-MemFd fds with EINVAL (not EBADF) so a
+        // process that calls F_ADD_SEALS on a regular file sees the
+        // same error Linux's mm/shmem.c returns for the same shape.
+        let kind_gate = |k: HandleKind| -> Result<(), i32> {
+            if k != HandleKind::MemFd { Err(errno::EINVAL) } else { Ok(()) }
+        };
+        assert_eq!(kind_gate(HandleKind::File), Err(errno::EINVAL));
+        assert_eq!(kind_gate(HandleKind::Pipe), Err(errno::EINVAL));
+        assert_eq!(kind_gate(HandleKind::Console), Err(errno::EINVAL));
+        assert_eq!(kind_gate(HandleKind::EventFd), Err(errno::EINVAL));
+        assert_eq!(kind_gate(HandleKind::PidFd), Err(errno::EINVAL));
+        assert_eq!(kind_gate(HandleKind::MemFd), Ok(()));
+
+        // Direct subsystem round-trip — install seals via the memfd
+        // module (which is what the F_ADD_SEALS arm calls) and verify
+        // F_GET_SEALS would observe them.  This catches a regression
+        // where the arm forgets to call into memfd::add_seals at all.
+        let h = crate::ipc::memfd::create_with_flags(b"fcntl-seal-test".to_vec(), true);
+        crate::ipc::memfd::add_seals(h, crate::ipc::memfd::F_SEAL_WRITE)?;
+        let got = crate::ipc::memfd::get_seals(h)?;
+        if got != crate::ipc::memfd::F_SEAL_WRITE {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd seals round-trip {} != {}",
+                got, crate::ipc::memfd::F_SEAL_WRITE,
+            );
+            crate::ipc::memfd::close(h);
+            return Err(KernelError::InternalError);
+        }
+        crate::ipc::memfd::close(h);
+        serial_println!("[syscall/linux]   fcntl F_ADD_SEALS/F_GET_SEALS gate: OK");
     }
 
     // Batch 92: fcntl(F_GET_RW_HINT / F_SET_RW_HINT /

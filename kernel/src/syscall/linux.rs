@@ -17776,8 +17776,16 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 == 0 {
         return linux_err(errno::EINVAL);
     }
-    // 16 KiB page alignment for start.
-    if args.arg0 % 0x4000 != 0 {
+    // 4 KiB ABI page alignment for start: Linux's mm/mempolicy.c uses
+    // PAGE_SIZE (4096 on x86_64) for the start alignment check.  Our
+    // internal FRAME_SIZE is 16 KiB, but the user-visible Linux ABI is
+    // 4 KiB on x86_64 — and feature-probing libraries (libnuma, glibc
+    // numa_set_localalloc) hand in 4 KiB-aligned addresses they got
+    // from /proc/self/maps or sysconf(_SC_PAGESIZE).  Requiring 16 KiB
+    // alignment forces those probes to see EINVAL on every reasonable
+    // call.  Same issue/fix as sys_msync (batch 196).
+    const ABI_PAGE_SIZE: u64 = 4096;
+    if args.arg0 & (ABI_PAGE_SIZE - 1) != 0 {
         return linux_err(errno::EINVAL);
     }
     // With a single NUMA node (node 0), pinning the home node of
@@ -38113,6 +38121,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node range2 not 0");
             return Err(KernelError::InternalError);
         }
+        // Batch 201: 4 KiB-aligned (but NOT 16 KiB-aligned) start
+        // must be accepted — Linux's mm/mempolicy.c uses PAGE_SIZE
+        // (4096 on x86_64) for the alignment gate, not our internal
+        // 16 KiB FRAME_SIZE.  Pre-batch this returned EINVAL because
+        // 0x1000 % 0x4000 != 0; post-batch it returns 0 because
+        // 0x1000 & (4096 - 1) == 0.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy_home_node 4K-aligned not 0 ({})",
+                dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // 1-byte-misaligned (off by 1 from 4 KiB grid) must still
+        // be EINVAL — proves the new gate is tighter than "anything
+        // goes", not laxer than Linux.
+        let a = SyscallArgs { arg0: 0x1001, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node off-by-1 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   set_mempolicy_home_node 4K-aligned: OK");
 
         // Batch 60: getrandom flag validation.
         //   - Unknown flag bit (0x10) -> EINVAL.

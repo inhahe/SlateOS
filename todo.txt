@@ -18984,3 +18984,42 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          anything but -EINVAL.  Same condition.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 230. [DONE 2026-06-05] Linux ABI: sys_set_mempolicy_home_node 4 KiB alignment.
+##      The start-address alignment gate in sys_set_mempolicy_home_node
+##      used our internal 16 KiB FRAME_SIZE (args.arg0 % 0x4000) where
+##      Linux's mm/mempolicy.c uses PAGE_SIZE (4096 on x86_64).  Feature
+##      probes from libnuma / glibc numa_set_localalloc that hand us a
+##      4 KiB-aligned address (the value they got from sysconf
+##      (_SC_PAGESIZE) or /proc/self/maps) would see EINVAL where Linux
+##      accepts.  Same class of bug as the sys_msync FRAME_SIZE vs
+##      ABI_PAGE_SIZE fix (batch 196).
+##
+##      Fix: replace `args.arg0 % 0x4000 != 0` with
+##      `args.arg0 & (ABI_PAGE_SIZE - 1) != 0` where
+##      `const ABI_PAGE_SIZE: u64 = 4096;`.  Doc comment now cites the
+##      msync precedent and explains why ABI_PAGE_SIZE (Linux's
+##      user-visible PAGE_SIZE on x86_64) is correct.
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * set_mempolicy_home_node(start=0x1000, len=0x4000, node=0,
+##          flags=0) -> 0.  4 KiB-aligned but NOT 16 KiB-aligned start;
+##          pre-batch returned EINVAL, post-batch returns 0.
+##        * set_mempolicy_home_node(start=0x1001, ...) -> EINVAL.
+##          Off-by-one from the 4 KiB grid; proves the gate didn't get
+##          weaker — only narrower in the right direction.
+##      Existing tests for node!=0, flags!=0, len=0, 0x4001-misaligned,
+##      0x4000-aligned valid, idempotent, and second-range cases still
+##      pass unchanged.
+##      Marker emitted: "set_mempolicy_home_node 4K-aligned: OK".
+##
+##      Known limitations:
+##        * Single NUMA node only.  home_node > 0 still EINVAL; that
+##          is correct for our topology but must be revisited when
+##          real NUMA arrives.
+##        * No backing mempolicy state — Linux walks the VMA tree and
+##          applies the home-node hint per-vma.  We accept and return
+##          0 because, with one node, there is no observable
+##          difference.  When NUMA lands, this needs a real VMA scan.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

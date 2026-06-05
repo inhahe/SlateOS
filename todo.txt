@@ -20295,5 +20295,47 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 259. [DONE 2026-06-05] Linux ABI: sys_landlock_create_ruleset forward-compat
+##      trailing-zero E2BIG check — extends the pattern from batches
+##      227/228/229 to security/landlock/syscalls.c.
+##
+##      Linux's landlock_create_ruleset calls
+##      copy_min_struct_from_user(&attr, sizeof(attr), ksize_min, uattr,
+##      usize) where ksize_min = offsetofend(struct
+##      landlock_ruleset_attr, handled_access_fs) = 8.  When usize > 8,
+##      the wrapper walks bytes [8, usize) and returns -E2BIG on the
+##      first non-zero byte so probes can detect what the kernel knows.
+##
+##      Pre-batch divergence:
+##      - (attr=16-byte buffer with byte[8]=1, size=16) returned ENOSYS
+##        where Linux returns E2BIG.  Same shape as the openat2/clone3/
+##        mount_setattr limitations closed in batches 227/228/229.
+##
+##      Fix: after the existing validate_user_read, when
+##      `args.arg1 > LANDLOCK_RULESET_ATTR_KSIZE (8)` walk the trailing
+##      `size - 8` bytes in 64-byte chunks via copy_from_user and
+##      return E2BIG on the first non-zero byte.  Insertion point is
+##      right after the readable-range check, before the terminal
+##      ENOSYS — matches Linux's copy_struct_from_user order, which
+##      does the trailing-zero walk before any field interpretation.
+##
+##      Self-tests added (after the batch-224 size-gate marker):
+##      - landlock_create_ruleset size=16 (zero pad)   -> ENOSYS
+##                                                       (confirms
+##                                                        forward-compat
+##                                                        sizes still
+##                                                        work).
+##      - landlock_create_ruleset size=16 (byte[8]=1)  -> E2BIG (was
+##                                                        ENOSYS).
+##      Marker: "landlock_create_ruleset forward-compat trailing-zero
+##      E2BIG: OK".
+##
+##      Known limitations: trailing bytes are read in 64-byte chunks
+##      via copy_from_user.  Worst case (size = PAGE_SIZE = 4096) is
+##      ~63 STAC/CLAC pairs.  Same shape as openat2/clone3/mount_setattr
+##      — see entries 256/257/258.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

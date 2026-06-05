@@ -16071,6 +16071,38 @@ fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, args.arg1 as usize) {
         return linux_err(linux_errno_for(e));
     }
+    // Forward-compat trailing-zero check (Linux lib/usercopy.c
+    // `copy_struct_from_user`).  If `usize > ksize` (=8 here, the
+    // offsetofend(handled_access_fs)), any non-zero byte in the
+    // unknown tail must return -E2BIG so probes can detect what
+    // the kernel knows.  Without this, a userspace probe passing
+    // size=16 with non-zero garbage at byte 8 would silently
+    // succeed where Linux returns -E2BIG.
+    const LANDLOCK_RULESET_ATTR_KSIZE: u64 = 8;
+    if args.arg1 > LANDLOCK_RULESET_ATTR_KSIZE {
+        let excess_addr = args.arg0.wrapping_add(LANDLOCK_RULESET_ATTR_KSIZE);
+        let excess_len = (args.arg1 - LANDLOCK_RULESET_ATTR_KSIZE) as usize;
+        let mut chunk = [0u8; 64];
+        let mut off: usize = 0;
+        while off < excess_len {
+            let take = core::cmp::min(64, excess_len - off);
+            // SAFETY: validate_user_read covered the full [attr, attr+size)
+            // range above; the excess sub-range is contained within it.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_from_user(
+                    excess_addr.wrapping_add(off as u64),
+                    chunk.as_mut_ptr(),
+                    take,
+                )
+            } {
+                return linux_err(linux_errno_for(e));
+            }
+            if chunk[..take].iter().any(|&b| b != 0) {
+                return linux_err(errno::E2BIG);
+            }
+            off += take;
+        }
+    }
     linux_err(errno::ENOSYS)
 }
 
@@ -37699,6 +37731,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   landlock_create_ruleset NULL-EFAULT > size-EINVAL > size-E2BIG gate order: OK"
+        );
+        // Batch 230 forward-compat trailing-zero E2BIG check.  Linux's
+        // copy_struct_from_user (lib/usercopy.c) requires that any
+        // bytes past the kernel-known size (ksize=8) are zero; the
+        // first non-zero byte returns -E2BIG so probes can detect
+        // what the kernel knows.
+        //
+        // Case A: size=16 with zero tail -> ENOSYS (passes zero-check;
+        // landlock not implemented so terminal stub returns ENOSYS).
+        let landlock_pad_zero = [0u8; 16];
+        let a = SyscallArgs {
+            arg0: landlock_pad_zero.as_ptr() as u64,
+            arg1: 16,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock (attr, size=16, zero-pad) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case B: size=16 with non-zero byte at offset 8 -> E2BIG.
+        let mut landlock_pad_nonzero = [0u8; 16];
+        landlock_pad_nonzero[8] = 1;
+        let a = SyscallArgs {
+            arg0: landlock_pad_nonzero.as_ptr() as u64,
+            arg1: 16,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock (attr, size=16, nonzero-pad) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   landlock_create_ruleset forward-compat trailing-zero E2BIG: OK"
         );
         // landlock_add_rule bad rule_type -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

@@ -15754,20 +15754,58 @@ fn sys_seccomp(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `ptrace(request, pid, addr, data)`.
+///
+/// Linux's `kernel/ptrace.c::SYSCALL_DEFINE4(ptrace)` gates:
+///
+///   1. `if (request == PTRACE_TRACEME) ptrace_traceme(); goto out;`
+///      The TRACEME request never consults `pid` — it sets PT_PTRACED
+///      on the caller and returns success (or `EPERM` if the caller
+///      is already being traced).
+///   2. `child = find_get_task_by_vpid(pid)`; on failure `-ESRCH`.
+///   3. `if (request == PTRACE_ATTACH || PTRACE_SEIZE) ptrace_attach(...)`.
+///   4. `ptrace_check_attach(child, ...)`.
+///   5. `arch_ptrace(child, request, addr, data)` — unknown requests
+///      surface as `-EIO` from `ptrace_request`'s switch default.
+///
+/// Pre-batch we rejected `request > 0x10_000` with `EINVAL` ahead of
+/// the pid lookup, so a probe with `(req=garbage, pid=non-existent)`
+/// saw `EINVAL` where Linux returns `ESRCH` (the pid lookup fires
+/// first).  We also ignored the PTRACE_TRACEME special case and
+/// returned `ESRCH` for `(req=0, pid=negative)` where Linux ignores
+/// `pid` entirely and either succeeds or returns `EPERM`.
+///
+/// This kernel has no ptrace subsystem, so the terminal answer for
+/// a real tracing request is `EPERM` (the caller is not allowed to
+/// attach) — but the gates above must fire ahead of `EPERM` so probes
+/// see Linux-shaped errnos for malformed inputs.
 fn sys_ptrace(args: &SyscallArgs) -> SyscallResult {
-    // Linux requests range 0..=0x4300 but the dense common ones are
-    // 0..=33.  Just cap at 0x10_000 as a sanity bound; anything bigger
-    // is clearly bogus.
-    if args.arg0 > 0x10_000 {
-        return linux_err(errno::EINVAL);
+    // 1. PTRACE_TRACEME (request==0) ignores pid.  Linux returns
+    //    success for the first call and EPERM if the caller is
+    //    already being traced.  We return EPERM unconditionally:
+    //    self-tracing is meaningful only if a tracer can later
+    //    attach, which we never allow.
+    if args.arg0 == 0 {
+        return linux_err(errno::EPERM);
     }
+    // 2. Pid lookup.  Linux's find_get_task_by_vpid(pid) treats
+    //    non-positive pids as "not found" and returns ESRCH.  We
+    //    also probe pcb::name for the positive case so a probe
+    //    discovers ESRCH for a stale pid before reaching EPERM.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid = args.arg1 as i32;
-    if pid < 0 {
+    if pid <= 0 {
         return linux_err(errno::ESRCH);
     }
-    // EPERM is the truthful answer: this kernel does not allow
-    // attaching a tracer to a process.
+    #[allow(clippy::cast_sign_loss)]
+    let target: crate::proc::pcb::ProcessId = pid as u64;
+    if crate::proc::pcb::name(target).is_none() {
+        return linux_err(errno::ESRCH);
+    }
+    // 3-5. Pid resolved.  This kernel does not allow a tracer to
+    //      attach, so the terminal answer is EPERM regardless of
+    //      request.  A real implementation should also dispatch the
+    //      request switch and return EIO for unknown ops; for now
+    //      the EPERM denies the operation before the request matters.
     linux_err(errno::EPERM)
 }
 
@@ -35683,24 +35721,52 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   seccomp per-op flag validation: OK");
 
-        // ptrace huge req -> EINVAL.
-        let a = SyscallArgs { arg0: 0x20_000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: ptrace huge req not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        // ptrace negative pid -> ESRCH.
+        // ptrace(PTRACE_TRACEME=0, _, _, _) -> EPERM.  Linux ignores
+        // pid for TRACEME (it's a self-trace request), and we deny
+        // self-tracing because no tracer can ever attach.  Pre-batch
+        // this returned ESRCH because we tested pid<0 ahead of the
+        // TRACEME special-case.
         let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::ESRCH) {
-            serial_println!("[syscall/linux]   FAIL: ptrace neg pid not ESRCH");
-            return Err(KernelError::InternalError);
-        }
-        // ptrace valid -> EPERM.
-        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: ptrace valid not EPERM");
+            serial_println!(
+                "[syscall/linux]   FAIL: ptrace TRACEME -> {} (want EPERM)",
+                dispatch_linux(nr::PTRACE, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
+        // ptrace(PTRACE_ATTACH=16, pid=neg, _, _) -> ESRCH.  Linux's
+        // find_get_task_by_vpid treats non-positive as "not found".
+        let a = SyscallArgs { arg0: 16, arg1: u64::MAX, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: ptrace ATTACH neg pid not ESRCH");
+            return Err(KernelError::InternalError);
+        }
+        // ptrace(PTRACE_ATTACH=16, pid=huge non-existent, _, _) -> ESRCH.
+        // Pre-batch the pid<0 gate fired but a positive non-existent
+        // pid fell through to EPERM; now we probe pcb::name first.
+        let a = SyscallArgs { arg0: 16, arg1: 0x7FFF_FFFE, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: ptrace ATTACH stale pid -> {} (want ESRCH)",
+                dispatch_linux(nr::PTRACE, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // ptrace(0x20_000 = bogus huge req, pid=neg, _, _) -> ESRCH.
+        // Pre-batch we rejected this with EINVAL via a synthetic
+        // request-range gate Linux doesn't have; now pid lookup
+        // fires first as Linux does.
+        let a = SyscallArgs { arg0: 0x20_000, arg1: u64::MAX, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PTRACE, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: ptrace huge req + neg pid -> {} (want ESRCH)",
+                dispatch_linux(nr::PTRACE, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   ptrace TRACEME-first / pid-lookup / no-request-gate: OK"
+        );
 
         // clone3 NULL args -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 88, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

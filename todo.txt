@@ -18497,3 +18497,56 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        * security_bpf LSM hook is not modelled (we have no LSM).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+## 222. Linux ABI: ptrace TRACEME-first / pid-lookup / no-request-gate
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's kernel/ptrace.c::SYSCALL_DEFINE4(ptrace) gates:
+##        1. if (request == PTRACE_TRACEME) { ptrace_traceme();
+##           goto out; }                    -- ignores pid
+##        2. child = find_get_task_by_vpid(pid);
+##           if (!child) return -ESRCH;
+##        3. attach / check / arch_ptrace; unknown request inside
+##           arch_ptrace -> -EIO
+##
+##      Pre-batch sys_ptrace:
+##        * Rejected request > 0x10_000 with EINVAL upfront — Linux
+##          has no such gate; unknown requests surface EIO from the
+##          per-arch switch default, AFTER the pid lookup.
+##        * Returned ESRCH for (request=0=TRACEME, pid=negative).
+##          Linux ignores pid for TRACEME entirely; the negative pid
+##          shouldn't enter the picture at all.
+##        * Returned EPERM for (any request, pid=positive but
+##          non-existent).  Linux returns ESRCH first because
+##          find_get_task_by_vpid fails.
+##
+##      Fix: reorder so PTRACE_TRACEME is checked first (returns
+##      EPERM — we deny self-tracing); then pid<=0 -> ESRCH; then
+##      pcb::name(pid).is_none() -> ESRCH; then terminal EPERM.
+##      Drop the synthetic request-range gate.
+##
+##      Self-tests updated/added (4):
+##        * PTRACE(TRACEME=0, pid=neg) -> EPERM (was ESRCH).
+##          Confirms TRACEME ignores pid.
+##        * PTRACE(ATTACH=16, pid=neg) -> ESRCH (new).  Same as old
+##          "negative pid" coverage but with a non-TRACEME request.
+##        * PTRACE(ATTACH=16, pid=0x7FFF_FFFE non-existent) -> ESRCH
+##          (new).  Confirms pcb::name existence check fires.
+##        * PTRACE(req=0x20_000 bogus, pid=neg) -> ESRCH (was
+##          EINVAL).  Confirms pid lookup shadows the synthetic
+##          request-range gate.
+##      Marker emitted: "ptrace TRACEME-first / pid-lookup /
+##      no-request-gate: OK".
+##
+##      Known limitations:
+##        * Real PTRACE_TRACEME should succeed once on a fresh
+##          caller (and only return EPERM on a re-call from an
+##          already-traced task).  We return EPERM unconditionally
+##          because no tracer can attach in this kernel.
+##        * Request-switch dispatch isn't implemented at all; once a
+##          ptrace subsystem lands, the EIO-for-unknown-request path
+##          should fire after the pid resolves (e.g. for
+##          (req=0x20_000, pid=valid) -> EIO).
+##        * No PR_SET_PTRACER / Yama policy enforcement.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 25s).

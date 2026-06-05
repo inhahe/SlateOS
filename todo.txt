@@ -19407,3 +19407,43 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      simulate a page-faulting userspace pointer.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 240. [DONE 2026-06-05] Linux ABI: sys_statmount flags-first +
+##      copy_mnt_id_req size gates (E2BIG / EINVAL).
+##
+##      Pre-batch sys_statmount (kernel/src/syscall/linux.rs) ran
+##      EFAULT/EINVAL pointer + bufsize gates ahead of the flags!=0
+##      check.  Linux's fs/namespace.c::SYSCALL_DEFINE4(statmount)
+##      runs `if (flags) return -EINVAL` FIRST, ahead of any pointer
+##      touch.  Additionally, copy_mnt_id_req validates the leading
+##      `size` u32 field:
+##         size > PAGE_SIZE -> E2BIG
+##         size < MNT_ID_REQ_SIZE_VER0 (24) -> EINVAL
+##         copy_struct_from_user
+##         spare != 0 -> EINVAL
+##      Pre-batch we ignored the size field entirely and the
+##      `valid_mnt_req` test buffer was all-zero — happened to pass
+##      because no size gate was being applied.  Probes walking the
+##      size field saw consistent ENOENT where Linux returns E2BIG
+##      for size>PAGE_SIZE and EINVAL for size<24.
+##
+##      Fix: reorder to flags -> req NULL -> size field read ->
+##      E2BIG/EINVAL gates -> full-struct validate_user_read ->
+##      buf/bufsize -> terminal ENOENT.  PAGE_SIZE pegged at Linux
+##      x86_64 4096, not our internal 16 KiB FRAME_SIZE.
+##
+##      Self-tests added/updated:
+##      - (req=NULL, flags=1) -> EINVAL  (was EFAULT)  flags-first.
+##      - (req=NULL, flags=0) -> EFAULT  (unchanged).
+##      - (valid_req size=16) -> EINVAL  (new; size<24 gate).
+##      - (valid_req size=8192) -> E2BIG  (new; size>PAGE gate).
+##      - (valid_req size=24, bufsize=0) -> EINVAL (unchanged path).
+##      - (valid_req size=24, bufsize=128) -> ENOENT (unchanged).
+##      Marker: "statmount flags-first / size E2BIG / size<VER0 EINVAL: OK".
+##
+##      Follow-up candidate: sys_listmount has the same Linux
+##      structure (copy_mnt_id_req + flags-first + LISTMOUNT_REVERSE
+##      mask) but pre-batch ordering — kept for the next batch to
+##      keep this one focused.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s on first try).

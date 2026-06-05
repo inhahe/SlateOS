@@ -18344,14 +18344,62 @@ fn sys_kexec_file_load(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `statmount(req*, buf*, bufsize, flags)`.
+///
+/// Linux's `fs/namespace.c::SYSCALL_DEFINE4(statmount)` gate order:
+///   1. `if (flags) return -EINVAL;` — runs first, ahead of any
+///      pointer touch.
+///   2. `copy_mnt_id_req(req, &kreq)`:
+///        a. `get_user(usize, &req->size)` -> -EFAULT on bad req.
+///        b. `usize > PAGE_SIZE` -> -E2BIG.
+///        c. `usize < MNT_ID_REQ_SIZE_VER0 (24)` -> -EINVAL.
+///        d. `copy_struct_from_user` -> -EFAULT.
+///        e. `kreq.spare != 0` -> -EINVAL.
+///   3. `do_statmount` -> -ENOENT for an unknown mnt_id.
+///
+/// Pre-batch we ran `req == 0 || buf == 0 -> EFAULT` ahead of the
+/// flags check, so `statmount(req=NULL, buf=NULL, _, flags=1)`
+/// returned -EFAULT where Linux returns -EINVAL (flags fires first).
+/// Reorder, and additionally surface the size-field gates from
+/// copy_mnt_id_req so probes walking the `size` field see the same
+/// E2BIG / EINVAL ladder Linux exposes.
 fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 || args.arg1 == 0 {
+    const MNT_ID_REQ_SIZE_VER0: u32 = 24;
+    // Linux x86_64 PAGE_SIZE for ABI; do not use our 16 KiB internal frame.
+    const LINUX_PAGE_SIZE: u32 = 4096;
+    // 1. flags first — Linux gates this ahead of every pointer touch.
+    if args.arg3 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 2a. get_user(size, &req->size) -> EFAULT on bad req.
+    if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
-    // struct mnt_id_req has a u32 size field at offset 0; min size is
-    // 24 bytes (size, spare, mnt_id, param).
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 24) {
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 4) {
         return linux_err(linux_errno_for(e));
+    }
+    let mut size_buf = [0u8; 4];
+    // SAFETY: validate_user_read above confirmed 4 bytes readable.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg0, size_buf.as_mut_ptr(), 4)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let usize_field = u32::from_le_bytes(size_buf);
+    // 2b. usize > PAGE_SIZE -> E2BIG.
+    if usize_field > LINUX_PAGE_SIZE {
+        return linux_err(errno::E2BIG);
+    }
+    // 2c. usize < MNT_ID_REQ_SIZE_VER0 -> EINVAL.
+    if usize_field < MNT_ID_REQ_SIZE_VER0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 2d. copy_struct_from_user the whole declared usize.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, usize_field as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Buffer / bufsize handling (after req is fully validated).
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
     }
     if args.arg2 == 0 {
         return linux_err(errno::EINVAL);
@@ -18359,11 +18407,7 @@ fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, args.arg2 as usize) {
         return linux_err(linux_errno_for(e));
     }
-    // flags must be 0 (no flags defined yet).
-    if args.arg3 != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // No mount-tree exposed yet — any mnt_id is unknown.
+    // 3. No mount-tree exposed yet — any mnt_id is unknown.
     linux_err(errno::ENOENT)
 }
 
@@ -39319,30 +39363,64 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   kexec_load/kexec_file_load flag validation: OK");
 
-        // statmount NULL req -> EFAULT.
+        // Linux's copy_mnt_id_req reads the leading u32 `size` field
+        // from the user-supplied request and gates on it:
+        //   size > PAGE_SIZE -> E2BIG; size < MNT_ID_REQ_SIZE_VER0 (24)
+        //   -> EINVAL; otherwise copy the full declared size.  Build a
+        // properly-shaped request for the valid/bufsize tests.
+        #[repr(C)]
+        struct MntIdReq { size: u32, spare: u32, mnt_id: u64, param: u64 }
+        let valid_mnt_req = MntIdReq { size: 24, spare: 0, mnt_id: 0, param: 0 };
+        let valid_mnt_req_ptr = (&raw const valid_mnt_req) as u64;
+        let small_mnt_req = MntIdReq { size: 16, spare: 0, mnt_id: 0, param: 0 };
+        let small_mnt_req_ptr = (&raw const small_mnt_req) as u64;
+        let huge_mnt_req = MntIdReq { size: 8192, spare: 0, mnt_id: 0, param: 0 };
+        let huge_mnt_req_ptr = (&raw const huge_mnt_req) as u64;
+
+        // statmount flags!=0 -> EINVAL.  Pre-batch the NULL-req EFAULT
+        // gate fired first; Linux runs flags ahead of every pointer
+        // touch.  Confirm with req=NULL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: statmount flags-first not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // statmount NULL req -> EFAULT (after flags gate).
         let a = SyscallArgs { arg0: 0, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: statmount NULL req not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // statmount bufsize 0 -> EINVAL.
-        let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        // statmount size < MNT_ID_REQ_SIZE_VER0 -> EINVAL.
+        let a = SyscallArgs { arg0: small_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: statmount size<24 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // statmount size > PAGE_SIZE (4096) -> E2BIG.
+        let a = SyscallArgs { arg0: huge_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: statmount size>PAGE not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        // statmount valid req, bufsize 0 -> EINVAL.
+        let a = SyscallArgs { arg0: valid_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: statmount bufsize=0 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // statmount flags!=0 -> EINVAL.
-        let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 1, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: statmount flags!=0 not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        // statmount valid -> ENOENT.
-        let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 0, arg4: 0, arg5: 0 };
+        // statmount valid req+buf -> ENOENT (no mount tree).
+        let a = SyscallArgs { arg0: valid_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 128, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::ENOENT) {
             serial_println!("[syscall/linux]   FAIL: statmount valid not ENOENT");
             return Err(KernelError::InternalError);
         }
+        core::hint::black_box(&valid_mnt_req);
+        core::hint::black_box(&small_mnt_req);
+        core::hint::black_box(&huge_mnt_req);
+        serial_println!(
+            "[syscall/linux]   statmount flags-first / size E2BIG / size<VER0 EINVAL: OK"
+        );
         // listmount valid -> ENOENT.
         let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 8, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::ENOENT) {

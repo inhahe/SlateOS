@@ -12118,9 +12118,37 @@ fn sys_fremovexattr(args: &SyscallArgs) -> SyscallResult {
 /// probes passing a junk type see the same errno as on Linux instead
 /// of being told they lacked privilege.
 fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
-    // type = cmd & 0xff; MAXQUOTAS == 3 (USR, GRP, PRJ).
-    let typ = (args.arg0 & 0xff) as u32;
+    // Linux's `fs/quota/quota.c::SYSCALL_DEFINE4(quotactl)` decodes
+    // cmd via:
+    //   cmds = cmd >> SUBCMDSHIFT   // SUBCMDSHIFT = 8
+    //   type = cmd & SUBCMDMASK     // SUBCMDMASK  = 0xff
+    // then validates `type < MAXQUOTAS (3)` and dispatches on `cmds`.
+    // The dispatch's default arm returns -EINVAL.  Before this batch
+    // we accepted any `cmds` value and returned EPERM at the bottom,
+    // which collapsed "valid op + unprivileged caller" with "garbage
+    // op" into the same answer.  A libquota / setquota / repquota
+    // probe walking cmd values to discover what the kernel actually
+    // implements saw EPERM for everything (including obvious garbage
+    // like cmd = 0xdeadbeef00), defeating the probe.
+    //
+    // Mirror Linux's gate order: type check, then cmds whitelist,
+    // then path validation, then the terminal EPERM.
+    const SUBCMDMASK: u64 = 0xff;
+    const SUBCMDSHIFT: u32 = 8;
+    let typ = (args.arg0 & SUBCMDMASK) as u32;
     if typ >= 3 {
+        return linux_err(errno::EINVAL);
+    }
+    let cmds = args.arg0 >> SUBCMDSHIFT;
+    // Generic quotactl ops (include/uapi/linux/quota.h):
+    //   Q_SYNC=0x800001, Q_QUOTAON=0x800002, Q_QUOTAOFF=0x800003,
+    //   Q_GETFMT=0x800004, Q_GETINFO=0x800005, Q_SETINFO=0x800006,
+    //   Q_GETQUOTA=0x800007, Q_SETQUOTA=0x800008, Q_GETNEXTQUOTA=0x800009.
+    let generic_ok = (0x800001..=0x800009).contains(&cmds);
+    // XFS quotactl ops (XQM_CMD(n) = ('X'<<8) | n = 0x5800 | n):
+    //   Q_XQUOTAON..Q_XGETNEXTQUOTA = 0x5801..0x5809.
+    let xfs_ok = (0x5801..=0x5809).contains(&cmds);
+    if !generic_ok && !xfs_ok {
         return linux_err(errno::EINVAL);
     }
     // special is a path pointer (when needed); validate if non-NULL.
@@ -31945,13 +31973,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // quotactl with NULL special -> EPERM (NULL is allowed; type=0
-        // is USRQUOTA, valid).
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+        // quotactl(cmd=Q_SYNC<<8|USRQUOTA=0x80000100) NULL special
+        // -> EPERM.  Q_SYNC=0x800001 is a valid generic op and
+        // type=0 (USRQUOTA) is valid, so the gate passes and we
+        // land on the terminal privilege check.
+        let a = SyscallArgs { arg0: 0x8000_0100, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::QUOTACTL, &a).value
             != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: quotactl not EPERM");
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_SYNC) not EPERM");
             return Err(KernelError::InternalError);
         }
         // quotactl with type=3 (>= MAXQUOTAS) -> EINVAL.  cmd encodes
@@ -31973,6 +32003,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   quotactl type validation: OK");
+
+        // quotactl cmds whitelist tests.  Linux decodes
+        // `cmds = cmd >> 8` and dispatches; anything outside the
+        // known op tables falls through to the default `-EINVAL`
+        // arm ahead of the privilege check.
+        // Q_GETQUOTA=0x800007 with type=0 -> valid op, EPERM.
+        let a = SyscallArgs { arg0: 0x8000_0700, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_GETQUOTA) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Q_XQUOTAON=0x5801 with type=0 -> valid XFS op, EPERM.
+        let a = SyscallArgs { arg0: 0x580100, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_XQUOTAON) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Q_XGETNEXTQUOTA=0x5809 with type=0 -> valid XFS op, EPERM.
+        let a = SyscallArgs { arg0: 0x580900, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_XGETNEXTQUOTA) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // cmd=0 with type=0 -> cmds=0 is not in any whitelist -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(cmd=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // cmds=0x80000a is one past the generic range -> EINVAL.
+        let a = SyscallArgs { arg0: 0x8000_0a00, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(cmds=0x80000a) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // cmds=0x580a is one past the XFS range -> EINVAL.
+        let a = SyscallArgs { arg0: 0x580a00, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(cmds=0x580a) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // cmds=0xdeadbe (obvious garbage) -> EINVAL.
+        let a = SyscallArgs { arg0: 0xdeadbe00, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(cmds=0xdeadbe) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   quotactl cmd validation: OK");
         // quotactl_fd in kernel context -> EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

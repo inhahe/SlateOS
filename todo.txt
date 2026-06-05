@@ -16272,3 +16272,93 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   fanotify_mark flag
 ##      validation: OK" in build/serial-test.txt.
 
+
+## 184. Linux ABI: quotactl cmds-whitelist validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_quotactl.
+##
+##      Problem: sys_quotactl already gated `type >= MAXQUOTAS (3)`
+##              with EINVAL, but accepted any `cmds = cmd >> 8`
+##              value and fell through to the terminal EPERM.
+##              A libquota / setquota / repquota probe walking
+##              the cmd space to discover which ops the kernel
+##              implements saw EPERM uniformly — including for
+##              obvious garbage like cmd = 0xdeadbeef00 — when
+##              Linux's fs/quota/quota.c::SYSCALL_DEFINE4(quotactl)
+##              dispatches on `cmds` and the default arm returns
+##              EINVAL.  Collapsing "valid op + unprivileged caller"
+##              with "garbage op" into the same answer defeats
+##              probes that need to distinguish "this kernel
+##              doesn't know that op" from "this kernel knows it
+##              but won't let me run it without CAP_SYS_ADMIN".
+##
+##      Fix:    Mirrored Linux's gate order from
+##              fs/quota/quota.c::SYSCALL_DEFINE4(quotactl):
+##                1. typ = cmd & SUBCMDMASK (0xff); typ >= 3
+##                   -> EINVAL (kept).
+##                2. cmds = cmd >> SUBCMDSHIFT (8); reject ops
+##                   outside the two known whitelists:
+##                     * Generic ops 0x800001..=0x800009
+##                       (Q_SYNC..Q_GETNEXTQUOTA per
+##                       include/uapi/linux/quota.h).
+##                     * XFS ops 0x5801..=0x5809
+##                       (Q_XQUOTAON..Q_XGETNEXTQUOTA, encoded
+##                       as XQM_CMD(n) = ('X'<<8) | n).
+##                3. Validate `special` (arg1) with
+##                   validate_user_read for 1 byte if non-NULL
+##                   (EFAULT for unmapped) — kept.
+##                4. Terminal: EPERM for well-formed calls
+##                   (placeholder until real quota support).
+##
+##      Self-tests (boot-time):
+##        * quotactl(cmd=Q_SYNC<<8|0 = 0x80000100, NULL, ...)
+##          -> EPERM  (valid generic op; gate passes, terminal
+##          fires; replaces the old "arg0=0 -> EPERM" test which
+##          now correctly EINVALs since cmds=0 is not whitelisted).
+##        * quotactl(cmd=0x800003, ...) -> EINVAL  (type=3
+##          rejected ahead of cmds check; kept).
+##        * quotactl(cmd=0xff, ...) -> EINVAL  (type=0xff
+##          rejected; kept).
+##        * Emits "[syscall/linux]   quotactl type validation: OK".
+##        * quotactl(cmd=Q_GETQUOTA<<8|0 = 0x80000700, NULL, ...)
+##          -> EPERM  (valid generic op at top of range; new).
+##        * quotactl(cmd=Q_XQUOTAON<<8|0 = 0x580100, NULL, ...)
+##          -> EPERM  (valid XFS op at bottom of range; new).
+##        * quotactl(cmd=Q_XGETNEXTQUOTA<<8|0 = 0x580900, NULL,
+##          ...) -> EPERM  (valid XFS op at top of range; new).
+##        * quotactl(cmd=0, NULL, ...) -> EINVAL  (cmds=0 is
+##          not in any whitelist; new — was EPERM pre-batch).
+##        * quotactl(cmd=0x80000a00, ...) -> EINVAL  (cmds=
+##          0x80000a, one past generic range; new).
+##        * quotactl(cmd=0x580a00, ...) -> EINVAL  (cmds=
+##          0x580a, one past XFS range; new).
+##        * quotactl(cmd=0xdeadbe00, ...) -> EINVAL  (cmds=
+##          0xdeadbe, obvious garbage; new).
+##        * Emits "[syscall/linux]   quotactl cmd validation: OK".
+##
+##      Known limitations:
+##        * `special` (path) is only validated 1 byte deep, not
+##          the full string.  Sufficient for EFAULT visibility
+##          on unmapped pages; not for ENAMETOOLONG.
+##        * `addr` (arg2) and `id` (arg3) are not validated.
+##          Linux validates these per-op: Q_GETQUOTA needs a
+##          writable dqblk; Q_SETINFO needs a readable
+##          dqinfo; etc.  Without an actual quota implementation
+##          there's no struct layout to check against.  When
+##          real quota lands, this needs the per-op argument
+##          validation.
+##        * Terminal remains EPERM rather than per-op
+##          behavior.  Linux gives EPERM only when the caller
+##          lacks CAP_SYS_ADMIN for ops that need it; some
+##          ops (Q_SYNC with NULL special) work without
+##          privilege.  Distinguishing requires a real
+##          quota module.
+##        * Q_SETQB / Q_GETQB obsolete v1 ops are not in the
+##          whitelist (Linux dropped them).  Probes targeting
+##          those see EINVAL, which matches Linux 2.6+.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms both "[syscall/linux]   quotactl type
+##      validation: OK" and "[syscall/linux]   quotactl cmd
+##      validation: OK" in build/serial-test.txt.
+

@@ -19494,3 +19494,44 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      lands and the spare-zero path can actually succeed.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 242. [DONE 2026-06-05] Linux ABI: sys_mbind MPOL_MF_MOVE_ALL EPERM
+##      gate ahead of addr alignment.
+##
+##      Pre-batch sys_mbind (kernel/src/syscall/linux.rs) had no
+##      capability check for MPOL_MF_MOVE_ALL — the flag bits were
+##      accepted as long as they were a subset of MOVE|MOVE_ALL|
+##      STRICT (=0x7), then addr alignment was the next gate.  Linux
+##      `mm/mempolicy.c::do_mbind` runs:
+##         if (flags & ~(MPOL_MF_STRICT|MOVE|MOVE_ALL)) -> -EINVAL
+##         if ((flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE))
+##                                                      -> -EPERM
+##         if (start & ~PAGE_MASK)                      -> -EINVAL
+##      MOVE_ALL EPERM fires AFTER the flag-bits mask but AHEAD of
+##      addr alignment, so a probe passing (addr=unaligned,
+##      flags=MOVE_ALL) saw EINVAL where Linux returns EPERM.
+##
+##      Fix: insert `if flags & MPOL_MF_MOVE_ALL != 0 -> EPERM` between
+##      the flag-bits mask check and the addr-alignment check.  We
+##      have no per-task credentials struct in the dispatch-time test
+##      context, so MOVE_ALL is always EPERM (matches the
+##      unprivileged-task case on Linux).  When real task creds land
+##      with a capability set, replace this with a CAP_SYS_NICE check
+##      and the gate becomes conditional.
+##
+##      Self-tests added (continuing the existing (9g) mbind block):
+##      - Case 10: (addr=0x123 unaligned, flags=MOVE_ALL=2)
+##                  -> EPERM  (was EINVAL via addr).
+##      - Case 11: (addr=0x1000 aligned, flags=MOVE_ALL=2)
+##                  -> EPERM  (was 0).
+##      - Case 12: (addr=0x1000 aligned, flags=MOVE=1)
+##                  -> 0      (MOVE without MOVE_ALL is unprivileged).
+##      Marker: "mbind MOVE_ALL EPERM ahead of addr-align: OK".
+##
+##      Known limitation: when a task with a credentials struct
+##      lands and we wire a real CAP_SYS_NICE check, the gate
+##      becomes conditional — a privileged task with MOVE_ALL must
+##      then succeed.  Tests 11 and 12 will need a process-context
+##      variant covering that path.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s on first try).

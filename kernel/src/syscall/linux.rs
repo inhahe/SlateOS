@@ -14851,10 +14851,24 @@ fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
     let mode = mode_raw & MPOL_MODE_MASK;
 
     // mbind flags: MOVE | MOVE_ALL | STRICT (= 1 | 2 | 4).
+    const MPOL_MF_MOVE_ALL: u32 = 1 << 1;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg5 as u32;
     if flags & !0x7 != 0 {
         return linux_err(errno::EINVAL);
+    }
+    // Linux do_mbind: `(flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE)
+    // -> -EPERM`, fired immediately after the flag-bits sanity check
+    // and ahead of `start & ~PAGE_MASK` (addr alignment).  Pre-batch
+    // we ran addr alignment first, so a probe passing
+    // (addr=unaligned, flags=MPOL_MF_MOVE_ALL) saw EINVAL where
+    // Linux returns EPERM.  We have no per-task capability set in
+    // the dispatch-time test context, so MOVE_ALL is always EPERM
+    // here (matches the unprivileged-task case on Linux).  When a
+    // real task lands with a credentials struct, swap this for a
+    // CAP_SYS_NICE check.
+    if flags & MPOL_MF_MOVE_ALL != 0 {
+        return linux_err(errno::EPERM);
     }
 
     // addr must be page-aligned.  Linux returns -EINVAL otherwise.
@@ -23405,6 +23419,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Case 10: MPOL_MF_MOVE_ALL without CAP_SYS_NICE -> -EPERM.
+        // Linux do_mbind runs `(flags & MPOL_MF_MOVE_ALL) &&
+        // !capable(CAP_SYS_NICE) -> -EPERM` immediately after the
+        // flag-bits sanity check and ahead of `start & ~PAGE_MASK`
+        // (addr alignment).  Pre-batch we ran addr alignment first
+        // and a probe passing (addr=unaligned, flags=MOVE_ALL) saw
+        // EINVAL where Linux returns EPERM.  Verify the EPERM gate
+        // fires even with an unaligned addr.
+        const MPOL_MF_MOVE_ALL: u64 = 1 << 1;
+        let a = SyscallArgs {
+            arg0: 0x123, arg1: 0x1000, arg2: MPOL_DEFAULT,
+            arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ALL,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(unaligned,MOVE_ALL) -> {} (expected -EPERM)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 11: MPOL_MF_MOVE_ALL with aligned addr still -> -EPERM
+        // (capability gate, not address gate).
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_DEFAULT,
+            arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ALL,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(aligned,MOVE_ALL) -> {} (expected -EPERM)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 12: MPOL_MF_MOVE (not MOVE_ALL) does NOT trigger
+        // EPERM — MOVE is allowed for any user.  This case should
+        // still succeed UMA-style.
+        const MPOL_MF_MOVE_ONLY: u64 = 1 << 0;
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_DEFAULT,
+            arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ONLY,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(aligned,MOVE) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mbind MOVE_ALL EPERM ahead of addr-align: OK"
+        );
     }
 
     // (9h) Batch 104: migrate_pages upgraded from -ENOSYS stub to

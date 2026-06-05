@@ -4263,24 +4263,59 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::USER_SPACE_END;
 
+    // Linux gate order (mm/madvise.c::do_madvise):
+    //   1. madvise_behavior_valid(behavior)  -> -EINVAL  (FIRST)
+    //   2. !PAGE_ALIGNED(start)              -> -EINVAL
+    //   3. len = PAGE_ALIGN(len_in); overflow -> -EINVAL
+    //   4. end = start + len; end < start    -> -EINVAL
+    //   5. end == start (len==0)             -> 0  (no-op)
+    //   6. HWPOISON / SOFT_OFFLINE: madvise_inject_error
+    //                              !capable  -> -EPERM
+    //   7. (deeper VMA-lookup work; we no-op)  -> 0
+    //
+    // Pre-batch divergences fixed here:
+    //   * `len == 0 -> 0` was the FIRST gate, so a probe with bogus
+    //     advice (e.g. madvise(garbage, 0, 9999)) saw 0 where Linux
+    //     returns EINVAL (behavior_valid fires first).  Probes that
+    //     use len=0 to feature-detect advice values would falsely
+    //     conclude every advice is supported.
+    //   * Address bounds (USER_SPACE_END) check fired BEFORE the
+    //     advice dispatch, so `madvise(kernel_addr, len, MADV_HWPOISON)`
+    //     saw ENOMEM where Linux returns EPERM (inject_error's
+    //     capable() check fires ahead of the user-space VMA lookup).
+    //   * Misaligned addr with len=0 returned 0; Linux returns
+    //     EINVAL because alignment is gate 2, ahead of len==0.
+
     let addr = args.arg0;
     let len = args.arg1;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let advice = args.arg2 as i32;
 
-    // POSIX: zero-length succeeds as a no-op without any validation.
-    if len == 0 {
-        return SyscallResult::ok(0);
+    // Documented Linux MADV_* values.  Anything in 0..=25 is a known
+    // advisory hint; HWPOISON / SOFT_OFFLINE are privileged on Linux.
+    // See `include/uapi/asm-generic/mman-common.h`.
+    const MADV_HWPOISON: i32 = 100;
+    const MADV_SOFT_OFFLINE: i32 = 101;
+    const MADV_KNOWN_MAX: i32 = 25; // MADV_COLLAPSE
+
+    // Gate 1: madvise_behavior_valid — unknown advice short-circuits
+    // ahead of any address/length validation.
+    let behavior_known = matches!(
+        advice,
+        0..=MADV_KNOWN_MAX | MADV_HWPOISON | MADV_SOFT_OFFLINE,
+    );
+    if !behavior_known {
+        return linux_err(errno::EINVAL);
     }
 
-    // addr must be page-aligned (Linux requires alignment to the system
-    // page size; ours is 16 KiB).
+    // Gate 2: addr must be page-aligned.  Linux requires this even for
+    // len=0; we now match that semantics.  Our page is 16 KiB.
     let frame_size = FRAME_SIZE as u64;
     if (addr & (frame_size - 1)) != 0 {
         return linux_err(errno::EINVAL);
     }
 
-    // Round len up to whole frames for the bounds check.
+    // Gate 3: round len up to whole frames; reject overflow.
     let len_aligned = match len
         .checked_add(frame_size - 1)
         .map(|v| v & !(frame_size - 1))
@@ -4288,28 +4323,34 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
         Some(v) => v,
         None => return linux_err(errno::EINVAL),
     };
+    // Gate 4: addr + len overflow.
     let end = match addr.checked_add(len_aligned) {
         Some(e) => e,
         None => return linux_err(errno::EINVAL),
     };
+
+    // Gate 5: zero-length no-op (only after gates 1-4 have validated
+    // behavior and addr).
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // Gate 6: HWPOISON / SOFT_OFFLINE dispatch.  Linux's
+    // madvise_inject_error checks capable(CAP_SYS_ADMIN) before any
+    // VMA lookup, so EPERM fires ahead of out-of-user-space ENOMEM.
+    if advice == MADV_HWPOISON || advice == MADV_SOFT_OFFLINE {
+        return linux_err(errno::EPERM);
+    }
+
+    // Gate 7: for the documented no-op hints, the user-space bounds
+    // check stands in for Linux's per-VMA walk.  Anything outside our
+    // user range surfaces ENOMEM (no VMA covers the request).
     if addr >= USER_SPACE_END || end > USER_SPACE_END {
         return linux_err(errno::ENOMEM);
     }
 
-    // Documented Linux MADV_* values.  Anything in 0..=25 is a known
-    // advisory hint we accept as a no-op.  HWPOISON / SOFT_OFFLINE are
-    // privileged.  Anything else is EINVAL.
-    //
-    // See `include/uapi/asm-generic/mman-common.h` in the Linux tree.
-    const MADV_HWPOISON: i32 = 100;
-    const MADV_SOFT_OFFLINE: i32 = 101;
-    const MADV_KNOWN_MAX: i32 = 25; // MADV_COLLAPSE
-
-    match advice {
-        0..=MADV_KNOWN_MAX => SyscallResult::ok(0),
-        MADV_HWPOISON | MADV_SOFT_OFFLINE => linux_err(errno::EPERM),
-        _ => linux_err(errno::EINVAL),
-    }
+    // Known advisory hint over a valid user-space range: no-op success.
+    SyscallResult::ok(0)
 }
 
 /// `munmap(addr, len)` — passes through to native, then refunds the
@@ -24567,19 +24608,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    // madvise(addr, len, advice) coverage:
-    //   - len == 0: succeeds without further validation, even for bogus
-    //     addr / advice values.
-    //   - Known MADV_* advice (0..=25): returns 0 (no-op).  Crucial
-    //     because glibc/jemalloc/tcmalloc call MADV_DONTNEED on every
-    //     free; ENOSYS here would make them spam the syscall and leak
-    //     RSS unbounded.
-    //   - MADV_HWPOISON (100) and MADV_SOFT_OFFLINE (101): EPERM —
-    //     these are privileged memory-failure injection on Linux and
-    //     we don't expose them.
-    //   - Unknown advice: EINVAL.
-    //   - Misaligned addr (with nonzero len): EINVAL.
-    //   - Kernel-space addr (with nonzero len): ENOMEM.
+    // madvise(addr, len, advice) coverage, Linux do_madvise gate order:
+    //   1. behavior_valid  -> EINVAL  (FIRST — fires for unknown advice
+    //                                  even with len=0 and bad addr)
+    //   2. !PAGE_ALIGNED(addr) -> EINVAL
+    //   3. len overflow    -> EINVAL
+    //   4. addr+len overflow -> EINVAL
+    //   5. len == 0        -> 0  (no-op, after gates 1-4)
+    //   6. HWPOISON/SOFT_OFFLINE -> EPERM (capable check ahead of VMA walk)
+    //   7. out-of-user-range -> ENOMEM
+    //   8. known no-op advice -> 0
     {
         const MADV_DONTNEED: u64 = 4;
         const MADV_FREE: u64 = 8;
@@ -24587,12 +24625,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         const MADV_HWPOISON: u64 = 100;
         const MADV_SOFT_OFFLINE: u64 = 101;
 
-        // Zero-length always succeeds — even with intentionally bad
-        // addr and advice.
-        let a = SyscallArgs { arg0: 0x4001 /* misaligned! */, arg1: 0,
+        // Gate 1: unknown advice with len=0 and bogus addr -> EINVAL.
+        // Pre-batch this returned 0 because len==0 was the first gate.
+        let a = SyscallArgs { arg0: 0x4001 /* misaligned */, arg1: 0,
             arg2: 9999 /* bogus advice */, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: madvise(unknown advice, len=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Same shape with valid advice and valid addr — len=0 no-op.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MADVISE, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: madvise(len=0)");
+            serial_println!("[syscall/linux]   FAIL: madvise(known, len=0) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Gate 2: misaligned addr with len=0 and valid advice -> EINVAL.
+        // Pre-batch this returned 0 (len=0 short-circuited).
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: madvise(misalign, len=0) not EINVAL");
             return Err(KernelError::InternalError);
         }
 
@@ -24610,7 +24663,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
         }
 
-        // HWPOISON / SOFT_OFFLINE: EPERM.
+        // HWPOISON / SOFT_OFFLINE over a user range: EPERM.
         for advice in [MADV_HWPOISON, MADV_SOFT_OFFLINE] {
             let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
                 arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
@@ -24620,6 +24673,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+        }
+        // Gate 6: HWPOISON with kernel addr -> EPERM (capable check
+        // fires before the VMA bounds check).  Pre-batch this
+        // returned ENOMEM via the user-space bounds gate.
+        let a = SyscallArgs { arg0: 0xFFFF_8000_0000_0000, arg1: 0x4000,
+            arg2: MADV_HWPOISON, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: madvise(HWPOISON, kernel addr) not EPERM");
+            return Err(KernelError::InternalError);
         }
 
         // Unknown advice (26 — between documented max 25 and HWPOISON):
@@ -24639,13 +24701,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Kernel-space addr with nonzero len: ENOMEM.
+        // Kernel-space addr with nonzero len and valid no-op advice:
+        // ENOMEM (Linux's per-VMA walk finds no covering VMA).
         let a = SyscallArgs { arg0: 0xFFFF_8000_0000_0000, arg1: 0x4000,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::ENOMEM) {
             serial_println!("[syscall/linux]   FAIL: madvise kernel-addr");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   madvise behavior-EINVAL > align > overflow > len=0 > HWPOISON-EPERM > ENOMEM gate order: OK"
+        );
     }
 
     // wait4 wstatus encoding (pure function — no real reaped child

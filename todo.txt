@@ -19880,4 +19880,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 251. [DONE 2026-06-05] Linux ABI: sys_madvise gate order — behavior_valid
+##      first, then align/overflow, then len=0 no-op, then HWPOISON EPERM
+##      ahead of user-space ENOMEM.
+##
+##      Linux gate order (mm/madvise.c::do_madvise):
+##         1. madvise_behavior_valid(behavior)  -> -EINVAL  (FIRST)
+##         2. !PAGE_ALIGNED(start)              -> -EINVAL
+##         3. PAGE_ALIGN(len) overflow          -> -EINVAL
+##         4. start + len overflow              -> -EINVAL
+##         5. end == start (len==0)             -> 0  (no-op)
+##         6. HWPOISON/SOFT_OFFLINE inject_error: !capable -> -EPERM
+##         7. (per-VMA walk; we map to user-space-range -> ENOMEM)
+##         8. known no-op advice                -> 0
+##
+##      Pre-batch divergences in sys_madvise:
+##      - `len == 0 -> 0` was the FIRST gate, so a probe with bogus
+##        advice (madvise(addr, 0, 9999)) saw 0 where Linux returns
+##        EINVAL.  Probes that use len=0 to feature-detect advice
+##        values would falsely conclude every advice is supported,
+##        then call with real len and observe a different errno.
+##      - Misaligned addr with len=0 returned 0; Linux returns
+##        EINVAL because alignment is gate 2, ahead of the len==0
+##        short-circuit.
+##      - `madvise(kernel_addr, len, MADV_HWPOISON)` returned ENOMEM
+##        via the user-space bounds gate, where Linux's
+##        madvise_inject_error checks capable() ahead of the VMA
+##        walk and returns EPERM.
+##
+##      Fix: reorder validation to mirror Linux's source statement
+##      order: behavior_valid -> alignment -> overflow -> len=0 no-op
+##      -> HWPOISON EPERM -> user-space ENOMEM -> known-advice 0.
+##
+##      Self-tests updated/added (~line 24590):
+##      - madvise(0x4001, 0, 9999) -> EINVAL  (was 0; behavior gate).
+##      - madvise(0x4000, 0, 0)    -> 0       (new; len=0 no-op when
+##                                             behavior valid + aligned).
+##      - madvise(0x4001, 0, 0)    -> EINVAL  (new; alignment fires
+##                                             ahead of len=0 no-op).
+##      - madvise(kernel, 0x4000, HWPOISON) -> EPERM  (was ENOMEM;
+##                                             EPERM ahead of bounds).
+##      - kept: known-advice = 0, HWPOISON over user range = EPERM,
+##        unknown advice = EINVAL, misaligned with len>0 = EINVAL,
+##        kernel addr with valid no-op advice = ENOMEM.
+##      Marker: "madvise behavior-EINVAL > align > overflow > len=0 >
+##              HWPOISON-EPERM > ENOMEM gate order: OK".
+##
+##      Known limitations: gate 7 maps Linux's per-VMA walk to a
+##      simple user-space-range bound check.  A real implementation
+##      should walk the VMA tree and return ENOMEM only when no VMA
+##      covers the request — until we have VMA tracking, the bound
+##      check is a coarser approximation.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+
 

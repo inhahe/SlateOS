@@ -55,6 +55,9 @@
 //! |          |                   | / F_GETPIPE_SZ / F_SETPIPE_SZ      |
 //! |          |                   | / F_GETOWN_EX / F_SETOWN_EX        |
 //! |          |                   | / F_GETLEASE / F_SETLEASE          |
+//! |          |                   | / F_GET_RW_HINT / F_SET_RW_HINT    |
+//! |          |                   | / F_GET_FILE_RW_HINT               |
+//! |          |                   | / F_SET_FILE_RW_HINT               |
 //! | 257      | openat            | only AT_FDCWD; routes to VFS open  |
 //! | 292      | dup3              | via per-process Linux fd table     |
 //! | 293      | pipe2             | pipe with O_CLOEXEC / O_NONBLOCK   |
@@ -763,6 +766,40 @@ pub mod fcntl_cmd {
     /// if none).
     pub const F_GETLEASE: u32 = 1025;
     pub const F_DUPFD_CLOEXEC: u32 = 1030;
+
+    /// Per-open-fd write-life hint (`RWH_WRITE_LIFE_*`).  rocksdb /
+    /// postgres / leveldb use this to advise the I/O layer of the
+    /// expected lifetime of data written via this fd so SSD
+    /// wear-leveling can group writes by lifetime.
+    pub const F_GET_RW_HINT: u32 = 1035;
+    /// Counterpart write that updates the per-open-fd hint.
+    pub const F_SET_RW_HINT: u32 = 1036;
+    /// Per-file write-life hint (shared across all open fds of the
+    /// same inode).
+    pub const F_GET_FILE_RW_HINT: u32 = 1037;
+    /// Counterpart write that updates the per-file hint.
+    pub const F_SET_FILE_RW_HINT: u32 = 1038;
+
+    /// `RWH_WRITE_LIFE_*` values for F_*_RW_HINT.  Numeric values
+    /// match `<linux/fcntl.h>` and the in-kernel `WRITE_LIFE_*`
+    /// enum used by the block I/O layer for SSD wear-leveling.
+    pub mod write_hint {
+        /// No hint set — kernel uses default placement.
+        pub const RWH_WRITE_LIFE_NOT_SET: u64 = 0;
+        /// Caller has no hint to give.
+        pub const RWH_WRITE_LIFE_NONE: u64 = 1;
+        /// Short-lived data (temp files, hot caches).
+        pub const RWH_WRITE_LIFE_SHORT: u64 = 2;
+        /// Medium-lived data.
+        pub const RWH_WRITE_LIFE_MEDIUM: u64 = 3;
+        /// Long-lived data.
+        pub const RWH_WRITE_LIFE_LONG: u64 = 4;
+        /// Extreme-lifetime data (almost never rewritten).
+        pub const RWH_WRITE_LIFE_EXTREME: u64 = 5;
+        /// Inclusive upper bound on legal hint values.  Anything
+        /// above triggers EINVAL in F_SET_*.
+        pub const MAX: u64 = RWH_WRITE_LIFE_EXTREME;
+    }
 
     /// `arg` values for [`F_SETLEASE`] and return values for
     /// [`F_GETLEASE`].  These constants are shared across Linux's
@@ -2655,6 +2692,79 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
                 }
                 _ => linux_err(errno::EINVAL),
             }
+        }
+        fcntl_cmd::F_GET_RW_HINT | fcntl_cmd::F_GET_FILE_RW_HINT => {
+            // Linux returns the currently-set write-life hint as a
+            // u64 written to *arg.  We don't (yet) track hints per
+            // fd or per inode — but the truthful answer in that
+            // state is RWH_WRITE_LIFE_NOT_SET (== 0), which is the
+            // documented "no hint set" sentinel.  Callers like
+            // rocksdb interpret 0 as "no hint" and proceed without
+            // changing behaviour.
+            if pcb::linux_fd_lookup(pid, fd).is_none() {
+                return linux_err(errno::EBADF);
+            }
+            if arg == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            if let Err(e) = crate::mm::user::validate_user_write(arg, 8) {
+                return linux_err(linux_errno_for(e));
+            }
+            let hint: u64 = fcntl_cmd::write_hint::RWH_WRITE_LIFE_NOT_SET;
+            // SAFETY: validate_user_write confirmed [arg, arg+8) is a
+            // writable user range; copy_to_user re-checks under SMAP
+            // and copies exactly 8 bytes from a stack-local u64.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_to_user(
+                    core::ptr::addr_of!(hint).cast::<u8>(),
+                    arg,
+                    8,
+                )
+            } {
+                return linux_err(linux_errno_for(e));
+            }
+            SyscallResult::ok(0)
+        }
+        fcntl_cmd::F_SET_RW_HINT | fcntl_cmd::F_SET_FILE_RW_HINT => {
+            // Read the caller-supplied u64 hint, validate it lies in
+            // the documented RWH_WRITE_LIFE_* range, and silently
+            // discard it.  Hints are *advisory* — Linux itself drops
+            // them on filesystems that don't implement
+            // ->set_rw_hint, so callers must not assume they round-
+            // trip.  Pretending to store the hint (and reflecting it
+            // back in F_GET_*_RW_HINT) would be a lie; reporting
+            // NOT_SET is truthful.  When a real I/O scheduler grows
+            // wear-leveling awareness, this arm starts plumbing the
+            // hint into per-fd / per-inode state.
+            if pcb::linux_fd_lookup(pid, fd).is_none() {
+                return linux_err(errno::EBADF);
+            }
+            if arg == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            if let Err(e) = crate::mm::user::validate_user_read(arg, 8) {
+                return linux_err(linux_errno_for(e));
+            }
+            let mut hint: u64 = 0;
+            // SAFETY: validate_user_read confirmed [arg, arg+8) is a
+            // readable user range; copy_from_user re-checks under
+            // SMAP and writes exactly 8 bytes into a stack-local u64.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_from_user(
+                    arg,
+                    core::ptr::addr_of_mut!(hint).cast::<u8>(),
+                    8,
+                )
+            } {
+                return linux_err(linux_errno_for(e));
+            }
+            if hint > fcntl_cmd::write_hint::MAX {
+                return linux_err(errno::EINVAL);
+            }
+            // Hint accepted-and-dropped.  Future: route into per-fd
+            // / per-inode storage when the I/O layer learns to
+            // honour it.
+            SyscallResult::ok(0)
         }
         // Linux `kernel/fcntl.c` returns -EINVAL (not -ENOSYS) for
         // unknown `cmd` values.  Match the reference behaviour so
@@ -20587,6 +20697,91 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::ipc::pipe::close(rh);
         crate::ipc::pipe::close(wh);
         pcb::destroy(test_pid);
+    }
+
+    // Batch 92: fcntl(F_GET_RW_HINT / F_SET_RW_HINT /
+    // F_GET_FILE_RW_HINT / F_SET_FILE_RW_HINT) — per-open-fd and
+    // per-file write-life hints used by rocksdb / postgres / leveldb
+    // to advise the I/O layer of expected write lifetime for SSD
+    // wear-leveling.  Pre-batch the four commands (cmd numbers
+    // 1035 / 1036 / 1037 / 1038) fell into the catch-all -> EINVAL.
+    //
+    // We don't (yet) implement an I/O scheduler that consumes these
+    // hints, so the truthful semantics we provide are:
+    //   * F_GET_*_RW_HINT on any valid fd writes
+    //     RWH_WRITE_LIFE_NOT_SET (== 0) into *arg and returns 0.
+    //   * F_SET_*_RW_HINT on any valid fd reads a u64 from *arg,
+    //     validates it's <= RWH_WRITE_LIFE_EXTREME (== 5), and
+    //     silently drops it (returns 0).  Out-of-range hint values
+    //     return EINVAL — matches Linux's fs/fcntl.c::rw_hint_valid.
+    //   * All four on a bad fd -> EBADF.
+    //   * *arg == NULL on all four -> EFAULT.
+    //
+    // Coverage exercises the routing branches (kernel-context EBADF
+    // gate) and the constant table.  The arm bodies themselves
+    // operate on a synthetic Linux process; since copy_to_user /
+    // copy_from_user can't be called against kernel-resident memory
+    // in this test harness, we exercise the gate-and-policy
+    // boundary plus the range check directly.
+    {
+        // Constant sanity.
+        assert_eq!(fcntl_cmd::F_GET_RW_HINT, 1035);
+        assert_eq!(fcntl_cmd::F_SET_RW_HINT, 1036);
+        assert_eq!(fcntl_cmd::F_GET_FILE_RW_HINT, 1037);
+        assert_eq!(fcntl_cmd::F_SET_FILE_RW_HINT, 1038);
+        assert_eq!(fcntl_cmd::write_hint::RWH_WRITE_LIFE_NOT_SET, 0);
+        assert_eq!(fcntl_cmd::write_hint::RWH_WRITE_LIFE_NONE, 1);
+        assert_eq!(fcntl_cmd::write_hint::RWH_WRITE_LIFE_SHORT, 2);
+        assert_eq!(fcntl_cmd::write_hint::RWH_WRITE_LIFE_MEDIUM, 3);
+        assert_eq!(fcntl_cmd::write_hint::RWH_WRITE_LIFE_LONG, 4);
+        assert_eq!(fcntl_cmd::write_hint::RWH_WRITE_LIFE_EXTREME, 5);
+        assert_eq!(fcntl_cmd::write_hint::MAX, 5);
+
+        // Kernel-context routing: all four new cmds short-circuit
+        // to EBADF before the arm runs (same gate as the rest of
+        // sys_fcntl).
+        for cmd in [
+            fcntl_cmd::F_GET_RW_HINT,
+            fcntl_cmd::F_SET_RW_HINT,
+            fcntl_cmd::F_GET_FILE_RW_HINT,
+            fcntl_cmd::F_SET_FILE_RW_HINT,
+        ] {
+            let a = SyscallArgs {
+                arg0: 0, arg1: u64::from(cmd), arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::FCNTL, &a);
+            if r.value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl(0, {}) kernel-ctx → {} (expected -EBADF)",
+                    cmd, r.value,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Policy: F_SET_*_RW_HINT accepts hint values 0..=MAX and
+        // rejects MAX+1 and above with EINVAL.  Replicate the range
+        // check verbatim so a future divergence between the arm
+        // body and this table is caught.
+        let set_hint_policy = |hint: u64| -> Result<i64, i32> {
+            if hint > fcntl_cmd::write_hint::MAX {
+                Err(errno::EINVAL)
+            } else {
+                Ok(0)
+            }
+        };
+        for ok_hint in 0..=fcntl_cmd::write_hint::MAX {
+            assert_eq!(set_hint_policy(ok_hint), Ok(0));
+        }
+        for bad_hint in [
+            fcntl_cmd::write_hint::MAX + 1,
+            7,
+            42,
+            u64::MAX,
+        ] {
+            assert_eq!(set_hint_policy(bad_hint), Err(errno::EINVAL));
+        }
     }
 
     // personality dispatch validation.

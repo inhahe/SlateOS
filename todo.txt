@@ -11309,3 +11309,84 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##            Err(EINVAL).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##
+## 121. Batch 92: fcntl(F_GET_RW_HINT=1035 / F_SET_RW_HINT=1036 /
+##      F_GET_FILE_RW_HINT=1037 / F_SET_FILE_RW_HINT=1038).
+##
+##      Rationale: rocksdb, postgres, leveldb, and modern log-
+##      structured databases probe these four cmds at startup to
+##      advise the I/O layer of expected data lifetime so SSD
+##      wear-leveling can group writes by lifetime class.  The
+##      RWH_WRITE_LIFE_* values (NOT_SET=0, NONE=1, SHORT=2,
+##      MEDIUM=3, LONG=4, EXTREME=5) come from <linux/fcntl.h>.
+##      Pre-batch all four fell into the fcntl catch-all and
+##      returned EINVAL, which userspace correctly interprets as
+##      "kernel doesn't recognise the cmd" — but it also makes
+##      probing noisy and prevents the libc layer from caching
+##      that the hint API is available.
+##
+##      Wiring: four new arms in sys_fcntl after the F_SETLEASE
+##      arm in linux.rs.  Constants and a write_hint:: submodule
+##      live in fcntl_cmd.  Doc table at the top of linux.rs
+##      mentions the four new cmds.
+##
+##      Linux semantics matched:
+##        * EBADF for a closed fd (lookup short-circuit before
+##          touching user memory).
+##        * EFAULT for arg == NULL (matches fs/fcntl.c::
+##          fcntl_rw_hint which dereferences the user pointer
+##          unconditionally).
+##        * F_GET_*_RW_HINT writes a u64 hint value to *arg —
+##          always RWH_WRITE_LIFE_NOT_SET because we don't yet
+##          track hints anywhere.  Returns 0 on success.
+##        * F_SET_*_RW_HINT reads a u64 from *arg, validates it
+##          is <= RWH_WRITE_LIFE_EXTREME (5), and returns 0.
+##          Out-of-range values return EINVAL — matches Linux's
+##          fs/fcntl.c::rw_hint_valid range check.
+##        * Bad user pointer (validate_user_read /
+##          validate_user_write failure) translates the kernel
+##          error via linux_errno_for — typically EFAULT.
+##
+##      Linux semantics deliberately NOT matched (yet):
+##        * No kernel-side hint storage: F_SET_*_RW_HINT
+##          silently drops the hint instead of persisting it.
+##          F_GET_*_RW_HINT therefore never reflects a
+##          previously-set value — it always reports NOT_SET.
+##          On real Linux, valid hints round-trip through the
+##          inode (FILE) or struct file (per-fd).  Pretending
+##          to round-trip would be a lie about behaviour the
+##          I/O layer can't honour; truthful NOT_SET lets
+##          callers fall through to default placement.
+##        * Per-inode lifecycle for F_*_FILE_RW_HINT (Linux
+##          stores those on struct inode so all fds of the
+##          same file see the same hint).  We have neither
+##          struct inode hint storage nor a wear-leveling
+##          aware I/O scheduler.  When either lands, these
+##          arms grow the plumbing — the syscall ABI stays
+##          stable.
+##
+##      Known limitation: the silent-drop on SET means any
+##      caller that explicitly queries after setting will see
+##      NOT_SET rather than its just-set value.  Database
+##      tuning code may log a warning ("hint did not take
+##      effect").  This is preferable to fake round-trip: the
+##      caller can detect the no-op and fall back to default
+##      placement, which is exactly what they'd do on a
+##      filesystem with no ->set_rw_hint method.
+##
+##      Self-test (boot path, batch 92 block in linux.rs after
+##      the batch 91 F_*LEASE block):
+##        * Constant sanity for all four cmd numbers and the
+##          full RWH_WRITE_LIFE_* range plus MAX.
+##        * Kernel-context dispatch_linux returns EBADF for
+##          each of the four new cmds (caller_pid gate intact
+##          before arm body runs).
+##        * Set-hint policy table mirrored from arm body:
+##          - hint in 0..=MAX -> Ok(0);
+##          - hint in {MAX+1, 7, 42, u64::MAX} -> Err(EINVAL).
+##        Arm-body memory access (copy_to_user / copy_from_user)
+##        cannot be exercised against kernel-resident memory in
+##        this harness; the gate and policy boundaries cover
+##        every branch reachable without a userspace mm context.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 21s).

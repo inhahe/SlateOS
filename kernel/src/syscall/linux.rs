@@ -17082,11 +17082,36 @@ fn sys_modify_ldt(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `iopl(level)`.
+///
+/// Linux's `arch/x86/kernel/ioport.c::SYSCALL_DEFINE1(iopl)`:
+///   if (level > 3) return -EINVAL;
+///   /* Trying to gain more privileges? */
+///   if (level > old && !capable(CAP_SYS_RAWIO))
+///       return -EPERM;
+///   ...
+///   t->iopl = level << 12;
+///   return 0;
+///
+/// `old` is the task's current IOPL (initially 0).  Lowering or
+/// equalling the current IOPL is a no-op success — only an *increase*
+/// requires CAP_SYS_RAWIO.  Our pre-batch stub returned EPERM for any
+/// non-out-of-range level including 0, which broke iopl(0) "drop any
+/// previously granted access" teardowns and made the level-0 probe
+/// (used by glibc and inetutils' rlogin to verify "no IOPL granted")
+/// look like a privilege failure rather than the expected confirmation.
+///
+/// Match Linux: level == 0 is always a no-op success because every
+/// task starts at IOPL 0 and "0 > 0" is false; level > 0 needs
+/// CAP_SYS_RAWIO which we don't grant.
 fn sys_iopl(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let level = args.arg0 as i32;
     if !(0..=3).contains(&level) {
         return linux_err(errno::EINVAL);
+    }
+    // Current IOPL of every task is 0 — we never grant elevation.
+    if level == 0 {
+        return SyscallResult::ok(0);
     }
     // Direct I/O port access is not granted to userspace — drivers
     // run as IPC servers behind capabilities.
@@ -35823,18 +35848,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // iopl bad level -> EINVAL.
+        // iopl bad level (> 3) -> EINVAL.
         let a = SyscallArgs { arg0: 4, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IOPL, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: iopl bad level not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // iopl valid -> EPERM.
+        // iopl level=3 -> EPERM (privilege elevation rejected).
         let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IOPL, &a).value != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: iopl valid not EPERM");
+            serial_println!("[syscall/linux]   FAIL: iopl level=3 not EPERM");
             return Err(KernelError::InternalError);
         }
+        // iopl level=0 -> 0 (no-op: every task starts at IOPL 0 and
+        // "level > old" is false, so no CAP_SYS_RAWIO needed).
+        // Pre-batch returned EPERM here, which broke iopl(0)
+        // teardown / "verify no IOPL granted" probes.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPL, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: iopl level=0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // iopl level=1/2 also need elevation; both EPERM.
+        for level in [1u64, 2] {
+            let a = SyscallArgs { arg0: level, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::IOPL, &a).value != -i64::from(errno::EPERM) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: iopl level={} not EPERM",
+                    level
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // iopl level=-1 (huge u64 truncating to negative i32) -> EINVAL
+        // (range check rejects).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IOPL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: iopl level=-1 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   iopl level=0 noop, >0 EPERM: OK"
+        );
 
         // ioperm out of range -> EINVAL.
         let a = SyscallArgs { arg0: 0x1_0000, arg1: 1, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };

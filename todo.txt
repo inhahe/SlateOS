@@ -1,3 +1,5 @@
+add microsoft-like ribbons to roadmap-detailed, with a note not to copy them to the degree that they would violate microsoft patents.
+
 The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
 ## FLAKY TEST (noticed+FIXED 2026-06-04): ktrace::self_test "Read back"
@@ -17019,3 +17021,66 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
 ##      Serial confirms "[syscall/linux]   ioperm turn_on=0 revoke
 ##      path: OK" in build/serial-test.txt.
+
+
+## 193. Linux ABI: iopl level=0 no-op success.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_iopl.
+##
+##      Problem: sys_iopl returned EPERM for every in-range level
+##              including 0.  Linux's
+##              arch/x86/kernel/ioport.c::SYSCALL_DEFINE1(iopl)
+##              gates the CAP_SYS_RAWIO check on level > current_iopl:
+##                if (level > old && !capable(CAP_SYS_RAWIO))
+##                    return -EPERM;
+##              Every task starts at IOPL 0, so `level == 0` always
+##              passes "0 > 0 == false" and is a no-op success
+##              regardless of capability.  glibc's iopl(0) teardown
+##              after a protected I/O block (mirror of the ioperm
+##              revoke pattern) and probes verifying "I have no IOPL
+##              right now" both expect 0; our pre-batch stub gave
+##              EPERM and made the probe conclude the kernel was
+##              actively denying a request it should have accepted.
+##
+##      Fix:    After the `level > 3 -> EINVAL` range check, treat
+##              `level == 0` as a no-op success (SyscallResult::ok(0)).
+##              Levels 1/2/3 still EPERM — we don't grant direct
+##              port access to userspace because drivers run as
+##              IPC servers behind capabilities.
+##
+##      Self-tests (boot-time):
+##        * iopl(4) -> EINVAL  (kept; out of range).
+##        * iopl(3) -> EPERM  (renamed marker to clarify
+##          "level=3 needs CAP_SYS_RAWIO").
+##        * iopl(0) -> 0  (new; no-op success).
+##        * iopl(1) -> EPERM  (new; loop also covers level=2).
+##        * iopl(2) -> EPERM  (new).
+##        * iopl(u64::MAX) -> EINVAL  (new; -1 as i32 outside 0..=3).
+##        * Emits "[syscall/linux]   iopl level=0 noop, >0 EPERM:
+##          OK".
+##
+##      Known limitations:
+##        * The success path doesn't actually adjust any per-task
+##          IOPL — there's nothing to lower because we never raise.
+##          Real iopl support needs to write `t->iopl = level <<
+##          12` into the task struct and refresh the FLAGS image so
+##          IRET picks up the new IOPL.
+##        * `args.arg0 as i32` truncates the high u64 bits before
+##          the range check.  A u64 value with low 32 bits in
+##          [0, 3] but high bits set (e.g., 0x1_0000_0000) would
+##          truncate to 0 and slide through as a no-op success.
+##          Linux uses `unsigned int level` and accepts any u32
+##          value <= 3 with the same effect, so this matches
+##          Linux's behaviour on 32-bit-truncated arg passing.
+##          Adding an explicit `args.arg0 > 3 -> EINVAL` against
+##          the raw u64 would be stricter than Linux; left as-is.
+##        * iopl is deprecated in Linux 6.x in favour of ioperm
+##          for the common case (single-port grant) and remains
+##          for legacy callers.  No need to deprecate ours.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s; two prior
+##      runs hit the intermittent RCU self-test stall —
+##      same flake observed in batches 155 / 159 / others — third
+##      attempt passed).
+##      Serial confirms "[syscall/linux]   iopl level=0 noop, >0
+##      EPERM: OK" in build/serial-test.txt.

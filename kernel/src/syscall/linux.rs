@@ -4408,6 +4408,37 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         // continuing") even though the disable has no observable
         // effect on us.
         31 | 32 => SyscallResult::ok(0),
+        // PR_SET_TIMING (14) — select the timing-statistics mode for the
+        // calling task.  Linux only ever supported PR_TIMING_STATISTICAL
+        // (0); the originally-planned PR_TIMING_TIMESTAMP (1) was never
+        // wired up and `prctl_set_timing` rejects it with `EINVAL`.
+        // Linux ignores arg3..arg5 entirely (kernel/sys.c).  Mirror
+        // exactly: arg1 must be 0 (PR_TIMING_STATISTICAL), arg2..arg4
+        // (our positions for prctl arg3..arg5) are not validated.
+        //
+        // We do not record a per-task timing mode because there is only
+        // one valid value; PR_GET_TIMING below always returns 0.
+        //
+        // Returning success (instead of EINVAL on every call) prevents
+        // boot-time profilers and accounting wrappers (sysstat's `sar`,
+        // gnu coreutils `time` when probing for high-resolution timing,
+        // a few older glibc versions during NSS init) from emitting
+        // their "kernel does not support timing mode selection" warning
+        // on every invocation.
+        14 => {
+            if args.arg1 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_TIMING (13) — return the current timing-statistics
+        // mode.  Linux returns PR_TIMING_STATISTICAL (0) unconditionally
+        // (`prctl_get_timing` is hard-coded to that value) and ignores
+        // arg2..arg5.  Mirror exactly.
+        //
+        // No per-PCB storage: the kernel offers only one timing mode,
+        // so the return value is a constant.
+        13 => SyscallResult::ok(0),
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -17668,6 +17699,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_mdwe_bits(test_pid), None);
             assert_eq!(pcb::set_mdwe_bits(test_pid, 1), None);
+        }
+
+        // Batch 77: PR_GET_TIMING / PR_SET_TIMING — Linux supports
+        // only one timing mode (PR_TIMING_STATISTICAL = 0).
+        // Verifications:
+        //   1. PR_SET_TIMING(0) -> 0.
+        //   2. PR_SET_TIMING(1) -> EINVAL (PR_TIMING_TIMESTAMP is the
+        //      reserved-but-unimplemented mode that Linux rejects).
+        //   3. PR_SET_TIMING(anything-else) -> EINVAL.
+        //   4. PR_SET_TIMING ignores arg2..arg5 (Linux does too).
+        //   5. PR_GET_TIMING -> 0, ignoring arg1..arg5.
+        {
+            // PR_SET_TIMING(0) -> 0.
+            let a = SyscallArgs { arg0: 14, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_TIMING(1) -> EINVAL (timestamp mode never wired up).
+            let a = SyscallArgs { arg0: 14, arg1: 1, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 1) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_TIMING(0xdead) -> EINVAL.
+            let a = SyscallArgs { arg0: 14, arg1: 0xdead, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0xdead) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_TIMING(0) with garbage arg2..arg5 -> 0 (Linux
+            // ignores those).
+            let a = SyscallArgs { arg0: 14, arg1: 0, arg2: 0xaaaa,
+                arg3: 0xbbbb, arg4: 0xcccc, arg5: 0xdddd };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0, garbage…) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_GET_TIMING -> 0 regardless of arg1..arg5.
+            let a = SyscallArgs { arg0: 13, arg1: 0xaaaa, arg2: 0xbbbb,
+                arg3: 0xcccc, arg4: 0xdddd, arg5: 0xeeee };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_TIMING, garbage…) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
         }
     }
 

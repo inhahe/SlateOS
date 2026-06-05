@@ -15090,3 +15090,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   signalfd/signalfd4 fd
 ##      discrimination: OK".
 
+## 165. Linux ABI: perf_event_open(2) attr/flag/pid-cpu validation
+##      (batch 136).
+##
+##      Issue:  perf_event_open returned ENOSYS after only checking
+##              that `attr` was non-NULL and readable for 8 bytes.  A
+##              probe that wanted to feature-test the syscall would
+##              get the same answer (ENOSYS) for "kernel doesn't have
+##              perf" as for "I just passed a malformed attr."  Linux
+##              checks several gates *before* the ENOSYS-equivalent
+##              (which is actually a per-cpu-state lookup), and
+##              userspace (libbpf, glibc, `perf record`) walks the
+##              attr_size up to negotiate the highest version both
+##              sides support — see Linux 6.x's PERF_ATTR_SIZE_VER0..7
+##              compatibility table.  Without our gates that
+##              negotiation incorrectly returns ENOSYS instead of the
+##              expected EINVAL / E2BIG.
+##
+##      Fix:    Match Linux's pre-dispatch validation:
+##                * attr != NULL and at least the 8-byte header (type
+##                  + size) readable -> EFAULT otherwise (kept).
+##                * Read the size field (offset 4, u32), validate:
+##                  - size < PERF_ATTR_SIZE_VER0 (64) -> EINVAL.
+##                  - size > LINUX_PAGE_SIZE (4096) -> E2BIG.
+##                  - Re-validate the full `size` bytes are readable.
+##                * flags must be a subset of PERF_FLAG_FD_NO_GROUP |
+##                  FD_OUTPUT | PID_CGROUP | FD_CLOEXEC (0x0F) ->
+##                  EINVAL otherwise.
+##                * pid == -1 && cpu == -1 -> EINVAL (Linux explicitly
+##                  rejects this combination — no task to attach the
+##                  event to and no per-cpu counter to allocate).
+##                * After all gates pass -> ENOSYS.
+##
+##      Self-tests (boot-time):
+##        * perf_event_open(NULL,...) -> EFAULT (unchanged).
+##        * perf_event_open(size=0 attr) -> EINVAL.
+##        * perf_event_open(size=8192 attr) -> E2BIG.
+##        * perf_event_open(valid attr, flags=0x10) -> EINVAL.
+##        * perf_event_open(valid attr, pid=-1, cpu=-1) -> EINVAL.
+##        * perf_event_open(valid attr, pid=0, cpu=0) -> ENOSYS.
+##
+##      Known limitations:
+##        * Linux's PAGE_SIZE for x86_64 is 4096, while we use 16 KiB
+##          internally.  We pick the Linux x86_64 bound (4096) for
+##          the E2BIG gate to keep userspace probes that walk
+##          attr_size up to PAGE_SIZE-1 working.  A probe that
+##          specifically probes 4097-byte attrs to detect 16 KiB pages
+##          would see E2BIG even though our page size is larger; this
+##          is acceptable since perf doesn't expose page size in any
+##          probed way.
+##        * We don't validate the attr.config / sample_type / read_format
+##          fields — those are perf-internal and rejected only by the
+##          real dispatcher.  When perf lands here, the dispatcher
+##          will run after these gates and the existing tests need to
+##          continue to hold.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   perf_event_open validation
+##      gates: OK".
+

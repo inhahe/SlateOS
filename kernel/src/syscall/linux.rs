@@ -10776,13 +10776,67 @@ fn sys_bpf(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `perf_event_open(attr, pid, cpu, group_fd, flags)`.
+///
+/// We don't have a perf subsystem, so the operation itself returns
+/// ENOSYS — but we validate the inputs Linux's kernel/events/core.c
+/// checks before reaching the dispatcher, so probes see the same
+/// errnos a real Linux would give for malformed calls.  This keeps
+/// glibc's perf_event_open wrapper, libbpf's CPU profiling fallback,
+/// and `perf record`'s feature-detection robust against our stub.
 fn sys_perf_event_open(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
-    // struct perf_event_attr is at least 8 bytes (size header).
+    // struct perf_event_attr starts with `__u32 type; __u32 size`.
+    // Read the size field to validate against the ABI's bounds.
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 8) {
         return linux_err(linux_errno_for(e));
+    }
+    let mut header = [0u8; 8];
+    // SAFETY: validate_user_read above checked 8 bytes are readable.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg0, header.as_mut_ptr(), 8)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let attr_size = u32::from_ne_bytes(match <[u8; 4]>::try_from(&header[4..8]) {
+        Ok(b) => b,
+        // Unreachable: the slice is guaranteed 4 bytes wide.  Return
+        // EINVAL rather than panic so the path stays warning-free.
+        Err(_) => return linux_err(errno::EINVAL),
+    });
+    // Linux: size < PERF_ATTR_SIZE_VER0 (64) or > PAGE_SIZE -> E2BIG.
+    // PAGE_SIZE varies (we use 16 KiB internally; Linux x86_64 uses 4K
+    // and rejects size > 4K with E2BIG).  Pick the Linux x86_64 bound
+    // so a probe that walks attr_size up from 0 sees the same gate.
+    const PERF_ATTR_SIZE_VER0: u32 = 64;
+    const LINUX_PAGE_SIZE: u32 = 4096;
+    if attr_size < PERF_ATTR_SIZE_VER0 {
+        return linux_err(errno::EINVAL);
+    }
+    if attr_size > LINUX_PAGE_SIZE {
+        return linux_err(errno::E2BIG);
+    }
+    // Re-validate the full attr struct now that we know its size.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, attr_size as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    // flags: PERF_FLAG_FD_NO_GROUP=1, PERF_FLAG_FD_OUTPUT=2,
+    // PERF_FLAG_PID_CGROUP=4, PERF_FLAG_FD_CLOEXEC=8.
+    const PERF_FLAG_MASK: u64 = 1 | 2 | 4 | 8;
+    if args.arg4 & !PERF_FLAG_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // pid == -1 && cpu == -1 is the "any task on any cpu" combination
+    // that Linux explicitly rejects with EINVAL — without a pid there
+    // is no task to attach the event to, and without a cpu there is no
+    // per-cpu counter to allocate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg1 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cpu = args.arg2 as i32;
+    if pid == -1 && cpu == -1 {
+        return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
 }
@@ -30161,16 +30215,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: perf_event_open(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // perf_event_open(attr,_,_,_,_) -> ENOSYS.
+        // Build a 64-byte zeroed perf_event_attr with size=64 in the
+        // size field (offset 4).  This satisfies the new minimum-size
+        // check (PERF_ATTR_SIZE_VER0 == 64).
+        let mut pea = [0u8; 64];
+        pea[4..8].copy_from_slice(&64u32.to_ne_bytes());
+        // perf_event_open(size=0) -> EINVAL.
+        let mut pea_zero = [0u8; 64];
+        // pea_zero.size is already 0 — exercises the size < VER0 gate.
         let a = SyscallArgs {
-            arg0: attr.as_ptr() as u64,
+            arg0: pea_zero.as_mut_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: perf_event_open(size=0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // perf_event_open(size=8192) -> E2BIG.  Stash 8192 in the size
+        // field of a valid 64-byte attr; validate_user_read will check
+        // the size field at offset 4, then E2BIG fires.
+        let mut pea_big = [0u8; 64];
+        pea_big[4..8].copy_from_slice(&8192u32.to_ne_bytes());
+        let a = SyscallArgs {
+            arg0: pea_big.as_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: perf_event_open(size=8192) not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        // perf_event_open(bad flag bit) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: pea.as_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0x10, arg5: 0,
+        };
+        if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: perf_event_open(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // perf_event_open(pid=-1, cpu=-1) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: pea.as_ptr() as u64,
+            arg1: u64::MAX, arg2: u64::MAX, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: perf_event_open(-1,-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // perf_event_open(valid attr, pid=0, cpu=0) -> ENOSYS.
+        let a = SyscallArgs {
+            arg0: pea.as_ptr() as u64,
             arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
             != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: perf_event_open not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: perf_event_open valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   perf_event_open validation gates: OK");
         // keyctl(_,_,_,_,_) -> ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

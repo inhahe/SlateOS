@@ -8411,41 +8411,80 @@ fn sys_munlockall(_args: &SyscallArgs) -> SyscallResult {
 
 /// `msync(addr, len, flags)` — accept after validating shape.
 ///
-/// Flag bits per Linux: MS_ASYNC=1, MS_INVALIDATE=2, MS_SYNC=4.
-/// MS_SYNC and MS_ASYNC are mutually exclusive.
+/// Linux's `mm/msync.c::SYSCALL_DEFINE3(msync)` gate order:
+///   1. `flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC)` -> `-EINVAL`.
+///   2. `offset_in_page(start)`                          -> `-EINVAL`.
+///   3. `(flags & MS_ASYNC) && (flags & MS_SYNC)`        -> `-EINVAL`.
+///   4. `len = (len + ~PAGE_MASK) & PAGE_MASK; end = start + len;`
+///      `end < start`                                    -> `-ENOMEM`.
+///   5. `end == start`                                   ->  `0`.
+///   6. Walk VMAs.
+///
+/// Critically, Linux does **not** require either of `MS_SYNC` or
+/// `MS_ASYNC` to be set: `flags == 0` and `flags == MS_INVALIDATE`
+/// alone are both accepted (the VMA walker still iterates; the
+/// sync-vs-async distinction only matters within each VMA's
+/// fsync_range call).  Pre-batch we incorrectly rejected `flags == 0`
+/// with EINVAL.  Also: overflow on `start + len` returns `-ENOMEM`
+/// on Linux, not `-EINVAL`.
+///
+/// Linux's `PAGE_SIZE` for x86_64 is 4096 — that is the size visible
+/// to userspace via `sysconf(_SC_PAGESIZE)`.  Our kernel uses 16 KiB
+/// internal frames, but ABI probes do their alignment math against
+/// 4 KiB; reject only sub-4-KiB-aligned addresses so a probe passing
+/// a 4 KiB-aligned address (correct per the Linux ABI) is not
+/// spuriously rejected by our larger frame size.
 fn sys_msync(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::FRAME_SIZE;
     const MS_ASYNC: u64 = 1;
     const MS_INVALIDATE: u64 = 2;
     const MS_SYNC: u64 = 4;
     const MS_ALL: u64 = MS_ASYNC | MS_INVALIDATE | MS_SYNC;
+    // Linux ABI page size on x86_64 (sysconf(_SC_PAGESIZE)); the
+    // internal frame size of this kernel is larger but is not
+    // observable through this syscall.
+    const ABI_PAGE_SIZE: u64 = 4096;
 
     let addr = args.arg0;
     let len = args.arg1;
     let flags = args.arg2;
 
-    // Validate flag combination.
+    // 1. Validate flag mask.
     if (flags & !MS_ALL) != 0 {
         return linux_err(errno::EINVAL);
     }
+    // 2. addr must be ABI-page-aligned (offset_in_page == 0).
+    if (addr & (ABI_PAGE_SIZE - 1)) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 3. MS_SYNC and MS_ASYNC are mutually exclusive.  Linux does NOT
+    //    require either to be set; flags = 0 or flags = MS_INVALIDATE
+    //    alone are both valid.
     if (flags & MS_SYNC) != 0 && (flags & MS_ASYNC) != 0 {
         return linux_err(errno::EINVAL);
     }
-    // At least one of ASYNC/SYNC must be set per Linux semantics.
-    if (flags & (MS_SYNC | MS_ASYNC)) == 0 {
-        return linux_err(errno::EINVAL);
-    }
-
-    // addr must be page-aligned (16 KiB on this kernel).
-    let frame_size = FRAME_SIZE as u64;
-    if (addr & (frame_size - 1)) != 0 {
-        return linux_err(errno::EINVAL);
-    }
-
-    if len == 0 {
+    // 4. Round len up to a page boundary, then check for overflow.
+    //    Linux: `len = (len + ~PAGE_MASK) & PAGE_MASK;` then
+    //    `end = start + len; if (end < start) goto out` with
+    //    `error = -ENOMEM` already set.  Rounding can overflow on its
+    //    own when len = u64::MAX - small_constant.
+    let len_aligned = match len.checked_add(ABI_PAGE_SIZE - 1) {
+        Some(v) => v & !(ABI_PAGE_SIZE - 1),
+        None => return linux_err(errno::ENOMEM),
+    };
+    let end = match addr.checked_add(len_aligned) {
+        Some(v) => v,
+        None => return linux_err(errno::ENOMEM),
+    };
+    // 5. end == start -> trivial success (no VMAs to walk).
+    if end == addr {
         return SyscallResult::ok(0);
     }
-    let len_usize = match usize::try_from(len) {
+    // 6. We have no real file-backed VMA tracking and no page cache to
+    //    flush, but every mapped range qualifies as a "successful sync"
+    //    in this kernel.  Still range-check the user range so a probe
+    //    passing wildly-unmapped addresses sees ENOMEM (Linux's
+    //    VM_BAD_AREA path also produces ENOMEM).
+    let len_usize = match usize::try_from(len_aligned) {
         Ok(v) => v,
         Err(_) => return linux_err(errno::ENOMEM),
     };
@@ -30423,12 +30462,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // msync flag/alignment validation.
     {
-        // flags == 0 -> EINVAL (need at least MS_SYNC or MS_ASYNC).
+        // flags == 0 with len == 0 -> 0 (end == start short-circuit).
+        // Linux does NOT require MS_SYNC or MS_ASYNC to be set; flags = 0
+        // and flags = MS_INVALIDATE alone are both accepted.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MSYNC, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: msync(flags=0) not EINVAL");
+        if dispatch_linux(nr::MSYNC, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: msync(flags=0,len=0) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // MS_INVALIDATE alone with len == 0 -> 0 (no SYNC/ASYNC required).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 2, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(MS_INVALIDATE,len=0) not 0"
+            );
             return Err(KernelError::InternalError);
         }
         // MS_SYNC | MS_ASYNC -> EINVAL (mutually exclusive).
@@ -30449,7 +30498,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Misaligned addr with valid flags -> EINVAL.
+        // Misaligned addr (4 KiB ABI page check) with valid flags -> EINVAL.
         let a = SyscallArgs { arg0: 0x1234, arg1: 4096, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MSYNC, &a).value
@@ -30466,6 +30515,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: msync(len=0) not 0");
             return Err(KernelError::InternalError);
         }
+        // 4 KiB-aligned (sub-frame) addr accepted by alignment gate.
+        // Our internal frame is 16 KiB but Linux ABI page is 4 KiB; a
+        // 4 KiB-aligned address must not be rejected as misaligned.
+        // Use len=0 so this exits via end==start, avoiding any
+        // user-range validation.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(4K-aligned,len=0) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // len overflow on rounding -> ENOMEM (not EINVAL).  Linux sets
+        // error = -ENOMEM before the overflow check.
+        let a = SyscallArgs { arg0: 0x4000, arg1: u64::MAX, arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value
+            != -i64::from(errno::ENOMEM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(len=u64::MAX) not ENOMEM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   msync flags=0 / 4K-aligned / ENOMEM: OK"
+        );
     }
 
     // fadvise64 / readahead — advice validation.

@@ -18656,3 +18656,75 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      First boot run timed out at 120s (apparent QEMU flake,
 ##      matches batch 191 pattern); re-run with --timeout=300
 ##      PASSED (BOOT_OK at 24s).  Build clean.
+
+## 225. Linux ABI: msync flags=0 / 4K-aligned / overflow=ENOMEM (batch 196).
+##      Linux's mm/msync.c::SYSCALL_DEFINE3(msync) gate order:
+##        1. flags & ~(MS_ASYNC|MS_INVALIDATE|MS_SYNC) -> -EINVAL.
+##        2. offset_in_page(start)                     -> -EINVAL.
+##        3. (flags & MS_ASYNC) && (flags & MS_SYNC)   -> -EINVAL.
+##        4. len = round_up_page(len); end = start + len;
+##           overflow (end < start, or rounding overflow) -> -ENOMEM
+##           (error is set to -ENOMEM before the if (end < start)
+##           goto out, so any out-path uses -ENOMEM).
+##        5. end == start                              ->  0.
+##        6. Walk VMAs.
+##
+##      Our previous implementation diverged in three places that
+##      a Linux feature-detection probe would observe:
+##        (a) We required flags & (MS_SYNC|MS_ASYNC) != 0, returning
+##            -EINVAL for flags=0 and for flags=MS_INVALIDATE alone.
+##            Linux accepts both: the sync-vs-async distinction only
+##            matters per-VMA inside the walker, not at the gate.
+##        (b) We aligned addr against FRAME_SIZE (16 KiB, our
+##            internal page size).  Linux's PAGE_SIZE on x86_64 is
+##            4 KiB and userspace probes via sysconf(_SC_PAGESIZE)
+##            see 4 KiB; a probe passing a 4 KiB-aligned (but not
+##            16 KiB-aligned) addr was spuriously rejected with
+##            -EINVAL.  Switched to ABI_PAGE_SIZE = 4096.
+##        (c) Overflow on start + len returned -EINVAL.  Linux's
+##            error variable is pre-set to -ENOMEM before the
+##            overflow check; we now return -ENOMEM and also use
+##            -ENOMEM for the rounding overflow path (len near
+##            u64::MAX).
+##
+##      The new gate order matches Linux exactly:
+##        flag mask -> 4K alignment -> SYNC&ASYNC exclusion ->
+##        len rounding (overflow=ENOMEM) -> end overflow (ENOMEM) ->
+##        end==start short-circuit -> user-range validation.
+##
+##      Self-tests updated/added in dispatch_linux self-test:
+##        * msync(addr=0,len=0,flags=0)              -> 0
+##          (was EINVAL pre-batch; this is the SYNC/ASYNC
+##           discriminator).
+##        * msync(addr=0,len=0,flags=MS_INVALIDATE)  -> 0
+##          (proves MS_INVALIDATE alone is accepted).
+##        * msync(addr=0,len=0,flags=MS_SYNC|MS_ASYNC) -> EINVAL
+##          (mutual exclusion preserved).
+##        * msync(addr=0,len=0,flags=0x10)           -> EINVAL
+##          (unknown flag bit).
+##        * msync(addr=0x1234,len=4096,flags=MS_ASYNC) -> EINVAL
+##          (sub-4K-aligned addr).
+##        * msync(addr=0x1000,len=0,flags=MS_ASYNC)  -> 0
+##          (4K-aligned addr accepted despite not being 16K-aligned;
+##           this is the ABI_PAGE_SIZE discriminator).
+##        * msync(addr=0x4000,len=u64::MAX,flags=MS_ASYNC) -> ENOMEM
+##          (rounding overflow; this is the ENOMEM-vs-EINVAL
+##           discriminator).
+##      Marker emitted: "msync flags=0 / 4K-aligned / ENOMEM: OK".
+##
+##      Known limitations:
+##        * We still don't actually walk VMAs or flush page cache
+##          on success — there is no page cache yet.  msync returns
+##          0 for any in-range request once the gates pass, which
+##          is correct for anonymous mappings but loses the
+##          "file-backed writes hit disk" guarantee for file
+##          mappings.  When file-backed mmap lands, msync needs to
+##          forward to the per-VMA fsync_range equivalent.
+##        * validate_user_read in the kernel-context self-test
+##          path is a no-op, so the test for ENOMEM-on-bad-range
+##          (Linux's VM_BAD_AREA path) is not exercised by the
+##          boot self-test — only the gate-level errno is.
+##
+##      First boot run timed out at 120s (apparent QEMU flake,
+##      matches batches 191 and 195); re-run with --timeout=300
+##      PASSED (BOOT_OK at 23s).  Build clean.

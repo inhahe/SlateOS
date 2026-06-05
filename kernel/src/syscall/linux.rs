@@ -10867,9 +10867,14 @@ fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
 //
 // In the meantime we expose principled-stub semantics:
 //
-//   * openat2 / execveat: validate every pointer and flag bit, then ENOSYS
-//     so glibc / io_uring fall back to openat / execve (which we already
-//     implement).
+//   * openat2 (batch 110): forwards to openat with the embedded flags /
+//     mode after validating the resolve-flag bits.  RESOLVE_CACHED ->
+//     EAGAIN (no dcache), RESOLVE_IN_ROOT -> EOPNOTSUPP (no chroot
+//     tracking), RESOLVE_BENEATH -> EXDEV (can't enforce escape
+//     prevention safely), and NO_XDEV / NO_MAGICLINKS / NO_SYMLINKS are
+//     trivially satisfied by this kernel.
+//   * execveat: validate every pointer and flag bit, then ENOSYS so
+//     glibc / io_uring fall back to execve.
 //   * The new mount API (fsopen, fsconfig, fsmount, fspick, open_tree,
 //     move_mount) returns EPERM after validation — these are privileged
 //     and a non-root caller on Linux gets the same answer.
@@ -10883,6 +10888,20 @@ fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
 /// resolve flags.  `how` is `struct open_how { u64 flags; u64 mode;
 /// u64 resolve; }` (24 bytes).
 fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
+    // RESOLVE_* flag bits (Linux openat2 ABI).
+    const RESOLVE_NO_XDEV: u64 = 0x01;
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    const RESOLVE_IN_ROOT: u64 = 0x10;
+    const RESOLVE_CACHED: u64 = 0x20;
+    const VALID_RESOLVE: u64 = RESOLVE_NO_XDEV
+        | RESOLVE_NO_MAGICLINKS
+        | RESOLVE_NO_SYMLINKS
+        | RESOLVE_BENEATH
+        | RESOLVE_IN_ROOT
+        | RESOLVE_CACHED;
+
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -10901,8 +10920,72 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 24) {
         return linux_err(linux_errno_for(e));
     }
-    // We validated everything; tell callers to fall back to openat.
-    linux_err(errno::ENOSYS)
+
+    // Read the 24-byte struct open_how { __u64 flags, mode, resolve }.
+    let mut buf = [0u8; 24];
+    // SAFETY: validate_user_read above confirmed 24 readable bytes.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg2, buf.as_mut_ptr(), 24)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let flags = u64::from_le_bytes([
+        buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+    ]);
+    let mode = u64::from_le_bytes([
+        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+    ]);
+    let resolve = u64::from_le_bytes([
+        buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
+    ]);
+
+    // Unknown resolve bits -> EINVAL.  Linux rejects unknown bits
+    // strictly to keep future flag additions detectable.
+    if resolve & !VALID_RESOLVE != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // RESOLVE_CACHED: only succeed if the result is already in the
+    // dcache (without performing any path walk).  We have no dcache,
+    // so every request is conceptually a "miss" — Linux documents
+    // -EAGAIN as the answer.
+    if resolve & RESOLVE_CACHED != 0 {
+        return linux_err(errno::EAGAIN);
+    }
+    // RESOLVE_IN_ROOT: rooted resolution (chroot-like) requires per-fd
+    // root tracking we don't have.  Refuse rather than silently allow
+    // a path-escape vulnerability.
+    if resolve & RESOLVE_IN_ROOT != 0 {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    // RESOLVE_BENEATH: prevents .. and absolute paths from escaping
+    // the directory denoted by dirfd.  Without chroot-style tracking
+    // we can't enforce this either; refuse with EXDEV (the Linux
+    // documented error when the walk would cross a forbidden
+    // boundary).
+    if resolve & RESOLVE_BENEATH != 0 {
+        return linux_err(errno::EXDEV);
+    }
+    // The remaining bits (NO_XDEV, NO_MAGICLINKS, NO_SYMLINKS) are
+    // trivially satisfied: we have no mount points to cross, no
+    // /proc magic symlinks, and no symlinks at all.  Accept and
+    // proceed to the openat fast path.
+
+    // Forward to sys_openat with (dirfd=arg0, path=arg1, flags, mode).
+    // The flags / mode in `open_how` are u64 but only the low 32
+    // bits are meaningful per Linux (open_how reserves the high bits
+    // for future use; we already rejected unknown bits at the
+    // resolve gate above and sys_openat truncates flags to u32
+    // anyway).
+    let openat_args = SyscallArgs {
+        arg0: args.arg0,
+        arg1: args.arg1,
+        arg2: flags,
+        arg3: mode,
+        arg4: 0,
+        arg5: 0,
+    };
+    sys_openat(&openat_args)
 }
 
 /// `execveat(dirfd, path, argv, envp, flags)` — like execve relative to a
@@ -27153,10 +27236,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: openat2 NULL how not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // openat2 with valid args -> ENOSYS.
+        // openat2 with valid args (batch 110 upgrade): no longer
+        // returns -ENOSYS; instead forwards to sys_openat with the
+        // embedded flags/mode/resolve.  In bare-kernel self-test
+        // context the forwarded openat tries to open "/tmp/x" via
+        // sys_fs_open, which returns -ENOENT (file does not exist in
+        // the boot image).  We just assert the result is no longer
+        // -ENOSYS — proves the upgrade landed and validation didn't
+        // accidentally start swallowing real failures.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_ptr, arg3: 24, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: openat2 valid not ENOSYS");
+        let v = dispatch_linux(nr::OPENAT2, &a).value;
+        if v == -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: openat2 valid still ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // openat2 with RESOLVE_CACHED (bit 5) -> -EAGAIN.  We have no
+        // dcache, so the cached-only resolution path can never hit.
+        let mut how_cached = [0u8; 24];
+        how_cached[16] = 0x20; // resolve = RESOLVE_CACHED
+        let how_cached_ptr = how_cached.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_cached_ptr, arg3: 24, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EAGAIN) {
+            serial_println!("[syscall/linux]   FAIL: openat2 RESOLVE_CACHED not EAGAIN");
+            return Err(KernelError::InternalError);
+        }
+        // openat2 with RESOLVE_BENEATH (bit 3) -> -EXDEV.  Without
+        // chroot-style tracking we can't enforce path-escape
+        // prevention safely; refuse rather than silently allow.
+        let mut how_beneath = [0u8; 24];
+        how_beneath[16] = 0x08; // resolve = RESOLVE_BENEATH
+        let how_beneath_ptr = how_beneath.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_beneath_ptr, arg3: 24, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EXDEV) {
+            serial_println!("[syscall/linux]   FAIL: openat2 RESOLVE_BENEATH not EXDEV");
+            return Err(KernelError::InternalError);
+        }
+        // openat2 with unknown resolve bit (bit 6) -> -EINVAL.
+        let mut how_bad = [0u8; 24];
+        how_bad[16] = 0x40; // resolve = unknown bit
+        let how_bad_ptr = how_bad.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_bad_ptr, arg3: 24, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: openat2 unknown resolve bit not EINVAL");
             return Err(KernelError::InternalError);
         }
 

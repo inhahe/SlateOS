@@ -12629,3 +12629,77 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          either, so this matches behavior.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 139. Batch 110: sys_openat2 upgraded from -ENOSYS stub to forward
+##      to sys_openat with resolve-flag validation
+##      ---------------------------------------------------------------
+##      Pre-batch: validated path / size / how-pointer and then
+##      returned -ENOSYS, forcing callers to fall back to plain
+##      openat.  glibc and io_uring's IORING_OP_OPENAT2 both handled
+##      the fallback gracefully, but the openat2-specific behaviour
+##      (RESOLVE_* path-walk restrictions) was unreachable.
+##
+##      Post-batch: sys_openat2 reads the 24-byte `struct open_how`
+##      { __u64 flags, __u64 mode, __u64 resolve }, validates the
+##      resolve bits, and forwards to sys_openat with (dirfd, path,
+##      flags, mode).  Userspace gets full open functionality through
+##      the openat2 entry point with the same dirfd / relative-path
+##      semantics as openat.
+##
+##      Resolve-flag handling:
+##        * Unknown resolve bits -> -EINVAL (strict rejection so
+##          future Linux additions are detectable rather than
+##          silently dropped).
+##        * RESOLVE_CACHED (0x20) -> -EAGAIN: we have no dcache, so
+##          the "succeed only on cache hit" mode can never satisfy.
+##          Matches the documented Linux answer.
+##        * RESOLVE_IN_ROOT (0x10) -> -EOPNOTSUPP: chroot-style
+##          rooted resolution requires per-fd root tracking we
+##          don't have.  Refuse rather than silently allow a path-
+##          escape vulnerability.
+##        * RESOLVE_BENEATH (0x08) -> -EXDEV: same root-tracking
+##          dependency as IN_ROOT; -EXDEV is Linux's documented
+##          "would cross a forbidden boundary" answer.
+##        * RESOLVE_NO_XDEV (0x01), RESOLVE_NO_MAGICLINKS (0x02),
+##          RESOLVE_NO_SYMLINKS (0x04): trivially satisfied — we
+##          have no mount points to cross, no /proc magic symlinks,
+##          and no symlinks at all.  Accept and proceed.
+##
+##      Validation gates (unchanged):
+##        * path == NULL -> -EFAULT.
+##        * non-readable path string -> -EFAULT (via validate_user_str).
+##        * size != 24 -> -EINVAL (Linux currently locks open_how at
+##          exactly 24 bytes; the kernel may grow it later but never
+##          shrink it).
+##        * how == NULL -> -EFAULT.
+##        * non-readable 24-byte how struct -> -EFAULT.
+##
+##      Boot self-test extended:
+##        1. valid args (path="/tmp/x", how={0,0,0}) -> something
+##           other than -ENOSYS.  In bare-kernel context the
+##           forwarded openat tries to open /tmp/x via sys_fs_open
+##           which returns -ENOENT (file not in boot image); the
+##           exact errno is incidental, what we assert is the
+##           pre-batch -ENOSYS is gone.
+##        2. RESOLVE_CACHED -> -EAGAIN.
+##        3. RESOLVE_BENEATH -> -EXDEV.
+##        4. unknown resolve bit (0x40) -> -EINVAL.
+##        The original NULL-path / wrong-size / NULL-how cases are
+##        unchanged.
+##
+##      Known limitations:
+##        * NO_SYMLINKS et al. are trivially honored only because we
+##          have no symlinks.  If symlink support lands later, this
+##          forwarding has to actually pass the resolve restrictions
+##          through to the VFS walk.  Documented here as the upgrade
+##          path.
+##        * IN_ROOT and BENEATH refuse rather than enforce.  When
+##          chroot-style tracking exists, these can become true
+##          enforcement paths (currently they're conservative
+##          rejections — safe but restrictive).
+##        * The open_how flags / mode are accepted as u64 but the
+##          forwarded sys_openat truncates to u32.  Linux's open_how
+##          ABI reserves the high bits for future use; we don't
+##          inspect them.  When new bits ship, validate them here.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 21s).

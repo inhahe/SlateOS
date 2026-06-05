@@ -493,11 +493,22 @@ pub fn self_test() {
     serial_println!("[ktrace]   Enable/disable: OK");
 
     // --- 5. Wrap-around (fill buffer beyond capacity) ---
+    //
+    // Mask everything except General during the loop so timer-driven
+    // Sched / Irq events recorded by other CPUs (or by our own timer
+    // interrupt firing between iterations) can't inflate the count.
+    // Without this mask the assertion is racy — observed 602 vs
+    // expected 600 in the wild when boot self-tests run long enough
+    // for the periodic timer tick to land inside the 600-iteration
+    // window.  Restore the original mask afterwards.
+    let saved_mask = category_mask();
+    set_category_mask(1u32 << (Category::General as u32));
     let before = total_events();
     for i in 0u64..600 {
         record(Category::General, event::USER_EVENT, i, 0);
     }
     let after = total_events();
+    set_category_mask(saved_mask);
     assert_eq!(after - before, 600);
     // valid_count should be capped at BUFFER_SIZE.
     assert_eq!(valid_count(), BUFFER_SIZE);

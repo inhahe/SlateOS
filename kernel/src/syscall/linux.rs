@@ -4287,8 +4287,22 @@ fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::ESRCH);
         }
     }
-    // 20 - nice, with nice = 0.  Linux's kernel ABI return convention.
-    SyscallResult::ok(20)
+    // Resolve target pid: which==0 with who==0 means caller; with
+    // who!=0 means the named process.  PRIO_PGRP / PRIO_USER are
+    // accepted (we don't model groups / per-uid nice yet) and
+    // report the caller's nice.
+    let target_pid: Option<u64> = if which == 0 && who != 0 {
+        Some(who)
+    } else {
+        caller_pid()
+    };
+    // Read stored nice; default 0 if unknown (kernel context with
+    // no PCB, or PRIO_PGRP/PRIO_USER from kernel context).
+    let nice: i32 = target_pid.and_then(pcb::get_nice).unwrap_or(0);
+    // ABI quirk: getpriority returns `20 - nice` so callers can
+    // distinguish "nice = -5" (-> 25) from "syscall error" (-1 to
+    // -4095 are reserved for errno).
+    SyscallResult::ok(i64::from(20 - nice))
 }
 
 /// `setpriority(which, who, prio)` — set the nice value.
@@ -4349,6 +4363,15 @@ fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
+    // Resolve target pid for the per-PCB store.
+    let target_pid: Option<u64> = if which == 0 && who != 0 {
+        Some(who)
+    } else {
+        caller_pid()
+    };
+    if let Some(tp) = target_pid {
+        let _ = pcb::set_nice(tp, new_nice);
+    }
     SyscallResult::ok(0)
 }
 
@@ -16076,6 +16099,88 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             Ok(()),
             "kernel-context rlimit gate must pass through",
         );
+
+        // Batch 63: per-PCB nice round-trip.
+        //
+        // Storage-layer round-trip via the pcb helpers directly.  We
+        // can't drive caller_pid() from kernel test context so for
+        // the dispatch side we use PRIO_PROCESS with an explicit
+        // who==test_pid (the "named process" branch).
+        //
+        // What this test proves:
+        //   - Fresh PCB starts at nice=0.
+        //   - set_nice installs a value and returns the previous one.
+        //   - get_nice returns whatever set_nice last installed.
+        //   - sys_getpriority on a real pid reports 20 - nice with
+        //     the stored value (not always 20).
+        //   - sys_setpriority on a real pid stores the (clamped)
+        //     value.
+        //   - After destroy, helpers return None (no leak).
+        {
+            let test_pid = pcb::create("nice-test", 0);
+            // Default.
+            assert_eq!(pcb::get_nice(test_pid), Some(0));
+            // Install nice=10 (lower priority).
+            assert_eq!(pcb::set_nice(test_pid, 10), Some(0));
+            assert_eq!(pcb::get_nice(test_pid), Some(10));
+            // Replace with nice=19 (lowest priority).
+            assert_eq!(pcb::set_nice(test_pid, 19), Some(10));
+            assert_eq!(pcb::get_nice(test_pid), Some(19));
+            // Verify sys_getpriority reports 20 - 19 = 1 for this
+            // pid via PRIO_PROCESS dispatch (which==0, who==pid).
+            let a = SyscallArgs { arg0: 0, arg1: test_pid, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETPRIORITY, &a).value != 1 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getpriority(PRIO_PROCESS, pid) for nice=19 expected 1 (= 20 - 19), got {}",
+                    dispatch_linux(nr::GETPRIORITY, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sys_setpriority with the explicit pid path: install
+            // nice=-5 directly via dispatch and observe round-trip.
+            // arg2 is a u64 carrying the i32 nice; sign-extending
+            // via cast.
+            #[allow(clippy::cast_sign_loss)]
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: test_pid,
+                arg2: (-5i64) as u64,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setpriority(pid, -5) not 0 ({})",
+                    dispatch_linux(nr::SETPRIORITY, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            assert_eq!(pcb::get_nice(test_pid), Some(-5));
+            // Verify the round-trip via getpriority: 20 - (-5) = 25.
+            let a = SyscallArgs { arg0: 0, arg1: test_pid, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETPRIORITY, &a).value != 25 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getpriority(pid) for nice=-5 expected 25 (= 20 - -5), got {}",
+                    dispatch_linux(nr::GETPRIORITY, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Out-of-range +100 silently clamps to +19 and stores it.
+            let a = SyscallArgs { arg0: 0, arg1: test_pid, arg2: 100,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setpriority(pid, 100) clamp not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+            assert_eq!(pcb::get_nice(test_pid), Some(19));
+            pcb::destroy(test_pid);
+            // After destroy, helpers return None.
+            assert_eq!(pcb::get_nice(test_pid), None);
+            assert_eq!(pcb::set_nice(test_pid, 0), None);
+        }
     }
 
     // Credential setters dispatch + setuid/setgid semantics (batch 52).

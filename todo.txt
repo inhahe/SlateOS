@@ -9278,4 +9278,97 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##         tracked under the scheduler roadmap and is the
 ##         right place for that work.
 
+## 90. Linux ABI batch 63: real per-PCB nice value with
+##     round-trip across getpriority(2) / setpriority(2).
+##
+##     Background: setpriority previously validated the
+##     request (which whitelist, range clamp to [-20, 19],
+##     RLIMIT_NICE gate when boosting) and then silently
+##     discarded the result.  getpriority always reported
+##     `20 - 0 = 20` regardless of what the caller had
+##     set.  Programs that round-trip nice (e.g. shell
+##     `renice $$` followed by `nice` to display, or
+##     systemd's `Nice=` directive that re-reads after
+##     setting) would observe nice=0 forever.
+##
+##     What was done:
+##       - Added `linux_nice: i32` (default 0) to the
+##         Process struct in kernel/src/proc/pcb.rs.
+##         Inherited verbatim across fork (matches Linux:
+##         nice is inherited and also preserved across
+##         exec).
+##       - Added pcb::get_nice / set_nice helpers.
+##       - sys_setpriority now resolves the target pid —
+##           * PRIO_PROCESS (which=0) + who!=0 -> named
+##             process,
+##           * everything else (which=PGRP/USER, or
+##             which=0 with who=0) -> caller_pid()
+##         — and stores the clamped nice value via
+##         pcb::set_nice after the existing range and
+##         RLIMIT_NICE checks.
+##       - sys_getpriority resolves the same way, reads
+##         the stored nice via pcb::get_nice (defaulting
+##         to 0 if no PCB), and returns `20 - nice` (the
+##         Linux ABI quirk that lets callers distinguish
+##         negative-nice results from -errno).
+##       - Self-tests exercise:
+##           * Storage helpers: defaults to 0; set/get
+##             round-trips for 10, 19, then -5; after
+##             destroy both helpers return None.
+##           * sys_getpriority(PRIO_PROCESS, real_pid)
+##             after set_nice(19) reports 1 (= 20 - 19).
+##           * sys_setpriority(real_pid, -5) succeeds and
+##             pcb::get_nice reads back -5.
+##           * sys_getpriority for the same pid reports
+##             25 (= 20 - -5).
+##           * Out-of-range +100 silently clamps to +19
+##             and stores it.
+##
+##     Known limitations:
+##       - The stored nice does NOT affect the actual
+##         scheduler decisions yet.  Same situation as
+##         batch 62 (sched_policy / sched_priority): the
+##         ABI now round-trips honestly but our scheduler
+##         is single priority-round-robin and treats
+##         every task uniformly.  Real nice-aware
+##         scheduling lives under the scheduler roadmap.
+##       - PRIO_PGRP and PRIO_USER target *every* process
+##         in the group / owned by the uid; we store/read
+##         only against the caller's PCB for now (a
+##         partial implementation that's correct for the
+##         common case of "renice myself" or "look up my
+##         own nice value", which is what every shell
+##         command does).  A full implementation would
+##         walk the PCB table by pgrp/uid; that walks the
+##         same gap we already noted for setpgid /
+##         getpgid (no real pgrp / session tracking yet).
+
+## 91. Flaky ktrace wrap-around self-test (FIXED in
+##     batch 63 as a drive-by).
+##
+##     Symptom: `assertion left == right failed: left:
+##     602, right: 600` at kernel/src/ktrace.rs:501 during
+##     boot.  Reproduces intermittently — observed once in
+##     batch 63's first build, did not reproduce on
+##     immediate re-run.
+##
+##     Cause: the wrap-around test recorded 600 General
+##     events in a loop and asserted that
+##     `total_events()` increased by exactly 600.  But
+##     `total_events()` counts every category; if a timer
+##     interrupt fires inside the 600-iteration window and
+##     records a Sched CONTEXT_SWITCH event, the delta
+##     becomes 601 or 602 and the assertion blows up.
+##     Race window grew slightly as more dispatch self-
+##     tests were added to linux.rs (batches 59 onward
+##     shifted the timing such that the ktrace test now
+##     runs late enough to catch a tick).
+##
+##     Fix: mask all categories except General around the
+##     loop, then restore the saved mask.  Now only our
+##     own General events can be recorded during the
+##     window; timer/IRQ/Sched activity is mask-dropped.
+##     Three immediate re-runs of the boot test PASSED
+##     after the fix.
+
 

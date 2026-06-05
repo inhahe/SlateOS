@@ -436,6 +436,20 @@ pub struct Process {
     /// Storing it per-PCB lets the get-side report the value the
     /// caller actually installed, instead of always 0.
     pub linux_sched_priority: i32,
+    /// Linux nice value, as set via `setpriority(2)` and reported via
+    /// `getpriority(2)`.  Range -20..=19; default 0.
+    ///
+    /// ABI quirk worth recording at the call site: `getpriority`
+    /// returns `20 - nice` (so a result of 20 means "nice=0", 39
+    /// means "nice=-19", etc.).  The PCB stores the *logical* nice
+    /// value; the ABI translation happens in `sys_getpriority`.
+    ///
+    /// Inherited verbatim across fork and preserved across exec —
+    /// matches Linux exactly.  We store this purely for ABI
+    /// round-trip; our scheduler does not currently honour nice in
+    /// its priority decisions (that lives under the scheduler
+    /// roadmap).
+    pub linux_nice: i32,
 }
 
 impl Process {
@@ -486,6 +500,9 @@ impl Process {
             // exec'd binary inherits on stock Linux.
             linux_sched_policy: 0,
             linux_sched_priority: 0,
+            // Default nice value is 0 on Linux for every freshly
+            // exec'd binary that hasn't inherited a non-zero value.
+            linux_nice: 0,
         }
     }
 }
@@ -599,6 +616,7 @@ pub fn fork_create(
         linux_personality,
         linux_sched_policy,
         linux_sched_priority,
+        linux_nice,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -624,6 +642,7 @@ pub fn fork_create(
             parent.linux_personality,
             parent.linux_sched_policy,
             parent.linux_sched_priority,
+            parent.linux_nice,
         )
     };
 
@@ -716,6 +735,10 @@ pub fn fork_create(
         // implement that flag yet — see todo entry.)
         linux_sched_policy,
         linux_sched_priority,
+        // Linux: nice value is inherited verbatim across fork and
+        // preserved across exec.  Forked children start with the
+        // same nice as their parent.
+        linux_nice,
     };
 
     table.insert(pid, child);
@@ -1247,6 +1270,28 @@ pub fn set_sched_priority(pid: ProcessId, prio: i32) -> Option<i32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_sched_priority;
     proc.linux_sched_priority = prio;
+    Some(old)
+}
+
+/// Read the recorded `setpriority` nice value for `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
+/// default for every newly-created process.  The value is the
+/// *logical* nice in -20..=19, not the `getpriority`-encoded form.
+#[must_use]
+pub fn get_nice(pid: ProcessId) -> Option<i32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_nice)
+}
+
+/// Install a new nice value for `pid`, returning the prior value.
+/// Caller is responsible for clamping to -20..=19; this helper
+/// stores whatever it is given.  Returns `None` if `pid` is
+/// unknown.
+pub fn set_nice(pid: ProcessId, nice: i32) -> Option<i32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_nice;
+    proc.linux_nice = nice;
     Some(old)
 }
 

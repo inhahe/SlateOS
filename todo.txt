@@ -19286,3 +19286,42 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          yet validate — candidate for a follow-up batch.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 237. [DONE 2026-06-05] Linux ABI: sys_io_submit drop upfront iocbpp
+##      access_ok; match Linux >= 5.5 SYSCALL_DEFINE3 order.
+##
+##      Pre-batch sys_io_submit (kernel/src/syscall/linux.rs) ran
+##      `nr < 0 -> EINVAL`, then `if nr > 0: iocbpp NULL/access_ok ->
+##      EFAULT`, then terminal -EINVAL.  That mirrored Linux's
+##      pre-5.5 do_io_submit, which had an upfront
+##      `access_ok(iocbpp, nr * sizeof(*iocbpp))`.  Linux 5.5+ moved
+##      the iocbpp touch into the per-iocb loop and gated lookup_ioctx
+##      first:
+##
+##          SYSCALL_DEFINE3(io_submit, ctx_id, nr, iocbpp) {
+##              if (nr < 0) return -EINVAL;
+##              ctx = lookup_ioctx(ctx_id);
+##              if (!ctx) return -EINVAL;
+##              // per-iocb get_user only here.
+##          }
+##
+##      Because no aio context ever exists on our kernel, lookup_ioctx
+##      fails for every call, so the per-iocb get_user is unreachable.
+##      Modern libaio probes see -EINVAL for io_submit(0, 1, NULL); we
+##      were returning -EFAULT.  CLAUDE.md targets Linux 6.10 shape.
+##
+##      Fix: remove the iocbpp NULL + access_ok block; reduce to
+##      `nr < 0 -> EINVAL` then terminal -EINVAL.
+##
+##      Self-tests updated:
+##      - (ctx=0, nr=1, iocbpp=NULL) now expects EINVAL (was EFAULT).
+##      - (ctx=0xdeadbeef, nr=1, iocbpp=0x1) new discriminator test
+##        confirming the ctx lookup fires ahead of any iocbpp touch.
+##      - (nr=0) still EINVAL (no ctx).
+##      Marker: "io_submit ctx-lookup-first / iocbpp-not-pre-validated: OK".
+##
+##      Known limitation: when we eventually implement a real aio
+##      context, the per-iocb get_user EFAULT path will need its own
+##      tests.  Currently unreachable.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

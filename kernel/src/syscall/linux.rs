@@ -11028,41 +11028,29 @@ fn sys_io_destroy(_args: &SyscallArgs) -> SyscallResult {
 
 /// `io_submit(ctx_id, nr, iocbpp)`.
 ///
-/// Linux's `fs/aio.c::do_io_submit` validates, in this order, ahead of
-/// looking up the AIO context:
+/// Linux's modern (>= 5.5) `fs/aio.c::SYSCALL_DEFINE3(io_submit)` body:
 ///
-///   1. `nr < 0` -> `-EINVAL`.
-///   2. `!access_ok(iocbpp, nr * sizeof(struct iocb *))` -> `-EFAULT`.
-///      The check uses the full `nr * 8` byte span; a NULL iocbpp with
-///      nr > 0 fails this gate.
-///   3. context lookup fails -> `-EINVAL`.
+///   1. `if (unlikely(nr < 0)) return -EINVAL;`
+///   2. `ctx = lookup_ioctx(ctx_id); if (!ctx) return -EINVAL;`
+///   3. per-iocb loop: `get_user(user_iocb, iocbpp + i)` -> EFAULT
+///      (only reached when the ctx exists).
 ///
-/// We have no AIO context implementation, so any context id we're
-/// asked about is invalid — gate (3) is implicit.  Add (2) so a probe
-/// passing iocbpp into an unmapped range sees -EFAULT instead of the
-/// unrelated -EINVAL.
+/// Pre-5.5 had an upfront `access_ok(iocbpp, nr * sizeof(*iocbpp))`
+/// before the ctx lookup — we mirrored that for years, so
+/// `io_submit(ctx=0, nr=1, iocbpp=NULL)` returned -EFAULT here while
+/// a current Linux kernel returns -EINVAL (the ctx lookup fires first
+/// and never reaches the per-iocb get_user).  CLAUDE.md pegs the
+/// target shape at 6.10, so drop the upfront iocbpp check and return
+/// the terminal -EINVAL for every call — this is observably what a
+/// libaio probe sees on any kernel where no `io_setup` ever succeeded.
 fn sys_io_submit(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_wrap)]
     let nr = args.arg1 as i64;
     if nr < 0 {
         return linux_err(errno::EINVAL);
     }
-    if nr > 0 {
-        if args.arg2 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        // Each entry is a `struct iocb *` (8 bytes on x86_64).
-        #[allow(clippy::cast_sign_loss)]
-        let total = match (nr as u64).checked_mul(8) {
-            Some(v) => v as usize,
-            None => return linux_err(errno::EINVAL),
-        };
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, total) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // nr == 0 with valid iocbpp falls through to the context lookup,
-    // which yields EINVAL because we hold no contexts.
+    // No contexts exist -> lookup_ioctx fails -> EINVAL, regardless of
+    // iocbpp.  The per-iocb get_user path is unreachable.
     linux_err(errno::EINVAL)
 }
 
@@ -33092,19 +33080,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_submit(-1) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // io_submit(_, 1, NULL) -> EFAULT (Linux's access_ok gate;
-        // see todo 176).  Note: validate_user_read bypasses in
-        // kernel-context, so this test exercises only the explicit
-        // NULL check, not the full mapping validation.
+        // io_submit(ctx=0, nr=1, iocbpp=NULL) -> EINVAL.
+        // Modern Linux (>= 5.5) does lookup_ioctx BEFORE touching
+        // iocbpp; since no contexts ever exist on this kernel the
+        // ctx lookup fails first and the iocbpp pointer is never
+        // examined.  Pre-batch this returned -EFAULT under an upfront
+        // access_ok mirror; current Linux returns -EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IO_SUBMIT, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: io_submit(NULL iocbpp) not EFAULT");
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: io_submit(NULL iocbpp) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // io_submit(_, 0, _) -> EINVAL (no context exists; nr=0 skips
-        // the iocbpp validation and falls through to context lookup).
+        // io_submit(ctx=0xdeadbeef, nr=1, iocbpp=BADPTR) -> EINVAL.
+        // Same discriminator: pre-batch the unmapped 0x1 iocbpp would
+        // race the now-removed upfront access_ok and produce EFAULT;
+        // post-batch lookup_ioctx fires first regardless.
+        let a = SyscallArgs { arg0: 0xdeadbeef, arg1: 1, arg2: 0x1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_SUBMIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_submit(ctx=bad, iocbpp=bad) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // io_submit(_, 0, _) -> EINVAL (no context exists; nr=0 is a
+        // no-op loop that returns 0 on a real ctx, EINVAL otherwise).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IO_SUBMIT, &a).value
@@ -33112,6 +33115,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_submit(nr=0) not EINVAL");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   io_submit ctx-lookup-first / iocbpp-not-pre-validated: OK"
+        );
         // io_cancel(_, NULL, _) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x2000, arg3: 0,
             arg4: 0, arg5: 0 };

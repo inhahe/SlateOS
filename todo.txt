@@ -9425,5 +9425,71 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     a small follow-up batch — extract the validation into
 ##     a helper (`is_canonical_user_fs_base`) in syscall::
 ##     linux and reuse it from thread_clone.
+##
+##     RESOLVED in batch 65 (see entry 93 below).
+
+
+## 93. Linux ABI batch 65: extend ARCH_SET_FS validation to
+##     the CLONE_SETTLS path.
+##
+##     The follow-up flagged in entry 92.  Before this batch,
+##     `linux_clone` passed `args.new_tls` (= `frame.arg4`)
+##     through to `thread_clone::clone_thread` unvalidated.
+##     The cloned thread's trampoline (`clone_thread_trampoline`
+##     in `kernel/src/proc/thread_clone.rs`) then did
+##     `WRMSR(IA32_FS_BASE, new_tls)` for any non-zero
+##     `new_tls`.  Same #GP-on-non-canonical hazard as the
+##     direct `arch_prctl(ARCH_SET_FS, …)` path, except the
+##     crash fires on the NEW thread's first scheduler
+##     dispatch — even more confusing to debug.  Reachable by
+##     any userspace via `clone(CLONE_VM | CLONE_THREAD |
+##     CLONE_SETTLS, …)` with a poisoned `tls` argument.
+##
+##     Fix: hoist `USER_FS_BASE_MAX = 1 << 47` to a module-
+##     level `pub(crate) const` in `syscall/linux.rs` so both
+##     call sites use the same canonical-user ceiling.  Then
+##     in `linux_clone`, immediately after extracting
+##     `new_tls`, gate on `CLONE_SETTLS` being set AND
+##     `new_tls != 0` AND `new_tls >= USER_FS_BASE_MAX`, and
+##     return `-EPERM` on hit.
+##
+##     Why the gate is at the dispatch site and not in
+##     `clone_thread`: returning EPERM cleanly requires
+##     bypassing the `KernelError -> errno` mapping (the
+##     closest `KernelError::PermissionDenied` maps to EACCES,
+##     not EPERM).  Keeping the policy at the Linux-ABI layer
+##     makes the errno choice direct and matches Linux's own
+##     `do_arch_prctl_64` which is what
+##     `arch/x86/kernel/process.c:set_new_tls` reaches
+##     through.
+##
+##     Why gate on CLONE_SETTLS: without that flag, `arg4` is
+##     not interpreted as a TLS address — it could be any
+##     garbage value the caller happened to leave in R8.  The
+##     trampoline currently honours `new_tls != 0` regardless
+##     of the flag, which is itself a latent bug (the args
+##     struct should clear new_tls when CLONE_SETTLS is
+##     unset).  That bug is now masked by the dispatch gate
+##     for any input that would actually trigger #GP, but
+##     belongs on the cleanup list:
+##
+##       TODO (small): in `linux_clone`, force
+##       `args.new_tls = 0` when `CLONE_SETTLS` is not set, so
+##       the trampoline's "0 = leave MSR alone" invariant
+##       holds regardless of caller hygiene.  Not security-
+##       critical given the dispatch gate, just hygiene.
+##
+##     Self-tests added to the existing clone-frame block:
+##       * tls == 1 << 47           → -EPERM (boundary)
+##       * tls == 0xffff_ffff_8000_0000 → -EPERM (kernel half)
+##       * tls == u64::MAX          → -EPERM (non-canonical)
+##       * tls == (1 << 47) - 0x1000 → -ESRCH (valid, reaches
+##         clone_thread which then bails on no-owning-process)
+##       * CLONE_SETTLS unset + garbage tls → -ESRCH (gate
+##         must not fire)
+##       * CLONE_SETTLS set + tls == 0 → -ESRCH (gate must
+##         not fire on the "leave MSR alone" sentinel)
+##
+##     Build clean; boot test PASSED (BOOT_OK at 21s).
 
 

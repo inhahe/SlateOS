@@ -1133,6 +1133,25 @@ fn linux_clone(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
             return -i64::from(errno::ENOSYS);
         }
 
+        // CLONE_SETTLS with a non-canonical or kernel-half TLS base
+        // would feed the child trampoline's WRMSR(IA32_FS_BASE, …) a
+        // value that either crashes the kernel synchronously (#GP on
+        // non-canonical, per Intel SDM Vol 3A §4.4) or installs a
+        // kernel pointer into the child's FS.  Reject up-front with
+        // -EPERM to mirror what `arch_prctl(ARCH_SET_FS, …)` does for
+        // the equivalent direct path (see [`USER_FS_BASE_MAX`]).  Gate
+        // on CLONE_SETTLS so we don't penalise plain clone() callers
+        // who happen to have garbage in arg4, and on new_tls != 0
+        // because the trampoline treats 0 as "leave the inherited MSR
+        // alone" — no WRMSR will fire and there is nothing to
+        // validate.
+        if (flags & clone_flags::CLONE_SETTLS) != 0
+            && new_tls != 0
+            && new_tls >= USER_FS_BASE_MAX
+        {
+            return -i64::from(errno::EPERM);
+        }
+
         let task_id = crate::sched::current_task_id();
         let parent_pid = match thread::owner_process(task_id) {
             Some(pid) if pid != 0 => pid,
@@ -13341,6 +13360,25 @@ fn sys_set_robust_list(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// The userspace ceiling on x86_64 with classic 4-level paging: the
+/// top canonical user address is just below `1 << 47`.  Linux rejects
+/// any `ARCH_SET_FS` value `>= TASK_SIZE_MAX` with `EPERM`; we mirror
+/// that exactly.  This both (a) refuses to install kernel addresses
+/// or attacker-controlled non-canonical values that would `#GP` on
+/// `WRMSR` (the `IA32_FS_BASE` MSR requires canonical form on write
+/// per Intel SDM Vol 3A §4.4 — a non-canonical input would crash the
+/// kernel synchronously), and (b) keeps userspace from setting `FS`
+/// to a kernel pointer.  The latter can't be dereferenced from user
+/// mode (it would page-fault on first use), but it sidesteps a tiny
+/// info-disclosure / privilege probe so we close it as defence in
+/// depth.
+///
+/// Used both by [`sys_arch_prctl`] (the explicit `ARCH_SET_FS` entry
+/// point) and by `linux_clone` (the `CLONE_SETTLS` path) — every
+/// place where userspace can influence `IA32_FS_BASE` MUST go through
+/// this gate before `WRMSR`.
+pub(crate) const USER_FS_BASE_MAX: u64 = 1u64 << 47;
+
 /// `arch_prctl(code, addr)` — only ARCH_SET_FS / ARCH_GET_FS.
 ///
 /// ARCH_SET_FS writes IA32_FS_BASE (MSR 0xC000_0100).  ARCH_GET_FS reads
@@ -13353,20 +13391,6 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
     const ARCH_GET_GS: u64 = 0x1004;
 
     const IA32_FS_BASE: u32 = 0xC000_0100;
-
-    // The userspace ceiling on x86_64 with classic 4-level paging:
-    // the top canonical user address is just below 1 << 47.  Linux
-    // rejects any ARCH_SET_FS value >= TASK_SIZE_MAX with EPERM; we
-    // mirror that exactly.  This both (a) refuses to install kernel
-    // addresses or attacker-controlled non-canonical values that
-    // would #GP on `WRMSR` (the IA32_FS_BASE MSR requires canonical
-    // form on write per Intel SDM Vol 3A §4.4 — a non-canonical
-    // input would crash the kernel synchronously), and (b) keeps
-    // userspace from setting FS to a kernel pointer.  The latter
-    // can't be dereferenced from user mode (would page-fault on
-    // first use), but it sidesteps a tiny info-disclosure / privilege
-    // probe so we close it as defence in depth.
-    const USER_FS_BASE_MAX: u64 = 1u64 << 47;
 
     let code = args.arg0;
     let addr = args.arg1;
@@ -14128,6 +14152,105 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             other => {
                 serial_println!(
                     "[syscall/linux]   FAIL: pthread-clone via with_frame → {:?} (expected -ESRCH)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // CLONE_SETTLS path: when the requested TLS base is non-
+        // canonical or sits in the kernel half, linux_clone must
+        // reject with -EPERM BEFORE reaching thread_clone::clone_thread
+        // (which would otherwise hand the value to the trampoline's
+        // WRMSR(IA32_FS_BASE, …) and crash the kernel synchronously
+        // with #GP on the new thread's first dispatch).  The
+        // pthread-like clone above already used flags with
+        // CLONE_SETTLS — keep the same frame and just vary arg4 (tls).
+        // Boundary (== 1 << 47): EPERM.
+        f.arg4 = 1u64 << 47;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::EPERM) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=1<<47 → {:?} (expected -EPERM)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Kernel-half canonical address: EPERM.
+        f.arg4 = 0xffff_ffff_8000_0000;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::EPERM) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=kernel → {:?} (expected -EPERM)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Top of 64-bit space (non-canonical): EPERM.  Without the
+        // gate, this would #GP inside the new thread's trampoline.
+        f.arg4 = u64::MAX;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::EPERM) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=u64::MAX → {:?} (expected -EPERM)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Just below the boundary: a valid canonical user address —
+        // the TLS check must pass and we proceed to clone_thread,
+        // which still returns -ESRCH in self-test context (no owning
+        // Linux process).  Proves the gate doesn't reject good
+        // inputs.
+        f.arg4 = (1u64 << 47) - 0x1000;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ESRCH) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=just-below → {:?} (expected -ESRCH)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // CLONE_SETTLS not set + garbage tls: gate must NOT fire (tls
+        // is meaningless without the flag).  Result is -ESRCH again.
+        f.arg0 = clone_flags::CLONE_VM
+            | clone_flags::CLONE_FS
+            | clone_flags::CLONE_FILES
+            | clone_flags::CLONE_SIGHAND
+            | clone_flags::CLONE_THREAD
+            | clone_flags::CLONE_SYSVSEM
+            | clone_flags::CLONE_PARENT_SETTID
+            | clone_flags::CLONE_CHILD_CLEARTID
+            | clone_flags::CLONE_CHILD_SETTID;
+        f.arg4 = u64::MAX;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ESRCH) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clone no-SETTLS garbage-tls → {:?} (expected -ESRCH)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // CLONE_SETTLS set with tls == 0: also accepted (trampoline
+        // skips the WRMSR for new_tls == 0, mirroring "leave MSR
+        // alone").  Result -ESRCH.
+        f.arg0 |= clone_flags::CLONE_SETTLS;
+        f.arg4 = 0;
+        match dispatch_linux_with_frame(&mut f) {
+            Some(v) if v == -i64::from(errno::ESRCH) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=0 → {:?} (expected -ESRCH)",
                     other
                 );
                 return Err(KernelError::InternalError);

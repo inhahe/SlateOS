@@ -1329,6 +1329,48 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
         return Err(linux_errno_for(e));
     }
 
+    // Forward-compat zero check (batch 228).  Linux's
+    // `copy_struct_from_user` (used inside
+    // `copy_clone_args_from_user`) walks the bytes in
+    // `[sizeof(struct clone_args), usize)` and returns -E2BIG if any
+    // trailing byte is non-zero — the signal a userspace probe uses
+    // to detect that it's passing a newer ABI field the kernel
+    // doesn't recognise.  Pre-batch 228 we silently ignored bytes
+    // past offset 88 (CLONE_ARGS_SIZE_VER2 = sizeof(struct
+    // clone_args)).  A probe with size=96 and byte[88]=1 saw the
+    // call succeed (returning the configured ENOSYS) where Linux
+    // returns E2BIG.
+    const CLONE_ARGS_KSIZE: u64 = 88;
+    if size > CLONE_ARGS_KSIZE {
+        let excess_addr = cl_args_ptr.wrapping_add(CLONE_ARGS_KSIZE);
+        #[allow(clippy::cast_possible_truncation)]
+        let excess_len = (size - CLONE_ARGS_KSIZE) as usize;
+        if let Err(e) = crate::mm::user::validate_user_read(excess_addr, excess_len) {
+            return Err(linux_errno_for(e));
+        }
+        let mut chunk = [0u8; 64];
+        let mut off: usize = 0;
+        while off < excess_len {
+            let take = core::cmp::min(64, excess_len - off);
+            // SAFETY: validate_user_read above confirmed `excess_len`
+            // bytes are readable at `excess_addr`, and (off, take) is
+            // within that range.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_from_user(
+                    excess_addr.wrapping_add(off as u64),
+                    chunk.as_mut_ptr(),
+                    take,
+                )
+            } {
+                return Err(linux_errno_for(e));
+            }
+            if chunk[..take].iter().any(|&b| b != 0) {
+                return Err(errno::E2BIG);
+            }
+            off += take;
+        }
+    }
+
     let flags_user = buf[0];
     let _pidfd_out = buf[1];
     let child_tid = buf[2];
@@ -38033,6 +38075,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: clone3 valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // Batch 228 forward-compat: clone3 size=96 with trailing bytes
+        // all zero -> ENOSYS (same as VER2; the trailing 8 zero bytes
+        // are validated and accepted).  Confirms a zero-padded
+        // forward-compat size doesn't accidentally start failing.
+        let clone3_pad_zero = [0u8; 96];
+        let clone3_pad_zero_ptr = clone3_pad_zero.as_ptr() as u64;
+        let a = SyscallArgs { arg0: clone3_pad_zero_ptr, arg1: 96,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone3 size=96 (zero pad) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 228 discriminator: clone3 size=96 with byte[88]=1
+        // -> E2BIG.  Linux's copy_struct_from_user checks bytes in
+        // [sizeof(struct clone_args), usize) are all zero and
+        // returns -E2BIG on the first non-zero byte.  Pre-batch we
+        // silently ignored bytes past offset 88 and would have
+        // returned ENOSYS via the validated-but-unsupported path.
+        let mut clone3_pad_nonzero = [0u8; 96];
+        clone3_pad_nonzero[88] = 1;
+        let clone3_pad_nonzero_ptr = clone3_pad_nonzero.as_ptr() as u64;
+        let a = SyscallArgs { arg0: clone3_pad_nonzero_ptr, arg1: 96,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone3 size=96 (byte[88]=1) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   clone3 forward-compat trailing-zero E2BIG: OK"
+        );
         // clone3 with CLONE_PIDFD set in flags -> EINVAL (no pidfd kind yet).
         {
             let mut ca = [0u64; 8];

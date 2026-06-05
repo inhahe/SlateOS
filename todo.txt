@@ -20215,5 +20215,46 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 257. [DONE 2026-06-05] Linux ABI: sys_clone3 forward-compat trailing-zero
+##      E2BIG check — extends the pattern fixed in batch 227 (openat2) to
+##      kernel/fork.c::copy_clone_args_from_user.
+##
+##      Linux's `copy_clone_args_from_user` forwards to
+##      `copy_struct_from_user(&args, sizeof(args), uargs, usize)`.
+##      `sizeof(struct clone_args)` is CLONE_ARGS_SIZE_VER2 = 88
+##      (Linux 5.7+ with cgroup field).  When `usize > 88`,
+##      copy_struct_from_user walks bytes [88, usize) checking they
+##      are all zero — any non-zero byte returns -E2BIG.  This is
+##      the canonical "newer ABI than the kernel understands" signal.
+##
+##      Pre-batch divergence:
+##      - (cl_args points at 96 bytes with byte[88]=1, size=96)
+##        returned ENOSYS (the validated-but-unsupported path) where
+##        Linux returns E2BIG via the trailing-zero check.  Our
+##        per-batch-219 code computed `nwords = min(size/8, 11)` so
+##        we only ever read 88 bytes and silently ignored the rest.
+##        A glibc that fuzzes trailing bytes to detect the upstream
+##        ABI cap would conclude the running kernel supports an
+##        undefined newer ABI.
+##
+##      Fix: after the existing copy_from_user of `nwords*8` bytes
+##      (capped at 88), if `size > 88` walk the trailing `size - 88`
+##      bytes in 64-byte chunks via copy_from_user and return E2BIG
+##      on the first non-zero byte.  Matches the pattern just
+##      applied to openat2 in batch 227.
+##
+##      Self-tests added (~line 38030):
+##      - clone3 size=96 with all-zero pad -> ENOSYS  (confirms
+##        zero-padded forward-compat sizes still succeed).
+##      - clone3 size=96 with byte[88]=1  -> E2BIG    (was ENOSYS;
+##        the new gate now fires).
+##      Marker: "clone3 forward-compat trailing-zero E2BIG: OK".
+##
+##      Known limitations: trailing bytes are read in 64-byte chunks
+##      via copy_from_user.  Worst case (size = PAGE_SIZE = 4096) is
+##      ~63 STAC/CLAC pairs.  Same shape as openat2 — see entry 256.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

@@ -14469,19 +14469,34 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
         | RESOLVE_BENEATH
         | RESOLVE_IN_ROOT
         | RESOLVE_CACHED;
+    const OPEN_HOW_SIZE_VER0: u64 = 24;
+    const LINUX_PAGE_SIZE: u64 = 4096;
 
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = validate_user_str(args.arg1) {
-        return linux_err(linux_errno_for(e));
-    }
-    // Linux enforces size == sizeof(struct open_how) = 24 currently; any
-    // other value gets EINVAL.  The kernel may grow `how` over time but
-    // never below 24.
-    if args.arg3 != 24 {
+    // Linux fs/open.c::SYSCALL_DEFINE4(openat2) literal source order:
+    //   1. if (usize < OPEN_HOW_SIZE_VER0) return -EINVAL;
+    //   2. if (usize > PAGE_SIZE)         return -E2BIG;
+    //   3. copy_struct_from_user(...) — NULL `how` surfaces as -EFAULT.
+    //   4. build_open_flags() — resolve & ~VALID -> -EINVAL.
+    //   5. getname(filename) — NULL/bad filename -> -EFAULT.
+    //   6. (path walk) RESOLVE_CACHED/IN_ROOT/BENEATH responses.
+    //
+    // Pre-batch 226 we required `args.arg3 == 24` exactly (returning
+    // EINVAL for any forward-compatible size in [25, PAGE_SIZE] that
+    // Linux accepts), and the filename pointer was validated at the
+    // very top — meaning malformed sizes with NULL filenames surfaced
+    // as EFAULT where Linux returns EINVAL or E2BIG.
+    //
+    // Gate 1: size < OPEN_HOW_SIZE_VER0 -> EINVAL.
+    if args.arg3 < OPEN_HOW_SIZE_VER0 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 2: size > PAGE_SIZE -> E2BIG.  Use the x86_64 Linux page
+    // size (4096); userspace expects this fixed ABI cap, not our
+    // 16 KiB internal frame size.
+    if args.arg3 > LINUX_PAGE_SIZE {
+        return linux_err(errno::E2BIG);
+    }
+    // Gate 3: copy_struct_from_user — NULL/unreadable `how` -> EFAULT.
     if args.arg2 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -14507,10 +14522,24 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
         buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
     ]);
 
-    // Unknown resolve bits -> EINVAL.  Linux rejects unknown bits
-    // strictly to keep future flag additions detectable.
+    // Gate 4: build_open_flags — unknown resolve bits -> EINVAL.
+    // Linux rejects unknown bits strictly to keep future flag
+    // additions detectable.
     if resolve & !VALID_RESOLVE != 0 {
         return linux_err(errno::EINVAL);
+    }
+
+    // Gate 5: getname(filename) — NULL/bad filename -> EFAULT.
+    // Linux runs this AFTER build_open_flags but BEFORE any
+    // RESOLVE_CACHED / RESOLVE_BENEATH / RESOLVE_IN_ROOT path-walk
+    // behaviour.  Pre-batch 226 this gate ran at the top of the
+    // function, so (filename=NULL, size=8) returned EFAULT where
+    // Linux returns EINVAL via the size gate.
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = validate_user_str(args.arg1) {
+        return linux_err(linux_errno_for(e));
     }
 
     // RESOLVE_CACHED: only succeed if the result is already in the
@@ -36942,6 +36971,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: openat2 unknown resolve bit not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 226 discriminator: (filename=NULL, how=valid, size=8) ->
+        // EINVAL.  Linux's size<VER0 gate runs ahead of getname, so
+        // even with a NULL filename the size error wins.  Pre-batch
+        // this returned EFAULT because filename was validated first.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: how_ptr, arg3: 8, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat2 (filename=NULL,size=8) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 226 discriminator: (filename=NULL, how=valid, size=8192)
+        // -> E2BIG.  size>PAGE_SIZE runs ahead of getname; pre-batch
+        // this returned EFAULT (filename validated first) and a valid
+        // filename returned EINVAL (size!=24).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: how_ptr, arg3: 8192, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat2 (filename=NULL,size=8192) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 226 discriminator: (filename=valid, how=valid, size=4097)
+        // -> E2BIG.  Pre-batch this returned EINVAL because we
+        // required size==24 exactly.  Confirms the upper bound is
+        // now PAGE_SIZE, not "anything != 24".
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_ptr, arg3: 4097, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat2 (size=4097) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 226 discriminator: (filename=valid, how=valid, size=32)
+        // -> NOT EINVAL.  Linux accepts forward-compatible sizes in
+        // [VER0, PAGE_SIZE].  We read only the first 24 bytes and
+        // forward to sys_openat which surfaces ENOENT for the
+        // non-existent path.  Pre-batch this returned EINVAL because
+        // size != 24.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_ptr, arg3: 32, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::OPENAT2, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat2 size=32 still EINVAL (forward-compat broken)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   openat2 size-EINVAL > size-E2BIG > how-EFAULT > resolve-EINVAL > filename-EFAULT gate order: OK"
+        );
 
         // execveat with bad flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0xff, arg5: 0 };

@@ -20110,5 +20110,66 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 255. [DONE 2026-06-05] Linux ABI: sys_openat2 gate order — split strict
+##      size==24 into [VER0, PAGE_SIZE], move filename validation after
+##      size/copy gates.
+##
+##      Linux fs/open.c::SYSCALL_DEFINE4(openat2) gates in this literal
+##      source order:
+##        1. if (usize < OPEN_HOW_SIZE_VER0) return -EINVAL;  (24)
+##        2. if (usize > PAGE_SIZE)         return -E2BIG;    (4096)
+##        3. copy_struct_from_user(...) -> -EFAULT for NULL `how`.
+##        4. build_open_flags() -> resolve & ~VALID -> -EINVAL.
+##        5. getname(filename) -> -EFAULT for NULL filename.
+##        6. (path walk) RESOLVE_CACHED/IN_ROOT/BENEATH responses.
+##
+##      Pre-batch divergences:
+##      - We required `args.arg3 == 24` exactly, returning EINVAL for
+##        any forward-compatible size in [25, PAGE_SIZE] that Linux
+##        accepts (with the excess zero-padded by copy_struct_from_user).
+##        A glibc that adds a new field would see EINVAL on every
+##        call even with the new layout's exact size.
+##      - Sizes > PAGE_SIZE returned EINVAL instead of E2BIG, losing
+##        the discriminator probes use to detect the upper cap.
+##      - The filename pointer was validated at the very top of the
+##        function — so (filename=NULL, size=8) returned EFAULT where
+##        Linux returns EINVAL (size gate runs first); (filename=NULL,
+##        size=8192) returned EFAULT where Linux returns E2BIG.
+##
+##      Fix: reorder to mirror Linux's source order — size<VER0
+##      EINVAL first, then size>PAGE_SIZE E2BIG, then how==NULL EFAULT,
+##      then read the first 24 bytes (any size in [24, PAGE_SIZE] is
+##      accepted; trailing bytes are silently ignored, see limitation),
+##      then resolve mask EINVAL, then filename EFAULT, then the
+##      existing RESOLVE_CACHED/IN_ROOT/BENEATH responses (which Linux
+##      surfaces at path-walk time, after getname).
+##
+##      Self-tests added (~line 36945):
+##      - (filename=NULL, size=8)    -> EINVAL  (was EFAULT; size gate
+##                                              now wins).
+##      - (filename=NULL, size=8192) -> E2BIG   (was EFAULT; size gate
+##                                              now wins).
+##      - (filename=valid, size=4097)-> E2BIG   (was EINVAL; was tied
+##                                              to strict ==24 check).
+##      - (filename=valid, size=32)  -> NOT EINVAL  (forward-compat;
+##                                              pre-batch all non-24
+##                                              sizes returned EINVAL).
+##      - kept: NULL path with size=24 -> EFAULT; wrong size 16 ->
+##        EINVAL; NULL how -> EFAULT; RESOLVE_CACHED -> EAGAIN;
+##        RESOLVE_BENEATH -> EXDEV; unknown resolve bit -> EINVAL.
+##      Marker: "openat2 size-EINVAL > size-E2BIG > how-EFAULT >
+##              resolve-EINVAL > filename-EFAULT gate order: OK".
+##
+##      Known limitations:
+##      - Trailing bytes [24..usize) are silently ignored.  Linux's
+##        copy_struct_from_user checks they are zero and returns
+##        -E2BIG if not, which signals "you're trying to use a newer
+##        flag the kernel doesn't recognise."  A probe that sets a
+##        non-zero byte at offset 24 will see success here where
+##        Linux returns E2BIG.  Add forward-compat zero check in a
+##        future batch (separate concern from the size-bounds fix).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
 
 

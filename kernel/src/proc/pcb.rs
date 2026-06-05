@@ -678,6 +678,24 @@ pub struct Process {
     /// `get_io_flusher(pid)` and grant the same `__GFP_MEMALLOC`
     /// fast-path that Linux uses for these tasks.
     pub linux_io_flusher: u32,
+    /// Linux `prctl(PR_SET_MEMORY_MERGE)` bit — Kernel Same-page
+    /// Merging (KSM) opt-in.  When set (1), the kernel is allowed to
+    /// merge identical pages in this task's anonymous VMAs to save
+    /// memory.  Used by VM hosts (qemu/kvm), JVM-with-many-containers
+    /// setups, and language runtimes with large deduplicable working
+    /// sets (Python multi-process pools).
+    ///
+    /// Stored as 0/1.  Default 0.  Inherited verbatim across fork
+    /// (Linux: `MMF_VM_MERGE_ANY` is in `mm->flags` and survives
+    /// `dup_mmap`).  Preserved across exec (the flag survives
+    /// `flush_old_exec`).
+    ///
+    /// Known limitation: we do not implement KSM at all.  The flag
+    /// is round-tripped for ABI compatibility only; no actual page
+    /// merging happens.  When KSM lands, the VMA-walk on each mmap
+    /// must consult `get_memory_merge(pid)` and queue mergeable
+    /// anonymous regions onto the KSM scanner's worklist.
+    pub linux_memory_merge: u32,
 }
 
 /// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
@@ -774,6 +792,9 @@ impl Process {
             // (drbd-worker, multipathd, nbd-client, dm_crypt_write)
             // set PR_SET_IO_FLUSHER on themselves at init.
             linux_io_flusher: 0,
+            // Linux default: KSM merging off.  VM hosts and large
+            // language runtimes opt in via PR_SET_MEMORY_MERGE.
+            linux_memory_merge: 0,
         }
     }
 }
@@ -927,6 +948,7 @@ pub fn fork_create(
         linux_mce_kill_policy,
         linux_mdwe_bits,
         linux_io_flusher,
+        linux_memory_merge,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -963,6 +985,7 @@ pub fn fork_create(
             parent.linux_mce_kill_policy,
             parent.linux_mdwe_bits,
             parent.linux_io_flusher,
+            parent.linux_memory_merge,
         )
     };
 
@@ -1118,6 +1141,12 @@ pub fn fork_create(
         // fork.  Preserved across exec (flush_thread does not
         // touch it).
         linux_io_flusher,
+        // Linux: `MMF_VM_MERGE_ANY` lives in `mm->flags` and
+        // survives `dup_mmap`, so the KSM-merge opt-in propagates
+        // verbatim across fork.  Preserved across exec
+        // (flush_old_exec keeps the mm flags subset that
+        // includes MMF_VM_MERGE_ANY).
+        linux_memory_merge,
     };
 
     table.insert(pid, child);
@@ -1918,6 +1947,25 @@ pub fn set_io_flusher(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_io_flusher;
     proc.linux_io_flusher = val;
+    Some(old)
+}
+
+/// Read the `PR_GET_MEMORY_MERGE` bit for `pid` (0 or 1).  Returns
+/// `None` if `pid` is unknown; `Some(0)` is the default.
+#[must_use]
+pub fn get_memory_merge(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_memory_merge)
+}
+
+/// Install the `PR_SET_MEMORY_MERGE` bit (must be 0 or 1) for
+/// `pid`, returning the prior value.  Returns `None` if `pid` is
+/// unknown.  The helper does not validate the value — the syscall
+/// surface rejects anything outside {0, 1}.
+pub fn set_memory_merge(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_memory_merge;
+    proc.linux_memory_merge = val;
     Some(old)
 }
 

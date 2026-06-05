@@ -4584,6 +4584,49 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 _ => linux_err(errno::ENODEV),
             }
         }
+        // PR_SET_MEMORY_MERGE (67) — mark the calling task's
+        // anonymous VMAs as KSM-mergeable.  Used by VM hosts
+        // (qemu/kvm), JVM-per-container deployments, Python
+        // multi-process pools — anywhere a large deduplicable
+        // working set is shared across processes.
+        //
+        // Linux semantics:
+        //   * arg3/arg4/arg5 must be 0 or EINVAL.
+        //   * arg2 (our arg1) must be 0 or 1; anything else EINVAL.
+        //   * Linux additionally requires NO_NEW_PRIVS or
+        //     CAP_SYS_RESOURCE; we don't enforce capabilities yet.
+        //
+        // Known limitation: we do not implement KSM at all.  Flag
+        // round-trips for ABI compatibility; no merging occurs.
+        67 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            if args.arg1 != 0 && args.arg1 != 1 {
+                return linux_err(errno::EINVAL);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let new_val = args.arg1 as u32;
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_memory_merge(pid, new_val);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_MEMORY_MERGE (68) — return the KSM-merge flag (0
+        // or 1) DIRECTLY as the syscall return value (no user
+        // pointer).  arg1..arg5 must all be 0 or EINVAL.  Kernel
+        // context reports 0 (the default).
+        68 => {
+            if args.arg1 != 0
+                || args.arg2 != 0
+                || args.arg3 != 0
+                || args.arg4 != 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            let v = caller_pid().and_then(pcb::get_memory_merge).unwrap_or(0);
+            SyscallResult::ok(i64::from(v))
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -18175,6 +18218,110 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     return Err(KernelError::InternalError);
                 }
             }
+        }
+
+        // Batch 81: PR_SET_MEMORY_MERGE / PR_GET_MEMORY_MERGE
+        // round-trip with strict argument validation matching
+        // Linux.
+        // Verifications:
+        //   1. PR_SET_MEMORY_MERGE arg3/arg4/arg5 != 0 -> EINVAL.
+        //   2. PR_SET_MEMORY_MERGE arg1 not in {0, 1} -> EINVAL.
+        //   3. PR_SET_MEMORY_MERGE(0) / (1) -> 0.
+        //   4. PR_GET_MEMORY_MERGE arg1..arg5 != 0 -> EINVAL.
+        //   5. Kernel context PR_GET_MEMORY_MERGE -> 0 (default).
+        //   6. pcb storage round-trip.
+        {
+            // arg3/arg4/arg5 != 0 -> EINVAL.
+            for (idx, a) in [
+                SyscallArgs { arg0: 67, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 67, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 67, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, …{}=1) not EINVAL ({})",
+                        idx + 3,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // arg1 not in {0, 1} -> EINVAL.
+            for v in [2u64, 3, 0xff, u64::MAX] {
+                let a = SyscallArgs { arg0: 67, arg1: v, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, {}) not EINVAL ({})",
+                        v,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET_MEMORY_MERGE(0) / (1) -> 0.
+            for v in [0u64, 1] {
+                let a = SyscallArgs { arg0: 67, arg1: v, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, {}) not 0 ({})",
+                        v,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET_MEMORY_MERGE arg1..arg5 != 0 -> EINVAL.
+            for (idx, a) in [
+                SyscallArgs { arg0: 68, arg1: 1, arg2: 0, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 68, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 68, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 68, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_MEMORY_MERGE, …{}=1) not EINVAL ({})",
+                        idx + 2,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Kernel context PR_GET_MEMORY_MERGE -> 0.
+            let a = SyscallArgs { arg0: 68, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_MEMORY_MERGE) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("memory-merge-test", 0);
+            assert_eq!(pcb::get_memory_merge(test_pid), Some(0));
+            assert_eq!(pcb::set_memory_merge(test_pid, 1), Some(0));
+            assert_eq!(pcb::get_memory_merge(test_pid), Some(1));
+            assert_eq!(pcb::set_memory_merge(test_pid, 0), Some(1));
+            assert_eq!(pcb::get_memory_merge(test_pid), Some(0));
+            pcb::destroy(test_pid);
+            assert_eq!(pcb::get_memory_merge(test_pid), None);
+            assert_eq!(pcb::set_memory_merge(test_pid, 1), None);
         }
     }
 

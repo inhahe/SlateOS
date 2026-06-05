@@ -10399,3 +10399,55 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
 
+## 110. Linux ABI batch 81: per-PCB PR_SET_MEMORY_MERGE /
+##      PR_GET_MEMORY_MERGE round-trip (KSM opt-in).
+##
+##      Before this batch options 67 and 68 fell through to
+##      the generic EINVAL catch-all in sys_prctl.  VM hosts
+##      (qemu/kvm setup paths), JVM-per-container deployments,
+##      and Python multi-process pools all probe these
+##      options at startup to opt into Kernel Same-page
+##      Merging.  EINVAL there forces the runtime to either
+##      assume KSM is unsupported (skipping a measurable
+##      memory-savings win for VM workloads) or emit a
+##      warning on every spawn.
+##
+##      Fix: add `linux_memory_merge: u32` (default 0, only
+##      values 0 and 1 are legal) to the PCB.  Inherited
+##      verbatim across fork (Linux: MMF_VM_MERGE_ANY is in
+##      `mm->flags` and survives `dup_mmap`).  Preserved
+##      across exec (the bit is in the mm-flags subset that
+##      survives flush_old_exec).
+##
+##      PR_SET_MEMORY_MERGE (67):
+##        * arg3/arg4/arg5 must be 0 or EINVAL.
+##        * arg2 (our arg1) must be 0 or 1; else EINVAL.
+##        * Linux additionally requires NO_NEW_PRIVS or
+##          CAP_SYS_RESOURCE; we don't enforce caps.
+##        * Returns 0 on success.
+##
+##      PR_GET_MEMORY_MERGE (68):
+##        * arg1..arg5 must all be 0 or EINVAL.
+##        * Returns the flag DIRECTLY as the syscall return.
+##        * Kernel context reports 0 (the default).
+##
+##      Known limitation (deferred): we do not implement KSM
+##      at all.  The flag round-trips for ABI compatibility
+##      but no actual page merging happens.  When KSM lands,
+##      the VMA-walk on each mmap must consult
+##      `get_memory_merge(pid)` and queue mergeable anonymous
+##      regions onto the KSM scanner's worklist.
+##
+##      Self-tests cover:
+##        * arg3/arg4/arg5 != 0 -> EINVAL on PR_SET.
+##        * arg1 not in {0, 1} -> EINVAL (2, 3, 0xff,
+##          u64::MAX).
+##        * (0) / (1) -> 0.
+##        * arg1..arg5 != 0 -> EINVAL on PR_GET.
+##        * Kernel context PR_GET -> 0.
+##        * pcb storage round-trip 0 -> 1 -> 0 -> destroy ->
+##          None.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 21s).
+
+

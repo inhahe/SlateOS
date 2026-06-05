@@ -20054,5 +20054,61 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 254. [DONE 2026-06-05] Linux ABI: sys_statx mask & sync-type validation —
+##      add STATX__RESERVED EINVAL and AT_STATX_SYNC_TYPE collision gates.
+##
+##      Linux fs/stat.c::do_statx() gates input in this order, BEFORE
+##      any path resolution or buffer access:
+##        1. `if (mask & STATX__RESERVED) return -EINVAL;`
+##           (STATX__RESERVED = 0x80000000, bit 31, reserved for
+##            future use).
+##        2. `if ((flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE)
+##            return -EINVAL;`
+##           (AT_STATX_SYNC_TYPE = AT_STATX_FORCE_SYNC |
+##            AT_STATX_DONT_SYNC = 0x6000; both bits set
+##            simultaneously is contradictory).
+##
+##      Pre-batch divergences:
+##      - `mask` was never validated.  A probe sending
+##        `mask=0x80000000` (Linux's reserved-bit feature-detect
+##        pattern) would see EFAULT/ENOENT/0 depending on the other
+##        args, where Linux returns EINVAL.  This is the canonical
+##        statx ABI compatibility check and was missing entirely.
+##      - `(flags=0x6000)` (both AT_STATX_FORCE_SYNC and
+##        AT_STATX_DONT_SYNC) passed the existing `flags & !VALID_FLAGS`
+##        gate because both bits are individually valid.  Linux
+##        rejects this combination with EINVAL; we returned ENOENT
+##        via the path-lookup fall-through.
+##
+##      Fix: add the two missing gates ahead of the existing VALID_FLAGS
+##      and statxbuf checks, matching Linux's literal source-order
+##      placement at the top of do_statx().  The existing
+##      `flags & !VALID_FLAGS` strict-mask check is kept (slightly
+##      stricter than upstream do_statx, which silently ignores unknown
+##      AT_ bits — kept for safety since probes that fuzz flag bits
+##      will see a consistent EINVAL).
+##
+##      Self-tests added (~line 32520):
+##      - mask=0x80000000, valid statxbuf, flags=0 -> EINVAL  (was
+##        ENOENT — STATX__RESERVED gate now fires first).
+##      - flags=0x6000 (FORCE|DONT), valid statxbuf      -> EINVAL  (was
+##        ENOENT — sync-type collision now rejected).
+##      - flags=0x2000 (FORCE_SYNC alone), valid statxbuf -> ENOENT
+##        (confirms the collision check is exact-equality, not popcount —
+##        a single sync-type bit still passes).
+##      - kept: bogus flag bit -> EINVAL; NULL statxbuf -> EFAULT;
+##        AT_EMPTY_PATH with Console -> 0 + S_IFCHR; path lookup
+##        without AT_EMPTY_PATH -> ENOENT.
+##      Marker: "statx mask-RESERVED-EINVAL > sync-type-collision-EINVAL
+##              gate order: OK".
+##
+##      Known limitations: terminal path-lookup return is still ENOENT
+##      (no real filesystem yet), so realistic mask values produce no
+##      stat output beyond the AT_EMPTY_PATH self-fd path.  Once a real
+##      VFS lands, the validated mask will be honoured to select which
+##      stx_* fields are filled.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

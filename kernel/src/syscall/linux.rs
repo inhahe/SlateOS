@@ -9819,6 +9819,16 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
     const AT_STATX_SYNC_AS_STAT: u64 = 0x0000;
     const AT_STATX_FORCE_SYNC: u64 = 0x2000;
     const AT_STATX_DONT_SYNC: u64 = 0x4000;
+    // AT_STATX_SYNC_TYPE is the bitmask covering both sync-type bits.
+    // Linux defines it as `AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC`
+    // (0x6000) and uses an exact-equality check to reject the case
+    // where the caller has set BOTH bits — the two are mutually
+    // exclusive directives.
+    const AT_STATX_SYNC_TYPE: u64 = AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC;
+    // STATX__RESERVED bit (0x80000000, bit 31).  Linux uapi reserves
+    // this for future use and explicitly rejects callers who set it
+    // in `mask`.
+    const STATX_RESERVED: u32 = 0x8000_0000;
     const VALID_FLAGS: u64 = AT_EMPTY_PATH
         | AT_SYMLINK_NOFOLLOW
         | AT_NO_AUTOMOUNT
@@ -9829,9 +9839,28 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
     let dirfd = args.arg0 as i32;
     let path = args.arg1;
     let flags = args.arg2;
-    let _mask = args.arg3;
+    let mask = args.arg3;
     let statxbuf = args.arg4;
 
+    // Gate 1: mask & STATX__RESERVED -> EINVAL.  Mirrors Linux
+    // fs/stat.c::do_statx(): `if (mask & STATX__RESERVED) return
+    // -EINVAL;`.  This is the first gate inside do_statx, ahead of
+    // anything else.  `mask` is typed `unsigned int` in Linux, so
+    // only the low 32 bits are meaningful for the reserved bit.
+    #[allow(clippy::cast_possible_truncation)]
+    if (mask as u32) & STATX_RESERVED != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 2: `(flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE`
+    // -> EINVAL.  Mirrors the next statement in Linux's do_statx —
+    // setting BOTH AT_STATX_FORCE_SYNC and AT_STATX_DONT_SYNC at the
+    // same time is contradictory.  Pre-batch 225 we accepted this
+    // combination because both bits were members of VALID_FLAGS, so
+    // (statxbuf=valid, flags=0x6000) bypassed the EINVAL gate and
+    // returned ENOENT/0 via the path or AT_EMPTY_PATH branches.
+    if flags & AT_STATX_SYNC_TYPE == AT_STATX_SYNC_TYPE {
+        return linux_err(errno::EINVAL);
+    }
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -32506,6 +32535,71 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 225 discriminator: mask & STATX__RESERVED (bit 31) ->
+        // EINVAL.  Linux fs/stat.c::do_statx checks this BEFORE any
+        // other validation, so even with a valid statxbuf and zero
+        // flags the call must reject.  Pre-batch we ignored mask
+        // entirely and would have fallen through to a path-lookup
+        // ENOENT.
+        let mut xbuf_reserved = [0u8; 256];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0x8000_0000,
+            arg4: xbuf_reserved.as_mut_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx(mask=STATX__RESERVED) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 225 discriminator: flags=AT_STATX_FORCE_SYNC |
+        // AT_STATX_DONT_SYNC (0x6000) -> EINVAL.  Setting both
+        // sync-type bits simultaneously is mutually exclusive in
+        // Linux's do_statx (`(flags & AT_STATX_SYNC_TYPE) ==
+        // AT_STATX_SYNC_TYPE`).  Pre-batch both bits were members
+        // of VALID_FLAGS, so this combination passed the flag-mask
+        // gate and reached the path-lookup ENOENT instead.
+        let mut xbuf_sync = [0u8; 256];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0x6000,
+            arg3: 0,
+            arg4: xbuf_sync.as_mut_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx(FORCE|DONT_SYNC) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Confirm a SINGLE sync-type bit still passes the gate (the
+        // collision check is an exact-equality test, not a popcount).
+        // FORCE_SYNC alone with valid statxbuf and a missing-path
+        // dirfd should fall through to ENOENT, not EINVAL.
+        let mut xbuf_one_sync = [0u8; 256];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0x2000,
+            arg3: 0,
+            arg4: xbuf_one_sync.as_mut_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx(FORCE_SYNC alone) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
         // NULL statxbuf -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -32555,6 +32649,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: statx path not ENOENT");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   statx mask-RESERVED-EINVAL > sync-type-collision-EINVAL gate order: OK"
+        );
     }
 
     // mkdir / mkdirat / rmdir / unlink / unlinkat / rename family —

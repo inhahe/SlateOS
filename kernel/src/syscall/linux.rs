@@ -3985,6 +3985,54 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             };
             SyscallResult::ok(i64::from(v))
         }
+        // PR_SET_CHILD_SUBREAPER (36) — opt the process in (or out)
+        // of being the orphan-reaper for its descendant tree.  Linux
+        // normalises arg2 to !!arg2 (any non-zero stores 1; 0
+        // clears).  arg3/arg4/arg5 must all be 0 or EINVAL.  We
+        // persist per-PCB for round-trip; orphan re-parenting to the
+        // nearest subreaper ancestor is not wired in the process
+        // lifecycle yet (tracked in todo.txt).
+        36 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            let normalised: u32 = if args.arg1 == 0 { 0 } else { 1 };
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_child_subreaper(pid, normalised);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_CHILD_SUBREAPER (37) — copy the recorded flag into
+        // the user int* at arg2.  NULL is EFAULT (consistent with
+        // every other PR_GET_* pointer surface).  arg3/arg4/arg5
+        // must all be 0 or EINVAL.  Kernel context (no PCB) reports
+        // 0 (default).
+        37 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            let user_buf = args.arg1;
+            if user_buf == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let v: i32 = caller_pid()
+                .and_then(pcb::get_child_subreaper)
+                .map(|x| x as i32)
+                .unwrap_or(0);
+            // SAFETY: copy_to_user validates the destination range
+            // and uses STAC/CLAC for SMAP-safe access.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(
+                    (&raw const v).cast::<u8>(),
+                    user_buf,
+                    core::mem::size_of::<i32>(),
+                )
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            SyscallResult::ok(0)
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -16374,6 +16422,139 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_no_new_privs(test_pid), None);
             assert_eq!(pcb::set_no_new_privs(test_pid, 1), None);
+        }
+
+        // Batch 69: PR_SET_CHILD_SUBREAPER / PR_GET_CHILD_SUBREAPER
+        // round-trip with strict argument validation matching Linux.
+        //
+        //   1. PR_SET_CHILD_SUBREAPER rejects non-zero arg3..arg5
+        //      with EINVAL (Linux gates the auxiliary args).
+        //   2. PR_SET_CHILD_SUBREAPER(0) and (1) and (42) all
+        //      succeed (Linux normalises arg2 to !!arg2 — anything
+        //      non-zero stores 1).
+        //   3. PR_GET_CHILD_SUBREAPER rejects non-zero arg3..arg5
+        //      with EINVAL.
+        //   4. PR_GET_CHILD_SUBREAPER with NULL pointer -> EFAULT.
+        //   5. PR_GET_CHILD_SUBREAPER with a kernel-stack scratch
+        //      buffer returns 0 (kernel context has no PCB so the
+        //      default applies).
+        //   6. pcb storage layer: default 0, set 1, query 1, set 0,
+        //      query 0, destroy -> None.
+        {
+            // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET.
+            for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                let mut a = SyscallArgs { arg0: 36, arg1: 1, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET_CHILD_SUBREAPER(0): accepted (clears flag).
+            let a = SyscallArgs { arg0: 36, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 0) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_CHILD_SUBREAPER(1): accepted (sets flag).
+            let a = SyscallArgs { arg0: 36, arg1: 1, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 1) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_CHILD_SUBREAPER(42): accepted (normalises to 1).
+            let a = SyscallArgs { arg0: 36, arg1: 42, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 42) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // arg3/arg4/arg5 != 0 -> EINVAL on PR_GET.
+            for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                let mut a = SyscallArgs { arg0: 37, arg1: 0, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET_CHILD_SUBREAPER NULL pointer -> EFAULT.
+            let a = SyscallArgs { arg0: 37, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, NULL) not EFAULT ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_GET_CHILD_SUBREAPER with scratch buffer -> 0
+            // (kernel context: no PCB, default applies).
+            let mut subreaper_out: i32 = 0x7f;
+            let a = SyscallArgs {
+                arg0: 37,
+                arg1: (&raw mut subreaper_out) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, &buf) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            if subreaper_out != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, &buf) buf not 0 ({})",
+                    subreaper_out
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("subreaper-test", 0);
+            // Default is 0.
+            assert_eq!(pcb::get_child_subreaper(test_pid), Some(0));
+            // Install 1.  set returns the prior value.
+            assert_eq!(pcb::set_child_subreaper(test_pid, 1), Some(0));
+            assert_eq!(pcb::get_child_subreaper(test_pid), Some(1));
+            // Clear back to 0.
+            assert_eq!(pcb::set_child_subreaper(test_pid, 0), Some(1));
+            assert_eq!(pcb::get_child_subreaper(test_pid), Some(0));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_child_subreaper(test_pid), None);
+            assert_eq!(pcb::set_child_subreaper(test_pid, 1), None);
         }
     }
 

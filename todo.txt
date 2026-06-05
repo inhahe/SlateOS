@@ -9652,3 +9652,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     Build clean; boot test PASSED (BOOT_OK at 21s).
 
 
+## 97. Linux ABI batch 69: real per-PCB PR_SET_CHILD_SUBREAPER
+##     / PR_GET_CHILD_SUBREAPER round-trip with strict
+##     argument validation matching Linux.
+##
+##     Before this batch, both options fell through to the
+##     generic `_ => EINVAL` catch-all in sys_prctl, so every
+##     caller (systemd in particular — it uses this during
+##     service unit setup) got the wrong error.  EINVAL on an
+##     option that should succeed makes systemd think we
+##     don't know the option at all and switch to a fallback
+##     supervision strategy (or fail outright depending on
+##     the unit).
+##
+##     Fix: add `linux_child_subreaper: u32` to the PCB
+##     (default 0).  **NOT inherited across fork** — Linux's
+##     copy_signal does not propagate is_child_subreaper to
+##     forked children, and a child must opt in via prctl
+##     itself.  Preserved across exec (no exec hook yet —
+##     same caveat as dumpable/keepcaps, but for this option
+##     the exec semantics actually match: Linux preserves
+##     child_subreaper across exec).
+##
+##     PR_SET_CHILD_SUBREAPER (36) — Linux normalises arg2 to
+##     `!!arg2`, so any non-zero stores 1 and 0 clears.
+##     arg3/arg4/arg5 must all be 0 or EINVAL.  We mirror
+##     exactly and persist via the helper.
+##
+##     PR_GET_CHILD_SUBREAPER (37) — copies the flag into the
+##     user int* at arg2.  NULL pointer is EFAULT (consistent
+##     with every other PR_GET_* pointer surface).
+##     arg3/arg4/arg5 must all be 0 or EINVAL.  Kernel
+##     context (no PCB) reports the default (0).
+##
+##     Known limitation (deferred): orphan re-parenting to
+##     the nearest subreaper ancestor is not yet wired in our
+##     process lifecycle.  Setting the flag stores the bit
+##     but on actual exit of a process with descendants, we
+##     don't walk up the parent chain looking for the first
+##     ancestor with linux_child_subreaper == 1 — we just
+##     reparent to pid 1 (init).  This is invisible to most
+##     userspace probes; the bit being readable back is what
+##     systemd checks.  Re-parenting will need its own batch
+##     once we have orphan handling at all.
+##
+##     Self-tests cover:
+##       * PR_SET arg3/arg4/arg5 != 0 -> EINVAL (each in turn).
+##       * PR_SET(0), (1), (42) all succeed (normalisation).
+##       * PR_GET arg3/arg4/arg5 != 0 -> EINVAL (each in turn).
+##       * PR_GET NULL pointer -> EFAULT.
+##       * PR_GET kernel context -> 0 (default).
+##       * pcb storage layer round-trips 0 -> 1 -> 0 -> destroy
+##         -> None.
+##
+##     Build clean; boot test PASSED (BOOT_OK at 21s).
+
+

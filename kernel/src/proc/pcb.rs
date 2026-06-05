@@ -511,6 +511,25 @@ pub struct Process {
     /// round-trip.  systemd, dbus, and chromium's sandbox all probe
     /// this flag during startup.
     pub linux_no_new_privs: u32,
+    /// Linux `prctl(PR_SET_CHILD_SUBREAPER)` flag.  When set, the
+    /// process becomes the "subreaper" for any orphaned descendant —
+    /// instead of being reparented to pid 1 (init), an orphaned
+    /// process is reparented to the nearest ancestor that has this
+    /// flag set.  systemd uses this for per-service supervision so a
+    /// daemon's grandchildren can be reaped by the supervisor
+    /// instead of escaping to init.
+    ///
+    /// Default 0.  **NOT inherited across fork** on Linux — a forked
+    /// child starts as a non-subreaper regardless of the parent's
+    /// flag (the parent's subreaper-ness still affects the child's
+    /// re-parenting destination, but the child does not itself
+    /// inherit the bit).  Preserved across exec.
+    ///
+    /// We store the flag per-PCB purely for ABI round-trip;
+    /// re-parenting on orphan is not yet wired in our process
+    /// lifecycle (no per-PCB "find subreaper ancestor" walk).
+    /// Tracked in todo.txt.
+    pub linux_child_subreaper: u32,
 }
 
 impl Process {
@@ -575,6 +594,10 @@ impl Process {
             // Linux default: NNP cleared (0).  PR_SET_NO_NEW_PRIVS(1)
             // sets it; once set, sticky forever.
             linux_no_new_privs: 0,
+            // Linux default: not a child subreaper.  systemd, dumb-init,
+            // etc., opt in via PR_SET_CHILD_SUBREAPER(1).  NOT inherited
+            // across fork.
+            linux_child_subreaper: 0,
         }
     }
 }
@@ -834,6 +857,13 @@ pub fn fork_create(
         // sandboxes rely on it being preserved through exec).  Fork
         // verbatim covers both.
         linux_no_new_privs,
+        // Linux: PR_SET_CHILD_SUBREAPER is NOT inherited across
+        // fork.  The parent's subreaper-ness still influences the
+        // child's eventual orphan re-parenting destination, but the
+        // child does not itself start as a subreaper — it must opt
+        // in via prctl if it wants the role.  A forked child
+        // therefore always starts with the flag cleared.
+        linux_child_subreaper: 0,
     };
 
     table.insert(pid, child);
@@ -1459,6 +1489,28 @@ pub fn set_no_new_privs(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_no_new_privs;
     proc.linux_no_new_privs = val;
+    Some(old)
+}
+
+/// Read the recorded `prctl(PR_SET_CHILD_SUBREAPER)` flag for `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
+/// default (not a subreaper).
+#[must_use]
+pub fn get_child_subreaper(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_child_subreaper)
+}
+
+/// Install the child-subreaper flag for `pid`, returning the prior
+/// value.  Linux's `PR_SET_CHILD_SUBREAPER` normalises the input to
+/// `!!arg2` (any non-zero argument becomes 1); we leave that
+/// normalisation to the syscall surface and store whatever value the
+/// caller provides here.  Returns `None` if `pid` is unknown.
+pub fn set_child_subreaper(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_child_subreaper;
+    proc.linux_child_subreaper = val;
     Some(old)
 }
 

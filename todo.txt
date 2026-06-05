@@ -12280,3 +12280,69 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      entries 130, 131, 132.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 25s).
+##
+##  134. Linux ABI: sys_move_pages upgraded from -ENOSYS stub
+##      to UMA-aware no-op with per-page status writeback
+##      (batch 105).
+##
+##      move_pages(pid, count, pages, nodes, status, flags):
+##        * When `nodes == NULL` ("query mode"), write the
+##          current node id of each page into status[i].  Pages
+##          not present get -ENOENT in Linux; we conservatively
+##          claim "on node 0" for every entry (we don't have
+##          per-task VMA introspection to detect non-present
+##          pages from the dispatch path).
+##        * When `nodes != NULL` ("move mode"), for each page:
+##          target node 0 -> status[i] = 0; any other target
+##          -> status[i] = -EINVAL (matches Linux's "target not
+##          in mems_allowed" rejection).
+##        * Return 0 unconditionally on accept (per-page errors
+##          go in status[], not the return code).
+##
+##      Heap usage is bounded: the `pages` array is never
+##      dereferenced (each entry would need a VMA walk we don't
+##      have), and `nodes` + `status` are streamed in 256-entry
+##      chunks (1 KiB at a time).  No 4 MiB single allocation
+##      even at the 1 << 20 count cap.
+##
+##      Validation gates (unchanged from pre-batch except the
+##      count==0 case):
+##        * flags subset of MPOL_MF_MOVE (2) | MPOL_MF_MOVE_ALL (4).
+##        * count > (1 << 20) -> -E2BIG.
+##        * count == 0 -> 0 (no-op success; was -ENOSYS).
+##        * count > 0 with pages == NULL or status == NULL
+##          -> -EFAULT.
+##        * unreadable / unwritable user buffers -> -EFAULT.
+##
+##      Boot self-test "(9i) Batch 105" covers six cases:
+##        1. count == 0                              -> 0
+##        2. query mode (nodes NULL), 3 pages        -> status=[0,0,0]
+##        3. move mode all-zero targets, 3 pages     -> status=[0,0,0]
+##        4. move mode mixed [0,1,0]                 -> status=[0,-EINVAL,0]
+##        5. count > 1 << 20                         -> -E2BIG
+##        6. count > 0 with NULL pages               -> -EFAULT
+##
+##      Also updated the legacy "move_pages count=0 -> ENOSYS"
+##      test to expect 0, and updated the top-of-file doc table
+##      to note that the entire mempolicy family now accepts
+##      UMA-shaped inputs (batches 101-105 collectively).
+##
+##      Known limitation: we don't actually read the pages
+##      array.  A real Linux implementation walks each pointer
+##      through the target task's VMA tree, returns -ENOENT for
+##      non-resident pages, -EFAULT for invalid addresses, and
+##      -EACCES for cross-task access without ptrace.  On UMA
+##      these distinctions are invisible to callers that just
+##      use move_pages to check NUMA support — they only test
+##      whether the syscall returns ≥ 0.  When per-task VMA
+##      introspection lands, this is the place to walk pages[i]
+##      and emit accurate per-page status.  Cross-reference
+##      entries 130-133.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 26s; first
+##      attempt timed out in an unrelated ksnapshot test that
+##      didn't reach BOOT_OK — retry succeeded with no code
+##      change, indicating a flake in that subsystem).  Filed
+##      observation on flake under bug-tracking convention but
+##      no separate todo entry since it didn't reproduce and is
+##      not in code I touched.

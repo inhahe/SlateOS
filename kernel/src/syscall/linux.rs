@@ -11166,8 +11166,9 @@ fn sys_move_mount(args: &SyscallArgs) -> SyscallResult {
 // This kernel is uniform-memory-access by design (the namespace / topology
 // modules already report a single node 0 when no SRAT is found).  Memory-
 // policy syscalls (mbind / set_mempolicy / get_mempolicy / move_pages /
-// migrate_pages) therefore have no work to do; we validate every pointer
-// and return ENOSYS so libnuma-style callers know not to bother.
+// migrate_pages) all now accept UMA-shaped inputs and return positive
+// answers — batches 101-105.  Earlier they returned ENOSYS; the
+// asymmetry confused libnuma callers that probe both directions.
 //
 // sched_setattr / sched_getattr describe SCHED_DEADLINE / DEADLINE-class
 // scheduling which our priority round-robin scheduler does not model.
@@ -11757,10 +11758,44 @@ fn sys_migrate_pages(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `move_pages(pid, count, pages*, nodes*, status*, flags)`.
+/// `move_pages(pid, count, pages*, nodes*, status*, flags)` — move each
+/// of `count` pages to a target node (when `nodes != NULL`), and write
+/// the resulting node id of each page into `status[i]`.
+///
+/// Pre-batch this returned -ENOSYS after pointer validation, leaving an
+/// asymmetry with batches 101-104.  numactl(8)'s `--touch` mode,
+/// libnuma's `numa_move_pages`, and tcmalloc's per-arena placement
+/// query all expect 0 (or per-element status) from a UMA kernel.
+///
+/// Linux semantics:
+///   * `pid == 0` means "self".
+///   * `count == 0` is a no-op success.
+///   * `flags` is a subset of MPOL_MF_MOVE (2) | MPOL_MF_MOVE_ALL (4).
+///   * When `nodes != NULL`: try to move each page; write the resulting
+///     node id (or per-page errno) into `status[i]`.
+///   * When `nodes == NULL`: just query; write the current node id of
+///     each page into `status[i]`.  Pages not present get -ENOENT.
+///
+/// Our UMA semantics:
+///   * Every present page is on node 0.  Pages not present cannot be
+///     introspected from the dispatch path (no per-task VMA walk), so
+///     we conservatively claim "on node 0" for every entry — matching
+///     what a single-node Linux box returns for any successful page.
+///   * When `nodes != NULL`, we read each requested target node id:
+///     if it's 0, status[i] = 0; if it's non-zero, status[i] = -EINVAL
+///     (Linux's "target not in mems_allowed" rejection).
+///   * Return 0 unconditionally on accept (per-page errors live in
+///     status[i], not the return code).
+///
+/// Heap usage: the `pages` array is never dereferenced (each pointer
+/// would need a VMA lookup we don't have), but `nodes` and `status` are
+/// streamed in 256-entry chunks (1 KiB at a time) to avoid allocating
+/// a 4 MiB buffer for the 1 << 20-entry maximum.
 fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
     const MPOL_MF_MOVE: u32 = 0x2;
     const MPOL_MF_MOVE_ALL: u32 = 0x4;
+    const CHUNK: usize = 256;
+
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg5 as u32;
     if flags & !(MPOL_MF_MOVE | MPOL_MF_MOVE_ALL) != 0 {
@@ -11770,29 +11805,94 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
     if count > (1 << 20) {
         return linux_err(errno::E2BIG);
     }
-    if count > 0 {
-        if args.arg2 == 0 || args.arg4 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        // pages: count * 8 bytes (array of void*).
-        let pbytes = count.saturating_mul(8) as usize;
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, pbytes) {
-            return linux_err(linux_errno_for(e));
-        }
-        // nodes is optional (NULL means "just report status").
-        if args.arg3 != 0 {
-            let nbytes = count.saturating_mul(4) as usize;
-            if let Err(e) = crate::mm::user::validate_user_read(args.arg3, nbytes) {
-                return linux_err(linux_errno_for(e));
-            }
-        }
-        // status is required: count * 4 bytes.
-        let sbytes = count.saturating_mul(4) as usize;
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg4, sbytes) {
+    if count == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // pages: required, count * 8 bytes.
+    if args.arg2 == 0 || args.arg4 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let pbytes = count.saturating_mul(8) as usize;
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, pbytes) {
+        return linux_err(linux_errno_for(e));
+    }
+    // nodes: optional, count * 4 bytes when non-NULL.
+    let nodes_ptr = args.arg3;
+    if nodes_ptr != 0 {
+        let nbytes = count.saturating_mul(4) as usize;
+        if let Err(e) = crate::mm::user::validate_user_read(nodes_ptr, nbytes) {
             return linux_err(linux_errno_for(e));
         }
     }
-    linux_err(errno::ENOSYS)
+    // status: required, count * 4 bytes.
+    let status_ptr = args.arg4;
+    let sbytes = count.saturating_mul(4) as usize;
+    if let Err(e) = crate::mm::user::validate_user_write(status_ptr, sbytes) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Stream the nodes/status arrays in 256-entry chunks.  i tracks
+    // the current page index; we never need to keep more than one
+    // chunk of either array in kernel memory at a time.
+    let mut nodes_chunk = [0i32; CHUNK];
+    let mut status_chunk = [0i32; CHUNK];
+    let mut i: u64 = 0;
+    while i < count {
+        let n = core::cmp::min(CHUNK as u64, count - i) as usize;
+
+        if nodes_ptr != 0 {
+            let off = i.saturating_mul(4);
+            // SAFETY: validate_user_read above covers the full
+            // nodes array; we read sub-ranges of it here.
+            let r = unsafe {
+                crate::mm::user::copy_from_user(
+                    nodes_ptr + off,
+                    nodes_chunk.as_mut_ptr().cast::<u8>(),
+                    n * 4,
+                )
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            for j in 0..n {
+                // Per-entry decision: target node 0 -> status 0;
+                // any other node -> -EINVAL (we have only node 0).
+                #[allow(clippy::indexing_slicing)]
+                let want = nodes_chunk[j];
+                #[allow(clippy::indexing_slicing)]
+                {
+                    status_chunk[j] = if want == 0 { 0 } else { -errno::EINVAL };
+                }
+            }
+        } else {
+            // Query mode: every page is on node 0.
+            for j in 0..n {
+                #[allow(clippy::indexing_slicing)]
+                {
+                    status_chunk[j] = 0;
+                }
+            }
+        }
+
+        let off = i.saturating_mul(4);
+        // SAFETY: validate_user_write above covers the full status
+        // array; we write a sub-range of it here.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(
+                status_chunk.as_ptr().cast::<u8>(),
+                status_ptr + off,
+                n * 4,
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+
+        i += n as u64;
+    }
+
+    SyscallResult::ok(0)
 }
 
 /// `sched_setattr(pid, attr*, flags)` — set a thread's scheduling
@@ -17474,6 +17574,116 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if r.value != -i64::from(errno::EINVAL) {
             serial_println!(
                 "[syscall/linux]   FAIL: migrate_pages(huge maxnode) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (9i) Batch 105: move_pages upgraded from -ENOSYS stub to a
+    // UMA-aware no-op + per-page status writer.  Verifies that
+    // status[i] is written correctly for both query (nodes==NULL)
+    // and move (nodes != NULL with target 0 / non-zero) modes.
+    {
+        // Case 1: count == 0 -> 0 (Linux no-op success).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(count=0) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 2: query mode (nodes == NULL) on 3 pages.  All
+        // status entries must be 0 (= node 0).
+        let pages: [u64; 3] = [0x1000, 0x2000, 0x3000];
+        let mut status: [i32; 3] = [0x55; 3];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 3,
+            arg2: pages.as_ptr().addr() as u64,
+            arg3: 0,
+            arg4: status.as_mut_ptr().addr() as u64,
+            arg5: 0,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != 0 || status != [0, 0, 0] {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(query) ret {} status {:?}",
+                r.value, status,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 3: move mode with target = node 0 for every page.
+        // status[i] must be 0.
+        let nodes: [i32; 3] = [0, 0, 0];
+        let mut status: [i32; 3] = [0xaa; 3];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 3,
+            arg2: pages.as_ptr().addr() as u64,
+            arg3: nodes.as_ptr().addr() as u64,
+            arg4: status.as_mut_ptr().addr() as u64,
+            arg5: 0,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != 0 || status != [0, 0, 0] {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(all->0) ret {} status {:?}",
+                r.value, status,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 4: mixed targets — node 0 / node 1 / node 0.
+        // status must be 0 / -EINVAL / 0.
+        let nodes: [i32; 3] = [0, 1, 0];
+        let mut status: [i32; 3] = [0x77; 3];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 3,
+            arg2: pages.as_ptr().addr() as u64,
+            arg3: nodes.as_ptr().addr() as u64,
+            arg4: status.as_mut_ptr().addr() as u64,
+            arg5: 0,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != 0 || status != [0, -errno::EINVAL, 0] {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(mixed) ret {} status {:?}",
+                r.value, status,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 5: count > limit -> -E2BIG.
+        let a = SyscallArgs {
+            arg0: 0, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(huge count) -> {} (expected -E2BIG)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 6: count > 0 with NULL pages pointer -> -EFAULT.
+        let mut status: [i32; 1] = [0];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 1,
+            arg2: 0,
+            arg3: 0,
+            arg4: status.as_mut_ptr().addr() as u64,
+            arg5: 0,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(NULL pages) -> {} (expected -EFAULT)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -26876,10 +27086,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: move_pages huge count not E2BIG");
             return Err(KernelError::InternalError);
         }
-        // move_pages count=0 -> ENOSYS.
+        // move_pages count=0 -> 0 (batch 105 upgrade: was ENOSYS,
+        // now a no-op success).
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MOVE_PAGES, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: move_pages 0 count not ENOSYS");
+        if dispatch_linux(nr::MOVE_PAGES, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: move_pages count=0 not 0");
             return Err(KernelError::InternalError);
         }
 

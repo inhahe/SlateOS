@@ -78,7 +78,8 @@
 //! | 110      | getppid           | reads parent pid                   |
 //! | 158      | arch_prctl        | ARCH_SET_FS / ARCH_GET_FS via MSR, |
 //! |          |                   | ARCH_SET_GS / ARCH_GET_GS via MSR, |
-//! |          |                   | ARCH_GET_CPUID / ARCH_SET_CPUID    |
+//! |          |                   | ARCH_GET_CPUID / ARCH_SET_CPUID,   |
+//! |          |                   | ARCH_GET_XCOMP_SUPP/PERM, REQ_PERM |
 //! | 186      | gettid            | direct                             |
 //! | 201      | time              | clock_realtime / 1e9               |
 //! | 202      | futex             | maps to SYS_FUTEX_*                |
@@ -15366,8 +15367,10 @@ fn sys_set_robust_list(args: &SyscallArgs) -> SyscallResult {
 pub(crate) const USER_FS_BASE_MAX: u64 = 1u64 << 47;
 
 /// `arch_prctl(code, addr)` — ARCH_SET_FS / ARCH_GET_FS / ARCH_SET_GS
-/// / ARCH_GET_GS via MSR, plus ARCH_GET_CPUID / ARCH_SET_CPUID for
-/// the CPUID-faulting feature (Linux 4.12+).
+/// / ARCH_GET_GS via MSR, ARCH_GET_CPUID / ARCH_SET_CPUID for the
+/// CPUID-faulting feature (Linux 4.12+), and ARCH_GET_XCOMP_SUPP /
+/// ARCH_GET_XCOMP_PERM / ARCH_REQ_XCOMP_PERM for the dynamic XSAVE
+/// permission interface (Linux 5.17+).
 ///
 /// ARCH_SET_FS writes IA32_FS_BASE (MSR 0xC000_0100).  ARCH_GET_FS
 /// reads it and stores it via the user pointer.
@@ -15377,6 +15380,14 @@ pub(crate) const USER_FS_BASE_MAX: u64 = 1u64 << 47;
 /// CPUID, so GET returns 1 and SET accepts 1, rejecting 0 with
 /// -ENODEV (exactly what a Linux kernel without
 /// `X86_FEATURE_CPUID_FAULT` returns).
+/// ARCH_GET_XCOMP_SUPP writes the XSAVE supported-state mask (CPUID
+/// leaf 0xD subleaf 0, EDX:EAX) to the user pointer.
+/// ARCH_GET_XCOMP_PERM writes the same mask (we don't gate any
+/// user-mode state component behind dynamic permission).
+/// ARCH_REQ_XCOMP_PERM accepts a feature bit number; we return 0
+/// for any bit already present in the supported mask (already
+/// permitted) and -EINVAL otherwise (no dynamic features available
+/// to grant — the answer Linux gives on kernels without AMX).
 fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
     const ARCH_SET_GS: u64 = 0x1001;
     const ARCH_SET_FS: u64 = 0x1002;
@@ -15384,6 +15395,9 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
     const ARCH_GET_GS: u64 = 0x1004;
     const ARCH_GET_CPUID: u64 = 0x1011;
     const ARCH_SET_CPUID: u64 = 0x1012;
+    const ARCH_GET_XCOMP_SUPP: u64 = 0x1021;
+    const ARCH_GET_XCOMP_PERM: u64 = 0x1022;
+    const ARCH_REQ_XCOMP_PERM: u64 = 0x1023;
 
     const IA32_FS_BASE: u32 = 0xC000_0100;
     /// On x86_64 Linux, ARCH_SET_GS writes the userspace GS base
@@ -15529,6 +15543,76 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
             1 => SyscallResult::ok(0),
             _ => linux_err(errno::EINVAL),
         },
+        // ARCH_GET_XCOMP_SUPP (0x1021) — write the XSAVE
+        // supported-state mask (CPUID leaf 0xD subleaf 0, EDX:EAX)
+        // to *(u64 *)addr.  Linux 5.17+ exposes this so userspace
+        // can discover which dynamic XSAVE state components the
+        // kernel knows about (XCR0 / IA32_XSS bits) before asking
+        // permission to use them.  glibc's tunable parser, recent
+        // OpenJDK, and AMX-aware ML runtimes call this on startup;
+        // without an arm they get -EINVAL and either fall back to
+        // a pessimistic feature mask or abort.
+        //
+        // Our stance: surface exactly what the CPU reports via
+        // `crate::cpu::features().xcr0_supported`.  No dynamic
+        // permission gating exists in our kernel, so SUPP and PERM
+        // return the same mask — same behaviour Linux exhibits on
+        // any CPU without AMX (where there are no dynamic
+        // components to gate).
+        //
+        // ARCH_GET_XCOMP_PERM (0x1022) — same payload as SUPP for
+        // us: a process is "permitted" to use every state component
+        // the CPU supports.  On Linux with AMX the kernel withholds
+        // bit 18 (XTILEDATA) until ARCH_REQ_XCOMP_PERM grants it;
+        // our kernel does no such withholding, so PERM == SUPP.
+        ARCH_GET_XCOMP_SUPP | ARCH_GET_XCOMP_PERM => {
+            if addr == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let supp: u64 = crate::cpu::features()
+                .map_or(0, |f| f.xcr0_supported);
+            // SAFETY: copy_to_user validates the destination range
+            // and faults via the user-access helpers on bad
+            // addresses; supp lives in kernel .text-adjacent stack
+            // and is fully initialised.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(
+                    (&raw const supp).cast::<u8>(),
+                    addr,
+                    core::mem::size_of::<u64>(),
+                )
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            SyscallResult::ok(0)
+        }
+        // ARCH_REQ_XCOMP_PERM (0x1023) — request permission to use
+        // XSAVE state component `addr` (a bit index, not a mask).
+        // Linux returns 0 if the bit is in the supported mask and
+        // already permitted (or successfully grants it for AMX);
+        // -EINVAL for unknown bit indices; -EPERM if the caller's
+        // RLIMIT_AS would be exceeded once the dynamic state is
+        // expanded.  Bit indices >= 63 are always -EINVAL because
+        // they cannot fit in the XCR0 / IA32_XSS u64 mask.
+        //
+        // Our stance: we permit every state component the CPU
+        // already advertises in xcr0_supported (no withholding),
+        // and reject anything else.  Bits >= 63 are rejected for
+        // parity with Linux.  No RLIMIT_AS interaction since we
+        // don't dynamically expand XSAVE save areas at this layer.
+        ARCH_REQ_XCOMP_PERM => {
+            if addr >= 63 {
+                return linux_err(errno::EINVAL);
+            }
+            let supp: u64 = crate::cpu::features()
+                .map_or(0, |f| f.xcr0_supported);
+            if supp & (1u64 << addr) != 0 {
+                SyscallResult::ok(0)
+            } else {
+                linux_err(errno::EINVAL)
+            }
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -16263,6 +16347,144 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!(
                     "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, {}) -> {} (expected -EINVAL)",
                     bad, r.value,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // (9d) Batch 100: arch_prctl(ARCH_GET_XCOMP_SUPP = 0x1021),
+    // ARCH_GET_XCOMP_PERM (0x1022), ARCH_REQ_XCOMP_PERM (0x1023).
+    // The Linux 5.17+ dynamic XSAVE permission interface.  glibc's
+    // tunable parser, recent OpenJDK, and AMX-aware ML runtimes
+    // call SUPP/PERM on startup to discover usable XSAVE state
+    // components; without an arm they got -EINVAL and silently
+    // pessimised their feature mask.  We surface the CPU's
+    // advertised xcr0_supported mask (CPUID leaf 0xD subleaf 0)
+    // and reject bit-index requests for components the CPU does
+    // not advertise — exactly what Linux returns on a CPU without
+    // AMX (the only mainstream component currently gated behind
+    // dynamic permission).
+    {
+        const ARCH_GET_XCOMP_SUPP_CODE: u64 = 0x1021;
+        const ARCH_GET_XCOMP_PERM_CODE: u64 = 0x1022;
+        const ARCH_REQ_XCOMP_PERM_CODE: u64 = 0x1023;
+
+        // Sanity: constants compile to the expected magic numbers
+        // (no endianness convention here — these are just opcode
+        // IDs in the 0x10xx arch_prctl space).
+        const _: () = assert!(ARCH_GET_XCOMP_SUPP_CODE == 0x1021);
+        const _: () = assert!(ARCH_GET_XCOMP_PERM_CODE == 0x1022);
+        const _: () = assert!(ARCH_REQ_XCOMP_PERM_CODE == 0x1023);
+
+        // SUPP and PERM both write the supported XSAVE-state mask.
+        // The mask depends on host CPU features — on the default
+        // QEMU `qemu64` CPU model XSAVE is not advertised at all,
+        // so the kernel correctly returns 0 (same as Linux on a
+        // no-XSAVE CPU).  On real Intel/AMD hardware at least bits
+        // 0 (x87) and 1 (SSE) will be set.  We accept both.
+        let mut got_supp: u64 = 0;
+        let a = SyscallArgs {
+            arg0: ARCH_GET_XCOMP_SUPP_CODE,
+            arg1: (&raw mut got_supp).addr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_XCOMP_SUPP) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Cross-check: the value returned must match what the CPU
+        // module advertises in xcr0_supported (or 0 if the feature
+        // table is not yet populated).
+        let expected_supp: u64 = crate::cpu::features()
+            .map_or(0, |f| f.xcr0_supported);
+        if got_supp != expected_supp {
+            serial_println!(
+                "[syscall/linux]   FAIL: ARCH_GET_XCOMP_SUPP {:#x} != cpu::features().xcr0_supported {:#x}",
+                got_supp, expected_supp,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        let mut got_perm: u64 = 0;
+        let a = SyscallArgs {
+            arg0: ARCH_GET_XCOMP_PERM_CODE,
+            arg1: (&raw mut got_perm).addr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_XCOMP_PERM) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // We don't withhold any state component, so PERM mirrors SUPP.
+        if got_perm != got_supp {
+            serial_println!(
+                "[syscall/linux]   FAIL: ARCH_GET_XCOMP_PERM {:#x} != SUPP {:#x}",
+                got_perm, got_supp,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // NULL destination -> -EFAULT for both SUPP and PERM.
+        for code in [ARCH_GET_XCOMP_SUPP_CODE, ARCH_GET_XCOMP_PERM_CODE] {
+            let a = SyscallArgs {
+                arg0: code, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+            if r.value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: arch_prctl({:#x}, NULL) -> {} (expected -EFAULT)",
+                    code, r.value,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // ARCH_REQ_XCOMP_PERM behaviour depends on what the CPU
+        // advertises.  For every bit advertised in the supported
+        // mask we expect 0 (already permitted); for every bit NOT
+        // advertised (within the 0..63 valid range) we expect
+        // -EINVAL.  Bit indices >= 63 are always -EINVAL.
+        for b in 0u64..63 {
+            let a = SyscallArgs {
+                arg0: ARCH_REQ_XCOMP_PERM_CODE, arg1: b,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+            let want = if got_supp & (1u64 << b) != 0 {
+                0_i64
+            } else {
+                -i64::from(errno::EINVAL)
+            };
+            if r.value != want {
+                serial_println!(
+                    "[syscall/linux]   FAIL: arch_prctl(ARCH_REQ_XCOMP_PERM, {}) -> {} (expected {})",
+                    b, r.value, want,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // ARCH_REQ_XCOMP_PERM for bit indices >= 63 -> -EINVAL
+        // (cannot fit in the XCR0 u64 mask).
+        for bad_bit in [63u64, 64, 100, u64::MAX] {
+            let a = SyscallArgs {
+                arg0: ARCH_REQ_XCOMP_PERM_CODE, arg1: bad_bit,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+            if r.value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: arch_prctl(ARCH_REQ_XCOMP_PERM, {}) -> {} (expected -EINVAL)",
+                    bad_bit, r.value,
                 );
                 return Err(KernelError::InternalError);
             }

@@ -11932,3 +11932,95 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      per-PCB storage instead of returning a constant.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+## 129. [Batch 100] arch_prctl ARCH_GET_XCOMP_SUPP / ARCH_GET_XCOMP_PERM /
+##      ARCH_REQ_XCOMP_PERM (Linux 5.17+ dynamic XSAVE permission)
+##
+##      Before this batch sys_arch_prctl returned -EINVAL for
+##      arch_prctl codes 0x1021..=0x1023, the dynamic XSAVE state-
+##      component permission interface added in Linux 5.17 to
+##      gate AMX (XTILEDATA, XSAVE state bit 18) behind an opt-in.
+##      glibc's tunable parser, recent OpenJDK runtimes, and AMX-
+##      aware ML frameworks call ARCH_GET_XCOMP_SUPP /
+##      ARCH_GET_XCOMP_PERM on startup to discover the usable
+##      state mask, and ARCH_REQ_XCOMP_PERM to request access to
+##      gated bits.  -EINVAL on these surfaces caused those
+##      callers to either fall back to a pessimistic feature mask
+##      (losing AVX-512 / AMX paths even when the CPU advertises
+##      them) or abort.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##        * Three new consts in sys_arch_prctl's const block:
+##            const ARCH_GET_XCOMP_SUPP: u64 = 0x1021;
+##            const ARCH_GET_XCOMP_PERM: u64 = 0x1022;
+##            const ARCH_REQ_XCOMP_PERM: u64 = 0x1023;
+##        * ARCH_GET_XCOMP_SUPP and ARCH_GET_XCOMP_PERM are
+##          collapsed into a single arm (we do not gate any
+##          state component behind dynamic permission, so PERM
+##          == SUPP).  Both write
+##              crate::cpu::features().xcr0_supported
+##          (the CPUID leaf 0xD subleaf 0 EDX:EAX aggregate) to
+##          *(u64 *)addr via copy_to_user.  NULL addr returns
+##          -EFAULT before any write attempt; copy_to_user
+##          faults map back to errno via linux_errno_for.
+##        * ARCH_REQ_XCOMP_PERM takes a BIT INDEX (not a mask)
+##          in addr.  Bits >= 63 are rejected with -EINVAL
+##          (can't fit in the XCR0 u64).  Otherwise, if the
+##          bit is set in xcr0_supported we return 0 (already
+##          permitted — no withholding policy); else -EINVAL.
+##          This is exactly Linux's response on a CPU without
+##          AMX: bits 0..62 that the CPU advertises succeed,
+##          everything else returns -EINVAL.
+##        * sys_arch_prctl doc comment expanded to describe the
+##          XCOMP family; top-of-file doc table line 79+ updated
+##          to mention XCOMP_SUPP / XCOMP_PERM / REQ_PERM in the
+##          arch_prctl row.
+##
+##      Self-test (boot path, slotted as "(9d) Batch 100" after
+##      the (9c) ARCH_GET/SET_CPUID block):
+##        1. SUPP into a kernel-mapped u64 -> 0, value matches
+##           crate::cpu::features().xcr0_supported.
+##        2. PERM into kernel-mapped u64 -> 0, value equals SUPP
+##           (no dynamic withholding).
+##        3. SUPP and PERM with NULL addr -> -EFAULT.
+##        4. REQ for every bit b in 0..63: return value must be
+##           0 if (supp & (1<<b)) != 0, else -EINVAL.  This
+##           covers both "supported bit succeeds" and "unsupported
+##           bit rejected" without making host-CPU-specific
+##           assumptions.
+##        5. REQ for bit indices {63, 64, 100, u64::MAX} -> -EINVAL.
+##
+##      Important environmental note:
+##        QEMU's default `qemu64` CPU model does NOT advertise
+##        XSAVE, so features().xcr0_supported is 0 inside the
+##        boot test.  My first-draft self-test asserted "x87+SSE
+##        bits must always be present" and panicked with
+##          [syscall/linux]   FAIL: ARCH_GET_XCOMP_SUPP mask 0x0
+##              missing x87+SSE bits
+##        This was the test's assumption being wrong, not the
+##        kernel arm's behaviour — Linux on a no-XSAVE CPU
+##        likewise reports 0.  The fix was to cross-check
+##        against features().xcr0_supported rather than assert
+##        any fixed minimum mask.  Lesson: don't assume CPU
+##        features at boot-test time; sample what the kernel
+##        detected and check for consistency.
+##
+##      Known limitation:
+##        We do not store per-process XCOMP permission state and
+##        do not enlarge any XSAVE save area in response to a
+##        successful REQ.  That is harmless today because we
+##        report exactly what the CPU advertises and never gate
+##        any bit dynamically — so REQ is a pure permission
+##        check, with no side effect to track.  If we ever
+##        introduce dynamic XSAVE state (e.g. AMX XTILEDATA at
+##        XSAVE bit 18, gated until requested), the REQ arm
+##        will need to:
+##          (a) consult per-PCB granted-mask storage,
+##          (b) enlarge the per-thread XSAVE area by the bit's
+##              CPUID leaf 0xD subleaf N size before granting,
+##          (c) reject if RLIMIT_AS would be exceeded.
+##        None of (a)-(c) is needed for the current "no gating"
+##        policy, so deferring them is structurally correct
+##        rather than a band-aid.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).

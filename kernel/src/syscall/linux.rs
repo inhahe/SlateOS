@@ -11953,8 +11953,33 @@ fn xattr_validate_fd_name(fd: i32, name: u64) -> Result<(), SyscallResult> {
     validate_linux_fd(fd)
 }
 
+/// Helper: validate the size + flags arguments shared by all the
+/// xattr set-path operations.  Linux's `fs/xattr.c::setxattr_copy`
+/// rejects flag bits outside `XATTR_CREATE | XATTR_REPLACE` (=3) with
+/// EINVAL and sizes greater than `XATTR_SIZE_MAX` (=65536) with
+/// E2BIG, both ahead of the per-FS dispatch.  Pre-batch our stubs
+/// did neither — a probe passing flags=4 or size=70_000 got
+/// EOPNOTSUPP from the terminal, not the Linux-shaped errnos.
+fn xattr_validate_size_flags(size: u64, flags: u64) -> Result<(), SyscallResult> {
+    const XATTR_FLAGS_MASK: u64 = 0x3; // XATTR_CREATE | XATTR_REPLACE
+    const XATTR_SIZE_MAX: u64 = 65536;
+    if flags & !XATTR_FLAGS_MASK != 0 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    if size > XATTR_SIZE_MAX {
+        return Err(linux_err(errno::E2BIG));
+    }
+    Ok(())
+}
+
 fn xattr_set_path(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = xattr_validate_path_name(args.arg0, args.arg1) {
+        return r;
+    }
+    // Linux gates flags & size before touching the value buffer; do
+    // the same so probes passing flags=4 or size > 65536 see EINVAL
+    // / E2BIG instead of the terminal EOPNOTSUPP.
+    if let Err(r) = xattr_validate_size_flags(args.arg3, args.arg4) {
         return r;
     }
     // value pointer is optional (NULL = delete-like behaviour for some
@@ -11982,6 +12007,9 @@ fn sys_fsetxattr(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = xattr_validate_fd_name(fd, args.arg1) {
+        return r;
+    }
+    if let Err(r) = xattr_validate_size_flags(args.arg3, args.arg4) {
         return r;
     }
     let size = args.arg3 as usize;
@@ -32358,6 +32386,96 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: setxattr not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        // setxattr with bad flags (bit outside XATTR_CREATE|REPLACE)
+        // -> EINVAL.  Pre-batch returned EOPNOTSUPP from the
+        // terminal because no flags gate existed.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 4, arg5: 0 };
+        if dispatch_linux(nr::SETXATTR, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setxattr flags=4 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setxattr with flags=3 (CREATE|REPLACE both set) is bit-
+        // legal at this layer; both bits are in the mask.  Falls
+        // through to terminal EOPNOTSUPP.  (vfs_setxattr enforces
+        // mutual exclusion later as EEXIST/ENODATA on a real FS.)
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 3, arg5: 0 };
+        if dispatch_linux(nr::SETXATTR, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setxattr flags=3 not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setxattr with size > XATTR_SIZE_MAX (65536) -> E2BIG.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 70_000,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETXATTR, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setxattr size>65536 not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setxattr with size = 65537 (one past max) -> E2BIG.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 65537,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETXATTR, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setxattr size=65537 not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setxattr with size = 65536 (at the boundary) -> EOPNOTSUPP
+        // (boundary inclusive; not E2BIG).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 65536,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETXATTR, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setxattr size=65536 not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // fsetxattr with bad flags -> EINVAL (fd validation passes
+        // in kernel context, flags gate fires).
+        let a = SyscallArgs { arg0: 0, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 8, arg5: 0 };
+        if dispatch_linux(nr::FSETXATTR, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fsetxattr flags=8 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // fsetxattr with size > 65536 -> E2BIG.
+        let a = SyscallArgs { arg0: 0, arg1: 0x2000, arg2: 0, arg3: 100_000,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSETXATTR, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fsetxattr size>65536 not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsetxattr also shares xattr_set_path -> bad flags -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0x100, arg5: 0 };
+        if dispatch_linux(nr::LSETXATTR, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsetxattr flags=0x100 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   xattr set flags/E2BIG gating: OK"
+        );
         // getxattr(path,name,_,_) -> ENODATA.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

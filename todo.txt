@@ -17405,3 +17405,69 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##       "lsm_set_self_attr flags/size/E2BIG gating: OK",
 ##       "lsm_list_modules flags-first gating: OK")
 ##      in build/serial-test.txt.
+
+## 199. syscall/linux: setxattr/lsetxattr/fsetxattr flags &
+##      XATTR_SIZE_MAX gating (batch 170).
+##
+##      Symptom: Pre-batch sys_setxattr / sys_lsetxattr /
+##               sys_fsetxattr never validated flags or size.
+##               A caller passing flags=4 (bit outside
+##               XATTR_CREATE|XATTR_REPLACE) or size > 65536
+##               (XATTR_SIZE_MAX) got EOPNOTSUPP from the
+##               terminal, where Linux's fs/xattr.c::
+##               setxattr_copy returns EINVAL / E2BIG ahead of
+##               the per-FS dispatch.
+##
+##      Fix:    Added a shared helper xattr_validate_size_flags
+##              that gates:
+##                - flags & ~(XATTR_CREATE|XATTR_REPLACE)  -> EINVAL
+##                - size > XATTR_SIZE_MAX (65536)          -> E2BIG
+##              Called from xattr_set_path (covers setxattr +
+##              lsetxattr) after path/name validation and from
+##              sys_fsetxattr after fd+name validation, in both
+##              cases ahead of the value-buffer validate_user_read.
+##
+##              flags=3 (CREATE | REPLACE both set) is bit-legal
+##              at this gate — Linux only rejects unknown bits.
+##              Real FSes enforce the mutual exclusion later as
+##              EEXIST or ENODATA; on our stub it falls through
+##              to EOPNOTSUPP.
+##
+##      Self-tests (boot-time):
+##        * setxattr(path,name,_,size=0,flags=4)    -> EINVAL  (new)
+##        * setxattr(path,name,_,size=0,flags=3)    -> EOPNOTSUPP
+##          (new; CREATE|REPLACE both set is bit-legal)
+##        * setxattr(path,name,_,size=70_000,_)     -> E2BIG   (new)
+##        * setxattr(path,name,_,size=65537,_)      -> E2BIG   (new;
+##          off-by-one boundary)
+##        * setxattr(path,name,_,size=65536,_)      -> EOPNOTSUPP
+##          (new; boundary inclusive)
+##        * fsetxattr(fd=0,name,_,_,flags=8)        -> EINVAL  (new)
+##        * fsetxattr(fd=0,name,_,size=100_000,_)   -> E2BIG   (new)
+##        * lsetxattr(path,name,_,_,flags=0x100)    -> EINVAL  (new;
+##          confirms shared xattr_set_path path)
+##        * Pre-existing tests (NULL path -> EFAULT, valid ->
+##          EOPNOTSUPP) all still pass.
+##        * Emits "[syscall/linux]   xattr set flags/E2BIG gating: OK".
+##
+##      Known limitations:
+##        * Linux's setxattr_copy gates flags *before* the name
+##          copy (strncpy_from_user).  Our xattr_set_path checks
+##          name validity (1-byte probe) before flags.  For a
+##          real user call with simultaneously bad name pointer
+##          and bad flags, Linux returns EINVAL where we return
+##          EFAULT.  This is a strictly-rarer divergence than the
+##          missing flags gate itself; fixing it requires splitting
+##          xattr_validate_path_name into separate path / name
+##          stages, which is more invasive than this batch warrants.
+##          When real xattr code lands and gets a strncpy_from_user
+##          equivalent, restructure to match.
+##        * ERANGE for names longer than XATTR_NAME_MAX (255 bytes)
+##          is not enforced because we don't have a bounded
+##          strncpy_from_user yet.  Probes that pass an extra-long
+##          name will see EOPNOTSUPP instead of ERANGE.  Same
+##          dependency as above.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   xattr set
+##      flags/E2BIG gating: OK" in build/serial-test.txt.

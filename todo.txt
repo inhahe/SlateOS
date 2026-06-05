@@ -16073,3 +16073,103 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   seccomp per-op flag
 ##      validation: OK" in build/serial-test.txt.
 
+
+## 182. Linux ABI: fanotify_init flag validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_fanotify_init.
+##
+##      Problem: sys_fanotify_init unconditionally returned ENOSYS
+##              and ignored both `flags` and `event_f_flags` entirely.
+##              That hid the EINVAL Linux returns for malformed flag
+##              bits, dual-class combinations, broken FID interlocks,
+##              and out-of-range access modes.  A probe passing
+##              `flags = FAN_REPORT_NAME` (without FAN_REPORT_DIR_FID)
+##              saw ENOSYS — concluding "the kernel doesn't have
+##              fanotify at all" — when Linux would give EINVAL
+##              meaning "the kernel has it; you specified an invalid
+##              combination."  libfanotify, systemd-tmpfiles, and
+##              audit feature detection walk the flag-bit space
+##              expecting EINVAL to mean "valid syscall, bad flags"
+##              and ENOSYS to mean "syscall absent"; collapsing both
+##              into ENOSYS broke that distinction.
+##
+##      Fix:    Ported Linux's fs/notify/fanotify/fanotify_user.c
+##              flag-validation table from SYSCALL_DEFINE2(fanotify_init):
+##                * FANOTIFY_INIT_FLAGS = FAN_CLOEXEC | FAN_NONBLOCK
+##                                      | FAN_CLASS_MASK (0xc)
+##                                      | FAN_UNLIMITED_QUEUE
+##                                      | FAN_UNLIMITED_MARKS
+##                                      | FAN_ENABLE_AUDIT
+##                                      | FAN_REPORT_PIDFD
+##                                      | FAN_REPORT_TID
+##                                      | FAN_REPORT_FID
+##                                      | FAN_REPORT_DIR_FID
+##                                      | FAN_REPORT_NAME
+##                                      | FAN_REPORT_TARGET_FID
+##                                      = 0x1fff (Linux 6.10)
+##                * Unknown bits in `flags` -> EINVAL.
+##                * Class field must NOT be 0xc (CONTENT |
+##                  PRE_CONTENT both set) -> EINVAL.
+##                * FAN_REPORT_NAME requires FAN_REPORT_DIR_FID
+##                  -> EINVAL otherwise.
+##                * FAN_REPORT_TARGET_FID requires the full FID
+##                  trio (FID | DIR_FID | NAME) -> EINVAL otherwise.
+##                * FANOTIFY_INIT_FD_FLAGS = O_ACCMODE | O_LARGEFILE
+##                                          | O_CLOEXEC | O_APPEND
+##                                          | O_NONBLOCK | O_NOATIME
+##                * Unknown bits in `event_f_flags` -> EINVAL.
+##                * (event_f_flags & O_ACCMODE) == 3 -> EINVAL.
+##                * Terminal answer: ENOSYS for well-formed calls
+##                  (userspace falls back to inotify).
+##
+##      Self-tests (boot-time):
+##        * fanotify_init(0, 0) -> ENOSYS (pre-existing; verifies
+##          all-zero passes the new gates and reaches the terminal
+##          answer).
+##        * fanotify_init(0x2000, 0) -> EINVAL (unknown bit above
+##          FANOTIFY_INIT_FLAGS; new).
+##        * fanotify_init(0xc, 0) -> EINVAL (dual class CONTENT |
+##          PRE_CONTENT; new).
+##        * fanotify_init(FAN_REPORT_NAME=0x800, 0) -> EINVAL
+##          (NAME requires DIR_FID; new).
+##        * fanotify_init(NAME | DIR_FID=0xc00, 0) -> ENOSYS
+##          (verifies the dependency, when satisfied, lets the call
+##          reach the terminal; new).
+##        * fanotify_init(NAME|DIR_FID|TARGET_FID=0x1c00, 0)
+##          -> EINVAL (TARGET_FID requires FID too; new).
+##        * fanotify_init(FID|DIR_FID|NAME|TARGET_FID=0x1e00, 0)
+##          -> ENOSYS (verifies full FID trio; new).
+##        * fanotify_init(0, 0x10) -> EINVAL (unknown event_f_flags
+##          bit; new).
+##        * fanotify_init(0, 3) -> EINVAL (O_ACCMODE=3 is the
+##          invalid all-three combination; new).
+##        * fanotify_init(0, O_CLOEXEC | O_NONBLOCK) -> ENOSYS
+##          (verifies a typical real-world event_f_flags passes; new).
+##        * fanotify_mark(0,...) -> ENOSYS (pre-existing).
+##        * Emits "[syscall/linux]   fanotify_init flag validation:
+##          OK".
+##
+##      Known limitations:
+##        * FANOTIFY_INIT_FLAGS is hard-coded to 0x1fff, the Linux
+##          6.10 layout.  When new flag bits land upstream (a
+##          hypothetical FAN_REPORT_FD_ERROR or similar) this mask
+##          needs to widen.  Documented here so the next maintainer
+##          knows to re-check against the current Linux UAPI on a
+##          minimum-kernel-version bump.
+##        * The terminal answer for fanotify_init is ENOSYS rather
+##          than the EPERM Linux gives an unprivileged caller.  We
+##          have no CAP_SYS_ADMIN model for the linux ABI yet, and
+##          ENOSYS is the path userspace handles with a clean
+##          fallback to inotify.  When capability checks land for
+##          the linux ABI, this should become EPERM for the
+##          ADMIN-only init-flag combinations and ENOSYS only for
+##          the FAN_CLASS_NOTIF unprivileged path (since 5.13).
+##        * sys_fanotify_mark still only validates the pathname's
+##          first byte.  Full flag-bit validation (FAN_MARK_ADD/
+##          REMOVE/FLUSH exclusivity, FAN_MARK_MOUNT/FILESYSTEM
+##          exclusivity, FANOTIFY_MARK_FLAGS mask) is a future batch.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   fanotify_init flag
+##      validation: OK" in build/serial-test.txt.
+

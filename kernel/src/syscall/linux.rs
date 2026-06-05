@@ -10398,10 +10398,97 @@ fn sys_inotify_rm_watch(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `fanotify_init(flags, event_f_flags)`.
-fn sys_fanotify_init(_args: &SyscallArgs) -> SyscallResult {
-    // fanotify is privileged on Linux (requires CAP_SYS_ADMIN) and
-    // userspace already handles ENOSYS as "kernel does not have
-    // fanotify"; that's the honest answer for us.
+///
+/// Linux's `fs/notify/fanotify/fanotify_user.c::SYSCALL_DEFINE2(fanotify_init)`
+/// validates the two arguments against `FANOTIFY_INIT_FLAGS` and
+/// `FANOTIFY_INIT_FD_FLAGS` before any capability or allocation work.
+/// We mirror those gates so a feature-detection probe (libfanotify,
+/// systemd-tmpfiles, audit) sees the same EINVAL that a real Linux
+/// would return for a bogus flag bit, then ENOSYS for a well-formed
+/// call (instead of ENOSYS unconditionally, which hid validity errors
+/// from probes).
+///
+/// Per Linux 6.10:
+///   * `flags`: known bits below FAN_REPORT_TARGET_FID, with the
+///     constraint that the class field (bits 2..3) is one of NOTIF,
+///     CONTENT, PRE_CONTENT (i.e. `(flags & 0xc) != 0xc`).
+///   * `FAN_REPORT_NAME` requires `FAN_REPORT_DIR_FID`.
+///   * `FAN_REPORT_TARGET_FID` requires the full FID + DIR_FID + NAME
+///     trio (Linux's `FANOTIFY_FID_BITS` interlock).
+///   * `event_f_flags`: only the bits in `FANOTIFY_INIT_FD_FLAGS`
+///     (O_ACCMODE | O_LARGEFILE | O_CLOEXEC | O_APPEND | O_NONBLOCK |
+///     O_NOATIME), with the access-mode field (low 2 bits) constrained
+///     to RDONLY/WRONLY/RDWR (the all-three combination 3 is invalid).
+fn sys_fanotify_init(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg0 as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let event_f_flags = args.arg1 as u32;
+
+    // Init-flag bits (FANOTIFY_INIT_FLAGS, Linux 6.10).
+    const FAN_CLOEXEC: u32 = 0x1;
+    const FAN_NONBLOCK: u32 = 0x2;
+    const FAN_CLASS_CONTENT: u32 = 0x4;
+    const FAN_CLASS_PRE_CONTENT: u32 = 0x8;
+    const FAN_CLASS_MASK: u32 = FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT;
+    const FAN_UNLIMITED_QUEUE: u32 = 0x10;
+    const FAN_UNLIMITED_MARKS: u32 = 0x20;
+    const FAN_ENABLE_AUDIT: u32 = 0x40;
+    const FAN_REPORT_PIDFD: u32 = 0x80;
+    const FAN_REPORT_TID: u32 = 0x100;
+    const FAN_REPORT_FID: u32 = 0x200;
+    const FAN_REPORT_DIR_FID: u32 = 0x400;
+    const FAN_REPORT_NAME: u32 = 0x800;
+    const FAN_REPORT_TARGET_FID: u32 = 0x1000;
+    const FANOTIFY_INIT_FLAGS: u32 = FAN_CLOEXEC | FAN_NONBLOCK
+        | FAN_CLASS_MASK
+        | FAN_UNLIMITED_QUEUE | FAN_UNLIMITED_MARKS | FAN_ENABLE_AUDIT
+        | FAN_REPORT_PIDFD | FAN_REPORT_TID | FAN_REPORT_FID
+        | FAN_REPORT_DIR_FID | FAN_REPORT_NAME | FAN_REPORT_TARGET_FID;
+
+    if flags & !FANOTIFY_INIT_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // The class field is bits [2..3] and must encode exactly one of
+    // NOTIF (0), CONTENT (4), or PRE_CONTENT (8).  Setting both
+    // CONTENT and PRE_CONTENT simultaneously is invalid.
+    if flags & FAN_CLASS_MASK == FAN_CLASS_MASK {
+        return linux_err(errno::EINVAL);
+    }
+    // FAN_REPORT_NAME requires FAN_REPORT_DIR_FID.
+    if flags & FAN_REPORT_NAME != 0 && flags & FAN_REPORT_DIR_FID == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // FAN_REPORT_TARGET_FID requires FID + DIR_FID + NAME (Linux's
+    // FANOTIFY_FID_BITS interlock).
+    if flags & FAN_REPORT_TARGET_FID != 0 {
+        const FID_TRIO: u32 = FAN_REPORT_FID | FAN_REPORT_DIR_FID | FAN_REPORT_NAME;
+        if flags & FID_TRIO != FID_TRIO {
+            return linux_err(errno::EINVAL);
+        }
+    }
+
+    // event_f_flags mask (FANOTIFY_INIT_FD_FLAGS, Linux 6.10).
+    const O_ACCMODE: u32 = 0x3;
+    const O_APPEND: u32 = 0o2000;
+    const O_NONBLOCK: u32 = 0o4000;
+    const O_LARGEFILE: u32 = 0o100000;
+    const O_NOATIME: u32 = 0o1000000;
+    const O_CLOEXEC: u32 = 0o2000000;
+    const FANOTIFY_INIT_FD_FLAGS: u32 = O_ACCMODE
+        | O_LARGEFILE | O_CLOEXEC | O_APPEND | O_NONBLOCK | O_NOATIME;
+    if event_f_flags & !FANOTIFY_INIT_FD_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Access mode (low 2 bits) cannot be the all-three combination 3.
+    if event_f_flags & O_ACCMODE == O_ACCMODE {
+        return linux_err(errno::EINVAL);
+    }
+
+    // fanotify is privileged on Linux (requires CAP_SYS_ADMIN for most
+    // classes) and userspace already handles ENOSYS as "kernel does
+    // not have fanotify"; that's the honest answer for us once the
+    // flag fields are well-formed.
     linux_err(errno::ENOSYS)
 }
 
@@ -30400,6 +30487,79 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fanotify_init not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // fanotify_init with unknown flag bit (0x2000) -> EINVAL (see todo 182).
+        let a = SyscallArgs { arg0: 0x2000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_init with both CONTENT+PRE_CONTENT class bits -> EINVAL.
+        let a = SyscallArgs { arg0: 0xc, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init dual class not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_init with FAN_REPORT_NAME but no FAN_REPORT_DIR_FID -> EINVAL.
+        let a = SyscallArgs { arg0: 0x800, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init NAME w/o DIR_FID not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_init with FAN_REPORT_NAME | FAN_REPORT_DIR_FID -> ENOSYS.
+        let a = SyscallArgs { arg0: 0xc00, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init NAME+DIR_FID not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_init with FAN_REPORT_TARGET_FID missing FID -> EINVAL.
+        let a = SyscallArgs { arg0: 0x1c00, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init TARGET_FID w/o FID not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_init with full FID trio + TARGET_FID -> ENOSYS.
+        let a = SyscallArgs { arg0: 0x1e00, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init full FID trio not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_init with unknown event_f_flags bit (0x10) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x10, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init bad event_f_flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_init with access mode == 3 (invalid combo) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x3, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init O_ACCMODE=3 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_init with O_CLOEXEC|O_NONBLOCK (valid event_f_flags) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0o2_004_000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init valid event_f_flags not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   fanotify_init flag validation: OK");
         // fanotify_mark() -> ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

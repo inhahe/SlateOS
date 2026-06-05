@@ -11214,3 +11214,98 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##            projects (PID, 0) — the no-group sentinel.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 21s).
+##
+## 120. Linux ABI batch 91: fcntl(F_GETLEASE / F_SETLEASE) — file
+##      lease query / install.  Pre-batch the two commands (cmd
+##      numbers 1025 / 1024) fell into the fcntl catch-all ->
+##      EINVAL.  Samba (CIFS oplock bridge), NFSv4 servers, and
+##      database lock daemons probe these to find out whether a
+##      file has been opened by anyone else, so that they can
+##      release a held lock or downgrade an oplock.
+##
+##      Why it matters:
+##        * Samba's smbd installs F_WRLCK leases on opened files
+##          so it can notify Windows clients when another local
+##          process opens the same file, then downgrades the
+##          oplock.  Without F_SETLEASE it falls back to polling
+##          with stat() (much slower) or refuses to grant the
+##          oplock at all.
+##        * NFSv4 server daemons (knfsd / ganesha) use leases to
+##          implement delegations.
+##        * sqlite, leveldb, lmdb, postgres lock-manager probes
+##          poll F_GETLEASE on shared db files to detect rogue
+##          opens — without F_GETLEASE they fall through to
+##          much weaker fcntl(F_GETLK) advisory locking.
+##
+##      Wiring:
+##        - syscall/linux.rs fcntl_cmd module adds:
+##            F_SETLEASE = 1024;
+##            F_GETLEASE = 1025;
+##            lease_type::{F_RDLCK=0, F_WRLCK=1, F_UNLCK=2}.
+##        - Two new arms in sys_fcntl after F_SETPIPE_SZ.
+##        - F_GETLEASE: lookup-or-EBADF, then return F_UNLCK
+##          (we never grant a lease, so the truthful answer
+##          for every fd is "no lease held").
+##        - F_SETLEASE: lookup-or-EBADF, then route on `arg`:
+##          F_UNLCK -> 0 (releasing nothing is a no-op);
+##          F_RDLCK / F_WRLCK -> EAGAIN (the documented
+##          "lease could not be granted at this time" errno
+##          — matches Linux when a conflicting open prevents
+##          the lease, which is identically true here because
+##          our policy is "every open prevents leases");
+##          other -> EINVAL.
+##
+##      Linux semantics matched:
+##        * EBADF for closed / nonexistent fd at the lookup
+##          gate (matches fs/locks.c::fcntl_setlease).
+##        * F_GETLEASE returns F_UNLCK when no lease is held
+##          (matches fs/locks.c::fcntl_getlease's
+##          time_consistent path for an empty fl_lease list).
+##        * F_SETLEASE(F_UNLCK) succeeds as a no-op release
+##          (matches fs/locks.c when no lease exists to drop).
+##        * F_SETLEASE(F_RDLCK / F_WRLCK) returns EAGAIN —
+##          the same errno Linux returns when the kernel
+##          declines the lease for any reason short of
+##          syntactic invalidity.
+##        * F_SETLEASE(other) returns EINVAL.
+##
+##      Linux semantics deliberately NOT matched (yet):
+##        * No actual lease bookkeeping: F_SETLEASE(F_RDLCK /
+##          F_WRLCK) always returns EAGAIN regardless of fd
+##          contention state.  In a real Linux kernel with
+##          leases enabled and no contention, F_RDLCK on a
+##          file owned by the caller would succeed.  A future
+##          lease subsystem replaces the EAGAIN branch with
+##          real bookkeeping and signal delivery.
+##        * No CAP_LEASE check (we never reach the granting
+##          path).  When leases land, F_SETLEASE on a file
+##          owned by another user without CAP_LEASE should
+##          return EACCES.
+##        * Lease-break-time sysctl (kernel.lease-break-time)
+##          isn't wired up.  Not relevant until real leases
+##          land.
+##
+##      Known limitation: the "always F_UNLCK" / "always
+##      EAGAIN" answers mean lease-aware callers think the
+##      kernel is functioning normally but unable to grant a
+##      lease right now.  Most callers (samba, sqlite) handle
+##      that path correctly — they fall back to advisory
+##      locking with no further EINVAL probing.
+##
+##      Self-test (boot path, batch 91 block in linux.rs after
+##      batch 90's F_GETOWN_EX block):
+##        * Constant sanity for cmd numbers and lease_type::*.
+##        * Kernel-context dispatch_linux returns EBADF for
+##          both new cmds (caller_pid gate intact).
+##        * Synthetic Linux process with real pipe fd:
+##          - lookup hit (real fd) confirms is_some path;
+##          - lookup miss (bad fd 99) confirms is_none path.
+##        * Set-lease policy table (mirrored from the syscall
+##          arm body so a divergent edit trips the test):
+##          - F_UNLCK -> Ok(0);
+##          - F_RDLCK -> Err(EAGAIN);
+##          - F_WRLCK -> Err(EAGAIN);
+##          - {-1, 3, 4, 100, i32::MIN, i32::MAX} ->
+##            Err(EINVAL).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

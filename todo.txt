@@ -15718,3 +15718,48 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   io_submit/io_cancel pointer
 ##      validation: OK" at line 432 of build/serial-test.txt.
 
+## 177. Linux ABI: mq_timedsend(2) MQ_PRIO_MAX validation
+##      (Batch 148, 2026-06-05)
+##
+##      Issue:  sys_mq_timedsend validated msg/timeout pointers and
+##              the fd, then returned EBADF.  Linux's
+##              ipc/mqueue.c::do_mq_timedsend() rejects out-of-range
+##              priorities ahead of the fd lookup:
+##                if (unlikely(msg_prio >= (unsigned long) MQ_PRIO_MAX))
+##                    return -EINVAL;
+##              MQ_PRIO_MAX is 32768 (15 bits) on Linux x86_64.  A probe
+##              passing prio=70000 with a junk fd saw EBADF where Linux
+##              gives EINVAL, hiding the priority validation from
+##              feature-detection probes (libstdc++'s std::__poll_traits
+##              wrapper, glibc's mqueue self-test, the Linux Test
+##              Project's mq_timedsend01 test).
+##
+##      Fix:    Added `const MQ_PRIO_MAX: u64 = 32768;` and an early
+##              `if args.arg3 >= MQ_PRIO_MAX { return EINVAL; }` at
+##              the top of sys_mq_timedsend, before the msg/timeout
+##              pointer validation.  Valid priorities (0..=32767) fall
+##              through to the existing path.
+##
+##      Self-tests (boot-time):
+##        * mq_timedsend(0, NULL, _, 0, _) -> EFAULT (unchanged).
+##        * mq_timedsend(_, _, _, 32768, _) -> EINVAL (boundary; new).
+##        * mq_timedsend(_, _, _, 70000, _) -> EINVAL (well above; new).
+##        * mq_timedsend(0, NULL, _, 32767, _) -> EFAULT (highest valid
+##          priority passes the gate; NULL msg is then the next
+##          failure).
+##        * Emits "[syscall/linux]   mq_timedsend prio validation: OK".
+##
+##      Known limitations:
+##        * sys_mq_timedreceive doesn't take a prio argument (it
+##          receives prio_ptr instead, which we already validate), so
+##          no companion gate is needed there.
+##        * The actual POSIX message queue subsystem remains
+##          unimplemented — mq_open returns ENOSYS, and any valid
+##          mq_timedsend shape still terminates at EBADF.  When real
+##          queues land, MQ_PRIO_MAX stays as the pre-fd gate so the
+##          full implementation can rely on `prio <= 32767` thereafter.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 21s).
+##      Serial confirms "[syscall/linux]   mq_timedsend prio
+##      validation: OK" at line 445 of build/serial-test.txt.
+

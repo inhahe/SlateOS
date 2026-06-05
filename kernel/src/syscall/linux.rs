@@ -12339,7 +12339,22 @@ fn sys_mq_unlink(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `mq_timedsend(mqd, msg, len, prio, abs_timeout)`.
+///
+/// Linux's `ipc/mqueue.c::do_mq_timedsend()` validates the message
+/// priority *before* any fd lookup:
+///
+///   `if (unlikely(msg_prio >= (unsigned long) MQ_PRIO_MAX))
+///       return -EINVAL;`
+///
+/// `MQ_PRIO_MAX` is `32768` (15 bits) on Linux x86_64.  A probe
+/// passing `prio = 70000` with a junk fd sees -EINVAL ahead of the
+/// -EBADF that would otherwise apply.  Enforcing the gate here keeps
+/// the priority validation visible to feature-detection probes.
 fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
+    const MQ_PRIO_MAX: u64 = 32768;
+    if args.arg3 >= MQ_PRIO_MAX {
+        return linux_err(errno::EINVAL);
+    }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -31849,6 +31864,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mq_timedsend(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // mq_timedsend(_, _, _, prio=MQ_PRIO_MAX, _) -> EINVAL.
+        // Linux's do_mq_timedsend checks prio >= MQ_PRIO_MAX (32768)
+        // before the fd lookup; see todo 177.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 32768,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=MAX) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mq_timedsend(_, _, _, prio=70000, _) -> EINVAL (well above
+        // MQ_PRIO_MAX).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 70_000,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=70000) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mq_timedsend(_, _, _, prio=32767, _) with NULL msg -> EFAULT
+        // (prio at the highest valid value passes the gate; NULL msg
+        // is then the next failure).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 32767,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=32767, NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   mq_timedsend prio validation: OK");
         // mq_timedreceive(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };

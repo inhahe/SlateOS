@@ -11188,44 +11188,165 @@ fn sys_move_mount(args: &SyscallArgs) -> SyscallResult {
 // caller see a clear error.
 // ---------------------------------------------------------------------------
 
-/// `mbind(addr, len, mode, nodemask*, maxnode, flags)` — set memory
-/// policy for a range.
+/// `mbind(addr, len, mode, nodemask*, maxnode, flags)` — set the NUMA
+/// memory policy for a virtual-address range.
+///
+/// Pre-batch this validated mode / flags / mask buffer and then returned
+/// -ENOSYS.  That left an asymmetry with batch 101 (`get_mempolicy`) and
+/// batch 102 (`set_mempolicy`), both of which now succeed on a single-
+/// node UMA system.  Real callers (libnuma's `numa_tonode_memory` /
+/// `numa_interleave_memory`, jemalloc's huge-page binding code,
+/// tcmalloc's NUMA-aware regions) check the set/get pair to decide
+/// whether NUMA is "supported" and then expect `mbind` to follow the
+/// same answer.
+///
+/// Linux's `do_mbind` semantics relevant to a one-node system:
+///   * mode bits 0..2 in 0..=5; only MPOL_F_STATIC_NODES (1<<15) and
+///     MPOL_F_RELATIVE_NODES (1<<14) accepted as mode-flag bits.
+///   * `flags` is the OR of MPOL_MF_MOVE (1) | MPOL_MF_MOVE_ALL (2) |
+///     MPOL_MF_STRICT (4).  No other bits.
+///   * `addr` must be page-aligned (Linux uses 4 KiB; we accept 4 KiB
+///     alignment because that's the ABI consumers' expectation, even
+///     though our internal frame size is 16 KiB).
+///   * If `maxnode > 0`, mask must be readable; any bit > 0 -> -EINVAL
+///     (no node > 0 exists on UMA — matches Linux's "not a subset of
+///     mems_allowed" rejection).
+///   * Per-mode emptiness:
+///       - DEFAULT, LOCAL   : empty mask required.
+///       - PREFERRED,
+///         PREFERRED_MANY   : empty or non-empty accepted.
+///       - BIND, INTERLEAVE : non-empty mask required.
+///   * MPOL_MF_STRICT means "return -EIO if any page can't comply with
+///     the new policy".  On UMA every page already lives on node 0,
+///     so every page complies with every policy that includes node 0
+///     or has an empty mask — strict mode is always satisfied.
+///
+/// We do **not** validate the [addr, addr + len) range against a VMA
+/// list because we have no per-task VMA introspection in this dispatch
+/// path (boot-test invocations have no current process at all).  Real
+/// Linux would return -EFAULT for an unmapped range; we silently accept.
+/// This is acceptable because:
+///   * `mbind` has no observable effect on UMA beyond the return code;
+///   * libnuma / jemalloc / tcmalloc only check the return code to
+///     decide whether NUMA is supported, not to validate ranges;
+///   * accepting an unmapped range here is strictly less harmful than
+///     Linux's choice (the policy is silently dropped either way).
+///
+/// If we ever add per-VMA mempolicy storage (paired with a real
+/// `get_mempolicy(MPOL_F_ADDR)` lookup), this is the place to walk the
+/// VMA list and persist the validated (mode, mask) tuple per VMA, and
+/// to return -EFAULT for unmapped ranges or -EIO for MPOL_MF_STRICT
+/// failures.  Cross-reference todo.txt entries 130 (get_mempolicy),
+/// 131 (set_mempolicy), and 132 (this entry).
 fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
-    // mode must be one of MPOL_DEFAULT(0), PREFERRED(1), BIND(2),
-    // INTERLEAVE(3), LOCAL(4), PREFERRED_MANY(5).  Linux also allows
-    // mode flags MPOL_F_STATIC_NODES (1<<15) and MPOL_F_RELATIVE_NODES
-    // (1<<14) ORed in.
     const MPOL_MODE_MASK: u32 = 0x7;
     const MPOL_MODE_FLAGS: u32 = (1 << 14) | (1 << 15);
+    const MPOL_DEFAULT: u32 = 0;
+    const MPOL_PREFERRED: u32 = 1;
+    const MPOL_BIND: u32 = 2;
+    const MPOL_INTERLEAVE: u32 = 3;
+    const MPOL_LOCAL: u32 = 4;
+    const MPOL_PREFERRED_MANY: u32 = 5;
+    // 4 KiB is the architectural page size that Linux ABI consumers
+    // expect for address alignment.  Our internal frame size is 16 KiB
+    // but accepting 4 KiB alignment matches what programs assume.
+    const ABI_PAGE_SIZE: u64 = 4096;
+
     #[allow(clippy::cast_possible_truncation)]
-    let mode = args.arg2 as u32;
-    if (mode & MPOL_MODE_MASK) > 5
-        || (mode & !(MPOL_MODE_MASK | MPOL_MODE_FLAGS)) != 0
+    let mode_raw = args.arg2 as u32;
+    if (mode_raw & MPOL_MODE_MASK) > 5
+        || (mode_raw & !(MPOL_MODE_MASK | MPOL_MODE_FLAGS)) != 0
     {
         return linux_err(errno::EINVAL);
     }
+    let mode = mode_raw & MPOL_MODE_MASK;
+
     // mbind flags: MOVE | MOVE_ALL | STRICT (= 1 | 2 | 4).
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg5 as u32;
     if flags & !0x7 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // nodemask is required if maxnode > 0.
+
+    // addr must be page-aligned.  Linux returns -EINVAL otherwise.
+    let addr = args.arg0;
+    if addr & (ABI_PAGE_SIZE - 1) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let len = args.arg1;
+    // addr + len must not overflow (Linux's "is_negative_pte" check).
+    if addr.checked_add(len).is_none() {
+        return linux_err(errno::EINVAL);
+    }
+    // len == 0 is a no-op success on Linux.
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // Nodemask handling — required if maxnode > 0.
     let maxnode = args.arg4;
-    if maxnode > 0 {
-        if args.arg3 == 0 {
+    let mask_ptr = args.arg3;
+    let (mask_empty, mask_has_extra_bits) = if maxnode > 0 {
+        if mask_ptr == 0 {
             return linux_err(errno::EFAULT);
         }
-        // ceil(maxnode / 8) bytes; cap at 1 MiB worth of bits.
         if maxnode > (1 << 23) {
             return linux_err(errno::EINVAL);
         }
         let bytes = ((maxnode + 7) / 8) as usize;
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, bytes) {
+        if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, bytes) {
             return linux_err(linux_errno_for(e));
         }
+        let mut mask = alloc::vec![0u8; bytes];
+        // SAFETY: validate_user_read above confirmed the readable
+        // range; copy_from_user does the SMAP-safe transfer.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                mask_ptr,
+                mask.as_mut_ptr(),
+                bytes,
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        let empty = mask.iter().all(|&b| b == 0);
+        // x86_64 nodemask is a little-endian unsigned-long array;
+        // bit 0 (node 0) lives in byte 0 bit 0.  Any other set bit
+        // refers to a node we do not have.
+        let bit0_cleared = mask[0] & !1u8;
+        let extra = bit0_cleared != 0
+            || mask.iter().skip(1).any(|&b| b != 0);
+        (empty, extra)
+    } else {
+        (true, false)
+    };
+
+    if mask_has_extra_bits {
+        return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+
+    match mode {
+        MPOL_DEFAULT | MPOL_LOCAL => {
+            if !mask_empty {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        MPOL_PREFERRED | MPOL_PREFERRED_MANY => {
+            // Either empty or {0} is fine.
+        }
+        MPOL_BIND | MPOL_INTERLEAVE => {
+            if mask_empty {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        _ => return linux_err(errno::EINVAL),
+    }
+
+    // Accepted.  Policy is silently dropped — see top-of-function
+    // comment.  On UMA every page is already on node 0 so even
+    // MPOL_MF_STRICT is trivially satisfied.
+    SyscallResult::ok(0)
 }
 
 /// `set_mempolicy(mode, nodemask*, maxnode)` — install the calling
@@ -17041,6 +17162,146 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if r.value != 0 {
             serial_println!(
                 "[syscall/linux]   FAIL: set_mempolicy(INTERLEAVE|STATIC,{{0}},64) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (9g) Batch 103: mbind upgraded from -ENOSYS stub to UMA-aware
+    // accept/reject decision.  Per-VMA equivalent of batch 102.
+    {
+        const MPOL_DEFAULT: u64 = 0;
+        const MPOL_BIND: u64 = 2;
+        const MPOL_INTERLEAVE: u64 = 3;
+        const MPOL_LOCAL: u64 = 4;
+        const MPOL_MF_STRICT: u64 = 4;
+
+        // Case 1: zero-length range -> 0 (Linux no-op success).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: MPOL_DEFAULT, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(0,0,DEFAULT,...) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 2: mbind(BIND, {0}, 64) over a 4 KiB range -> 0.
+        let mask: u64 = 0x1;
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_BIND,
+            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(BIND,{{0}}) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 3: mbind with MPOL_MF_STRICT -> 0 (on UMA every page is
+        // already on node 0, so STRICT is trivially satisfied).
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_BIND,
+            arg3: (&raw const mask).addr() as u64, arg4: 64,
+            arg5: MPOL_MF_STRICT,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(BIND|STRICT) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 4: misaligned addr -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x123, arg1: 0x1000, arg2: MPOL_DEFAULT,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(unaligned) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 5: bogus mbind flags bit -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: MPOL_DEFAULT,
+            arg3: 0, arg4: 0, arg5: 0x8,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(bogus flag) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 6: MPOL_BIND with empty mask -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: MPOL_BIND,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(BIND,empty) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 7: MPOL_INTERLEAVE with mask = {bit 1} (= node we don't
+        // have) -> -EINVAL.
+        let bad_mask: u64 = 0x2;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: MPOL_INTERLEAVE,
+            arg3: (&raw const bad_mask).addr() as u64, arg4: 64, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(INTERLEAVE,{{1}}) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 8: MPOL_LOCAL with non-empty mask -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: MPOL_LOCAL,
+            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(LOCAL,{{0}}) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 9: maxnode > 0 but nodemask NULL -> -EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: MPOL_BIND,
+            arg3: 0, arg4: 64, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(BIND,NULL,64) -> {} (expected -EFAULT)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -26381,10 +26642,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mbind bad mode not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // mbind valid mode + no nodemask -> ENOSYS.
+        // mbind(addr=0, len=0x1000, MPOL_DEFAULT, NULL, 0, 0) -> 0
+        // (batch 103 upgrade: was ENOSYS; now accepted UMA-style on
+        // a 4 KiB-aligned addr with empty mask).
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MBIND, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: mbind valid not ENOSYS");
+        if dispatch_linux(nr::MBIND, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mbind valid DEFAULT not 0");
             return Err(KernelError::InternalError);
         }
         // set_mempolicy bad mode -> EINVAL.

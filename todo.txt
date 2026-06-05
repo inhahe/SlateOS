@@ -12159,3 +12159,67 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      note is now superseded — both directions are implemented.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 27s).
+##
+##  132. Linux ABI: sys_mbind upgraded from -ENOSYS stub to
+##      UMA-aware accept/reject (batch 103).
+##
+##      sys_mbind is the per-VMA equivalent of set_mempolicy:
+##      callers use it to set the NUMA policy on a single
+##      address range rather than on the whole task.  libnuma's
+##      numa_tonode_memory / numa_interleave_memory, jemalloc's
+##      huge-page binding, and tcmalloc's NUMA-aware region
+##      assignment all check the mbind return code to decide
+##      whether NUMA is "supported" and expect it to mirror the
+##      set/get_mempolicy answer.  Pre-batch this returned
+##      -ENOSYS after validating mode/flags/mask buffer, which
+##      left a set-says-yes / mbind-says-no asymmetry after
+##      batches 101 and 102.
+##
+##      Validation now mirrors Linux's do_mbind for a single-node
+##      system:
+##        * mode bits 0..2 in 0..=5; only MPOL_F_STATIC_NODES /
+##          MPOL_F_RELATIVE_NODES allowed as mode-flag bits.
+##        * mbind flags: subset of MOVE | MOVE_ALL | STRICT
+##          (= 1 | 2 | 4); other bits -> -EINVAL.
+##        * addr must be 4 KiB-aligned (the ABI-level page size
+##          consumers assume, not our 16 KiB internal frame size).
+##        * addr + len must not overflow.
+##        * len == 0 -> 0 (Linux no-op success).
+##        * If maxnode > 0, mask buffer must be non-NULL and
+##          readable (heap Vec<u8>, capped at 1 << 23 bits).
+##        * Any bit > 0 in the mask -> -EINVAL.
+##        * Per-mode emptiness rules (DEFAULT/LOCAL empty;
+##          BIND/INTERLEAVE non-empty; PREFERRED variants either).
+##        * Accepted calls return 0; policy is silently dropped.
+##
+##      Boot self-test "(9g) Batch 103" covers nine cases:
+##        1. mbind(0, 0, DEFAULT, NULL, 0, 0)        -> 0
+##        2. mbind(0x1000, 0x1000, BIND, {0}, 64, 0) -> 0
+##        3. mbind(...BIND..., MPOL_MF_STRICT)        -> 0
+##        4. mbind(0x123, ..., ...)                   -> -EINVAL (misaligned)
+##        5. mbind(...flags=0x8...)                   -> -EINVAL (bogus flag)
+##        6. mbind(BIND, NULL, 0)                     -> -EINVAL (empty mask)
+##        7. mbind(INTERLEAVE, {bit 1}, 64)           -> -EINVAL (bad node)
+##        8. mbind(LOCAL, {0}, 64)                    -> -EINVAL (non-empty)
+##        9. mbind(BIND, NULL, 64)                    -> -EFAULT
+##
+##      Also updated the pre-existing legacy mbind test (formerly
+##      "expects ENOSYS"; now "expects 0").
+##
+##      Known limitation: we do NOT validate the [addr, addr+len)
+##      range against a VMA list — boot-test invocations have no
+##      current process at all, and the dispatch path doesn't
+##      walk per-task VMAs.  Linux would return -EFAULT for an
+##      unmapped range; we silently accept.  Acceptable because
+##      (a) mbind has no observable effect on UMA beyond the
+##      return code, (b) libnuma / jemalloc / tcmalloc only check
+##      the return code for "is NUMA supported" not for range
+##      validation, and (c) accepting an unmapped range is no
+##      worse than Linux's "drop the policy" behaviour for
+##      single-node systems.  When we add per-VMA mempolicy
+##      storage, this is where the VMA walk and per-VMA policy
+##      persistence belong — also the place to emit -EIO for
+##      MPOL_MF_STRICT failures.  Cross-reference entries 130
+##      (get_mempolicy), 131 (set_mempolicy).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 27s).

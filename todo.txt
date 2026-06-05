@@ -14622,3 +14622,96 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        * memfd_secret remains ENOSYS as in batch 127.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+
+
+
+## 159. Linux ABI: register_ipc_handle for sys_pidfd_getfd duplicated
+##      handles — class-bug fix (batch 130).
+##
+##      Same shape of class bug as batch 129 (entry 158), applied to
+##      the cross-process fd-duplication path.  Before this batch
+##      `sys_pidfd_getfd` performed the per-kind dup
+##      (`fs::handle::dup_shared`, `ipc::pipe::dup`,
+##      `ipc::eventfd::dup`, `ipc::memfd::dup`) and installed the
+##      duplicated FdEntry in the *caller's* linux_fd_table, but it
+##      did NOT call `pcb::register_ipc_handle` to add the caller's
+##      reference to its `ipc_handles` list.
+##
+##      Consequences before this batch:
+##        * Process-exit cleanup walks `ipc_handles` via
+##          `ipc::cleanup_handles`.  Handles obtained through
+##          `pidfd_getfd` never appeared in that list, so the
+##          per-process reference leaked: the underlying resource's
+##          refcount stayed elevated until reboot.
+##        * Fork's `build_fork_child` snapshots ipc_handles and
+##          calls `dup_one` per entry to refcount-bump into the
+##          child.  Without an entry, the caller's fork-inherited fd
+##          had a dangling reference: parent's subsequent close (or
+##          exit) would drop the only refcount and child operations
+##          would see InvalidHandle / EBADF.
+##
+##      The fix (analogous to batches 127–129):
+##        * Between the per-kind dup and `linux_fd_install`,
+##          register the duplicated handle in the caller's
+##          ipc_handles list under the matching ResourceType.
+##          File / Pipe / EventFd / MemFd each have a kernel-side
+##          refcount; Console and PidFd have no kernel resource and
+##          are intentionally skipped (matches the per-kind dup arm
+##          and `release_handle_ref`'s no-op cases).
+##        * Install-failure rollback now also deregisters before
+##          calling `release_handle_ref`.  The `release_handle_ref`
+##          path for File routes through `handlers::sys_fs_close`
+##          which itself deregisters; that second deregister is a
+##          safe no-op because `deregister_ipc_handle` swap_removes
+##          on the first matching tuple and finds nothing on the
+##          second call.
+##
+##      After this batch every Linux-ABI install path that adds a
+##      refcounted reference to the caller's process now also
+##      registers an `ipc_handles` entry.  The remaining install
+##      sites in syscall::linux are:
+##        * `open_common` / `open_kernel_path_install` — register via
+##          `handlers::sys_fs_open` (already correct pre-batch).
+##        * `pipe_common` — registers via
+##          `handlers::sys_pipe_create` (already correct pre-batch).
+##        * `eventfd_create_with_flags` — fixed in batch 129.
+##        * `sys_memfd_create` — fixed in batch 129.
+##        * `sys_pidfd_open` — pidfd has no kernel resource, intentionally
+##          unregistered (it carries a pid value, not a refcounted
+##          handle).
+##        * `sys_pidfd_getfd` — fixed in this batch.
+##
+##      Self-tests (syscall::linux::self_test, after the batch-129 block):
+##        * Kind→ResourceType mapping table: assert each HandleKind
+##          maps to the expected ResourceType (or None).  Catches a
+##          future edit where a new HandleKind variant is added
+##          without extending the new match.
+##        * Per-resource register/deregister round-trip on a
+##          synthetic PCB.  Walks {File, Pipe, EventFd, MemFd}, each
+##          with a fabricated handle id.  Verifies snapshot reflects
+##          presence after register and absence after deregister.
+##          Catches tuple-keying regressions and ResourceType discriminant
+##          conflicts.
+##        * Kernel-context dispatch: `pidfd_getfd(0, 0, 0)` returns
+##          -EBADF.  Guards against the new register call being
+##          accidentally moved above the caller_pid() check (which
+##          would mint phantom ipc_handles entries for kernel-context
+##          callers).
+##
+##      Known limitations / follow-ups:
+##        * No integration test for the full userspace round-trip
+##          (caller A opens fd; caller B pidfd_open(A) + pidfd_getfd;
+##          A closes its fd; verify B can still operate).  Same
+##          limitation as batches 127–129: the boot self-test harness
+##          can't synthesize two distinct PCBs both reachable from
+##          dispatch_linux.  Deferred to the Linux-ELF integration
+##          test pass.
+##        * `release_handle_ref` could be deduplicated with
+##          `close_handle` (both close a per-kind handle, both have
+##          the same set of arms).  Left for a future refactor — the
+##          two callers have slightly different rollback semantics
+##          (release_handle_ref doesn't deregister; close_handle now
+##          does) and merging them would require new flags.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

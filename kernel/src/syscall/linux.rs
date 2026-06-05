@@ -11052,10 +11052,43 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::EBADF);
         }
     };
+
+    // Register the duplicated handle in the *caller's* per-process
+    // ipc_handles list before the fd-table install.  The earlier
+    // refcount bump represents "one ref per process holding the
+    // resource"; the ipc_handles entry is what lets process-exit
+    // cleanup and fork's dup_one see that ref.  Without this the
+    // caller's reference would leak on exit and not be propagated
+    // across fork — the same class bug that batches 127–129 closed
+    // for the create paths, now applied to the cross-process dup
+    // path.  PidFd / Console map to no kernel resource, so we skip
+    // them (matches the dup-arm above and `release_handle_ref`'s
+    // no-op cases).
+    let resource = match entry.kind {
+        HandleKind::File => Some(crate::cap::ResourceType::File),
+        HandleKind::Pipe => Some(crate::cap::ResourceType::Pipe),
+        HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
+        HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
+        HandleKind::Console | HandleKind::PidFd => None,
+    };
+    if let Some(rt) = resource {
+        pcb::register_ipc_handle(caller, rt, entry.raw_handle);
+    }
+
     match pcb::linux_fd_install(caller, entry, 0) {
         Ok(new_fd) => SyscallResult::ok(i64::from(new_fd)),
         Err(e) => {
-            // Install failed (table full) — roll back the refcount.
+            // Install failed (table full) — roll back BOTH the
+            // ipc_handles entry we just added AND the refcount bump.
+            // deregister_ipc_handle is a no-op if `resource` was None;
+            // release_handle_ref for File routes through
+            // `handlers::sys_fs_close`, which itself deregisters —
+            // that's safe because deregister_ipc_handle is a no-op on
+            // a missing tuple (the explicit deregister below already
+            // removed it).
+            if let Some(rt) = resource {
+                pcb::deregister_ipc_handle(caller, rt, entry.raw_handle);
+            }
             release_handle_ref(entry.kind, entry.raw_handle);
             linux_err(linux_errno_for(e))
         }
@@ -26109,6 +26142,124 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   register_ipc_handle EventFd/MemFd wiring: OK",
+        );
+    }
+
+    // Batch 130: register_ipc_handle wiring for `sys_pidfd_getfd`.
+    //
+    // Same class-bug shape as batch 129, applied to the cross-process
+    // fd duplication path.  Before this batch, `sys_pidfd_getfd`
+    // bumped the underlying resource refcount via per-kind dup helpers
+    // (`fs::handle::dup_shared`, `pipe::dup`, `eventfd::dup`,
+    // `memfd::dup`) and installed an FdEntry in the caller's table,
+    // but did not record the caller's new reference in its
+    // `ipc_handles` list.  Consequences:
+    //   * If the caller exited without closing the duplicated fd,
+    //     `cleanup_handles` walked an ipc_handles list that never
+    //     contained the duplicated handle and the underlying refcount
+    //     leaked by one until the kernel rebooted.
+    //   * If the caller forked, `dup_one` was not invoked for the
+    //     duplicated handle, so the child's inherited fd was a dangling
+    //     reference once the caller closed.
+    //
+    // The fix mirrors batch 129: between the per-kind dup and the
+    // linux_fd_install, register the handle in the caller's
+    // ipc_handles under the matching ResourceType (File / Pipe /
+    // EventFd / MemFd).  Console and PidFd map to no kernel resource
+    // and are skipped, matching the dup-arm and release_handle_ref.
+    // Install-failure rollback now also deregisters before calling
+    // release_handle_ref.
+    //
+    // Self-test surface:
+    //   * Resource-type mapping table: assert each FdEntry kind maps to
+    //     the expected ResourceType (or None) — catches a future edit
+    //     where a new HandleKind is added without extending the match.
+    //   * Synthetic PCB round-trip: register an entry under each
+    //     resource type, verify it's in the snapshot, deregister,
+    //     verify it's gone.  Exercises the same register/deregister
+    //     contract the new arm relies on.
+    //   * Kernel-context dispatch: `pidfd_getfd` with no caller PCB
+    //     returns -EBADF without registering anything (the existing
+    //     `caller_pid().is_none()` branch fires before the register).
+    {
+        // (a) The kind→ResourceType map used by the new register call.
+        //     If a future HandleKind variant is added, this assertion
+        //     fails and forces the author to decide whether the new
+        //     kind needs a register_ipc_handle entry.
+        let kind_to_rt = |k: HandleKind| -> Option<crate::cap::ResourceType> {
+            match k {
+                HandleKind::File => Some(crate::cap::ResourceType::File),
+                HandleKind::Pipe => Some(crate::cap::ResourceType::Pipe),
+                HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
+                HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
+                HandleKind::Console | HandleKind::PidFd => None,
+            }
+        };
+        assert_eq!(kind_to_rt(HandleKind::File),
+                   Some(crate::cap::ResourceType::File));
+        assert_eq!(kind_to_rt(HandleKind::Pipe),
+                   Some(crate::cap::ResourceType::Pipe));
+        assert_eq!(kind_to_rt(HandleKind::EventFd),
+                   Some(crate::cap::ResourceType::EventFd));
+        assert_eq!(kind_to_rt(HandleKind::MemFd),
+                   Some(crate::cap::ResourceType::MemFd));
+        assert_eq!(kind_to_rt(HandleKind::Console), None);
+        assert_eq!(kind_to_rt(HandleKind::PidFd), None);
+
+        // (b) Per-resource register / deregister round-trip on a
+        //     synthetic PCB.  This is the contract sys_pidfd_getfd
+        //     relies on: register lands an entry, deregister removes
+        //     it, snapshot reflects both.
+        let test_pid = pcb::create("batch130-regdereg", 0);
+        for (rt, h) in [
+            (crate::cap::ResourceType::File, 0x1111_2222u64),
+            (crate::cap::ResourceType::Pipe, 0x3333_4444u64),
+            (crate::cap::ResourceType::EventFd, 0x5555_6666u64),
+            (crate::cap::ResourceType::MemFd, 0x7777_8888u64),
+        ] {
+            pcb::register_ipc_handle(test_pid, rt, h);
+            let snap = pcb::ipc_handles_snapshot(test_pid)
+                .unwrap_or_default();
+            if !snap.iter().any(|&(r, x)| r == rt && x == h) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pidfd_getfd register missed: {:?} {:#x}",
+                    rt, h,
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
+            pcb::deregister_ipc_handle(test_pid, rt, h);
+            let snap2 = pcb::ipc_handles_snapshot(test_pid)
+                .unwrap_or_default();
+            if snap2.iter().any(|&(r, x)| r == rt && x == h) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pidfd_getfd deregister missed: {:?} {:#x}",
+                    rt, h,
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
+        }
+        pcb::destroy(test_pid);
+
+        // (c) Kernel-context dispatch.  pidfd_getfd needs a caller PCB;
+        //     without one it returns -EBADF before any registration.
+        //     This guards against the new register call being moved
+        //     above the caller_pid() check.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::PIDFD_GETFD, &a);
+        if r.value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_getfd kernel-ctx → {} (expected -EBADF)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   register_ipc_handle pidfd_getfd wiring: OK",
         );
     }
 

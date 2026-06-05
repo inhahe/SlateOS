@@ -10046,3 +10046,101 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
 
+## 105. Linux ABI batch 76: real per-PCB PR_SET_MDWE /
+##      PR_GET_MDWE round-trip (Memory-Deny-Write-Execute),
+##      with sticky-monotone semantics matching Linux.
+##
+##      Before this batch, both options fell through to the
+##      generic `_ => EINVAL` catch-all in sys_prctl.  Modern
+##      sandbox / hardening layers (systemd's
+##      MemoryDenyWriteExecute=, chromium's renderer
+##      sandbox, openssh's seccomp-MDWE combo, podman's
+##      hardened-container preset) call PR_SET_MDWE during
+##      init.  EINVAL there silently disables MDWE and the
+##      process falls back to weaker W^X enforcement, which
+##      is a measurable hardening regression.
+##
+##      Fix: add `linux_mdwe_bits: u32` (default 0) to the
+##      PCB with strict sticky-monotone semantics matching
+##      Linux's task_struct::mm->flags MDWE bit pair:
+##        * Bit 0 = PR_MDWE_REFUSE_EXEC_GAIN (1)
+##        * Bit 1 = PR_MDWE_NO_INHERIT       (2)
+##        * Valid mask = 3.
+##
+##      Inheritance: verbatim across fork.  Linux duplicates
+##      `mm->flags` MDWE bits via `dup_mm_flags`, so the child
+##      starts with the same MDWE policy as the parent
+##      regardless of NO_INHERIT (which is an exec-time, not
+##      fork-time, gate).  fork_create copies the field
+##      verbatim.
+##
+##      Across exec: Linux clears the bits iff
+##      PR_MDWE_NO_INHERIT was set.  We preserve
+##      unconditionally for now (same caveat as
+##      DUMPABLE/KEEPCAPS — exec hook not yet landed).  When
+##      the exec hook lands it must check NO_INHERIT and
+##      clear linux_mdwe_bits on the new image.
+##
+##      PR_SET_MDWE (65) — strict Linux semantics:
+##        * arg3 / arg4 / arg5 (our arg2/arg3/arg4) must all
+##          be 0 or EINVAL.
+##        * arg2 (our arg1) > u32::MAX -> EINVAL.
+##        * arg1 with bits outside the valid mask -> EINVAL.
+##        * NO_INHERIT without REFUSE_EXEC_GAIN -> EINVAL
+##          (Linux: NO_INHERIT is meaningless without the
+##          refusal bit).
+##        * Sticky monotone: once set non-zero, the only
+##          legal subsequent value is the same value;
+##          attempting to clear or change -> EPERM.  Matches
+##          Linux's prctl_set_mdwe which refuses any
+##          transition out of a previously-set state.
+##        * Returns 0 on success.
+##
+##      PR_GET_MDWE (66) — returns the bits DIRECTLY as the
+##      syscall return value (no user pointer).  arg1..arg5
+##      must all be 0 or EINVAL.  Kernel context reports 0.
+##
+##      Known limitation (deferred — IMPORTANT): mmap and
+##      mprotect do NOT yet consult linux_mdwe_bits.  This
+##      means PR_SET_MDWE succeeds, PR_GET_MDWE truthfully
+##      reports the value, but the security promise of
+##      refusing PROT_WRITE | PROT_EXEC (or transitioning a
+##      mapping to PROT_EXEC after having been writable) is
+##      NOT honoured.  A process that sets MDWE today still
+##      gets W+X mappings.  This is an active hardening
+##      regression vs Linux for any caller that trusts the
+##      kernel to enforce MDWE after a successful PR_SET.
+##      Fix: when mmap / mprotect land, both must consult
+##      get_mdwe_bits(pid) and, if REFUSE_EXEC_GAIN is set,
+##      reject any mapping that grants PROT_EXEC while
+##      having had PROT_WRITE at any point, returning
+##      EACCES.  Track this in the mmap / mprotect work
+##      items.
+##
+##      Storage layer (get_mdwe_bits / set_mdwe_bits) does
+##      NOT enforce monotonicity.  The sticky-monotone EPERM
+##      is enforced at the syscall surface only, so future
+##      kernel callers (e.g. exec hardening reloads) can
+##      adjust the bits without violating user-visible
+##      stickiness.
+##
+##      Self-tests cover:
+##        * PR_SET_MDWE arg3/arg4/arg5 != 0 -> EINVAL.
+##        * arg1 > u32::MAX -> EINVAL.
+##        * arg1 with bit outside valid mask (e.g. 4) ->
+##          EINVAL.
+##        * NO_INHERIT (2) without REFUSE_EXEC_GAIN ->
+##          EINVAL.
+##        * Valid values 0, 1, 3 all return 0 in kernel
+##          context (kernel-context path skips state mutation
+##          so stickiness check doesn't reject the sequence).
+##        * PR_GET_MDWE arg1..arg5 != 0 -> EINVAL.
+##        * Kernel context PR_GET_MDWE -> 0 (default).
+##        * pcb storage round-trip:
+##          0 -> 1 -> 3 -> 0 (helper accepts because surface
+##          enforces monotonicity, not the helper) ->
+##          destroy -> None.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+

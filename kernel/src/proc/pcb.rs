@@ -625,6 +625,40 @@ pub struct Process {
     /// should consult `get_mce_kill_policy(pid)` to choose between
     /// SIGBUS-immediately vs. let-recovery-try-first.
     pub linux_mce_kill_policy: u32,
+    /// Linux `prctl(PR_SET_MDWE)` bits — Memory Deny Write+Execute.
+    /// A security policy that forbids any subsequent `mmap`/
+    /// `mprotect` from setting both `PROT_WRITE` and `PROT_EXEC`
+    /// on the same page range; used by sandboxes (Chromium, Firefox,
+    /// systemd hardened services) to prevent JIT-spray injection.
+    ///
+    /// Bitmask of:
+    /// * `PR_MDWE_REFUSE_EXEC_GAIN` (1) — refuse any mmap/mprotect
+    ///   that would make a writable region executable.
+    /// * `PR_MDWE_NO_INHERIT` (2) — clear the flag on execve.
+    ///   Only valid when `REFUSE_EXEC_GAIN` is also set.
+    ///
+    /// Default 0 (no policy).  STICKY MONOTONE: once a non-zero
+    /// value has been installed, any attempt to set a different
+    /// value (including 0) returns `EPERM`; only setting the same
+    /// value again is allowed.
+    ///
+    /// Inheritance: across fork, the bits are copied verbatim
+    /// (Linux: `mm->flags` MDWE bits are duplicated by
+    /// `dup_mm_flags`).  Across exec, the bits are CLEARED iff
+    /// `PR_MDWE_NO_INHERIT` was set; otherwise they're preserved.
+    /// We do not have an exec-time hook yet, so we preserve
+    /// unconditionally (same caveat as dumpable/keepcaps — tracked
+    /// in todo.txt).
+    ///
+    /// Known limitation: we do not actually consult this flag in
+    /// `mmap` / `mprotect` yet.  The flag is round-tripped per
+    /// ABI compatibility but the security promise of refusing
+    /// `PROT_WRITE|PROT_EXEC` is NOT honoured.  Sandbox callers
+    /// will still see the right PR_GET answer.  Will need an
+    /// `mmap`/`mprotect` hook to consult `get_mdwe_bits(pid)` and
+    /// return `EACCES` on a forbidden combination.  Tracked in
+    /// todo.txt.
+    pub linux_mdwe_bits: u32,
 }
 
 /// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
@@ -714,9 +748,25 @@ impl Process {
             // applies.  Container runtimes / OOM-handling daemons
             // override.
             linux_mce_kill_policy: LINUX_PR_MCE_KILL_DEFAULT,
+            // Linux default: MDWE off (0).  Sandboxes opt in via
+            // PR_SET_MDWE.  Once non-zero, sticky monotone.
+            linux_mdwe_bits: 0,
         }
     }
 }
+
+/// `prctl(PR_SET_MDWE)` bit: refuse any subsequent `mmap` /
+/// `mprotect` that would make a writable region executable.
+pub const LINUX_PR_MDWE_REFUSE_EXEC_GAIN: u32 = 1;
+
+/// `prctl(PR_SET_MDWE)` bit: clear the MDWE flag on `execve`.
+/// Only valid when [`LINUX_PR_MDWE_REFUSE_EXEC_GAIN`] is also set.
+pub const LINUX_PR_MDWE_NO_INHERIT: u32 = 2;
+
+/// Bitmask of all defined MDWE bits — anything else in
+/// `PR_SET_MDWE arg2` is `EINVAL`.
+pub const LINUX_PR_MDWE_VALID_MASK: u32 =
+    LINUX_PR_MDWE_REFUSE_EXEC_GAIN | LINUX_PR_MDWE_NO_INHERIT;
 
 /// `prctl(PR_MCE_KILL)` policy: kill the process **after** the
 /// kernel's recovery attempt fails.
@@ -852,6 +902,7 @@ pub fn fork_create(
         linux_timer_slack_default_ns,
         linux_tsc_mode,
         linux_mce_kill_policy,
+        linux_mdwe_bits,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -886,6 +937,7 @@ pub fn fork_create(
             parent.linux_timer_slack_default_ns,
             parent.linux_tsc_mode,
             parent.linux_mce_kill_policy,
+            parent.linux_mdwe_bits,
         )
     };
 
@@ -1030,6 +1082,12 @@ pub fn fork_create(
         // task_struct::flags copy path, so PR_MCE_KILL state
         // propagates verbatim across fork.  Preserved across exec.
         linux_mce_kill_policy,
+        // Linux: MDWE bits live in `mm->flags` (`MMF_HAS_MDWE_*`)
+        // and are duplicated by `dup_mm_flags` at fork.  Across
+        // exec the bits are cleared iff `PR_MDWE_NO_INHERIT` was
+        // set; we preserve unconditionally for now — exec-hook
+        // limitation tracked in todo.txt.
+        linux_mdwe_bits,
     };
 
     table.insert(pid, child);
@@ -1786,6 +1844,31 @@ pub fn set_mce_kill_policy(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_mce_kill_policy;
     proc.linux_mce_kill_policy = val;
+    Some(old)
+}
+
+/// Read the recorded `prctl(PR_GET_MDWE)` bits for `pid` (a
+/// bitmask of [`LINUX_PR_MDWE_REFUSE_EXEC_GAIN`] /
+/// [`LINUX_PR_MDWE_NO_INHERIT`]).  Returns `None` if `pid` is
+/// unknown; `Some(0)` is the documented default (no policy).
+#[must_use]
+pub fn get_mdwe_bits(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_mdwe_bits)
+}
+
+/// Install the MDWE bits for `pid`, returning the prior value.
+///
+/// **Sticky monotone semantics**: this helper itself does not
+/// enforce the "cannot change once set" rule — the syscall surface
+/// for `PR_SET_MDWE` performs that check (re-setting to the same
+/// non-zero value is allowed; any other change once non-zero is
+/// `EPERM`).  The helper accepts arbitrary values so test fixtures
+/// can manipulate it freely.  Returns `None` if `pid` is unknown.
+pub fn set_mdwe_bits(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_mdwe_bits;
+    proc.linux_mdwe_bits = val;
     Some(old)
 }
 

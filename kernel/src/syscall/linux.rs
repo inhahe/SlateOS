@@ -21077,13 +21077,50 @@ fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
 /// (already-past target) return immediately.
 fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     const TIMER_ABSTIME: u64 = 1;
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
     let clockid = args.arg0;
     let flags = args.arg1;
     let req_ptr = args.arg2;
+
+    // Linux's `SYSCALL_DEFINE4(clock_nanosleep)`
+    // (kernel/time/posix-timers.c) gates in this order:
+    //   1. `kc = clockid_to_kclock(which_clock); if (!kc) return -EINVAL;`
+    //   2. `if (!kc->nsleep) return -EOPNOTSUPP;`
+    //   3. `if (get_timespec64(&t, rqtp)) return -EFAULT;`
+    //   4. `if (!timespec64_valid(&t)) return -EINVAL;`
+    //   5. `if (flags & ~TIMER_ABSTIME) return -EINVAL;`
+    // Pre-batch we skipped (1), (2), (4), (5) entirely and fell through
+    // to sleep with whatever timespec was passed, treating unknown
+    // clockids as "use hrtimer".  Feature-detection probes (e.g. glibc's
+    // clock_nanosleep wrapper) saw success where Linux rejects.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid_i32 = clockid as i32;
+    // Valid posix clockids: REALTIME(0), MONOTONIC(1),
+    // PROCESS_CPUTIME_ID(2), THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
+    // REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
+    // REALTIME_ALARM(8), BOOTTIME_ALARM(9), TAI(11).
+    // SGI_CYCLE(10) is reserved-not-implemented in Linux
+    // (clockid_to_kclock returns NULL) — EINVAL.
+    if !(0..=11).contains(&clockid_i32) || clockid_i32 == 10 {
+        return linux_err(errno::EINVAL);
+    }
+    // Clocks whose k_clock entry has .nsleep == NULL in Linux:
+    //   THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
+    //   REALTIME_COARSE(5), MONOTONIC_COARSE(6).
+    // These produce EOPNOTSUPP from `common_nsleep`'s caller.
+    if matches!(clockid_i32, 3 | 4 | 5 | 6) {
+        return linux_err(errno::EOPNOTSUPP);
+    }
     let req = match read_timespec(req_ptr) {
         Ok(t) => t,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
+    if req.tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&req.tv_nsec) {
+        return linux_err(errno::EINVAL);
+    }
+    if flags & !TIMER_ABSTIME != 0 {
+        return linux_err(errno::EINVAL);
+    }
     let target_ns = req.to_nanos();
     let now_ns: u64 = match clockid {
         0 => crate::timekeeping::clock_realtime(),
@@ -30269,6 +30306,112 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+    }
+
+    // clock_nanosleep — Linux gate order: clockid -> EINVAL/EOPNOTSUPP,
+    // get_timespec64 -> EFAULT, timespec64_valid -> EINVAL, flags -> EINVAL.
+    {
+        let zero_ts = [0u8; 16];
+        let zero_ts_ptr = zero_ts.as_ptr() as u64;
+        // clockid=99 (out of range) -> EINVAL even with NULL req
+        // (pre-batch this returned EFAULT because read_timespec ran first).
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep bad clockid not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clockid=10 (SGI_CYCLE) -> EINVAL.
+        let a = SyscallArgs { arg0: 10, arg1: 0, arg2: zero_ts_ptr, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep SGI_CYCLE not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clockid=3 (THREAD_CPUTIME_ID) -> EOPNOTSUPP (no .nsleep in Linux).
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: zero_ts_ptr, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep THREAD_CPUTIME_ID not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clockid=5 (REALTIME_COARSE) -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 5, arg1: 0, arg2: zero_ts_ptr, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep REALTIME_COARSE not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clockid=MONOTONIC + NULL req -> EFAULT (clockid OK, get_timespec64
+        // fails on NULL).
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep NULL req not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clockid=MONOTONIC + bad timespec (tv_nsec=1e9) -> EINVAL.
+        let mut bad_ts = [0u8; 16];
+        bad_ts[8..16].copy_from_slice(&1_000_000_000i64.to_ne_bytes());
+        let a = SyscallArgs { arg0: 1, arg1: 0,
+            arg2: bad_ts.as_ptr() as u64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep bad nsec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clockid=MONOTONIC + neg tv_sec -> EINVAL.
+        let mut neg_ts = [0u8; 16];
+        neg_ts[0..8].copy_from_slice(&(-1i64).to_ne_bytes());
+        let a = SyscallArgs { arg0: 1, arg1: 0,
+            arg2: neg_ts.as_ptr() as u64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep neg sec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clockid=MONOTONIC + bad flags (0x2) + valid ts -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 0x2, arg2: zero_ts_ptr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep bad flags not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // bad flags + bad clockid -> EINVAL (clockid checked first).
+        let a = SyscallArgs { arg0: 99, arg1: 0x2, arg2: zero_ts_ptr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep bad clockid+flags not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   clock_nanosleep clockid/EOPNOTSUPP/validity/flags gating: OK"
+        );
     }
 
     // chroot / mknod / mknodat — NULL path -> EFAULT, non-NULL -> EPERM.

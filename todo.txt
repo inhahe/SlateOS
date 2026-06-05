@@ -17728,3 +17728,53 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 35s).
 ##      Serial confirms "[syscall/linux]   timer_gettime
 ##      lookup-first gating: OK" in build/serial-test.txt.
+
+## 206. Batch 177: sys_clock_nanosleep clockid/EOPNOTSUPP/validity/flags
+##      ------------------------------------------------------------------
+##      Tightened sys_clock_nanosleep to mirror Linux's
+##      SYSCALL_DEFINE4(clock_nanosleep) in kernel/time/posix-timers.c.
+##      Pre-batch the stub jumped straight into read_timespec and
+##      treated every clockid except CLOCK_REALTIME(0) as "use
+##      hrtimer" — invalid clockids silently slept, bad flags were
+##      ignored, malformed timespecs were converted via saturation.
+##      Glibc-style probes saw success where Linux rejects.
+##
+##      Implementation (Linux gate order):
+##        1. clockid in [0..=11] AND != 10 (SGI_CYCLE reserved)
+##           -> else EINVAL.
+##        2. clockid in {3,4,5,6} (THREAD_CPUTIME_ID, MONOTONIC_RAW,
+##           REALTIME_COARSE, MONOTONIC_COARSE; no .nsleep in Linux)
+##           -> EOPNOTSUPP.
+##        3. read_timespec(req_ptr) -> EFAULT on NULL/bad ptr.
+##        4. timespec64_valid: tv_sec >= 0 AND
+##           tv_nsec in [0, NSEC_PER_SEC) -> else EINVAL.
+##        5. flags & ~TIMER_ABSTIME -> EINVAL.
+##        6. Sleep (existing logic preserved).
+##
+##      Self-tests added (9 cases):
+##        * clockid=99 + NULL req -> EINVAL (was EFAULT pre-batch
+##          because read_timespec ran first).
+##        * clockid=10 (SGI_CYCLE) + valid req -> EINVAL.
+##        * clockid=3 (THREAD_CPUTIME_ID) -> EOPNOTSUPP.
+##        * clockid=5 (REALTIME_COARSE) -> EOPNOTSUPP.
+##        * clockid=1 (MONOTONIC) + NULL req -> EFAULT.
+##        * clockid=1 + tv_nsec=1e9 -> EINVAL.
+##        * clockid=1 + tv_sec=-1 -> EINVAL.
+##        * clockid=1 + flags=0x2 + valid req -> EINVAL.
+##        * clockid=99 + flags=0x2 + valid req -> EINVAL (clockid first).
+##        * Emits "[syscall/linux]   clock_nanosleep
+##          clockid/EOPNOTSUPP/validity/flags gating: OK".
+##
+##      Known limitations:
+##        * Linux's posix_clock_nanosleep further forbids TIMER_ABSTIME
+##          with CLOCK_PROCESS_CPUTIME_ID (returns EINVAL) — we accept
+##          it for now since we don't model per-process cputime
+##          accounting.  Documented under judgment calls.
+##        * Linux's nsleep returns ERESTART_RESTARTBLOCK on signal
+##          interrupt and writes remaining time to rem_ptr if non-NULL;
+##          we never deliver signals to the running thread mid-sleep
+##          (no signal infrastructure on this kernel) so rem_ptr is
+##          never used.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms marker in build/serial-test.txt.

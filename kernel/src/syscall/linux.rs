@@ -16782,16 +16782,37 @@ fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
     sys_fchmodat(args)
 }
 
-/// `futex_wake(uaddr2*, mask, nr, flags)` — futex2 wake.
+/// `futex_wake(uaddr2*, mask, nr, flags)` — futex2 wake (Linux 6.7+).
 ///
-/// New in Linux 6.7.  Validates `uaddr2` 4-byte readable, `nr >= 0`,
-/// recognised flags (FUTEX2_PRIVATE=1, FUTEX2_SIZE_U32=2, FUTEX2_NUMA=4).
-/// Returns ENOSYS so glibc falls back to classic `futex(FUTEX_WAKE)`
-/// which we handle.
+/// `flags` follows the FUTEX2 layout shared with `futex_wait`:
+/// - bits `[0..1]` encode the futex element size (`FUTEX2_SIZE_MASK=0x3`).
+///   Only `FUTEX2_SIZE_U32=0x2` is wired; other sizes return `-EINVAL`
+///   (matches upstream — Linux only ships U32 today).
+/// - bit `2` is `FUTEX2_NUMA=0x4` — NUMA-aware hashing.  We have one
+///   global futex hash, so this is `-ENOSYS`.
+/// - bit `7` is `FUTEX2_PRIVATE=0x80` — accepted, no per-address-space
+///   tagging (we never differentiated private vs shared in the classic
+///   futex either).
+///
+/// `mask == 0` is `-EINVAL`: a zero bitmask can never match any waiter,
+/// so Linux rejects it up front.  Our underlying queue does not yet
+/// track per-waiter masks, so a non-zero mask wakes any waiter on
+/// `uaddr2`; POSIX permits the resulting spurious wakeups (callers
+/// re-check their predicate).  When per-waiter mask state is added to
+/// `ipc::futex` this becomes a one-line change — same caveat as
+/// `FUTEX_WAKE_BITSET` (batch 119).
 fn sys_futex2_wake(args: &SyscallArgs) -> SyscallResult {
+    const FUTEX2_SIZE_MASK: u32 = 0x3;
+    const FUTEX2_SIZE_U32: u32 = 0x2;
+    const FUTEX2_NUMA: u32 = 0x4;
+    const FUTEX2_PRIVATE: u32 = 0x80;
+    const VALID_FLAG_BITS: u32 = FUTEX2_SIZE_MASK | FUTEX2_NUMA | FUTEX2_PRIVATE;
+
     let uaddr2 = args.arg0;
-    let _mask = args.arg1;
+    let mask = args.arg1;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let nr = args.arg2 as i32;
+    #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg3 as u32;
     if uaddr2 == 0 {
         return linux_err(errno::EFAULT);
@@ -16799,32 +16820,78 @@ fn sys_futex2_wake(args: &SyscallArgs) -> SyscallResult {
     if nr < 0 {
         return linux_err(errno::EINVAL);
     }
-    const VALID: u32 = 1 | 2 | 4;
-    if flags & !VALID != 0 {
+    if flags & !VALID_FLAG_BITS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32 {
+        return linux_err(errno::EINVAL);
+    }
+    if flags & FUTEX2_NUMA != 0 {
+        return linux_err(errno::ENOSYS);
+    }
+    if mask == 0 {
         return linux_err(errno::EINVAL);
     }
     if let Err(e) = crate::mm::user::validate_user_read(uaddr2, 4) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::ENOSYS)
+    // Forward to the legacy WAKE handler.  arg1 carries `nr` (count to
+    // wake) per `handlers::sys_futex_wake`'s ABI; mask is consumed
+    // here and dropped (see doc comment for the upgrade path).
+    let a = SyscallArgs {
+        arg0: uaddr2,
+        arg1: nr as u64,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    linux_from_native(handlers::sys_futex_wake(&a))
 }
 
-/// `futex_wait(uaddr*, val, mask, flags, timespec*, clockid)` — futex2 wait.
+/// `futex_wait(uaddr*, val, mask, flags, timespec*, clockid)` — futex2 wait (Linux 6.7+).
+///
+/// Same FUTEX2 flag layout as `sys_futex2_wake`.  `clockid` is
+/// restricted to `0` (`CLOCK_MONOTONIC`) and `1` (`CLOCK_REALTIME`);
+/// any other clock returns `-EINVAL` per Linux's much tighter check on
+/// this path (vs. the 0..=12 range accepted by `clock_gettime`).
+/// `timespec == 0` means "wait indefinitely"; otherwise the `timespec`
+/// is an **absolute** deadline on the chosen clock — we read it, sample
+/// the matching clock, and convert to a relative nanosecond value for
+/// `handlers::sys_futex_wait_timeout` (with `saturating_sub` for the
+/// "already past" case, which the handler then resolves as
+/// value-compare-then-`ETIMEDOUT`).
 fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
+    const FUTEX2_SIZE_MASK: u32 = 0x3;
+    const FUTEX2_SIZE_U32: u32 = 0x2;
+    const FUTEX2_NUMA: u32 = 0x4;
+    const FUTEX2_PRIVATE: u32 = 0x80;
+    const VALID_FLAG_BITS: u32 = FUTEX2_SIZE_MASK | FUTEX2_NUMA | FUTEX2_PRIVATE;
+
     let uaddr = args.arg0;
-    let _val = args.arg1;
-    let _mask = args.arg2;
+    let val = args.arg1;
+    let mask = args.arg2;
+    #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg3 as u32;
     let timespec = args.arg4;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid = args.arg5 as i32;
     if uaddr == 0 {
         return linux_err(errno::EFAULT);
     }
-    const VALID: u32 = 1 | 2 | 4;
-    if flags & !VALID != 0 {
+    if flags & !VALID_FLAG_BITS != 0 {
         return linux_err(errno::EINVAL);
     }
-    if !(0..=12).contains(&clockid) {
+    if flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32 {
+        return linux_err(errno::EINVAL);
+    }
+    if flags & FUTEX2_NUMA != 0 {
+        return linux_err(errno::ENOSYS);
+    }
+    if mask == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if clockid != 0 && clockid != 1 {
         return linux_err(errno::EINVAL);
     }
     if let Err(e) = crate::mm::user::validate_user_read(uaddr, 4) {
@@ -16835,7 +16902,30 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    linux_err(errno::ENOSYS)
+    let native = if timespec == 0 {
+        let a = SyscallArgs {
+            arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        handlers::sys_futex_wait(&a)
+    } else {
+        let ts = match read_timespec(timespec) {
+            Ok(t) => t,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
+        let abs_ns = ts.to_nanos();
+        let now_ns = if clockid == 1 {
+            crate::timekeeping::clock_realtime()
+        } else {
+            crate::timekeeping::clock_monotonic()
+        };
+        let rel_ns = abs_ns.saturating_sub(now_ns);
+        let a = SyscallArgs {
+            arg0: uaddr, arg1: val, arg2: rel_ns,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        handlers::sys_futex_wait_timeout(&a)
+    };
+    linux_from_native(native)
 }
 
 /// `creat(path, mode)` — legacy `open(path, O_CREAT|O_WRONLY|O_TRUNC, mode)`.
@@ -32257,34 +32347,150 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // futex_wake NULL -> EFAULT.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
+        // futex2 wake/wait — batch 120 plumbs these through to the
+        // legacy handlers.  flags use the FUTEX2 layout: size in bits
+        // [0..1] (only U32=0x2), NUMA=0x4 (ENOSYS), PRIVATE=0x80 (ok).
+        const F2_SIZE_U32: u64 = 0x2;
+        const F2_NUMA: u64 = 0x4;
+        const F2_PRIVATE: u64 = 0x80;
+
+        // futex2 wake NULL -> EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: futex_wake NULL not EFAULT");
+            serial_println!("[syscall/linux]   FAIL: futex2 wake NULL not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // futex_wake bad flags -> EINVAL.
-        let a = SyscallArgs { arg0: u32_ptr, arg1: 0, arg2: 1, arg3: 0x100, arg4: 0, arg5: 0 };
+        // futex2 wake nr<0 -> EINVAL.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: u64::MAX, arg3: F2_SIZE_U32,
+            arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: futex_wake bad flags not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: futex2 wake nr<0 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // futex_wake valid -> ENOSYS.
-        let a = SyscallArgs { arg0: u32_ptr, arg1: u64::MAX, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
+        // futex2 wake unknown flag bit (0x100) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1, arg3: 0x100, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wake bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wake size != U32 (flags=0 -> SIZE_U8) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wake non-U32 size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wake NUMA -> ENOSYS.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1,
+            arg3: F2_SIZE_U32 | F2_NUMA, arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: futex_wake valid not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: futex2 wake NUMA not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // futex_wait bad clockid -> EINVAL.
-        let a = SyscallArgs { arg0: u32_ptr, arg1: 0, arg2: 0, arg3: 1, arg4: 0, arg5: 99 };
+        // futex2 wake mask=0 -> EINVAL.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 0, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wake mask=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wake valid PRIVATE+U32, nr=0 -> 0 (no waiters).
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: u64::MAX, arg2: 0,
+            arg3: F2_SIZE_U32 | F2_PRIVATE, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: futex2 wake valid not 0");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wake valid U32, nr=10 -> 0 (no waiters).
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 10, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: futex2 wake nr=10 not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // futex2 wait bad clockid (99) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 99,
+        };
         if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: futex_wait bad clockid not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: futex2 wait bad clockid not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // futex_wait valid -> ENOSYS.
-        let a = SyscallArgs { arg0: u32_ptr, arg1: 0, arg2: 0, arg3: 1, arg4: ts_ptr, arg5: 0 };
+        // futex2 wait clockid=2 (BOOTTIME) -> EINVAL (futex2 only allows 0/1).
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 2,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait clockid=2 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait mask=0 -> EINVAL.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 0, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait mask=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait NUMA -> ENOSYS.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1,
+            arg3: F2_SIZE_U32 | F2_NUMA, arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: futex_wait valid not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: futex2 wait NUMA not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait non-U32 size (flags=0) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait non-U32 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait value mismatch (expected=1, buffer=0), no timeout
+        // -> 0 (Ok(false) pre-EAGAIN translation; documented as a
+        // known limitation shared with classic FUTEX_WAIT).
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait mismatch not 0");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait value mismatch with past absolute MONOTONIC
+        // deadline (ts=(0,0)) -> 0 (value-mismatch short-circuit
+        // beats the timeout branch in handlers::sys_futex_wait_timeout).
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: ts_ptr, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait past abs MONO not 0");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait value mismatch with past absolute REALTIME
+        // deadline -> 0.
+        let a = SyscallArgs {
+            arg0: u32_ptr, arg1: 1, arg2: 1,
+            arg3: F2_SIZE_U32 | F2_PRIVATE, arg4: ts_ptr, arg5: 1,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait past abs REAL not 0");
             return Err(KernelError::InternalError);
         }
         // futex_requeue nonzero flags -> EINVAL.

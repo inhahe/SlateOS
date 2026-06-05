@@ -13668,5 +13668,112 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          to warrant its own batch.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##
+## 149. Batch 120 — futex2 wake/wait routed through to legacy handlers,
+##      with the FUTEX2 flag layout fixed.
+##
+##      The pre-existing futex2_wake / futex2_wait stubs in
+##      kernel/src/syscall/linux.rs validated `flags` against
+##      `const VALID: u32 = 1 | 2 | 4` and then returned -ENOSYS for
+##      every conforming call.  That treatment had two problems:
+##        (a) the constants treated the low two flag bits as independent
+##            switches (PRIVATE/U32/NUMA).  Linux's actual FUTEX2 layout
+##            uses bits [0..1] as a 2-bit size *field*
+##            (FUTEX2_SIZE_MASK = 0x3) where the only implemented value
+##            is FUTEX2_SIZE_U32 = 0x2.  Bit 2 is FUTEX2_NUMA = 0x4 and
+##            bit 7 is FUTEX2_PRIVATE = 0x80.  Our previous "valid" mask
+##            therefore accepted FUTEX2_SIZE_U8 (flags=0) and rejected
+##            FUTEX2_PRIVATE (flags=0x80) — exactly inverted from real
+##            Linux on every modern caller.
+##        (b) returning -ENOSYS forced glibc/Rust to fall back to the
+##            classic futex(2) op-with-bitset path on every wake/wait.
+##            With the underlying handlers::sys_futex_wake /
+##            sys_futex_wait[_timeout] already in place, the routing
+##            was a 10-line plumb job — no excuse for the fallback.
+##
+##      Implementation (sys_futex2_wake, sys_futex2_wait):
+##        * Reject unknown flag bits with -EINVAL
+##          (flags & !(SIZE_MASK|NUMA|PRIVATE) != 0).
+##        * Reject any size other than U32 with -EINVAL.  Matches Linux's
+##          state of the world today (the other size variants are
+##          syntactically defined but not implemented kernel-side).
+##        * Reject NUMA with -ENOSYS.  Our futex hash is global; per-node
+##          buckets would need a redesign of ipc::futex bucket sharding.
+##        * Accept PRIVATE silently — we never differentiated private vs
+##          shared in the classic futex either, and PRIVATE is purely an
+##          optimization hint.
+##        * Reject mask == 0 with -EINVAL (a zero bitmask matches nothing).
+##        * Validate uaddr is 4-byte readable; return EFAULT on miss.
+##
+##      futex2_wake forwarding: build a SyscallArgs with arg0=uaddr,
+##      arg1=nr (cast from i32, already validated >= 0), pass to
+##      handlers::sys_futex_wake.  Mask is consumed and dropped — same
+##      caveat as FUTEX_WAKE_BITSET from batch 119 (no per-waiter mask
+##      state in the queue).
+##
+##      futex2_wait forwarding:
+##        * clockid restricted to 0 (CLOCK_MONOTONIC) or 1
+##          (CLOCK_REALTIME) per Linux's tighter check on this path.
+##          Other clocks are -EINVAL.
+##        * NULL timespec → indefinite wait → handlers::sys_futex_wait.
+##        * Non-NULL timespec is an **absolute** deadline on the chosen
+##          clock.  Read with read_timespec, convert to relative ns via
+##          `abs_ns.saturating_sub(now_ns)`, then call
+##          handlers::sys_futex_wait_timeout.  The saturating_sub
+##          collapses "deadline already past" to rel_ns=0, which the
+##          handler resolves correctly: value-compare first, then
+##          ETIMEDOUT on hit (vs. Ok(false) → 0 on mismatch).
+##
+##      Boot self-tests (16 cases, replacing the 6 pre-batch ENOSYS
+##      regression tests in the fchmodat2/futex2 block):
+##        FUTEX2 wake:
+##          1. NULL uaddr2 → EFAULT.
+##          2. nr < 0 (u64::MAX cast to i32 → negative) → EINVAL.
+##          3. Unknown flag bit (0x100) → EINVAL.
+##          4. Non-U32 size (flags=0 ⇒ SIZE_U8) → EINVAL.
+##          5. NUMA bit set (with U32) → ENOSYS.
+##          6. mask=0 (with U32) → EINVAL.
+##          7. Valid PRIVATE|U32, nr=0, mask=MAX → 0 (no waiters).
+##          8. Valid U32 only, nr=10, mask=1 → 0 (no waiters).
+##        FUTEX2 wait:
+##          9. Bad clockid (99) → EINVAL.
+##         10. clockid=2 (BOOTTIME — disallowed on futex2 path) → EINVAL.
+##         11. mask=0 → EINVAL.
+##         12. NUMA → ENOSYS.
+##         13. Non-U32 size → EINVAL.
+##         14. Value mismatch (expected=1, buffer[0]=0), no timeout → 0
+##             (Ok(false) → SyscallResult::ok(0); same pre-EAGAIN
+##             translation gap documented in batch 119, behaves as a
+##             spurious wakeup to glibc / Rust park).
+##         15. Past absolute MONOTONIC deadline (ts=(0,0)) → 0
+##             (value-mismatch short-circuit beats the timeout branch).
+##         16. Past absolute REALTIME deadline (clockid=1, PRIVATE|U32)
+##             → 0.
+##
+##      Known limitations carried forward:
+##        * Per-waiter bitmask filtering: futex2_wake still wakes any
+##          waiter on uaddr regardless of mask.  Same upgrade path as
+##          FUTEX_WAKE_BITSET — adding per-waiter mask state in
+##          ipc::futex flips the behaviour with no callsite changes.
+##        * EAGAIN translation: value-mismatch on the WAIT path returns 0
+##          to userspace instead of -EAGAIN.  Pre-existing, documented
+##          in batch 119.
+##        * futex2 elements other than U32 (U8/U16/U64) are rejected
+##          with EINVAL.  Matches Linux today; if Linux ever lights up
+##          U64 futexes, this needs a wider WAIT handler in
+##          ipc::futex (the value compare and wake bucket hash both
+##          assume u32).
+##        * futex2_requeue still ENOSYS.  Same blocker as
+##          FUTEX_CMP_REQUEUE — needs a futex_requeue helper in
+##          ipc::futex that atomically transfers waiters between
+##          buckets while running the cmpval check.  Deferred to the
+##          same future batch.
+##        * NUMA path: returns ENOSYS rather than silently ignoring the
+##          flag.  If callers fall back gracefully (Linux man page says
+##          they should), this is the right answer; if they hard-fail,
+##          a future revision could ignore NUMA when our hash remains
+##          global.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
 

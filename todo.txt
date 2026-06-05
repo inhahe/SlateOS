@@ -18244,3 +18244,41 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          inotify_init / init1 return ENOSYS.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 25s).
+
+## 217. Linux ABI: pidfd_open PIDFD_THREAD acceptance
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux 6.2 added PIDFD_THREAD (= O_EXCL = 0o200) as a valid
+##      pidfd_open flag (include/uapi/linux/pidfd.h):
+##          #define PIDFD_NONBLOCK O_NONBLOCK  // 0o4000
+##          #define PIDFD_THREAD   O_EXCL       // 0o200
+##      Pre-batch sys_pidfd_open only accepted PIDFD_NONBLOCK, so a
+##      probe (libpidfd / glibc 2.36+ / systemd-pidfd) requesting a
+##      per-thread pidfd saw EINVAL where Linux 6.2+ creates one.
+##
+##      Fix: extend VALID_FLAGS to PIDFD_NONBLOCK | PIDFD_THREAD.
+##      Our pcb backing the FdEntry::pidfd doesn't model threads
+##      separately from processes, so PIDFD_THREAD is accepted as a
+##      hint and the resulting fd refers to the target's process —
+##      Linux semantics aside from "wait4 on a thread pidfd only
+##      reaps that thread" which we'd model only once threads are
+##      first-class.
+##
+##      Self-tests added (2):
+##        * PIDFD_OPEN(pid=0x7FFF_FFFE, PIDFD_THREAD) -> ESRCH
+##          (was EINVAL).  Confirms PIDFD_THREAD passes the flag
+##          gate and reaches the pid lookup.
+##        * PIDFD_OPEN(pid=0x7FFF_FFFE, NONBLOCK|THREAD) -> ESRCH.
+##        * Pre-existing pidfd_open(0) -> EINVAL and
+##          pidfd_open(_, flag=0x1) -> EINVAL still hold (0x1 is
+##          outside the new mask).
+##
+##      Known limitations:
+##        * No per-thread pidfd semantics.  Once threads are
+##          first-class in pcb, PIDFD_THREAD should switch the entry
+##          kind to a thread pidfd and route waitid / pidfd_send_signal
+##          to the thread, not the whole process.
+##        * No new marker emitted (the change is a single flag
+##          addition; the existing pidfd test block is the validator).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

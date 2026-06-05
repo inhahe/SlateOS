@@ -11563,8 +11563,19 @@ fn sys_memfd_secret(args: &SyscallArgs) -> SyscallResult {
 ///   * `ESRCH`  — no process with that pid is currently alive.
 ///   * `EBADF`  — kernel-context invocation (no caller PCB).
 fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
-    // PIDFD_NONBLOCK = O_NONBLOCK = 0o4000.
-    const VALID_FLAGS: u64 = 0o4000;
+    // Linux 6.2+ accepts two flags here (include/uapi/linux/pidfd.h):
+    //   PIDFD_NONBLOCK = O_NONBLOCK = 0o4000  (since 5.10)
+    //   PIDFD_THREAD   = O_EXCL     = 0o200   (since 6.2)
+    // Pre-batch we only accepted PIDFD_NONBLOCK, so a probe asking for
+    // a per-thread pidfd (PIDFD_THREAD by itself, or PIDFD_NONBLOCK |
+    // PIDFD_THREAD) saw EINVAL where Linux 6.2+ creates a thread-mode
+    // pidfd.  Our PCB doesn't distinguish thread vs process pidfds at
+    // this layer — both end up referring to a process via raw_handle —
+    // so accept the flag and treat it as a hint until a real
+    // thread-aware pidfd lands.
+    const PIDFD_NONBLOCK: u64 = 0o4000;
+    const PIDFD_THREAD: u64 = 0o200;
+    const VALID_FLAGS: u64 = PIDFD_NONBLOCK | PIDFD_THREAD;
     if args.arg1 & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -32866,13 +32877,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pidfd_open(0) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pidfd_open with invalid flags -> EINVAL.  PIDFD_NONBLOCK=0o4000
-        // is the only accepted flag.
+        // pidfd_open with invalid flags -> EINVAL.  Valid flags are
+        // PIDFD_NONBLOCK (0o4000) and PIDFD_THREAD (0o200).  Bit 1
+        // (= 0x1) is outside that set.
         let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_OPEN, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: pidfd_open bad flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_open with PIDFD_THREAD on a missing pid -> ESRCH.
+        // Pre-batch returned EINVAL (PIDFD_THREAD was rejected as bad
+        // flags); Linux 6.2+ accepts the flag and runs the pid lookup.
+        let a = SyscallArgs { arg0: 0x7FFF_FFFE, arg1: 0o200, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_OPEN, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_open(PIDFD_THREAD, missing) not ESRCH"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_open with PIDFD_NONBLOCK|PIDFD_THREAD on a missing pid
+        // -> ESRCH (both flags pass the validity gate).
+        let a = SyscallArgs { arg0: 0x7FFF_FFFE, arg1: 0o4200, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_OPEN, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_open(NONBLOCK|THREAD, missing) not ESRCH"
+            );
             return Err(KernelError::InternalError);
         }
         // pidfd_open(pid that does not exist) -> ESRCH.  Pick a positive

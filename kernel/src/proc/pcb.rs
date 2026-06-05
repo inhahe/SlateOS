@@ -475,6 +475,23 @@ pub struct Process {
     /// and we don't have an exec hook for this yet, so the exec-time
     /// reset is a known limitation tracked in todo.txt.
     pub linux_dumpable: u32,
+    /// Linux `prctl(PR_SET_KEEPCAPS)` flag.  Controls whether the
+    /// process retains its permitted-capability set across a uid
+    /// change to non-root.  Stored as 0 (`KEEPCAPS_CLEAR`, the
+    /// default — capabilities cleared on uid change) or 1
+    /// (`KEEPCAPS_KEEP` — capabilities preserved).
+    ///
+    /// Inherited verbatim across fork on Linux (the per-thread
+    /// keepcaps flag is preserved by `copy_process`); Linux *resets*
+    /// it to 0 on every successful `execve`.  We preserve across
+    /// exec for now — same exec-time hook limitation as
+    /// `linux_dumpable`.  Tracked in todo.txt.
+    ///
+    /// We do not model POSIX capability sets, so the flag has no
+    /// effect on actual privilege transitions — it exists purely for
+    /// ABI round-trip so that programs which set and then read it
+    /// back observe the value they wrote.
+    pub linux_keepcaps: u32,
 }
 
 impl Process {
@@ -532,6 +549,10 @@ impl Process {
             // core-dumpable and /proc/self entries are owned by the
             // real uid.  PR_SET_DUMPABLE may flip this to 0 or 2.
             linux_dumpable: 1,
+            // Linux default: KEEPCAPS_CLEAR (0) — capability set is
+            // cleared on uid-change-from-root.  PR_SET_KEEPCAPS(1)
+            // opts out so caps survive setuid.
+            linux_keepcaps: 0,
         }
     }
 }
@@ -647,6 +668,7 @@ pub fn fork_create(
         linux_sched_priority,
         linux_nice,
         linux_dumpable,
+        linux_keepcaps,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -674,6 +696,7 @@ pub fn fork_create(
             parent.linux_sched_priority,
             parent.linux_nice,
             parent.linux_dumpable,
+            parent.linux_keepcaps,
         )
     };
 
@@ -777,6 +800,11 @@ pub fn fork_create(
         // this yet, so exec preserves rather than resets.  Known
         // limitation tracked in todo.txt.
         linux_dumpable,
+        // Linux: PR_SET_KEEPCAPS propagates verbatim across fork
+        // and is RESET to 0 on execve.  We preserve across exec
+        // for the same reason as dumpable above — pending exec-time
+        // PCB cleanup hook.  Tracked in todo.txt.
+        linux_keepcaps,
     };
 
     table.insert(pid, child);
@@ -1353,6 +1381,27 @@ pub fn set_dumpable(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_dumpable;
     proc.linux_dumpable = val;
+    Some(old)
+}
+
+/// Read the recorded `prctl(PR_SET_KEEPCAPS)` flag for `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
+/// default (`KEEPCAPS_CLEAR` — capabilities cleared on uid change).
+#[must_use]
+pub fn get_keepcaps(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_keepcaps)
+}
+
+/// Install a new keepcaps flag for `pid`, returning the prior
+/// value.  Caller is responsible for validating the value is 0 or
+/// 1; this helper stores whatever it is given.  Returns `None` if
+/// `pid` is unknown.
+pub fn set_keepcaps(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_keepcaps;
+    proc.linux_keepcaps = val;
     Some(old)
 }
 

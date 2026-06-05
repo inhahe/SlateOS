@@ -3839,11 +3839,32 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             };
             SyscallResult::ok(i64::from(v))
         }
-        // PR_SET_KEEPCAPS (8) — accept silently.  We do not model
-        // POSIX capability flags yet so there is no flag to flip.
-        8 => SyscallResult::ok(0),
-        // PR_GET_KEEPCAPS — we don't track it.
-        7 => SyscallResult::ok(0),
+        // PR_SET_KEEPCAPS (8) — install the keepcaps flag.  Linux
+        // accepts 0 (KEEPCAPS_CLEAR) and 1 (KEEPCAPS_KEEP); anything
+        // else is EINVAL.  We persist per-PCB for ABI round-trip; we
+        // do not model POSIX capabilities yet so the flag has no
+        // effect on actual privilege transitions.  Kernel context
+        // (no PCB) silently succeeds without storing.
+        8 => {
+            let new_keepcaps = args.arg1 as u32;
+            if new_keepcaps > 1 {
+                return linux_err(errno::EINVAL);
+            }
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_keepcaps(pid, new_keepcaps);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_KEEPCAPS (7) — return the per-process flag.  Kernel
+        // context (no PCB) reports the KEEPCAPS_CLEAR default (0),
+        // matching what a fresh userspace process would observe.
+        7 => {
+            let v = match caller_pid() {
+                Some(pid) => pcb::get_keepcaps(pid).unwrap_or(0),
+                None => 0,
+            };
+            SyscallResult::ok(i64::from(v))
+        }
         // PR_SET_NAME — install up to 16 bytes (NUL-terminated within
         // 16) as the calling process's comm.  Linux reads with
         // strncpy_from_user(len=TASK_COMM_LEN=16): everything past the
@@ -16121,6 +16142,76 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_dumpable(test_pid), None);
             assert_eq!(pcb::set_dumpable(test_pid, 1), None);
+        }
+
+        // Batch 67: PR_SET_KEEPCAPS / PR_GET_KEEPCAPS round-trip.
+        //
+        //   1. PR_SET_KEEPCAPS rejects 2, 3, u64::MAX with EINVAL —
+        //      only 0 (KEEPCAPS_CLEAR) and 1 (KEEPCAPS_KEEP) are
+        //      accepted.
+        //   2. PR_SET_KEEPCAPS(0) and (1) both succeed.
+        //   3. PR_GET_KEEPCAPS in kernel context (no PCB) reports
+        //      the KEEPCAPS_CLEAR default (0).
+        //   4. pcb::{get,set}_keepcaps round-trips through
+        //      0 -> 1 -> destroy -> None.
+        {
+            // Out-of-range -> EINVAL.
+            for bad in [2u64, 3, 100, u64::MAX] {
+                let a = SyscallArgs { arg0: 8, arg1: bad, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, {}) not EINVAL ({})",
+                        bad, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // 0 (KEEPCAPS_CLEAR) accepted.
+            let a = SyscallArgs { arg0: 8, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, 0) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // 1 (KEEPCAPS_KEEP) accepted.
+            let a = SyscallArgs { arg0: 8, arg1: 1, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, 1) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_GET_KEEPCAPS in kernel context -> default 0.
+            let a = SyscallArgs { arg0: 7, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_KEEPCAPS) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("keepcaps-test", 0);
+            // Default is 0 (KEEPCAPS_CLEAR).
+            assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
+            // Install 1 (KEEPCAPS_KEEP).  set returns the prior value.
+            assert_eq!(pcb::set_keepcaps(test_pid, 1), Some(0));
+            assert_eq!(pcb::get_keepcaps(test_pid), Some(1));
+            // Cycle back to 0.
+            assert_eq!(pcb::set_keepcaps(test_pid, 0), Some(1));
+            assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_keepcaps(test_pid), None);
+            assert_eq!(pcb::set_keepcaps(test_pid, 1), None);
         }
     }
 

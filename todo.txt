@@ -9554,3 +9554,42 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     Build clean; boot test PASSED (BOOT_OK at 19s).
 
 
+## 95. Linux ABI batch 67: real per-PCB PR_SET_KEEPCAPS /
+##     PR_GET_KEEPCAPS round-trip.
+##
+##     Same problem as entry 94 (dumpable), one notch over.
+##     PR_SET_KEEPCAPS silently accepted anything and
+##     PR_GET_KEEPCAPS always returned 0.  No round-trip:
+##     setting 1 still read 0 back.  Programs that drop
+##     privileges via setuid and check PR_GET_KEEPCAPS to
+##     confirm whether their caps will survive saw the wrong
+##     answer.
+##
+##     Fix: add `linux_keepcaps: u32` to the PCB (default 0 =
+##     KEEPCAPS_CLEAR, matching Linux), with `pcb::get_keepcaps`
+##     / `pcb::set_keepcaps` helpers.  Inherited verbatim
+##     across fork.  PR_SET_KEEPCAPS validates user range (0
+##     or 1; anything else is EINVAL) and persists.
+##     PR_GET_KEEPCAPS reads the stored value.
+##
+##     Same exec-reset limitation as dumpable: Linux RESETS
+##     keepcaps to 0 on every successful execve, we preserve.
+##     Tracked under the same exec-hook follow-up.
+##
+##     The flag has no effect on actual privilege transitions
+##     because we don't model POSIX capability sets; it
+##     exists purely for ABI round-trip.  systemd and dbus
+##     both probe it during startup.
+##
+##     Self-tests cover both layers:
+##       * PR_SET_KEEPCAPS rejects 2, 3, 100, u64::MAX with
+##         EINVAL.
+##       * PR_SET_KEEPCAPS(0) and (1) both succeed.
+##       * PR_GET_KEEPCAPS returns the default (0) in kernel
+##         context.
+##       * pcb::{get,set}_keepcaps round-trips 0 -> 1 -> 0
+##         -> destroy -> None.
+##
+##     Build clean; boot test PASSED (BOOT_OK at 21s).
+
+

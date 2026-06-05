@@ -19447,3 +19447,50 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      keep this one focused.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 25s on first try).
+
+## 241. [DONE 2026-06-05] Linux ABI: sys_listmount flags-first +
+##      copy_mnt_id_req size gates + LISTMOUNT_REVERSE mask.
+##
+##      Pre-batch sys_listmount (kernel/src/syscall/linux.rs) ran
+##      EFAULT pointer + validate_user_read gates ahead of the flags
+##      check, and never inspected the req->size field — so probes
+##      walking the gate ladder saw:
+##         (req=NULL,  flags=1)        -> EFAULT vs Linux EINVAL
+##         (req->size=8192)            -> ENOENT vs Linux E2BIG
+##         (req->size=16)              -> ENOENT vs Linux EINVAL
+##
+##      Linux's fs/namespace.c::SYSCALL_DEFINE4(listmount) gate
+##      order:
+##        1. flags & ~LISTMOUNT_REVERSE   -> -EINVAL
+##        2. copy_mnt_id_req(req, &kreq):
+##             get_user(usize, &req->size) -> -EFAULT
+##             usize > PAGE_SIZE           -> -E2BIG
+##             usize < MNT_ID_REQ_SIZE_VER0 (24) -> -EINVAL
+##             copy_struct_from_user       -> -EFAULT
+##             kreq.spare != 0             -> -EINVAL
+##        3. do_listmount lookup           -> -ENOENT for unknown mnt
+##
+##      Mirrors the statmount batch (240) but allows the
+##      LISTMOUNT_REVERSE=1 flag.  PAGE_SIZE pegged at Linux x86_64
+##      4096, not our internal 16 KiB FRAME_SIZE.
+##
+##      Self-tests added in dispatch_linux:
+##      - (req=NULL, flags=2) -> EINVAL  (flags-first; bit 1 invalid).
+##      - (valid_req, flags=LISTMOUNT_REVERSE=1) -> ENOENT (REVERSE
+##        accepted; falls through to terminal lookup).
+##      - (small_req size=16) -> EINVAL  (size<24 gate).
+##      - (huge_req size=8192) -> E2BIG  (size>PAGE gate).
+##      - (valid_req size=24) -> ENOENT  (terminal mnt lookup miss).
+##      Marker: "listmount flags-first / size gates / REVERSE accepted: OK".
+##
+##      Also removed the now-unused all-zero mnt_req_buf/mnt_req_ptr
+##      test-locals (superseded by the typed valid/small/huge variants
+##      introduced in batch 240).  Keeps the build warning-free per
+##      CLAUDE.md.
+##
+##      Known limitation: do_listmount still returns ENOENT for every
+##      mnt_id because no mount tree is exposed via this syscall yet
+##      — the kreq.spare!=0 gate isn't observable until a real mount
+##      lands and the spare-zero path can actually succeed.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

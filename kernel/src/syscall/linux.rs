@@ -18412,13 +18412,60 @@ fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `listmount(req*, buf*, bufsize, flags)`.
+///
+/// Linux's `fs/namespace.c::SYSCALL_DEFINE4(listmount)` gate order
+/// (mirrors statmount but allows the LISTMOUNT_REVERSE bit in flags):
+///   1. `if (flags & ~LISTMOUNT_REVERSE)` -> -EINVAL.
+///   2. `copy_mnt_id_req(req, &kreq)`:
+///        a. `get_user(usize, &req->size)`               -> -EFAULT
+///        b. `usize > PAGE_SIZE`                         -> -E2BIG
+///        c. `usize < MNT_ID_REQ_SIZE_VER0 (24)`         -> -EINVAL
+///        d. `copy_struct_from_user`                     -> -EFAULT
+///        e. `kreq.spare != 0`                           -> -EINVAL
+///   3. `do_listmount` -> -ENOENT for an unknown mnt_id.
+///
+/// Pre-batch we ran EFAULT pointer + validate_user_read gates ahead
+/// of the flags check and never read the leading `size` field, so:
+///   * (req=NULL, flags=1)                  -> -EFAULT vs Linux -EINVAL.
+///   * (req->size=8192)                     -> -ENOENT vs Linux -E2BIG.
+///   * (req->size=16)                       -> -ENOENT vs Linux -EINVAL.
+/// Reorder to match.
 fn sys_listmount(args: &SyscallArgs) -> SyscallResult {
+    const MNT_ID_REQ_SIZE_VER0: u32 = 24;
+    const LINUX_PAGE_SIZE: u32 = 4096;
+    const LISTMOUNT_REVERSE: u64 = 1;
+    // 1. flags first.
+    if args.arg3 & !LISTMOUNT_REVERSE != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 2a. get_user(size, &req->size) -> EFAULT on bad req.
     if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 24) {
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 4) {
         return linux_err(linux_errno_for(e));
     }
+    let mut size_buf = [0u8; 4];
+    // SAFETY: validate_user_read above confirmed 4 bytes readable.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg0, size_buf.as_mut_ptr(), 4)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let usize_field = u32::from_le_bytes(size_buf);
+    // 2b. size > PAGE_SIZE -> E2BIG.
+    if usize_field > LINUX_PAGE_SIZE {
+        return linux_err(errno::E2BIG);
+    }
+    // 2c. size < MNT_ID_REQ_SIZE_VER0 -> EINVAL.
+    if usize_field < MNT_ID_REQ_SIZE_VER0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 2d. copy_struct_from_user the whole declared usize.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, usize_field as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Buffer / bufsize handling (after req is fully validated).
     if args.arg2 > 0 {
         if args.arg1 == 0 {
             return linux_err(errno::EFAULT);
@@ -18429,9 +18476,7 @@ fn sys_listmount(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    if args.arg3 != 0 {
-        return linux_err(errno::EINVAL);
-    }
+    // 3. No mount-tree exposed yet — any mnt_id is unknown.
     linux_err(errno::ENOENT)
 }
 
@@ -39133,8 +39178,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let user_desc_ptr = user_desc_buf.as_ptr() as u64;
         let kexec_seg_buf = [0u8; 64];
         let kexec_seg_ptr = kexec_seg_buf.as_ptr() as u64;
-        let mnt_req_buf = [0u8; 24];
-        let mnt_req_ptr = mnt_req_buf.as_ptr() as u64;
         let mnt_outbuf = [0u8; 128];
         let mnt_outbuf_ptr = mnt_outbuf.as_ptr() as u64;
         // Sized for size_t (8 bytes on x86_64); lsm_list_modules
@@ -39421,12 +39464,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   statmount flags-first / size E2BIG / size<VER0 EINVAL: OK"
         );
-        // listmount valid -> ENOENT.
-        let a = SyscallArgs { arg0: mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 8, arg3: 0, arg4: 0, arg5: 0 };
+        // listmount flags=2 (LISTMOUNT_REVERSE=1 mask: bit 1 invalid)
+        // -> EINVAL even with req=NULL.  Pre-batch the NULL-req EFAULT
+        // gate fired first; Linux runs flags ahead of every pointer
+        // touch.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 2, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: listmount flags-first not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // listmount flags=LISTMOUNT_REVERSE accepted; falls through.
+        let a = SyscallArgs { arg0: valid_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 8, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: listmount REVERSE valid not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // listmount req->size = 16 (< MNT_ID_REQ_SIZE_VER0) -> EINVAL.
+        let a = SyscallArgs { arg0: small_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 8, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: listmount size<24 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // listmount req->size = 8192 (> PAGE_SIZE) -> E2BIG.
+        let a = SyscallArgs { arg0: huge_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 8, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: listmount size>PAGE not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        // listmount valid req+buf -> ENOENT (no mount tree).
+        let a = SyscallArgs { arg0: valid_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 8, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::ENOENT) {
             serial_println!("[syscall/linux]   FAIL: listmount valid not ENOENT");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   listmount flags-first / size gates / REVERSE accepted: OK"
+        );
 
         // lsm_get_self_attr attr=0 (LSM_ATTR_UNDEF) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: ctx_ptr, arg2: size_ptr, arg3: 0, arg4: 0, arg5: 0 };

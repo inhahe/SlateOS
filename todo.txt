@@ -17974,3 +17974,60 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 25s).
 ##      Serial confirms marker in build/serial-test.txt.
+
+## 212. Linux ABI: epoll_pwait/pwait2 sigsetsize-iff-umask gating
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's set_user_sigmask (kernel/signal.c) implements:
+##          if (!umask) return 0;
+##          if (sigsetsize != sizeof(sigset_t)) return -EINVAL;
+##          if (copy_from_user(&kmask, umask, ...)) return -EFAULT;
+##
+##      That is: sigsetsize is only validated when umask is non-NULL.
+##      Our sys_epoll_pwait and sys_epoll_pwait2 stubs unconditionally
+##      rejected any sigsetsize that wasn't 0 or 8, diverging in two
+##      cases that feature-detection probes can hit:
+##        * (umask = NULL, sigsetsize = 99) — Linux: 0 (continues into
+##          the wait), us: EINVAL.
+##        * (umask != NULL, sigsetsize = 0)  — Linux: EINVAL, us:
+##          accepted.
+##
+##      Fix: reorder so the umask presence gate runs first.  When
+##      umask is NULL, skip the sigsetsize check entirely.  When
+##      umask is non-NULL, require sigsetsize == 8 (EINVAL on any
+##      other value) before validating the umask pointer (EFAULT on
+##      bad pointer).  Maxevents/events checks still run after, in
+##      the same order as before.
+##
+##      epoll_pwait2 keeps its timespec gate ahead of the umask
+##      check, matching Linux's SYSCALL_DEFINE6(epoll_pwait2) which
+##      copies the timespec before delegating to do_epoll_pwait
+##      (which is what runs set_user_sigmask).
+##
+##      Self-tests updated/added:
+##        * epoll_pwait(_, _, 1, _, umask=0x1000, sigsetsize=4) ->
+##          EINVAL  (was EINVAL via the old unconditional gate, now
+##          via the correct non-NULL-umask path).
+##        * epoll_pwait(_, _, 1, _, umask=NULL,   sigsetsize=99) ->
+##          EBADF   (NEW: pre-batch returned EINVAL).
+##        * epoll_pwait(_, _, 1, _, umask=0x1000, sigsetsize=0)  ->
+##          EINVAL  (NEW: pre-batch returned EBADF).
+##        * epoll_pwait2(_, _, 1, _, umask=NULL,   sigsetsize=99) ->
+##          EBADF.
+##        * epoll_pwait2(_, _, 1, _, umask=0x1000, sigsetsize=0)  ->
+##          EINVAL.
+##        * Emits "[syscall/linux]   epoll_pwait/pwait2
+##          sigsetsize-iff-umask gating: OK".
+##
+##      Known limitations:
+##        * In kernel context (the only context the boot self-tests
+##          run in) validate_user_read is a no-op, so we cannot
+##          distinguish "sigsetsize == 8 but bad pointer" (which
+##          Linux returns EFAULT for) from a successful read.  A
+##          dummy non-NULL pointer like 0x1000 lets us exercise the
+##          sigsetsize check; the EFAULT path needs a real userspace
+##          caller with an unmapped page to test.
+##        * Still no real epoll implementation behind the gates; the
+##          terminal EBADF stands in for "epfd is not a valid fd".
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

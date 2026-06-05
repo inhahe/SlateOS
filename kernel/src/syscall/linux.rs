@@ -13692,52 +13692,77 @@ fn sys_epoll_wait(args: &SyscallArgs) -> SyscallResult {
 
 /// `epoll_pwait(epfd, events*, maxevents, timeout_ms, sigmask*, sigsetsize)`.
 fn sys_epoll_pwait(args: &SyscallArgs) -> SyscallResult {
+    // Mirror Linux's `SYSCALL_DEFINE6(epoll_pwait, ...)` gate order:
+    //   set_user_sigmask(umask, sigsetsize) — kernel/signal.c:
+    //     if (!umask) return 0;                       // umask=NULL: skip
+    //     if (sigsetsize != sizeof(sigset_t))         // 8 bytes on x86_64
+    //         return -EINVAL;
+    //     if (copy_from_user(&kmask, umask, ...))     // bad pointer
+    //         return -EFAULT;
+    //   do_epoll_wait — fs/eventpoll.c:
+    //     if (maxevents <= 0 || maxevents > EP_MAX_EVENTS) return -EINVAL;
+    //     if (!access_ok(events, ...)) return -EFAULT;
+    //     fdget -> EBADF; is_file_epoll -> EINVAL.
+    //
+    // Pre-batch we unconditionally rejected (sigsetsize != 0 && != 8),
+    // diverging from Linux in two cases:
+    //   * (umask = NULL, sigsetsize = anything-but-{0,8})  Linux: 0; us: EINVAL
+    //   * (umask != NULL, sigsetsize = 0)                  Linux: EINVAL; us: accept
+    if args.arg4 != 0 {
+        // umask non-NULL: sigsetsize must equal sizeof(sigset_t) == 8.
+        if args.arg5 != 8 {
+            return linux_err(errno::EINVAL);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // (sigsetsize is ignored when umask is NULL — matches Linux.)
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let maxevents = args.arg2 as i32;
-    // Same maxevents range as epoll_wait (see EP_MAX_EVENTS comment there).
     if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
         return linux_err(errno::EINVAL);
     }
     let len = (maxevents as u64).saturating_mul(12);
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
         return linux_err(linux_errno_for(e));
-    }
-    if args.arg5 != 0 && args.arg5 != 8 {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg4 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 8) {
-            return linux_err(linux_errno_for(e));
-        }
     }
     linux_err(errno::EBADF)
 }
 
 /// `epoll_pwait2(epfd, events*, maxevents, timespec*, sigmask*, sigsetsize)`.
 fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let maxevents = args.arg2 as i32;
-    // Same maxevents range as epoll_wait (see EP_MAX_EVENTS comment there).
-    if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
-        return linux_err(errno::EINVAL);
-    }
-    let len = (maxevents as u64).saturating_mul(12);
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Mirror Linux's `SYSCALL_DEFINE6(epoll_pwait2, ...)` gate order:
+    //   if (timeout) {
+    //       if (get_timespec64(&ts, timeout)) return -EFAULT;
+    //   }
+    //   do_epoll_pwait -> set_user_sigmask (same as epoll_pwait above) ->
+    //   do_epoll_wait (maxevents range, then events ptr).
+    //
+    // Same sigsetsize fix as epoll_pwait: only validated when umask is
+    // non-NULL.
     if args.arg3 != 0 {
         // timespec 16 bytes.
         if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
             return linux_err(linux_errno_for(e));
         }
     }
-    if args.arg5 != 0 && args.arg5 != 8 {
-        return linux_err(errno::EINVAL);
-    }
     if args.arg4 != 0 {
+        if args.arg5 != 8 {
+            return linux_err(errno::EINVAL);
+        }
         if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 8) {
             return linux_err(linux_errno_for(e));
         }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let maxevents = args.arg2 as i32;
+    if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
+        return linux_err(errno::EINVAL);
+    }
+    let len = (maxevents as u64).saturating_mul(12);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
+        return linux_err(linux_errno_for(e));
     }
     linux_err(errno::EBADF)
 }
@@ -34289,12 +34314,52 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: epoll_pwait neg maxevents not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // epoll_pwait with bad sigsetsize -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 4 };
-        // arg1 must point to writable memory; in kernel context validation
-        // is a no-op so this proceeds to the sigsetsize check.
+        // epoll_pwait with non-NULL umask and bad sigsetsize -> EINVAL.
+        // Linux's set_user_sigmask only validates sigsetsize when umask is
+        // non-NULL; we use a non-zero umask pointer here (validate_user_read
+        // is a no-op in kernel context, so the sigsetsize check fires first).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0x1000, arg5: 4 };
         if dispatch_linux(nr::EPOLL_PWAIT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: epoll_pwait bad sigsetsize not EINVAL");
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_pwait non-NULL umask bad sigsetsize not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // epoll_pwait with NULL umask and weird sigsetsize -> EBADF.
+        // Linux: set_user_sigmask returns 0 because umask==NULL (sigsetsize
+        // is ignored); we then fall through maxevents/events gates to the
+        // terminal EBADF.  Pre-batch we returned EINVAL — divergence fixed.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 99 };
+        if dispatch_linux(nr::EPOLL_PWAIT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_pwait NULL umask bogus sigsetsize not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // epoll_pwait with non-NULL umask and sigsetsize=0 -> EINVAL.
+        // Linux requires sigsetsize == 8 whenever umask is non-NULL.
+        // Pre-batch we accepted this because the `!= 0 && != 8` test passed.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0x1000, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_PWAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_pwait non-NULL umask sigsetsize=0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Same NULL-umask-ignores-sigsetsize semantics for epoll_pwait2.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 99 };
+        if dispatch_linux(nr::EPOLL_PWAIT2, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_pwait2 NULL umask bogus sigsetsize not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // epoll_pwait2 non-NULL umask + sigsetsize=0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0x1000, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_PWAIT2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_pwait2 non-NULL umask sigsetsize=0 not EINVAL"
+            );
             return Err(KernelError::InternalError);
         }
         // epoll_pwait2 with 0 maxevents -> EINVAL.
@@ -34360,6 +34425,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   epoll_wait/pwait/pwait2 EP_MAX_EVENTS gating: OK"
+        );
+        serial_println!(
+            "[syscall/linux]   epoll_pwait/pwait2 sigsetsize-iff-umask gating: OK"
         );
     }
 

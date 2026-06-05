@@ -17635,3 +17635,37 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   timerfd_settime
 ##      itimerspec64_valid: OK" in build/serial-test.txt.
+
+## 203. Batch 174: sys_timerfd_gettime fd-first gating
+##      ------------------------------------------------
+##      Reordered sys_timerfd_gettime so the fd lookup happens
+##      BEFORE any user-pointer checks on curr_value, matching
+##      Linux's `do_timerfd_gettime` (fs/timerfd.c).  Linux calls
+##      `timerfd_fget(ufd, &f)` first and returns EBADF before
+##      `put_itimerspec64` ever touches the output buffer.  Our
+##      pre-batch version validated curr_ptr (NULL -> EFAULT,
+##      then validate_user_write 32) ahead of the fd lookup, so a
+##      probe that passed a bad fd with NULL curr saw EFAULT
+##      where Linux returns EBADF.
+##
+##      Self-tests added/updated:
+##        * timerfd_gettime(fd=0, curr=NULL) -> EBADF (was EFAULT
+##          pre-batch; in kernel context caller_pid is None so
+##          any fd hits EBADF after the reorder).
+##        * timerfd_gettime(fd=-1, curr=0x1 bogus ptr) -> EBADF
+##          (fd checked first, never reaches validate_user_write).
+##        * Emits "[syscall/linux]   timerfd_gettime fd-first
+##          gating: OK".
+##
+##      Known limitations:
+##        * In kernel context every fd path short-circuits to
+##          EBADF because caller_pid returns None.  The EFAULT
+##          path after a valid fd (curr_ptr=NULL or unmapped)
+##          is not exercisable from kernel-context tests until
+##          timerfd fds and a user caller exist.
+##        * No timerfd implementation yet; the terminal EINVAL
+##          ("fd is real but not a timerfd") remains unreachable.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   timerfd_gettime
+##      fd-first gating: OK" in build/serial-test.txt.

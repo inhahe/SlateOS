@@ -10361,13 +10361,12 @@ fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
 
 /// `timerfd_gettime(fd, curr_value)`.
 fn sys_timerfd_gettime(args: &SyscallArgs) -> SyscallResult {
-    let curr_ptr = args.arg1;
-    if curr_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(curr_ptr, 32) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Linux's `do_timerfd_gettime` (fs/timerfd.c) does fd lookup FIRST via
+    // `timerfd_fget`, returning EBADF before touching the user-supplied
+    // `curr_value` pointer. Only after the timerfd is resolved does Linux
+    // perform `put_itimerspec64` (which can EFAULT). Mirror that order so
+    // feature-detection probes see EBADF for bad fds even with NULL/bad
+    // curr_value.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let pid = match caller_pid() {
@@ -10376,6 +10375,13 @@ fn sys_timerfd_gettime(args: &SyscallArgs) -> SyscallResult {
     };
     if pcb::linux_fd_lookup(pid, fd).is_none() {
         return linux_err(errno::EBADF);
+    }
+    let curr_ptr = args.arg1;
+    if curr_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(curr_ptr, 32) {
+        return linux_err(linux_errno_for(e));
     }
     linux_err(errno::EINVAL)
 }
@@ -31159,14 +31165,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   timerfd_settime itimerspec64_valid: OK"
         );
-        // timerfd_gettime with NULL curr -> EFAULT.
+        // timerfd_gettime: Linux's `do_timerfd_gettime` (fs/timerfd.c) does
+        // fd lookup first, before touching the curr_value pointer. In
+        // kernel-context the caller has no pid, so any fd lookup short-
+        // circuits to EBADF. Verify the fd-first ordering: even with a NULL
+        // curr_value, a bad fd must yield EBADF (not EFAULT).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMERFD_GETTIME, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: timerfd_gettime(NULL) not EFAULT");
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_gettime(bad fd, NULL) not EBADF"
+            );
             return Err(KernelError::InternalError);
         }
+        // Negative fd with bad curr ptr -> EBADF (fd checked first).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0x1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_GETTIME, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_gettime(neg fd, bad ptr) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   timerfd_gettime fd-first gating: OK"
+        );
 
         // inotify_init() -> ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

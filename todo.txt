@@ -11868,3 +11868,67 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      PCB and the ptrace-attach path should consult it.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##
+## 128. Batch 99 — arch_prctl(ARCH_GET_CPUID / ARCH_SET_CPUID)
+##      CPUID-fault probe stub.  COMPLETED 2026-06-05.
+##
+##      Motivation:
+##      arch_prctl(0x1011 / 0x1012) is the x86_64-specific Linux
+##      4.12+ knob that queries / installs the per-thread
+##      CPUID-disable bit (intel `IA32_MISC_ENABLE.LIMIT_CPUID_MAXVAL`
+##      or AMD-equivalent on CPUs with X86_FEATURE_CPUID_FAULT).
+##      glibc's startup checks GET to decide whether `cpuid` is
+##      safe to issue; gdb / lldb / rr toggle SET to force
+##      deterministic feature detection during record-replay;
+##      certain V8 / OpenJDK JIT bring-up code disables CPUID to
+##      pin a feature mask; multiple ifunc resolvers in glibc/musl
+##      probe GET as a "is CPUID emulated for me?" sanity check.
+##      Pre-batch our sys_arch_prctl returned -EINVAL via the
+##      catch-all, so glibc fell back to the SIGSEGV-handler path
+##      for CPUID and gdb's record mode complained about
+##      non-deterministic boot.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##        * Added ARCH_GET_CPUID (0x1011) / ARCH_SET_CPUID (0x1012)
+##          to the `const` block at the top of sys_arch_prctl
+##          alongside the existing ARCH_SET_FS / GET_FS / SET_GS /
+##          GET_GS codes.
+##        * New arms after ARCH_GET_GS, before the catch-all:
+##          - ARCH_GET_CPUID -> SyscallResult::ok(1).  No user
+##            pointer; no auxiliary validation (Linux doesn't
+##            police arg2/3/4 here).  The 1 mirrors what
+##            get_cpuid_mode returns on CPUs without
+##            X86_FEATURE_CPUID_FAULT — i.e. the typical Linux
+##            return on hardware that physically cannot fault
+##            CPUID.
+##          - ARCH_SET_CPUID matches on the `addr` argument
+##            (Linux's arg2): 0 -> -ENODEV (we cannot disable
+##            CPUID), 1 -> 0 (idempotent re-enable), anything
+##            else -> -EINVAL.  This is the bit-exact answer
+##            set_cpuid_mode returns on a CPU without the fault
+##            feature.
+##        * sys_arch_prctl doc comment expanded to mention CPUID
+##          arms and call out the "fault-feature-absent CPU"
+##          equivalence.
+##        * Top-of-file doc table (line 79) split into three
+##          rows to list ARCH_SET_GS / ARCH_GET_GS / ARCH_GET_CPUID
+##          / ARCH_SET_CPUID alongside the FS pair.
+##
+##      Self-test (boot path, slotted as "(9c) Batch 99" between
+##      the existing GS-restore and the timespec round-trip):
+##        1. ARCH_GET_CPUID -> 1.
+##        2. ARCH_GET_CPUID with garbage arg1 (0xdead_beef) -> 1
+##           (proves we don't police the unused auxiliary, matching
+##           Linux).
+##        3. ARCH_SET_CPUID(1) -> 0.
+##        4. ARCH_SET_CPUID(0) -> -ENODEV.
+##        5. ARCH_SET_CPUID(2 / 42 / u64::MAX) -> -EINVAL for each.
+##
+##      Known limitation: we always return 1 for GET regardless
+##      of any prior SET; this is harmless because SET(1) is the
+##      only success path and matches the always-on default.
+##      If we ever wire CPUID-fault MSR plumbing (Intel
+##      IA32_MISC_ENABLE bit 33), the GET arm should consult
+##      per-PCB storage instead of returning a constant.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

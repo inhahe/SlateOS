@@ -76,7 +76,9 @@
 //! | 107      | geteuid           | reads cred.euid                    |
 //! | 108      | getegid           | reads cred.egid                    |
 //! | 110      | getppid           | reads parent pid                   |
-//! | 158      | arch_prctl        | ARCH_SET_FS / ARCH_GET_FS via MSR  |
+//! | 158      | arch_prctl        | ARCH_SET_FS / ARCH_GET_FS via MSR, |
+//! |          |                   | ARCH_SET_GS / ARCH_GET_GS via MSR, |
+//! |          |                   | ARCH_GET_CPUID / ARCH_SET_CPUID    |
 //! | 186      | gettid            | direct                             |
 //! | 201      | time              | clock_realtime / 1e9               |
 //! | 202      | futex             | maps to SYS_FUTEX_*                |
@@ -15363,16 +15365,25 @@ fn sys_set_robust_list(args: &SyscallArgs) -> SyscallResult {
 /// this gate before `WRMSR`.
 pub(crate) const USER_FS_BASE_MAX: u64 = 1u64 << 47;
 
-/// `arch_prctl(code, addr)` — only ARCH_SET_FS / ARCH_GET_FS.
+/// `arch_prctl(code, addr)` — ARCH_SET_FS / ARCH_GET_FS / ARCH_SET_GS
+/// / ARCH_GET_GS via MSR, plus ARCH_GET_CPUID / ARCH_SET_CPUID for
+/// the CPUID-faulting feature (Linux 4.12+).
 ///
-/// ARCH_SET_FS writes IA32_FS_BASE (MSR 0xC000_0100).  ARCH_GET_FS reads
-/// it and stores it via the user pointer.  Anything else returns
-/// -ENOSYS.
+/// ARCH_SET_FS writes IA32_FS_BASE (MSR 0xC000_0100).  ARCH_GET_FS
+/// reads it and stores it via the user pointer.
+/// ARCH_SET_GS / ARCH_GET_GS use IA32_KERNEL_GS_BASE (the post-SWAPGS
+/// userspace value).  ARCH_GET_CPUID / ARCH_SET_CPUID query and
+/// install the per-thread CPUID-disable bit — we never disable
+/// CPUID, so GET returns 1 and SET accepts 1, rejecting 0 with
+/// -ENODEV (exactly what a Linux kernel without
+/// `X86_FEATURE_CPUID_FAULT` returns).
 fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
     const ARCH_SET_GS: u64 = 0x1001;
     const ARCH_SET_FS: u64 = 0x1002;
     const ARCH_GET_FS: u64 = 0x1003;
     const ARCH_GET_GS: u64 = 0x1004;
+    const ARCH_GET_CPUID: u64 = 0x1011;
+    const ARCH_SET_CPUID: u64 = 0x1012;
 
     const IA32_FS_BASE: u32 = 0xC000_0100;
     /// On x86_64 Linux, ARCH_SET_GS writes the userspace GS base
@@ -15468,6 +15479,56 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
             }
             SyscallResult::ok(0)
         }
+        // ARCH_GET_CPUID (0x1011) — return whether CPUID is enabled
+        // for the calling thread.  Linux returns 1 (enabled) or 0
+        // (disabled by a prior ARCH_SET_CPUID).  glibc reads this
+        // on startup before relying on `cpuid` for feature detection;
+        // strace and ptrace-based emulators check it before issuing
+        // CPUID themselves; perf/ftrace use it to gate userspace
+        // CPUID counters.  Pre-batch this fell through to the catch-
+        // all -EINVAL, breaking glibc's "is CPUID emulated for me?"
+        // probe — they'd assume disabled and emit the
+        // SIGSEGV-on-CPUID fallback path.
+        //
+        // Linux semantics (arch/x86/kernel/process.c
+        // ::get_cpuid_mode):
+        //   * No arg required (Linux ignores arg2 / arg3 / arg4).
+        //   * Returns 1 if CPUID is enabled (the default and the
+        //     only value on CPUs without X86_FEATURE_CPUID_FAULT),
+        //     0 if disabled via ARCH_SET_CPUID.
+        //
+        // Our stance: we have no CPUID-fault MSR plumbing
+        // (IA32_MISC_ENABLE bit 33 on Intel; no AMD equivalent)
+        // and never disable CPUID for userspace, so we always
+        // return 1 — exactly what Linux returns on any CPU
+        // lacking the disable feature.  No PCB storage needed.
+        ARCH_GET_CPUID => SyscallResult::ok(1),
+        // ARCH_SET_CPUID (0x1012) — request CPUID enable/disable.
+        // glibc's ifunc resolver tests "set to disabled, observe
+        // it stuck, re-enable, verify" as a feature-detection
+        // hack; gdb / lldb / rr's record-replay engines flip it
+        // to force determinism; certain Java/V8 JITs disable
+        // CPUID to make their cached feature mask authoritative.
+        //
+        // Linux semantics (arch/x86/kernel/process.c
+        // ::set_cpuid_mode):
+        //   * arg2 (our arg1 = addr) is the new value: 1 = enable,
+        //     0 = disable, anything else is -EINVAL.
+        //   * Without X86_FEATURE_CPUID_FAULT, enable is a no-op
+        //     success (the thread already has CPUID); disable
+        //     returns -ENODEV ("this CPU has no fault feature").
+        //
+        // Our stance: we have no CPUID-fault MSR plumbing.  Enable
+        // = 0 (already enabled, idempotent success); disable =
+        // -ENODEV (we cannot disable); other values = -EINVAL.
+        // Mirrors Linux's behaviour on CPUs without the fault
+        // feature — the result that real glibc / gdb / V8 code
+        // already handles gracefully.
+        ARCH_SET_CPUID => match addr {
+            0 => linux_err(errno::ENODEV),
+            1 => SyscallResult::ok(0),
+            _ => linux_err(errno::EINVAL),
+        },
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -16120,6 +16181,93 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // can swapgs and dereference it as the per-CPU pointer.
     // SAFETY: writing back the exact value we sampled above.
     unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+
+    // (9c) Batch 99: arch_prctl(ARCH_GET_CPUID = 0x1011) and
+    // ARCH_SET_CPUID (0x1012).  glibc, gdb, lldb, rr, V8, and
+    // several ifunc resolvers probe these on startup.  Pre-batch
+    // they fell through to the catch-all -EINVAL — making glibc
+    // assume CPUID is faulted out and emit the SIGSEGV-on-cpuid
+    // fallback path.  We implement them as a CPUID-fault-not-
+    // supported CPU would: GET always returns 1, SET accepts 1
+    // (idempotent), rejects 0 with -ENODEV, and other values with
+    // -EINVAL.  No MSR or PCB state needs to change.
+    {
+        const ARCH_GET_CPUID_CODE: u64 = 0x1011;
+        const ARCH_SET_CPUID_CODE: u64 = 0x1012;
+
+        // ARCH_GET_CPUID -> 1 (always enabled).
+        let a = SyscallArgs {
+            arg0: ARCH_GET_CPUID_CODE, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_CPUID) -> {} (expected 1)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // ARCH_GET_CPUID ignores arg1 — Linux does not police it.
+        // Confirm garbage arg1 still returns 1 (the GET arm reads
+        // no addr).
+        let a = SyscallArgs {
+            arg0: ARCH_GET_CPUID_CODE, arg1: 0xdead_beef, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_CPUID, garbage) -> {} (expected 1)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // ARCH_SET_CPUID(1) -> 0 (idempotent: already enabled).
+        let a = SyscallArgs {
+            arg0: ARCH_SET_CPUID_CODE, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, 1) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // ARCH_SET_CPUID(0) -> -ENODEV (we cannot disable CPUID;
+        // matches CPUs without X86_FEATURE_CPUID_FAULT).
+        let a = SyscallArgs {
+            arg0: ARCH_SET_CPUID_CODE, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != -i64::from(errno::ENODEV) {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, 0) -> {} (expected -ENODEV)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // ARCH_SET_CPUID(2) and (u64::MAX) -> -EINVAL (Linux
+        // rejects any value outside {0, 1} with EINVAL).
+        for bad in [2u64, 42, u64::MAX] {
+            let a = SyscallArgs {
+                arg0: ARCH_SET_CPUID_CODE, arg1: bad, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+            if r.value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, {}) -> {} (expected -EINVAL)",
+                    bad, r.value,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
 
     // (10) LinuxTimespec round-trip.
     let ts = LinuxTimespec { tv_sec: 5, tv_nsec: 123_456_789 };

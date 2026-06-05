@@ -19535,3 +19535,41 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      variant covering that path.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 25s on first try).
+
+## 243. [DONE 2026-06-05] Linux ABI: sys_move_pages MPOL_MF_MOVE_ALL
+##      EPERM gate ahead of pid/count gates.
+##
+##      Pre-batch sys_move_pages (kernel/src/syscall/linux.rs) had no
+##      capability check for MPOL_MF_MOVE_ALL — the flag bits were
+##      accepted as long as they were a subset of MOVE|MOVE_ALL
+##      (=0x6), then count limit / count==0 / pages NULL gates ran.
+##      Linux `mm/migrate.c::kernel_move_pages`:
+##         if (flags & ~(MPOL_MF_MOVE|MPOL_MF_MOVE_ALL)) -> -EINVAL
+##         if ((flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE))
+##                                                      -> -EPERM
+##         rcu_read_lock();
+##         task = pid ? find_task_by_vpid(pid) : current;
+##         ...
+##      MOVE_ALL EPERM fires AFTER the flag-bits mask but AHEAD of
+##      the pid lookup AND ahead of the count==0 no-op shortcut, so
+##      probes saw:
+##         (count=0, flags=MOVE_ALL) -> 0 vs Linux -EPERM
+##         (count=huge, flags=MOVE_ALL) -> -E2BIG vs Linux -EPERM
+##
+##      Fix: insert `if flags & MPOL_MF_MOVE_ALL -> EPERM` between
+##      the flag-bits mask check and the count-limit check.  Same
+##      shape as batch 242 (mbind).  When real task creds land with
+##      a CAP_SYS_NICE bit, swap the unconditional EPERM for the
+##      capability test.
+##
+##      Self-tests added (continuing the (9i) move_pages block):
+##      - Case 7: (count=0, flags=MOVE_ALL=4) -> EPERM (was 0).
+##      - Case 8: (count=2M, flags=MOVE_ALL=4) -> EPERM (was E2BIG).
+##      - Case 9: (count=0, flags=MOVE=2) -> 0 (MOVE unprivileged).
+##      Marker: "move_pages MOVE_ALL EPERM ahead of pid/count: OK".
+##
+##      Known limitation: when CAP_SYS_NICE is wired, tests 7 and 8
+##      will need a privileged-task variant covering the "MOVE_ALL
+##      with cap" path.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

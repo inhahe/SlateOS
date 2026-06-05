@@ -15403,6 +15403,20 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
     if flags & !(MPOL_MF_MOVE | MPOL_MF_MOVE_ALL) != 0 {
         return linux_err(errno::EINVAL);
     }
+    // Linux kernel_move_pages (mm/migrate.c): after the flag-bits mask
+    // check, `(flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE)
+    // -> -EPERM` fires before the pid lookup and before the count==0
+    // no-op shortcut.  Pre-batch we accepted MOVE_ALL silently, so a
+    // probe passing (count=0, flags=MOVE_ALL) saw 0 where Linux
+    // returns -EPERM, and (count>0, flags=MOVE_ALL, pages=BADPTR) saw
+    // -EFAULT where Linux returns -EPERM.  We have no per-task
+    // credentials struct in the dispatch-time test context, so
+    // MOVE_ALL is unconditionally EPERM here (matches the
+    // unprivileged-task case on Linux).  When real task creds land,
+    // swap for a CAP_SYS_NICE check.
+    if flags & MPOL_MF_MOVE_ALL != 0 {
+        return linux_err(errno::EPERM);
+    }
     let count = args.arg1;
     if count > (1 << 20) {
         return linux_err(errno::E2BIG);
@@ -23691,6 +23705,61 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Case 7: MPOL_MF_MOVE_ALL without CAP_SYS_NICE -> -EPERM.
+        // Linux kernel_move_pages (mm/migrate.c) runs the EPERM gate
+        // immediately after the flag-bits mask, ahead of the pid
+        // lookup AND ahead of the count==0 no-op shortcut.  Pre-batch
+        // we accepted MOVE_ALL silently; a probe passing
+        // (count=0, flags=MOVE_ALL) saw 0 where Linux returns -EPERM.
+        const MPOL_MF_MOVE_ALL_FLAG: u64 = 0x4;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
+            arg5: MPOL_MF_MOVE_ALL_FLAG,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(count=0,MOVE_ALL) -> {} (expected -EPERM)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 8: MOVE_ALL EPERM fires ahead of count > limit -> -E2BIG.
+        // Probe passing (count=huge, flags=MOVE_ALL) must see EPERM,
+        // not E2BIG (Linux gate order).
+        let a = SyscallArgs {
+            arg0: 0, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0,
+            arg5: MPOL_MF_MOVE_ALL_FLAG,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(huge,MOVE_ALL) -> {} (expected -EPERM)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 9: MPOL_MF_MOVE (not MOVE_ALL) does NOT trigger EPERM
+        // — MOVE is allowed for any user.  count=0 still succeeds.
+        const MPOL_MF_MOVE_FLAG: u64 = 0x2;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
+            arg5: MPOL_MF_MOVE_FLAG,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(count=0,MOVE) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   move_pages MOVE_ALL EPERM ahead of pid/count: OK"
+        );
     }
 
     // (10) LinuxTimespec round-trip.

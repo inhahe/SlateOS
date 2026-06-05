@@ -10922,28 +10922,248 @@ fn sys_mq_getsetattr(args: &SyscallArgs) -> SyscallResult {
 // poll / ppoll / select / pselect6 / epoll family
 //
 // These are the four flavours of "wait for I/O readiness on a set of file
-// descriptors with an optional timeout".  Real readiness-multiplexing does
-// not yet exist in this kernel: console / pipe / file fds are all read /
-// written synchronously, and the in-flight IPC / IOCP path is a separate
-// world from POSIX fds.  Wiring them up to a real ready-queue is a multi-
-// week effort that has to land alongside non-blocking I/O on all four
-// HandleKinds.
+// descriptors with an optional timeout".  Batch 116 wires poll/ppoll up to
+// a real readiness check for the three HandleKinds we expose (Console, File,
+// Pipe).  select/pselect6/epoll still return ENOSYS — the fd_set layout
+// makes those a separate effort, and epoll needs an EpollFd HandleKind.
 //
-// In the meantime we expose a principled-stub API:
+// Readiness rules (per HandleKind):
 //
-//   * Validate every user-space pointer (pollfd arrays, fd_set bitmaps,
-//     timespec, sigset_t) so a malicious caller cannot trick the kernel
-//     into reading arbitrary memory.
-//   * For all four (poll / ppoll / select / pselect6) plus all six epoll
-//     variants, return ENOSYS so glibc / libuv / tokio's feature-detect
-//     paths know to skip these and use blocking I/O directly.  Returning
-//     "0 events ready" would silently hang every event-loop based program.
-//   * epoll_ctl returns EBADF because there is no real epoll-fd to operate
-//     on.
+//   * File: regular files are always reported readable and writable.
+//     This matches Linux's per-fs implementation (ext4, tmpfs, etc.):
+//     reads at EOF return 0 bytes, not block, so POLLIN is always set.
+//     POLLOUT is always set because writes never block on a regular
+//     file.
 //
-// When real readiness multiplexing lands, these stubs are replaced by
-// dispatches into the readiness subsystem.
+//   * Pipe: dispatches to `crate::ipc::pipe::poll_status` which already
+//     reports POLLIN | POLLOUT | POLLERR | POLLHUP using the same bit
+//     values as Linux.  POLLRDNORM / POLLWRNORM are mirrored from
+//     POLLIN / POLLOUT to match what Linux's pipe driver returns.
+//
+//   * Console: stdout / stderr (access flags O_WRONLY=1 or O_RDWR=2)
+//     are always writable.  stdin (O_RDONLY=0) has no kernel-side
+//     input source today — keyboard events are not delivered into the
+//     Linux fd path — so POLLIN is never set.  This is the same
+//     behaviour a real Linux sees on a console with no input source
+//     (e.g. a tty without ICANON and an empty input queue): instant
+//     poll returns 0 for POLLIN, timed poll blocks until the timeout
+//     expires.  When keyboard → Linux fd plumbing lands, the
+//     stdin-readable check becomes a real query.
+//
+// Blocking behaviour:
+//
+//   * timeout_ms == 0: return immediately with the count of ready fds.
+//   * timeout_ms > 0: poll instantaneously; if anything is ready,
+//     return it; otherwise sleep in 10 ms slices, re-polling between
+//     each slice, until ready or the timeout expires.  10 ms is small
+//     enough to be responsive to pipe state changes without busy-
+//     waiting.
+//   * timeout_ms < 0 (infinite wait): same as above, but with no
+//     deadline.  The caller relies on either a pipe state change or a
+//     signal to wake up.  We don't yet have signal delivery, so the
+//     wait will loop until a pipe state changes; that's still the
+//     correct behaviour for a regular Linux poll(-1) wait on a stalled
+//     fd set.
+//
+// epoll_* / select / pselect6 stay ENOSYS for the reasons in their own
+// doc comments.
 // ---------------------------------------------------------------------------
+
+/// Linux poll(2) event-bit constants.  Reproduced here so they don't
+/// have to be looked up at every call site.
+mod poll_bits {
+    /// Data may be read without blocking.
+    pub const POLLIN: u16 = 0x0001;
+    /// High-priority / out-of-band data (not modelled here).
+    #[allow(dead_code)]
+    pub const POLLPRI: u16 = 0x0002;
+    /// Write will not block.
+    pub const POLLOUT: u16 = 0x0004;
+    /// Error condition.
+    pub const POLLERR: u16 = 0x0008;
+    /// Hangup — peer closed write end.
+    pub const POLLHUP: u16 = 0x0010;
+    /// Bad fd — never set unless caller passed a non-negative invalid fd.
+    pub const POLLNVAL: u16 = 0x0020;
+    /// Normal data available (same bit as POLLIN on Linux).
+    pub const POLLRDNORM: u16 = 0x0040;
+    /// Priority data may be read (not modelled).
+    #[allow(dead_code)]
+    pub const POLLRDBAND: u16 = 0x0080;
+    /// Normal data may be written (same bit as POLLOUT on Linux).
+    pub const POLLWRNORM: u16 = 0x0100;
+    /// Priority data may be written (not modelled).
+    #[allow(dead_code)]
+    pub const POLLWRBAND: u16 = 0x0200;
+}
+
+/// Compute revents for a known fd entry.  Used by `sys_poll`, by the
+/// per-pid wrapper, and directly by the self-test (with a synthetic
+/// FdEntry).
+fn poll_revents_from_entry(entry: crate::proc::linux_fd::FdEntry, events: u16) -> u16 {
+    use crate::proc::linux_fd::HandleKind;
+    // POLLERR / POLLHUP / POLLNVAL are always returned, regardless of
+    // the caller's `events` mask, per the Linux poll(2) man page.
+    let always = poll_bits::POLLERR | poll_bits::POLLHUP | poll_bits::POLLNVAL;
+    let mask = events | always;
+
+    let raw = match entry.kind {
+        HandleKind::File => {
+            // Regular files are always readable (EOF reports as POLLIN
+            // with subsequent read returning 0) and always writable
+            // (writes never block on a regular file).
+            poll_bits::POLLIN
+                | poll_bits::POLLRDNORM
+                | poll_bits::POLLOUT
+                | poll_bits::POLLWRNORM
+        }
+        HandleKind::Console => {
+            // O_RDONLY=0, O_WRONLY=1, O_RDWR=2.  stdin (RDONLY) has no
+            // input source today; stdout/stderr always writable.
+            let access = entry.status_flags & 0x3;
+            let mut r = 0u16;
+            if access == 1 || access == 2 {
+                r |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
+            }
+            // No POLLIN: there is no Linux-fd-visible keyboard input
+            // path yet (keystrokes go through the console subsystem
+            // directly, not through fd 0).  When that lands, this is
+            // where the input-queue-nonempty check goes.
+            r
+        }
+        HandleKind::Pipe => {
+            // pipe::poll_status uses the same bit values as Linux:
+            // POLLIN(0x01), POLLOUT(0x04), POLLERR(0x08), POLLHUP(0x10).
+            let status = crate::ipc::pipe::poll_status(
+                crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle),
+            );
+            let mut r = status;
+            if status & poll_bits::POLLIN != 0 {
+                r |= poll_bits::POLLRDNORM;
+            }
+            if status & poll_bits::POLLOUT != 0 {
+                r |= poll_bits::POLLWRNORM;
+            }
+            r
+        }
+    };
+
+    raw & mask
+}
+
+/// Compute revents for a (pid, fd, events) triple, doing the fd-table
+/// lookup.  Returns POLLNVAL for unknown fds and 0 for fd < 0.
+fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
+    // Negative fd is ignored entirely by Linux poll().
+    if fd < 0 {
+        return 0;
+    }
+    // In kernel context (no PCB) we cannot look up the Linux fd table;
+    // we honestly report POLLNVAL ("this kernel can't see your fd
+    // table from here").  Self-tests exercise the engine directly via
+    // poll_revents_from_entry instead.
+    let Some(pid) = pid else {
+        return poll_bits::POLLNVAL;
+    };
+    let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
+        return poll_bits::POLLNVAL;
+    };
+    poll_revents_from_entry(entry, events)
+}
+
+/// Shared core for `sys_poll` / `sys_ppoll` — the user pointer validation
+/// is done by the caller (which knows whether timeout is `int` ms or a
+/// `struct timespec`).  This function does the read-compute-write loop
+/// and the timed re-poll.
+///
+/// `timeout_ms_signed` follows Linux poll(2):
+///   * positive  — total deadline in milliseconds.
+///   * 0         — no wait, instantaneous check.
+///   * negative  — wait forever (here implemented by re-polling
+///                 indefinitely; callers can break the wait by
+///                 changing the polled fd's state from another task).
+fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
+    use alloc::vec::Vec;
+
+    // Quick path: no fds, just a timed sleep.
+    if nfds == 0 {
+        if timeout_ms_signed > 0 {
+            #[allow(clippy::cast_sign_loss)]
+            crate::sched::sleep_ms(timeout_ms_signed as u64);
+        }
+        return SyscallResult::ok(0);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let nfds_usize = nfds as usize;
+    let len = nfds_usize.saturating_mul(8);
+    let mut buf: Vec<u8> = Vec::new();
+    buf.resize(len, 0);
+
+    // Read the pollfd array in once.  We re-compute revents from this
+    // local copy on every loop iteration so the user-visible writes
+    // happen at most once at the end.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(fds_ptr, buf.as_mut_ptr(), len)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let pid = caller_pid();
+    let mut remaining_ms: i64 = timeout_ms_signed;
+
+    loop {
+        let mut count: i64 = 0;
+        for i in 0..nfds_usize {
+            let off = i.saturating_mul(8);
+            // SAFETY-of-indexing: off+7 < nfds_usize*8 == len == buf.len()
+            // because i < nfds_usize.  buf was resized to len above.
+            let fd = i32::from_ne_bytes([
+                buf[off],
+                buf[off.saturating_add(1)],
+                buf[off.saturating_add(2)],
+                buf[off.saturating_add(3)],
+            ]);
+            let events = u16::from_ne_bytes([
+                buf[off.saturating_add(4)],
+                buf[off.saturating_add(5)],
+            ]);
+            let revents = poll_compute_revents(pid, fd, events);
+            buf[off.saturating_add(6)] = (revents & 0xFF) as u8;
+            buf[off.saturating_add(7)] = ((revents >> 8) & 0xFF) as u8;
+            if revents != 0 {
+                count = count.saturating_add(1);
+            }
+        }
+        if count > 0 || remaining_ms == 0 {
+            let w = unsafe {
+                crate::mm::user::copy_to_user(buf.as_ptr(), fds_ptr, len)
+            };
+            if let Err(e) = w {
+                return linux_err(linux_errno_for(e));
+            }
+            return SyscallResult::ok(count);
+        }
+        // Slice the wait into 10 ms chunks so we re-poll fast enough to
+        // catch pipe state changes from another task.
+        let slice_ms: u64 = if remaining_ms < 0 {
+            10
+        } else {
+            #[allow(clippy::cast_sign_loss)]
+            core::cmp::min(remaining_ms as u64, 10)
+        };
+        crate::sched::sleep_ms(slice_ms);
+        if remaining_ms > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            let consumed = slice_ms as i64;
+            remaining_ms = remaining_ms.saturating_sub(consumed);
+            if remaining_ms < 0 {
+                remaining_ms = 0;
+            }
+        }
+    }
+}
 
 /// `poll(fds*, nfds, timeout_ms)` — wait for events on a set of fds.
 fn sys_poll(args: &SyscallArgs) -> SyscallResult {
@@ -10963,7 +11183,10 @@ fn sys_poll(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    linux_err(errno::ENOSYS)
+    // timeout_ms is `int` (32-bit signed) per the man page.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let timeout_ms_signed = (args.arg2 as i32) as i64;
+    poll_core(args.arg0, nfds, timeout_ms_signed)
 }
 
 /// `ppoll(fds*, nfds, timespec*, sigmask*, sigsetsize)` — like poll with
@@ -10982,12 +11205,6 @@ fn sys_ppoll(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    if args.arg2 != 0 {
-        // struct timespec is 16 bytes.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 16) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
     // sigsetsize must equal sizeof(sigset_t) = 8 on x86_64.
     if args.arg4 != 0 && args.arg4 != 8 {
         return linux_err(errno::EINVAL);
@@ -10996,8 +11213,46 @@ fn sys_ppoll(args: &SyscallArgs) -> SyscallResult {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 8) {
             return linux_err(linux_errno_for(e));
         }
+        // The sigmask is intentionally ignored: we have no signal
+        // delivery, so atomic swap-in / swap-out has no observable
+        // effect.  Validating the read keeps callers honest.
     }
-    linux_err(errno::ENOSYS)
+    // Translate timespec -> int ms.  NULL timespec means "wait forever"
+    // (per Linux man page) — encoded as -1 ms for poll_core.
+    let timeout_ms_signed: i64 = if args.arg2 == 0 {
+        -1
+    } else {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+        let mut ts = [0u8; 16];
+        let r = unsafe {
+            crate::mm::user::copy_from_user(args.arg2, ts.as_mut_ptr(), 16)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        let tv_sec = i64::from_ne_bytes([
+            ts[0], ts[1], ts[2], ts[3], ts[4], ts[5], ts[6], ts[7],
+        ]);
+        let tv_nsec = i64::from_ne_bytes([
+            ts[8], ts[9], ts[10], ts[11], ts[12], ts[13], ts[14], ts[15],
+        ]);
+        if tv_sec < 0 || !(0..1_000_000_000).contains(&tv_nsec) {
+            return linux_err(errno::EINVAL);
+        }
+        // sec * 1000 + nsec / 1_000_000, saturating to i32::MAX ms to
+        // stay within int range.  Round non-zero nsec up so a 1-ns
+        // timeout still represents "at least 1 ms wait" not "no wait".
+        let extra_ms: i64 = if tv_nsec == 0 { 0 } else { (tv_nsec - 1) / 1_000_000 + 1 };
+        let total_ms = tv_sec
+            .saturating_mul(1000)
+            .saturating_add(extra_ms);
+        // Cap at i32::MAX (~24.8 days) to fit poll's int timeout.
+        core::cmp::min(total_ms, i64::from(i32::MAX))
+    };
+
+    poll_core(args.arg0, nfds, timeout_ms_signed)
 }
 
 /// Round nfds bits up to bytes for an fd_set, capped at a sane maximum
@@ -28073,10 +28328,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // poll / ppoll / select / pselect6 + epoll family
     // -----------------------------------------------------------------
     {
-        // poll(NULL, 0, 0) — nfds == 0 -> ENOSYS (validation skipped).
+        // poll(NULL, 0, 0) (batch 116) — nfds == 0 with timeout 0 is
+        // an instant "no fds ready" answer; returns 0.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::POLL, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: poll(NULL,0,0) not ENOSYS");
+        if dispatch_linux(nr::POLL, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: poll(NULL,0,0) not 0");
             return Err(KernelError::InternalError);
         }
         // poll with absurd nfds -> EINVAL.
@@ -28091,17 +28347,180 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: poll NULL fds not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // ppoll with nfds=0 and NULL timespec / sigmask -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: ppoll not ENOSYS");
-            return Err(KernelError::InternalError);
+        // Real poll with kernel-stack pollfd buffer (kernel context:
+        // caller_pid==None, so non-negative fds report POLLNVAL,
+        // negative fds report revents=0).
+        // Layout per entry: i32 fd, u16 events, u16 revents = 8 bytes.
+        {
+            // Two entries: fd=-1 (ignored) and fd=99 (POLLNVAL).
+            #[repr(C)]
+            #[derive(Copy, Clone)]
+            struct PollFd { fd: i32, events: u16, revents: u16 }
+            let mut pollfds: [PollFd; 2] = [
+                PollFd { fd: -1, events: 0x1, revents: 0xCAFE },
+                PollFd { fd: 99, events: 0x1, revents: 0xCAFE },
+            ];
+            let ptr = (&raw mut pollfds[0]) as u64;
+            let a = SyscallArgs { arg0: ptr, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            let res = dispatch_linux(nr::POLL, &a).value;
+            if res != 1 {
+                serial_println!("[syscall/linux]   FAIL: poll(neg,99) count != 1 (got {})", res);
+                return Err(KernelError::InternalError);
+            }
+            if pollfds[0].revents != 0 {
+                serial_println!("[syscall/linux]   FAIL: poll fd=-1 revents != 0 ({:x})", pollfds[0].revents);
+                return Err(KernelError::InternalError);
+            }
+            // POLLNVAL = 0x20.
+            if pollfds[1].revents != 0x20 {
+                serial_println!("[syscall/linux]   FAIL: poll fd=99 revents != POLLNVAL ({:x})", pollfds[1].revents);
+                return Err(KernelError::InternalError);
+            }
         }
-        // ppoll bad sigsetsize -> EINVAL.
+        // poll_revents_from_entry exercises the readiness engine
+        // directly for all three HandleKinds without needing a real
+        // pid (which kernel-context dispatch can't provide).
+        {
+            use crate::proc::linux_fd::{FdEntry, HandleKind};
+            // POLLIN | POLLOUT requested.
+            let req: u16 = 0x1 | 0x4;
+            // File: always POLLIN|POLLRDNORM|POLLOUT|POLLWRNORM.
+            // Masked by req|always(0x38) = 0x3D, so result =
+            // 0x145 & 0x3D = 0x5 (POLLIN|POLLOUT).  POLLRDNORM(0x40)
+            // and POLLWRNORM(0x100) are *not* in the mask so they
+            // drop out — that's the same behaviour Linux has when
+            // the caller only asked for POLLIN|POLLOUT.
+            let file_entry = FdEntry {
+                kind: HandleKind::File,
+                raw_handle: 0,
+                fd_flags: 0,
+                status_flags: 2,
+                f_owner: 0,
+                f_owner_sig: 0,
+            };
+            let r = poll_revents_from_entry(file_entry, req);
+            if r != 0x5 {
+                serial_println!("[syscall/linux]   FAIL: poll File POLLIN|POLLOUT got {:x}", r);
+                return Err(KernelError::InternalError);
+            }
+            // If caller also asks for POLLRDNORM|POLLWRNORM we should
+            // get all four bits back.
+            let req2: u16 = 0x1 | 0x4 | 0x40 | 0x100;
+            let r2 = poll_revents_from_entry(file_entry, req2);
+            if r2 != 0x145 {
+                serial_println!("[syscall/linux]   FAIL: poll File full request got {:x}", r2);
+                return Err(KernelError::InternalError);
+            }
+            // Console O_RDONLY: no POLLIN (no input source), no POLLOUT.
+            let stdin_entry = FdEntry {
+                kind: HandleKind::Console,
+                raw_handle: 0,
+                fd_flags: 0,
+                status_flags: 0, // O_RDONLY
+                f_owner: 0,
+                f_owner_sig: 0,
+            };
+            let r = poll_revents_from_entry(stdin_entry, req);
+            if r != 0 {
+                serial_println!("[syscall/linux]   FAIL: poll stdin Console got {:x}", r);
+                return Err(KernelError::InternalError);
+            }
+            // Console O_WRONLY: POLLOUT but no POLLIN.
+            let stdout_entry = FdEntry {
+                kind: HandleKind::Console,
+                raw_handle: 0,
+                fd_flags: 0,
+                status_flags: 1, // O_WRONLY
+                f_owner: 0,
+                f_owner_sig: 0,
+            };
+            let r = poll_revents_from_entry(stdout_entry, req);
+            if r != 0x4 {
+                serial_println!("[syscall/linux]   FAIL: poll stdout Console got {:x}", r);
+                return Err(KernelError::InternalError);
+            }
+            // Pipe: create a real pipe, exercise read & write ends.
+            let (rh, wh) = crate::ipc::pipe::create();
+            let pipe_read = FdEntry {
+                kind: HandleKind::Pipe,
+                raw_handle: rh.raw(),
+                fd_flags: 0,
+                status_flags: 0,
+                f_owner: 0,
+                f_owner_sig: 0,
+            };
+            let pipe_write = FdEntry {
+                kind: HandleKind::Pipe,
+                raw_handle: wh.raw(),
+                fd_flags: 0,
+                status_flags: 1,
+                f_owner: 0,
+                f_owner_sig: 0,
+            };
+            // Empty pipe: read end not readable, write end writable.
+            let rr = poll_revents_from_entry(pipe_read, 0x1 | 0x4);
+            if rr != 0 {
+                serial_println!("[syscall/linux]   FAIL: empty pipe read end got {:x}", rr);
+                return Err(KernelError::InternalError);
+            }
+            let rw = poll_revents_from_entry(pipe_write, 0x1 | 0x4);
+            if rw != 0x4 {
+                serial_println!("[syscall/linux]   FAIL: empty pipe write end got {:x}", rw);
+                return Err(KernelError::InternalError);
+            }
+            // After a write, read end should become readable.
+            let _ = crate::ipc::pipe::try_write(wh, b"x");
+            let rr2 = poll_revents_from_entry(pipe_read, 0x1 | 0x4);
+            if rr2 != 0x1 {
+                serial_println!("[syscall/linux]   FAIL: filled pipe read end got {:x}", rr2);
+                return Err(KernelError::InternalError);
+            }
+            // Close write end; read end should report POLLIN
+            // (drain) and POLLHUP.
+            crate::ipc::pipe::close(wh);
+            let rr3 = poll_revents_from_entry(pipe_read, 0x1);
+            // POLLIN(0x1) + POLLHUP(0x10) = 0x11; POLLHUP is implicit.
+            if rr3 & 0x1 == 0 || rr3 & 0x10 == 0 {
+                serial_println!("[syscall/linux]   FAIL: pipe HUP read end got {:x}", rr3);
+                return Err(KernelError::InternalError);
+            }
+            crate::ipc::pipe::close(rh);
+        }
+        // ppoll with nfds=0 and NULL timespec — sigmask invalid size -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 16, arg5: 0 };
         if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: ppoll bad sigsetsize not EINVAL");
             return Err(KernelError::InternalError);
+        }
+        // ppoll with nfds=0 and timespec={0,0} -> instant 0 (no wait).
+        {
+            let ts: [i64; 2] = [0, 0];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: ts_ptr, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PPOLL, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: ppoll {{0,0}} not 0");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // ppoll with negative tv_sec -> EINVAL.
+        {
+            let ts: [i64; 2] = [-1, 0];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: ts_ptr, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: ppoll neg tv_sec not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // ppoll with tv_nsec >= 1e9 -> EINVAL.
+        {
+            let ts: [i64; 2] = [0, 1_000_000_000];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: ts_ptr, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: ppoll bad tv_nsec not EINVAL");
+                return Err(KernelError::InternalError);
+            }
         }
         // select(0, NULL, NULL, NULL, NULL) -> ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

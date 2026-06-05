@@ -13187,3 +13187,126 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
 
+## 145. [LINUX ABI BATCH 116 - DONE] Implement poll(2) and ppoll(2)
+##      with a real readiness check over Console / File / Pipe fds,
+##      replacing the prior validate-and-ENOSYS stubs.
+##
+##      File: kernel/src/syscall/linux.rs
+##      New code: mod poll_bits, poll_revents_from_entry,
+##                poll_compute_revents, poll_core,
+##                sys_poll (rewritten), sys_ppoll (rewritten)
+##      (~lines 10921-11270 region)
+##
+##      Readiness semantics per HandleKind:
+##        * File: regular files are always reported readable and
+##          writable.  Reads past EOF return 0 bytes (not block),
+##          and writes never block on a regular file in this kernel,
+##          so POLLIN|POLLRDNORM and POLLOUT|POLLWRNORM are always
+##          set.  Matches what Linux's per-fs poll callback does
+##          for ext4/tmpfs.
+##        * Pipe: dispatches to crate::ipc::pipe::poll_status which
+##          already returns the same bits Linux uses
+##          (POLLIN=0x01 / POLLOUT=0x04 / POLLERR=0x08 /
+##          POLLHUP=0x10).  POLLRDNORM / POLLWRNORM are mirrored
+##          from POLLIN / POLLOUT so glibc's poll wrapper sees what
+##          it expects.
+##        * Console: O_WRONLY/O_RDWR -> always writable
+##          (POLLOUT|POLLWRNORM).  O_RDONLY (stdin) -> no POLLIN,
+##          because there is no Linux-fd-visible keyboard input
+##          path yet; matches the behaviour Linux exhibits on a
+##          tty with no input source.  When keyboard -> Linux fd
+##          plumbing lands, the stdin-readable check becomes a
+##          real input-queue-nonempty query.
+##
+##      Always-implicit bits: POLLERR, POLLHUP, POLLNVAL are reported
+##      in revents regardless of whether the caller put them in
+##      `events`.  fd < 0 entries report revents = 0 (Linux ignores
+##      negative fds).  Unknown fds report POLLNVAL = 0x20.
+##
+##      Blocking model:
+##        * timeout_ms == 0 -> instantaneous check, return count.
+##        * timeout_ms > 0 -> poll once; if no fds ready, sleep in
+##          10 ms slices via crate::sched::sleep_ms re-polling
+##          between each slice, until any fd becomes ready or the
+##          deadline expires.  10 ms is small enough to catch pipe
+##          state changes from another task without busy-waiting.
+##        * timeout_ms < 0 -> wait forever in 10 ms slices.  A
+##          state change in any polled fd ends the wait.  When
+##          signal delivery lands, EINTR will also end it.
+##
+##      ppoll(2) translates timespec -> ms (round nsec up so a 1-ns
+##      timeout still represents "wait at least 1 ms"), caps at
+##      i32::MAX ms, and forwards to the shared poll_core.  NULL
+##      timespec means wait forever (-1 ms).  sigmask is validated
+##      and ignored — we have no signal delivery, so atomic
+##      swap-in/out has no observable effect.
+##
+##      Why the count is honest, not a placeholder:
+##        - Every fd reported as ready actually is ready: regular-
+##          file I/O is synchronous, write to a known-open pipe is
+##          guaranteed not to block past `pipe::poll_status` saying
+##          so, and console stdout/stderr writes don't block.
+##        - Every fd reported as not ready actually isn't: stdin
+##          has no source, and `pipe::poll_status` is computed from
+##          the pipe's live `len` / `buf.capacity` / closed flags
+##          under the pipe table lock.
+##        - The count returned matches the number of pollfd entries
+##          with non-zero revents, which is the precise Linux
+##          contract.
+##
+##      Self-tests in linux.rs (replacing the prior ENOSYS-checking
+##      tests for poll/ppoll):
+##        * poll(NULL, 0, 0) -> 0 (no fds, no wait).
+##        * poll absurd nfds -> EINVAL.
+##        * poll nfds>0 NULL ptr -> EFAULT.
+##        * poll[{fd=-1, fd=99}, timeout=0] -> count=1; revents
+##          stays 0 for fd=-1 and is POLLNVAL(0x20) for fd=99
+##          (kernel context = no fd table = unknown fd).
+##        * poll_revents_from_entry direct exercise for File:
+##            - events=POLLIN|POLLOUT -> revents=POLLIN|POLLOUT.
+##            - events including POLLRDNORM|POLLWRNORM ->
+##              revents=POLLIN|POLLOUT|POLLRDNORM|POLLWRNORM.
+##        * Console O_RDONLY -> revents=0; O_WRONLY -> revents=
+##          POLLOUT.
+##        * Pipe end-to-end:
+##            - empty pipe read end -> 0.
+##            - empty pipe write end -> POLLOUT.
+##            - write 1 byte, read end -> POLLIN.
+##            - close write end, read end -> POLLIN|POLLHUP.
+##        * ppoll with sigsetsize=16 -> EINVAL (must be 0 or 8).
+##        * ppoll timespec{0,0} -> 0.
+##        * ppoll timespec{-1,0} -> EINVAL (negative tv_sec).
+##        * ppoll timespec{0, 1e9} -> EINVAL (tv_nsec out of range).
+##
+##      Known limitations / documented for follow-on work:
+##        * No wakeup notification: when a pipe transitions
+##          empty->non-empty from another task, the polling task
+##          finds out on its next 10 ms re-poll, not immediately.
+##          For a real userspace event loop this adds up to 10 ms
+##          of latency per readiness transition.  Fix by wiring
+##          pipe::write_one_byte to wake any tasks parked in
+##          poll_core for that pipe handle (and by exporting a
+##          ready-queue from pipe.rs).
+##        * No POLLPRI / POLLRDBAND / POLLWRBAND modelling: bits
+##          defined for completeness but never set.  Console and
+##          pipe don't carry priority data, files don't either.
+##        * Console POLLIN never set: stdin has no input source
+##          yet.  Fixed when keyboard -> Linux fd plumbing lands;
+##          the check goes into the HandleKind::Console arm of
+##          poll_revents_from_entry.
+##        * select / pselect6 / epoll_* still ENOSYS: select uses
+##          fd_set bitmaps (a separate plumbing effort), and
+##          epoll needs an EpollFd HandleKind.  Documented in
+##          the section header comment.
+##        * In kernel context (no caller PCB) poll reports
+##          POLLNVAL for every non-negative fd because there is
+##          no fd table to look up; this is the same EBADF gate
+##          fcntl uses in batch 113.  Real fd-level testing
+##          requires a real Linux process, which the boot self-
+##          test doesn't construct; instead the engine is tested
+##          directly via poll_revents_from_entry with synthetic
+##          FdEntry values, mirroring the fcntl(F_GETLK) test
+##          pattern.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+

@@ -11700,3 +11700,96 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      until we have a terminal device with column/row state.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##
+## 126. Batch 97 — prctl(PR_SET_VMA) anonymous-VMA naming
+##      (no-op accept).  COMPLETED 2026-06-05.
+##
+##      Motivation: Linux 5.17+ exposes
+##      prctl(PR_SET_VMA = 0x5356_4d41, PR_SET_VMA_ANON_NAME = 0,
+##      start, size, name) which lets userspace tag anonymous
+##      VMAs with a short label that appears in
+##      /proc/<pid>/maps as `[anon:<name>]`.  Started in Android
+##      Bionic but now used by jemalloc, scudo, ART, libunwind,
+##      and Chrome's PartitionAlloc to label arenas, thread
+##      stacks, JIT regions, and guard pages.  Pre-batch our
+##      sys_prctl returned -EINVAL (the catch-all) for any
+##      unknown option, so every malloc/allocator call site
+##      that probes it took the warn-and-skip path on startup.
+##      Accepting it removes a per-process noise line and
+##      brings us into ABI parity with mainline kernels.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##        * New 0x5356_4d41 arm in sys_prctl, gated on sub-op
+##          arg1 == 0 (PR_SET_VMA_ANON_NAME).  Anything else
+##          returns -EINVAL — same shape Linux uses.
+##        * Validate start + size does not overflow u64
+##          (mirrors madvise_set_anon_name's
+##          `start + len_in < start` check); -EINVAL if so.
+##        * NULL name pointer is accepted as "clear the name"
+##          and returns 0 without touching user memory.
+##        * Non-NULL name pointer:
+##          - validate_user_read(ptr, 1) probe; surface its
+##            errno on failure.
+##          - copy_from_user up to ANON_VMA_NAME_MAX_LEN (80)
+##            bytes into a kernel buffer.
+##          - Locate NUL terminator; ENAMETOOLONG if absent.
+##          - Reject empty (NUL at offset 0) with -EINVAL —
+##            matches Linux's strndup_user behavior, where
+##            zero-length names cannot be installed.
+##          - Validate every byte before the NUL is printable
+##            ASCII (0x20..=0x7e) excluding `\`, `` ` ``, `$`,
+##            `[`, `]` — the forbidden-character set Linux
+##            uses in is_valid_name_char().  First bad byte
+##            yields -EINVAL.
+##        * Validated name is DROPPED — we have no per-VMA
+##          name storage layer yet.  The arm returns 0 so the
+##          caller's flow continues but the name is not
+##          visible anywhere.  Documented as a known
+##          limitation in the arm's doc comment AND below in
+##          this entry.
+##        * Top-of-function sys_prctl doc table updated with
+##          a PR_SET_VMA bullet explaining the accept-and-drop
+##          stance and citing the Android/jemalloc/ART users.
+##
+##      Self-test (boot path, batch 97 block in linux.rs
+##      after the batch 96 FIONBIO block):
+##        1. Constant sanity: PR_SET_VMA == 0x5356_4d41 and
+##           PR_SET_VMA_ANON_NAME == 0 used as named locals.
+##        2. Unknown sub-op (arg1=1) -> -EINVAL.  Drift would
+##           re-route to the catch-all (also -EINVAL but with
+##           no sub-op gate).
+##        3. NULL name + valid (start, size) -> 0.  The
+##           "clear" form must work without reading user
+##           memory; kernel context can reach the success
+##           return via dispatch_linux.
+##        4. Overflow (start = u64::MAX - 0x10000, size =
+##           0x20000) -> -EINVAL.
+##        5. Empty name buffer (NUL at offset 0) at a
+##           kernel-mapped address -> -EINVAL.  Exercises the
+##           "nul == 0" rejection.
+##        6. Valid printable name "libc:malloc\0" at a
+##           kernel-mapped address -> 0.
+##        7. Forbidden character: name "foo[bar]\0" -> -EINVAL.
+##           Exercises the is_valid_name_char loop.
+##
+##      Known limitation: validated names are silently
+##      dropped — we have no per-VMA name storage to plumb
+##      them into.  Callers that read /proc/<pid>/maps to
+##      find a label they installed (Android Runtime's GC
+##      diagnostic, scudo's heap dump) will see `[anon]`
+##      where they expect `[anon:<their-name>]`.  Once the
+##      VMA layer gains an optional Arc<str> label field, this
+##      arm should propagate the name through.  Procfs maps
+##      rendering will need a corresponding suffix emitter.
+##
+##      Judgment call: the copy_from_user we perform on the
+##      name buffer is bulk-sized (80 bytes) and may fault
+##      partway through if the user string is shorter than 80
+##      bytes and abuts an unmapped page.  Linux's
+##      strndup_user walks byte-by-byte and only faults if no
+##      NUL appears within the readable run.  Documented in
+##      the arm body's SAFETY comment; could be tightened
+##      with a per-byte probe loop once we need closer Linux
+##      parity for fault semantics.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).

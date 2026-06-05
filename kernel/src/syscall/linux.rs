@@ -4364,6 +4364,15 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
 ///     don't implement core scheduling; return `-ENODEV` (bit-for-bit
 ///     what `CONFIG_SCHED_CORE=n` kernels return), which Chromium and
 ///     runc handle gracefully (fall back to default placement).
+///   - `PR_SET_VMA` (0x5356_4d41 = "SVMA"): Android-derived
+///     anonymous-VMA naming.  Linux 5.17+ accepts a single sub-option
+///     `PR_SET_VMA_ANON_NAME` (0); jemalloc, scudo, Bionic, libunwind
+///     and Android Runtime all probe it to tag arenas / thread stacks
+///     / JIT regions visible in `/proc/<pid>/maps`.  We have no VMA
+///     naming infrastructure, but we validate the sub-option and the
+///     name pointer (if non-NULL) and return 0 — the name is dropped
+///     but the caller continues.  Unrecognised sub-options return
+///     `-EINVAL` exactly as Linux does.
 ///
 /// Everything else: `-EINVAL`.
 ///
@@ -5592,6 +5601,146 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                     return linux_err(errno::EPERM);
                 }
                 let _ = pcb::set_securebits(pid, new_val);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_SET_VMA (0x5356_4d41 = ASCII "SVMA", little-endian
+        // representation of the four-byte "SVMA" magic — see
+        // mm/madvise.c::madvise_set_anon_name and the
+        // PR_SET_VMA define in include/uapi/linux/prctl.h).
+        // Android-origin since Linux 5.17: lets userspace tag
+        // anonymous VMAs with a short label that shows up in
+        // /proc/<pid>/maps as `[anon:<name>]`.  Bionic, jemalloc,
+        // scudo, libunwind, ART, and Chrome's PartitionAlloc all
+        // probe it to label arenas, thread stacks, JIT regions,
+        // and guard pages.  Linux returns -EINVAL for any sub-op
+        // other than PR_SET_VMA_ANON_NAME (0), and Android
+        // userspace callers all check for that to decide whether
+        // to retry on later kernels — they treat 0 as "kernel
+        // accepted, name applied" and -EINVAL as "kernel does not
+        // support naming, drop the label".
+        //
+        // Linux semantics (mm/madvise.c::prctl_set_vma):
+        //   * arg2 (our arg1) is the sub-operation; only
+        //     PR_SET_VMA_ANON_NAME (0) is defined.
+        //   * arg3 (our arg2) is the region start address.  Must
+        //     be page-aligned; otherwise -EINVAL.
+        //   * arg4 (our arg3) is the region size in bytes.
+        //     start + size must not overflow; otherwise -EINVAL.
+        //   * arg5 (our arg4) is a user pointer to a
+        //     NUL-terminated name string up to
+        //     ANON_VMA_NAME_MAX_LEN (80) bytes including NUL.
+        //     NULL clears any previously-set name.  Characters
+        //     must be printable ASCII (0x20..=0x7e) excluding the
+        //     special `[`, `]`, `\\`, `$`, `'`, `"` set — Linux
+        //     strictly enforces this and returns -EINVAL on the
+        //     first bad byte.  We don't store the name (we have
+        //     no per-VMA name infrastructure yet) but we DO
+        //     validate it so callers passing garbage get the same
+        //     EINVAL they'd see on real Linux, and callers passing
+        //     a bad pointer get EFAULT.
+        //
+        // Our stance: we accept PR_SET_VMA_ANON_NAME as silent
+        // success after validation; we reject other sub-operations
+        // with -EINVAL.  The name is dropped (we have no per-VMA
+        // name storage), but the caller's flow continues.  This is
+        // the strictly-friendliest answer for Android-derived
+        // runtimes — they don't depend on the names being visible
+        // anywhere, only on the syscall succeeding.
+        //
+        // Limitation tracked in todo.txt: when our VMA layer gains
+        // per-mapping labels, this arm should propagate the name
+        // through to the VMA so /proc/<pid>/maps can render the
+        // `[anon:<name>]` suffix.  Until then, names are silently
+        // dropped after validation.
+        0x5356_4d41 => {
+            // Only PR_SET_VMA_ANON_NAME (sub-op 0) is defined in
+            // Linux.  Anything else: -EINVAL — and on
+            // CONFIG_ANON_VMA_NAME=n kernels, even sub-op 0 yields
+            // -EINVAL, so callers already handle both outcomes.
+            if args.arg1 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // start + size overflow check (Linux's
+            // madvise_set_anon_name does this via
+            // `start + len_in < start`).
+            let start = args.arg2;
+            let size = args.arg3;
+            if start.checked_add(size).is_none() {
+                return linux_err(errno::EINVAL);
+            }
+            // Name pointer validation.  NULL is the canonical
+            // "clear the name" — accept it as success without
+            // touching user memory.
+            let name_ptr = args.arg4;
+            if name_ptr != 0 {
+                // Linux uses strndup_user with
+                // ANON_VMA_NAME_MAX_LEN (80 — see
+                // include/linux/mm_inline.h).  Bad pointer ->
+                // EFAULT, missing NUL within 80 bytes -> ENAMETOOLONG,
+                // bad characters -> EINVAL.  Mirror that here.
+                const ANON_VMA_NAME_MAX_LEN: usize = 80;
+                if let Err(e) = crate::mm::user::validate_user_read(name_ptr, 1) {
+                    return linux_err(linux_errno_for(e));
+                }
+                let mut buf = [0u8; ANON_VMA_NAME_MAX_LEN];
+                // SAFETY: validate_user_read above probed the
+                // first byte; copy_from_user re-validates the full
+                // ANON_VMA_NAME_MAX_LEN-byte range and surfaces
+                // EFAULT on a short readable run.  We pass a
+                // fully-sized kernel buffer.
+                //
+                // Linux's strndup_user copies up to (max-1) bytes
+                // and requires a NUL within that window.  If
+                // copy_from_user faults partway through (the user
+                // string is shorter than the buffer and abuts an
+                // unmapped page), we treat that exactly like
+                // Linux: -EFAULT.  But Linux's strncpy_from_user
+                // actually walks the user buffer byte-by-byte and
+                // stops at NUL without faulting on the tail; our
+                // copy_from_user is bulk, so we accept that we may
+                // over-fault for short strings near a page
+                // boundary.  Documented limitation.
+                if let Err(e) = unsafe {
+                    crate::mm::user::copy_from_user(
+                        name_ptr,
+                        buf.as_mut_ptr(),
+                        ANON_VMA_NAME_MAX_LEN,
+                    )
+                } {
+                    return linux_err(linux_errno_for(e));
+                }
+                // Locate the NUL terminator within the buffer.
+                // ENAMETOOLONG if absent.
+                let nul = match buf.iter().position(|&b| b == 0) {
+                    Some(n) => n,
+                    None => return linux_err(errno::ENAMETOOLONG),
+                };
+                // Character validation: printable ASCII
+                // (0x20..=0x7e) excluding the special set Linux
+                // forbids in mm/madvise.c::is_valid_name_char.
+                // Empty name (just NUL) is rejected by Linux with
+                // -EINVAL — `name_len == 0` in strndup_user means
+                // "no name" but the surrounding code requires at
+                // least one character.
+                if nul == 0 {
+                    return linux_err(errno::EINVAL);
+                }
+                for &b in &buf[..nul] {
+                    let ok = (0x20..=0x7e).contains(&b)
+                        && b != b'\\'
+                        && b != b'`'
+                        && b != b'$'
+                        && b != b'['
+                        && b != b']';
+                    if !ok {
+                        return linux_err(errno::EINVAL);
+                    }
+                }
+                // Name validated.  We deliberately drop it: no
+                // per-VMA name storage yet (todo.txt).  The
+                // observable behaviour matches Linux for callers
+                // that don't read /proc/<pid>/maps.
             }
             SyscallResult::ok(0)
         }
@@ -21363,6 +21512,148 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         pcb::destroy(test_pid);
+    }
+
+    // Batch 97: prctl(PR_SET_VMA = 0x5356_4d41) — Android-derived
+    // anonymous-VMA naming.  Linux 5.17+ accepts sub-op
+    // PR_SET_VMA_ANON_NAME (0) with (start, size, name_ptr).  Bionic,
+    // jemalloc, scudo, ART, libunwind, Chrome's PartitionAlloc all
+    // probe it on startup to label arenas / thread stacks / JIT
+    // regions; pre-batch they got -EINVAL (the catch-all) and either
+    // logged a warning or skipped naming.  We accept sub-op 0 as
+    // silent success (after validating start+size and the name
+    // string) and reject other sub-ops with -EINVAL — same shape
+    // Linux uses, so callers can't distinguish us from a real Linux
+    // kernel that has CONFIG_ANON_VMA_NAME=n.
+    //
+    // Coverage from dispatch_linux (kernel context):
+    //   1. Constant sanity (option value).
+    //   2. PR_SET_VMA with sub-op != 0 -> EINVAL (the kernel rejects
+    //      unknown sub-operations before touching user memory).
+    //   3. PR_SET_VMA with NULL name + non-overflowing range -> 0
+    //      (the "clear name" form succeeds without reading user
+    //      memory, so it works in kernel context).
+    //   4. PR_SET_VMA with start + size that overflows u64 -> EINVAL.
+    //   5. PR_SET_VMA with non-NULL name + kernel-context bypass:
+    //      validate_user_read with the kernel bypass passes for any
+    //      address, but copy_from_user from a zero-filled scratch
+    //      page must observe a NUL at offset 0, which our arm body
+    //      treats as "empty name" -> EINVAL.  We use a known
+    //      kernel-mapped buffer for this case.
+    //   6. PR_SET_VMA with a valid printable name -> 0.
+    //   7. PR_SET_VMA with a name containing a forbidden character
+    //      ('[') -> EINVAL.
+    {
+        // 1. Constant sanity.
+        const PR_SET_VMA: u64 = 0x5356_4d41;
+        const PR_SET_VMA_ANON_NAME: u64 = 0;
+
+        // 2. Unknown sub-op -> EINVAL.
+        let a = SyscallArgs {
+            arg0: PR_SET_VMA, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_VMA, sub=1) not EINVAL ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // 3. NULL name + valid range -> 0 (the "clear" form).
+        let a = SyscallArgs {
+            arg0: PR_SET_VMA,
+            arg1: PR_SET_VMA_ANON_NAME,
+            arg2: 0x1_0000,
+            arg3: 0x1_0000,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_VMA, ANON_NAME, _, _, NULL) not 0 ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // 4. start + size overflow -> EINVAL.
+        let a = SyscallArgs {
+            arg0: PR_SET_VMA,
+            arg1: PR_SET_VMA_ANON_NAME,
+            arg2: u64::MAX - 0x1_0000,
+            arg3: 0x2_0000,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_VMA, ANON_NAME, overflow) not EINVAL ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // 5-7 exercise copy_from_user reads from kernel-mapped
+        // buffers.  Build three test strings: a valid one, an empty
+        // one (NUL at offset 0), and one with a forbidden '['
+        // character.  Use static byte arrays so their addresses are
+        // stable and within the kernel-context bypass window of
+        // validate_user_read.
+        let valid_name: [u8; 16] = *b"libc:malloc\0\0\0\0\0";
+        let empty_name: [u8; 16] = [0u8; 16];
+        let bad_name: [u8; 16] = *b"foo[bar]\0\0\0\0\0\0\0\0";
+
+        // 5. Empty name -> EINVAL.
+        let a = SyscallArgs {
+            arg0: PR_SET_VMA,
+            arg1: PR_SET_VMA_ANON_NAME,
+            arg2: 0x1_0000,
+            arg3: 0x1_0000,
+            arg4: empty_name.as_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_VMA, empty name) not EINVAL ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // 6. Valid printable name -> 0.
+        let a = SyscallArgs {
+            arg0: PR_SET_VMA,
+            arg1: PR_SET_VMA_ANON_NAME,
+            arg2: 0x1_0000,
+            arg3: 0x1_0000,
+            arg4: valid_name.as_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_VMA, 'libc:malloc') not 0 ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // 7. Forbidden character '[' -> EINVAL.
+        let a = SyscallArgs {
+            arg0: PR_SET_VMA,
+            arg1: PR_SET_VMA_ANON_NAME,
+            arg2: 0x1_0000,
+            arg3: 0x1_0000,
+            arg4: bad_name.as_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prctl(PR_SET_VMA, 'foo[bar]') not EINVAL ({})",
+                dispatch_linux(nr::PRCTL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
     }
 
     // personality dispatch validation.

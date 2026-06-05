@@ -10864,7 +10864,26 @@ fn sys_perf_event_open(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `keyctl(cmd, arg2, arg3, arg4, arg5)`.
-fn sys_keyctl(_args: &SyscallArgs) -> SyscallResult {
+///
+/// We don't have a keyring subsystem, so any in-range cmd returns
+/// ENOSYS — userspace treats that as "kernel has no keyrings" and
+/// falls back to in-process key management.  But unknown/wildly-bogus
+/// cmds need to be distinguished: Linux's `security/keys/keyctl.c`
+/// dispatches via a switch whose default arm returns `-EOPNOTSUPP`,
+/// not `-ENOSYS`.  Mirroring that gate keeps probes that intentionally
+/// pass garbage cmds (e.g. fuzzers, or libkeyutils sniffing kernel
+/// version) seeing the same shape they would on Linux.
+///
+/// Linux 6.10's UAPI defines cmds 0..=33 (`KEYCTL_LSM_CONTROL` is the
+/// newest).  Cap at 64 for a forward-compat buffer so cmds added in
+/// 6.11+ aren't pre-rejected here, while still flagging values that
+/// clearly fell out of an integer overflow.
+fn sys_keyctl(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd = args.arg0 as i32;
+    if cmd < 0 || cmd > 64 {
+        return linux_err(errno::EOPNOTSUPP);
+    }
     linux_err(errno::ENOSYS)
 }
 
@@ -30322,7 +30341,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   perf_event_open validation gates: OK");
-        // keyctl(_,_,_,_,_) -> ENOSYS.
+        // keyctl(cmd=0,_,_,_,_) -> ENOSYS (known cmd, no backend).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::KEYCTL, &a).value
@@ -30330,6 +30349,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: keyctl not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // keyctl(cmd=100) -> EOPNOTSUPP (out of forward-compat range).
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEYCTL, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: keyctl(cmd=100) not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // keyctl(cmd=-1) -> EOPNOTSUPP (negative cmd is bogus).
+        // 0xFFFF_FFFF_FFFF_FFFF rounds to -1 via `as i32` after the
+        // low 32 bits sign-extend.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEYCTL, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: keyctl(cmd=-1) not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   keyctl cmd range validation: OK");
         // add_key(NULL,_,_,_,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

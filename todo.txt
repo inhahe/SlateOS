@@ -15201,3 +15201,49 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   bpf cmd/size validation: OK"
 ##      at line 433 of build/serial-test.txt.
 
+## 167. Linux ABI: keyctl(2) cmd range validation
+##      (Batch 138, 2026-06-05)
+##
+##      Issue:  sys_keyctl returned ENOSYS unconditionally — a known cmd
+##              like KEYCTL_GET_KEYRING_ID and a wildly-bogus cmd like
+##              cmd=999 both reported the syscall as missing.  Linux's
+##              security/keys/keyctl.c uses a switch whose default arm
+##              returns -EOPNOTSUPP (95) for unknown cmds, not -ENOSYS.
+##              Probes / fuzzers that pass garbage cmds to detect
+##              keyctl behaviour saw a different shape on our ABI than
+##              on Linux.
+##
+##      Fix:    Range-check the cmd before falling through to ENOSYS.
+##              Linux 6.10's UAPI defines cmds 0..=33 (KEYCTL_LSM_CONTROL
+##              is the newest); cap at 64 for forward-compat buffer so
+##              cmds added in 6.11+ aren't pre-rejected here, while
+##              still flagging values that fell out of integer overflow:
+##                * cmd < 0 -> EOPNOTSUPP
+##                * cmd > 64 -> EOPNOTSUPP
+##                * otherwise -> ENOSYS (preserved)
+##
+##      Self-tests (boot-time):
+##        * keyctl(cmd=0,...) -> ENOSYS (unchanged; KEYCTL_GET_KEYRING_ID
+##          is a valid cmd, we just don't have a backend).
+##        * keyctl(cmd=100,...) -> EOPNOTSUPP (out of forward-compat
+##          range).
+##        * keyctl(cmd=u64::MAX,...) -> EOPNOTSUPP (sign-extends to -1
+##          via `as i32`, exercises the cmd<0 branch).
+##        * Emits "[syscall/linux]   keyctl cmd range validation: OK".
+##
+##      Known limitations:
+##        * The cmd > 64 cap is a soft forward-compat buffer, not a
+##          hard spec.  When a real keyring backend lands we'll switch
+##          to a per-cmd dispatch; until then 64 keeps any conformance
+##          probe happy while still rejecting trash.
+##        * Per-cmd buffer validation (KEYCTL_UPDATE/INSTANTIATE take a
+##          payload, KEYCTL_DESCRIBE/READ/GET_SECURITY take a writable
+##          buffer) is not yet wired — those user-pointer checks would
+##          fire ahead of ENOSYS on Linux but currently we accept any
+##          arg2/arg3/arg4.  Deferred until the keyring backend exists,
+##          since the per-cmd plumbing belongs there.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   keyctl cmd range validation:
+##      OK" at line 435 of build/serial-test.txt.
+

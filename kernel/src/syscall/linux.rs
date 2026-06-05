@@ -9108,26 +9108,59 @@ fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
     let new_value = args.arg1;
     let old_value = args.arg2;
 
+    // Linux's `SYSCALL_DEFINE3(setitimer)` (kernel/time/itimer.c):
+    //   if (value) { if (copy_from_user(...)) return -EFAULT; }
+    //   else memset(&set_buffer, 0, sizeof(set_buffer));
+    //   error = do_setitimer(which, &set_buffer, ovalue ? &get : NULL);
+    // do_setitimer (kernel/time/itimer.c) validates `timeval_valid` on
+    // both itimerval halves -> EINVAL, then switches on `which` with a
+    // default -> EINVAL.  So NULL `value` is "clear the timer" (not
+    // EFAULT), `which` is validated AFTER copy_from_user, and a probe
+    // passing (which=99, bad_ptr) sees EFAULT (copy fails first).
+    // Pre-batch order (which > 2 first, then NULL -> EFAULT) inverted
+    // both, so (which=99, bad_ptr) returned EINVAL and (which=0, NULL)
+    // returned EFAULT instead of 0.
+    let mut new_buf = [0u8; ITIMERVAL_SIZE];
+    if new_value != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(new_value, ITIMERVAL_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
+        // SAFETY: validated above as a readable user range.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(new_value, new_buf.as_mut_ptr(), ITIMERVAL_SIZE)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // timeval_valid (include/linux/time.h): tv_sec >= 0 AND
+    // tv_usec in [0, USEC_PER_SEC).  Apply to it_interval and it_value.
+    // Layout: it_interval.tv_sec, it_interval.tv_usec, it_value.tv_sec,
+    // it_value.tv_usec — each 8 bytes on x86_64.
+    const USEC_PER_SEC: i64 = 1_000_000;
+    let parse_i64 = |off: usize| -> i64 {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&new_buf[off..off + 8]);
+        i64::from_ne_bytes(bytes)
+    };
+    let interval_sec = parse_i64(0);
+    let interval_usec = parse_i64(8);
+    let value_sec = parse_i64(16);
+    let value_usec = parse_i64(24);
+    if interval_sec < 0
+        || !(0..USEC_PER_SEC).contains(&interval_usec)
+        || value_sec < 0
+        || !(0..USEC_PER_SEC).contains(&value_usec)
+    {
+        return linux_err(errno::EINVAL);
+    }
+    // `which` validation happens inside do_setitimer's switch default
+    // (AFTER copy_from_user and timeval_valid).  Valid: ITIMER_REAL(0),
+    // ITIMER_VIRTUAL(1), ITIMER_PROF(2).
     if which > 2 {
         return linux_err(errno::EINVAL);
     }
-    if new_value == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(new_value, ITIMERVAL_SIZE) {
-        return linux_err(linux_errno_for(e));
-    }
 
-    // Copy the new itimerval in to inspect whether this is a cancel
-    // (all-zero) or an arm (any field non-zero).
-    let mut new_buf = [0u8; ITIMERVAL_SIZE];
-    // SAFETY: validated above as a readable user range.
-    let r = unsafe {
-        crate::mm::user::copy_from_user(new_value, new_buf.as_mut_ptr(), ITIMERVAL_SIZE)
-    };
-    if let Err(e) = r {
-        return linux_err(linux_errno_for(e));
-    }
     let is_cancel = new_buf.iter().all(|&b| b == 0);
 
     if !is_cancel {
@@ -30634,9 +30667,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // setitimer(which=99, _, _) -> EINVAL.
-        let a = SyscallArgs { arg0: 99, arg1: 0x1000, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // setitimer(which=99, valid_zero_itimerval, _) -> EINVAL
+        // (Linux copies first, validates timeval, then rejects which in
+        // do_setitimer's switch default).
+        let itv_zero = [0u8; ITIMERVAL_SIZE];
+        let itv_zero_ptr = itv_zero.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 99, arg1: itv_zero_ptr, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETITIMER, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!(
@@ -30644,16 +30681,55 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // setitimer(0, NULL, _) -> EFAULT.
+        // setitimer(0, NULL, NULL) -> 0 (Linux: NULL value means "clear
+        // the timer"; pre-batch returned EFAULT).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SETITIMER, &a).value
-            != -i64::from(errno::EFAULT) {
+        if dispatch_linux(nr::SETITIMER, &a).value != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: setitimer(0,NULL,_) not EFAULT"
+                "[syscall/linux]   FAIL: setitimer(0,NULL,_) not 0"
             );
             return Err(KernelError::InternalError);
         }
+        // setitimer(0, malformed itimerval tv_usec=2_000_000, _) -> EINVAL
+        // via timeval_valid gate.
+        let mut bad_itv = [0u8; ITIMERVAL_SIZE];
+        bad_itv[8..16].copy_from_slice(&2_000_000i64.to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: bad_itv.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETITIMER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setitimer bad tv_usec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setitimer(0, neg tv_sec, _) -> EINVAL.
+        let mut neg_itv = [0u8; ITIMERVAL_SIZE];
+        neg_itv[16..24].copy_from_slice(&(-1i64).to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: neg_itv.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETITIMER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setitimer neg tv_sec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setitimer(99, NULL, _) -> EINVAL (NULL -> zero buf, validity
+        // passes, which=99 rejected).
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETITIMER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setitimer(99,NULL,_) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   setitimer NULL-cancel/timeval/which-last gating: OK"
+        );
         // alarm(N) -> 0 for any N.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

@@ -17858,3 +17858,52 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms marker in build/serial-test.txt.
+
+## 209. Batch 180: sys_setitimer NULL-cancel/timeval/which-last gating
+##      -----------------------------------------------------------------
+##      Tightened sys_setitimer to mirror Linux's
+##      SYSCALL_DEFINE3(setitimer) in kernel/time/itimer.c:
+##        if (value) { copy_from_user -> EFAULT }
+##        else memset(&set_buffer, 0, sizeof(...));
+##        error = do_setitimer(which, &set_buffer, ...);
+##      do_setitimer: timeval_valid on both halves -> EINVAL;
+##      switch (which) default -> EINVAL.
+##      Pre-batch ordering was: which > 2 -> EINVAL FIRST; then
+##      NULL value -> EFAULT; then read.  Two visible divergences:
+##        * (which=0, value=NULL) returned EFAULT where Linux
+##          treats NULL as "clear the timer" and returns 0.
+##        * (which=99, value=bad_ptr) returned EINVAL where Linux
+##          returns EFAULT (copy_from_user fails before which).
+##      Also missing: timeval_valid gate on both itimerval halves.
+##
+##      Implementation:
+##        * NULL new -> zeroed set_buffer (cancel semantics).
+##        * Non-NULL new -> validate_user_read + copy_from_user
+##          (EFAULT propagated).
+##        * Parse 4 i64s and gate timeval_valid:
+##          tv_sec >= 0 AND tv_usec in [0, USEC_PER_SEC) on both
+##          it_interval and it_value -> else EINVAL.
+##        * which > 2 -> EINVAL (now AFTER copy + validity).
+##        * is_cancel terminal: zero buf -> 0 with old_value write;
+##          non-zero -> ENOSYS (no timer arming infrastructure).
+##
+##      Self-tests updated/added (5 cases, 2 updated):
+##        * setitimer(99, valid_zero_itv, _) -> EINVAL (was using
+##          0x1000 ptr that worked accidentally via early which gate).
+##        * setitimer(0, NULL, _) -> 0 (was EFAULT pre-batch).
+##        * setitimer(0, tv_usec=2e6, _) -> EINVAL (new validity gate).
+##        * setitimer(0, neg tv_sec, _) -> EINVAL.
+##        * setitimer(99, NULL, _) -> EINVAL (NULL->zero, which-default).
+##        * Emits "[syscall/linux]   setitimer
+##          NULL-cancel/timeval/which-last gating: OK".
+##
+##      Known limitations:
+##        * Non-zero (arming) itimerval still returns ENOSYS rather
+##          than 0; we have no signal infrastructure to deliver
+##          SIGALRM/SIGVTALRM/SIGPROF on expiry.
+##        * The (which=99, bad_ptr) -> EFAULT case is not testable in
+##          kernel context because validate_user_read is bypassed and
+##          copy_from_user page-faults on ad-hoc pointers.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms marker in build/serial-test.txt.

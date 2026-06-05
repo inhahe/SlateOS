@@ -8861,4 +8861,64 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          gets a success return, which is the right
 ##          observation since kernel-context callers
 ##          never check the comm afterwards.
+##
+##   83. uname/sethostname/setdomainname wired to
+##      nameservice + EPERM gate (batch 57).
+##      Status: real round-trip.  CAP_SYS_ADMIN
+##              approximated as uid==0.
+##
+##      Before batch 57, sethostname/setdomainname were
+##      silent-accept stubs and uname always returned
+##      nodename="localhost", domainname="localdomain"
+##      regardless of any sethostname call.  Programs that
+##      did `sethostname("foo"); read /proc/sys/kernel/
+##      hostname` (or the uname equivalent) would always
+##      see localhost — breaking hostnamectl, init
+##      scripts, and anything that reads the nodename to
+##      log its identity.
+##
+##      What was done:
+##        - sethostname: copy_from_user into a 64-byte
+##          stack buffer; validate UTF-8 (deviation —
+##          documented limitation); gate CAP_SYS_ADMIN
+##          equivalent on uid==0 (kernel ctx bypasses);
+##          push through fs::nameservice::set_hostname.
+##          len==0 -> EINVAL (nameservice rejects empty).
+##        - setdomainname: same shape but len==0 is a
+##          legal "clear domain" operation (Linux
+##          accepts).
+##        - uname: read nodename and domainname from the
+##          nameservice get_hostname/get_domain getters,
+##          falling back to "localhost"/"localdomain" if
+##          nameservice isn't initialised yet.
+##        - All three eagerly call nameservice::
+##          init_defaults() (idempotent) so the syscall
+##          works even if no kshell command has woken
+##          nameservice up yet.
+##
+##      Self-test coverage:
+##        - sethostname(NULL,0) -> -EINVAL (replaces the
+##          old "returns 0" assertion).
+##        - setdomainname(NULL,0) -> 0 (clear-domain).
+##        - sethostname(NULL,5) -> -EFAULT.
+##        - sethostname(len=65) -> -EINVAL.
+##        - Round-trip: set_hostname("ouros-test") +
+##          get_hostname() reads back; same for domain.
+##          Originals restored at end of test.
+##
+##      Known limitations:
+##        - Non-UTF-8 input rejected with EINVAL.  Linux
+##          accepts any bytes.  Tie-break: nameservice
+##          stores Rust String.  Migrate when nameservice
+##          state migrates to Vec<u8>.
+##        - CAP_SYS_ADMIN is approximated by uid==0
+##          instead of being a real per-task capability
+##          set.  Same caveat as setgroups in batch 54.
+##        - Kernel context bypasses the uid==0 gate.
+##          That matches the bootstrap usage (we want
+##          init to be able to set the hostname) but
+##          would need revisiting if any kernel module
+##          that doesn't have full privilege starts
+##          calling sethostname.
+
 

@@ -5445,14 +5445,28 @@ fn sys_syncfs(args: &SyscallArgs) -> SyscallResult {
 
 /// `sethostname(name, len)` — set the system hostname.
 ///
-/// We don't carry a mutable hostname (uname reports "localhost"
-/// always).  Accept any name as silent success; validate the user
-/// pointer.
+/// The new name is copied from userspace into the global nameservice
+/// state so that subsequent `uname(2)` calls observe it.  Linux
+/// requires `CAP_SYS_ADMIN` (effectively root) to set the hostname;
+/// we gate on uid==0 via the caller's credentials.  Kernel context
+/// bypasses the gate (boot init sets the hostname before any user
+/// process exists).
 ///
 /// Errors:
 ///   - `-EFAULT` on bad pointer
 ///   - `-EINVAL` for `len > 64` (Linux's `_UTSNAME_NODENAME_LENGTH`).
+///   - `-EINVAL` for non-UTF-8 input (deviation from Linux which
+///     accepts arbitrary bytes; documented in todo.txt — the
+///     nameservice stores a Rust String).
+///   - `-EPERM` if the caller is non-root.
 fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
+    // Ensure the nameservice storage layer is initialised; idempotent.
+    // Without this, a sethostname call from userspace before any
+    // kshell-triggered nameservice init would see NotSupported from
+    // set_hostname and we'd return -ENOSYS, which is not Linux's
+    // contract for this call.
+    crate::fs::nameservice::init_defaults();
+
     let name_ptr = args.arg0;
     let len = args.arg1 as usize;
     if len > 64 {
@@ -5461,19 +5475,99 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
     if name_ptr == 0 && len != 0 {
         return linux_err(errno::EFAULT);
     }
-    if name_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(name_ptr, len) {
-            return linux_err(linux_errno_for(e));
+
+    // Permission check.  Linux: CAP_SYS_ADMIN.  We model with uid==0.
+    // Kernel context (caller_pid() == None) is bootstrap — bypass.
+    if let Some(pid) = caller_pid() {
+        match pcb::get_credentials(pid) {
+            Some(creds) if creds.uid != 0 => return linux_err(errno::EPERM),
+            _ => {} // root or PCB-tear-down race — proceed
         }
+    }
+
+    if len == 0 {
+        // Empty hostname is rejected by Linux with EINVAL (the
+        // nameservice also rejects empty strings).
+        return linux_err(errno::EINVAL);
+    }
+
+    // Copy from user into a stack buffer (max 64 bytes per the
+    // length check above).
+    let mut buf = [0u8; 64];
+    // SAFETY: copy_from_user validates the read range and uses
+    // STAC/CLAC for SMAP-safe access.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(name_ptr, buf.as_mut_ptr(), len)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let name_bytes = &buf[..len];
+    let name = match core::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+
+    if let Err(e) = crate::fs::nameservice::set_hostname(name) {
+        return linux_err(linux_errno_for(e));
     }
     SyscallResult::ok(0)
 }
 
 /// `setdomainname(name, len)` — set the NIS domain name.
 ///
-/// Same model as [`sys_sethostname`].
+/// Same permission and validation model as [`sys_sethostname`], but
+/// routes to `nameservice::set_domain` instead.  Linux allows the
+/// empty domain (it's a valid "no NIS domain" state); we permit that
+/// through the underlying nameservice's empty-string acceptance.
 fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
-    sys_sethostname(args)
+    // Idempotent — nameservice may not yet be live if userspace gets
+    // here before any kshell command has woken it up.
+    crate::fs::nameservice::init_defaults();
+
+    let name_ptr = args.arg0;
+    let len = args.arg1 as usize;
+    if len > 64 {
+        return linux_err(errno::EINVAL);
+    }
+    if name_ptr == 0 && len != 0 {
+        return linux_err(errno::EFAULT);
+    }
+
+    // CAP_SYS_ADMIN gate (uid==0); kernel context bypasses.
+    if let Some(pid) = caller_pid() {
+        match pcb::get_credentials(pid) {
+            Some(creds) if creds.uid != 0 => return linux_err(errno::EPERM),
+            _ => {}
+        }
+    }
+
+    // setdomainname(NULL, 0) is "clear the domain" — Linux accepts.
+    if len == 0 {
+        if let Err(e) = crate::fs::nameservice::set_domain("") {
+            return linux_err(linux_errno_for(e));
+        }
+        return SyscallResult::ok(0);
+    }
+
+    let mut buf = [0u8; 64];
+    // SAFETY: copy_from_user validates the read range and uses STAC/CLAC.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(name_ptr, buf.as_mut_ptr(), len)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let name_bytes = &buf[..len];
+    let name = match core::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+
+    if let Err(e) = crate::fs::nameservice::set_domain(name) {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -12467,6 +12561,10 @@ fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
 /// the standard fields with values that satisfy Linux programs probing
 /// for "are we running on Linux x86_64?".
 fn sys_uname(args: &SyscallArgs) -> SyscallResult {
+    // Lazy-init nameservice so get_hostname/get_domain return the
+    // configured defaults rather than the "unknown"/empty fallback.
+    crate::fs::nameservice::init_defaults();
+
     let user_buf = args.arg0;
     if user_buf == 0 {
         return linux_err(errno::EFAULT);
@@ -12483,11 +12581,27 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
         // buf[off + n] is the NUL terminator (already zero).
     }
     fill(&mut buf, 0, b"OuRoS");                    // sysname
-    fill(&mut buf, 1, b"localhost");                // nodename
+    // nodename / domainname now live in the global nameservice
+    // state; sethostname / setdomainname update them and uname
+    // reads them back.  Falls back to "localhost" / "localdomain"
+    // if nameservice isn't initialised (kernel-only test contexts).
+    let nodename = crate::fs::nameservice::get_hostname();
+    let nodename_bytes = if nodename == "unknown" {
+        alloc::string::String::from("localhost")
+    } else {
+        nodename
+    };
+    fill(&mut buf, 1, nodename_bytes.as_bytes());
     fill(&mut buf, 2, b"0.1.0-ouros");              // release
     fill(&mut buf, 3, b"#1 SMP");                   // version
     fill(&mut buf, 4, b"x86_64");                   // machine
-    fill(&mut buf, 5, b"localdomain");              // domainname (GNU ext)
+    let domain = crate::fs::nameservice::get_domain();
+    let domain_bytes = if domain.is_empty() {
+        alloc::string::String::from("localdomain")
+    } else {
+        domain
+    };
+    fill(&mut buf, 5, domain_bytes.as_bytes());
 
     // SAFETY: copy_to_user validates the user range.
     let r = unsafe {
@@ -16305,8 +16419,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // sethostname / setdomainname validation.
     //   - len > 64 -> EINVAL.
     //   - NULL pointer with non-zero len -> EFAULT.
-    //   - NULL pointer with zero len -> 0 (no-op).
+    //   - NULL pointer with zero len:
+    //     * sethostname -> EINVAL (empty name rejected, batch 57).
+    //     * setdomainname -> 0 (clear-domain is allowed, batch 57).
     {
+        // Initialise nameservice up front so the setdomainname
+        // clear-domain path has somewhere to write.  Idempotent.
+        crate::fs::nameservice::init_defaults();
+
         let a = SyscallArgs { arg0: 0, arg1: 65, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETHOSTNAME, &a).value
@@ -16325,19 +16445,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 57: sethostname now rejects empty hostnames with
+        // EINVAL (the nameservice refuses zero-length names).
+        // setdomainname accepts (clear-domain operation).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SETHOSTNAME, &a).value != 0 {
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: sethostname(NULL,0) not 0"
+                "[syscall/linux]   FAIL: sethostname(NULL,0) not EINVAL ({})",
+                dispatch_linux(nr::SETHOSTNAME, &a).value
             );
             return Err(KernelError::InternalError);
         }
         if dispatch_linux(nr::SETDOMAINNAME, &a).value != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: setdomainname(NULL,0) not 0"
+                "[syscall/linux]   FAIL: setdomainname(NULL,0) not 0 ({})",
+                dispatch_linux(nr::SETDOMAINNAME, &a).value
             );
             return Err(KernelError::InternalError);
+        }
+
+        // Batch 57: hostname/domain round-trip via the underlying
+        // nameservice.  We can't reach the user-pointer copy_from_user
+        // path from kernel context, but we can confirm the storage
+        // layer that uname / sethostname read and write actually
+        // round-trips.
+        //
+        // Ensure nameservice is initialised (it's lazily started via
+        // kshell normally; we don't want this self-test to depend on
+        // that startup ordering).
+        {
+            crate::fs::nameservice::init_defaults();
+            let original = crate::fs::nameservice::get_hostname();
+            crate::fs::nameservice::set_hostname("ouros-test")
+                .expect("set_hostname");
+            assert_eq!(
+                crate::fs::nameservice::get_hostname(),
+                "ouros-test",
+            );
+            let orig_domain = crate::fs::nameservice::get_domain();
+            crate::fs::nameservice::set_domain("test.local")
+                .expect("set_domain");
+            assert_eq!(
+                crate::fs::nameservice::get_domain(),
+                "test.local",
+            );
+            // Restore originals so subsequent boot tests see
+            // unchanged state.
+            crate::fs::nameservice::set_hostname(&original)
+                .expect("restore hostname");
+            let _ = crate::fs::nameservice::set_domain(&orig_domain);
         }
     }
 

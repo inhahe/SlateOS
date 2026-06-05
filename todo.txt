@@ -15247,3 +15247,52 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   keyctl cmd range validation:
 ##      OK" at line 435 of build/serial-test.txt.
 
+## 168. Linux ABI: add_key(2) payload/plen validation
+##      (Batch 139, 2026-06-05)
+##
+##      Issue:  sys_add_key validated only the type/description
+##              pointers and fell through to ENOSYS, leaving payload
+##              (arg2) and plen (arg3) unchecked.  Linux's
+##              security/keys/keyctl.c::sys_add_key validates these
+##              ahead of any keyring work:
+##                * plen > 1 MiB - 1 -> EINVAL.
+##                * plen > 0 with payload == NULL -> EFAULT.
+##                * plen > 0 with payload range not readable -> EFAULT.
+##                * plen == 0 with payload == NULL is a valid "no
+##                  payload" call (some key types accept it).
+##              Without these gates, probes passing oversize or NULL
+##              payloads saw ENOSYS instead of the precise Linux
+##              errnos.
+##
+##      Fix:    Added the same gate ladder in sys_add_key:
+##                * plen > (1 << 20) - 1 -> EINVAL.
+##                * plen > 0 && payload == 0 -> EFAULT.
+##                * plen > 0 -> validate_user_read(payload, plen).
+##                * plen == 0 -> fall through (payload not consulted).
+##                * Otherwise -> ENOSYS (preserved).
+##
+##      Self-tests (boot-time):
+##        * add_key(NULL,...) -> EFAULT (unchanged).
+##        * add_key(t,d,NULL,0,_) -> ENOSYS (no-payload valid path).
+##        * add_key(t,d,NULL,8,_) -> EFAULT (NULL payload, plen > 0).
+##        * add_key(t,d,payload,1<<21,_) -> EINVAL (plen > 1 MiB).
+##        * Emits "[syscall/linux]   add_key payload/plen validation:
+##          OK".
+##
+##      Known limitations:
+##        * validate_user_read is permissive in kernel context, so the
+##          "valid payload" case (plen=32, payload=0x3000) returns
+##          ENOSYS only because the kernel-context bypass lets it
+##          through.  From real userspace with a mapped 32-byte buffer
+##          it would also return ENOSYS, but from a kernel-context
+##          self-test we can't distinguish the "buffer was actually
+##          mapped" case.  The NULL-with-plen>0 case still fires the
+##          EFAULT branch because the pointer-NULL check runs first.
+##        * request_key (arg2 = callout_info, optional C string) has
+##          analogous validation in Linux but isn't covered here —
+##          will fold in next batch if it stays as a Rosetta gap.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   add_key payload/plen
+##      validation: OK" at line 436 of build/serial-test.txt.
+

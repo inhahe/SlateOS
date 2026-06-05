@@ -10888,8 +10888,22 @@ fn sys_keyctl(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `add_key(type, description, payload, plen, keyring)`.
+///
+/// Linux's `security/keys/keyctl.c::sys_add_key` validates the inputs
+/// before reaching the keyring backend:
+///   * `type` and `description` are non-NULL C strings (EFAULT
+///     otherwise).
+///   * `plen <= 1 MiB - 1` (Linux's hard cap; otherwise EINVAL).
+///   * If `plen > 0`, `payload` must point at a readable buffer of
+///     `plen` bytes; NULL or an unmapped range produces EFAULT.
+///   * `plen == 0` with `payload == NULL` is a valid "no payload"
+///     call (some key types — e.g. `keyring` — accept it).
+///
+/// We don't have a keyring backend, so the final answer is ENOSYS,
+/// but the gates above must fire ahead of ENOSYS so probes see the
+/// same errno shape they would on Linux.
 fn sys_add_key(args: &SyscallArgs) -> SyscallResult {
-    // type and description must be non-NULL.
+    // type and description must be non-NULL C strings.
     if args.arg0 == 0 || args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -10898,6 +10912,26 @@ fn sys_add_key(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
         return linux_err(linux_errno_for(e));
+    }
+    // plen > 1 MiB - 1 -> EINVAL.  Matches the hard cap in Linux's
+    // sys_add_key (security/keys/keyctl.c: `if (plen > 1024 * 1024 - 1)
+    // goto error;`).  Keeps probes that intentionally pass an absurd
+    // plen seeing the same errno.
+    let plen = args.arg3 as usize;
+    const ADD_KEY_PLEN_MAX: usize = 1024 * 1024 - 1;
+    if plen > ADD_KEY_PLEN_MAX {
+        return linux_err(errno::EINVAL);
+    }
+    // payload pointer must be valid when plen > 0; plen == 0 with
+    // payload == NULL is allowed (Linux passes that for empty key
+    // types).
+    if plen > 0 {
+        if args.arg2 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, plen) {
+            return linux_err(linux_errno_for(e));
+        }
     }
     linux_err(errno::ENOSYS)
 }
@@ -30376,7 +30410,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: add_key(NULL,_,_,_,_) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // add_key(t,d,_,_,_) -> ENOSYS.
+        // add_key(t,d,NULL,0,_) -> ENOSYS (no payload is valid).
         let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::ADD_KEY, &a).value
@@ -30384,6 +30418,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: add_key not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // add_key(t,d,NULL,8,_) -> EFAULT (NULL payload with plen>0).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 8,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: add_key(NULL payload,plen>0) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // add_key(t,d,payload,1<<21,_) -> EINVAL (plen > 1 MiB - 1).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0x3000,
+            arg3: 1u64 << 21, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: add_key(plen=2MiB) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   add_key payload/plen validation: OK");
         // request_key(t,d,_,_) -> ENOSYS.
         if dispatch_linux(nr::REQUEST_KEY, &a).value
             != -i64::from(errno::ENOSYS) {

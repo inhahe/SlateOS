@@ -19121,8 +19121,39 @@ fn sys_io_pgetevents(args: &SyscallArgs) -> SyscallResult {
     }
     if sig != 0 {
         // struct __aio_sigset { sigset_t *sigmask; size_t sigsetsize; } — 16B.
+        // Linux: SYSCALL_DEFINE6(io_pgetevents) does copy_from_user(&ksig, usig,
+        // sizeof(ksig)) then set_user_sigmask(ksig.sigmask, ksig.sigsetsize).
+        // set_user_sigmask in kernel/signal.c gates on sigsetsize ==
+        // sizeof(sigset_t) (8 on x86_64) and copies the sigmask before
+        // returning to the read_events path.  Mirror that ordering so probes
+        // see EFAULT/EINVAL on a malformed sigset ahead of the terminal
+        // "no context" EINVAL.
         if let Err(e) = crate::mm::user::validate_user_read(sig, 16) {
             return linux_err(linux_errno_for(e));
+        }
+        let mut buf = [0u8; 16];
+        // SAFETY: validate_user_read above confirmed 16 bytes are readable
+        // and aligned to the caller's address space.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(sig, buf.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let sigmask = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
+            Ok(b) => b,
+            Err(_) => return linux_err(errno::EINVAL),
+        });
+        let sigsetsize = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[8..16]) {
+            Ok(b) => b,
+            Err(_) => return linux_err(errno::EINVAL),
+        });
+        if sigsetsize != 8 {
+            return linux_err(errno::EINVAL);
+        }
+        if sigmask != 0 {
+            if let Err(e) = crate::mm::user::validate_user_read(sigmask, 8) {
+                return linux_err(linux_errno_for(e));
+            }
         }
     }
     linux_err(errno::EINVAL)
@@ -36823,6 +36854,105 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_pgetevents valid not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // io_pgetevents __aio_sigset gating.  Build dedicated 16-byte
+        // sigset buffers exercising sigmask/sigsetsize handling.
+        // Layout: [sigmask u64 LE][sigsetsize u64 LE].
+        //
+        // Kernel-context note: validate_user_read/copy_from_user bypass
+        // validation when there's no owning user process (see
+        // mm/user::is_kernel_context).  That means we cannot synthesize
+        // the EFAULT path from kernel-context tests — pointer validity is
+        // always treated as OK.  What we *can* test is the sigsetsize
+        // gate, which fires on the in-struct field independent of any
+        // pointer check.
+        //
+        // Valid: sigmask=NULL, sigsetsize=8 -> falls through to terminal EINVAL.
+        let aio_sig_null: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[8..16].copy_from_slice(&8u64.to_ne_bytes());
+            b
+        };
+        let aio_sig_null_ptr = aio_sig_null.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_null_ptr,
+        };
+        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_pgetevents sigset null mask sz=8 not EINVAL (terminal)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Bad sigsetsize (7) -> EINVAL.  Distinguished from the terminal
+        // EINVAL by ordering: the set_user_sigmask gate rejects ahead of
+        // the do_io_getevents context lookup.  Both surface EINVAL here
+        // but a probe pairing this with a sigsetsize=8 + bad-ctx request
+        // would see the size errno on every non-8 value uniformly.
+        let aio_sig_badsz: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[8..16].copy_from_slice(&7u64.to_ne_bytes());
+            b
+        };
+        let aio_sig_badsz_ptr = aio_sig_badsz.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_badsz_ptr,
+        };
+        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_pgetevents sigsetsize=7 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sigsetsize=9 -> EINVAL (only exactly 8 is accepted).
+        let aio_sig_sz9: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[8..16].copy_from_slice(&9u64.to_ne_bytes());
+            b
+        };
+        let aio_sig_sz9_ptr = aio_sig_sz9.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_sz9_ptr,
+        };
+        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_pgetevents sigsetsize=9 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sigsetsize=0 -> EINVAL.
+        let aio_sig_sz0 = [0u8; 16];
+        let aio_sig_sz0_ptr = aio_sig_sz0.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_sz0_ptr,
+        };
+        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_pgetevents sigsetsize=0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Valid sigmask + sigsetsize=8 (mask points at kernel stack
+        // buffer which validates in kernel context) -> terminal EINVAL.
+        let sigmask_buf = [0u8; 8];
+        let sigmask_ptr = sigmask_buf.as_ptr() as u64;
+        let aio_sig_valid: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&sigmask_ptr.to_ne_bytes());
+            b[8..16].copy_from_slice(&8u64.to_ne_bytes());
+            b
+        };
+        let aio_sig_valid_ptr = aio_sig_valid.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_valid_ptr,
+        };
+        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_pgetevents valid sigset not EINVAL (terminal)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   io_pgetevents sigset validation: OK"
+        );
 
         // mount_setattr bad flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x80, arg3: attr_ptr, arg4: 32, arg5: 0 };

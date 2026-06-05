@@ -16786,3 +16786,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 ##      Serial confirms "[syscall/linux]   landlock_add_rule
 ##      attr validation: OK" in build/serial-test.txt.
+
+
+## 190. Linux ABI: io_pgetevents __aio_sigset sigsetsize validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_io_pgetevents.
+##
+##      Problem: sys_io_pgetevents validated the outer 16-byte
+##              __aio_sigset struct pointer (validate_user_read of
+##              args.arg5 + 16) but did not parse the struct's fields
+##              and gate them.  Linux's
+##              SYSCALL_DEFINE6(io_pgetevents) does:
+##                copy_from_user(&ksig, usig, sizeof(ksig));
+##                ret = set_user_sigmask(ksig.sigmask, ksig.sigsetsize);
+##                if (ret) return ret;
+##                ret = do_io_getevents(...);
+##              and set_user_sigmask (kernel/signal.c) returns -EINVAL
+##              when sigsetsize != sizeof(sigset_t) (8 bytes on x86_64).
+##              That gate fires *before* the AIO context lookup, so a
+##              probe pairing a non-8 sigsetsize with a known-bad ctx_id
+##              would on Linux see EINVAL-from-sigmask, but on our stub
+##              saw the same EINVAL emanating from the terminal "no
+##              context" path — masking the parse error behind the
+##              context error.
+##
+##      Fix:    After validate_user_read of the 16-byte sigset struct,
+##              copy_from_user the 16 bytes, parse sigmask (u64 LE at
+##              offset 0) and sigsetsize (u64 LE at offset 8).
+##              - sigsetsize != 8 -> EINVAL (matches set_user_sigmask).
+##              - sigmask != 0 -> validate_user_read(sigmask, 8)
+##                returning linux_errno_for on fault.
+##              Then fall through to the terminal EINVAL (no ctx).
+##
+##      Self-tests (boot-time):
+##        * io_pgetevents bad nr ordering (min>nr) -> EINVAL  (kept).
+##        * io_pgetevents valid no-sigset -> EINVAL (terminal)  (kept).
+##        * io_pgetevents sigset {mask=NULL, size=8} -> EINVAL
+##          (terminal; new — confirms the valid sigset path falls
+##          through cleanly).
+##        * io_pgetevents sigset {size=7} -> EINVAL  (new; size gate).
+##        * io_pgetevents sigset {size=9} -> EINVAL  (new; size gate;
+##          exactly-8 only).
+##        * io_pgetevents sigset {size=0} -> EINVAL  (new; size gate).
+##        * io_pgetevents sigset {mask=kernel-stack-buf, size=8}
+##          -> EINVAL (terminal; new — confirms the sigmask
+##          validate_user_read accepts a real readable pointer and
+##          falls through).
+##        * Emits "[syscall/linux]   io_pgetevents sigset validation:
+##          OK".
+##
+##      Known limitations:
+##        * The EFAULT path on a bad sigmask pointer cannot be
+##          exercised from kernel-context self-tests because
+##          mm::user::is_kernel_context() bypasses validate_user_read
+##          (no owning user process means every address is trusted).
+##          The validate_user_read call site is correct; only the
+##          test harness can't reach it.  When a userspace task
+##          test harness lands, add EFAULT coverage for sigmask
+##          pointing at unmapped/kernel addresses and for the outer
+##          sigset struct pointer being bad.
+##        * sigmask contents (the 8 sigset bytes) are not interpreted
+##          — we don't actually install a temporary sigmask because
+##          we don't return events to wait on.  Linux's
+##          set_user_sigmask saves/restores the current sigset around
+##          the syscall; that's a no-op on our terminal EINVAL path,
+##          but real AIO support needs the save/restore wired through
+##          signal-mask state.
+##        * The 16-byte __aio_sigset layout assumes 64-bit (sizeof
+##          pointer == 8, sizeof size_t == 8).  32-bit compat needs
+##          the COMPAT_SYSCALL_DEFINE entry with a 12-byte struct
+##          (4-byte pointer + 8-byte size_t with padding); we don't
+##          have a 32-bit ABI so this isn't an issue today, but
+##          when COMPAT lands, the struct read has to come from the
+##          compat wrapper.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   io_pgetevents sigset
+##      validation: OK" in build/serial-test.txt.

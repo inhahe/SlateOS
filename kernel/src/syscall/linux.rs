@@ -13684,9 +13684,12 @@ fn sys_clone3(args: &SyscallArgs) -> SyscallResult {
 ///     interrupt return, so by the time any other CPU observes a
 ///     code change the local fence here is sufficient.
 ///   * The `_RSEQ` variants additionally restart any in-flight RSEQ
-///     critical sections.  We don't yet implement RSEQ kernel-side
-///     (`sys_rseq` returns ENOSYS), so there are no critical
-///     sections to restart and the barrier itself is the contract.
+///     critical sections.  Since batch 121 we accept rseq registration
+///     but do not run the per-preemption update / abort hook on the
+///     scheduler (uniprocessor: nothing to restart).  Once the SMP
+///     rseq hook lands, these commands will need to walk the
+///     RSEQ-registered tasks and run their abort handlers — until
+///     then "fence and return 0" remains the correct answer.
 ///
 /// Therefore "fence locally and return 0" is the truthful answer
 /// for every barrier command, including the GLOBAL variants —
@@ -13802,23 +13805,135 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `rseq(rseq*, len, flags, sig)`.
+/// `rseq(rseq*, len, flags, sig)` — restartable-sequence registration.
+///
+/// glibc 2.35+ calls this from every thread's startup; before batch
+/// 121 we returned -ENOSYS, forcing glibc into a degraded mode where
+/// its per-CPU malloc cache slot is computed via a `sched_getcpu`
+/// fallback on every alloc, and per-thread tcache stays disabled.
+///
+/// We now do the bookkeeping but skip the per-preemption hook:
+///   * Register: validate ptr/len/flags/sig, refuse double-register
+///     with -EBUSY, store (ptr, len, sig) per task, zero the runtime
+///     fields of the userspace `struct rseq` (cpu_id_start, cpu_id,
+///     node_id, mm_cid) so the first read sees CPU 0 (truthful for
+///     our current uniprocessor scheduler), and return 0.
+///   * Unregister: validate the (ptr, len, sig) triple matches the
+///     stored registration (-EINVAL on mismatch), drop the entry,
+///     return 0.
+///
+/// What we DO NOT do (deferred — see todo.txt for the SMP hook):
+///   * Update `cpu_id` / `cpu_id_start` / `mm_cid` on each context
+///     switch.  This is the kernel side of rseq's abort-on-migration
+///     protocol.  On a single CPU it does not matter — cpu_id is
+///     always 0 and no abort is ever needed.  When SMP scheduling is
+///     wired up this hook must be added before correctness holds.
+///   * Walk the registered `rseq_cs` pointer on preemption and rewrite
+///     RIP to the abort handler if the section was crossed.  Same SMP
+///     condition.
+///
+/// Linux ABI:
+///   arg0 = rseq*    (32-byte aligned, 32 bytes valid in user space)
+///   arg1 = len      (must equal sizeof(struct rseq) = 32)
+///   arg2 = flags    (0 = register, RSEQ_FLAG_UNREGISTER = 1)
+///   arg3 = sig      (32-bit signature, must match abort handler's
+///                    preceding word; we store but never check
+///                    because we never invoke an abort handler)
 fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
-    // flags must be 0 (or RSEQ_FLAG_UNREGISTER = 1).
-    if args.arg2 > 1 {
+    const RSEQ_STRUCT_SIZE: u64 = 32;
+    const RSEQ_FLAG_UNREGISTER: u64 = 1;
+    const RSEQ_STRUCT_ALIGN: u64 = 32;
+
+    let rseq_ptr = args.arg0;
+    let len = args.arg1;
+    let flags = args.arg2;
+    #[allow(clippy::cast_possible_truncation)]
+    let sig = args.arg3 as u32;
+
+    if flags & !RSEQ_FLAG_UNREGISTER != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Linux requires len == sizeof(struct rseq) = 32.
-    if args.arg1 != 32 {
+    if len != RSEQ_STRUCT_SIZE {
         return linux_err(errno::EINVAL);
     }
-    if args.arg0 == 0 {
+    if rseq_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 32) {
+    if rseq_ptr & (RSEQ_STRUCT_ALIGN - 1) != 0 {
+        // Linux rejects unaligned rseq pointers with EINVAL.
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(rseq_ptr, RSEQ_STRUCT_SIZE as usize) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::ENOSYS)
+    if let Err(e) = crate::mm::user::validate_user_write(rseq_ptr, RSEQ_STRUCT_SIZE as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    let task_id = crate::sched::current_task_id();
+
+    if flags & RSEQ_FLAG_UNREGISTER != 0 {
+        // Unregister: must match stored (ptr, len, sig) triple.
+        match crate::proc::thread_clone::lookup_rseq(task_id) {
+            Some((stored_ptr, stored_len, stored_sig)) => {
+                if stored_ptr != rseq_ptr
+                    || u64::from(stored_len) != len
+                    || stored_sig != sig
+                {
+                    return linux_err(errno::EINVAL);
+                }
+                crate::proc::thread_clone::unregister_rseq(task_id);
+                return SyscallResult::ok(0);
+            }
+            None => return linux_err(errno::EINVAL),
+        }
+    }
+
+    // Register.  Linux returns -EBUSY for any second registration,
+    // even when the parameters match exactly (idempotent re-register
+    // is not allowed — userspace must unregister first).
+    if crate::proc::thread_clone::lookup_rseq(task_id).is_some() {
+        return linux_err(errno::EBUSY);
+    }
+
+    // Store before writing user space so a copy_to_user fault leaves
+    // the task in a clean unregistered state on rollback.
+    #[allow(clippy::cast_possible_truncation)]
+    crate::proc::thread_clone::register_rseq(task_id, rseq_ptr, len as u32, sig);
+
+    // Initialise the runtime fields the kernel owns:
+    //   offset  0: u32 cpu_id_start (= 0 on our UP scheduler)
+    //   offset  4: u32 cpu_id       (= 0; Linux sentinel for
+    //                                "unregistered" is u32::MAX, so a
+    //                                value of 0 also signals "we are
+    //                                on CPU 0")
+    //   offset 20: u32 node_id      (= 0; single NUMA node)
+    //   offset 24: u32 mm_cid       (= 0; we have no mm-cid concept)
+    //
+    // We do NOT touch:
+    //   offset  8: u64 rseq_cs (user-managed pointer/union)
+    //   offset 16: u32 flags   (user-managed; opt-ins per critical-section)
+    //   offset 28: u32 padding (reserved; touching it would be wrong)
+    let zeros8 = [0u8; 8];
+    let zeros4 = [0u8; 4];
+    // SAFETY: validate_user_write succeeded above for the whole 32-byte
+    // range; the three sub-writes target disjoint slices inside that
+    // range and copy_to_user re-checks under SMAP.
+    let write_init = || -> Result<(), KernelError> {
+        unsafe {
+            crate::mm::user::copy_to_user(zeros8.as_ptr(), rseq_ptr, 8)?;
+            crate::mm::user::copy_to_user(zeros4.as_ptr(), rseq_ptr + 20, 4)?;
+            crate::mm::user::copy_to_user(zeros4.as_ptr(), rseq_ptr + 24, 4)?;
+        }
+        Ok(())
+    };
+    if let Err(e) = write_init() {
+        // Roll back the registration so the task is in the state it
+        // was before this syscall.
+        crate::proc::thread_clone::unregister_rseq(task_id);
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 /// `sync_file_range(fd, offset, nbytes, flags)`.
@@ -30372,14 +30487,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
+        // rseq (batch 121): full register/unregister round-trip with
+        // EBUSY on double-register and EINVAL on mismatched unregister.
+        //
+        // We need a 32-byte-aligned buffer for the rseq struct; the
+        // stack buffer above doesn't guarantee that.  Declare an
+        // explicitly-aligned local struct.
+        #[repr(C, align(32))]
+        struct RseqAligned([u8; 32]);
+        // Pre-fill with non-zero sentinels so we can verify that
+        // register zeroes cpu_id_start/cpu_id/node_id/mm_cid.
+        let mut rseq_buf = RseqAligned([0xAAu8; 32]);
+        let rseq_buf_ptr = (&raw mut rseq_buf.0).cast::<u8>() as u64;
+
         // rseq wrong len -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 16, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let a = SyscallArgs { arg0: rseq_buf_ptr, arg1: 16, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: rseq wrong len not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // rseq bad flags -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 32, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };
+        // rseq bad flags (bit 1 not RSEQ_FLAG_UNREGISTER) -> EINVAL.
+        let a = SyscallArgs { arg0: rseq_buf_ptr, arg1: 32, arg2: 0x2, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: rseq bad flags not EINVAL");
             return Err(KernelError::InternalError);
@@ -30390,10 +30518,99 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: rseq NULL not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // rseq valid -> ENOSYS.
-        let a = SyscallArgs { arg0: buf_ptr, arg1: 32, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: rseq valid not ENOSYS");
+        // rseq unaligned (ptr+1) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr.wrapping_add(1), arg1: 32, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rseq unaligned not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // rseq unregister-when-not-registered -> EINVAL.
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr, arg1: 32, arg2: 1, arg3: 0x5305_3053,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rseq unregister-fresh not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // rseq register valid -> 0.  Use glibc's signature 0x53053053.
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr, arg1: 32, arg2: 0, arg3: 0x5305_3053,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq register not 0 ({})",
+                dispatch_linux(nr::RSEQ, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Verify register zeroed cpu_id_start, cpu_id, node_id, mm_cid
+        // and did NOT touch rseq_cs (offset 8..16), flags (offset 16),
+        // padding (offset 28).
+        let view: [u8; 32] = rseq_buf.0;
+        if view[0..8] != [0u8; 8] {
+            serial_println!("[syscall/linux]   FAIL: rseq cpu_id_start/cpu_id not zeroed");
+            return Err(KernelError::InternalError);
+        }
+        if view[8..20] != [0xAAu8; 12] {
+            serial_println!("[syscall/linux]   FAIL: rseq overwrote user-owned region 8..20");
+            return Err(KernelError::InternalError);
+        }
+        if view[20..28] != [0u8; 8] {
+            serial_println!("[syscall/linux]   FAIL: rseq node_id/mm_cid not zeroed");
+            return Err(KernelError::InternalError);
+        }
+        if view[28..32] != [0xAAu8; 4] {
+            serial_println!("[syscall/linux]   FAIL: rseq overwrote padding");
+            return Err(KernelError::InternalError);
+        }
+        // Re-register (any value) -> EBUSY.
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr, arg1: 32, arg2: 0, arg3: 0x5305_3053,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EBUSY) {
+            serial_println!("[syscall/linux]   FAIL: rseq double-register not EBUSY");
+            return Err(KernelError::InternalError);
+        }
+        // Unregister with mismatched sig -> EINVAL.
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr, arg1: 32, arg2: 1, arg3: 0xDEAD_BEEF,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: rseq unregister-mismatch not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Unregister with matching sig -> 0.
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr, arg1: 32, arg2: 1, arg3: 0x5305_3053,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: rseq unregister-match not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Re-register after unregister -> 0 (fresh slot).
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr, arg1: 32, arg2: 0, arg3: 0x1234_5678,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: rseq re-register-after-unregister not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Clean up: unregister so the table is empty across boot tests.
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr, arg1: 32, arg2: 1, arg3: 0x1234_5678,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: rseq cleanup unregister not 0");
             return Err(KernelError::InternalError);
         }
 

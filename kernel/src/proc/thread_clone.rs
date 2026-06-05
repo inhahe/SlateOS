@@ -186,6 +186,60 @@ pub fn lookup_robust_list(task_id: TaskId) -> Option<(u64, u64)> {
     ROBUST_LIST.lock().get(&task_id).copied()
 }
 
+// ---------------------------------------------------------------------------
+// rseq registration (rseq(2))
+// ---------------------------------------------------------------------------
+
+/// Per-task `rseq(2)` registration.
+///
+/// `ptr` is the userspace pointer to the `struct rseq` (32 bytes,
+/// 32-byte-aligned) the task registered with; `sig` is the 32-bit
+/// signature value that must precede the `abort_ip` of any rseq
+/// critical section the task installs (Linux checks this at abort
+/// time as a defence against attacker-supplied abort handlers).
+///
+/// We currently use this only as an ABI-stored value:
+///   * `rseq(2)` register/unregister/duplicate-check is satisfied
+///     from this map.
+///   * The userspace `struct rseq` fields (`cpu_id_start`, `cpu_id`,
+///     `node_id`, `mm_cid`) are zeroed on register and never updated
+///     thereafter.  This is correct on a uniprocessor (cpu_id never
+///     changes from 0), and matches the semantics glibc's per-cpu
+///     fast paths require for *correctness* — they always succeed
+///     because the published cpu_id matches the cpu the section
+///     committed on.  On SMP we would need a preemption-time hook
+///     in the scheduler that writes the current CPU back into
+///     `*ptr` (and runs the abort handler when RIP falls inside a
+///     critical section that crossed CPUs).  See todo.txt for the
+///     deferred SMP rseq hook.
+///
+/// Entries are removed in [`on_thread_exit_hook`] so the table does
+/// not grow without bound across the lifetime of the system.  No
+/// userspace write happens at exit (the thread is dying; Linux also
+/// does not zero the struct on exit).
+static RSEQ: Mutex<BTreeMap<TaskId, (u64, u32, u32)>> = Mutex::new(BTreeMap::new());
+
+/// Register `ptr` (`rseq` userspace pointer), `len` (struct length —
+/// Linux requires 32), and `sig` (abort-signature) for `task_id`.
+///
+/// Caller is expected to have validated `ptr` (non-NULL, aligned, in
+/// user space, readable+writable for `len` bytes) and `len == 32`.
+pub fn register_rseq(task_id: TaskId, ptr: u64, len: u32, sig: u32) {
+    RSEQ.lock().insert(task_id, (ptr, len, sig));
+}
+
+/// Look up the rseq registration for `task_id`.  Returns
+/// `(ptr, len, sig)` if registered, `None` otherwise.
+pub fn lookup_rseq(task_id: TaskId) -> Option<(u64, u32, u32)> {
+    RSEQ.lock().get(&task_id).copied()
+}
+
+/// Remove the rseq registration for `task_id`, if any.  Returns
+/// the previous value for the caller's sanity-checks.
+pub fn unregister_rseq(task_id: TaskId) -> Option<(u64, u32, u32)> {
+    RSEQ.lock().remove(&task_id)
+}
+
 /// Called from [`super::thread::on_thread_exit`] BEFORE the thread is
 /// detached from its process — at this point CR3 still points at the
 /// dying thread's address space, so `copy_to_user` against the
@@ -204,6 +258,11 @@ pub fn on_thread_exit_hook(task_id: TaskId) {
     // the CLEAR_CHILD_TID handling, because robust-list cleanup is
     // independent of CLONE_CHILD_CLEARTID.
     ROBUST_LIST.lock().remove(&task_id);
+
+    // Drop any rseq registration.  Linux does not zero the userspace
+    // struct on exit (the thread is dying — there is no observer left
+    // in this address space's task list); we match that.
+    RSEQ.lock().remove(&task_id);
 
     let ctid_ptr = match CLEAR_CHILD_TID.lock().remove(&task_id) {
         Some(p) => p,

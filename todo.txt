@@ -13775,5 +13775,96 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          global.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##
+## 150. Batch 121 — rseq(2) registration accepted instead of returning
+##      ENOSYS at glibc startup.
+##
+##      glibc 2.35+ calls rseq() from every thread's startup so it can
+##      use per-CPU malloc tcache slot selection without a syscall on
+##      each allocation.  Before batch 121 we returned -ENOSYS, which
+##      glibc tolerates (falls back to a sched_getcpu-based path) but
+##      logs in diagnostic builds and degrades malloc throughput.
+##
+##      Implementation:
+##        * New per-task store in kernel/src/proc/thread_clone.rs:
+##            RSEQ: Mutex<BTreeMap<TaskId, (ptr, len, sig)>>
+##          register_rseq / lookup_rseq / unregister_rseq.
+##        * on_thread_exit_hook now also drops the rseq entry (after the
+##          robust-list drop, before the CLEAR_CHILD_TID handling).
+##          No userspace write at exit — Linux doesn't either; the
+##          thread's address space is going away.
+##        * kernel/src/syscall/linux.rs::sys_rseq replaces the ENOSYS
+##          stub with a real register/unregister:
+##            - Validate flags ∈ {0, 1=UNREGISTER}, len == 32, ptr != 0,
+##              ptr & 0x1F == 0 (32-byte alignment, Linux-enforced),
+##              ptr 32-byte readable AND writable.
+##            - On UNREGISTER: lookup_rseq must return Some with matching
+##              (ptr, len, sig); -EINVAL on mismatch or "never registered".
+##              Successful unregister drops the entry and returns 0.
+##            - On register (flags & UNREGISTER == 0):
+##                * If already registered, -EBUSY (Linux behaviour: no
+##                  idempotent re-register, userspace must unregister
+##                  first).
+##                * Insert the (ptr, len, sig) triple.
+##                * Zero the userspace runtime fields the kernel owns:
+##                  - cpu_id_start (off 0..4) = 0
+##                  - cpu_id        (off 4..8) = 0
+##                  - node_id       (off 20..24) = 0
+##                  - mm_cid        (off 24..28) = 0
+##                  Leave rseq_cs (off 8..16), flags (off 16..20), and
+##                  padding (off 28..32) untouched — those are
+##                  user-owned per the ABI.
+##                * If any copy_to_user fails (e.g. the page got
+##                  unmapped between validation and write), roll back
+##                  the registration so the task is in a clean
+##                  unregistered state.
+##                * Return 0.
+##
+##      Boot self-tests (12 cases, replacing the 4 pre-batch ENOSYS
+##      tests in the seccomp/ptrace/membarrier/rseq block):
+##        Validation:
+##          1. wrong len (16) -> EINVAL.
+##          2. bad flags (0x2 not RSEQ_FLAG_UNREGISTER) -> EINVAL.
+##          3. NULL ptr -> EFAULT.
+##          4. unaligned ptr (ptr+1) -> EINVAL.
+##          5. unregister with no prior registration -> EINVAL.
+##        Round-trip:
+##          6. register with sig=0x53053053 (glibc) -> 0.
+##          7. Verify view of the 32-byte buffer: bytes [0..8] zeroed
+##             (cpu_id_start, cpu_id), bytes [8..20] still 0xAA
+##             (rseq_cs + flags, untouched), bytes [20..28] zeroed
+##             (node_id, mm_cid), bytes [28..32] still 0xAA (padding).
+##          8. double-register -> EBUSY.
+##          9. unregister with mismatched sig (0xDEADBEEF) -> EINVAL.
+##         10. unregister with matching sig -> 0.
+##         11. re-register after unregister with a different sig -> 0.
+##         12. cleanup unregister -> 0 (so the RSEQ table is empty at
+##             the end of the rseq test block; matters because the
+##             current task carries through subsequent boot tests).
+##
+##      Known limitations / deferred work:
+##        * No per-preemption cpu_id update.  Linux's scheduler writes
+##          the current CPU back into *rseq on every context switch
+##          (and walks rseq_cs to check whether the section was
+##          crossed, rewriting RIP to abort_ip if so).  We are
+##          single-CPU today: cpu_id stays 0 forever, no abort is ever
+##          warranted, and glibc's per-CPU malloc fast path always
+##          "succeeds" against cpu 0.  When SMP scheduling lands this
+##          hook MUST be added before correctness holds — otherwise
+##          per-CPU tcache could be raced under migration.  Tracked
+##          here as a hard prerequisite for SMP enablement.
+##        * The `sig` field is stored and round-tripped but never
+##          consulted at abort time, because we never abort (see
+##          above).  When the abort hook lands it MUST verify the u32
+##          immediately preceding the abort_ip matches the stored
+##          sig — this is Linux's defence against attacker-supplied
+##          abort handlers.
+##        * The clone path does not inherit / propagate rseq across
+##          thread creation.  glibc's pthread_create registers rseq
+##          inside the child thread's own startup, so this is correct
+##          for the common case.  fork() also doesn't carry rseq, by
+##          design (Linux: rseq is per-task, child has none).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
 

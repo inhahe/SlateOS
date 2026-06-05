@@ -11420,9 +11420,41 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
 }
 
 /// `process_mrelease(pidfd, flags)`.
+///
+/// Linux 5.15+ syscall used by an OOM-aware userspace daemon to release
+/// the memory of a process it has already sent SIGKILL to.  We do not
+/// implement the actual page-reclaim path (that requires hooks into the
+/// MM reclaim machinery and a way to identify "this task has been
+/// killed, drop its anon pages"), so the syscall itself returns ENOSYS.
+///
+/// What we *can* do correctly is the input validation that runs before
+/// the page-reclaim step.  In particular the `pidfd` argument is a
+/// `HandleKind::PidFd` now that `pidfd_open` is wired (batch 124), so we
+/// must distinguish three cases the way Linux does:
+///   * `flags != 0`        — EINVAL (only `flags == 0` is defined).
+///   * `pidfd` not a pidfd — EBADF (matches Linux's `pidfd_get_pid`,
+///     which returns -EBADF when the file is not a pidfd).  Also
+///     EBADF when the fd doesn't exist or `caller_pid()` is None
+///     (no current process, e.g. kernel-context self-test).
+///   * `pidfd` is a real pidfd — ENOSYS (the operation itself is
+///     not implemented; surface a syscall-level error rather than an
+///     fd error so userspace can tell apart "kernel doesn't know
+///     `process_mrelease`" from "wrong fd type").
 fn sys_process_mrelease(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 != 0 {
         return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    if entry.kind != HandleKind::PidFd {
+        return linux_err(errno::EBADF);
     }
     linux_err(errno::ENOSYS)
 }
@@ -14922,8 +14954,19 @@ fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    // No real pidfd exists in our kernel.
-    linux_err(errno::EBADF)
+    // Distinguish "not a pidfd" (EBADF, matching Linux's pidfd_get_pid)
+    // from "valid pidfd, syscall not implemented" (ENOSYS) so callers
+    // can probe for process_madvise support without confusing it with
+    // a wrong-kind fd error.  HandleKind::PidFd became real in batch
+    // 124 (pidfd_open), so the all-EBADF answer is no longer truthful.
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    if entry.kind != HandleKind::PidFd {
+        return linux_err(errno::EBADF);
+    }
+    linux_err(errno::ENOSYS)
 }
 
 /// `cachestat(fd, cstat_range*, cstat*, flags)` — query page-cache
@@ -30419,14 +30462,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: process_mrelease(flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // process_mrelease(0,0) -> ENOSYS.
+        // process_mrelease(0,0) -> EBADF.
+        //
+        // Batch 133: with HandleKind::PidFd now real (pidfd_open lands
+        // a real fd in the caller's table), process_mrelease must
+        // distinguish "fd is not a pidfd" (EBADF) from "fd is a real
+        // pidfd, syscall not implemented" (ENOSYS).  In kernel-context
+        // self-test there is no caller PCB, so lookup_caller_fd returns
+        // EBADF — exactly the same answer userspace would see for a
+        // non-pidfd fd.  The ENOSYS path can only be exercised from a
+        // real userspace caller holding an actual pidfd; we cover it
+        // logically by code review here.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PROCESS_MRELEASE, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: process_mrelease not ENOSYS");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: process_mrelease(fd=0) not EBADF");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   process_mrelease pidfd discrimination: OK");
     }
 
     // Batch 113: fcntl(F_GETLK / F_SETLK / F_SETLKW) and OFD

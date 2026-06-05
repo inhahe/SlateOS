@@ -14924,3 +14924,64 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 ##      Serial confirms "[syscall/linux]   io_uring_enter/register
 ##      validation: OK".
+
+## 162. Linux ABI: process_mrelease(2) / process_madvise(2) pidfd-aware
+##      discrimination (batch 133).
+##
+##      Issue:  Both syscalls take a pidfd as their first argument.
+##              Pre-batch:
+##                * process_mrelease: validated flags then returned ENOSYS
+##                  unconditionally, ignoring the fd entirely.
+##                * process_madvise: validated iov/iovcnt/advice/flags
+##                  then `validate_linux_fd(fd)` then returned EBADF
+##                  unconditionally, with a comment claiming "no real
+##                  pidfd exists in our kernel."
+##              That comment became stale in batch 124 when pidfd_open
+##              landed `HandleKind::PidFd` in real callers' fd tables.
+##              Today a userspace program that opens a pidfd and tries
+##              process_madvise on it gets EBADF — the same answer it
+##              would get for a non-pidfd — making it impossible to
+##              distinguish "kernel doesn't implement the syscall"
+##              (ENOSYS) from "you passed the wrong kind of fd" (EBADF).
+##              process_mrelease was even worse: it returned ENOSYS for
+##              a bogus fd, hiding the descriptor error.
+##
+##      Fix:    Match Linux's `pidfd_get_pid` discrimination after fd
+##              validation:
+##                * Bad fd or non-pidfd kind -> EBADF (Linux returns
+##                  -EBADF for both cases from inside pidfd_get_pid).
+##                * Real pidfd -> ENOSYS, since neither syscall has a
+##                  real reclaim/advice path in this kernel yet.
+##              Implementation reuses the existing `lookup_caller_fd`
+##              helper (kernel-context callers see EBADF directly, same
+##              as userspace passing a non-pidfd — exactly the desired
+##              behaviour).
+##
+##      Self-tests (boot-time):
+##        * process_mrelease(fd=0, flags=1) -> EINVAL (unchanged).
+##        * process_mrelease(fd=0, flags=0) -> EBADF (was ENOSYS; new
+##          discrimination correctly reports the non-pidfd error from
+##          kernel-context lookup, matching what userspace would see
+##          for a non-pidfd fd).
+##        * process_madvise(fd=0, advice=0, flags=0) -> EBADF
+##          (unchanged: kernel-context lookup still returns EBADF
+##          before reaching the ENOSYS path).
+##
+##      Known limitations:
+##        * The "valid pidfd -> ENOSYS" branch cannot be exercised in a
+##          boot-time self-test because there is no caller PCB to hang
+##          a real pidfd off of.  Userspace callers holding a real
+##          pidfd from pidfd_open(2) will see ENOSYS.  Logical
+##          correctness is verified by code review against
+##          sys_pidfd_send_signal which uses the same pattern.
+##        * process_mrelease's actual semantics — drop the target
+##          task's anonymous memory after OOM-kill — require integration
+##          with the reclaim path.  process_madvise's semantics — apply
+##          MADV_* to another task's address space — require a
+##          cross-process VMA walk.  Both are non-trivial; ENOSYS lets
+##          systemd-oomd / earlyoom / glibc fall back to their pre-5.15
+##          paths.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   process_mrelease pidfd
+##      discrimination: OK".

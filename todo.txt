@@ -19573,3 +19573,52 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      with cap" path.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 244. [DONE 2026-06-05] Linux ABI: sys_migrate_pages pid lookup after
+##      mask copy + neg-pid ESRCH (not EINVAL).
+##
+##      Pre-batch sys_migrate_pages (kernel/src/syscall/linux.rs)
+##      rejected pid<0 with EINVAL at the very top of the function,
+##      before maxnode validation, mask copy, or any other gate.
+##      Linux `mm/mempolicy.c::kernel_migrate_pages` walks the gates
+##      in this order:
+##         get_nodes(&old, old_nodes, maxnode)   -> -EFAULT/-EINVAL
+##         get_nodes(&new, new_nodes, maxnode)   -> -EFAULT/-EINVAL
+##         task = pid ? find_task_by_vpid(pid) : current
+##         if (!task) return -ESRCH
+##         if (!ptrace_may_access(task, ...))    -> -EPERM
+##         ...
+##      find_task_by_vpid on a negative pid returns NULL too (the
+##      idr lookup is keyed on pid_t and out-of-range entries fail),
+##      so pid<0 yields ESRCH, not EINVAL.  Pre-batch divergences:
+##         (pid<0,   valid masks)  -> EINVAL vs Linux ESRCH
+##         (pid=99,  valid masks)  -> 0      vs Linux ESRCH
+##         (pid<0,   NULL old)     -> EINVAL vs Linux EFAULT
+##                                   (Linux runs get_nodes first)
+##
+##      Fix: remove the up-front pid<0 EINVAL gate.  After both mask
+##      copies succeed, look up the target task:
+##         if pid != 0 && pid != current_task_id() as i32 -> ESRCH
+##      We have no per-task tracking beyond `current` in the
+##      dispatch context, so every non-self pid resolves to NULL ->
+##      ESRCH (matches Linux's find_task_by_vpid NULL path).  When
+##      real task tracking lands, slot a ptrace_may_access EPERM
+##      gate between this ESRCH check and the new_mask intersection.
+##
+##      Self-tests added (continuing the (9h) migrate_pages block):
+##      - Case 7: (pid=u64::MAX, valid masks) -> ESRCH (was EINVAL).
+##      - Case 8: (pid=99999,    valid masks) -> ESRCH (was 0).
+##      - Case 9: (pid=u64::MAX, NULL old, valid new) -> EFAULT
+##                (mask EFAULT beats ESRCH per Linux order).
+##      Marker: "migrate_pages pid-lookup-after-mask / neg-pid ESRCH: OK".
+##
+##      Also updated the older neg-pid test at the bottom of the
+##      dispatch self-test (was labeled "neg pid -> EINVAL") to
+##      document that maxnode=0 now drives the EINVAL — neg-pid
+##      itself now yields ESRCH via the proper lookup path.
+##
+##      Known limitation: when CAP_SYS_NICE / ptrace EPERM lands,
+##      tests 7 and 8 will need privileged-task variants exercising
+##      the "task exists but can't be inspected" path.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

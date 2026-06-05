@@ -19934,5 +19934,67 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
+## 252. [DONE 2026-06-05] Linux ABI: sys_mount_setattr gate order — size E2BIG
+##      ahead of size EINVAL, attr=NULL EFAULT not EINVAL.
+##
+##      Linux fs/namespace.c::copy_mount_setattr() executes its
+##      validation in this literal statement order:
+##        1. `if (usize > PAGE_SIZE) return -E2BIG;`
+##        2. `if (usize < MOUNT_ATTR_SIZE_VER0) return -EINVAL;`
+##        3. `if (!may_mount()) return -EPERM;`
+##        4. `copy_struct_from_user(...)` — NULL `uattr` -> -EFAULT.
+##      The top-level SYSCALL_DEFINE5(mount_setattr) does the flag
+##      mask EINVAL check first, then calls copy_mount_setattr.
+##
+##      Pre-batch divergences:
+##      - (path=path_ptr, flags=0, attr=NULL, size=8192) returned
+##        EINVAL instead of E2BIG, because we collapsed
+##        (attr==NULL || size<VER0) into a single EINVAL gate that
+##        preceded the size>PAGE_SIZE check.  A probe that sends
+##        size=8192 to feature-detect copy_struct_from_user's E2BIG
+##        cap would see EINVAL and conclude no cap exists, then call
+##        with valid attr and observe E2BIG anyway.
+##      - (path=path_ptr, flags=0, attr=NULL, size=64) returned
+##        EINVAL instead of EFAULT.  Once the size gates pass, Linux
+##        forwards to copy_struct_from_user which surfaces NULL as
+##        EFAULT.  A probe checking EFAULT/EINVAL discriminators on
+##        NULL pointers (a common libc feature-detection technique)
+##        would see the wrong errno for the in-range size case.
+##
+##      Fix: reorder validation to mirror Linux's source statement
+##      order — flag mask EINVAL stays at the top, then size>PAGE_SIZE
+##      E2BIG, then size<VER0 EINVAL, then attr==NULL EFAULT, then
+##      validate_user_read, then copy_from_user, then attr_set/clr
+##      mask EINVAL, then atime exclusivity, then propagation.  Path
+##      validation is moved after copy_from_user to match Linux's
+##      order (user_path_at runs after copy_mount_setattr).
+##
+##      Self-tests added/updated (~line 41326):
+##      - Kept: (path, flags=0, attr, size=4097)         -> E2BIG.
+##      - New: (path, flags=0, attr=NULL, size=8192)     -> E2BIG
+##        (was EINVAL; demonstrates size-E2BIG ahead of NULL gate).
+##      - New: (path, flags=0, attr=NULL, size=64)       -> EFAULT
+##        (was EINVAL; demonstrates NULL surfaces as EFAULT once
+##         size is in range, matching copy_struct_from_user).
+##      - New: (path, flags=0, attr=NULL, size=16)       -> EINVAL
+##        (was EINVAL; confirms size-EINVAL still fires ahead of
+##         the NULL-EFAULT gate when size < VER0).
+##      - Kept: small size (16, valid attr)              -> EINVAL.
+##      - Kept: valid (size=32, valid attr)              -> ENOSYS.
+##      - Kept: bad flags                                -> EINVAL.
+##      Marker: "mount_setattr flags-EINVAL > size-E2BIG > size-EINVAL >
+##              NULL-EFAULT gate order: OK".
+##
+##      Known limitations: gate 3 (may_mount EPERM) is not modelled —
+##      we have no per-mount-ns capability gating yet.  Linux would
+##      return EPERM ahead of copy_struct_from_user for an unprivileged
+##      caller; we proceed straight to the user-pointer gate.  This
+##      affects only the (privileged-attr=NULL, size=in-range) case
+##      under a no-CAP_SYS_ADMIN process, where we'd return EFAULT
+##      where Linux returns EPERM.  Will be addressed once mount-ns
+##      capabilities land.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

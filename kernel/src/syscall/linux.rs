@@ -20663,27 +20663,45 @@ fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
     // AT_RECURSIVE=0x8000, AT_NO_AUTOMOUNT=0x800, AT_SYMLINK_NOFOLLOW=0x100,
     // AT_EMPTY_PATH=0x1000.
     const VALID: u32 = 0x8000 | 0x800 | 0x100 | 0x1000;
+    // Gate 1 (top-level): flag mask EINVAL.  Matches Linux
+    // fs/namespace.c::SYSCALL_DEFINE5(mount_setattr) which rejects
+    // unknown flag bits before doing anything else.
     if flags & !VALID != 0 {
         return linux_err(errno::EINVAL);
     }
-    if path != 0 {
-        if let Err(e) = validate_user_str(path) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // struct mount_attr is 32 bytes (attr_set, attr_clr, propagation, userns_fd).
-    if attr == 0 || size < 32 {
-        return linux_err(errno::EINVAL);
-    }
-    // Linux: `copy_struct_from_user` rejects size > PAGE_SIZE with
-    // -E2BIG.  Use the x86_64 Linux page size (4096) — userspace
-    // expects a fixed cap, not our 16 KiB internal page size.
+    // Gates 2-4 follow Linux `copy_mount_setattr()` literal statement
+    // order (fs/namespace.c):
+    //   1. `if (usize > PAGE_SIZE) return -E2BIG;`
+    //   2. `if (usize < MOUNT_ATTR_SIZE_VER0) return -EINVAL;`
+    //   3. `copy_struct_from_user(...)` — NULL `uattr` surfaces as -EFAULT.
+    // Prior to batch 223 we collapsed (attr==NULL || size<VER0) into a
+    // single EINVAL gate that preceded the size>PAGE_SIZE check, so:
+    //   * (attr=NULL, size=8192) returned EINVAL instead of E2BIG;
+    //   * (attr=NULL, size=64) returned EINVAL instead of EFAULT.
+    // Use the x86_64 Linux page size (4096) — userspace expects this
+    // fixed cap, not our 16 KiB internal frame size.
     const LINUX_PAGE_SIZE: u64 = 4096;
     if size > LINUX_PAGE_SIZE {
         return linux_err(errno::E2BIG);
     }
+    // struct mount_attr is 32 bytes (attr_set, attr_clr, propagation, userns_fd) —
+    // i.e. MOUNT_ATTR_SIZE_VER0 = 32.
+    if size < 32 {
+        return linux_err(errno::EINVAL);
+    }
+    if attr == 0 {
+        return linux_err(errno::EFAULT);
+    }
     if let Err(e) = crate::mm::user::validate_user_read(attr, 32) {
         return linux_err(linux_errno_for(e));
+    }
+    // Path validation happens after copy_mount_setattr in Linux (via
+    // user_path_at), so any string-pointer faults surface only once the
+    // attr-struct gates have all passed.
+    if path != 0 {
+        if let Err(e) = validate_user_str(path) {
+            return linux_err(linux_errno_for(e));
+        }
     }
     // Read struct mount_attr { __u64 attr_set, attr_clr, propagation,
     // userns_fd }.
@@ -41329,6 +41347,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mount_setattr size>PAGE_SIZE not E2BIG");
             return Err(KernelError::InternalError);
         }
+        // Batch 223 discriminator: (attr=NULL, size=8192) — Linux
+        // copy_mount_setattr() checks `usize > PAGE_SIZE` BEFORE NULL/access
+        // gates, so the size-E2BIG return must outrank attr=NULL.  Prior
+        // to batch 223 this returned EINVAL because the (attr==NULL ||
+        // size<VER0) collapsed gate ran first.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 8192, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr (NULL, size=8192) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 223 discriminator: (attr=NULL, size=64) — valid size range,
+        // so the size gates pass.  copy_struct_from_user then sees a NULL
+        // user pointer and Linux returns -EFAULT.  Prior to batch 223 we
+        // returned EINVAL for any NULL attr regardless of size.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 64, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr (NULL, size=64) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 223 discriminator: (attr=NULL, size=16) — size < VER0, so
+        // the size-EINVAL gate fires before NULL-EFAULT.  This confirms
+        // the EINVAL/EFAULT layering: only the in-range-but-NULL case
+        // surfaces as EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 16, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr (NULL, size=16) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
         // mount_setattr attr_set has bit outside MOUNT_ATTR_MASK -> EINVAL.
         // 0x400 is unallocated in the current MOUNT_ATTR_* space.
         let bad_attr_set: [u8; 32] = {
@@ -41433,6 +41485,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   mount_setattr attr validation: OK");
+        serial_println!(
+            "[syscall/linux]   mount_setattr flags-EINVAL > size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK"
+        );
 
         // fchmodat2 bad flag -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0o644, arg3: 0x800_0000, arg4: 0, arg5: 0 };

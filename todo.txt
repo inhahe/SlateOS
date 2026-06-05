@@ -17824,3 +17824,37 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 ##      Serial confirms marker in build/serial-test.txt.
+
+## 208. Batch 179: sys_clock_getres clockid gating
+##      ----------------------------------------------
+##      Linux's SYSCALL_DEFINE2(clock_getres) calls
+##      clockid_to_kclock and returns -EINVAL for unknown clockids
+##      BEFORE touching the user tp pointer.  Our stub returned
+##      1ns success for every clockid (including SGI_CYCLE=10 and
+##      garbage like 99) — a probe walking clockids would think
+##      our kernel supports the full set.
+##
+##      Implementation: add clockid in [0..=11] AND != 10 gate
+##      ahead of the existing NULL-permitted res-ptr write.
+##      Negative clockids (Linux's dynamic-CPU/posix-fd encoding)
+##      rejected as EINVAL — we don't implement any of them.
+##
+##      Self-tests added (5):
+##        * clock_getres(REALTIME, valid ptr) -> 0.
+##        * clock_getres(MONOTONIC, NULL) -> 0 (NULL permitted).
+##        * clock_getres(99, valid ptr) -> EINVAL (was 0 pre-batch).
+##        * clock_getres(SGI_CYCLE=10, valid ptr) -> EINVAL.
+##        * clock_getres(u64::MAX -> -1 i32, NULL) -> EINVAL
+##          (clockid check beats NULL-ok).
+##        * Emits "[syscall/linux]   clock_getres clockid gating: OK".
+##
+##      Known limitations:
+##        * Always returns 1ns resolution; Linux varies per clock
+##          (REALTIME_COARSE = jiffy resolution, etc.).  Acceptable
+##          since our hrtimer provides ns granularity uniformly.
+##        * Negative clockids that would be valid dynamic-CPU clocks
+##          in Linux (kthread_create_cpu encoding) are rejected
+##          here — no CPU clock subsystem to back them.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms marker in build/serial-test.txt.

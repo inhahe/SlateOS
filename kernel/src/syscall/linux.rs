@@ -21077,6 +21077,25 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
 ///
 /// We report 1 ns (the resolution our hrtimer reports in `now_ns`).
 fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
+    // Linux's `SYSCALL_DEFINE2(clock_getres)` (kernel/time/posix-timers.c):
+    //   kc = clockid_to_kclock(which_clock);
+    //   if (!kc) return -EINVAL;
+    //   error = kc->clock_getres(...);
+    //   if (!error && tp && put_timespec64(...)) error = -EFAULT;
+    // Pre-batch we skipped the clockid gate entirely — any clockid
+    // (including SGI_CYCLE=10 and 99/garbage) returned 1ns success.
+    // Linux returns EINVAL for unknown clockids before touching the
+    // user pointer.
+    let clockid = args.arg0;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid_i32 = clockid as i32;
+    // Valid posix clockids: 0..=9, 11. SGI_CYCLE(10) is reserved-
+    // not-implemented (clockid_to_kclock returns NULL).  Negative
+    // clockids encode dynamic-CPU/posix-fd clocks in Linux; we don't
+    // implement any of those, so reject them as EINVAL.
+    if !(0..=11).contains(&clockid_i32) || clockid_i32 == 10 {
+        return linux_err(errno::EINVAL);
+    }
     let res_ptr = args.arg1;
     if res_ptr == 0 {
         // Linux permits NULL — succeed without writing.
@@ -30255,6 +30274,61 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   clock_settime clockid/EOPNOTSUPP gating: OK"
+        );
+        // clock_getres — Linux gates on clockid first; we then return
+        // 1ns for any valid clockid. NULL res ptr is OK (no write).
+        let mut res_buf = [0u8; 16];
+        let res_ptr = res_buf.as_mut_ptr() as u64;
+        // Valid: REALTIME -> 0.
+        let a = SyscallArgs { arg0: 0, arg1: res_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_GETRES, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_getres REALTIME not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Valid + NULL res -> 0 (NULL permitted by Linux).
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_GETRES, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_getres MONOTONIC+NULL not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Bad clockid -> EINVAL (was 0 pre-batch).
+        let a = SyscallArgs { arg0: 99, arg1: res_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_GETRES, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_getres bad clockid not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // SGI_CYCLE(10) -> EINVAL.
+        let a = SyscallArgs { arg0: 10, arg1: res_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_GETRES, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_getres SGI_CYCLE not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Bad clockid + NULL res -> EINVAL (clockid check beats NULL ok).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_GETRES, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_getres neg clockid not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   clock_getres clockid gating: OK"
         );
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read
         // path used by chrony / ntpd / timedatectl.  Non-zero modes

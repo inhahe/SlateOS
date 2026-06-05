@@ -18441,3 +18441,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; first background boot run timed out (apparent
 ##      QEMU flake — no panic line in the output), re-run PASSED
 ##      (BOOT_OK at 23s).
+
+## 221. Linux ABI: bpf size-first / NULL-iff-size>0 / cmd-range
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's kernel/bpf/syscall.c::__sys_bpf gate order:
+##        1. bpf_check_uarg_tail_zero(uattr, sizeof(bpf_attr), size)
+##           - size > PAGE_SIZE -> E2BIG
+##           - size <= sizeof(attr) -> 0 (no buffer touch)
+##           - else: scan trailing bytes for zero
+##        2. copy_from_bpfptr(&attr, uattr, size) -> EFAULT.
+##           Crucially, copy with size=0 is a no-op success, so
+##           NULL is fine when size==0.
+##        3. switch (cmd) ... default -> EINVAL
+##
+##      Pre-batch sys_bpf had three divergences from Linux:
+##        a. cmd>64 was rejected with EINVAL BEFORE the size check,
+##           so a probe with (cmd=garbage, size=huge) saw EINVAL
+##           where Linux returns E2BIG.
+##        b. size==0 was rejected with EINVAL unconditionally; Linux
+##           treats it as a valid no-op copy (and the per-cmd handler
+##           decides whether the all-zero bpf_attr is acceptable).
+##        c. arg1==NULL was rejected with EFAULT even when size==0,
+##           so a probe doing bpf(cmd, NULL, 0) saw EFAULT where
+##           Linux's copy_from_bpfptr copies zero bytes successfully.
+##
+##      Fix: reorder so size -> NULL-iff-size>0 -> validate_user_read
+##      -> cmd-range -> ENOSYS.  Drop the unconditional size==0
+##      gate.
+##
+##      Self-tests updated / added (3 updated, 2 new):
+##        * BPF(0, NULL, 0) now expects ENOSYS (was EINVAL).
+##          Confirms size==0 + cmd-in-range + NULL is no longer
+##          short-circuited.
+##        * BPF(0, NULL, 8) -> EFAULT (unchanged).
+##        * BPF(0, attr, 8) -> ENOSYS (unchanged).
+##        * BPF(100, attr, 8) -> EINVAL (unchanged; cmd>64).
+##        * BPF(0, attr, 8192) -> E2BIG (unchanged).
+##        * BPF(100, NULL, 8192) -> E2BIG (new).  Confirms size check
+##          shadows the cmd-range gate.  Pre-batch this was EINVAL.
+##        * BPF(100, NULL, 0) -> EINVAL (new).  Confirms cmd-range
+##          fires after size + NULL gates when size==0.
+##      Marker emitted: "bpf size-first / NULL-iff-size>0 /
+##      cmd-range: OK".
+##
+##      Known limitations:
+##        * No real BPF dispatcher; valid cmds still terminate at
+##          ENOSYS.  Once the dispatcher lands, replace the cmd<=64
+##          forward-compat gate with an exact __MAX_BPF_CMD compare
+##          and surface per-cmd errnos (e.g. EINVAL for malformed
+##          attr, EPERM for missing CAP_BPF, etc.).
+##        * The "tail bytes must be zero" check Linux runs for
+##          size > sizeof(bpf_attr) is not modelled.  Once the real
+##          attr struct lands we should call the equivalent helper.
+##        * security_bpf LSM hook is not modelled (we have no LSM).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

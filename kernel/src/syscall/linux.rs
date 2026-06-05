@@ -11201,37 +11201,54 @@ fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
 
 /// `bpf(cmd, attr, size)`.
 fn sys_bpf(args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order in kernel/bpf/syscall.c::__sys_bpf:
+    //
+    //   1. bpf_check_uarg_tail_zero(uattr, sizeof(bpf_attr), size):
+    //        - size > PAGE_SIZE              -> -E2BIG
+    //        - size <= sizeof(attr)          -> 0  (no buffer touch)
+    //        - size > sizeof(attr): scan trailing bytes for zero
+    //          (EFAULT / E2BIG)
+    //   2. size = min(size, sizeof(attr))
+    //   3. memset(&attr, 0); copy_from_bpfptr(&attr, uattr, size)
+    //      -> -EFAULT.  Note: copy with size=0 is a no-op success,
+    //      so NULL is FINE when size=0.
+    //   4. switch (cmd) ... default -> -EINVAL
+    //
     // Linux 6.10 defines BPF_MAP_CREATE=0..BPF_TOKEN_CREATE=36 in
     // include/uapi/linux/bpf.h.  Cap at 64 for a forward-compat buffer
     // so future cmds added in 6.11+ aren't pre-rejected, but wildly
-    // bogus values surface EINVAL rather than ENOSYS.  When real BPF
-    // dispatch lands this cap should become an exact match against
-    // __MAX_BPF_CMD; for now we err on the side of accepting unknown
-    // cmds and surfacing ENOSYS from the dispatcher (matching what
-    // Linux does for known-but-unsupported-by-config cmds).
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let cmd = args.arg0 as i32;
-    if cmd < 0 || cmd > 64 {
-        return linux_err(errno::EINVAL);
-    }
+    // bogus values surface EINVAL rather than ENOSYS.
+    //
+    // Pre-batch divergences fixed here:
+    //   * size == 0 was rejected with EINVAL upfront, but Linux
+    //     treats size=0 as a valid no-op copy (and the per-cmd
+    //     handler decides whether the resulting all-zero bpf_attr
+    //     is acceptable).  Drop the unconditional gate.
+    //   * cmd > 64 was rejected BEFORE the size check, so a probe
+    //     with (cmd=garbage, size=huge) saw EINVAL where Linux
+    //     returns E2BIG.  Reorder so size fires first.
+    //   * arg1==NULL was rejected with EFAULT even when size==0,
+    //     so a probe doing bpf(cmd, NULL, 0) saw EFAULT where
+    //     Linux's copy_from_bpfptr happily copies zero bytes.
+    //     Skip the NULL check when size==0.
     let size = args.arg2 as usize;
-    if size == 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // Linux: bpf_attr buffer must be no larger than PAGE_SIZE.  Use the
-    // same 4096-byte bound as perf_event_open (see batch 136 note) for
-    // the same reason — userspace expects a fixed cap, not our 16 KiB
-    // page size.  E2BIG is the errno Linux uses (kernel/bpf/syscall.c:
-    // __sys_bpf rejects size > PAGE_SIZE with -E2BIG).
     const LINUX_PAGE_SIZE: usize = 4096;
     if size > LINUX_PAGE_SIZE {
         return linux_err(errno::E2BIG);
     }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
+    if size > 0 {
+        if args.arg1 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, size) {
+            return linux_err(linux_errno_for(e));
+        }
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, size) {
-        return linux_err(linux_errno_for(e));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd = args.arg0 as i32;
+    if cmd < 0 || cmd > 64 {
+        // Matches Linux's switch-default -> -EINVAL for unknown cmds.
+        return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
 }
@@ -32602,15 +32619,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // BPF / perf_event_open / keyring / userfaultfd / memfd / pidfd /
     // process_vm — input validation plus principled errno.
     {
-        // bpf(0, NULL, 0) -> EINVAL (size == 0).
+        // bpf(0, NULL, 0) -> ENOSYS: size==0 makes the NULL pointer
+        // a no-op (Linux's copy_from_bpfptr with size=0 doesn't touch
+        // the pointer), cmd=0 is in range, and the dispatcher hasn't
+        // landed, so we return ENOSYS.  Pre-batch we rejected size==0
+        // with EINVAL unconditionally — Linux's gate doesn't.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::BPF, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: bpf(size=0) not EINVAL");
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bpf(0,NULL,0) -> {} (want ENOSYS)",
+                dispatch_linux(nr::BPF, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
-        // bpf(0, NULL, 8) -> EFAULT.
+        // bpf(0, NULL, 8) -> EFAULT: size>0 makes the NULL pointer
+        // dereferencable, so the EFAULT gate fires.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::BPF, &a).value
@@ -32652,7 +32677,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: bpf(size=8192) not E2BIG");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   bpf cmd/size validation: OK");
+        // bpf(cmd=100, NULL, 8192) -> E2BIG: size check fires BEFORE
+        // the cmd-range gate, so the bogus cmd doesn't shadow the
+        // E2BIG.  Pre-batch this returned EINVAL (cmd-range was first).
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 8192, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bpf(cmd=100,NULL,8192) -> {} (want E2BIG)",
+                dispatch_linux(nr::BPF, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // bpf(cmd=100, NULL, 0) -> EINVAL: size=0 skips the NULL check,
+        // then the cmd-range gate fires.  This was EINVAL pre-batch
+        // too (via the size==0 gate) but for a different reason; the
+        // new path proves the cmd-range gate still works after the
+        // size-first reorder.
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bpf(cmd=100,NULL,0) -> {} (want EINVAL)",
+                dispatch_linux(nr::BPF, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   bpf size-first / NULL-iff-size>0 / cmd-range: OK"
+        );
         // perf_event_open(NULL,_,_,_,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

@@ -1962,6 +1962,24 @@ pub fn name(pid: ProcessId) -> Option<String> {
     table.get(&pid).map(|p| p.name.clone())
 }
 
+/// Install a new process "comm" name for `pid`, returning the previous
+/// name.
+///
+/// Linux's `PR_SET_NAME` semantics: the comm field is 16 bytes
+/// (`TASK_COMM_LEN`) including a trailing NUL, so the visible name is
+/// truncated to 15 bytes.  Trailing NULs (and anything after the first
+/// NUL) are not stored.  Callers should perform the byte-level NUL
+/// scan and UTF-8 validation before invoking this helper; this layer
+/// just persists the resulting string.
+///
+/// Returns `None` if `pid` is unknown.
+pub fn set_name(pid: ProcessId, new: String) -> Option<String> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = core::mem::replace(&mut proc.name, new);
+    Some(old)
+}
+
 // ---------------------------------------------------------------------------
 // IPC handle tracking
 // ---------------------------------------------------------------------------

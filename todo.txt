@@ -8777,4 +8777,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          path when we get exec wired up properly.
 ##          Track separately when execve grows real
 ##          semantics.
+##
+##   82. PR_SET_NAME / PR_GET_NAME backed by pcb.name
+##      (batch 56).
+##      Status: real round-trip; UTF-8 limitation
+##              documented.
+##
+##      Before batch 56, sys_prctl handled PR_SET_NAME
+##      (option 15) as "silent success that ignores the
+##      argument" and PR_GET_NAME (option 16) as "write 16
+##      zero bytes to the user buffer (or skip if NULL)".
+##      A program that did
+##           prctl(PR_SET_NAME, "worker");
+##           prctl(PR_GET_NAME, buf);
+##      would always see an empty comm, breaking strace
+##      output, systemd's "MainPID=" notification matching,
+##      and gdb's `info thread` (which all rely on
+##      per-thread comm).
+##
+##      What was done:
+##        - Added pcb::set_name(pid, new) -> Option<old>
+##          (parallel to pcb::name() lookup that already
+##          existed).  Stores the new String verbatim;
+##          truncation and NUL handling live at the
+##          syscall call-site so the helper stays generic.
+##        - Rewrote PR_SET_NAME:
+##           * Reads 16 bytes from user pointer via
+##             copy_from_user (validates the range,
+##             STAC/CLAC-guarded).
+##           * Truncates at first NUL or 15 bytes
+##             (Linux's TASK_COMM_LEN-1 = 15 visible chars,
+##             16th byte reserved for terminator).
+##           * Validates UTF-8 (see limitation below);
+##             non-UTF-8 -> EINVAL.
+##           * Calls pcb::set_name on caller_pid().
+##             Kernel context (no PCB) silently succeeds.
+##           * NULL user buffer: Linux behaviour is to
+##             ignore (no change, returns 0); we match.
+##        - Rewrote PR_GET_NAME:
+##           * NULL user buffer -> EFAULT (Linux returns
+##             EFAULT because copy_to_user fails on NULL;
+##             previously we returned 0 here, which was
+##             wrong).
+##           * Validates 16-byte writable user range.
+##           * Reads pcb::name(caller_pid) into a 16-byte
+##             zero-initialised buffer (16th byte stays
+##             NUL).  Truncates at 15 visible chars.
+##           * Kernel context: returns 16 zero bytes
+##             (matches what an unnamed task would see).
+##
+##      Self-test coverage:
+##        - prctl(PR_SET_NAME, NULL) -> 0 (silent ignore).
+##        - prctl(PR_GET_NAME, NULL) -> -EFAULT
+##          (replaces the old "returns 0" stub assertion).
+##        - PCB round-trip on a dummy PID: create("orig")
+##          reads back "orig"; set_name("new") returns
+##          "orig"; subsequent name() returns "new".
+##        - 15-byte truncation invariant: storing a
+##          15-char string (the pre-truncated form of a
+##          16-char input that PR_SET_NAME would chop)
+##          reads back unchanged.
+##
+##      Known limitations:
+##        - pcb.name is a Rust String, so we reject
+##          non-UTF-8 PR_SET_NAME inputs with EINVAL.
+##          Linux accepts arbitrary bytes (comm is a
+##          byte buffer, not a UTF-8 string).  Every
+##          userspace program we have seen sets ASCII
+##          comms, so this is observationally equivalent
+##          for real workloads — but it is a deviation.
+##          When the rest of the codebase migrates from
+##          String to Vec<u8> for OS-boundary names per
+##          CLAUDE.md, switch pcb.name to Vec<u8> and
+##          drop the UTF-8 validation here.
+##        - Per-thread comm: Linux gives each thread its
+##          own comm; we currently share the per-process
+##          PCB name across all threads.  When threads
+##          grow their own PCB-equivalent storage, route
+##          PR_SET_NAME/PR_GET_NAME to per-thread state
+##          instead.
+##        - PR_SET_NAME from kernel context is a no-op
+##          (we have no PCB to write).  The caller still
+##          gets a success return, which is the right
+##          observation since kernel-context callers
+##          never check the comm afterwards.
 

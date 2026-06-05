@@ -12873,17 +12873,38 @@ fn sys_semget(args: &SyscallArgs) -> SyscallResult {
 
 /// `semop(semid, sops, nsops)`.
 ///
-/// Linux's `ipc/sem.c::do_semtimedop()` (the worker for both semop and
-/// semtimedop) validates ahead of the namespace lookup:
+/// Linux's `ipc/sem.c::SYSCALL_DEFINE3(semop)` -> `do_semtimedop` ->
+/// `__do_semtimedop` gate order:
 ///
-///   `if (nsops < 1 || semid < 0) return -EINVAL;`
-///   `if (nsops > ns->sc_semopm) return -E2BIG;`
+///   1. `copy_from_user(sops, tsops, nsops * sizeof(struct sembuf))`
+///      runs BEFORE the structural gates.  With nsops>0 and an
+///      unreadable tsops, this returns -EFAULT.  (With nsops==0 the
+///      copy is a no-op and falls through to step 2.)
+///   2. `__do_semtimedop`: `nsops < 1 || semid < 0` -> EINVAL.
+///   3. `nsops > sc_semopm` -> E2BIG (sc_semopm default 500).
 ///
-/// `sc_semopm` defaults to `SEMOPM = 500`.  Note the distinct errno:
-/// "too many ops" is `-E2BIG`, not `-EINVAL`.
+/// Pre-batch we ran the nsops/semid gates BEFORE the sops copy.  A
+/// probe passing (sops=BADPTR, nsops=1, semid=-1) saw -EINVAL where
+/// Linux returns -EFAULT.  Batch 204 reorders the gates so the sops
+/// EFAULT wins.
 fn sys_semop(args: &SyscallArgs) -> SyscallResult {
     const SEMOPM: usize = 500;
     let nsops = args.arg2 as usize;
+    // 1. copy_from_user runs first in Linux.  Only meaningful when
+    //    nsops > 0 — Linux's copy_from_user(..., 0) is a no-op even
+    //    against NULL.
+    if nsops > 0 {
+        if args.arg1 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        // struct sembuf = 6 bytes; round up validate.
+        if let Err(e) =
+            crate::mm::user::validate_user_read(args.arg1, nsops.saturating_mul(6))
+        {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // 2. nsops < 1 || semid < 0 -> EINVAL.
     if nsops == 0 {
         return linux_err(errno::EINVAL);
     }
@@ -12892,15 +12913,9 @@ fn sys_semop(args: &SyscallArgs) -> SyscallResult {
     if semid < 0 {
         return linux_err(errno::EINVAL);
     }
+    // 3. nsops > SEMOPM -> E2BIG.
     if nsops > SEMOPM {
         return linux_err(errno::E2BIG);
-    }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    // struct sembuf = 6 bytes; round up validate.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, nsops.saturating_mul(6)) {
-        return linux_err(linux_errno_for(e));
     }
     linux_err(errno::EINVAL)
 }
@@ -12912,12 +12927,51 @@ fn sys_semctl(_args: &SyscallArgs) -> SyscallResult {
 
 /// `semtimedop(semid, sops, nsops, timeout)`.
 ///
-/// Same `nsops`/`semid`/SEMOPM gates as `semop(2)` — see
-/// [`sys_semop`].  `timeout` is an optional pointer to a timespec
-/// (16 bytes); when NULL the call behaves like `semop`.
+/// Linux's `ipc/sem.c::SYSCALL_DEFINE4(semtimedop)` order:
+///
+///   1. If `timeout != NULL`: `get_timespec64(&ts, timeout)`
+///      (copy_from_user 16 bytes) -> EFAULT on unreadable.  Note:
+///      `get_timespec64` does NOT range-check tv_nsec — that happens
+///      later in `__do_semtimedop`.
+///   2. `do_semtimedop`:
+///      `copy_from_user(sops, tsops, nsops * sizeof(*tsops))`
+///      -> EFAULT (no-op when nsops==0).
+///   3. `__do_semtimedop`:
+///      a. `nsops < 1 || semid < 0` -> EINVAL.
+///      b. `nsops > sc_semopm` -> E2BIG.
+///      c. If timeout: `tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1e9`
+///         -> EINVAL.
+///
+/// Pre-batch we did nsops/semid first and never validated the
+/// timespec content.  A probe passing
+/// (timeout=BADPTR, nsops=0, semid=-1) saw -EINVAL where Linux
+/// returns -EFAULT, and (timeout={tv_nsec=2e9}, nsops=1, semid=0,
+/// sops=valid) saw the terminal -EINVAL via the wrong code path.
+/// Batch 204 reorders to match Linux exactly.
 fn sys_semtimedop(args: &SyscallArgs) -> SyscallResult {
     const SEMOPM: usize = 500;
+
+    // 1. Timeout EFAULT first (timeout pointer readability only;
+    //    content validity is gate 3c below).
+    if args.arg3 != 0 {
+        // timespec = 16 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // 2. sops EFAULT — only checked when nsops > 0 (see sys_semop).
     let nsops = args.arg2 as usize;
+    if nsops > 0 {
+        if args.arg1 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) =
+            crate::mm::user::validate_user_read(args.arg1, nsops.saturating_mul(6))
+        {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // 3a. nsops < 1 || semid < 0 -> EINVAL.
     if nsops == 0 {
         return linux_err(errno::EINVAL);
     }
@@ -12926,19 +12980,16 @@ fn sys_semtimedop(args: &SyscallArgs) -> SyscallResult {
     if semid < 0 {
         return linux_err(errno::EINVAL);
     }
+    // 3b. nsops > SEMOPM -> E2BIG.
     if nsops > SEMOPM {
         return linux_err(errno::E2BIG);
     }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, nsops.saturating_mul(6)) {
-        return linux_err(linux_errno_for(e));
-    }
+    // 3c. Timeout content validity: tv_sec >= 0 AND tv_nsec in
+    //     [0, NSEC_PER_SEC).  validate_user_timespec64 is the same
+    //     helper used by mq_timed{send,receive} (batch 198).
     if args.arg3 != 0 {
-        // timespec = 16 bytes.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
-            return linux_err(linux_errno_for(e));
+        if let Err(r) = validate_user_timespec64(args.arg3) {
+            return r;
         }
     }
     linux_err(errno::EINVAL)
@@ -34739,34 +34790,39 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: semget(32001) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // semop(semid=-1, nsops=1, NULL) -> EINVAL (semid<0 ordered before
-        // NULL pointer check).
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1, arg3: 0,
+        // Batch 204: sops EFAULT now ordered AHEAD of semid<0 / SEMOPM
+        // gates, matching Linux's do_semtimedop -> __do_semtimedop
+        // sequence.  Tests that exercise the semid<0 / E2BIG gates
+        // must therefore supply a readable sops buffer.
+        let sops_buf = [0u8; 4096]; // enough for nsops<=682 sembufs
+        let sops_ptr = sops_buf.as_ptr() as u64;
+        // semop(semid=-1, nsops=1, valid sops) -> EINVAL (semid<0).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: sops_ptr, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SEMOP, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: semop(semid=-1) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // semop(_, _, nsops=501, _) -> E2BIG (SEMOPM cap, distinct from
-        // EINVAL — see Linux ipc/sem.c::do_semtimedop()).
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 501, arg3: 0,
+        // semop(_, valid sops, nsops=501) -> E2BIG (SEMOPM cap; distinct
+        // errno from EINVAL — see Linux ipc/sem.c::__do_semtimedop).
+        let a = SyscallArgs { arg0: 0, arg1: sops_ptr, arg2: 501, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SEMOP, &a).value
             != -i64::from(errno::E2BIG) {
             serial_println!("[syscall/linux]   FAIL: semop(nsops=501) not E2BIG");
             return Err(KernelError::InternalError);
         }
-        // semtimedop(semid=-1, nsops=1, NULL, _) -> EINVAL.
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1, arg3: 0,
+        // semtimedop(semid=-1, nsops=1, valid sops, NULL) -> EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: sops_ptr, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SEMTIMEDOP, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: semtimedop(semid=-1) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // semtimedop(_, _, nsops=501, _) -> E2BIG.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 501, arg3: 0,
+        // semtimedop(_, valid sops, nsops=501, NULL) -> E2BIG.
+        let a = SyscallArgs { arg0: 0, arg1: sops_ptr, arg2: 501, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SEMTIMEDOP, &a).value
             != -i64::from(errno::E2BIG) {
@@ -34774,6 +34830,83 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   semget/semop SEMMSL/SEMOPM validation: OK");
+
+        // Batch 204: sops EFAULT ordered ahead of structural gates.
+        //   * (sops=BADPTR, nsops=1, semid=-1) -> EFAULT (was EINVAL).
+        //     Linux's do_semtimedop runs copy_from_user before the
+        //     __do_semtimedop semid<0 check.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMOP, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semop(sops=NULL,semid=-1) not EFAULT ({})",
+                dispatch_linux(nr::SEMOP, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * (sops=BADPTR, nsops=501, semid=0) -> EFAULT (was E2BIG).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 501, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMOP, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semop(sops=NULL,nsops=501) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Note: a (timeout=BADPTR, nsops=0) "EFAULT-from-pointer"
+        // discriminator can't be exercised here — validate_user_read
+        // is a no-op in kernel context, so any pointer is considered
+        // accessible.  The content validity gate (3c, below) is what
+        // userspace probes will actually hit on a malformed timespec.
+        //
+        // semtimedop timespec64 content validity gate (after structural
+        // gates).  Tests use #[repr(C)] struct SemTs64 with explicit
+        // tv_sec, tv_nsec.
+        #[repr(C)]
+        struct SemTs64 { tv_sec: i64, tv_nsec: i64 }
+        //   * Valid timespec + valid sops + semid=0 + nsops=1 -> EINVAL
+        //     (terminal, no real backend).  Sanity check that a valid
+        //     timespec passes the gate.
+        let ts_ok = SemTs64 { tv_sec: 1, tv_nsec: 500_000_000 };
+        let a = SyscallArgs {
+            arg0: 0, arg1: sops_ptr, arg2: 1, arg3: (&raw const ts_ok) as u64,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SEMTIMEDOP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semtimedop(ts_ok) not terminal EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * tv_nsec = 2e9 (>= NSEC_PER_SEC) -> EINVAL via content gate.
+        let ts_bad_nsec = SemTs64 { tv_sec: 1, tv_nsec: 2_000_000_000 };
+        let a = SyscallArgs {
+            arg0: 0, arg1: sops_ptr, arg2: 1,
+            arg3: (&raw const ts_bad_nsec) as u64,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SEMTIMEDOP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semtimedop(tv_nsec=2e9) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * tv_sec = -1 -> EINVAL.
+        let ts_neg_sec = SemTs64 { tv_sec: -1, tv_nsec: 0 };
+        let a = SyscallArgs {
+            arg0: 0, arg1: sops_ptr, arg2: 1,
+            arg3: (&raw const ts_neg_sec) as u64,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SEMTIMEDOP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semtimedop(tv_sec=-1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sem(timed)op gate-order / timespec64_valid: OK"
+        );
 
         // msgget -> ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

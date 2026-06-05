@@ -19104,3 +19104,56 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          must read old attrs and copy_to_user when oldattr is set.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 233. [DONE 2026-06-05] Linux ABI: sem(timed)op gate-order + timespec64_valid.
+##      sys_semop and sys_semtimedop validated nsops/semid/SEMOPM
+##      BEFORE the sops EFAULT check, and sys_semtimedop never
+##      range-checked the timespec content.  Linux's
+##      ipc/sem.c::SYSCALL_DEFINE3(semop) / SYSCALL_DEFINE4(semtimedop)
+##      order:
+##        (1) If timeout: get_timespec64(timeout) -> EFAULT (pointer
+##            readability only; no content check).
+##        (2) do_semtimedop: copy_from_user(sops, tsops, nsops*6)
+##            -> EFAULT (no-op when nsops==0).
+##        (3) __do_semtimedop:
+##              a. nsops<1 || semid<0  -> EINVAL.
+##              b. nsops > sc_semopm   -> E2BIG.
+##              c. If timeout: tv_sec<0 || tv_nsec<0 || tv_nsec>=1e9
+##                 -> EINVAL.
+##      Pre-batch a probe with (sops=NULL, nsops=1, semid=-1) saw
+##      -EINVAL where Linux returns -EFAULT, and a probe with
+##      (timeout={tv_nsec=2e9}, ...) hit our terminal -EINVAL via
+##      the wrong code path.
+##
+##      Fix: reorder both functions to match Linux's gate sequence,
+##      and reuse validate_user_timespec64 (batch 198) for the
+##      content validity check.
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * (sops=NULL, nsops=1, semid=-1)   -> EFAULT (was EINVAL).
+##        * (sops=NULL, nsops=501)           -> EFAULT (was E2BIG).
+##        * (sops=valid, ts={tv_sec=1,
+##          tv_nsec=500e6})                  -> EINVAL terminal
+##          (sanity: valid timespec passes the content gate).
+##        * (sops=valid, ts={tv_nsec=2e9})   -> EINVAL via content gate.
+##        * (sops=valid, ts={tv_sec=-1})     -> EINVAL via content gate.
+##      Existing tests updated to use a 4 KiB stack sops buffer so the
+##      semid<0 EINVAL and nsops>SEMOPM E2BIG gates still fire
+##      cleanly.
+##      Marker emitted: "sem(timed)op gate-order / timespec64_valid: OK".
+##
+##      Known limitations:
+##        * The (timeout=BADPTR, nsops=0) -> EFAULT discriminator
+##          cannot be exercised from in-kernel self-tests because
+##          validate_user_read is a no-op in kernel context.  The
+##          gate is wired correctly; only the test coverage is
+##          deferred until userspace tests exist.
+##        * SEMOPM_FAST (=64 in Linux) isn't modelled here — we
+##          treat all nsops paths uniformly.  When the real semop
+##          backend lands and nsops>64 triggers a kvmalloc, the
+##          ENOMEM gate must be inserted between (2) and (3a) per
+##          Linux's do_semtimedop.
+##        * sc_semopm is hardcoded at 500 (Linux default).  Should
+##          come from the IPC namespace when namespaces land.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

@@ -17084,3 +17084,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      attempt passed).
 ##      Serial confirms "[syscall/linux]   iopl level=0 noop, >0
 ##      EPERM: OK" in build/serial-test.txt.
+
+
+## 194. Linux ABI: acct CAP_SYS_PACCT-first ordering.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_acct.
+##
+##      Problem: sys_acct validated the filename pointer (when
+##              non-NULL) via validate_user_str *before* returning
+##              the terminal EPERM.  Linux's
+##              kernel/acct.c::SYSCALL_DEFINE1(acct) is in the
+##              opposite order:
+##                if (!capable(CAP_SYS_PACCT))
+##                    return -EPERM;
+##                if (name) { tmp = getname(name); ... }
+##              The CAP check is the first gate.  We never grant
+##              CAP_SYS_PACCT, so a probe calling
+##              `acct(unmapped_or_kernel_ptr)` on Linux gets EPERM
+##              (the cap check fires before getname).  Our stub
+##              returned EFAULT from validate_user_str, leaking the
+##              "I would have read the path" signal to a fuzzer or
+##              ABI-shape detector — they could distinguish "EPERM
+##              because no cap" from "EFAULT because pointer bad"
+##              when Linux conflates both into EPERM.
+##
+##      Fix:    Drop the path validation entirely.  Return EPERM
+##              unconditionally.  The function now takes _args
+##              because the pointer is never inspected.
+##
+##      Self-tests (boot-time):
+##        * acct(NULL) -> EPERM  (kept).
+##        * acct("/var/log/acct") -> EPERM  (kept).
+##        * acct(0xffff_8000_0000_0000) -> EPERM  (new; kernel-
+##          space ptr — pre-batch returned EFAULT from
+##          validate_user_str).
+##        * acct(0xdead_beef_dead_beef) -> EPERM  (new; arbitrary
+##          junky ptr).
+##        * Emits "[syscall/linux]   acct CAP_SYS_PACCT first: OK".
+##
+##      Known limitations:
+##        * Real process accounting is not implemented.  If
+##          CAP_SYS_PACCT ever becomes grantable, the full Linux
+##          flow needs the getname/acct_on/putname dance and the
+##          per-superblock accounting hook.
+##        * Linux's acct also validates the path is a regular file
+##          (acct_on returns -EACCES for directories, -EROFS for
+##          read-only fs, etc.).  None of that is reachable here
+##          because we never get past the cap check.
+##        * Linux 5.9+ deprecated the per-process accounting subsystem
+##          in favour of cgroup-based bookkeeping; new code is
+##          expected to use cgroups instead.  Our EPERM matches what
+##          a kernel built without CONFIG_BSD_PROCESS_ACCT returns,
+##          which is the safest "this feature is gone" signal.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   acct CAP_SYS_PACCT
+##      first: OK" in build/serial-test.txt.

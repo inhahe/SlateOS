@@ -17615,14 +17615,24 @@ fn sys_mlock2(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `acct(filename*)`.
-fn sys_acct(args: &SyscallArgs) -> SyscallResult {
-    // NULL = disable process accounting.  Non-NULL = enable with given
-    // file.  Either way, requires CAP_SYS_PACCT which we don't expose.
-    if args.arg0 != 0 {
-        if let Err(e) = validate_user_str(args.arg0) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+///
+/// Linux's `kernel/acct.c::SYSCALL_DEFINE1(acct)` checks
+/// `CAP_SYS_PACCT` *first*, before any path lookup:
+///   if (!capable(CAP_SYS_PACCT)) return -EPERM;
+///   if (name) { tmp = getname(name); ... }
+///
+/// We never grant CAP_SYS_PACCT, so the EPERM branch is always taken.
+/// That means a probe calling `acct(bad_ptr)` on Linux sees EPERM —
+/// not EFAULT — because the path validation never runs.  Our pre-batch
+/// stub validated the path first and returned EFAULT for a bad
+/// pointer, leaking a "Linux would have skipped this check" signal to
+/// fuzzers and ABI detectors.  Reverse the order to match Linux: cap
+/// check is the terminal, and it fires before any pointer is
+/// touched.  Both `acct(NULL)` (disable) and `acct(path)` (enable)
+/// surface EPERM uniformly, regardless of pointer shape.
+fn sys_acct(_args: &SyscallArgs) -> SyscallResult {
+    // CAP_SYS_PACCT is not granted to userspace; matches Linux's
+    // capable() failure path which is the first gate in the syscall.
     linux_err(errno::EPERM)
 }
 
@@ -36404,6 +36414,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: acct path not EPERM");
             return Err(KernelError::InternalError);
         }
+        // acct with bogus pointer -> EPERM (cap check is first per Linux
+        // ordering — pre-batch this returned EFAULT from the path
+        // validation, leaking the "I would have validated" signal).
+        let a = SyscallArgs {
+            arg0: 0xffff_8000_0000_0000u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ACCT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: acct kptr not EPERM (cap-first ordering)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // acct with arbitrarily junky high arg also EPERM uniformly.
+        let a = SyscallArgs {
+            arg0: 0xdead_beef_dead_beefu64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ACCT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: acct junk ptr not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   acct CAP_SYS_PACCT first: OK"
+        );
 
         // ustat NULL buf -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

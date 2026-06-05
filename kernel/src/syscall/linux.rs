@@ -12058,14 +12058,19 @@ fn sys_swapoff(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `reboot(magic1, magic2, cmd, arg)`.
-fn sys_reboot(args: &SyscallArgs) -> SyscallResult {
-    // Linux requires magic1 = LINUX_REBOOT_MAGIC1 (0xfee1dead)
-    // and magic2 in a fixed set (672274793 etc.).  We refuse all
-    // reboots from userspace for now.
-    const MAGIC1: u64 = 0xfee1_dead;
-    if args.arg0 != MAGIC1 {
-        return linux_err(errno::EINVAL);
-    }
+///
+/// Linux's `kernel/reboot.c::SYSCALL_DEFINE4(reboot)` checks
+/// `capable(CAP_SYS_BOOT)` *before* validating the magic numbers, so
+/// an unprivileged caller passing `magic1=0` sees -EPERM, not -EINVAL.
+/// This kernel exposes no path to acquiring `CAP_SYS_BOOT` from
+/// userspace, so every caller is unprivileged: the truthful, Linux-
+/// shaped answer is EPERM unconditionally.
+///
+/// Pre-batch-143 we returned EINVAL when `magic1 != 0xfee1dead`, which
+/// leaked the magic-number sanity check to unprivileged callers — a
+/// deviation from Linux's intentional design of denying that
+/// information to non-root.  Now matches Linux exactly.
+fn sys_reboot(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
@@ -31384,12 +31389,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // reboot with bad magic1 -> EINVAL.
+        // reboot with bad magic1 -> EPERM (Linux's CAP_SYS_BOOT check
+        // runs *before* the magic validation, so unprivileged callers
+        // see EPERM regardless of magic — see batch 143 / todo 172).
         let a = SyscallArgs { arg0: 0xdead, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::REBOOT, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: reboot(bad magic) not EINVAL");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: reboot(bad magic) not EPERM");
             return Err(KernelError::InternalError);
         }
         // reboot with valid magic -> EPERM.
@@ -31400,6 +31407,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: reboot not EPERM");
             return Err(KernelError::InternalError);
         }
+        // reboot(0,0,0,0) -> EPERM (every arg shape collapses to EPERM
+        // now that the magic gate doesn't run for non-CAP_SYS_BOOT
+        // callers).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REBOOT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: reboot(0,0,0,0) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   reboot EPERM ordering: OK");
 
         // syslog(99) -> EINVAL.
         let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,

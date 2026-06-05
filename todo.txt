@@ -15434,3 +15434,40 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   quotactl type validation:
 ##      OK" at line 440 of build/serial-test.txt.
 
+## 172. Linux ABI: reboot(2) EPERM ordering bugfix
+##      (Batch 143, 2026-06-05)
+##
+##      Issue:  sys_reboot returned -EINVAL when `magic1 != 0xfee1dead`
+##              and only fell through to -EPERM for the right magic.
+##              Linux's kernel/reboot.c::SYSCALL_DEFINE4(reboot) does
+##              the opposite: `capable(CAP_SYS_BOOT)` runs *before*
+##              magic validation, so an unprivileged caller passing
+##              magic1=0 sees -EPERM, not -EINVAL.  This is Linux's
+##              intentional design — denying that information to
+##              non-root keeps unprivileged code from confirming the
+##              syscall accepts the documented magic constants.
+##
+##      Fix:    sys_reboot now returns EPERM unconditionally.  This
+##              kernel exposes no path to acquiring CAP_SYS_BOOT from
+##              userspace, so every caller is unprivileged in Linux's
+##              model — EPERM is the truthful, Linux-shaped answer for
+##              any reboot(2) shape.
+##
+##      Self-tests (boot-time):
+##        * reboot(0xdead,0,0,0) -> EPERM (previously asserted EINVAL).
+##        * reboot(0xfee1dead,0,0,0) -> EPERM (unchanged).
+##        * reboot(0,0,0,0) -> EPERM (new: every shape collapses to
+##          EPERM).
+##        * Emits "[syscall/linux]   reboot EPERM ordering: OK".
+##
+##      Known limitations:
+##        * Once we add a proper CAP_SYS_BOOT capability and a system
+##          shutdown path that consumes it, the EPERM-unconditional
+##          stub will need to switch to: check CAP_SYS_BOOT first,
+##          then magic1/magic2, then cmd switch, mirroring Linux's
+##          ordering.  Until then EPERM is correct.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   reboot EPERM ordering: OK"
+##      at line 441 of build/serial-test.txt.
+

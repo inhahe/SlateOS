@@ -10762,9 +10762,31 @@ fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
 
 /// `bpf(cmd, attr, size)`.
 fn sys_bpf(args: &SyscallArgs) -> SyscallResult {
+    // Linux 6.10 defines BPF_MAP_CREATE=0..BPF_TOKEN_CREATE=36 in
+    // include/uapi/linux/bpf.h.  Cap at 64 for a forward-compat buffer
+    // so future cmds added in 6.11+ aren't pre-rejected, but wildly
+    // bogus values surface EINVAL rather than ENOSYS.  When real BPF
+    // dispatch lands this cap should become an exact match against
+    // __MAX_BPF_CMD; for now we err on the side of accepting unknown
+    // cmds and surfacing ENOSYS from the dispatcher (matching what
+    // Linux does for known-but-unsupported-by-config cmds).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd = args.arg0 as i32;
+    if cmd < 0 || cmd > 64 {
+        return linux_err(errno::EINVAL);
+    }
     let size = args.arg2 as usize;
     if size == 0 {
         return linux_err(errno::EINVAL);
+    }
+    // Linux: bpf_attr buffer must be no larger than PAGE_SIZE.  Use the
+    // same 4096-byte bound as perf_event_open (see batch 136 note) for
+    // the same reason — userspace expects a fixed cap, not our 16 KiB
+    // page size.  E2BIG is the errno Linux uses (kernel/bpf/syscall.c:
+    // __sys_bpf rejects size > PAGE_SIZE with -E2BIG).
+    const LINUX_PAGE_SIZE: usize = 4096;
+    if size > LINUX_PAGE_SIZE {
+        return linux_err(errno::E2BIG);
     }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
@@ -30207,6 +30229,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: bpf not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // bpf(cmd=100, attr, 8) -> EINVAL (cmd > forward-compat cap of 64).
+        let a = SyscallArgs {
+            arg0: 100,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: bpf(cmd=100) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // bpf(0, attr, 8192) -> E2BIG (size > PAGE_SIZE).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8192, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: bpf(size=8192) not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   bpf cmd/size validation: OK");
         // perf_event_open(NULL,_,_,_,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

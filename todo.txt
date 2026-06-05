@@ -15149,3 +15149,55 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   perf_event_open validation
 ##      gates: OK".
 
+## 166. Linux ABI: bpf(2) cmd/size validation hygiene
+##      (Batch 137, 2026-06-05)
+##
+##      Issue:  sys_bpf only validated (size==0 -> EINVAL) and (attr
+##              NULL+nonzero size -> EFAULT) before falling through to
+##              ENOSYS.  Userspace probes that pass a wildly-out-of-
+##              range cmd, or an oversized attr struct, expected EINVAL/
+##              E2BIG (matching Linux's __sys_bpf which range-checks
+##              cmd against __MAX_BPF_CMD and caps size at PAGE_SIZE).
+##              Our handler instead reported ENOSYS, which made probes
+##              think the syscall was missing.
+##
+##      Fix:    Added an early-gate ladder in sys_bpf:
+##                * cmd as i32: cmd < 0 || cmd > 64 -> EINVAL
+##                  (forward-compat cap: Linux 6.10's __MAX_BPF_CMD is
+##                  ~36; we leave headroom to 64 so future cmds don't
+##                  hit EINVAL here while still gating clearly bogus
+##                  values like 0x10000+).
+##                * size == 0 -> EINVAL (preserved).
+##                * size > 4096 -> E2BIG (Linux x86_64 PAGE_SIZE).
+##                * attr == NULL -> EFAULT (preserved).
+##                * validate_user_read(attr, size) -> EFAULT on bad
+##                  range.
+##                * After all gates pass -> ENOSYS.
+##
+##      Self-tests (boot-time, in the BPF/perf/userfaultfd block):
+##        * bpf(0, NULL, 0) -> EINVAL (size=0; unchanged).
+##        * bpf(0, NULL, 8) -> EFAULT (NULL attr; unchanged).
+##        * bpf(0, attr, 8) -> ENOSYS (valid attr, valid cmd; unchanged).
+##        * bpf(cmd=100, attr, 8) -> EINVAL (cmd > 64 cap).
+##        * bpf(0, attr, 8192) -> E2BIG (size > Linux PAGE_SIZE).
+##        * Emits "[syscall/linux]   bpf cmd/size validation: OK".
+##
+##      Known limitations:
+##        * The cmd > 64 cap is a soft forward-compat buffer, not a hard
+##          spec.  When real bpf cmds land we'll switch to a precise
+##          per-cmd switch; until then 64 keeps any conformance probe
+##          happy while still rejecting trash.
+##        * Like the perf gate, the size cap uses Linux's x86_64
+##          PAGE_SIZE (4096) rather than our internal 16 KiB.  Userspace
+##          probes that grow attr up to PAGE_SIZE-1 will work; a probe
+##          that specifically probes 4097-byte attrs to detect 16 KiB
+##          pages will see E2BIG — acceptable per the perf rationale.
+##        * validate_user_read is permissive in kernel context, so the
+##          self-test for "bad-range EFAULT" only triggers from real
+##          userspace (matches the io_uring/perf pattern documented in
+##          entries 161/165).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 21s).
+##      Serial confirms "[syscall/linux]   bpf cmd/size validation: OK"
+##      at line 433 of build/serial-test.txt.
+

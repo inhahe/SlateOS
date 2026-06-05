@@ -20256,5 +20256,44 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 258. [DONE 2026-06-05] Linux ABI: sys_mount_setattr forward-compat trailing-
+##      zero E2BIG check — extends the pattern from batches 227/228 to
+##      fs/namespace.c::copy_mount_setattr.
+##
+##      Linux's copy_mount_setattr calls
+##      copy_struct_from_user(&attr, sizeof(attr), uattr, usize) with
+##      ksize = sizeof(struct mount_attr) = 32.  When usize > 32,
+##      copy_struct_from_user walks bytes [32, usize) and returns
+##      -E2BIG on the first non-zero byte.
+##
+##      Pre-batch divergence:
+##      - (uattr=40-byte buffer with byte[32]=1, size=40) returned
+##        the attr-validation result (typically ENOSYS) where Linux
+##        returns E2BIG.  Same shape as the openat2 (batch 227) and
+##        clone3 (batch 228) limitations.
+##
+##      Fix: after the existing copy_from_user(buf, 32), when
+##      `size > 32` walk the trailing `size - 32` bytes in 64-byte
+##      chunks via copy_from_user and return E2BIG on the first
+##      non-zero byte.  Insertion point is right after the struct
+##      read, before any field validation — matches the order of
+##      Linux's copy_struct_from_user, which does the trailing-zero
+##      walk before the field-level interpretation.
+##
+##      Self-tests added (~line 41472):
+##      - mount_setattr size=40 (zero pad)        -> ENOSYS  (confirms
+##                                                 forward-compat
+##                                                 sizes still work).
+##      - mount_setattr size=40 (byte[32]=1)      -> E2BIG   (was
+##                                                 ENOSYS).
+##      Marker: "mount_setattr forward-compat trailing-zero E2BIG: OK".
+##
+##      Known limitations: trailing bytes are read in 64-byte chunks
+##      via copy_from_user.  Worst case (size = PAGE_SIZE = 4096) is
+##      ~63 STAC/CLAC pairs.  Same shape as openat2/clone3 — see
+##      entries 256/257.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

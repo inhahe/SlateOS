@@ -20873,6 +20873,47 @@ fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
     } {
         return linux_err(linux_errno_for(e));
     }
+
+    // Forward-compat zero check (batch 229).  Linux's
+    // `copy_struct_from_user` (used inside fs/namespace.c::
+    // copy_mount_setattr) walks the bytes in `[sizeof(struct
+    // mount_attr), usize)` and returns -E2BIG if any trailing byte
+    // is non-zero — the canonical signal a probe expects when it's
+    // trying to use a newer ABI field the running kernel doesn't
+    // recognise.  Pre-batch 229 we silently ignored bytes past
+    // offset 32.  A probe with (size=40, byte[32]=1) saw the call
+    // succeed (returning the attr-validation result) where Linux
+    // returns E2BIG.  Same pattern fixed in batch 227 (openat2) and
+    // batch 228 (clone3).
+    const MOUNT_ATTR_KSIZE: u64 = 32;
+    if size > MOUNT_ATTR_KSIZE {
+        let excess_addr = attr.wrapping_add(MOUNT_ATTR_KSIZE);
+        #[allow(clippy::cast_possible_truncation)]
+        let excess_len = (size - MOUNT_ATTR_KSIZE) as usize;
+        if let Err(e) = crate::mm::user::validate_user_read(excess_addr, excess_len) {
+            return linux_err(linux_errno_for(e));
+        }
+        let mut chunk = [0u8; 64];
+        let mut off: usize = 0;
+        while off < excess_len {
+            let take = core::cmp::min(64, excess_len - off);
+            // SAFETY: validate_user_read above confirmed `excess_len`
+            // bytes are readable at `excess_addr`.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_from_user(
+                    excess_addr.wrapping_add(off as u64),
+                    chunk.as_mut_ptr(),
+                    take,
+                )
+            } {
+                return linux_err(linux_errno_for(e));
+            }
+            if chunk[..take].iter().any(|&b| b != 0) {
+                return linux_err(errno::E2BIG);
+            }
+            off += take;
+        }
+    }
     let attr_set = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
         Ok(b) => b,
         Err(_) => return linux_err(errno::EINVAL),
@@ -41860,6 +41901,39 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[syscall/linux]   mount_setattr attr validation: OK");
         serial_println!(
             "[syscall/linux]   mount_setattr flags-EINVAL > size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK"
+        );
+        // Batch 229 forward-compat: mount_setattr size=40 with all-
+        // zero trailing 8 bytes -> ENOSYS (same as size=32).  Linux
+        // accepts forward-compatible sizes in [VER0, PAGE_SIZE]
+        // provided the trailing bytes are all zero.
+        let mount_attr_pad_zero = [0u8; 40];
+        let mount_attr_pad_zero_ptr = mount_attr_pad_zero.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0,
+            arg3: mount_attr_pad_zero_ptr, arg4: 40, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr size=40 (zero pad) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 229 discriminator: mount_setattr size=40 with
+        // byte[32]=1 -> E2BIG.  Linux's copy_struct_from_user checks
+        // bytes [32, 40) are all zero and returns -E2BIG on the
+        // first non-zero byte.  Pre-batch we silently ignored
+        // trailing bytes and returned ENOSYS.
+        let mut mount_attr_pad_nonzero = [0u8; 40];
+        mount_attr_pad_nonzero[32] = 1;
+        let mount_attr_pad_nonzero_ptr = mount_attr_pad_nonzero.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0,
+            arg3: mount_attr_pad_nonzero_ptr, arg4: 40, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr size=40 (byte[32]=1) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mount_setattr forward-compat trailing-zero E2BIG: OK"
         );
 
         // fchmodat2 bad flag -> EINVAL.

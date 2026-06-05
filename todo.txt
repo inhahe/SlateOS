@@ -15469,5 +15469,58 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   reboot EPERM ordering: OK"
+##      at line 442 of build/serial-test.txt.
+
+## 173. Linux ABI: swapon(2) swap_flags validation ordering
+##      (Batch 144, 2026-06-05)
+##
+##      Issue:  sys_swapon validated only that the path pointer was
+##              non-NULL and readable, then returned EPERM.  Linux's
+##              mm/swapfile.c::SYSCALL_DEFINE2(swapon) checks the
+##              swap_flags mask against SWAP_FLAGS_VALID *before* the
+##              CAP_SYS_ADMIN gate, so an unprivileged caller passing a
+##              junk flag bit sees -EINVAL ahead of the -EPERM that
+##              would otherwise apply.  A probe passing
+##              swapflags=0x8000_0000 saw EPERM where Linux gives
+##              EINVAL, masking the flag-bit gate from feature detection.
+##
+##      Fix:    Added the SWAP_FLAGS_VALID gate at the top of
+##              sys_swapon:
+##                const SWAP_FLAGS_VALID: u64 = 0x7_FFFF;
+##                if args.arg1 & !SWAP_FLAGS_VALID != 0 {
+##                    return linux_err(errno::EINVAL);
+##                }
+##              The mask is the union of:
+##                * SWAP_FLAG_PRIO_MASK     = 0x7FFF (priority 0..32767)
+##                * SWAP_FLAG_PREFER        = 0x8000
+##                * SWAP_FLAG_DISCARD       = 0x10000
+##                * SWAP_FLAG_DISCARD_ONCE  = 0x20000
+##                * SWAP_FLAG_DISCARD_PAGES = 0x40000
+##              Valid flag combinations still fall through to the
+##              existing NULL/EFAULT path and finally EPERM.
+##
+##      Self-tests (boot-time):
+##        * swapon(path, 0) -> EPERM (valid empty flags).
+##        * swapon(path, 0x8000_0000) -> EINVAL (bit 31 outside mask).
+##        * swapon(path, 0x8000|5) -> EPERM (PREFER + prio=5, valid).
+##        * swapoff(path) -> EPERM (unchanged).
+##        * Emits "[syscall/linux]   swapon flags validation: OK".
+##
+##      Known limitations:
+##        * The priority value within SWAP_FLAG_PRIO_MASK is not
+##          separately validated.  Linux's only enforced upper bound
+##          is the mask itself (0..0x7FFF), so any value that fits in
+##          15 bits is accepted and we honour the same envelope.
+##        * Once a real swap subsystem lands, the post-validation
+##          path will need: VFS path resolution, file-vs-blockdev
+##          discrimination, swap signature read, and the actual
+##          CAP_SYS_ADMIN check.  Until then EPERM is correct for
+##          every flag-valid call shape.
+##        * sys_swapoff is unchanged — Linux's path validation for it
+##          is just `getname(specialfile)` which short-circuits to
+##          EFAULT/EPERM the same way our stub does.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   swapon flags validation: OK"
 ##      at line 441 of build/serial-test.txt.
 

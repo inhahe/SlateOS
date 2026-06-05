@@ -12036,7 +12036,24 @@ fn sys_pivot_root(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `swapon(path, swapflags)`.
+///
+/// Linux's `mm/swapfile.c::SYSCALL_DEFINE2(swapon)` validates the
+/// swap_flags mask *before* the CAP_SYS_ADMIN check, so an
+/// unprivileged caller passing a junk flag bit sees -EINVAL ahead of
+/// the -EPERM that would otherwise apply.  Match that order here.
+///
+/// Valid swap_flags (Linux 6.10):
+///   * `SWAP_FLAG_PRIO_MASK = 0x7FFF` — priority value (0..32767).
+///   * `SWAP_FLAG_PREFER    = 0x8000` — honour the priority value.
+///   * `SWAP_FLAG_DISCARD   = 0x10000`
+///   * `SWAP_FLAG_DISCARD_ONCE  = 0x20000`
+///   * `SWAP_FLAG_DISCARD_PAGES = 0x40000`
+/// Union = `0x7_FFFF` (`SWAP_FLAGS_VALID`).
 fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
+    const SWAP_FLAGS_VALID: u64 = 0x7_FFFF;
+    if args.arg1 & !SWAP_FLAGS_VALID != 0 {
+        return linux_err(errno::EINVAL);
+    }
     if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -31374,7 +31391,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // swapon(path) -> EPERM.
+        // swapon(path, 0) -> EPERM (valid flags, EPERM path).
         let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SWAPON, &a).value
@@ -31382,12 +31399,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: swapon not EPERM");
             return Err(KernelError::InternalError);
         }
+        // swapon(path, bad flag bit) -> EINVAL (Linux validates flags
+        // before the privilege check; see todo 173).  Bit 31 is
+        // outside SWAP_FLAGS_VALID (0x7_FFFF).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x8000_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SWAPON, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: swapon(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // swapon(path, valid PREFER+priority) -> EPERM (flags valid).
+        let a = SyscallArgs { arg0: 0x1000,
+            arg1: 0x8000 | 5,  // SWAP_FLAG_PREFER | priority=5
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SWAPON, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: swapon(prefer+prio) not EPERM");
+            return Err(KernelError::InternalError);
+        }
         // swapoff(path) -> EPERM.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SWAPOFF, &a).value
             != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: swapoff not EPERM");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   swapon flags validation: OK");
 
         // reboot with bad magic1 -> EPERM (Linux's CAP_SYS_BOOT check
         // runs *before* the magic validation, so unprivileged callers

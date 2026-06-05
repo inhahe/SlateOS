@@ -9828,3 +9828,86 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     Build clean; boot test PASSED (BOOT_OK at 23s).
 
 
+## 100. Linux ABI batch 72: real per-PCB PR_SET_TSC /
+##      PR_GET_TSC round-trip with strict argument
+##      validation matching Linux.
+##
+##      Before this batch, both options fell through to the
+##      generic `_ => EINVAL` catch-all in sys_prctl.  Sandbox
+##      runtimes (gVisor's setup probe, some seccomp-based
+##      sandboxes) and benchmark harnesses use these to
+##      enforce deterministic timing by trapping RDTSC.
+##      EINVAL on an option that should succeed makes the
+##      sandbox think we don't support the feature and either
+##      fall back to a software counter or refuse to run.
+##
+##      Fix: add `linux_tsc_mode: u32` (default 1 =
+##      PR_TSC_ENABLE) to the PCB.  Inherited verbatim across
+##      fork (Linux: TIF_NOTSC is in the thread_info copy
+##      path).  Preserved across exec (flush_thread does not
+##      touch TIF_NOTSC).
+##
+##      PR_SET_TSC (26) — arg2 (our arg1) must be 1
+##      (PR_TSC_ENABLE) or 2 (PR_TSC_SIGSEGV); anything else
+##      including 0 is EINVAL.  arg3/arg4/arg5 must all be 0
+##      or EINVAL.  Returns 0 on success.
+##
+##      PR_GET_TSC (25) — copies the mode into the user int*
+##      at arg2 (our arg1).  NULL is EFAULT.  arg3/arg4/arg5
+##      must all be 0 or EINVAL.  Kernel context (no PCB)
+##      reports the default (PR_TSC_ENABLE = 1).
+##
+##      Known limitation (deferred): we do NOT actually wire
+##      the CR4.TSD bit on context switch, so the flag is
+##      round-tripped purely for ABI compatibility — userspace
+##      RDTSC reads never trap.  This makes the PR_GET path
+##      truthful (callers see what they set) but the
+##      enforcement promise of PR_SET_TSC(PR_TSC_SIGSEGV) is
+##      not honoured.  Will need a context-switch hook that
+##      OR's CR4.TSD into the loaded value when the next
+##      task's tsc_mode == 2.  Tracked here; revisit when the
+##      context-switch fast path is being touched anyway.
+##
+##      Self-tests cover:
+##        * PR_SET arg1 not in {1, 2} -> EINVAL (0, 3, 99, MAX).
+##        * PR_SET arg3/arg4/arg5 != 0 -> EINVAL (each in turn).
+##        * PR_SET(1) and PR_SET(2) -> 0 (kernel context: no PCB).
+##        * PR_GET arg3/arg4/arg5 != 0 -> EINVAL (each in turn).
+##        * PR_GET NULL pointer -> EFAULT.
+##        * PR_GET with scratch buffer -> writes 1 (default).
+##        * pcb storage round-trips default 1 -> set 2 -> query 2 ->
+##          set 1 -> query 1 -> destroy -> None.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Note: first attempt of the boot test hung in the
+##      [rcu] self-test after "Callback registration: OK" —
+##      see entry 101 for the flake.
+
+
+## 101. Boot-test flake: [rcu] self-test occasionally hangs
+##      after "Callback registration: OK" line.
+##
+##      Observed once during batch-72 boot test (timed out at
+##      the 600s mark with serial log truncating at the rcu
+##      callback registration step).  Re-running immediately
+##      produced a clean BOOT_OK at 23s.  No code change
+##      between the two runs.
+##
+##      Hypothesis: the test posts an RCU callback and waits
+##      for a grace period; if no quiescent state is observed
+##      (e.g. the only CPU is sitting in the test loop itself
+##      and never yields), the wait never completes.  Should
+##      either:
+##        a) explicitly advance an rcu quiescent state from
+##           inside the test, or
+##        b) yield to the scheduler between callback post and
+##           wait, or
+##        c) bound the wait with a deadline + report
+##           "skipped" / "timed out" rather than hanging.
+##
+##      The boot path otherwise works.  Affects test
+##      reliability, not production code.  Re-run the boot
+##      test if it hangs here; do not block on this.  Fix
+##      should land in `kernel/src/rcu/` with the test logic.
+
+

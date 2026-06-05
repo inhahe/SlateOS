@@ -4137,6 +4137,66 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             // return type) which fits the entire realistic range.
             SyscallResult::ok(v as i64)
         }
+        // PR_SET_TSC (26) — set whether userspace `RDTSC` raises
+        // SIGSEGV.  arg2 (Linux's `arg2`, our `arg1`) must be 1
+        // (PR_TSC_ENABLE) or 2 (PR_TSC_SIGSEGV); anything else is
+        // EINVAL.  arg3/arg4/arg5 must all be 0 or EINVAL.
+        //
+        // Known limitation: we do not actually wire the `CR4.TSD`
+        // bit on context switch, so the flag has no enforcement
+        // effect — `RDTSC` reads from userspace never trap.  The
+        // value is round-tripped for ABI compatibility only.
+        // Tracked in todo.txt.
+        26 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // Accept only the two documented Linux user-visible
+            // values.  Linux itself returns EINVAL for anything
+            // else.
+            if args.arg1 != u64::from(pcb::LINUX_PR_TSC_ENABLE)
+                && args.arg1 != u64::from(pcb::LINUX_PR_TSC_SIGSEGV)
+            {
+                return linux_err(errno::EINVAL);
+            }
+            // arg1 fits in u32 because we just gated it to {1, 2}.
+            let val_u32 = args.arg1 as u32;
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_tsc_mode(pid, val_u32);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_TSC (25) — copy the mode into the user int* at
+        // arg2 (Linux's `arg2`, our `arg1`).  NULL is EFAULT
+        // (consistent with every other PR_GET_* pointer surface).
+        // arg3/arg4/arg5 must all be 0 or EINVAL.  Kernel context
+        // (no PCB) reports PR_TSC_ENABLE (1), the default.
+        25 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            let user_buf = args.arg1;
+            if user_buf == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let v: i32 = caller_pid()
+                .and_then(pcb::get_tsc_mode)
+                .map(|x| x as i32)
+                .unwrap_or(pcb::LINUX_PR_TSC_ENABLE as i32);
+            // SAFETY: copy_to_user validates the destination range
+            // and uses STAC/CLAC for SMAP-safe access.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(
+                    (&raw const v).cast::<u8>(),
+                    user_buf,
+                    core::mem::size_of::<i32>(),
+                )
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            SyscallResult::ok(0)
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -16900,6 +16960,136 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::get_timer_slack_ns(test_pid), None);
             assert_eq!(pcb::get_timer_slack_default_ns(test_pid), None);
             assert_eq!(pcb::set_timer_slack_ns(test_pid, 1), None);
+        }
+
+        // Batch 72: PR_SET_TSC / PR_GET_TSC round-trip with strict
+        // argument validation matching Linux.
+        //
+        //   1. PR_SET_TSC with any value other than 1 or 2 -> EINVAL.
+        //   2. PR_SET_TSC arg3/arg4/arg5 != 0 -> EINVAL.
+        //   3. PR_SET_TSC(1), PR_SET_TSC(2) -> 0 (kernel context: no PCB).
+        //   4. PR_GET_TSC arg3/arg4/arg5 != 0 -> EINVAL.
+        //   5. PR_GET_TSC NULL pointer -> EFAULT.
+        //   6. PR_GET_TSC with scratch buffer -> writes 1 (default).
+        //   7. pcb storage: default 1, set 2, query 2, set 1, query 1,
+        //      destroy -> None.
+        {
+            // arg1 not in {1, 2} -> EINVAL on PR_SET_TSC.
+            for bad_val in &[0u64, 3, 99, u64::MAX] {
+                let a = SyscallArgs { arg0: 26, arg1: *bad_val, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_TSC, {}) not EINVAL ({})",
+                        bad_val, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_TSC.
+            for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                let mut a = SyscallArgs { arg0: 26, arg1: 1, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_TSC, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET_TSC(1) -> 0 (kernel context: no PCB, no side effect).
+            let a = SyscallArgs { arg0: 26, arg1: 1, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_TSC, 1) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_TSC(2) -> 0.
+            let a = SyscallArgs { arg0: 26, arg1: 2, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_TSC, 2) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_TSC.
+            for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                let mut a = SyscallArgs { arg0: 25, arg1: 0, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_TSC, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET_TSC NULL pointer -> EFAULT.
+            let a = SyscallArgs { arg0: 25, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_TSC, NULL) not EFAULT ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_GET_TSC with scratch buffer -> writes 1
+            // (kernel context: no PCB, default applies).
+            let mut tsc_out: i32 = 0x7f;
+            let a = SyscallArgs {
+                arg0: 25,
+                arg1: (&raw mut tsc_out) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_TSC, &buf) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            if tsc_out != 1 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_TSC, &buf) buf not 1 ({})",
+                    tsc_out
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("tsc-test", 0);
+            // Default is PR_TSC_ENABLE (1).
+            assert_eq!(pcb::get_tsc_mode(test_pid), Some(1));
+            // Install PR_TSC_SIGSEGV (2).  set returns the prior.
+            assert_eq!(pcb::set_tsc_mode(test_pid, 2), Some(1));
+            assert_eq!(pcb::get_tsc_mode(test_pid), Some(2));
+            // Clear back to 1.
+            assert_eq!(pcb::set_tsc_mode(test_pid, 1), Some(2));
+            assert_eq!(pcb::get_tsc_mode(test_pid), Some(1));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_tsc_mode(test_pid), None);
+            assert_eq!(pcb::set_tsc_mode(test_pid, 1), None);
         }
     }
 

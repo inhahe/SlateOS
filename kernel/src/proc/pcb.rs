@@ -572,6 +572,31 @@ pub struct Process {
     /// no syscall to change this directly; it is purely the
     /// reset target for `PR_SET_TIMERSLACK(0)`.
     pub linux_timer_slack_default_ns: u64,
+    /// Linux `prctl(PR_SET_TSC)` mode.  Controls whether
+    /// userspace `RDTSC` / `RDTSCP` raises `SIGSEGV` (sandboxes
+    /// use this to force determinism; some VMM hot-patchers
+    /// also probe it).  Encoded with Linux's user-visible
+    /// values:
+    ///
+    /// * `1` = `PR_TSC_ENABLE`  — TSC reads allowed (default).
+    /// * `2` = `PR_TSC_SIGSEGV` — TSC reads raise `SIGSEGV`.
+    ///
+    /// On Linux this corresponds to `TIF_NOTSC` on
+    /// `thread_info`; we store the user-visible value
+    /// directly (no internal bit-flip) because it makes the
+    /// PR_GET path a trivial copy.
+    ///
+    /// Default 1 (TSC enabled).  Inherited verbatim across
+    /// fork (Linux: `TIF_NOTSC` is in the thread_info copy
+    /// path).  Preserved across exec (Linux's `flush_thread`
+    /// does not touch `TIF_NOTSC`).
+    ///
+    /// Known limitation: we do not actually wire the
+    /// `CR4.TSD` bit on context switch yet, so the flag is
+    /// round-tripped for ABI compatibility but `RDTSC` reads
+    /// never trap.  Sandbox callers will still see the right
+    /// PR_GET answer, just no enforcement.  Tracked in todo.txt.
+    pub linux_tsc_mode: u32,
 }
 
 /// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
@@ -654,9 +679,18 @@ impl Process {
             // restore on PR_SET_TIMERSLACK(0)" start at the same point.
             linux_timer_slack_ns: LINUX_DEFAULT_TIMER_SLACK_NS,
             linux_timer_slack_default_ns: LINUX_DEFAULT_TIMER_SLACK_NS,
+            // Linux default: PR_TSC_ENABLE (1) — userspace TSC
+            // reads are allowed.  Sandboxes set PR_TSC_SIGSEGV (2).
+            linux_tsc_mode: 1,
         }
     }
 }
+
+/// `prctl(PR_SET_TSC)` value meaning "RDTSC reads are allowed".
+pub const LINUX_PR_TSC_ENABLE: u32 = 1;
+
+/// `prctl(PR_SET_TSC)` value meaning "RDTSC reads raise SIGSEGV".
+pub const LINUX_PR_TSC_SIGSEGV: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Global process table
@@ -774,6 +808,7 @@ pub fn fork_create(
         linux_thp_disable,
         linux_timer_slack_ns,
         linux_timer_slack_default_ns,
+        linux_tsc_mode,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -806,6 +841,7 @@ pub fn fork_create(
             parent.linux_thp_disable,
             parent.linux_timer_slack_ns,
             parent.linux_timer_slack_default_ns,
+            parent.linux_tsc_mode,
         )
     };
 
@@ -942,6 +978,10 @@ pub fn fork_create(
         // values are preserved across exec.
         linux_timer_slack_ns,
         linux_timer_slack_default_ns,
+        // Linux: TIF_NOTSC is in the thread_info copy path, so
+        // PR_SET_TSC propagates verbatim across fork.  Preserved
+        // across exec (flush_thread does not touch the flag).
+        linux_tsc_mode,
     };
 
     table.insert(pid, child);
@@ -1652,6 +1692,27 @@ pub fn get_timer_slack_default_ns(pid: ProcessId) -> Option<u64> {
         .lock()
         .get(&pid)
         .map(|p| p.linux_timer_slack_default_ns)
+}
+
+/// Read the recorded `prctl(PR_GET_TSC)` mode for `pid` (one of
+/// [`LINUX_PR_TSC_ENABLE`] / [`LINUX_PR_TSC_SIGSEGV`]).  Returns
+/// `None` if `pid` is unknown; `Some(LINUX_PR_TSC_ENABLE)` is the
+/// documented default.
+#[must_use]
+pub fn get_tsc_mode(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_tsc_mode)
+}
+
+/// Install the TSC mode for `pid`, returning the prior value.  The
+/// syscall surface validates `val` is in {1, 2}; this helper accepts
+/// arbitrary values so test fixtures / future kernel paths can set
+/// it freely.  Returns `None` if `pid` is unknown.
+pub fn set_tsc_mode(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_tsc_mode;
+    proc.linux_tsc_mode = val;
+    Some(old)
 }
 
 /// Index of `RLIMIT_AS` (resident *address space* size) in [`Process::rlimits`].

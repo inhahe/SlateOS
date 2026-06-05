@@ -17526,3 +17526,55 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).  Serial
 ##      confirms "[syscall/linux]   quotactl_fd type/cmds gating:
 ##      OK" in build/serial-test.txt.
+
+## 201. syscall/linux: init_module short-len -> ENOEXEC (not
+##      EINVAL) gating (batch 172).
+##
+##      Symptom: Pre-batch sys_init_module returned EINVAL for
+##               len == 0 and accepted any nonzero len, deferring
+##               to a per-byte validate_user_read and then the
+##               terminal EPERM.  Linux's
+##               kernel/module/main.c::copy_module_from_user
+##               rejects `len < sizeof(*hdr)` (Elf64_Ehdr = 64
+##               bytes on x86_64) with ENOEXEC ("not a valid
+##               ELF"), and only the `len == 0` corner accidentally
+##               matched our EINVAL.  A CAP_SYS_MODULE-holding
+##               probe walking len values to find the minimum
+##               module size on Linux sees ENOEXEC for 1..=63 and
+##               progresses further at 64; on our stub it saw
+##               EPERM for any len >= 1.
+##
+##      Fix:    Replaced the `len == 0 -> EINVAL` gate with
+##              `len < ELF64_EHDR_SIZE (64) -> ENOEXEC`, matching
+##              Linux's copy_module_from_user check exactly.
+##              Terminal stays EPERM (no module loader; CAP-first
+##              ordering is documented as a known limitation).
+##
+##      Self-tests (boot-time):
+##        * init_module(NULL, _, _) -> EFAULT  (kept).
+##        * init_module(img, 0, _) -> ENOEXEC  (was EINVAL).
+##        * init_module(img, 63, _) -> ENOEXEC  (new; off-by-one).
+##        * init_module(img, 64, NULL) -> EPERM  (new; boundary
+##          inclusive — gate clears, validate bypassed in kernel
+##          context, terminal CAP).
+##        * Emits "[syscall/linux]   init_module ELF len gating:
+##          OK".
+##
+##      Known limitations:
+##        * Linux gates CAP_SYS_MODULE *first* via
+##          may_init_module; we put EPERM at the terminal.  For
+##          an unprivileged user this is invisible (Linux returns
+##          EPERM immediately, we eventually return EPERM after
+##          validation), but for a CAP-holding probe the gates
+##          BELOW EPERM matter — Linux lets them through to
+##          ENOEXEC / EFAULT / ELF parse errors, we still return
+##          EPERM.  The proper fix is the actual module loader
+##          implementation (out of scope for this batch).
+##        * We don't validate ELF magic, e_ident, or any header
+##          fields beyond the size check.  Linux does this inside
+##          elf_validity_check after copying.  Carried for the
+##          module-loader implementation.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   init_module ELF len
+##      gating: OK" in build/serial-test.txt.

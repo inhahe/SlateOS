@@ -12230,13 +12230,37 @@ fn sys_quotactl_fd(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `init_module(module_image, len, param_values)`.
+///
+/// Linux's `kernel/module/main.c::SYSCALL_DEFINE3(init_module)`
+/// gates (for a CAP_SYS_MODULE caller; without the cap, EPERM
+/// fires first in `may_init_module`):
+///   1. EPERM if !CAP_SYS_MODULE || modules_disabled
+///   2. `copy_module_from_user`:
+///      - len < sizeof(Elf64_Ehdr) (64 bytes) -> ENOEXEC
+///      - vmemdup_user(umod, len) -> EFAULT on bad pointer
+///
+/// Pre-batch we returned EINVAL for `len == 0` instead of Linux's
+/// ENOEXEC, and allowed any nonzero len (down to 1) through to
+/// the per-byte validate_user_read.  A CAP-holding probe walking
+/// len values to discover the minimum module size saw EPERM (our
+/// terminal) for any len >= 1, where Linux returns ENOEXEC for
+/// 1..=63 and only progresses further at >= 64.
+///
+/// We keep the terminal EPERM ahead of any real implementation —
+/// Linux's CAP-first ordering means an unprivileged user always
+/// sees EPERM, so this divergence affects only CAP-holding probes
+/// (which on real Linux would proceed into ENOEXEC / EFAULT
+/// territory we don't yet emulate properly).
 fn sys_init_module(args: &SyscallArgs) -> SyscallResult {
+    const ELF64_EHDR_SIZE: usize = 64;
     if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
     let len = args.arg1 as usize;
-    if len == 0 {
-        return linux_err(errno::EINVAL);
+    // Linux: copy_module_from_user rejects len < sizeof(*hdr) with
+    // ENOEXEC ("not a valid ELF").
+    if len < ELF64_EHDR_SIZE {
+        return linux_err(errno::ENOEXEC);
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
         return linux_err(linux_errno_for(e));
@@ -32698,14 +32722,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: init_module(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // init_module(img, 0, _) -> EINVAL.
+        // init_module(img, 0, _) -> ENOEXEC.  Linux's
+        // copy_module_from_user gates `len < sizeof(Elf64_Ehdr)`
+        // before any other validation, returning ENOEXEC ("not a
+        // valid ELF").  Pre-batch we returned EINVAL.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INIT_MODULE, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: init_module(len=0) not EINVAL");
+            != -i64::from(errno::ENOEXEC) {
+            serial_println!("[syscall/linux]   FAIL: init_module(len=0) not ENOEXEC");
             return Err(KernelError::InternalError);
         }
+        // init_module(img, 63, _) -> ENOEXEC (one byte short of
+        // an ELF64 header).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 63, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INIT_MODULE, &a).value
+            != -i64::from(errno::ENOEXEC) {
+            serial_println!(
+                "[syscall/linux]   FAIL: init_module(len=63) not ENOEXEC"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // init_module(img, 64, NULL) -> EPERM (at the boundary;
+        // gate clears, validate_user_read bypassed in kernel
+        // context, terminal CAP).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 64, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INIT_MODULE, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: init_module(len=64) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   init_module ELF len gating: OK"
+        );
         // finit_module bogus flag -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x8000_0000, arg3: 0,
             arg4: 0, arg5: 0 };

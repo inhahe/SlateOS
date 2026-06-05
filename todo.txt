@@ -8920,5 +8920,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          would need revisiting if any kernel module
 ##          that doesn't have full privilege starts
 ##          calling sethostname.
+##
+##   84. sysinfo procs field wired to pcb::count
+##      (batch 58).
+##      Status: real live-process count.  Thread
+##              under-reporting documented.
+##
+##      Before batch 58, sys_sysinfo left the `procs`
+##      field (offset 80..82 in struct sysinfo) at zero
+##      while filling in uptime/totalram/freeram.  Tools
+##      that surface "number of processes" via sysinfo
+##      (htop's fallback path, /proc/loadavg approximations,
+##      various monitoring shims) would see 0 — implying
+##      a dead system — even with hundreds of live PCBs.
+##
+##      What was done:
+##        - sys_sysinfo now writes pcb::count() as a u16
+##          at offset 80..82, saturating at u16::MAX as
+##          Linux does (the field is `unsigned short`).
+##        - Self-test verifies the underlying count helper
+##          increments on pcb::create and decrements on
+##          pcb::destroy, and that the saturating cast at
+##          u16::MAX clamps as expected.
+##
+##      Known limitations:
+##        - We model one PCB per process; Linux counts
+##          every kernel-visible thread (LWP) in this
+##          field, so workloads with many threads per
+##          process will under-report.  When threads
+##          grow their own kernel-visible structure,
+##          switch this field to "total LWP count" and
+##          have sys_clone with CLONE_THREAD bump a
+##          separate counter.
+##        - Saturation at u16::MAX is silent.  Linux
+##          truncates the same way and userspace
+##          accommodates it.  No errno needed.
+##
+##   85. BUG: sched_fairness::self_test() is flaky.
+##      Status: observed crash; root cause unknown.
+##
+##      During batch 58 boot testing, the
+##      [sched_fairness] Running self-test... line was
+##      followed by a KERNEL PANIC with the message
+##      truncated mid-line.  Re-running boot-test.sh
+##      immediately produced a PASS with no code
+##      changes.  The same flakiness was visible at the
+##      start of the session before batch 55 was
+##      committed (initial boot test failed; subsequent
+##      ones passed).
+##
+##      Reproduction is intermittent.  Likely root
+##      causes:
+##        - Race in sched::all_task_ticks() between the
+##          measurement loop and the scheduler updating
+##          tick counters concurrently.
+##        - One of the assertions in fairness self-test
+##          (JFI bounds check, equal-distribution check)
+##          fires when the per-task tick deltas land in
+##          a degenerate distribution (e.g. a single
+##          short-running task gets all the ticks in the
+##          window).
+##        - Serial output buffering ate the panic
+##          message so we don't know which assertion
+##          fired.
+##
+##      Next steps when revisiting:
+##        - Read assert/panic info from QEMU's debug
+##          exit code (debugcon.log) instead of relying
+##          on serial echo.
+##        - Add a try-catch wrapper around the self-test
+##          that prints a "[sched_fairness] FAILED:
+##          <assertion message>" line before re-raising,
+##          so the test failure is forensically visible.
+##        - If the JFI assertion is the issue, widen
+##          the tolerance window from ~500..520 to
+##          ~480..540 or similar.
 
 

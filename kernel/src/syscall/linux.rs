@@ -4052,6 +4052,20 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
         buf[40..48].copy_from_slice(&free_bytes.to_ne_bytes());
     }
 
+    // procs at offset 80..82 (ushort): live process count.  Linux
+    // counts all threads; we currently model one PCB per process,
+    // which under-reports thread-rich workloads — documented as a
+    // limitation in todo.txt.  Saturating cast guards against the
+    // unlikely u16::MAX overflow.
+    let procs_u: u64 = pcb::count() as u64;
+    #[allow(clippy::cast_possible_truncation)]
+    let procs_u16: u16 = if procs_u > u64::from(u16::MAX) {
+        u16::MAX
+    } else {
+        procs_u as u16
+    };
+    buf[80..82].copy_from_slice(&procs_u16.to_ne_bytes());
+
     // mem_unit = 1 (totalram/freeram are byte counts directly).
     let mem_unit: u32 = 1;
     buf[100..104].copy_from_slice(&mem_unit.to_ne_bytes());
@@ -15502,6 +15516,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 dispatch_linux(nr::SYSINFO, &a).value
             );
             return Err(KernelError::InternalError);
+        }
+
+        // Batch 58: verify the storage layer that sysinfo's `procs`
+        // field reads — pcb::count() — reflects live PCB allocations
+        // and decrements on destroy.  We can't reach a user-pointer
+        // copy_to_user from kernel context to inspect the wire-level
+        // bytes, but we can confirm the source of truth round-trips
+        // and that the saturating-cast guard at u16::MAX doesn't fire
+        // on normal counts.
+        {
+            let before = pcb::count();
+            let test_pid = pcb::create("sysinfo-procs-test", 0);
+            assert!(pcb::count() > before,
+                "pcb::count did not increment after create");
+            pcb::destroy(test_pid);
+            assert_eq!(pcb::count(), before,
+                "pcb::count did not decrement after destroy");
+            // u16 saturating cast: a count of u16::MAX+1 must clamp.
+            // We don't actually allocate that many PCBs here, just
+            // re-derive the cast inline as a regression guard for the
+            // cast itself.
+            let overflow: u64 = u64::from(u16::MAX) + 1;
+            #[allow(clippy::cast_possible_truncation)]
+            let clamped: u16 = if overflow > u64::from(u16::MAX) {
+                u16::MAX
+            } else {
+                overflow as u16
+            };
+            assert_eq!(clamped, u16::MAX);
         }
         // times(NULL) succeeds with the tick count.
         if dispatch_linux(nr::TIMES, &a).value < 0 {

@@ -127,6 +127,24 @@ pub struct FdEntry {
     /// time and modifiable via `fcntl(F_SETFL)` for non-access-mode
     /// bits.
     pub status_flags: u32,
+    /// `fcntl(F_GETOWN)` / `F_SETOWN` value — the pid (positive)
+    /// or pgid (negative) that should receive SIGIO when this fd
+    /// signals readiness for async I/O.  Linux stores this on the
+    /// `struct file` (open-file description); we attach it
+    /// per-fd because we don't yet have a separate file-table
+    /// layer.  Default 0 ("no delivery target", matches a fresh
+    /// fd on Linux).
+    ///
+    /// We never actually deliver SIGIO — there is no signal
+    /// machinery in the kernel — so this is a stored-only ABI
+    /// round-trip.  Programs that set the owner and read it
+    /// back observe what they wrote.
+    pub f_owner: i32,
+    /// `fcntl(F_GETSIG)` / `F_SETSIG` value — the signal number
+    /// to deliver in lieu of SIGIO (default 0 means "use SIGIO").
+    /// Linux validates 0 or [1, 64]; we mirror that range.
+    /// Stored only; same delivery caveat as `f_owner`.
+    pub f_owner_sig: i32,
 }
 
 impl FdEntry {
@@ -139,6 +157,8 @@ impl FdEntry {
             raw_handle: 0,
             fd_flags: 0,
             status_flags: access,
+            f_owner: 0,
+            f_owner_sig: 0,
         }
     }
 
@@ -150,6 +170,8 @@ impl FdEntry {
             raw_handle: handle,
             fd_flags: 0,
             status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
         }
     }
 
@@ -161,6 +183,8 @@ impl FdEntry {
             raw_handle: handle,
             fd_flags: 0,
             status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
         }
     }
 }
@@ -323,6 +347,50 @@ impl KernelFdTable {
         let entry = self.entry_mut(fd)?;
         let access = entry.status_flags & O_ACCMODE;
         entry.status_flags = (new_flags & !O_ACCMODE) | access;
+        Ok(())
+    }
+
+    /// Read the `fcntl(F_GETOWN)` value for `fd`.
+    ///
+    /// Returns `Err(InvalidHandle)` if the fd is closed / out of range.
+    pub fn get_owner(&self, fd: i32) -> KernelResult<i32> {
+        self.lookup(fd)
+            .map(|e| e.f_owner)
+            .ok_or(KernelError::InvalidHandle)
+    }
+
+    /// Set the `fcntl(F_SETOWN)` value for `fd`.
+    ///
+    /// Linux stores this verbatim — positive = pid, negative = pgid,
+    /// 0 = clear.  We do not validate that the pid/pgid actually
+    /// exists, because Linux doesn't either (the value is consulted
+    /// asynchronously at SIGIO delivery time, by which time the
+    /// target may have exited).
+    pub fn set_owner(&mut self, fd: i32, owner: i32) -> KernelResult<()> {
+        let entry = self.entry_mut(fd)?;
+        entry.f_owner = owner;
+        Ok(())
+    }
+
+    /// Read the `fcntl(F_GETSIG)` value for `fd`.  0 means "use the
+    /// default SIGIO".
+    pub fn get_owner_sig(&self, fd: i32) -> KernelResult<i32> {
+        self.lookup(fd)
+            .map(|e| e.f_owner_sig)
+            .ok_or(KernelError::InvalidHandle)
+    }
+
+    /// Set the `fcntl(F_SETSIG)` value for `fd`.
+    ///
+    /// Linux validates `sig == 0 || (1..=64).contains(&sig)` and
+    /// returns `EINVAL` otherwise.  This helper enforces the same
+    /// range; the surface syscall surfaces the error code.
+    pub fn set_owner_sig(&mut self, fd: i32, sig: i32) -> KernelResult<()> {
+        if sig != 0 && !(1..=64).contains(&sig) {
+            return Err(KernelError::InvalidArgument);
+        }
+        let entry = self.entry_mut(fd)?;
+        entry.f_owner_sig = sig;
         Ok(())
     }
 

@@ -10780,3 +10780,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
 
+
+## 115. Linux ABI batch 86: fcntl(F_GETOWN / F_SETOWN /
+##      F_GETSIG / F_SETSIG) per-fd async-I/O delivery target
+##      round-trip + catch-all EINVAL fix.
+##
+##      Motivation: pre-batch fcntl with any cmd outside the
+##      F_DUPFD/GETFD/SETFD/GETFL/SETFL/DUPFD_CLOEXEC set
+##      returned ENOSYS, not EINVAL.  Glibc and musl probe for
+##      kernel capability by issuing fcntl commands and checking
+##      for EINVAL (Linux kernel/fcntl.c default case) vs ENOSYS
+##      (which historically signals "this entire syscall is
+##      missing" — meaningful for syscall wrappers, not for
+##      individual commands).  Programs that set up SIGIO-based
+##      async I/O — including most network servers built on
+##      glibc's signal-driven I/O paths and a number of older
+##      X11 / D-Bus clients — call F_SETOWN / F_SETSIG very
+##      early; if those return ENOSYS the program either aborts
+##      or silently degrades to polling.
+##
+##      Wired up:
+##        * F_SETOWN (8): store i32 value verbatim on the fd
+##          (positive pid, negative pgid, 0 = clear).
+##        * F_GETOWN (9): return the stored value.
+##        * F_SETSIG (10): validate sig == 0 || (1..=64), then
+##          store; out-of-range -> EINVAL.
+##        * F_GETSIG (11): return the stored value.
+##        * fcntl catch-all: changed from -ENOSYS to -EINVAL to
+##          match Linux kernel/fcntl.c (the SYS_fcntl wrapper
+##          itself is wired, so individual unknown commands
+##          must surface EINVAL).
+##
+##      Storage layer: two new fields on FdEntry —
+##        - f_owner: i32 (default 0)
+##        - f_owner_sig: i32 (default 0)
+##      attached per-fd because we don't yet have an open-file-
+##      description layer separating fd -> file -> open-file.
+##      Linux stores these on the open-file description (so a
+##      dup'd fd shares them); we currently store per-fd, which
+##      diverges slightly: F_SETOWN on one dup is not observable
+##      from the other.
+##
+##      Known limitation: we never actually deliver SIGIO —
+##      there is no signal machinery in the kernel.  These
+##      operations are stored-only ABI round-trips.  Programs
+##      that block waiting for SIGIO will hang; programs that
+##      merely set up the owner and continue to use blocking
+##      I/O work normally.  When signal delivery lands, the
+##      stored values will be consulted at delivery time.
+##
+##      Helpers:
+##        linux_fd::KernelFdTable::{get_owner, set_owner,
+##                                  get_owner_sig, set_owner_sig}
+##        pcb::{linux_fd_get_owner, linux_fd_set_owner,
+##              linux_fd_get_sig, linux_fd_set_sig}
+##
+##      Self-test (boot path):
+##        * Constant sanity: F_SETOWN=8, F_GETOWN=9,
+##          F_SETSIG=10, F_GETSIG=11.
+##        * dispatch_linux(FCNTL, fd=5, cmd=9999) in kernel
+##          context -> EBADF (proves the early caller_pid
+##          short-circuit still runs before cmd dispatch, so
+##          the new catch-all change is safe).
+##        * Per-PCB helpers on a real process:
+##          - Default owner=0, sig=0.
+##          - F_SETOWN with 1234 / -5678 / 0 / i32::MIN /
+##            i32::MAX all round-trip exactly.
+##          - F_SETOWN affects only the targeted fd
+##            (stdio entries untouched).
+##          - F_SETSIG with sig in {0, 1, 9, 15, 32, 33, 64}
+##            succeeds and round-trips.
+##          - F_SETSIG with {-1, 65, 100, i32::MIN, i32::MAX}
+##            -> InvalidArgument (-> EINVAL); prior good
+##            value (64) is preserved.
+##        * Helpers on a closed fd -> InvalidHandle (-> EBADF).
+##        * Helpers on a destroyed pid -> NoSuchProcess.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).

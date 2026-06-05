@@ -3600,6 +3600,80 @@ pub fn linux_fd_set_status_flags(
     fd_table.set_status_flags(fd, new_flags)
 }
 
+/// Read the `fcntl(F_GETOWN)` value (SIGIO delivery target — pid if
+/// positive, pgid if negative, 0 if cleared) for `fd` in `pid`'s
+/// Linux fd table.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
+///   live process.
+/// - [`KernelError::InvalidHandle`] if `fd` is not open or the
+///   process has no Linux fd table.
+pub fn linux_fd_get_owner(pid: ProcessId, fd: i32) -> KernelResult<i32> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_ref()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.get_owner(fd)
+}
+
+/// Set the `fcntl(F_SETOWN)` value for `fd`.
+///
+/// # Errors
+///
+/// As [`linux_fd_get_owner`].
+pub fn linux_fd_set_owner(pid: ProcessId, fd: i32, owner: i32) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.set_owner(fd, owner)
+}
+
+/// Read the `fcntl(F_GETSIG)` value for `fd` (0 means "use the
+/// default SIGIO").
+///
+/// # Errors
+///
+/// As [`linux_fd_get_owner`].
+pub fn linux_fd_get_sig(pid: ProcessId, fd: i32) -> KernelResult<i32> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_ref()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.get_owner_sig(fd)
+}
+
+/// Set the `fcntl(F_SETSIG)` value for `fd`.
+///
+/// Linux validates `sig == 0 || (1..=64).contains(&sig)`; the
+/// helper returns [`KernelError::InvalidArgument`] otherwise.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
+///   live process.
+/// - [`KernelError::InvalidHandle`] if `fd` is not open or the
+///   process has no Linux fd table.
+/// - [`KernelError::InvalidArgument`] if `sig` is outside the
+///   permitted range.
+pub fn linux_fd_set_sig(pid: ProcessId, fd: i32, sig: i32) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.set_owner_sig(fd, sig)
+}
+
 /// Check if a process holds a capability for a specific resource
 /// with sufficient rights.
 ///

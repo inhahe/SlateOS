@@ -50,6 +50,8 @@
 //! | 33       | dup2              | via per-process Linux fd table     |
 //! | 72       | fcntl             | F_DUPFD / F_GETFD / F_SETFD /      |
 //! |          |                   | F_GETFL / F_SETFL / F_DUPFD_CLOEXEC|
+//! |          |                   | / F_GETOWN / F_SETOWN              |
+//! |          |                   | / F_GETSIG / F_SETSIG              |
 //! | 257      | openat            | only AT_FDCWD; routes to VFS open  |
 //! | 292      | dup3              | via per-process Linux fd table     |
 //! | 293      | pipe2             | pipe with O_CLOEXEC / O_NONBLOCK   |
@@ -729,6 +731,17 @@ pub mod fcntl_cmd {
     pub const F_SETFD: u32 = 2;
     pub const F_GETFL: u32 = 3;
     pub const F_SETFL: u32 = 4;
+    /// Set the pid (positive) / pgid (negative) that receives `SIGIO`
+    /// when the fd signals readiness for async I/O.  0 clears the
+    /// delivery target.
+    pub const F_SETOWN: u32 = 8;
+    /// Read the value stored by [`F_SETOWN`].
+    pub const F_GETOWN: u32 = 9;
+    /// Set the signal number delivered in lieu of `SIGIO` (0 means
+    /// "use SIGIO"; otherwise must be in `1..=64`).
+    pub const F_SETSIG: u32 = 10;
+    /// Read the value stored by [`F_SETSIG`].
+    pub const F_GETSIG: u32 = 11;
     pub const F_DUPFD_CLOEXEC: u32 = 1030;
 }
 
@@ -2318,7 +2331,43 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
-        _ => linux_err(errno::ENOSYS),
+        fcntl_cmd::F_GETOWN => match pcb::linux_fd_get_owner(pid, fd) {
+            Ok(owner) => SyscallResult::ok(i64::from(owner)),
+            Err(e) => linux_err(linux_errno_for(e)),
+        },
+        fcntl_cmd::F_SETOWN => {
+            // Linux stores arg verbatim as an `int` — positive pid,
+            // negative pgid, 0 clears.  Truncate to i32; bits above
+            // 32 in `arg` are ignored just like the Linux ABI does
+            // when the userspace `int` is sign-extended into the
+            // syscall register.
+            let owner = arg as i32;
+            match pcb::linux_fd_set_owner(pid, fd, owner) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        fcntl_cmd::F_GETSIG => match pcb::linux_fd_get_sig(pid, fd) {
+            Ok(sig) => SyscallResult::ok(i64::from(sig)),
+            Err(e) => linux_err(linux_errno_for(e)),
+        },
+        fcntl_cmd::F_SETSIG => {
+            // Linux validates `sig == 0 || (1..=64).contains(&sig)`.
+            // We forward the same range check to the per-PCB helper,
+            // which maps a range failure to `KernelError::InvalidArgument`
+            // (→ EINVAL).
+            let sig = arg as i32;
+            match pcb::linux_fd_set_sig(pid, fd, sig) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        // Linux `kernel/fcntl.c` returns -EINVAL (not -ENOSYS) for
+        // unknown `cmd` values.  Match the reference behaviour so
+        // glibc / musl probes that try a command we don't implement
+        // see the same error they'd see on a Linux kernel that
+        // doesn't recognise the command (e.g. an older one).
+        _ => linux_err(errno::EINVAL),
     }
 }
 
@@ -7564,6 +7613,8 @@ fn sys_fstat(args: &SyscallArgs) -> SyscallResult {
                 raw_handle: 0,
                 fd_flags: 0,
                 status_flags: 0,
+                f_owner: 0,
+                f_owner_sig: 0,
             }
         }
     };
@@ -7798,6 +7849,8 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
                 raw_handle: 0,
                 fd_flags: 0,
                 status_flags: 0,
+                f_owner: 0,
+                f_owner_sig: 0,
             },
         };
         let mut buf = [0u8; STATX_SIZE];
@@ -19221,6 +19274,176 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 40), 1u64 << 40);
             assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 41), 0);
             assert_eq!(pcb::LINUX_CAP_FULL_SET.count_ones(), 41);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Batch 86: fcntl(F_GETOWN / F_SETOWN / F_GETSIG / F_SETSIG)
+    // per-fd async-I/O delivery target round-trip.
+    //
+    // The boot self-test runs from a kernel task that has no Linux fd
+    // table, so the syscall-surface path returns EBADF immediately.
+    // Exercise the per-PCB helpers directly against a synthetic
+    // process to verify storage, validation, and the catch-all
+    // EINVAL change.
+    //
+    // We also verify:
+    //   - the catch-all in sys_fcntl now returns EBADF first when
+    //     caller_pid is None (because the pid lookup happens before
+    //     the cmd dispatch), which proves the early-exit path is
+    //     unchanged by the cmd-table addition;
+    //   - constant sanity for the new fcntl_cmd::F_{GET,SET}{OWN,SIG}.
+    {
+        use crate::proc::linux_fd::FdEntry;
+
+        // Constant sanity.
+        assert_eq!(fcntl_cmd::F_SETOWN, 8);
+        assert_eq!(fcntl_cmd::F_GETOWN, 9);
+        assert_eq!(fcntl_cmd::F_SETSIG, 10);
+        assert_eq!(fcntl_cmd::F_GETSIG, 11);
+
+        // Catch-all (any unknown cmd) — kernel context returns EBADF
+        // because caller_pid() is None and we early-exit before the
+        // dispatch table is consulted.  We can't reach the EINVAL
+        // arm without a real Linux process; that path is covered by
+        // dispatch_linux_with_frame integration tests when a Linux
+        // binary issues a real fcntl with an unknown command.
+        let a = SyscallArgs {
+            arg0: 5, arg1: 9999, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::FCNTL, &a);
+        if r.value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fcntl(5, unknown=9999) kernel-ctx → {} (expected -EBADF)",
+                r.value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // pcb helper round-trip.
+        let test_pid = pcb::create("fcntl-owner-test", 0);
+        pcb::linux_fd_install_stdio(test_pid).expect("install stdio");
+        let fd = pcb::linux_fd_install(
+            test_pid,
+            FdEntry::console(oflags::O_RDONLY),
+            0,
+        ).expect("install probe fd");
+
+        // Default values are 0/0.
+        assert_eq!(pcb::linux_fd_get_owner(test_pid, fd), Ok(0));
+        assert_eq!(pcb::linux_fd_get_sig(test_pid, fd), Ok(0));
+
+        // F_SETOWN positive pid round-trip.
+        pcb::linux_fd_set_owner(test_pid, fd, 1234).expect("setown 1234");
+        assert_eq!(pcb::linux_fd_get_owner(test_pid, fd), Ok(1234));
+        // Stdio entries are independent (default 0 still).
+        assert_eq!(pcb::linux_fd_get_owner(test_pid, 0), Ok(0));
+
+        // F_SETOWN negative pgid round-trip.
+        pcb::linux_fd_set_owner(test_pid, fd, -5678).expect("setown -5678");
+        assert_eq!(pcb::linux_fd_get_owner(test_pid, fd), Ok(-5678));
+
+        // F_SETOWN(0) clears.
+        pcb::linux_fd_set_owner(test_pid, fd, 0).expect("setown 0");
+        assert_eq!(pcb::linux_fd_get_owner(test_pid, fd), Ok(0));
+
+        // F_SETOWN i32::MIN / i32::MAX must round-trip — Linux stores
+        // it verbatim.
+        pcb::linux_fd_set_owner(test_pid, fd, i32::MIN).expect("setown MIN");
+        assert_eq!(pcb::linux_fd_get_owner(test_pid, fd), Ok(i32::MIN));
+        pcb::linux_fd_set_owner(test_pid, fd, i32::MAX).expect("setown MAX");
+        assert_eq!(pcb::linux_fd_get_owner(test_pid, fd), Ok(i32::MAX));
+        pcb::linux_fd_set_owner(test_pid, fd, 0).unwrap();
+
+        // F_SETSIG: 0 is valid (means "use SIGIO").
+        pcb::linux_fd_set_sig(test_pid, fd, 0).expect("setsig 0");
+        assert_eq!(pcb::linux_fd_get_sig(test_pid, fd), Ok(0));
+        // 1..=64 are valid.
+        for sig in [1, 9, 15, 32, 33, 64] {
+            pcb::linux_fd_set_sig(test_pid, fd, sig)
+                .unwrap_or_else(|e| panic!("setsig {sig} unexpectedly failed: {e:?}"));
+            assert_eq!(pcb::linux_fd_get_sig(test_pid, fd), Ok(sig));
+        }
+        // Out-of-range signals → InvalidArgument (→ EINVAL).
+        for bad in [-1, 65, 100, i32::MIN, i32::MAX] {
+            match pcb::linux_fd_set_sig(test_pid, fd, bad) {
+                Err(KernelError::InvalidArgument) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: fcntl_setsig({}) → {:?} (expected InvalidArgument)",
+                        bad, other,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+        // The most recent successful setsig (64) must still be in
+        // place — failed set must not corrupt prior state.
+        assert_eq!(pcb::linux_fd_get_sig(test_pid, fd), Ok(64));
+
+        // Helpers on a closed fd → InvalidHandle (→ EBADF).
+        match pcb::linux_fd_get_owner(test_pid, 99) {
+            Err(KernelError::InvalidHandle) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl_getown on closed fd → {:?} (expected InvalidHandle)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        match pcb::linux_fd_set_owner(test_pid, 99, 1) {
+            Err(KernelError::InvalidHandle) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl_setown on closed fd → {:?} (expected InvalidHandle)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        match pcb::linux_fd_get_sig(test_pid, 99) {
+            Err(KernelError::InvalidHandle) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl_getsig on closed fd → {:?} (expected InvalidHandle)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        match pcb::linux_fd_set_sig(test_pid, 99, 1) {
+            Err(KernelError::InvalidHandle) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl_setsig on closed fd → {:?} (expected InvalidHandle)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Helpers on a destroyed pid → NoSuchProcess.
+        pcb::destroy(test_pid);
+        match pcb::linux_fd_get_owner(test_pid, fd) {
+            Err(KernelError::NoSuchProcess) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl_getown on dead pid → {:?} (expected NoSuchProcess)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        match pcb::linux_fd_set_sig(test_pid, fd, 0) {
+            Err(KernelError::NoSuchProcess) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl_setsig on dead pid → {:?} (expected NoSuchProcess)",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
         }
     }
 

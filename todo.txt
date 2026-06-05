@@ -15042,3 +15042,51 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          showing the last successful line was "Callback
 ##          registration: OK" then no further output.
 
+## 164. Linux ABI: signalfd(2) / signalfd4(2) fd-shape validation
+##      (batch 135).
+##
+##      Issue:  Both syscalls validate the sigsetsize, the mask
+##              pointer, and (signalfd4) the flags, then return
+##              ENOSYS regardless of `fd`.  But `fd` has Linux-
+##              specific semantics: `-1` means "create a new
+##              signalfd", `>= 0` means "modify the mask on an
+##              existing signalfd."  Linux returns EINVAL when the
+##              fd is present but not a signalfd (kernel/signalfd.c:
+##              do_signalfd4 calls fdget + checks file->f_op ==
+##              signalfd_fops, returns -EINVAL otherwise).  We were
+##              accepting "update the mask on fd 5" and silently
+##              returning ENOSYS, hiding the descriptor-shape error
+##              from glibc / libsystemd / qemu signal handling.
+##
+##      Fix:    Add an fd-shape gate after the mask validation:
+##                * fd == -1: fall through to ENOSYS (create not
+##                  implemented).
+##                * fd != -1: validate_linux_fd; if missing, EBADF;
+##                  if present, EINVAL (no HandleKind::SignalFd
+##                  exists in this kernel, so any present fd is by
+##                  definition the wrong kind).
+##              Identical change to both signalfd and signalfd4.
+##
+##      Self-tests (boot-time):
+##        * signalfd(fd=-1, mask=ok) -> ENOSYS (was unchanged path).
+##        * signalfd(fd=0, mask=ok) -> EINVAL (new — stdin is a
+##          Console handle, not a signalfd, so the kind check fires).
+##        * signalfd4(fd=-1, flag=SFD_NONBLOCK) -> ENOSYS.
+##        * signalfd4(fd=0, mask=ok) -> EINVAL.
+##        * signalfd4(bogus flag bit) -> EINVAL (unchanged).
+##
+##      Known limitations:
+##        * Real signalfd functionality is still unimplemented — the
+##          ENOSYS path on fd=-1 returns the same answer it did
+##          pre-batch.  When HandleKind::SignalFd lands, the kind
+##          check needs a `kind == SignalFd` allowlist on the >=0
+##          path to permit mask updates and a real create routine on
+##          the -1 path.
+##        * sigsetsize is checked against 8 (sizeof(sigset_t) on
+##          x86_64) — Linux 32-bit compat code accepts 4 too, which
+##          we don't support yet (Linux ABI here is x86_64-only).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   signalfd/signalfd4 fd
+##      discrimination: OK".
+

@@ -10214,6 +10214,21 @@ fn sys_signalfd(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
         return linux_err(linux_errno_for(e));
     }
+    // fd semantics: -1 means "create a new signalfd"; >=0 means "update
+    // the mask on this existing signalfd".  Since no HandleKind::SignalFd
+    // exists in this kernel, any >=0 fd is by definition the wrong kind
+    // — return EINVAL to match Linux (kernel/signalfd.c: do_signalfd4
+    // returns -EINVAL when the fd is present but not a signalfd).
+    // Without this check we were silently accepting "update mask on fd 5"
+    // and returning ENOSYS, hiding the descriptor error.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if fd != -1 {
+        if let Err(r) = validate_linux_fd(fd) {
+            return r;
+        }
+        return linux_err(errno::EINVAL);
+    }
     linux_err(errno::ENOSYS)
 }
 
@@ -10237,6 +10252,15 @@ fn sys_signalfd4(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
         return linux_err(linux_errno_for(e));
+    }
+    // Same fd semantics as signalfd(2) — see comment there.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if fd != -1 {
+        if let Err(r) = validate_linux_fd(fd) {
+            return r;
+        }
+        return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
 }
@@ -29673,21 +29697,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: signalfd(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // signalfd with valid mask in kernel context -> ENOSYS.
+        // signalfd with fd=-1 (create new) in kernel context -> ENOSYS.
+        // -1i32 reinterpreted as u64 is the all-ones bit pattern; the
+        // syscall casts arg0 back to i32 which round-trips to -1.
         let sigmask = [0u8; 8];
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: sigmask.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: signalfd(-1) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // signalfd with fd=0 (stdin = Console, not a signalfd) -> EINVAL.
+        // Linux returns EINVAL when the fd is present but not a signalfd;
+        // we have no HandleKind::SignalFd, so every >=0 fd is "wrong kind".
         let a = SyscallArgs {
             arg0: 0,
             arg1: sigmask.as_ptr() as u64,
             arg2: 8, arg3: 0, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::SIGNALFD, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: signalfd not ENOSYS");
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: signalfd(fd=0) not EINVAL");
             return Err(KernelError::InternalError);
         }
         // signalfd4 with bogus flag -> EINVAL.
         let a = SyscallArgs {
-            arg0: 0,
+            arg0: u64::MAX,
             arg1: sigmask.as_ptr() as u64,
             arg2: 8, arg3: 0x8000_0000, arg4: 0, arg5: 0,
         };
@@ -29696,17 +29735,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: signalfd4(bad flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // signalfd4 with valid flag -> ENOSYS.
+        // signalfd4 with valid flag and fd=-1 -> ENOSYS.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: sigmask.as_ptr() as u64,
+            arg2: 8, arg3: 0o4000, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD4, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: signalfd4(-1) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // signalfd4 with fd=0 (Console) -> EINVAL (wrong kind).
         let a = SyscallArgs {
             arg0: 0,
             arg1: sigmask.as_ptr() as u64,
             arg2: 8, arg3: 0o4000, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::SIGNALFD4, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: signalfd4 not ENOSYS");
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: signalfd4(fd=0) not EINVAL");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   signalfd/signalfd4 fd discrimination: OK");
 
         // timerfd_create with bogus clockid -> EINVAL.
         let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,

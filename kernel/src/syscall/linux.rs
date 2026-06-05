@@ -9890,22 +9890,60 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)`.
+///
+/// Bulk-transfer data from another task's address space into the
+/// caller's iovecs.  flags is reserved and must be 0.
+///
+/// Pre-batch this validated inputs and returned `-ESRCH` for every
+/// non-self target — gdb's `target remote :PID` data fetch path,
+/// strace's `--decode-fds=path` symlink reader, and CRIU's parasite
+/// injector all use this to copy small payloads across processes.
+/// The honest answer for cross-process is still `-ESRCH` (we don't yet
+/// have cross-AS page-table mapping), but the *same-address-space*
+/// case is feasible: when the target TID belongs to the calling
+/// process (our thread model: threads share a PCB), every byte of
+/// remote_iov lies in the caller's own user space and the transfer
+/// is a regular SMAP-bracketed copy_from_user → scratch →
+/// copy_to_user sequence.  Glibc's `__libc_check_pid` self-probe and
+/// LLDB's local-process introspection rely on the same-AS path, and
+/// pre-batch we broke both.
+///
+/// Upgrade highlights:
+///   * Validates iovec arrays as before (pointer non-NULL, readable
+///     for `cnt * 16` bytes, counts ≤ 1024 / IOV_MAX).
+///   * If the target TID's owning process matches the caller's,
+///     stream bytes between the two iovec lists in 256-byte chunks
+///     via a kernel-stack scratch buffer.  Returns the total bytes
+///     moved (matches Linux's "best-effort partial copy" contract).
+///   * If a user-pointer copy fails mid-transfer, returns the bytes
+///     already moved (truthful partial-success), else maps the
+///     errno.  Matches Linux's `process_vm_readv` man-page: "On
+///     error, -1 is returned ... however, if a non-empty prefix of
+///     iovecs was transferred, that count is returned instead."
+///   * Cross-process target → `-ESRCH` (unchanged).
+///   * Kernel-context callers (no caller_pid) accept any pid > 0 as
+///     same-AS so the self-test can exercise the copy paths.
 fn sys_process_vm_readv(args: &SyscallArgs) -> SyscallResult {
     if args.arg5 != 0 {
         return linux_err(errno::EINVAL);
     }
-    process_vm_impl(args)
+    process_vm_impl(args, false)
 }
 
 /// `process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)`.
+///
+/// Mirror of `process_vm_readv` with the data direction reversed:
+/// bytes flow from `local_iov` (caller's buffers) into `remote_iov`
+/// (target task's address space).  Same-AS upgrade applies; see
+/// [`sys_process_vm_readv`] for the design.
 fn sys_process_vm_writev(args: &SyscallArgs) -> SyscallResult {
     if args.arg5 != 0 {
         return linux_err(errno::EINVAL);
     }
-    process_vm_impl(args)
+    process_vm_impl(args, true)
 }
 
-fn process_vm_impl(args: &SyscallArgs) -> SyscallResult {
+fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid = args.arg0 as i32;
     if pid <= 0 {
@@ -9932,8 +9970,128 @@ fn process_vm_impl(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    // Cross-process VM access not yet implemented.
-    linux_err(errno::ESRCH)
+
+    // Decide whether the target lives in the caller's address space.
+    // In our thread model two TIDs share an AS iff they share a PCB.
+    let target_owner = crate::proc::thread::owner_process(pid as u64);
+    let caller = caller_pid();
+    let kernel_ctx = caller.is_none();
+    let same_addr_space = match (target_owner, caller) {
+        (Some(a), Some(b)) => a == b,
+        // Kernel context: no PCB to consult.  Accept so the self-test
+        // can drive the copy path; production callers never hit this.
+        _ => kernel_ctx,
+    };
+    if !same_addr_space {
+        // Cross-AS not implemented — would need per-VMA inspection in
+        // the foreign address space plus per-page mapping.  Documented
+        // limitation; ESRCH matches Linux when the target task is gone.
+        return linux_err(errno::ESRCH);
+    }
+
+    // Nothing to do if either side has zero entries; matches Linux
+    // (returns 0 = no bytes moved).
+    if liovcnt == 0 || riovcnt == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    const CHUNK: usize = 256;
+    let mut scratch = [0u8; CHUNK];
+    let mut total: u64 = 0;
+    let mut li: usize = 0;
+    let mut ri: usize = 0;
+    let mut lo: u64 = 0;
+    let mut ro: u64 = 0;
+
+    while li < liovcnt && ri < riovcnt {
+        let l_entry_ptr = args.arg1.wrapping_add((li as u64) * 16);
+        let r_entry_ptr = args.arg3.wrapping_add((ri as u64) * 16);
+        let mut l_iov = [0u8; 16];
+        let mut r_iov = [0u8; 16];
+        // SAFETY: l_entry_ptr / r_entry_ptr each lie within the
+        // validated `cnt * 16` ranges checked above; the copy is
+        // SMAP-safe inside copy_from_user.
+        let r1 = unsafe {
+            crate::mm::user::copy_from_user(l_entry_ptr, l_iov.as_mut_ptr(), 16)
+        };
+        if let Err(e) = r1 {
+            if total > 0 {
+                #[allow(clippy::cast_possible_wrap)]
+                return SyscallResult::ok(total as i64);
+            }
+            return linux_err(linux_errno_for(e));
+        }
+        let r2 = unsafe {
+            crate::mm::user::copy_from_user(r_entry_ptr, r_iov.as_mut_ptr(), 16)
+        };
+        if let Err(e) = r2 {
+            if total > 0 {
+                #[allow(clippy::cast_possible_wrap)]
+                return SyscallResult::ok(total as i64);
+            }
+            return linux_err(linux_errno_for(e));
+        }
+        let l_base = u64::from_le_bytes(l_iov[0..8].try_into().unwrap_or([0u8; 8]));
+        let l_len = u64::from_le_bytes(l_iov[8..16].try_into().unwrap_or([0u8; 8]));
+        let r_base = u64::from_le_bytes(r_iov[0..8].try_into().unwrap_or([0u8; 8]));
+        let r_len = u64::from_le_bytes(r_iov[8..16].try_into().unwrap_or([0u8; 8]));
+
+        // Skip empty / fully-consumed iovec entries.
+        if l_len == 0 || lo >= l_len {
+            li += 1;
+            lo = 0;
+            continue;
+        }
+        if r_len == 0 || ro >= r_len {
+            ri += 1;
+            ro = 0;
+            continue;
+        }
+
+        let remaining = core::cmp::min(l_len - lo, r_len - ro);
+        #[allow(clippy::cast_possible_truncation)]
+        let n = core::cmp::min(remaining, CHUNK as u64) as usize;
+
+        // readv: data flows remote -> local.  writev: local -> remote.
+        let (src, dst) = if is_write {
+            (l_base + lo, r_base + ro)
+        } else {
+            (r_base + ro, l_base + lo)
+        };
+        // SAFETY: same-address-space invariant means both src and dst
+        // are user pointers in the caller's AS.  copy_from_user /
+        // copy_to_user perform SMAP-bracketed validation per byte.
+        let cf = unsafe { crate::mm::user::copy_from_user(src, scratch.as_mut_ptr(), n) };
+        if let Err(e) = cf {
+            if total > 0 {
+                #[allow(clippy::cast_possible_wrap)]
+                return SyscallResult::ok(total as i64);
+            }
+            return linux_err(linux_errno_for(e));
+        }
+        let ct = unsafe { crate::mm::user::copy_to_user(scratch.as_ptr(), dst, n) };
+        if let Err(e) = ct {
+            if total > 0 {
+                #[allow(clippy::cast_possible_wrap)]
+                return SyscallResult::ok(total as i64);
+            }
+            return linux_err(linux_errno_for(e));
+        }
+        total = total.saturating_add(n as u64);
+        lo = lo.saturating_add(n as u64);
+        ro = ro.saturating_add(n as u64);
+        if lo >= l_len {
+            li += 1;
+            lo = 0;
+        }
+        if ro >= r_len {
+            ri += 1;
+            ro = 0;
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(total as i64)
 }
 
 /// `process_mrelease(pidfd, flags)`.
@@ -26770,19 +26928,143 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: process_vm_readv(flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // process_vm_readv(pid=1, liovcnt=0, riovcnt=0) -> ESRCH (no
-        // target process exists).
+        // Batch 112: process_vm_readv / writev upgraded to perform
+        // the same-address-space transfer.  In kernel-context the
+        // owner-process lookup falls back to "same AS" so the copy
+        // path is exercised.
+        //
+        // pid=1, liovcnt=0, riovcnt=0 -> 0 bytes transferred (no
+        // entries on either side; nothing to do).
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
-            != -i64::from(errno::ESRCH) {
-            serial_println!("[syscall/linux]   FAIL: process_vm_readv not ESRCH");
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv empty not 0");
             return Err(KernelError::InternalError);
         }
-        // process_vm_writev same.
-        if dispatch_linux(nr::PROCESS_VM_WRITEV, &a).value
-            != -i64::from(errno::ESRCH) {
-            serial_println!("[syscall/linux]   FAIL: process_vm_writev not ESRCH");
+        if dispatch_linux(nr::PROCESS_VM_WRITEV, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: process_vm_writev empty not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Round-trip same-AS copy via PROCESS_VM_READV: remote -> local.
+        let src_bytes: [u8; 8] = *b"HelloPVR";
+        let mut dst_bytes: [u8; 8] = [0xAAu8; 8];
+        // local_iov = {dst_bytes, 8}, remote_iov = {src_bytes, 8}.
+        let mut liov = [0u8; 16];
+        let mut riov = [0u8; 16];
+        liov[0..8].copy_from_slice(&(dst_bytes.as_mut_ptr() as u64).to_le_bytes());
+        liov[8..16].copy_from_slice(&8u64.to_le_bytes());
+        riov[0..8].copy_from_slice(&(src_bytes.as_ptr() as u64).to_le_bytes());
+        riov[8..16].copy_from_slice(&8u64.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: liov.as_ptr() as u64,
+            arg2: 1,
+            arg3: riov.as_ptr() as u64,
+            arg4: 1,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 8 {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv 8-byte copy bad len");
+            return Err(KernelError::InternalError);
+        }
+        if dst_bytes != *b"HelloPVR" {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv dst mismatch");
+            return Err(KernelError::InternalError);
+        }
+        // PROCESS_VM_WRITEV: local -> remote.
+        let local_payload: [u8; 5] = *b"WrXYZ";
+        let mut remote_dst: [u8; 5] = [0x55u8; 5];
+        let mut liov2 = [0u8; 16];
+        let mut riov2 = [0u8; 16];
+        liov2[0..8].copy_from_slice(&(local_payload.as_ptr() as u64).to_le_bytes());
+        liov2[8..16].copy_from_slice(&5u64.to_le_bytes());
+        riov2[0..8].copy_from_slice(&(remote_dst.as_mut_ptr() as u64).to_le_bytes());
+        riov2[8..16].copy_from_slice(&5u64.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: liov2.as_ptr() as u64,
+            arg2: 1,
+            arg3: riov2.as_ptr() as u64,
+            arg4: 1,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_WRITEV, &a).value != 5 {
+            serial_println!("[syscall/linux]   FAIL: process_vm_writev 5-byte copy bad len");
+            return Err(KernelError::InternalError);
+        }
+        if remote_dst != *b"WrXYZ" {
+            serial_println!("[syscall/linux]   FAIL: process_vm_writev dst mismatch");
+            return Err(KernelError::InternalError);
+        }
+        // Large copy (> CHUNK = 256) verifying chunked streaming.
+        let big_src: [u8; 600] = {
+            let mut x = [0u8; 600];
+            let mut i = 0;
+            while i < 600 {
+                x[i] = (i as u8).wrapping_mul(31).wrapping_add(7);
+                i += 1;
+            }
+            x
+        };
+        let mut big_dst: [u8; 600] = [0u8; 600];
+        let mut liov3 = [0u8; 16];
+        let mut riov3 = [0u8; 16];
+        liov3[0..8].copy_from_slice(&(big_dst.as_mut_ptr() as u64).to_le_bytes());
+        liov3[8..16].copy_from_slice(&600u64.to_le_bytes());
+        riov3[0..8].copy_from_slice(&(big_src.as_ptr() as u64).to_le_bytes());
+        riov3[8..16].copy_from_slice(&600u64.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: liov3.as_ptr() as u64,
+            arg2: 1,
+            arg3: riov3.as_ptr() as u64,
+            arg4: 1,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 600 {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv 600-byte copy bad len");
+            return Err(KernelError::InternalError);
+        }
+        let mut i = 0;
+        let mut ok = true;
+        while i < 600 {
+            if big_dst[i] != big_src[i] {
+                ok = false;
+                break;
+            }
+            i += 1;
+        }
+        if !ok {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv 600 byte mismatch");
+            return Err(KernelError::InternalError);
+        }
+        // Multi-iovec split: read 10 bytes from src into two 5-byte
+        // local iovecs, verify total and per-buffer content.
+        let src_split: [u8; 10] = *b"0123456789";
+        let mut dst_a: [u8; 5] = [0u8; 5];
+        let mut dst_b: [u8; 5] = [0u8; 5];
+        let mut liovs = [0u8; 32];
+        let mut riovs = [0u8; 16];
+        liovs[0..8].copy_from_slice(&(dst_a.as_mut_ptr() as u64).to_le_bytes());
+        liovs[8..16].copy_from_slice(&5u64.to_le_bytes());
+        liovs[16..24].copy_from_slice(&(dst_b.as_mut_ptr() as u64).to_le_bytes());
+        liovs[24..32].copy_from_slice(&5u64.to_le_bytes());
+        riovs[0..8].copy_from_slice(&(src_split.as_ptr() as u64).to_le_bytes());
+        riovs[8..16].copy_from_slice(&10u64.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: liovs.as_ptr() as u64,
+            arg2: 2,
+            arg3: riovs.as_ptr() as u64,
+            arg4: 1,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 10 {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv split bad len");
+            return Err(KernelError::InternalError);
+        }
+        if dst_a != *b"01234" || dst_b != *b"56789" {
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv split content");
             return Err(KernelError::InternalError);
         }
         // process_mrelease with nonzero flags -> EINVAL.

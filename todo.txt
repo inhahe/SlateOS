@@ -12825,3 +12825,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          handles get hashed for /proc-like introspection.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 25s).
+
+## 141. [LINUX ABI BATCH 112 - DONE] Upgrade process_vm_readv(2) and
+##      process_vm_writev(2) from a validated -ESRCH stub to a real
+##      same-address-space byte-stream transfer.
+##
+##      Background:
+##        Linux's process_vm_{readv,writev} bulk-copy bytes between
+##        two iovec arrays — one local, one in another task's
+##        address space — bypassing the read/write/pipe round-trip.
+##        It's the canonical fast path for gdb's data-fetch, strace's
+##        symlink decode, LLDB's local-process introspection, glibc's
+##        __libc_check_pid self-probe, and CRIU's parasite injector.
+##        Pre-batch our impl validated iov ranges and counts then
+##        returned -ESRCH for every target — breaking even self-probes
+##        that copy a single byte from the calling thread.
+##
+##      What the upgrade does:
+##        * Resolves the target pid arg (Linux treats it as a TID) via
+##          thread::owner_process to its owning ProcessId.  If that
+##          matches the caller's ProcessId, the target shares the
+##          caller's address space and remote_iov bases are valid
+##          user pointers in our own AS — every chunk is a regular
+##          copy_from_user → kernel scratch → copy_to_user sequence.
+##        * Otherwise returns -ESRCH (cross-AS still unimplemented).
+##        * Streams bytes in 256-byte chunks via a stack scratch
+##          buffer.  Advances per-iovec offsets, skips empty entries,
+##          terminates when either side is exhausted.
+##        * Returns total bytes transferred — including partial
+##          counts when a mid-transfer copy_from/to_user fails (matches
+##          Linux's "partial-success returns bytes-so-far" contract).
+##          Only the first-byte failure case surfaces as -errno.
+##        * Kernel-context callers (caller_pid() is None) treat the
+##          target as same-AS so the self-test exercises the copy
+##          paths.  Production callers never hit this branch.
+##
+##      Validation gates (unchanged):
+##        * arg5 (flags) != 0          -> -EINVAL.
+##        * pid <= 0                   -> -ESRCH.
+##        * liovcnt or riovcnt > 1024  -> -EINVAL (matches IOV_MAX).
+##        * NULL iov ptr with cnt > 0  -> -EFAULT.
+##        * unreadable iov array       -> -EFAULT.
+##
+##      Boot self-test extended (over the original ESRCH cases):
+##        1. liovcnt=0, riovcnt=0, pid=1 -> 0 (both PVR and PVW).
+##        2. PROCESS_VM_READV: 8-byte src "HelloPVR" -> 8-byte dst,
+##           dst[..] == src[..], returns 8.
+##        3. PROCESS_VM_WRITEV: 5-byte src "WrXYZ" -> 5-byte dst,
+##           dst[..] == src[..], returns 5.
+##        4. 600-byte READV exercises the chunked-streaming loop
+##           (CHUNK = 256 -> 3 iterations).  Byte pattern
+##           ((i*31)+7) mod 256 verifies no offset drift.
+##        5. Multi-iovec split: 10-byte remote_iov, two 5-byte
+##           local_iovs.  Returns 10, dst_a="01234", dst_b="56789"
+##           — confirms iovec-boundary tracking is correct.
+##
+##      Known limitations / documented for follow-on work:
+##        * Cross-process transfer is still unsupported.  Implementing
+##          it requires walking the foreign task's VMA tree to confirm
+##          each remote_iov range is mapped, then ephemerally mapping
+##          its pages into the kernel's identity space (or using a
+##          per-CPU scratch window).  CRIU's parasite injection
+##          depends on this — adding it is its own major batch.
+##        * No PTRACE_ATTACH / ptrace-style permission gate yet.
+##          Linux requires PTRACE_MODE_ATTACH_REALCREDS on the
+##          target; with same-AS that's trivially the calling task
+##          (you can always read your own memory), so the gate is
+##          a no-op today.  When cross-process lands, plumb the
+##          ptrace permission check through.
+##        * Partial-failure return path takes the bytes-so-far branch
+##          if a chunked copy fails mid-iovec.  Linux's semantics are
+##          slightly stricter: "the count returned is for *whole*
+##          iovecs transferred plus the partial bytes of the
+##          following one".  Our partial accounting may return a
+##          count that splits an iovec mid-range.  Acceptable for
+##          single-iovec callers (the vast majority); document so a
+##          fix can land later.
+##        * IOV total length isn't pre-summed against SSIZE_MAX.
+##          A pathological caller passing iov_len = u64::MAX would
+##          eventually hit copy_to/from_user failure and unwind via
+##          the partial-return path; no kernel corruption, but the
+##          "right" answer is -EINVAL up front.  Cap via
+##          checked-add total tracking when we do another sweep.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+

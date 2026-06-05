@@ -12346,3 +12346,57 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      observation on flake under bug-tracking convention but
 ##      no separate todo entry since it didn't reproduce and is
 ##      not in code I touched.
+##
+##  135. Linux ABI: sys_sched_getattr upgraded from -ENOSYS stub
+##      to a real PCB-backed sched_attr populator (batch 106).
+##
+##      glibc's pthread_getattr_np, systemd's per-unit CPU-policy
+##      probe, and `chrt --show` all call sched_getattr at thread
+##      start.  -ENOSYS meant they couldn't report the thread's
+##      policy / priority back to applications — chrt --show would
+##      bail with "Operation not permitted (ENOSYS handler)".
+##
+##      The arm now writes a v0-shaped (48-byte) sched_attr:
+##        * u32 size           = user-requested `size`
+##        * u32 sched_policy   = pcb::get_sched_policy(pid)
+##                               (0 / SCHED_OTHER default; FIFO/RR
+##                                from earlier sched_setscheduler)
+##        * u64 sched_flags    = 0
+##        * s32 sched_nice     = 0
+##        * u32 sched_priority = pcb::get_sched_priority(pid) for
+##                               policy in {1, 2}; 0 otherwise
+##        * u64 sched_runtime/deadline/period = 0 (no DEADLINE
+##          support).
+##
+##      Validation gates (unchanged):
+##        * flags != 0 -> -EINVAL.
+##        * size < 48 -> -EINVAL.
+##        * size > (1 << 20) -> -E2BIG.
+##        * attr == NULL -> -EFAULT.
+##        * non-writable user buffer -> -EFAULT.
+##        * pid != 0 with no matching PCB -> -ESRCH.
+##
+##      For size > 48, trailing bytes are zero-filled with a
+##      256-byte chunked write (bounded by the existing 1 << 20
+##      cap; no multi-megabyte heap allocation).
+##
+##      Boot self-test "(updated existing) sched_getattr v0":
+##        1. valid 48-byte query -> 0.
+##        2. attr.size field matches user-requested size (48).
+##        3. attr.sched_policy in 0..=7 (boot context defaults to
+##           SCHED_OTHER = 0).
+##        4. bytes 48..64 of caller buffer untouched (verified
+##           with 0xCC sentinel) — proves we don't overwrite
+##           beyond the requested size.
+##
+##      Known limitations:
+##        * sched_nice always 0.  We don't store nice values in
+##          PCB.  When PCB grows a nice field, this is where to
+##          pipe it through.
+##        * sched_flags always 0.  No SCHED_FLAG_RESET_ON_FORK
+##          tracking yet.  Same upgrade path as nice.
+##        * SCHED_DEADLINE fields (runtime/deadline/period)
+##          always 0.  We have no DEADLINE scheduler; if one is
+##          added, populate from per-task DEADLINE attrs.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 26s).

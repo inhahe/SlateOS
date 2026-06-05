@@ -11914,26 +11914,134 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `sched_getattr(pid, attr*, size, flags)`.
+/// `sched_getattr(pid, attr*, size, flags)` — query the calling thread's
+/// (or `pid`'s) scheduling attributes.
+///
+/// Pre-batch this validated args and then returned -ENOSYS.  glibc's
+/// `pthread_getattr_np`, systemd's per-unit CPU-policy probe, and
+/// `chrt --show` all call sched_getattr at startup and treat -ENOSYS
+/// as "kernel does not support sched_attr at all" — they then can't
+/// report the thread's policy / priority back to the application.
+///
+/// Linux's `sched_getattr` writes a `struct sched_attr` of `size` bytes
+/// where the first `min(size, sizeof(kernel struct))` bytes come from
+/// the kernel's representation and any trailing bytes are zero-filled.
+/// `attr.size` is set to the user-requested `size` before the copy.
+///
+/// Our `struct sched_attr` mirrors the v0 layout (48 bytes):
+///   * u32 size
+///   * u32 sched_policy           — SCHED_OTHER (0), FIFO (1), RR (2),
+///                                  BATCH (3), IDLE (5), DEADLINE (6),
+///                                  EXT (7).
+///   * u64 sched_flags            — always 0 (no reset_on_fork / etc.).
+///   * s32 sched_nice             — 0 (we don't track nice values).
+///   * u32 sched_priority         — RT policies only; 0 otherwise.
+///   * u64 sched_runtime          — 0 (no DEADLINE support).
+///   * u64 sched_deadline         — 0.
+///   * u64 sched_period           — 0.
+///
+/// Policy and priority come from the PCB via `get_sched_policy` and
+/// `get_sched_priority`, the same source as `sched_getscheduler` and
+/// `sched_getparam`.  Kernel-context callers (no current task) and
+/// pid==0 fall back to (SCHED_OTHER, 0).
 fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     if args.arg3 != 0 {
         return linux_err(errno::EINVAL);
     }
     let size = args.arg2;
-    // Linux requires size >= 48 (the original sched_attr size).
     if size < 48 {
         return linux_err(errno::EINVAL);
     }
     if size > (1 << 20) {
         return linux_err(errno::E2BIG);
     }
-    if args.arg1 == 0 {
+    let attr_ptr = args.arg1;
+    if attr_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, size as usize) {
+    if let Err(e) = crate::mm::user::validate_user_write(attr_ptr, size as usize) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::ENOSYS)
+
+    // Resolve target pid: 0 means the caller; non-zero must reference
+    // a live process.
+    let pid = args.arg0;
+    let target_pid = if pid == 0 {
+        caller_pid()
+    } else {
+        if pcb::state(pid).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+        Some(pid)
+    };
+    let policy: u32 = target_pid
+        .and_then(pcb::get_sched_policy)
+        .unwrap_or(0);
+    let raw_prio: i32 = target_pid
+        .and_then(pcb::get_sched_priority)
+        .unwrap_or(0);
+    // Only RT policies (FIFO=1, RR=2) report a non-zero sched_priority
+    // in sched_attr; SCHED_OTHER / BATCH / IDLE keep it 0.
+    #[allow(clippy::cast_sign_loss)]
+    let priority: u32 = if policy == 1 || policy == 2 {
+        // RT priorities are in 1..=99 per Linux convention; the cast
+        // is safe for non-negative values.
+        raw_prio.max(0) as u32
+    } else {
+        0
+    };
+
+    // Assemble the v0-sized (48-byte) sched_attr.  We use a packed
+    // byte array to guarantee the exact Linux ABI layout regardless
+    // of Rust's default struct alignment.
+    #[allow(clippy::cast_possible_truncation)]
+    let user_size = size as u32;
+    let mut buf = [0u8; 48];
+    buf[0..4].copy_from_slice(&user_size.to_le_bytes());
+    buf[4..8].copy_from_slice(&policy.to_le_bytes());
+    // sched_flags @ 8..16 = 0 (already zero).
+    // sched_nice @ 16..20 = 0.
+    buf[20..24].copy_from_slice(&priority.to_le_bytes());
+    // sched_runtime @ 24..32, sched_deadline @ 32..40,
+    // sched_period @ 40..48 = 0.
+
+    // SAFETY: validate_user_write above confirmed the full `size`
+    // user buffer is writable; we write the first 48 bytes of it.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(buf.as_ptr(), attr_ptr, 48)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Zero-fill any trailing bytes the caller requested beyond v0.
+    // Chunked writes avoid allocating a multi-megabyte buffer when
+    // the caller passes a pathological size (capped at 1 << 20 by the
+    // E2BIG check above).
+    if size > 48 {
+        const ZERO_CHUNK: [u8; 256] = [0u8; 256];
+        let mut offset: u64 = 48;
+        while offset < size {
+            let remaining = size - offset;
+            #[allow(clippy::cast_possible_truncation)]
+            let n = core::cmp::min(remaining, ZERO_CHUNK.len() as u64) as usize;
+            // SAFETY: validate_user_write covers the whole user
+            // buffer; we are writing a sub-range of it.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(
+                    ZERO_CHUNK.as_ptr(),
+                    attr_ptr + offset,
+                    n,
+                )
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            offset += n as u64;
+        }
+    }
+
+    SyscallResult::ok(0)
 }
 
 /// `landlock_create_ruleset(attr*, size, flags)`.
@@ -27132,12 +27240,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: sched_getattr NULL not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // sched_getattr valid -> ENOSYS.
-        let big_buf = [0u8; 64];
-        let big_ptr = big_buf.as_ptr() as u64;
+        // sched_getattr(pid=0, attr, size=48) -> 0 (batch 106 upgrade:
+        // was ENOSYS, now writes a v0-shaped sched_attr from PCB).
+        let mut big_buf = [0xCCu8; 64];
+        let big_ptr = big_buf.as_mut_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: big_ptr, arg2: 48, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SCHED_GETATTR, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: sched_getattr valid not ENOSYS");
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: sched_getattr v0 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Verify attr.size field reflects the user-requested size.
+        let written_size = u32::from_le_bytes([big_buf[0], big_buf[1], big_buf[2], big_buf[3]]);
+        if written_size != 48 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr attr.size {} (expected 48)",
+                written_size,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sched_policy should be in 0..=7 (we accept any of the
+        // valid Linux policies — the boot-context default is
+        // SCHED_OTHER (0)).
+        let policy_byte = u32::from_le_bytes([big_buf[4], big_buf[5], big_buf[6], big_buf[7]]);
+        if policy_byte > 7 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr policy {} > 7",
+                policy_byte,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Bytes 48..64 of big_buf were not requested (size=48), so
+        // they should still hold the 0xCC sentinel — proves we
+        // didn't over-write.
+        if big_buf[48..].iter().any(|&b| b != 0xCC) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr wrote past requested size",
+            );
             return Err(KernelError::InternalError);
         }
 

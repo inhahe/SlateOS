@@ -15974,3 +15974,102 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   kexec_load/kexec_file_load
 ##      flag validation: OK" in build/serial-test.txt.
 
+
+## 181. Linux ABI: seccomp per-op flag validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_seccomp.
+##
+##      Problem: sys_seccomp had three coarse gates run in sequence
+##              for all operations:
+##                1. op > 3 -> EINVAL
+##                2. op == 0 (STRICT) && flags != 0 -> EINVAL
+##                3. op > 0 && uargs == NULL -> EFAULT
+##              then ENOSYS.  This collapsed every "needs uargs" op
+##              into one EFAULT check and never validated the
+##              SECCOMP_FILTER_FLAG_MASK bits.  Linux's
+##              kernel/seccomp.c::do_seccomp() dispatches on op and
+##              applies per-op validation:
+##                * SET_MODE_STRICT (0): flags != 0 || uargs != NULL
+##                  -> EINVAL.
+##                * SET_MODE_FILTER (1): flags & ~MASK -> EINVAL,
+##                  uargs == NULL -> EFAULT.
+##                * GET_ACTION_AVAIL (2): flags != 0 -> EINVAL,
+##                  uargs == NULL -> EFAULT.
+##                * GET_NOTIF_SIZES (3): flags != 0 -> EINVAL,
+##                  uargs == NULL -> EFAULT.
+##              A probe passing op=GET_ACTION_AVAIL with flags=1 saw
+##              ENOSYS (skipping the flag-validation entirely) instead
+##              of the EINVAL Linux returns; libseccomp's feature
+##              detection walks flag bits to discover the highest
+##              accepted value, and would conclude "all bits valid"
+##              and try to set every flag on a real filter — only to
+##              hit ENOSYS later on a path it thought was supported.
+##
+##      Fix:    Refactored sys_seccomp into a `match op` that applies
+##              Linux's per-op gates ahead of the terminal ENOSYS:
+##                  match op {
+##                      0 => { flags!=0 || uargs!=0 -> EINVAL }
+##                      1 => {
+##                          flags & ~0x3f -> EINVAL,
+##                          uargs==0 -> EFAULT,
+##                          validate_user_read(uargs, 4)
+##                      }
+##                      2|3 => {
+##                          flags!=0 -> EINVAL,
+##                          uargs==0 -> EFAULT,
+##                          validate_user_read(uargs, 4)
+##                      }
+##                      _ => EINVAL,
+##                  }
+##                  ENOSYS
+##              SECCOMP_FILTER_FLAG_MASK = TSYNC | LOG | SPEC_ALLOW
+##                                       | NEW_LISTENER | TSYNC_ESRCH
+##                                       | WAIT_KILLABLE_RECV
+##                                       = 0x3f  (Linux 6.10).
+##
+##      Self-tests (boot-time):
+##        * seccomp(0, 0, buf_ptr) -> EINVAL  (STRICT+uargs; new).
+##        * seccomp(1, 0x80, buf_ptr) -> EINVAL  (FILTER bad flag
+##          bit; new — previously ENOSYS).
+##        * seccomp(1, 0x3f, buf_ptr) -> ENOSYS  (FILTER all valid
+##          flags; new — verifies the mask accepts every documented
+##          bit).
+##        * seccomp(2, 1, buf_ptr) -> EINVAL  (GET_ACTION_AVAIL with
+##          flags!=0; new — previously ENOSYS).
+##        * seccomp(2, 0, buf_ptr) -> ENOSYS  (GET_ACTION_AVAIL
+##          valid; new — verifies the gate allows op==2 through).
+##        * seccomp(3, 1, buf_ptr) -> EINVAL  (GET_NOTIF_SIZES with
+##          flags!=0; new — previously ENOSYS).
+##        * seccomp(3, 0, buf_ptr) -> ENOSYS  (GET_NOTIF_SIZES
+##          valid; new).
+##        * All pre-existing seccomp tests still pass (bad op 99 ->
+##          EINVAL, STRICT+flags=1 -> EINVAL, FILTER NULL -> EFAULT,
+##          STRICT all-zero -> ENOSYS).
+##        * Emits "[syscall/linux]   seccomp per-op flag validation:
+##          OK".
+##
+##      Known limitations:
+##        * SECCOMP_FILTER_FLAG_MASK is hard-coded to 0x3f, the
+##          Linux 6.10 value.  When new flag bits land upstream
+##          (e.g. a SECCOMP_FILTER_FLAG_KILL_PROCESS_TGID hypothetical)
+##          this mask will need to widen.  Documented here so the
+##          next maintainer knows to re-check against the current
+##          Linux UAPI on bump.
+##        * The validate_user_read(uargs, 4) call is a 4-byte
+##          probe — enough to surface unmapped pages but not a full
+##          struct sock_fprog validation.  We can't usefully validate
+##          the filter contents until we have a real seccomp
+##          implementation; today the terminal answer is ENOSYS so
+##          the probe length is sufficient to mirror Linux's "I
+##          touched the pointer before erroring" behavior on a
+##          mapping issue.
+##        * The terminal answer remains ENOSYS for every valid call.
+##          glibc, runc, systemd, and libseccomp all degrade
+##          gracefully (run-without-filter for ENOSYS) — matches the
+##          documented "seccomp not configured into the kernel"
+##          fallback path.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   seccomp per-op flag
+##      validation: OK" in build/serial-test.txt.
+

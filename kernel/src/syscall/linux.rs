@@ -14990,28 +14990,67 @@ fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `seccomp(op, flags, args*)`.
+///
+/// Linux's `kernel/seccomp.c::do_seccomp()` dispatches on `op` and
+/// validates `flags` per-op:
+///
+///   * `SET_MODE_STRICT` (0): `flags != 0 || uargs != NULL` -> EINVAL.
+///   * `SET_MODE_FILTER` (1): `flags & ~SECCOMP_FILTER_FLAG_MASK`
+///     -> EINVAL.  `SECCOMP_FILTER_FLAG_MASK` is 0x3f as of Linux
+///     6.10 (TSYNC | LOG | SPEC_ALLOW | NEW_LISTENER | TSYNC_ESRCH |
+///     WAIT_KILLABLE_RECV).
+///   * `GET_ACTION_AVAIL` (2): `flags != 0` -> EINVAL.
+///   * `GET_NOTIF_SIZES` (3): `flags != 0` -> EINVAL.
+///   * default: -EINVAL.
+///
+/// Pre-batch-152 we collapsed all three "needs uargs" cases into one
+/// EFAULT gate and did not validate the flag bits for any op.  A
+/// probe passing `op = GET_ACTION_AVAIL` with `flags = 1` saw ENOSYS
+/// (after we passed the unrelated checks) instead of the EINVAL Linux
+/// returns, and `SET_MODE_FILTER` with bogus flag bits also saw
+/// ENOSYS.  This batch matches Linux's per-op validation exactly so
+/// libseccomp's feature detection (which walks flag bits looking for
+/// the highest accepted value) terminates correctly.
 fn sys_seccomp(args: &SyscallArgs) -> SyscallResult {
-    // Valid ops: SET_MODE_STRICT(0), SET_MODE_FILTER(1),
-    // GET_ACTION_AVAIL(2), GET_NOTIF_SIZES(3).
+    const SECCOMP_FILTER_FLAG_MASK: u64 = 0x3f;
     let op = args.arg0;
-    if op > 3 {
-        return linux_err(errno::EINVAL);
-    }
-    // Flags must be zero for SET_MODE_STRICT.
-    if op == 0 && args.arg1 != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // For SET_MODE_FILTER / GET_ACTION_AVAIL / GET_NOTIF_SIZES the
-    // args pointer must be non-NULL.
-    if op > 0 {
-        if args.arg2 == 0 {
-            return linux_err(errno::EFAULT);
+    let flags = args.arg1;
+    let uargs = args.arg2;
+    match op {
+        // SET_MODE_STRICT: no flags, no uargs.
+        0 => {
+            if flags != 0 || uargs != 0 {
+                return linux_err(errno::EINVAL);
+            }
         }
-        // Validate at least 4 bytes — enough to look at struct
-        // seccomp_notif_sizes.seccomp_notif (u16) or the action field.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 4) {
-            return linux_err(linux_errno_for(e));
+        // SET_MODE_FILTER: validate flag mask, uargs required.
+        1 => {
+            if flags & !SECCOMP_FILTER_FLAG_MASK != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            if uargs == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            // struct sock_fprog is { u16 len; struct sock_filter *filter; }
+            // = 16 bytes on x86_64.  Validate at least the prefix so
+            // an unmapped uargs surfaces EFAULT here, not later.
+            if let Err(e) = crate::mm::user::validate_user_read(uargs, 4) {
+                return linux_err(linux_errno_for(e));
+            }
         }
+        // GET_ACTION_AVAIL / GET_NOTIF_SIZES: flags must be 0, uargs required.
+        2 | 3 => {
+            if flags != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            if uargs == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            if let Err(e) = crate::mm::user::validate_user_read(uargs, 4) {
+                return linux_err(linux_errno_for(e));
+            }
+        }
+        _ => return linux_err(errno::EINVAL),
     }
     linux_err(errno::ENOSYS)
 }
@@ -33112,6 +33151,49 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: seccomp STRICT not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // seccomp STRICT (0) with non-NULL uargs -> EINVAL (see todo 181).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: seccomp STRICT+uargs not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp FILTER (1) with invalid flag bit (0x80) -> EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 0x80, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: seccomp FILTER bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp FILTER (1) with all valid flag bits (0x3f) -> ENOSYS.
+        let a = SyscallArgs { arg0: 1, arg1: 0x3f, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: seccomp FILTER valid flags not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp GET_ACTION_AVAIL (2) with flags!=0 -> EINVAL.
+        let a = SyscallArgs { arg0: 2, arg1: 1, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: seccomp GET_ACTION_AVAIL+flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp GET_ACTION_AVAIL (2) valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 2, arg1: 0, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: seccomp GET_ACTION_AVAIL not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp GET_NOTIF_SIZES (3) with flags!=0 -> EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 1, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: seccomp GET_NOTIF_SIZES+flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // seccomp GET_NOTIF_SIZES (3) valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: seccomp GET_NOTIF_SIZES not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   seccomp per-op flag validation: OK");
 
         // ptrace huge req -> EINVAL.
         let a = SyscallArgs { arg0: 0x20_000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

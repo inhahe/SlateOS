@@ -12400,3 +12400,89 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          added, populate from per-task DEADLINE attrs.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 26s).
+
+## 136. Batch 107: sys_sched_setattr upgraded from -EPERM stub to a
+##      real PCB-persisting implementation
+##      ---------------------------------------------------------------
+##      Pre-batch: validated args (flags/size/NULL/writable) and then
+##      returned -EPERM unconditionally.  glibc's pthread_setattr_np,
+##      systemd's per-unit CPUSchedulingPolicy=, and chrt --set all
+##      treated this as "unprivileged" rather than "unsupported" — they
+##      either gave up or retried with sched_setscheduler.
+##
+##      Post-batch: sys_sched_setattr reads the v0 (48-byte) sched_attr
+##      from the caller and persists policy + priority into the PCB
+##      using the same helpers as sys_sched_setscheduler.
+##
+##      Wire layout consumed (v0 sched_attr, 48 bytes):
+##        * u32 size      @ 0..4
+##        * u32 policy    @ 4..8     (read; must be 0/1/2/3/5)
+##        * u64 flags     @ 8..16    (ignored — see Limitations)
+##        * s32 nice      @ 16..20   (ignored)
+##        * u32 priority  @ 20..24   (validated by
+##                                    sched_priority_check_for_policy)
+##        * u64 runtime   @ 24..32   (ignored)
+##        * u64 deadline  @ 32..40   (ignored)
+##        * u64 period    @ 40..48   (ignored)
+##
+##      Validation gates:
+##        * flags != 0 -> -EINVAL.
+##        * attr == NULL -> -EFAULT.
+##        * non-readable 4 bytes for the size prefix -> -EFAULT.
+##        * size < 48 -> -EINVAL.
+##        * size > (1 << 20) -> -E2BIG.
+##        * non-readable full size buffer -> -EFAULT.
+##        * policy in {6 (DEADLINE), 7 (EXT)} -> -EOPNOTSUPP.
+##        * policy/priority compatibility check (the existing shared
+##          sched_priority_check_for_policy helper) — e.g. SCHED_OTHER
+##          with priority > 0 -> -EINVAL.
+##        * rlimit-based RT-priority check
+##          (rlimit_rtprio_check_for_caller) — caller can't raise
+##          priority beyond RLIMIT_RTPRIO.
+##        * pid != 0 with no matching PCB -> -ESRCH.
+##
+##      Persistence: pcb::set_sched_policy + pcb::set_sched_priority,
+##      same path sched_setscheduler uses.  sched_getattr (batch 106)
+##      then reads back the new policy/priority on the next query —
+##      verified by the boot self-test loop.
+##
+##      Boot self-test "(updated existing) sched_setattr v0":
+##        1. flags != 0 -> -EINVAL.
+##        2. attr == NULL -> -EFAULT.
+##        3. size < 48 -> -EINVAL (was "valid -> EPERM" pre-batch).
+##        4. v0 attr with policy=SCHED_OTHER, prio=0 -> 0 (success).
+##        5. v0 attr with policy=SCHED_DEADLINE -> -EOPNOTSUPP.
+##        6. v0 attr with policy=SCHED_OTHER, prio=5 -> -EINVAL
+##           (priority-vs-policy mismatch).
+##
+##      Bug fix bundled with this batch: when the old "sched_setattr
+##      valid -> EPERM" test case was rewritten into four new cases,
+##      the previously-shared local `size_ptr` (an 8-byte buffer used
+##      both by sched_setattr and by the LANDLOCK_CREATE_RULESET valid
+##      test below) was dropped.  The landlock test was silently
+##      relying on `size_ptr` from the sched_setattr block.  Added an
+##      explicit `let landlock_attr = [0u8; 8]; let size_ptr = …;`
+##      immediately before the LANDLOCK_CREATE_RULESET valid case so
+##      that subsystem's self-test still has a valid 8-byte readable
+##      buffer.  Caught at compile time (E0425 "cannot find value
+##      `size_ptr` in this scope") rather than at boot.
+##
+##      Known limitations:
+##        * sched_flags discarded silently.  SCHED_FLAG_RESET_ON_FORK
+##          / SCHED_FLAG_RECLAIM / SCHED_FLAG_DL_OVERRUN etc. are
+##          accepted-and-ignored.  Upgrade path: thread a flags field
+##          through PCB and surface it in sched_getattr.
+##        * sched_nice discarded silently.  We don't track nice in
+##          PCB.  Same upgrade path as flags.
+##        * SCHED_DEADLINE fields discarded.  We have no DEADLINE
+##          scheduler, so runtime/deadline/period are read but never
+##          stored — the -EOPNOTSUPP rejection on policy=6 means real
+##          DEADLINE clients see the failure before any DEADLINE
+##          attrs get inspected.
+##        * pid != caller_pid is accepted but persists into the
+##          target's PCB without an additional capability check beyond
+##          existence (-ESRCH on missing PCB).  Matches our
+##          sched_setscheduler behavior; revisit when we have a real
+##          credentials model.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 25s).

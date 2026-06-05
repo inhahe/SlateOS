@@ -11895,23 +11895,112 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `sched_setattr(pid, attr*, flags)` — set a thread's scheduling
-/// attributes including SCHED_DEADLINE parameters.  Reads size from the
-/// first 4 bytes of attr; size must be at least 48.
+/// `sched_setattr(pid, attr*, flags)` — install a thread's scheduling
+/// attributes from a user-provided `struct sched_attr`.
+///
+/// Pre-batch this returned -EPERM after pointer validation.  -EPERM is
+/// a survivable error for callers that probe (glibc's pthread_attr
+/// path, systemd's per-unit policy installer), but it's wrong: -EPERM
+/// means "you'd be allowed if you had CAP_SYS_NICE", whereas the
+/// actual story for SCHED_OTHER / FIFO / RR is "I can do this, here it
+/// is", and for SCHED_DEADLINE / SCHED_EXT it's "I can't do this at
+/// all" (-EOPNOTSUPP, the honest answer for unimplemented scheduling
+/// classes).
+///
+/// Behaviour now:
+///   * Read the 48-byte v0 sched_attr (any larger size is accepted but
+///     only the first 48 bytes are consumed).
+///   * Validate sched_policy in {SCHED_OTHER, FIFO, RR, BATCH, IDLE}
+///     and sched_priority in the policy's legal range, sharing the
+///     same `sched_priority_check_for_policy` helper used by
+///     sys_sched_setscheduler.
+///   * Enforce RLIMIT_RTPRIO for FIFO/RR via the same gate.
+///   * SCHED_DEADLINE (6) and SCHED_EXT (7) return -EOPNOTSUPP — Linux
+///     uses this errno when the scheduling class is compiled out.
+///   * sched_flags is accepted (only RESET_ON_FORK = 0x01 is non-zero
+///     interesting and we silently drop it — same approach as the
+///     sched_nice / sched_runtime / etc. fields).
+///   * Persist policy + priority into the PCB via the same setters as
+///     sys_sched_setscheduler.
 fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
+    const SCHED_DEADLINE: u32 = 6;
+    const SCHED_EXT: u32 = 7;
+
     if args.arg2 != 0 {
         return linux_err(errno::EINVAL);
     }
-    if args.arg1 == 0 {
+    let attr_ptr = args.arg1;
+    if attr_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-    // Validate at least the 4-byte size prefix.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 4) {
+    // Read the 4-byte size prefix to know how much is readable.
+    if let Err(e) = crate::mm::user::validate_user_read(attr_ptr, 4) {
         return linux_err(linux_errno_for(e));
     }
-    // SCHED_DEADLINE et al require CAP_SYS_NICE; without a real
-    // implementation, EPERM is the honest answer.
-    linux_err(errno::EPERM)
+    let mut size_buf = [0u8; 4];
+    // SAFETY: the 4-byte prefix is validated readable above.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(attr_ptr, size_buf.as_mut_ptr(), 4)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let size = u32::from_le_bytes(size_buf);
+    if size < 48 {
+        return linux_err(errno::EINVAL);
+    }
+    if size > (1 << 20) {
+        return linux_err(errno::E2BIG);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(attr_ptr, size as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Read the v0 fields we care about.  Sizes are little-endian on
+    // x86_64 — the platform Linux ABI we target.
+    let mut buf = [0u8; 48];
+    // SAFETY: validate_user_read above covers the full 48 bytes
+    // (size is already >= 48).
+    let r = unsafe {
+        crate::mm::user::copy_from_user(attr_ptr, buf.as_mut_ptr(), 48)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let policy = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let priority = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
+
+    // Reject unimplemented scheduling classes with -EOPNOTSUPP, the
+    // errno Linux uses when the class is compiled out.
+    if policy == SCHED_DEADLINE || policy == SCHED_EXT {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    // Cap priority to i32 range before the shared validator; Linux
+    // accepts priorities up to 99 so the truncation is harmless.
+    #[allow(clippy::cast_possible_wrap)]
+    let sched_prio = priority as i32;
+    if let Err(e) = sched_priority_check_for_policy(u64::from(policy), sched_prio) {
+        return linux_err(e);
+    }
+    // RLIMIT_RTPRIO gate for FIFO/RR.
+    if policy == 1 || policy == 2 {
+        if let Err(e) = rlimit_rtprio_check_for_caller(sched_prio) {
+            return linux_err(e);
+        }
+    }
+
+    // Resolve target pid and persist into the PCB.
+    let pid = args.arg0;
+    if pid != 0 && pcb::state(pid).is_none() {
+        return linux_err(errno::ESRCH);
+    }
+    let target_pid = if pid == 0 { caller_pid() } else { Some(pid) };
+    if let Some(tp) = target_pid {
+        let _ = pcb::set_sched_policy(tp, policy);
+        let _ = pcb::set_sched_priority(tp, sched_prio);
+    }
+
+    SyscallResult::ok(0)
 }
 
 /// `sched_getattr(pid, attr*, size, flags)` — query the calling thread's
@@ -27214,12 +27303,52 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: sched_setattr NULL not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // sched_setattr valid -> EPERM.
-        let size_bytes = [0u8; 8];
-        let size_ptr = size_bytes.as_ptr() as u64;
-        let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: sched_setattr valid not EPERM");
+        // sched_setattr(size = 0) -> EINVAL (batch 107 upgrade: was
+        // EPERM after a no-op return; now sub-48 size is rejected
+        // before we even look at the policy).
+        let zero48 = [0u8; 48];
+        let mut bad_size = zero48;
+        bad_size[0..4].copy_from_slice(&0u32.to_le_bytes()); // explicit
+        let bad_ptr = bad_size.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: bad_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sched_setattr size<48 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // sched_setattr v0 SCHED_OTHER, priority=0 -> 0.
+        let mut good = [0u8; 48];
+        good[0..4].copy_from_slice(&48u32.to_le_bytes()); // size = 48
+        // sched_policy @ 4..8 = 0 (SCHED_OTHER), priority @ 20..24 = 0.
+        let good_ptr = good.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: good_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: sched_setattr OTHER/0 not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // sched_setattr SCHED_DEADLINE -> -EOPNOTSUPP (unimplemented
+        // class).
+        let mut dl = [0u8; 48];
+        dl[0..4].copy_from_slice(&48u32.to_le_bytes());
+        dl[4..8].copy_from_slice(&6u32.to_le_bytes()); // SCHED_DEADLINE
+        let dl_ptr = dl.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: dl_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: sched_setattr DEADLINE not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+
+        // sched_setattr SCHED_OTHER with non-zero priority -> -EINVAL
+        // (the policy/priority compatibility check rejects this).
+        let mut bad_prio = [0u8; 48];
+        bad_prio[0..4].copy_from_slice(&48u32.to_le_bytes());
+        bad_prio[4..8].copy_from_slice(&0u32.to_le_bytes()); // SCHED_OTHER
+        bad_prio[20..24].copy_from_slice(&5u32.to_le_bytes()); // priority 5
+        let bp_ptr = bad_prio.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: bp_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sched_setattr OTHER/5 not EINVAL");
             return Err(KernelError::InternalError);
         }
         // sched_getattr size < 48 -> EINVAL.
@@ -27298,6 +27427,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // landlock_create_ruleset valid -> ENOSYS.
+        // Provide a small readable 8-byte buffer as the attr pointer
+        // (batch 107 removed the previous shared `size_ptr` definition
+        // when the sched_setattr test was rewritten).
+        let landlock_attr = [0u8; 8];
+        let size_ptr = landlock_attr.as_ptr() as u64;
         let a = SyscallArgs { arg0: size_ptr, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: landlock valid not ENOSYS");

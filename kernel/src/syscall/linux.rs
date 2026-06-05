@@ -19000,7 +19000,12 @@ fn sys_io_pgetevents(args: &SyscallArgs) -> SyscallResult {
 /// attribute mutation.
 ///
 /// Our mount layer doesn't yet support the new fs-API mutation calls;
-/// mount(2) itself is stubbed.  Validate path and attr, return ENOSYS.
+/// mount(2) itself is stubbed.  Validate flags, path, and the
+/// `struct mount_attr` fields against Linux's gates in
+/// `fs/namespace.c::SYSCALL_DEFINE5(mount_setattr)` and
+/// `build_mount_kattr()`, then return ENOSYS for the terminal so probes
+/// see exactly the same errno layering Linux would give for malformed
+/// calls versus "kernel doesn't implement the op."
 fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
     let _dirfd = args.arg0 as i32;
     let path = args.arg1;
@@ -19022,8 +19027,71 @@ fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
     if attr == 0 || size < 32 {
         return linux_err(errno::EINVAL);
     }
+    // Linux: `copy_struct_from_user` rejects size > PAGE_SIZE with
+    // -E2BIG.  Use the x86_64 Linux page size (4096) — userspace
+    // expects a fixed cap, not our 16 KiB internal page size.
+    const LINUX_PAGE_SIZE: u64 = 4096;
+    if size > LINUX_PAGE_SIZE {
+        return linux_err(errno::E2BIG);
+    }
     if let Err(e) = crate::mm::user::validate_user_read(attr, 32) {
         return linux_err(linux_errno_for(e));
+    }
+    // Read struct mount_attr { __u64 attr_set, attr_clr, propagation,
+    // userns_fd }.
+    let mut buf = [0u8; 32];
+    // SAFETY: validate_user_read above confirmed 32 bytes readable.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(attr, buf.as_mut_ptr(), 32)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let attr_set = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
+        Ok(b) => b,
+        Err(_) => return linux_err(errno::EINVAL),
+    });
+    let attr_clr = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[8..16]) {
+        Ok(b) => b,
+        Err(_) => return linux_err(errno::EINVAL),
+    });
+    let propagation = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[16..24]) {
+        Ok(b) => b,
+        Err(_) => return linux_err(errno::EINVAL),
+    });
+    // MOUNT_ATTR_MASK from include/uapi/linux/mount.h:
+    //   RDONLY=0x1, NOSUID=0x2, NODEV=0x4, NOEXEC=0x8,
+    //   __ATIME=0x70 (RELATIME=0, NOATIME=0x10, STRICTATIME=0x20),
+    //   NODIRATIME=0x80, IDMAP=0x100000, NOSYMFOLLOW=0x200000.
+    const MOUNT_ATTR_MASK: u64 = 0x1 | 0x2 | 0x4 | 0x8
+        | 0x70 | 0x80 | 0x100000 | 0x200000;
+    if attr_set & !MOUNT_ATTR_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if attr_clr & !MOUNT_ATTR_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // ATIME bits in attr_set are mutually exclusive — masked value must
+    // be exactly one of RELATIME (0), NOATIME (0x10), STRICTATIME (0x20).
+    // 0x30..=0x70 (multiple bits set or 0x40 standalone) is invalid.
+    const MOUNT_ATTR_ATIME_MASK: u64 = 0x70;
+    let atime_set = attr_set & MOUNT_ATTR_ATIME_MASK;
+    if !matches!(atime_set, 0 | 0x10 | 0x20) {
+        return linux_err(errno::EINVAL);
+    }
+    // Linux: cannot clear ATIME bits without setting one.  If attr_clr
+    // touches __ATIME but attr_set doesn't, the result would be an
+    // inconsistent state — reject.
+    let atime_clr = attr_clr & MOUNT_ATTR_ATIME_MASK;
+    if atime_clr != 0 && atime_set == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // propagation must be 0 or exactly one of:
+    //   MS_UNBINDABLE = 1 << 17 = 0x20000
+    //   MS_PRIVATE    = 1 << 18 = 0x40000
+    //   MS_SLAVE      = 1 << 19 = 0x80000
+    //   MS_SHARED     = 1 << 20 = 0x100000
+    if !matches!(propagation, 0 | 0x20000 | 0x40000 | 0x80000 | 0x100000) {
+        return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
 }
@@ -36475,6 +36543,116 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mount_setattr valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // mount_setattr size > PAGE_SIZE (4097) -> E2BIG.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: attr_ptr, arg4: 4097, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr size>PAGE_SIZE not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr attr_set has bit outside MOUNT_ATTR_MASK -> EINVAL.
+        // 0x400 is unallocated in the current MOUNT_ATTR_* space.
+        let bad_attr_set: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[0..8].copy_from_slice(&0x400u64.to_ne_bytes());
+            b
+        };
+        let bad_attr_set_ptr = bad_attr_set.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: bad_attr_set_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr bad attr_set not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr attr_clr has bit outside MOUNT_ATTR_MASK -> EINVAL.
+        let bad_attr_clr: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[8..16].copy_from_slice(&0x400u64.to_ne_bytes());
+            b
+        };
+        let bad_attr_clr_ptr = bad_attr_clr.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: bad_attr_clr_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr bad attr_clr not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr attr_set has both NOATIME (0x10) and STRICTATIME
+        // (0x20) — ATIME bits are mutually exclusive -> EINVAL.
+        let conflicting_atime: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[0..8].copy_from_slice(&0x30u64.to_ne_bytes());
+            b
+        };
+        let conflicting_atime_ptr = conflicting_atime.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: conflicting_atime_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr conflicting ATIME not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr attr_set ATIME=0x40 (single bit in the __ATIME
+        // mask but not a defined value) -> EINVAL.
+        let undef_atime: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[0..8].copy_from_slice(&0x40u64.to_ne_bytes());
+            b
+        };
+        let undef_atime_ptr = undef_atime.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: undef_atime_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr undef ATIME not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr attr_clr clears ATIME without attr_set setting
+        // ATIME -> EINVAL (cannot leave the mount in an inconsistent
+        // state).
+        let clr_atime_only: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[8..16].copy_from_slice(&0x10u64.to_ne_bytes());
+            b
+        };
+        let clr_atime_only_ptr = clr_atime_only.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: clr_atime_only_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr clr ATIME without set not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr propagation = MS_SHARED (0x100000) — valid;
+        // gate passes -> ENOSYS.
+        let prop_shared: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[16..24].copy_from_slice(&0x100000u64.to_ne_bytes());
+            b
+        };
+        let prop_shared_ptr = prop_shared.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: prop_shared_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr MS_SHARED not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr propagation = MS_SHARED | MS_PRIVATE — more than
+        // one propagation type -> EINVAL.
+        let prop_both: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[16..24].copy_from_slice(&(0x100000u64 | 0x40000u64).to_ne_bytes());
+            b
+        };
+        let prop_both_ptr = prop_both.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: prop_both_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr two prop types not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mount_setattr propagation = arbitrary value (0xdead) -> EINVAL.
+        let prop_bogus: [u8; 32] = {
+            let mut b = [0u8; 32];
+            b[16..24].copy_from_slice(&0xdeadu64.to_ne_bytes());
+            b
+        };
+        let prop_bogus_ptr = prop_bogus.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: prop_bogus_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr bogus prop not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   mount_setattr attr validation: OK");
 
         // fchmodat2 bad flag -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0o644, arg3: 0x800_0000, arg4: 0, arg5: 0 };

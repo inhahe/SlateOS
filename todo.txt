@@ -16362,3 +16362,98 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      validation: OK" and "[syscall/linux]   quotactl cmd
 ##      validation: OK" in build/serial-test.txt.
 
+
+## 185. Linux ABI: mount_setattr struct-field validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_mount_setattr.
+##
+##      Problem: sys_mount_setattr validated the AT_* `flags`
+##              argument, the `path` string, and that
+##              `attr != NULL && size >= 32`, then returned
+##              ENOSYS for every well-formed call.  Linux's
+##              fs/namespace.c::SYSCALL_DEFINE5(mount_setattr)
+##              and `build_mount_kattr()` enforce additional
+##              gates on `struct mount_attr` fields ahead of the
+##              kernel-mode dispatch:
+##                * `size > PAGE_SIZE` -> E2BIG.
+##                * `attr_set` outside MOUNT_ATTR_MASK -> EINVAL.
+##                * `attr_clr` outside MOUNT_ATTR_MASK -> EINVAL.
+##                * `attr_set & MOUNT_ATTR__ATIME` not in
+##                  {RELATIME(0), NOATIME(0x10), STRICTATIME(0x20)}
+##                  -> EINVAL.
+##                * `attr_clr` clears ATIME bits without `attr_set`
+##                  also setting one -> EINVAL.
+##                * `propagation` not in {0, MS_UNBINDABLE,
+##                  MS_PRIVATE, MS_SLAVE, MS_SHARED} -> EINVAL.
+##              A util-linux `unshare --mount-setattr` or systemd
+##              MountAPIVFS probe walking the attr fields to find
+##              what the kernel supports saw ENOSYS uniformly
+##              for both garbage and well-formed configurations
+##              and concluded the syscall was absent — when Linux
+##              would have given precise per-field EINVAL.
+##
+##      Fix:    Mirrored Linux's gate order:
+##                1. Flags AT_* mask check (kept).
+##                2. Path string validation if non-NULL (kept).
+##                3. attr == NULL || size < 32 -> EINVAL (kept).
+##                4. size > 4096 (Linux x86_64 PAGE_SIZE) -> E2BIG.
+##                5. validate_user_read(attr, 32) -> EFAULT.
+##                6. copy_from_user the 32-byte struct.
+##                7. attr_set / attr_clr outside MOUNT_ATTR_MASK
+##                   (0x1|0x2|0x4|0x8|0x70|0x80|0x100000|0x200000)
+##                   -> EINVAL.
+##                8. attr_set ATIME bits in
+##                   {RELATIME=0, NOATIME=0x10, STRICTATIME=0x20}
+##                   exclusively -> else EINVAL.
+##                9. attr_clr ATIME without attr_set ATIME -> EINVAL.
+##               10. propagation in whitelist or 0 -> else EINVAL.
+##               11. Terminal: ENOSYS (unchanged).
+##
+##      Self-tests (boot-time):
+##        * mount_setattr(flags=0x80) -> EINVAL  (bad flag; kept).
+##        * mount_setattr(size=16) -> EINVAL  (too small; kept).
+##        * mount_setattr(flags=AT_RECURSIVE, all-zero attr) ->
+##          ENOSYS  (valid; kept).
+##        * mount_setattr(size=4097) -> E2BIG  (PAGE_SIZE; new).
+##        * mount_setattr(attr_set=0x400) -> EINVAL  (bit outside
+##          MOUNT_ATTR_MASK; new).
+##        * mount_setattr(attr_clr=0x400) -> EINVAL  (bit outside
+##          MOUNT_ATTR_MASK; new).
+##        * mount_setattr(attr_set=0x30=NOATIME|STRICTATIME) ->
+##          EINVAL  (ATIME exclusivity; new).
+##        * mount_setattr(attr_set=0x40) -> EINVAL  (undefined
+##          bit in __ATIME mask; new).
+##        * mount_setattr(attr_clr=0x10, attr_set=0) -> EINVAL
+##          (cannot clear ATIME without setting one; new).
+##        * mount_setattr(propagation=MS_SHARED=0x100000) ->
+##          ENOSYS  (valid propagation; new).
+##        * mount_setattr(propagation=MS_SHARED|MS_PRIVATE) ->
+##          EINVAL  (mutually exclusive; new).
+##        * mount_setattr(propagation=0xdead) -> EINVAL  (not in
+##          whitelist; new).
+##        * Emits "[syscall/linux]   mount_setattr attr
+##          validation: OK".
+##
+##      Known limitations:
+##        * `userns_fd` (struct mount_attr field at offset 24) is
+##          not validated.  Linux uses it only when attr_set has
+##          MOUNT_ATTR_IDMAP — without a real userns implementation
+##          there's no fd to look up.  When IDMAP support lands,
+##          this needs `validate_linux_fd(userns_fd)` plus a
+##          HandleKind::UserNs check, conditional on
+##          (attr_set & MOUNT_ATTR_IDMAP) != 0.
+##        * `dirfd` is not validated.  We have no real mount fd
+##          (open_tree returns EPERM) so the fd table check would
+##          be vacuous against probe inputs.  When fsmount/
+##          open_tree return real fds this needs the fd gate plus
+##          a HandleKind::MountFd check.
+##        * Terminal remains ENOSYS rather than the EBADF Linux
+##          gives once a fully validated call reaches a non-mount
+##          fd.  ENOSYS is more informative for "syscall not
+##          implemented" probes that drive userspace fallback
+##          paths.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   mount_setattr attr
+##      validation: OK" in build/serial-test.txt.
+

@@ -13958,5 +13958,162 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          actually lands these become live fields.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##
+## 152. Batch 123 — eventfd(2) / eventfd2(2) wired through to the
+##      in-kernel ipc::eventfd counter (no longer ENOSYS).
+##
+##      Story: D-Bus, Wayland clients, libuv, Qt's QEventDispatcher,
+##      glibc's pthread cancel/setxid paths, and almost every modern
+##      Linux daemon that needs a kernel-mediated wakeup primitive
+##      uses eventfd.  Returning ENOSYS made those paths fall back to
+##      pipes — which costs an extra fd, an 8-byte buffer copy, and
+##      doesn't give the counter-coalescing semantics callers rely on
+##      (eventfd write+read coalesces many signals into one wakeup).
+##      We already had a fully-working counter primitive in
+##      kernel/src/ipc/eventfd.rs (1056 lines, used by completion
+##      ports and the bench/IPC tests); the gap was that nothing
+##      plumbed it into the Linux fd table.
+##
+##      Implementation:
+##
+##      1. kernel/src/proc/linux_fd.rs
+##         * New HandleKind::EventFd variant.
+##         * needs_kernel_close() returns true for EventFd (the entry
+##           must be released from EVENTFD_TABLE on last close).
+##         * FdEntry::eventfd(handle, status_flags) constructor — the
+##           raw_handle field stores the EventFdHandle's u64.
+##
+##      2. kernel/src/ipc/eventfd.rs
+##         * New pub fn poll_status(handle) -> u16, returning Linux
+##           poll(2) bit values:
+##             POLLIN  (0x01) if counter > 0
+##             POLLOUT (0x04) if counter < MAX_COUNTER
+##             POLLHUP (0x10) if closed
+##             POLLERR (0x08) if handle is no longer in the table.
+##
+##      3. kernel/src/syscall/linux.rs
+##         * close_handle: EventFd arm calls ipc::eventfd::close.
+##         * dispatch_write: new EventFd arm via dispatch_eventfd_write
+##           helper:
+##             - count < 8                 -> EINVAL
+##             - copy_from_user 8 LE bytes
+##             - value == u64::MAX         -> EINVAL  (Linux sentinel)
+##             - value == 0                -> no-op, returns 8
+##             - O_NONBLOCK + would overflow -> EAGAIN
+##             - blocking + would overflow  -> ipc::eventfd::write
+##               blocks until a reader drains the counter
+##             - success returns 8.
+##         * dispatch_read: new EventFd arm via dispatch_eventfd_read
+##           helper:
+##             - cap < 8                   -> EINVAL
+##             - O_NONBLOCK + empty        -> EAGAIN
+##             - blocking + empty          -> ipc::eventfd::read blocks
+##               until a writer signals
+##             - In default mode the entire counter is drained and the
+##               u64 is copied LE to userspace; in semaphore mode the
+##               counter is decremented by 1 and a `1u64` is returned.
+##             - success returns 8.
+##         * Every other `match entry.kind` site got an EventFd arm:
+##             - lseek, pread64, pwrite64, preadv, pwritev, preadv2,
+##               pwritev2     -> ESPIPE (not seekable)
+##             - fsync / fdatasync           -> EINVAL
+##             - flock                       -> EBADF (matches Linux:
+##               advisory locks on anon fds bounce on the open-file)
+##             - truncate / ftruncate        -> EINVAL
+##             - cachestat                   -> EOPNOTSUPP
+##             - fstat / statx               -> (S_IFREG | 0o600,
+##               blksize 4096) — matches Linux anon_inode behaviour
+##             - kcmp KCMP_FILE ord          -> 3 (after Pipe=2)
+##             - poll engine                 -> bits from
+##               ipc::eventfd::poll_status, with POLLRDNORM /
+##               POLLWRNORM mirrored from POLLIN / POLLOUT so
+##               POLLRDNORM-only pollers (libuv) see readiness.
+##         * EFD_* constants:
+##             EFD_SEMAPHORE = 1
+##             EFD_CLOEXEC   = 0o2_000_000
+##             EFD_NONBLOCK  = 0o4000
+##         * eventfd_create_with_flags(initval, flags) helper that:
+##             - Allocates an ipc::eventfd handle with the SEMAPHORE
+##               bit honoured.
+##             - Builds an FdEntry::eventfd carrying O_RDWR and
+##               O_NONBLOCK (the latter only if EFD_NONBLOCK is set).
+##             - Stamps fd_flags = FD_CLOEXEC if EFD_CLOEXEC is set.
+##             - Installs at the lowest free fd via
+##               pcb::linux_fd_install(pid, entry, 0); on failure the
+##               kernel-side counter is closed back out so it doesn't
+##               leak.
+##         * sys_eventfd: legacy form; flags arg must be 0 else
+##           EINVAL; otherwise creates with flags=0.
+##         * sys_eventfd2: validates flags ⊆ EFD_*, then creates.
+##
+##      Boot self-tests (replacing the 4 prior ENOSYS-acceptance tests
+##      with 17 active checks):
+##
+##         Dispatch-layer validation:
+##           1. eventfd(0, flags=1)              -> EINVAL.
+##           2. eventfd(0, 0) in kernel ctx       -> EBADF
+##              (no caller PCB to own the new fd).
+##           3. eventfd2(0, 0x1000)               -> EINVAL.
+##           4. eventfd2(0, CLOEXEC|NONBLOCK|
+##                       SEMAPHORE) kernel ctx    -> EBADF.
+##
+##         Kernel-side round-trip via dispatch_eventfd_{read,write}
+##         with synthetic FdEntry::eventfd entries (no PCB required):
+##           5. poll_status on fresh counter      = POLLOUT only.
+##           6. write count<8                     -> EINVAL.
+##           7. write value == u64::MAX           -> EINVAL.
+##           8. write value 7                     -> 8.
+##           9. poll_status after signal          = POLLIN|POLLOUT.
+##          10. read cap<8                        -> EINVAL.
+##          11. read 8 (NONBLOCK)                 -> 8, value 7.
+##          12. read empty (NONBLOCK)             -> EAGAIN.
+##          13. write 0 (no-op)                   -> 8.
+##          14. read after write(0)               -> EAGAIN (counter
+##              unchanged by zero write).
+##          15. read after close                  -> EBADF.
+##          16. semaphore mode: write 3, then 3x
+##              read each yielding 1, fourth      -> EAGAIN.
+##          17. poll_status on closed/removed
+##              handle                            = POLLERR.
+##
+##      Known limitations / deferred work:
+##
+##      * No epoll / EPOLLET wiring.  poll() / ppoll() correctly
+##        observe POLLIN on a signalled eventfd, but epoll itself is
+##        still ENOSYS — the same blocker as for pipe-on-epoll.
+##        Tracked under the epoll batch.
+##
+##      * Eventfd is not yet observable through readiness on
+##        completion ports.  The ipc::eventfd::has_value helper
+##        already exists for that, so wiring is just plumbing inside
+##        ipc::completion when that batch lands.
+##
+##      * sendfile / splice / tee / copy_file_range against an
+##        eventfd surface EINVAL (the same way Linux rejects splice
+##        between non-pipe non-file fds).  This is correct, not a
+##        gap.
+##
+##      * fstat blksize is 4096 (matches Linux's anon_inode default),
+##        but our kernel page size is 16KiB.  We report 4096 to look
+##        like Linux to userspace; we do not advertise the larger
+##        page size for eventfd because Linux doesn't either.
+##
+##      * The blocking write path will park the calling task on the
+##        eventfd's writer_waiter slot if the counter would overflow
+##        MAX_COUNTER (= u64::MAX - 1).  In practice no caller signals
+##        2^64-2 events between reads, so this path is theoretical.
+##        It is exercised by ipc::eventfd's own self-test on the
+##        kernel side; the dispatch-layer round-trip above uses small
+##        values that never come close.
+##
+##      * O_NONBLOCK can currently only be set at create time
+##        (EFD_NONBLOCK).  fcntl(F_SETFL, O_NONBLOCK) on an eventfd fd
+##        will update status_flags in the FdEntry but the existing
+##        F_SETFL path doesn't yet special-case EventFd handle kind —
+##        we inherit Pipe-like behaviour here, which is good enough
+##        for callers that set NONBLOCK at create time (almost all of
+##        them on modern glibc).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
 

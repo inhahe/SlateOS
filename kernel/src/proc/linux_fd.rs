@@ -96,6 +96,10 @@ pub enum HandleKind {
     /// Pipe endpoint.  Read/write via `SYS_PIPE_READ` / `SYS_PIPE_WRITE`;
     /// close via `SYS_PIPE_CLOSE`.
     Pipe,
+    /// Eventfd counter — kernel-managed 64-bit u64 with read/write of
+    /// exactly 8 bytes against the in-kernel `ipc::eventfd` table.
+    /// Close releases the entry from that table.
+    EventFd,
 }
 
 impl HandleKind {
@@ -105,7 +109,7 @@ impl HandleKind {
     pub const fn needs_kernel_close(self) -> bool {
         match self {
             Self::Console => false,
-            Self::File | Self::Pipe => true,
+            Self::File | Self::Pipe | Self::EventFd => true,
         }
     }
 }
@@ -180,6 +184,20 @@ impl FdEntry {
     pub const fn pipe(handle: u64, status_flags: u32) -> Self {
         Self {
             kind: HandleKind::Pipe,
+            raw_handle: handle,
+            fd_flags: 0,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for an eventfd counter.  `raw_handle` is the
+    /// `ipc::eventfd::EventFdHandle` raw u64.
+    #[must_use]
+    pub const fn eventfd(handle: u64, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::EventFd,
             raw_handle: handle,
             fd_flags: 0,
             status_flags,

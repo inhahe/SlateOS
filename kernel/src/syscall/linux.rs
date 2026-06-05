@@ -2378,6 +2378,11 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             };
             linux_from_native(handlers::sys_pipe_close(&a))
         }
+        HandleKind::EventFd => {
+            let h = crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle);
+            crate::ipc::eventfd::close(h);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -2433,7 +2438,83 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             };
             linux_from_native(handlers::sys_pipe_write(&a))
         }
+        HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
     }
+}
+
+/// Eventfd write: exactly 8 bytes interpreted as a little-endian u64
+/// added to the counter.  Linux semantics:
+///   * count < 8                 → EINVAL.
+///   * value == u64::MAX (sentinel) → EINVAL.
+///   * value == 0                 → counter unchanged, returns 8.
+///   * O_NONBLOCK + would overflow → EAGAIN.
+///   * blocking + would overflow  → block until a read drains room.
+/// Returns 8 on success.
+fn dispatch_eventfd_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
+    if len < 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(buf, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut bytes = [0u8; 8];
+    // SAFETY: validated as readable 8 bytes above.
+    let r = unsafe { crate::mm::user::copy_from_user(buf, bytes.as_mut_ptr(), 8) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let value = u64::from_le_bytes(bytes);
+    if value == u64::MAX {
+        return linux_err(errno::EINVAL);
+    }
+    let handle = crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle);
+    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    let res = if nonblock {
+        crate::ipc::eventfd::try_write(handle, value)
+    } else {
+        crate::ipc::eventfd::write(handle, value)
+    };
+    match res {
+        Ok(()) => SyscallResult::ok(8),
+        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+        Err(crate::error::KernelError::ChannelClosed) => linux_err(errno::EBADF),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// Eventfd read: exactly 8 bytes; counter must be > 0 (or it blocks /
+/// returns EAGAIN under O_NONBLOCK).  In default mode the entire
+/// counter is drained; in semaphore mode 1 is consumed and 1 is
+/// returned.  Returns 8 on success.
+fn dispatch_eventfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    if cap < 8 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(buf, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    let handle = crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle);
+    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    let res = if nonblock {
+        crate::ipc::eventfd::try_read(handle)
+    } else {
+        crate::ipc::eventfd::read(handle)
+    };
+    let value = match res {
+        Ok(v) => v,
+        Err(crate::error::KernelError::WouldBlock) => return linux_err(errno::EAGAIN),
+        Err(crate::error::KernelError::InvalidHandle) => return linux_err(errno::EBADF),
+        Err(crate::error::KernelError::ChannelClosed) => return linux_err(errno::EBADF),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let bytes = value.to_le_bytes();
+    // SAFETY: validated as writable 8 bytes above.
+    let r = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), buf, 8) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(8)
 }
 
 /// Dispatch a `read(buf, cap)` against an fd entry.
@@ -2466,6 +2547,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             };
             linux_from_native(handlers::sys_pipe_read(&a))
         }
+        HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
     }
 }
 
@@ -3183,7 +3265,7 @@ fn fcntl_flock_apply(
     // way Linux does for unsupported fd types.
     match entry.kind {
         HandleKind::File => {}
-        HandleKind::Console | HandleKind::Pipe => {
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => {
             return linux_err(errno::EBADF);
         }
     }
@@ -3278,7 +3360,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
             };
             linux_from_native(handlers::sys_fs_seek(&a))
         }
-        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -7909,7 +7991,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::EINVAL),
     }
 }
 
@@ -9028,6 +9110,9 @@ fn fill_stat_for_fd(
         HandleKind::Console => (S_IFCHR | 0o620, 1024),
         HandleKind::Pipe => (S_IFIFO | 0o600, 4096),
         HandleKind::File => (S_IFREG | 0o644, 16 * 1024),
+        // Linux exposes eventfd via anon_inode: stat reports a regular
+        // file with 0600 perms (the inode's i_mode), blocksize 4096.
+        HandleKind::EventFd => (S_IFREG | 0o600, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -9254,6 +9339,8 @@ fn fill_statx_for_fd(
         HandleKind::Console => ((S_IFCHR | 0o620) as u16, 1024),
         HandleKind::Pipe => ((S_IFIFO | 0o600) as u16, 4096),
         HandleKind::File => ((S_IFREG | 0o644) as u16, 16 * 1024),
+        // anon_inode S_IFREG | 0600 — matches Linux's eventfd stat.
+        HandleKind::EventFd => ((S_IFREG | 0o600) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     let now_ns = crate::timekeeping::clock_realtime();
@@ -9726,8 +9813,8 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
             }
             linux_err(errno::EROFS)
         }
-        // Pipes and consoles cannot be truncated.
-        HandleKind::Pipe | HandleKind::Console => linux_err(errno::EINVAL),
+        // Pipes, consoles and eventfds cannot be truncated.
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd => linux_err(errno::EINVAL),
     }
 }
 
@@ -11462,6 +11549,23 @@ fn poll_revents_from_entry(entry: crate::proc::linux_fd::FdEntry, events: u16) -
             // POLLIN(0x01), POLLOUT(0x04), POLLERR(0x08), POLLHUP(0x10).
             let status = crate::ipc::pipe::poll_status(
                 crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle),
+            );
+            let mut r = status;
+            if status & poll_bits::POLLIN != 0 {
+                r |= poll_bits::POLLRDNORM;
+            }
+            if status & poll_bits::POLLOUT != 0 {
+                r |= poll_bits::POLLWRNORM;
+            }
+            r
+        }
+        HandleKind::EventFd => {
+            // eventfd::poll_status returns the same bit layout as
+            // pipe::poll_status (Linux poll bit values).  POLLIN means
+            // counter > 0, POLLOUT means counter < MAX, POLLHUP means
+            // closed.
+            let status = crate::ipc::eventfd::poll_status(
+                crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle),
             );
             let mut r = status;
             if status & poll_bits::POLLIN != 0 {
@@ -13716,6 +13820,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::Console => 0,
         HandleKind::File => 1,
         HandleKind::Pipe => 2,
+        HandleKind::EventFd => 3,
     }
 }
 
@@ -14224,7 +14329,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
         if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
             match entry.kind {
                 HandleKind::File => {}
-                HandleKind::Console | HandleKind::Pipe => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -14933,8 +15038,10 @@ fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
 //
 // Semantics:
 //   * eventfd / eventfd2 — counter file descriptors used for cross-
-//     thread signalling.  We don't expose them yet; return ENOSYS so
-//     userspace event loops fall back to pipes (which we do expose).
+//     thread signalling.  Routed through the in-kernel
+//     `ipc::eventfd` table via a new `HandleKind::EventFd` slot in
+//     the per-process Linux fd table.  Read/write are 8-byte u64
+//     transfers; close releases the eventfd from the kernel table.
 //   * futex_waitv — Linux 5.16 multi-futex wait.  Our futex
 //     implementation handles single-futex wait/wake (see sys_futex).
 //     Return ENOSYS so glibc's wait_for_threads falls back to
@@ -14957,27 +15064,66 @@ fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
 //     on a single-node topology.
 // ---------------------------------------------------------------------------
 
-/// `eventfd(initval, flags)` — legacy form (flags ignored).
+// EFD_* flag constants (match Linux uapi/sys/eventfd.h).
+const EFD_SEMAPHORE: u32 = 1;
+const EFD_CLOEXEC: u32 = 0o2_000_000;
+const EFD_NONBLOCK: u32 = 0o4000;
+
+/// Shared helper: validate flags, allocate the underlying eventfd, and
+/// install a new fd in the caller's table.
+fn eventfd_create_with_flags(initval: u32, flags: u32) -> SyscallResult {
+    let semaphore = (flags & EFD_SEMAPHORE) != 0;
+    let cloexec = (flags & EFD_CLOEXEC) != 0;
+    let nonblock = (flags & EFD_NONBLOCK) != 0;
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    let handle =
+        crate::ipc::eventfd::create_with_flags(u64::from(initval), semaphore);
+    let mut status = oflags::O_RDWR;
+    if nonblock {
+        status |= oflags::O_NONBLOCK;
+    }
+    let mut entry = FdEntry::eventfd(handle.raw(), status);
+    if cloexec {
+        // FD_CLOEXEC is the per-fd flag bit, distinct from O_NONBLOCK.
+        entry.fd_flags = 1;
+    }
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            // Failed to install — release the kernel-side eventfd so it
+            // doesn't leak.
+            crate::ipc::eventfd::close(handle);
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// `eventfd(initval, flags)` — legacy form.  On Linux this is the
+/// pre-2.6.27 syscall and ignores flags entirely (treats arg1 as
+/// "must be zero" for forward compat).  We enforce arg1 == 0.
 fn sys_eventfd(args: &SyscallArgs) -> SyscallResult {
-    // initval is u32; any value is legal.
     #[allow(clippy::cast_possible_truncation)]
-    let _initval = args.arg0 as u32;
-    // The legacy eventfd takes no flags; arg1 must be 0.
+    let initval = args.arg0 as u32;
     if args.arg1 != 0 {
         return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+    eventfd_create_with_flags(initval, 0)
 }
 
-/// `eventfd2(initval, flags)` — modern form with CLOEXEC/NONBLOCK.
+/// `eventfd2(initval, flags)` — modern form with CLOEXEC / NONBLOCK /
+/// SEMAPHORE.
 fn sys_eventfd2(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
+    let initval = args.arg0 as u32;
+    #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg1 as u32;
-    // EFD_SEMAPHORE (1) | EFD_CLOEXEC (0o2_000_000) | EFD_NONBLOCK (0o4000).
-    if flags & !(1 | 0o2_000_000 | 0o4000) != 0 {
+    if flags & !(EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK) != 0 {
         return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+    eventfd_create_with_flags(initval, flags)
 }
 
 /// `futex_waitv(waiters*, nr_waiters, flags, timeout*, clockid)`.
@@ -15835,7 +15981,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -15878,7 +16024,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16699,7 +16845,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16725,7 +16871,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16773,7 +16919,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -16807,7 +16953,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -31414,16 +31560,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let len_ptr_buf = [0u8; 8];
         let len_ptr = len_ptr_buf.as_ptr() as u64;
 
+        // ---------- eventfd / eventfd2 (batch 123) ----------
+        //
+        // Dispatch-layer flag validation.  When the boot test runs there
+        // is no caller PCB, so the "valid args" path can't actually
+        // install an fd — it surfaces -EBADF, which is what
+        // `eventfd_create_with_flags` returns when caller_pid() is None.
+
         // eventfd legacy non-zero flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::EVENTFD, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: eventfd flags!=0 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // eventfd valid -> ENOSYS.
+        // eventfd valid in kernel context -> EBADF (no PCB to install into).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::EVENTFD, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: eventfd valid not ENOSYS");
+        if dispatch_linux(nr::EVENTFD, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: eventfd valid kernel-ctx not EBADF");
             return Err(KernelError::InternalError);
         }
         // eventfd2 bad flag -> EINVAL.
@@ -31432,11 +31585,183 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: eventfd2 bad flag not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // eventfd2 CLOEXEC|NONBLOCK -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: 0o2_004_000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::EVENTFD2, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: eventfd2 valid not ENOSYS");
+        // eventfd2 valid flags (CLOEXEC|NONBLOCK|SEMAPHORE) in kernel
+        // context -> EBADF (no PCB).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: u64::from(EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE),
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::EVENTFD2, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: eventfd2 valid kernel-ctx not EBADF");
             return Err(KernelError::InternalError);
+        }
+
+        // Round-trip the kernel-side machinery directly — exercises
+        // dispatch_eventfd_write / dispatch_eventfd_read against a real
+        // `ipc::eventfd` handle without needing a PCB.
+        {
+            use crate::ipc::eventfd as efd;
+            // Default (non-semaphore) mode, initval = 0.
+            let handle = efd::create_with_flags(0, false);
+            // Build a synthetic FdEntry routing through the EventFd kind.
+            // Blocking entry (no O_NONBLOCK).
+            let entry_blocking = FdEntry::eventfd(handle.raw(), oflags::O_RDWR);
+            // Same handle but with O_NONBLOCK set, for the EAGAIN paths.
+            let entry_nonblock =
+                FdEntry::eventfd(handle.raw(), oflags::O_RDWR | oflags::O_NONBLOCK);
+
+            // poll_status on a fresh counter: counter == 0, not closed
+            // -> POLLOUT only.
+            let st0 = efd::poll_status(handle);
+            if st0 != 0x0004 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: eventfd poll_status initial = {:#x} (want POLLOUT only)",
+                    st0
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Write a u64 value through dispatch_eventfd_write.
+            let mut write_buf = [0u8; 8];
+            write_buf.copy_from_slice(&7u64.to_le_bytes());
+            let write_ptr = write_buf.as_ptr() as u64;
+
+            // count < 8 -> EINVAL.
+            let r = dispatch_eventfd_write(entry_blocking, write_ptr, 4);
+            if r.value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: eventfd write count<8 not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+            // value == u64::MAX -> EINVAL.
+            let mut bad_buf = [0xFFu8; 8];
+            let bad_ptr = bad_buf.as_mut_ptr() as u64;
+            let r = dispatch_eventfd_write(entry_blocking, bad_ptr, 8);
+            if r.value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: eventfd write u64::MAX not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+            // Valid write -> 8.
+            let r = dispatch_eventfd_write(entry_blocking, write_ptr, 8);
+            if r.value != 8 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: eventfd write 7 -> {} (want 8)",
+                    r.value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // poll_status now: POLLIN | POLLOUT.
+            if efd::poll_status(handle) != (0x0001 | 0x0004) {
+                serial_println!("[syscall/linux]   FAIL: eventfd poll_status after signal");
+                return Err(KernelError::InternalError);
+            }
+
+            // Read: count < 8 -> EINVAL.
+            let mut read_buf = [0u8; 8];
+            let read_ptr = read_buf.as_mut_ptr() as u64;
+            let r = dispatch_eventfd_read(entry_blocking, read_ptr, 7);
+            if r.value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: eventfd read count<8 not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+
+            // Default-mode read drains the counter to 0.  Use the
+            // NONBLOCK entry so a future zero-counter read returns
+            // EAGAIN instead of blocking.
+            let r = dispatch_eventfd_read(entry_nonblock, read_ptr, 8);
+            if r.value != 8 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: eventfd read -> {} (want 8)",
+                    r.value
+                );
+                return Err(KernelError::InternalError);
+            }
+            let got = u64::from_le_bytes(read_buf);
+            if got != 7 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: eventfd read value = {} (want 7)",
+                    got
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Counter drained; NONBLOCK read again -> EAGAIN.
+            let r = dispatch_eventfd_read(entry_nonblock, read_ptr, 8);
+            if r.value != -i64::from(errno::EAGAIN) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: eventfd nonblock read empty -> {} (want EAGAIN)",
+                    r.value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // write(0) is a Linux no-op and returns 8.
+            let zero_buf = [0u8; 8];
+            let r = dispatch_eventfd_write(entry_blocking, zero_buf.as_ptr() as u64, 8);
+            if r.value != 8 {
+                serial_println!("[syscall/linux]   FAIL: eventfd write(0) not ok(8)");
+                return Err(KernelError::InternalError);
+            }
+            // Counter remained zero -> nonblock read still EAGAIN.
+            let r = dispatch_eventfd_read(entry_nonblock, read_ptr, 8);
+            if r.value != -i64::from(errno::EAGAIN) {
+                serial_println!("[syscall/linux]   FAIL: eventfd write(0) altered counter");
+                return Err(KernelError::InternalError);
+            }
+
+            // Close: subsequent ops surface EBADF (closed handle).
+            efd::close(handle);
+            let r = dispatch_eventfd_read(entry_nonblock, read_ptr, 8);
+            if r.value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: eventfd read after close -> {} (want EBADF)",
+                    r.value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Semaphore-mode round-trip.
+            let sem = efd::create_with_flags(0, true);
+            let sem_entry = FdEntry::eventfd(sem.raw(), oflags::O_RDWR | oflags::O_NONBLOCK);
+            // Signal +3.
+            let mut sig_buf = [0u8; 8];
+            sig_buf.copy_from_slice(&3u64.to_le_bytes());
+            let r = dispatch_eventfd_write(sem_entry, sig_buf.as_ptr() as u64, 8);
+            if r.value != 8 {
+                serial_println!("[syscall/linux]   FAIL: eventfd(sem) write 3 not ok(8)");
+                return Err(KernelError::InternalError);
+            }
+            // Read three times: each yields 1.
+            for i in 0..3 {
+                let r = dispatch_eventfd_read(sem_entry, read_ptr, 8);
+                if r.value != 8 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: eventfd(sem) read #{} -> {} (want 8)",
+                        i, r.value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if u64::from_le_bytes(read_buf) != 1 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: eventfd(sem) read #{} value not 1",
+                        i
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Fourth read -> EAGAIN.
+            let r = dispatch_eventfd_read(sem_entry, read_ptr, 8);
+            if r.value != -i64::from(errno::EAGAIN) {
+                serial_println!("[syscall/linux]   FAIL: eventfd(sem) drained not EAGAIN");
+                return Err(KernelError::InternalError);
+            }
+            efd::close(sem);
+
+            // poll_status on a now-closed (removed) handle -> POLLERR.
+            if efd::poll_status(sem) != 0x0008 {
+                serial_println!("[syscall/linux]   FAIL: eventfd poll_status closed not POLLERR");
+                return Err(KernelError::InternalError);
+            }
         }
 
         // futex_waitv nr_waiters == 0 -> EINVAL.

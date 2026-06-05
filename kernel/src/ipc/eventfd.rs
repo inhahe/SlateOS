@@ -671,6 +671,35 @@ pub fn has_value(handle: EventFdHandle) -> bool {
     efd.counter > 0 || efd.closed
 }
 
+/// Linux `poll(2)`-style readiness bits for an eventfd.
+///
+/// Bits use the same numeric values as `linux::syscall::poll_bits`:
+///   - 0x0001 POLLIN    — counter > 0 (read won't block).
+///   - 0x0004 POLLOUT   — counter < MAX_COUNTER (write won't block).
+///   - 0x0008 POLLERR   — handle no longer exists in the table.
+///   - 0x0010 POLLHUP   — eventfd closed.
+///
+/// Returns 0 if the handle exists and is mid-state (closed=false,
+/// counter=0).  Returns POLLERR for unknown handles.
+#[must_use]
+pub fn poll_status(handle: EventFdHandle) -> u16 {
+    let table = EVENTFD_TABLE.lock();
+    let Some(efd) = table.get(&handle.id()) else {
+        return 0x0008; // POLLERR — no such eventfd
+    };
+    let mut bits = 0u16;
+    if efd.counter > 0 {
+        bits |= 0x0001; // POLLIN
+    }
+    if efd.counter < MAX_COUNTER {
+        bits |= 0x0004; // POLLOUT
+    }
+    if efd.closed {
+        bits |= 0x0010; // POLLHUP
+    }
+    bits
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------

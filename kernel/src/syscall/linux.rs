@@ -8535,29 +8535,184 @@ fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `clock_adjtime(clk_id, timex*)` — refuse with EPERM.
+/// Size of `struct timex` on x86_64 Linux (legacy + clock_adjtime form).
+const TIMEX_STRUCT_SIZE: usize = 208;
+
+/// Linux return values for adjtimex / clock_adjtime.  These are the
+/// `time_state` enum, not errno values — the syscall returns them as
+/// a positive integer.  Userspace then inspects the value to learn
+/// whether a leap second is queued (TIME_INS/DEL/OOP/WAIT) or the
+/// kernel clock is unsynced (TIME_ERROR).
+const TIME_ERROR: i64 = 5;
+
+/// NTP status-bit constants used in the `status` field of timex.
+const STA_UNSYNC: i32 = 0x0040;
+const STA_NANO: i32 = 0x2000;
+
+/// Fill `tx_ptr` with a 208-byte read-only timex snapshot for the
+/// unprivileged `modes == 0` query path.  Returns `TIME_ERROR` on
+/// success (because STA_UNSYNC is set — we are not NTP-disciplined
+/// and Linux returns TIME_ERROR in that state).
+///
+/// Field offsets per the x86_64 `struct timex` layout:
+///   off  0  modes      (i32)              — echoes the caller's request
+///   off  8  offset     (i64)              — PLL skew offset in ns
+///   off 16  freq       (i64)              — PLL frequency offset (shifted)
+///   off 24  maxerror   (i64)              — max NTP error in microseconds
+///   off 32  esterror   (i64)              — estimated NTP error
+///   off 40  status     (i32)              — STA_* bits
+///   off 48  constant   (i64)              — PLL time constant
+///   off 56  precision  (i64)              — clock precision (us / ns)
+///   off 64  tolerance  (i64)              — frequency tolerance (ppm * 65536)
+///   off 72  time.tv_sec   (i64)           — current realtime seconds
+///   off 80  time.tv_usec  (i64)           — sub-second (ns under STA_NANO)
+///   off 88  tick       (i64)              — usec between ticks
+///   off 96  ppsfreq    (i64)              — PPS frequency
+///   off 104 jitter     (i64)              — PPS jitter
+///   off 112 shift      (i32)              — PPS interval duration
+///   off 120 stabil     (i64)              — PPS stability estimate
+///   off 128 jitcnt     (i64)              — jitter limit exceeded
+///   off 136 calcnt     (i64)              — calibration intervals
+///   off 144 errcnt     (i64)              — calibration errors
+///   off 152 stbcnt     (i64)              — stability limit exceeded
+///   off 160 tai        (i32)              — TAI offset in seconds
+///   off 164 (padding to 208)
+fn adjtimex_fill_read(tx_ptr: u64) -> SyscallResult {
+    let mut buf = [0u8; TIMEX_STRUCT_SIZE];
+
+    // modes (offset 0) = 0 — echo the caller's intent.
+    // offset / freq stay 0 (we run a free-running clock; no PLL skew).
+
+    // maxerror: NTP's default NTP_PHASE_MAX = 16_000_000 microseconds.
+    let maxerror: i64 = 16_000_000;
+    buf[24..32].copy_from_slice(&maxerror.to_le_bytes());
+
+    // status: not NTP-synced, but we do report time in nanoseconds.
+    // chrony reads STA_NANO to choose between us / ns for tv_usec.
+    let status: i32 = STA_UNSYNC | STA_NANO;
+    buf[40..44].copy_from_slice(&status.to_le_bytes());
+
+    // constant: PLL time constant (2 is the Linux default).
+    let constant: i64 = 2;
+    buf[48..56].copy_from_slice(&constant.to_le_bytes());
+
+    // precision: clock granularity.  With STA_NANO, this is in ns.
+    let precision: i64 = 1;
+    buf[56..64].copy_from_slice(&precision.to_le_bytes());
+
+    // tolerance: MAXFREQ = 32_768_000 (in units of ppm * 65536 per the
+    // NTP spec, but Linux stores the pre-multiplied value).
+    let tolerance: i64 = 32_768_000;
+    buf[64..72].copy_from_slice(&tolerance.to_le_bytes());
+
+    // time: current CLOCK_REALTIME split into (sec, sub-second).  Under
+    // STA_NANO the tv_usec slot carries nanoseconds.
+    let now_ns = crate::timekeeping::clock_realtime();
+    #[allow(clippy::cast_possible_wrap)]
+    let sec: i64 = (now_ns / 1_000_000_000) as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let nsec: i64 = (now_ns % 1_000_000_000) as i64;
+    buf[72..80].copy_from_slice(&sec.to_le_bytes());
+    buf[80..88].copy_from_slice(&nsec.to_le_bytes());
+
+    // tick: microseconds between scheduler ticks.  Linux default 10000
+    // (10 ms = 100 Hz).  Match that even though our tick rate is a
+    // separate constant — chrony only uses this for sanity-bounds.
+    let tick: i64 = 10_000;
+    buf[88..96].copy_from_slice(&tick.to_le_bytes());
+
+    // ppsfreq, jitter, shift, stabil, jitcnt, calcnt, errcnt, stbcnt,
+    // tai all stay 0 (no PPS or TAI tracking).
+
+    // SAFETY: caller validated tx_ptr writable for 208 bytes.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(buf.as_ptr(), tx_ptr, TIMEX_STRUCT_SIZE)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+
+    SyscallResult::ok(TIME_ERROR)
+}
+
+/// `clock_adjtime(clk_id, timex*)` — read-only state query (modes=0)
+/// or privileged adjustment (modes != 0).
+///
+/// We do not (yet) accept time adjustments — there is no NTP
+/// discipline loop or settable clock offset in `timekeeping.rs`, and
+/// Linux requires `CAP_SYS_TIME` for the write path which we never
+/// grant.  Non-zero `modes` therefore returns -EPERM, matching what
+/// any unprivileged Linux caller observes.
+///
+/// `modes == 0` is the unprivileged read path used by chrony's status
+/// probe, `timedatectl status`, ntpd's startup, and the various
+/// glibc helpers that call `adjtimex(...)` with a zeroed buffer.  We
+/// fill in the current `CLOCK_REALTIME` time, NTP status bits
+/// (`STA_UNSYNC | STA_NANO`), and the canonical defaults for the
+/// rest, then return `TIME_ERROR` (5) because we are not NTP-synced.
+///
+/// Clock IDs: only `CLOCK_REALTIME` (0) and `CLOCK_TAI` (11) are
+/// accepted on Linux; everything else is `-EINVAL`.  Our TAI offset
+/// is zero so the answer is identical to `CLOCK_REALTIME`, which we
+/// reflect by accepting both clocks against the same backend.
 fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
+    const CLOCK_REALTIME: u64 = 0;
+    const CLOCK_TAI: u64 = 11;
+
+    let clk = args.arg0;
+    if clk != CLOCK_REALTIME && clk != CLOCK_TAI {
+        return linux_err(errno::EINVAL);
+    }
     let tx = args.arg1;
     if tx == 0 {
         return linux_err(errno::EFAULT);
     }
-    // struct timex on x86_64 is 208 bytes.
-    if let Err(e) = crate::mm::user::validate_user_read(tx, 208) {
+    if let Err(e) = crate::mm::user::validate_user_read(tx, TIMEX_STRUCT_SIZE) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::EPERM)
+    if let Err(e) = crate::mm::user::validate_user_write(tx, TIMEX_STRUCT_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut modes_buf = [0u8; 4];
+    // SAFETY: validated readable for 208 bytes, including offset 0..4.
+    let r = unsafe { crate::mm::user::copy_from_user(tx, modes_buf.as_mut_ptr(), 4) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let modes = u32::from_le_bytes(modes_buf);
+    if modes != 0 {
+        // Any adjustment requires CAP_SYS_TIME; we never grant it.
+        return linux_err(errno::EPERM);
+    }
+    adjtimex_fill_read(tx)
 }
 
-/// `adjtimex(timex*)` — refuse with EPERM.
+/// `adjtimex(timex*)` — legacy entry equivalent to
+/// `clock_adjtime(CLOCK_REALTIME, ...)`.  Shares the same read /
+/// write split: `modes == 0` returns the kernel's current timex
+/// state, anything else is `-EPERM`.
 fn sys_adjtimex(args: &SyscallArgs) -> SyscallResult {
     let tx = args.arg0;
     if tx == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(tx, 208) {
+    if let Err(e) = crate::mm::user::validate_user_read(tx, TIMEX_STRUCT_SIZE) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::EPERM)
+    if let Err(e) = crate::mm::user::validate_user_write(tx, TIMEX_STRUCT_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut modes_buf = [0u8; 4];
+    // SAFETY: validated readable for 208 bytes including offset 0..4.
+    let r = unsafe { crate::mm::user::copy_from_user(tx, modes_buf.as_mut_ptr(), 4) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    let modes = u32::from_le_bytes(modes_buf);
+    if modes != 0 {
+        return linux_err(errno::EPERM);
+    }
+    adjtimex_fill_read(tx)
 }
 
 // ---------------------------------------------------------------------------
@@ -27055,6 +27210,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // adjtimex / clock_adjtime: batch 122 adds the modes=0 read
+        // path used by chrony / ntpd / timedatectl.  Non-zero modes
+        // still returns EPERM (no CAP_SYS_TIME).
+        let mut tx_buf = [0u8; 208];
+        let tx_ptr = tx_buf.as_mut_ptr() as u64;
+
         // adjtimex(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -27065,13 +27226,116 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // adjtimex with valid-ish ptr in kernel ctx -> EPERM.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+        // adjtimex with modes=0 (read-only) -> TIME_ERROR (5).  The
+        // buffer is populated with the current time state.
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        // modes already 0 from the zero-fill above.
+        let a = SyscallArgs { arg0: tx_ptr, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADJTIMEX, &a).value != 5 {
+            serial_println!(
+                "[syscall/linux]   FAIL: adjtimex(modes=0) not TIME_ERROR ({})",
+                dispatch_linux(nr::ADJTIMEX, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Verify the kernel wrote the expected status bits
+        // (STA_UNSYNC | STA_NANO = 0x2040) at offset 40.
+        let status_le = i32::from_le_bytes([tx_buf[40], tx_buf[41], tx_buf[42], tx_buf[43]]);
+        if status_le != 0x2040 {
+            serial_println!(
+                "[syscall/linux]   FAIL: adjtimex status not 0x2040 ({:#x})",
+                status_le
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Verify tv_sec (offset 72) is positive (timekeeping is up).
+        let sec_le = i64::from_le_bytes([
+            tx_buf[72], tx_buf[73], tx_buf[74], tx_buf[75],
+            tx_buf[76], tx_buf[77], tx_buf[78], tx_buf[79],
+        ]);
+        if sec_le <= 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: adjtimex tv_sec not positive ({})",
+                sec_le
+            );
+            return Err(KernelError::InternalError);
+        }
+        // adjtimex with modes != 0 -> EPERM (no CAP_SYS_TIME).
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        // modes = ADJ_OFFSET = 1.
+        tx_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+        let a = SyscallArgs { arg0: tx_ptr, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::ADJTIMEX, &a).value
             != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: adjtimex not EPERM"
+                "[syscall/linux]   FAIL: adjtimex modes=1 not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // clock_adjtime(BAD_CLOCK, _) -> EINVAL.
+        let a = SyscallArgs { arg0: 5, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime bad clock not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_adjtime(CLOCK_REALTIME, NULL) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime NULL not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_adjtime(CLOCK_REALTIME, &tx) modes=0 -> TIME_ERROR.
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value != 5 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime(REALTIME,0) not TIME_ERROR"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_adjtime(CLOCK_TAI, &tx) modes=0 -> TIME_ERROR.
+        // (Our TAI offset is 0; we accept the clk_id and return the
+        // same snapshot as CLOCK_REALTIME.)
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        let a = SyscallArgs { arg0: 11, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value != 5 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime(TAI,0) not TIME_ERROR"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_adjtime(CLOCK_REALTIME, modes=ADJ_OFFSET) -> EPERM.
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        tx_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime modes=1 not EPERM"
             );
             return Err(KernelError::InternalError);
         }

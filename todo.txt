@@ -13866,5 +13866,97 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          design (Linux: rseq is per-task, child has none).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##
+## 151. Batch 122 — adjtimex(2) / clock_adjtime(2) modes=0 read path
+##      returns a real struct timex snapshot instead of EPERM.
+##
+##      Story: chrony, ntpd, and `timedatectl status` all start by
+##      issuing adjtimex(&buf) with buf.modes == 0 to read the kernel's
+##      current NTP / timex state (status flags, last frequency
+##      correction, the realtime epoch the kernel observed).  Our
+##      previous stub returned -EPERM for any non-NULL argument,
+##      which caused those tools to abort during their probe phase
+##      before they ever attempted to discipline the clock.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##        * TIMEX_STRUCT_SIZE = 208 (matches Linux x86_64 layout).
+##        * Constants:
+##            TIME_ERROR  = 5    (return code when STA_UNSYNC is set)
+##            STA_UNSYNC  = 0x0040
+##            STA_NANO    = 0x2000
+##        * adjtimex_fill_read(tx_ptr) helper:
+##            - Stack-builds a zeroed 208-byte buffer.
+##            - Fills the fields userspace actually inspects on a
+##              modes=0 read:
+##                maxerror  (off 24..32)  = 16_000_000  us
+##                status    (off 40..44)  = STA_UNSYNC | STA_NANO
+##                constant  (off 48..56)  = 2
+##                precision (off 56..64)  = 1
+##                tolerance (off 64..72)  = 32_768_000
+##                time.tv_sec  (off 72..80) = realtime / 1e9
+##                time.tv_usec (off 80..88) = realtime % 1e9
+##                                            (STA_NANO -> nanoseconds)
+##                tick      (off 88..96)  = 10_000   us (10 ms)
+##            - Single copy_to_user; on EFAULT propagate the error
+##              code through linux_errno_for.
+##            - Returns TIME_ERROR=5 on success, matching Linux's
+##              "we are not yet synchronised" answer.
+##        * sys_adjtimex:
+##            - NULL tx -> EFAULT.
+##            - Validate 208-byte read of tx for modes.
+##            - Read modes (off 0..4).  Non-zero -> EPERM (we still
+##              don't implement clock discipline; userspace must
+##              tolerate this).  Zero -> adjtimex_fill_read.
+##        * sys_clock_adjtime:
+##            - clk_id must be CLOCK_REALTIME(0) or CLOCK_TAI(11);
+##              anything else -> EINVAL (matches Linux:
+##              only these two are user-disciplinable).
+##            - NULL tx -> EFAULT.
+##            - Same modes==0 fill / modes!=0 EPERM split.
+##            - CLOCK_TAI returns the same snapshot as CLOCK_REALTIME
+##              because our TAI-UTC offset is currently 0 (see
+##              limitations below).
+##
+##      Boot self-tests (8 cases, replacing the previous 2-test
+##      EPERM-only block):
+##         1. adjtimex(NULL) -> EFAULT.
+##         2. adjtimex(modes=0) -> 5; verify status word at off 40
+##            equals STA_UNSYNC|STA_NANO (0x2040); verify time.tv_sec
+##            at off 72 is non-zero (realtime epoch is populated).
+##         3. adjtimex(modes=1=ADJ_OFFSET) -> EPERM.
+##         4. clock_adjtime(clk=5, &buf, modes=0) -> EINVAL
+##            (unsupported clock).
+##         5. clock_adjtime(CLOCK_REALTIME, NULL, _) -> EFAULT.
+##         6. clock_adjtime(CLOCK_REALTIME, &buf, modes=0) -> 5;
+##            same status / tv_sec checks as case 2.
+##         7. clock_adjtime(CLOCK_TAI, &buf, modes=0) -> 5.
+##         8. clock_adjtime(CLOCK_REALTIME, &buf, modes=1) -> EPERM.
+##
+##      Known limitations / deferred work:
+##        * No actual clock discipline.  We do not run an NTP loop,
+##          do not maintain a frequency offset, and never clear
+##          STA_UNSYNC.  Userspace that needs a steered clock has
+##          to keep stepping CLOCK_REALTIME manually via
+##          clock_settime; we always advertise "unsynchronised, here
+##          is the current monotonically-advancing realtime".
+##        * tv_usec carries nanoseconds (STA_NANO is set).  Tools
+##          that ignore the STA_NANO bit and treat the field as
+##          microseconds will see absurd "fractional second"
+##          values.  This is correct per the Linux ABI but worth
+##          flagging if compatibility issues appear with very old
+##          ntpd builds.
+##        * TAI offset is 0 -> CLOCK_TAI is indistinguishable from
+##          CLOCK_REALTIME.  Real Linux today carries the
+##          accumulated TAI-UTC leap second delta (37 s in 2026);
+##          consumers that expect CLOCK_TAI to be ahead of
+##          CLOCK_REALTIME will see them equal.  When we eventually
+##          ingest a leap-second table the fill path must add the
+##          offset for clk == CLOCK_TAI.
+##        * adjtimex returns a fixed snapshot for tick / tolerance /
+##          precision rather than reading from a configurable
+##          per-system timekeeping state.  When clock discipline
+##          actually lands these become live fields.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
 

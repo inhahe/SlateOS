@@ -20379,5 +20379,56 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 261. [DONE 2026-06-05] Linux ABI: sys_perf_event_open forward-compat
+##      trailing-zero E2BIG check — extends the pattern from batches
+##      227-231 to kernel/events/core.c.
+##
+##      Linux's perf_copy_attr calls copy_struct_from_user with
+##      ksize = sizeof(struct perf_event_attr).  This struct has grown
+##      through versions:
+##        VER0 = 64, VER1 = 72, VER2 = 80, VER3 = 96, VER4 = 104,
+##        VER5 = 112, VER6 = 120 (5.12), VER7 = 128 (5.13),
+##        VER8 = 136 (6.x).
+##      When usize > ksize, bytes [ksize, usize) must be zero or the
+##      call fails with -E2BIG so userspace probes can detect what
+##      perf_event_attr extension the kernel knows about.
+##
+##      Pre-batch divergence:
+##      - (attr_size=144 with byte[136]=1) fell through to ENOSYS
+##        (or the pid/cpu check) where Linux returns -E2BIG.  Same
+##        shape as the openat2/clone3/mount_setattr/landlock/
+##        sched_setattr limitations closed in batches 227-231.
+##
+##      Fix: after the existing validate_user_read(args.arg0,
+##      attr_size), when `attr_size > PERF_ATTR_KSIZE (136)` walk
+##      [attr+136, attr+attr_size) in 64-byte chunks via copy_from_user
+##      and return E2BIG on the first non-zero byte.  Insertion point
+##      is right after the readable-range check, before the
+##      pid==-1 && cpu==-1 EINVAL gate — matches Linux's perf_copy_attr
+##      order (trailing-zero check happens inside copy_struct_from_user,
+##      which is called before the deeper perf_event_alloc validation).
+##      KSIZE = 136 (Linux VER8) is the current Linux 6.x size; we
+##      track the latest known version so probes passing common
+##      versions don't hit a false E2BIG.
+##
+##      Self-tests added (after the existing flags-first/size-quirk
+##      marker, before the keyctl tests):
+##      - perf_event_open size=144, zero pad      -> ENOSYS (terminal
+##                                                  stub since perf is
+##                                                  unimplemented).
+##      - perf_event_open size=144, byte[136]=1   -> E2BIG (was
+##                                                  ENOSYS).
+##      Marker: "perf_event_open forward-compat trailing-zero E2BIG: OK".
+##
+##      Known limitations:
+##      - PERF_ATTR_KSIZE pegged at VER8 (136); when Linux adds VER9
+##        and our copy is updated to track it, this batch's tests for
+##        size=144 zero-pad will still pass (zero check matches), but
+##        the new max size should match the new VER value.
+##      - Trailing bytes are read in 64-byte chunks via copy_from_user.
+##        Worst case (size = PAGE_SIZE = 4096) is ~63 STAC/CLAC pairs.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

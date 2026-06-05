@@ -11547,6 +11547,42 @@ fn sys_perf_event_open(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, attr_size as usize) {
         return linux_err(linux_errno_for(e));
     }
+    // Forward-compat trailing-zero check (Linux's perf_copy_attr in
+    // kernel/events/core.c, which calls copy_struct_from_user).  When
+    // `size > sizeof(struct perf_event_attr)`, the wrapper walks bytes
+    // [ksize, size) and returns -E2BIG on the first non-zero byte so
+    // probes can detect which perf_event_attr extension version the
+    // kernel knows about.  We mirror Linux's current PERF_ATTR_SIZE_VER8
+    // = 136 (Linux 6.x), which is the largest version userspace probes
+    // typically pass.  Without this, a userspace probe passing size=144
+    // with non-zero garbage at byte 136 would silently fall through to
+    // the pid/cpu check or ENOSYS where Linux returns -E2BIG.
+    const PERF_ATTR_KSIZE: u32 = 136;
+    if attr_size > PERF_ATTR_KSIZE {
+        let excess_addr = args.arg0.wrapping_add(u64::from(PERF_ATTR_KSIZE));
+        let excess_len = (attr_size - PERF_ATTR_KSIZE) as usize;
+        let mut chunk = [0u8; 64];
+        let mut off: usize = 0;
+        while off < excess_len {
+            let take = core::cmp::min(64, excess_len - off);
+            // SAFETY: validate_user_read above covers the full
+            // [args.arg0, args.arg0 + attr_size) range; the excess
+            // sub-range is contained within it.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_from_user(
+                    excess_addr.wrapping_add(off as u64),
+                    chunk.as_mut_ptr(),
+                    take,
+                )
+            } {
+                return linux_err(linux_errno_for(e));
+            }
+            if chunk[..take].iter().any(|&b| b != 0) {
+                return linux_err(errno::E2BIG);
+            }
+            off += take;
+        }
+    }
     // pid == -1 && cpu == -1 is the "any task on any cpu" combination
     // that Linux rejects with EINVAL — without a pid there is no task
     // to attach the event to, and without a cpu there is no per-cpu
@@ -34434,6 +34470,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   perf_event_open flags-first / size-E2BIG-both-bounds / size=0-quirk: OK"
+        );
+        // Batch 232 forward-compat trailing-zero E2BIG check.  Linux's
+        // perf_copy_attr (kernel/events/core.c) calls
+        // copy_struct_from_user with ksize = sizeof(struct
+        // perf_event_attr) — currently 136 (PERF_ATTR_SIZE_VER8 in
+        // 6.x).  When usize > ksize, bytes [ksize, usize) must be
+        // zero or the call fails with -E2BIG.
+        //
+        // Case A: size=144 with zero tail -> ENOSYS (passes zero-check;
+        // terminal stub returns ENOSYS since perf is unimplemented).
+        let mut perf_pad_zero = [0u8; 144];
+        perf_pad_zero[4..8].copy_from_slice(&144u32.to_le_bytes()); // size = 144
+        let a = SyscallArgs {
+            arg0: perf_pad_zero.as_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: perf_event_open (size=144, zero-pad) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case B: size=144 with non-zero byte at offset 136 -> E2BIG.
+        let mut perf_pad_nonzero = [0u8; 144];
+        perf_pad_nonzero[4..8].copy_from_slice(&144u32.to_le_bytes());
+        perf_pad_nonzero[136] = 1;
+        let a = SyscallArgs {
+            arg0: perf_pad_nonzero.as_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value
+            != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: perf_event_open (size=144, nonzero-pad) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   perf_event_open forward-compat trailing-zero E2BIG: OK"
         );
         // keyctl(cmd=0,_,_,_,_) -> ENOSYS (known cmd, no backend).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

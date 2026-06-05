@@ -11228,31 +11228,143 @@ fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
-/// `set_mempolicy(mode, nodemask*, maxnode)`.
+/// `set_mempolicy(mode, nodemask*, maxnode)` — install the calling
+/// thread's default NUMA mempolicy.
+///
+/// Pre-batch this returned `-ENOSYS` after argument validation, which
+/// libnuma, jemalloc, and tcmalloc all treat as "set silently failed,
+/// keep going with no policy".  That worked but produced confusing
+/// behaviour because the paired `get_mempolicy` (batch 101) now
+/// returns a positive answer — callers that probe both directions
+/// observed an asymmetry ("get says NUMA works, set says ENOSYS").
+///
+/// Linux semantics (mm/mempolicy.c::do_set_mempolicy) for a single-node
+/// system equivalent to ours:
+///   * MPOL_DEFAULT (0): nodemask must be empty.
+///   * MPOL_PREFERRED (1) / MPOL_PREFERRED_MANY (5): nodemask may be
+///     empty (= MPOL_LOCAL semantics) or contain bits that are a
+///     subset of `current->mems_allowed`.
+///   * MPOL_BIND (2) / MPOL_INTERLEAVE (3): nodemask must be non-empty,
+///     and every set bit must be in `current->mems_allowed`.
+///   * MPOL_LOCAL (4): nodemask must be empty.
+///   * `MPOL_F_STATIC_NODES` (1 << 15) and `MPOL_F_RELATIVE_NODES`
+///     (1 << 14) are accepted as mode-modifier flags affecting cpuset
+///     rebinding behaviour (irrelevant on UMA; we accept silently).
+///
+/// Our `mems_allowed` is exactly `{0}` (one node).  We therefore
+/// accept the call iff:
+///   * mode and mode-flag bits are valid;
+///   * if a nodemask is supplied, no bit above bit 0 is set;
+///   * the mode-specific emptiness rule (empty vs non-empty) is met.
+///
+/// We do not persist the chosen policy because we have no per-task
+/// policy storage and no policy enforcement path — every allocation
+/// already comes from node 0.  `get_mempolicy` will continue to
+/// report MPOL_DEFAULT after a successful set; libnuma's
+/// `numa_set_preferred` / `numa_set_bind_policy` do not check
+/// for set-then-get symmetry on UMA systems (their fallback path
+/// also assumes MPOL_DEFAULT), so this asymmetry is acceptable.
+/// Documented as a limitation in todo.txt.
 fn sys_set_mempolicy(args: &SyscallArgs) -> SyscallResult {
     const MPOL_MODE_MASK: u32 = 0x7;
     const MPOL_MODE_FLAGS: u32 = (1 << 14) | (1 << 15);
+    const MPOL_DEFAULT: u32 = 0;
+    const MPOL_PREFERRED: u32 = 1;
+    const MPOL_BIND: u32 = 2;
+    const MPOL_INTERLEAVE: u32 = 3;
+    const MPOL_LOCAL: u32 = 4;
+    const MPOL_PREFERRED_MANY: u32 = 5;
+
     #[allow(clippy::cast_possible_truncation)]
-    let mode = args.arg0 as u32;
-    if (mode & MPOL_MODE_MASK) > 5
-        || (mode & !(MPOL_MODE_MASK | MPOL_MODE_FLAGS)) != 0
+    let mode_raw = args.arg0 as u32;
+    if (mode_raw & MPOL_MODE_MASK) > 5
+        || (mode_raw & !(MPOL_MODE_MASK | MPOL_MODE_FLAGS)) != 0
     {
         return linux_err(errno::EINVAL);
     }
+    let mode = mode_raw & MPOL_MODE_MASK;
     let maxnode = args.arg2;
-    if maxnode > 0 {
-        if args.arg1 == 0 {
+    let mask_ptr = args.arg1;
+
+    // Read the nodemask (if any) so we can check both emptiness and
+    // whether any bit > 0 is set.  Linux requires the buffer be
+    // readable even for modes that ignore it (e.g. DEFAULT with
+    // maxnode > 0); we mirror that by validating first.
+    let (mask_empty, mask_has_extra_bits) = if maxnode > 0 {
+        if mask_ptr == 0 {
             return linux_err(errno::EFAULT);
         }
         if maxnode > (1 << 23) {
             return linux_err(errno::EINVAL);
         }
         let bytes = ((maxnode + 7) / 8) as usize;
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, bytes) {
+        if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, bytes) {
             return linux_err(linux_errno_for(e));
         }
+        // Heap scratch buffer, bounded by the (1 << 23)-bit cap above.
+        let mut mask = alloc::vec![0u8; bytes];
+        // SAFETY: validate_user_read above confirmed the readable
+        // range; copy_from_user does the SMAP-safe transfer.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(
+                mask_ptr,
+                mask.as_mut_ptr(),
+                bytes,
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        let empty = mask.iter().all(|&b| b == 0);
+        // x86_64 nodemask is a little-endian unsigned-long array;
+        // bit 0 (node 0) lives in byte 0 bit 0.  Any other set bit
+        // refers to a node we do not have.
+        let bit0_cleared = mask[0] & !1u8;
+        let extra = bit0_cleared != 0
+            || mask.iter().skip(1).any(|&b| b != 0);
+        (empty, extra)
+    } else {
+        // No mask supplied -> treat as empty per Linux convention.
+        (true, false)
+    };
+
+    // No node beyond node 0 exists on our kernel.  Linux returns
+    // -EINVAL when the requested mask is not a subset of
+    // `mems_allowed`.
+    if mask_has_extra_bits {
+        return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+
+    // Per-mode emptiness rules.
+    match mode {
+        MPOL_DEFAULT | MPOL_LOCAL => {
+            // Both demand an empty nodemask.
+            if !mask_empty {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        MPOL_PREFERRED | MPOL_PREFERRED_MANY => {
+            // PREFERRED variants accept either an empty mask
+            // (which Linux turns into MPOL_LOCAL) or {0}.  No
+            // further validation needed here.
+        }
+        MPOL_BIND | MPOL_INTERLEAVE => {
+            // Both require a non-empty mask listing at least one
+            // allowed node.
+            if mask_empty {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        _ => {
+            // Already filtered by the MPOL_MODE_MASK > 5 check; the
+            // match is exhaustive over the legal modes.
+            return linux_err(errno::EINVAL);
+        }
+    }
+
+    // Accepted.  Policy is silently dropped — see top-of-function
+    // comment and todo.txt entry on per-task policy storage.
+    SyscallResult::ok(0)
 }
 
 /// `get_mempolicy(mode*, nodemask*, maxnode, addr, flags)` — query the
@@ -16764,6 +16876,171 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if r.value != -i64::from(errno::EFAULT) {
             serial_println!(
                 "[syscall/linux]   FAIL: get_mempolicy(F_ADDR,NULL) -> {} (expected -EFAULT)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (9f) Batch 102: set_mempolicy upgraded from -ENOSYS stub to a
+    // real UMA-aware accept/reject decision.  Mirrors what libnuma's
+    // numa_set_preferred / numa_set_bind_policy emit at startup.
+    {
+        const MPOL_DEFAULT: u64 = 0;
+        const MPOL_PREFERRED: u64 = 1;
+        const MPOL_BIND: u64 = 2;
+        const MPOL_INTERLEAVE: u64 = 3;
+        const MPOL_LOCAL: u64 = 4;
+        const MPOL_F_STATIC_NODES: u64 = 1 << 15;
+
+        // Case 1: MPOL_DEFAULT with no mask -> 0.
+        let a = SyscallArgs {
+            arg0: MPOL_DEFAULT, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,NULL,0) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 2: MPOL_PREFERRED with node-0 mask -> 0.
+        let mask: u64 = 0x1;
+        let a = SyscallArgs {
+            arg0: MPOL_PREFERRED,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(PREFERRED,{{0}},64) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 3: MPOL_BIND with node-0 mask -> 0.
+        let a = SyscallArgs {
+            arg0: MPOL_BIND,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(BIND,{{0}},64) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 4: MPOL_BIND with empty mask -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: MPOL_BIND, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(BIND,NULL,0) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 5: MPOL_DEFAULT with node-0 mask -> -EINVAL (DEFAULT
+        // requires an empty mask).
+        let a = SyscallArgs {
+            arg0: MPOL_DEFAULT,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,{{0}},64) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 6: bogus mode (> 5) -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(99,NULL,0) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 7: MPOL_BIND with bit 1 set (= node 1, which does not
+        // exist) -> -EINVAL.
+        let bad_mask: u64 = 0x2;
+        let a = SyscallArgs {
+            arg0: MPOL_BIND,
+            arg1: (&raw const bad_mask).addr() as u64,
+            arg2: 64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(BIND,{{1}},64) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 8: MPOL_LOCAL with non-empty mask -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: MPOL_LOCAL,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(LOCAL,{{0}},64) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 9: MPOL_LOCAL with empty mask -> 0.
+        let a = SyscallArgs {
+            arg0: MPOL_LOCAL, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(LOCAL,NULL,0) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 10: MPOL_INTERLEAVE with mode-flag MPOL_F_STATIC_NODES
+        // and node-0 mask -> 0 (mode flag is accepted on UMA).
+        let a = SyscallArgs {
+            arg0: MPOL_INTERLEAVE | MPOL_F_STATIC_NODES,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(INTERLEAVE|STATIC,{{0}},64) -> {} (expected 0)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -26116,10 +26393,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: set_mempolicy bad mode not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // set_mempolicy valid -> ENOSYS.
+        // set_mempolicy(MPOL_DEFAULT, NULL, 0) -> 0 (batch 102 upgrade: was
+        // ENOSYS, now accepted UMA-style; policy is silently dropped — see
+        // todo.txt entry 131).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SET_MEMPOLICY, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: set_mempolicy valid not ENOSYS");
+        if dispatch_linux(nr::SET_MEMPOLICY, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: set_mempolicy MPOL_DEFAULT/NULL/0 not 0");
             return Err(KernelError::InternalError);
         }
         // get_mempolicy bad flags -> EINVAL.

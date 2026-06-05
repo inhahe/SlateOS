@@ -12086,3 +12086,76 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      -EINVAL (we have no other modes implementable on UMA).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##
+##  131. Linux ABI: sys_set_mempolicy upgraded from -ENOSYS stub
+##      to a UMA-aware accept/reject decision (batch 102).
+##
+##      sys_set_mempolicy used to validate mode bits and then
+##      return -ENOSYS unconditionally.  After batch 101 made
+##      get_mempolicy return a positive UMA answer, the set/get
+##      asymmetry became user-visible: libnuma callers and glibc
+##      tunable parsers saw "get says NUMA is supported, set says
+##      kernel does not understand mempolicy" — confusing, and
+##      some tools (jemalloc's mallctl numa.* setter, tcmalloc's
+##      numa_set_preferred) treat the asymmetry as a fatal
+##      configuration error rather than a graceful fallback.
+##
+##      The arm now mirrors Linux's do_set_mempolicy validation
+##      logic exactly for a single-node system:
+##        * mode bits 0..2 must be in 0..=5 (DEFAULT, PREFERRED,
+##          BIND, INTERLEAVE, LOCAL, PREFERRED_MANY); other modes
+##          -> -EINVAL.
+##        * Only MPOL_F_STATIC_NODES (1<<15) and
+##          MPOL_F_RELATIVE_NODES (1<<14) are allowed as mode-flag
+##          bits; other high bits -> -EINVAL.
+##        * If maxnode > 0, mask_ptr must be non-NULL and the
+##          buffer (capped at 1 << 23 bits) must be readable; we
+##          copy_from_user into a heap Vec<u8> and inspect it.
+##        * Any bit > 0 set in the mask -> -EINVAL (node 1+ does
+##          not exist on UMA; matches Linux's "not a subset of
+##          mems_allowed" rejection).
+##        * Per-mode emptiness:
+##            - DEFAULT, LOCAL   : empty mask required.
+##            - PREFERRED,
+##              PREFERRED_MANY   : empty or non-empty accepted.
+##            - BIND, INTERLEAVE : non-empty mask required.
+##        * Accepted calls return 0; the policy itself is
+##          silently dropped — see "Known limitation" below.
+##
+##      Boot self-test "(9f) Batch 102" covers ten cases:
+##        1.  set(DEFAULT, NULL, 0)                    -> 0
+##        2.  set(PREFERRED, {0}, 64)                  -> 0
+##        3.  set(BIND, {0}, 64)                       -> 0
+##        4.  set(BIND, NULL, 0)                       -> -EINVAL
+##        5.  set(DEFAULT, {0}, 64)                    -> -EINVAL
+##        6.  set(99, NULL, 0)                         -> -EINVAL
+##        7.  set(BIND, {bit 1}, 64)                   -> -EINVAL
+##        8.  set(LOCAL, {0}, 64)                      -> -EINVAL
+##        9.  set(LOCAL, NULL, 0)                      -> 0
+##        10. set(INTERLEAVE | MPOL_F_STATIC_NODES,
+##                {0}, 64)                              -> 0
+##
+##      Also updated the pre-existing legacy test that asserted
+##      "set_mempolicy(0,NULL,0) -> -ENOSYS"; it now expects 0.
+##
+##      Known limitation: we still do not store per-task / per-VMA
+##      mempolicy state.  After a successful set, the paired
+##      get_mempolicy will continue to report MPOL_DEFAULT with
+##      an empty nodemask, not the just-set policy.  This is
+##      acceptable because:
+##        * libnuma's numa_set_preferred / numa_set_bind_policy
+##          do not round-trip via get_mempolicy on UMA (their
+##          fallback path assumes MPOL_DEFAULT after any set).
+##        * jemalloc and tcmalloc treat get_mempolicy's reply as
+##          authoritative for placement decisions; since we have
+##          only one node, no per-task policy can change those
+##          decisions.
+##      If we ever wire up a real per-task default-policy slot
+##      (PCB field + matching get_mempolicy return), batch 102
+##      becomes the place to persist the validated (mode, mask)
+##      tuple.  Cross-reference batch 101 entry above.
+##
+##      The previous batch 101 entry's "set still returns ENOSYS"
+##      note is now superseded — both directions are implemented.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 27s).

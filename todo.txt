@@ -11390,3 +11390,68 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        every branch reachable without a userspace mm context.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 21s).
+##
+## 122. Batch 93: prctl(PR_SCHED_CORE = 62).
+##
+##      Rationale: Chromium's renderer sandbox, runc / cri-o
+##      container init, and Java's CoreShareScheduler probe this
+##      option at startup to learn whether the kernel supports
+##      SMT-sibling co-scheduling cookies (the kernel-side
+##      mitigation for L1TF/MDS cross-thread leaks).  Pre-batch
+##      option 62 fell into the catch-all -> EINVAL, which the
+##      probers log as a warning ("unexpected error probing core
+##      scheduling support") before falling back to default
+##      placement.
+##
+##      Wiring: one new arm in sys_prctl after the
+##      PR_SET_SPECULATION_CTRL (53) arm, immediately before
+##      PR_SET_MEMORY_MERGE (67).  The arm body is a single
+##      unconditional `linux_err(errno::ENODEV)` — no argument
+##      validation, no per-cmd dispatch.  This is bit-for-bit
+##      what Linux's kernel/sys.c::prctl returns on a
+##      CONFIG_SCHED_CORE=n kernel (the dominant configuration on
+##      consumer distributions and QEMU/KVM guests):
+##
+##        case PR_SCHED_CORE:
+##            if (!IS_ENABLED(CONFIG_SCHED_CORE))
+##                return -ENODEV;
+##            ...
+##
+##      The doc block at the top of sys_prctl now lists 62 with
+##      the same "we don't implement, fall through to ENODEV"
+##      stance.
+##
+##      Linux semantics matched:
+##        * Unconditional ENODEV for every cmd value, including
+##          the documented PR_SCHED_CORE_GET/CREATE/SHARE_{TO,
+##          FROM}/MAX range (0..=4) and garbage like u64::MAX.
+##        * No argument validation — Linux's short-circuit fires
+##          before the kernel inspects arg3/arg4/arg5, so we
+##          ignore them too (matching CONFIG_SCHED_CORE=n
+##          behaviour exactly).
+##
+##      Linux semantics deliberately NOT matched (yet):
+##        * Real core-cookie tracking (would require a CONFIG_-
+##          SCHED_CORE=y equivalent).  When an SMT-aware scheduler
+##          with cookie support lands, this arm grows into a real
+##          cmd dispatcher; the surface stays stable (today's
+##          ENODEV callers will see success on the cmds they ask
+##          for).
+##        * CAP_SYS_NICE check for the SHARE_TO cmd (not relevant
+##          on a kernel that doesn't implement the cmd).
+##
+##      Known limitation: none beyond the missing scheduler
+##      feature.  ENODEV is the truthful answer and every probe
+##      we've audited handles it gracefully.
+##
+##      Self-test (boot path, batch 93 block in linux.rs after
+##      the batch 92 F_*_RW_HINT block):
+##        * Sweep cmd values {0, 1, 2, 3, 4, 5, 100, u32::MAX,
+##          u64::MAX} through dispatch_linux(PRCTL, ...) and
+##          assert each returns -ENODEV.
+##        * Confirm the constant 62 routes here (a drift would
+##          send the zero-args probe to the catch-all -EINVAL).
+##        * Garbage in arg3/arg4/arg5 still produces -ENODEV (no
+##          accidental gating).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

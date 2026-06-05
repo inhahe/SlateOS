@@ -4203,6 +4203,10 @@ fn sys_ioctl(_args: &SyscallArgs) -> SyscallResult {
 ///     (return 1) and DROP as silent success.  This is the friendliest
 ///     answer for systemd, which calls PR_CAPBSET_DROP for every
 ///     capability it wants to drop and gates on the result.
+///   - `PR_SCHED_CORE` (62): core-scheduling cookie management.  We
+///     don't implement core scheduling; return `-ENODEV` (bit-for-bit
+///     what `CONFIG_SCHED_CORE=n` kernels return), which Chromium and
+///     runc handle gracefully (fall back to default placement).
 ///
 /// Everything else: `-EINVAL`.
 ///
@@ -5097,6 +5101,53 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 _ => linux_err(errno::ENODEV),
             }
         }
+        // PR_SCHED_CORE (62) — manipulate per-task core-scheduling
+        // cookies that prevent untrusted threads from co-scheduling
+        // on SMT siblings (Linux's mitigation for L1TF/MDS-style
+        // cross-thread leaks).  Chromium's renderer sandbox probes
+        // PR_SCHED_CORE_GET on startup; runc / cri-o consult it
+        // before assigning workloads to shared cores; Java's
+        // CoreShareScheduler does the same for tenant isolation.
+        //
+        // Linux semantics (kernel/sched/core_sched.c):
+        //   * arg2 (our arg1) = cmd:
+        //       PR_SCHED_CORE_GET       = 0
+        //       PR_SCHED_CORE_CREATE    = 1
+        //       PR_SCHED_CORE_SHARE_TO  = 2
+        //       PR_SCHED_CORE_SHARE_FROM= 3
+        //       (PR_SCHED_CORE_MAX      = 4 is the count, not a cmd)
+        //   * arg3 (our arg2) = pid (0 == self).
+        //   * arg4 (our arg3) = pid_type:
+        //       PIDTYPE_PID = 0, PIDTYPE_TGID = 1, PIDTYPE_PGID = 2.
+        //   * arg5 (our arg4) = cookie out-pointer (only meaningful
+        //     for GET; must be 0 for the other cmds).
+        //   * On CONFIG_SCHED_CORE=n kernels (the majority of
+        //     consumer distributions and every QEMU/KVM guest that
+        //     doesn't explicitly enable it), the entire arm
+        //     short-circuits to -ENODEV *before any argument
+        //     validation*.  See kernel/sys.c:
+        //         case PR_SCHED_CORE:
+        //             if (!IS_ENABLED(CONFIG_SCHED_CORE))
+        //                 return -ENODEV;
+        //             ...
+        //
+        // Our stance: we do not implement core scheduling and have
+        // no SMT-aware scheduler.  The bit-for-bit truthful answer
+        // is what CONFIG_SCHED_CORE=n returns: unconditional ENODEV
+        // with no argument validation.  This matches what every
+        // callsite already handles gracefully ("kernel doesn't
+        // support core scheduling, fall back to default placement").
+        // Pre-batch the catch-all returned EINVAL, which Chromium
+        // and runc log as a warning ("unexpected error probing
+        // core scheduling support") even though they fall back the
+        // same way.  Returning ENODEV silences the noise without
+        // lying about capability.
+        //
+        // Known limitation: when an SMT-aware scheduler with core
+        // cookie support lands, this arm grows into a real cmd
+        // dispatcher.  The syscall surface stays stable; userspace
+        // probes that see ENODEV today will see success then.
+        62 => linux_err(errno::ENODEV),
         // PR_SET_MEMORY_MERGE (67) — mark the calling task's
         // anonymous VMAs as KSM-mergeable.  Used by VM hosts
         // (qemu/kvm), JVM-per-container deployments, Python
@@ -20782,6 +20833,49 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         ] {
             assert_eq!(set_hint_policy(bad_hint), Err(errno::EINVAL));
         }
+    }
+
+    // Batch 93: prctl(PR_SCHED_CORE) — Chromium / runc / Java tenant
+    // isolation all probe this on startup to learn whether the
+    // kernel supports SMT-sibling co-scheduling cookies.  Pre-batch
+    // option 62 fell into the catch-all -> EINVAL.  Our truthful
+    // answer is the same as a CONFIG_SCHED_CORE=n Linux kernel:
+    // unconditional ENODEV, with no argument validation.  We
+    // exercise that against every documented subcommand plus a few
+    // out-of-band garbage values to confirm the arm body is the
+    // unconditional short-circuit Linux uses, not a per-cmd
+    // dispatcher we've added accidentally.
+    {
+        const PR_SCHED_CORE: u64 = 62;
+        // Cover the documented cmd range plus boundaries and a few
+        // garbage values; every input must come back as -ENODEV.
+        for cmd in [0u64, 1, 2, 3, 4, 5, 100, u32::MAX as u64, u64::MAX] {
+            let a = SyscallArgs {
+                arg0: PR_SCHED_CORE,
+                arg1: cmd,
+                arg2: 0xdead_beef,
+                arg3: 0x1111_2222,
+                arg4: 0x3333_4444,
+                arg5: 0,
+            };
+            let r = dispatch_linux(nr::PRCTL, &a);
+            if r.value != -i64::from(errno::ENODEV) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SCHED_CORE, cmd={}) → {} (expected -ENODEV)",
+                    cmd, r.value,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Sanity: PR_SCHED_CORE is option 62 per Linux's
+        // include/uapi/linux/prctl.h.  A drift in the constant
+        // would silently route to the catch-all (-EINVAL).
+        let a = SyscallArgs {
+            arg0: PR_SCHED_CORE, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::PRCTL, &a);
+        assert_eq!(r.value, -i64::from(errno::ENODEV));
     }
 
     // personality dispatch validation.

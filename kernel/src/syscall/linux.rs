@@ -11866,7 +11866,19 @@ fn sys_fremovexattr(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `quotactl(cmd, special, id, addr)`.
+///
+/// Linux's `fs/quota/quota.c::sys_quotactl` decodes the cmd as
+/// `(subcmd << 8) | type`, where `type` is one of `USRQUOTA=0`,
+/// `GRPQUOTA=1`, `PRJQUOTA=2`.  `type >= MAXQUOTAS (3)` produces
+/// `-EINVAL` ahead of any privilege check.  We mirror that gate so
+/// probes passing a junk type see the same errno as on Linux instead
+/// of being told they lacked privilege.
 fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
+    // type = cmd & 0xff; MAXQUOTAS == 3 (USR, GRP, PRJ).
+    let typ = (args.arg0 & 0xff) as u32;
+    if typ >= 3 {
+        return linux_err(errno::EINVAL);
+    }
     // special is a path pointer (when needed); validate if non-NULL.
     if args.arg1 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
@@ -31198,7 +31210,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // quotactl with NULL special -> EPERM (NULL is allowed).
+        // quotactl with NULL special -> EPERM (NULL is allowed; type=0
+        // is USRQUOTA, valid).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::QUOTACTL, &a).value
@@ -31206,6 +31219,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: quotactl not EPERM");
             return Err(KernelError::InternalError);
         }
+        // quotactl with type=3 (>= MAXQUOTAS) -> EINVAL.  cmd encodes
+        // type in the low byte; 0x800003 is Q_QUOTAOFF shifted with
+        // type=3 — Linux rejects ahead of the privilege check.
+        let a = SyscallArgs { arg0: 0x800003, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(type=3) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // quotactl with type=0xff -> EINVAL (any junk type rejected).
+        let a = SyscallArgs { arg0: 0xff, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(type=0xff) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   quotactl type validation: OK");
         // quotactl_fd in kernel context -> EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

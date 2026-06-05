@@ -15397,3 +15397,40 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   io_uring_setup entries/flags/
 ##      resv validation: OK" at line 432 of build/serial-test.txt.
 
+## 171. Linux ABI: quotactl(2) type validation
+##      (Batch 142, 2026-06-05)
+##
+##      Issue:  sys_quotactl validated only the optional `special`
+##              pointer and returned EPERM for everything.  Linux's
+##              fs/quota/quota.c::sys_quotactl decodes the cmd as
+##              `(subcmd << 8) | type` and returns -EINVAL when
+##              type >= MAXQUOTAS (3) ahead of any privilege check.
+##              Probes passing a junk type (e.g. type=0xff) saw EPERM
+##              where Linux gives EINVAL, masking the cap from
+##              feature detection.
+##
+##      Fix:    Added `let typ = (args.arg0 & 0xff) as u32; if typ >= 3
+##              { return linux_err(errno::EINVAL); }` ahead of the
+##              special-pointer check.  USRQUOTA(0), GRPQUOTA(1), and
+##              PRJQUOTA(2) continue to reach the EPERM path.
+##
+##      Self-tests (boot-time):
+##        * quotactl(cmd=0,NULL,_,_) -> EPERM (type=0 valid; unchanged).
+##        * quotactl(cmd=0x800003,NULL,_,_) -> EINVAL (Q_QUOTAOFF
+##          encoded with type=3 — out of range).
+##        * quotactl(cmd=0xff,NULL,_,_) -> EINVAL (junk type).
+##        * Emits "[syscall/linux]   quotactl type validation: OK".
+##
+##      Known limitations:
+##        * The subcmd portion (cmd >> 8) is not validated against the
+##          known Linux subcommand set.  Linux's switch returns EINVAL
+##          for unknown subcmds, but the privilege check fires first,
+##          so most probes never see it.  Since EPERM is correct
+##          regardless ("you lack privilege"), we don't add the subcmd
+##          gate here — the type gate is the one with a different
+##          errno on Linux.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   quotactl type validation:
+##      OK" at line 440 of build/serial-test.txt.
+

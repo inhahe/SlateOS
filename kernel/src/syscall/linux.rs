@@ -4242,6 +4242,86 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             }
             SyscallResult::ok(0)
         }
+        // PR_MCE_KILL (33) — set the per-process machine-check kill
+        // policy.  Container runtimes and OOM-handling daemons use
+        // this to opt into early kill for processes that hold large
+        // shared memory regions where recovery isn't worth the
+        // latency.  Linux's argument shape:
+        //
+        //   arg2 (our arg1) = PR_MCE_KILL_CLEAR (0) or
+        //                     PR_MCE_KILL_SET   (1)
+        //   arg3 (our arg2) = ignored when CLEAR (must be 0);
+        //                     when SET: PR_MCE_KILL_LATE (0),
+        //                     PR_MCE_KILL_EARLY (1),
+        //                     PR_MCE_KILL_DEFAULT (2)
+        //   arg4, arg5 = must be 0 or EINVAL.
+        //
+        // CLEAR sets the per-process policy to DEFAULT (system
+        // policy).  SET with EARLY/LATE installs that policy; SET
+        // with DEFAULT is equivalent to CLEAR (Linux: both clear
+        // the PF_MCE_PROCESS/PF_MCE_EARLY bits).  Any other arg2 or
+        // (for SET) arg3 value -> EINVAL.
+        //
+        // Known limitation: we do not implement machine-check
+        // exception handling; the policy is stored per-PCB for ABI
+        // round-trip and has no effect on actual MCE handling.
+        // Tracked in todo.txt.
+        33 => {
+            if args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // PR_MCE_KILL action constants (Linux user-visible).
+            const CLEAR: u64 = 0;
+            const SET: u64 = 1;
+            let target: u32 = match args.arg1 {
+                CLEAR => {
+                    if args.arg2 != 0 {
+                        return linux_err(errno::EINVAL);
+                    }
+                    pcb::LINUX_PR_MCE_KILL_DEFAULT
+                }
+                SET => match args.arg2 {
+                    0 => pcb::LINUX_PR_MCE_KILL_LATE,
+                    1 => pcb::LINUX_PR_MCE_KILL_EARLY,
+                    // SET with DEFAULT is equivalent to CLEAR
+                    // (Linux clears both PF bits).
+                    2 => pcb::LINUX_PR_MCE_KILL_DEFAULT,
+                    _ => return linux_err(errno::EINVAL),
+                },
+                _ => return linux_err(errno::EINVAL),
+            };
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_mce_kill_policy(pid, target);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_MCE_KILL_GET (34) — return the per-process MCE-kill
+        // policy directly as the syscall return value.  Linux's
+        // semantics: returns DEFAULT (2) when neither PF_MCE bit is
+        // set, EARLY (1) or LATE (0) when PF_MCE_PROCESS is set
+        // (depending on PF_MCE_EARLY).  We store the user-visible
+        // value directly so the read is trivial.
+        //
+        // arg2..arg5 must all be 0 or EINVAL.  arg1 has no meaning
+        // (returned directly, no user pointer) — we also gate it
+        // to 0 for consistency with our other "return-directly"
+        // PR_GET options.  Kernel context (no PCB) reports the
+        // default (PR_MCE_KILL_DEFAULT = 2).
+        34 => {
+            if args.arg1 != 0
+                || args.arg2 != 0
+                || args.arg3 != 0
+                || args.arg4 != 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            let v: u32 = match caller_pid() {
+                Some(pid) => pcb::get_mce_kill_policy(pid)
+                    .unwrap_or(pcb::LINUX_PR_MCE_KILL_DEFAULT),
+                None => pcb::LINUX_PR_MCE_KILL_DEFAULT,
+            };
+            SyscallResult::ok(i64::from(v))
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -17197,6 +17277,148 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+        }
+
+        // Batch 74: PR_MCE_KILL / PR_MCE_KILL_GET round-trip with
+        // strict argument validation matching Linux.
+        //
+        //   1. PR_MCE_KILL arg4/arg5 != 0 -> EINVAL.
+        //   2. PR_MCE_KILL arg2 not in {0, 1} -> EINVAL.
+        //   3. PR_MCE_KILL CLEAR + arg3 != 0 -> EINVAL.
+        //   4. PR_MCE_KILL SET + arg3 not in {0, 1, 2} -> EINVAL.
+        //   5. PR_MCE_KILL CLEAR / SET(EARLY) / SET(LATE) /
+        //      SET(DEFAULT) all -> 0 in kernel context.
+        //   6. PR_MCE_KILL_GET arg1..arg5 != 0 -> EINVAL.
+        //   7. PR_MCE_KILL_GET in kernel context -> 2 (default).
+        //   8. pcb storage round-trips DEFAULT -> EARLY -> LATE ->
+        //      DEFAULT -> destroy -> None.
+        {
+            // arg4/arg5 != 0 -> EINVAL on PR_MCE_KILL.
+            for (slot, name) in &[(3u8, "arg4"), (4, "arg5")] {
+                let mut a = SyscallArgs { arg0: 33, arg1: 0, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // arg1 not in {0, 1} -> EINVAL.
+            for bad_action in &[2u64, 3, 99, u64::MAX] {
+                let a = SyscallArgs { arg0: 33, arg1: *bad_action, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, action={}) not EINVAL ({})",
+                        bad_action, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // CLEAR (arg1=0) + arg2 != 0 -> EINVAL.
+            let a = SyscallArgs { arg0: 33, arg1: 0, arg2: 1, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, CLEAR, arg2=1) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // SET (arg1=1) + arg2 not in {0, 1, 2} -> EINVAL.
+            for bad_policy in &[3u64, 99, u64::MAX] {
+                let a = SyscallArgs { arg0: 33, arg1: 1, arg2: *bad_policy,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, SET, policy={}) not EINVAL ({})",
+                        bad_policy, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // CLEAR (arg1=0, arg2=0) -> 0.
+            let a = SyscallArgs { arg0: 33, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, CLEAR) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // SET + LATE/EARLY/DEFAULT all succeed.
+            for policy in &[0u64, 1, 2] {
+                let a = SyscallArgs { arg0: 33, arg1: 1, arg2: *policy,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, SET, {}) not 0 ({})",
+                        policy, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // PR_MCE_KILL_GET: arg1..arg5 != 0 -> EINVAL.
+            for (slot, name) in &[
+                (1u8, "arg2"),
+                (2, "arg3"),
+                (3, "arg4"),
+                (4, "arg5"),
+            ] {
+                let mut a = SyscallArgs { arg0: 34, arg1: 0, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    1 => a.arg1 = 1,
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_MCE_KILL_GET, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Kernel context -> 2 (DEFAULT).
+            let a = SyscallArgs { arg0: 34, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 2 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_MCE_KILL_GET) not 2 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("mce-kill-test", 0);
+            // Default is PR_MCE_KILL_DEFAULT (2).
+            assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(2));
+            // Install EARLY (1).
+            assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), Some(2));
+            assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(1));
+            // Install LATE (0).
+            assert_eq!(pcb::set_mce_kill_policy(test_pid, 0), Some(1));
+            assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(0));
+            // Back to DEFAULT (2).
+            assert_eq!(pcb::set_mce_kill_policy(test_pid, 2), Some(0));
+            assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(2));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_mce_kill_policy(test_pid), None);
+            assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), None);
         }
     }
 

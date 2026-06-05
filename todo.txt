@@ -9951,3 +9951,67 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 25s).
 
 
+## 103. Linux ABI batch 74: real per-PCB PR_MCE_KILL /
+##      PR_MCE_KILL_GET round-trip with strict argument
+##      validation matching Linux.
+##
+##      Before this batch, both options fell through to the
+##      generic `_ => EINVAL` catch-all in sys_prctl.
+##      Container runtimes (Podman, container-init) and
+##      OOM-handling daemons set this to PR_MCE_KILL_EARLY on
+##      processes that hold large shared-memory regions where
+##      recovery isn't worth the latency.  EINVAL on an
+##      option that should succeed silently disables the
+##      optimisation.
+##
+##      Fix: add `linux_mce_kill_policy: u32` (default 2 =
+##      PR_MCE_KILL_DEFAULT) to the PCB.  Encode the
+##      user-visible value directly (0=LATE, 1=EARLY,
+##      2=DEFAULT) rather than mirroring Linux's two-bit
+##      PF_MCE_PROCESS / PF_MCE_EARLY encoding — makes the
+##      GET path a trivial read.
+##
+##      Inherited verbatim across fork (Linux: both PF_MCE
+##      bits are in task_struct::flags copy path).  Preserved
+##      across exec (flush_thread does not touch them).
+##
+##      PR_MCE_KILL (33) — strict Linux semantics:
+##        * arg2 (our arg1) = PR_MCE_KILL_CLEAR (0) or
+##          PR_MCE_KILL_SET (1); other values -> EINVAL.
+##        * arg3 (our arg2) ignored on CLEAR (must be 0 or
+##          EINVAL); on SET must be PR_MCE_KILL_LATE (0),
+##          PR_MCE_KILL_EARLY (1), or PR_MCE_KILL_DEFAULT (2);
+##          others -> EINVAL.
+##        * arg4/arg5 must be 0 or EINVAL.
+##        * CLEAR and SET-with-DEFAULT both store DEFAULT
+##          (matches Linux clearing both PF bits).
+##        * Returns 0 on success.
+##
+##      PR_MCE_KILL_GET (34) — returns the policy DIRECTLY as
+##      the syscall return value (no user pointer).
+##      arg1..arg5 must all be 0 or EINVAL.  Kernel context
+##      reports the default (2).
+##
+##      Known limitation (deferred): we do not implement
+##      machine-check exception handling at all.  The stored
+##      policy is round-tripped for ABI compatibility only and
+##      has no effect on what actually happens on MCE.  When
+##      MCE handling lands it should consult
+##      get_mce_kill_policy(pid) to decide between
+##      SIGBUS-now vs. let-recovery-try-first.
+##
+##      Self-tests cover:
+##        * PR_MCE_KILL arg4/arg5 != 0 -> EINVAL.
+##        * arg1 not in {0, 1} -> EINVAL.
+##        * CLEAR + arg2 != 0 -> EINVAL.
+##        * SET + arg2 not in {0, 1, 2} -> EINVAL.
+##        * CLEAR / SET(0) / SET(1) / SET(2) all -> 0 in
+##          kernel context.
+##        * PR_MCE_KILL_GET arg1..arg5 != 0 -> EINVAL.
+##        * Kernel context -> 2 (default).
+##        * pcb storage layer round-trips
+##          DEFAULT -> EARLY -> LATE -> DEFAULT -> destroy -> None.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+

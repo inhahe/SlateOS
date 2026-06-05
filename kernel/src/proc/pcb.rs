@@ -597,6 +597,34 @@ pub struct Process {
     /// never trap.  Sandbox callers will still see the right
     /// PR_GET answer, just no enforcement.  Tracked in todo.txt.
     pub linux_tsc_mode: u32,
+    /// Linux `prctl(PR_MCE_KILL)` policy.  Selects what happens to
+    /// the process when a machine-check exception unmaps a page it
+    /// holds: kill *early* (before recovery), kill *late* (after
+    /// recovery fails), or use the system *default*.
+    ///
+    /// Encoded with Linux's user-visible values:
+    /// * 0 = `PR_MCE_KILL_LATE`
+    /// * 1 = `PR_MCE_KILL_EARLY`
+    /// * 2 = `PR_MCE_KILL_DEFAULT`  — system policy applies
+    ///       (the documented default).
+    ///
+    /// On Linux this is encoded as a pair of bits in
+    /// `task_struct::flags` (`PF_MCE_PROCESS` + `PF_MCE_EARLY`);
+    /// we collapse the encoding into a single `u32` storing the
+    /// user-visible value, so the PR_MCE_KILL_GET path is a
+    /// trivial read.
+    ///
+    /// Default 2 (`PR_MCE_KILL_DEFAULT`).  Inherited verbatim
+    /// across fork (Linux: the two PF_MCE bits are in the
+    /// `task_struct::flags` copy path).  Preserved across exec
+    /// (`flush_thread` does not touch the bits).
+    ///
+    /// Known limitation: we do not implement machine-check
+    /// exception handling at all.  The stored value is round-tripped
+    /// for ABI compatibility only.  When MCE handling lands it
+    /// should consult `get_mce_kill_policy(pid)` to choose between
+    /// SIGBUS-immediately vs. let-recovery-try-first.
+    pub linux_mce_kill_policy: u32,
 }
 
 /// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
@@ -682,9 +710,23 @@ impl Process {
             // Linux default: PR_TSC_ENABLE (1) — userspace TSC
             // reads are allowed.  Sandboxes set PR_TSC_SIGSEGV (2).
             linux_tsc_mode: 1,
+            // Linux default: PR_MCE_KILL_DEFAULT (2) — system policy
+            // applies.  Container runtimes / OOM-handling daemons
+            // override.
+            linux_mce_kill_policy: LINUX_PR_MCE_KILL_DEFAULT,
         }
     }
 }
+
+/// `prctl(PR_MCE_KILL)` policy: kill the process **after** the
+/// kernel's recovery attempt fails.
+pub const LINUX_PR_MCE_KILL_LATE: u32 = 0;
+/// `prctl(PR_MCE_KILL)` policy: kill the process **before** any
+/// recovery attempt (faster but loses any chance of resuming).
+pub const LINUX_PR_MCE_KILL_EARLY: u32 = 1;
+/// `prctl(PR_MCE_KILL)` policy: use the **system default** (this
+/// is the documented per-process default).
+pub const LINUX_PR_MCE_KILL_DEFAULT: u32 = 2;
 
 /// `prctl(PR_SET_TSC)` value meaning "RDTSC reads are allowed".
 pub const LINUX_PR_TSC_ENABLE: u32 = 1;
@@ -809,6 +851,7 @@ pub fn fork_create(
         linux_timer_slack_ns,
         linux_timer_slack_default_ns,
         linux_tsc_mode,
+        linux_mce_kill_policy,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -842,6 +885,7 @@ pub fn fork_create(
             parent.linux_timer_slack_ns,
             parent.linux_timer_slack_default_ns,
             parent.linux_tsc_mode,
+            parent.linux_mce_kill_policy,
         )
     };
 
@@ -982,6 +1026,10 @@ pub fn fork_create(
         // PR_SET_TSC propagates verbatim across fork.  Preserved
         // across exec (flush_thread does not touch the flag).
         linux_tsc_mode,
+        // Linux: PF_MCE_PROCESS and PF_MCE_EARLY are in the
+        // task_struct::flags copy path, so PR_MCE_KILL state
+        // propagates verbatim across fork.  Preserved across exec.
+        linux_mce_kill_policy,
     };
 
     table.insert(pid, child);
@@ -1712,6 +1760,32 @@ pub fn set_tsc_mode(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_tsc_mode;
     proc.linux_tsc_mode = val;
+    Some(old)
+}
+
+/// Read the recorded `prctl(PR_MCE_KILL_GET)` policy for `pid`
+/// (one of [`LINUX_PR_MCE_KILL_LATE`] / [`LINUX_PR_MCE_KILL_EARLY`]
+/// / [`LINUX_PR_MCE_KILL_DEFAULT`]).  Returns `None` if `pid` is
+/// unknown; `Some(LINUX_PR_MCE_KILL_DEFAULT)` is the documented
+/// default.
+#[must_use]
+pub fn get_mce_kill_policy(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| p.linux_mce_kill_policy)
+}
+
+/// Install the MCE-kill policy for `pid`, returning the prior
+/// value.  The syscall surface validates the value is one of the
+/// three documented constants; this helper accepts arbitrary values
+/// so test fixtures and future kernel paths can set it freely.
+/// Returns `None` if `pid` is unknown.
+pub fn set_mce_kill_policy(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_mce_kill_policy;
+    proc.linux_mce_kill_policy = val;
     Some(old)
 }
 

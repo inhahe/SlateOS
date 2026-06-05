@@ -11100,3 +11100,117 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##            "size, not copied" return contract).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##
+## 119. Linux ABI batch 90: fcntl(F_GETOWN_EX / F_SETOWN_EX) —
+##      thread/process/process-group targeted SIGIO ownership.
+##      Pre-batch the two commands (cmd numbers 15 and 16) fell
+##      into the fcntl catch-all -> EINVAL, which made glibc /
+##      libuv think the kernel rejected the F_OWNER_TID form and
+##      forced them down the legacy F_SETOWN-with-negative-pgrp
+##      path or gave up on SIGIO entirely.
+##
+##      Why it matters:
+##        * libuv (Node.js runtime) wires SIGIO to a specific
+##          worker thread via F_SETOWN_EX(F_OWNER_TID, tid) so
+##          async I/O wakeups land on the right runtime thread
+##          instead of broadcast-via-PGRP.
+##        * glibc's higher-level fcntl wrappers prefer F_*_EX
+##          over the legacy F_GETOWN/F_SETOWN now that the EX
+##          variants are universally available in Linux.
+##        * BSD sockets configured with O_ASYNC + fcntl ownership
+##          via the EX form is the documented modern usage in
+##          POSIX-2024 drafts.
+##
+##      Wiring:
+##        - syscall/linux.rs adds:
+##            fcntl_cmd::F_SETOWN_EX = 15;
+##            fcntl_cmd::F_GETOWN_EX = 16;
+##            fcntl_cmd::owner_type::{F_OWNER_TID=0,
+##                                   F_OWNER_PID=1,
+##                                   F_OWNER_PGRP=2};
+##        - Two new arms in sys_fcntl drive
+##          `fcntl_f_owner_ex_encode` (i32 owner -> (type, pid))
+##          and `fcntl_f_owner_ex_decode` ((type, pid) ->
+##          Result<i32, errno>).
+##        - F_GETOWN_EX reads pcb::linux_fd_get_owner, encodes
+##          via the projection helper, copies the
+##          struct f_owner_ex (8 bytes) to userspace via
+##          validate_user_write + copy_to_user.
+##        - F_SETOWN_EX validates the 8-byte read, decodes via
+##          the projection helper, and calls
+##          pcb::linux_fd_set_owner.
+##
+##      Encode/decode contract:
+##        * Encode: owner=0 -> (F_OWNER_PID, 0);
+##                  owner>0 -> (F_OWNER_PID, owner);
+##                  owner<0 -> (F_OWNER_PGRP, -owner).
+##          The "owner=0 reports PID" branch matches Linux's
+##          never-set-owner default — the slot defaults to 0
+##          and reads back as (PID, 0) until written.
+##        * Decode: pid<0 -> EINVAL (any type);
+##                  unknown type -> EINVAL;
+##                  TID/PID with pid p -> p;
+##                  PGRP with pid 0 -> 0 (no-group sentinel);
+##                  PGRP with pid p>0 -> -p.
+##
+##      Linux semantics matched:
+##        * EBADF for a bad fd at the early caller_pid /
+##          fd-lookup gate (unchanged from F_GETOWN/F_SETOWN).
+##        * EFAULT for NULL user pointer with non-zero struct
+##          size requirement.
+##        * EINVAL for unknown type or negative pid.
+##        * F_GETOWN_EX after F_SETOWN_EX round-trips the
+##          stored ownership shape, modulo TID-vs-PID below.
+##
+##      Linux semantics deliberately NOT matched (yet):
+##        * F_OWNER_TID collapses to F_OWNER_PID storage —
+##          our kernel does not yet expose intra-process TIDs
+##          distinct from PIDs (single-threaded processes
+##          today; clone3() returns -ENOSYS).  A
+##          F_SETOWN_EX(TID, tid) followed by F_GETOWN_EX
+##          therefore reads back as (PID, tid), not (TID, tid).
+##          Callers see the same wakeup behaviour because
+##          there's only one thread per process anyway;
+##          tracked here for when threading lands.
+##
+##      Known limitation:
+##        * TID/PID distinction is lossy as noted above.
+##        * Storage layout reuses the existing i32 owner slot
+##          rather than adding a (type, pid) pair — when
+##          threading lands and TID storage matters, the PCB
+##          fd slot should grow a separate `type` byte; the
+##          encode/decode helpers in linux.rs will swap their
+##          projection in one place with no syscall-surface
+##          change.
+##
+##      Self-test (boot path, batch 90 block in linux.rs after
+##      batch 89's PR_GET_AUXV block):
+##        * Constant sanity for cmd numbers and owner_type::*.
+##        * Kernel-context dispatch_linux returns EBADF for
+##          both new cmds (caller_pid gate unchanged).
+##        * fcntl_f_owner_ex_encode covers:
+##          - owner=0 -> (PID, 0);
+##          - owner=42 -> (PID, 42);
+##          - owner=-7 -> (PGRP, 7);
+##          - owner=i32::MAX -> (PID, i32::MAX).
+##        * fcntl_f_owner_ex_decode covers:
+##          - (PID, 0) -> Ok(0);
+##          - (PID, 42) -> Ok(42);
+##          - (TID, 99) -> Ok(99);
+##          - (PGRP, 7) -> Ok(-7);
+##          - (PGRP, 0) -> Ok(0);
+##          - negative pid (any type) -> Err(EINVAL);
+##          - unknown type (3,4,-1,100,i32::MIN,i32::MAX)
+##            -> Err(EINVAL).
+##        * Storage round-trip on a synthetic Linux process
+##          with a real pipe fd installed via FdEntry::pipe:
+##          - SETOWN_EX(PID,42) -> storage 42 -> GETOWN_EX
+##            projects (PID, 42);
+##          - SETOWN_EX(PGRP,7) -> storage -7 -> GETOWN_EX
+##            projects (PGRP, 7);
+##          - SETOWN_EX(TID,99) -> storage 99 -> GETOWN_EX
+##            projects (PID, 99) — the documented TID-collapse;
+##          - SETOWN_EX(PGRP,0) -> storage 0 -> GETOWN_EX
+##            projects (PID, 0) — the no-group sentinel.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 21s).

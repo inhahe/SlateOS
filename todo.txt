@@ -16173,3 +16173,102 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   fanotify_init flag
 ##      validation: OK" in build/serial-test.txt.
 
+
+## 183. Linux ABI: fanotify_mark flag validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_fanotify_mark.
+##
+##      Problem: sys_fanotify_mark validated only the pathname's
+##              first byte and returned ENOSYS for any flag/mask
+##              combination.  A probe walking the FANOTIFY_MARK_FLAGS
+##              space (looking for which combinations of ADD/REMOVE/
+##              FLUSH and MOUNT/FILESYSTEM/inode the kernel accepts)
+##              saw ENOSYS uniformly and concluded the syscall was
+##              absent — when Linux would give EINVAL for the
+##              malformed flag combos and reach the kernel's actual
+##              dispatch path for well-formed ones.  Batch 182 fixed
+##              the same hole in fanotify_init; this batch follows
+##              up with fanotify_mark so the pair is consistent.
+##
+##      Fix:    Ported Linux's fs/notify/fanotify/fanotify_user.c
+##              flag-validation gates from SYSCALL_DEFINE5(fanotify_mark):
+##                * FANOTIFY_MARK_FLAGS = ADD | REMOVE | DONT_FOLLOW
+##                                      | ONLYDIR | MOUNT
+##                                      | IGNORED_MASK
+##                                      | IGNORED_SURV_MODIFY | FLUSH
+##                                      | FILESYSTEM | EVICTABLE
+##                                      | IGNORE = 0x7ff (Linux 6.10)
+##                * Unknown bits -> EINVAL.
+##                * Exactly one of ADD (1), REMOVE (2), FLUSH (0x80)
+##                  must be set -> EINVAL if zero or more than one.
+##                * MOUNT (0x10) and FILESYSTEM (0x100) cannot both
+##                  be set (default mark type is inode) -> EINVAL.
+##                * EVICTABLE (0x200) requires inode mark type
+##                  (no MOUNT, no FILESYSTEM) -> EINVAL.
+##                * IGNORE (0x400) and IGNORED_MASK (0x20) are
+##                  mutually exclusive (Linux 6.0+ deprecated
+##                  IGNORED_MASK in favor of IGNORE) -> EINVAL.
+##                * IGNORED_SURV_MODIFY (0x40) requires one of
+##                  IGNORED_MASK or IGNORE -> EINVAL otherwise.
+##                * pathname (if non-NULL): existing 1-byte
+##                  validate_user_read for EFAULT.
+##                * Terminal: ENOSYS for well-formed calls (matches
+##                  batch 182's fanotify_init terminal).
+##
+##      Self-tests (boot-time):
+##        * fanotify_mark(0, 0, ...) -> EINVAL  (no op bit; new —
+##          previously ENOSYS).
+##        * fanotify_mark(_, ADD=0x1, ...) -> ENOSYS  (valid ADD;
+##          new — replaces the old "flags=0 -> ENOSYS" test which
+##          now correctly EINVALs).
+##        * fanotify_mark(_, 0x801, ...) -> EINVAL  (unknown bit
+##          0x800 above FANOTIFY_MARK_FLAGS; new).
+##        * fanotify_mark(_, ADD|REMOVE=0x3, ...) -> EINVAL  (op
+##          exclusivity; new).
+##        * fanotify_mark(_, ADD|FLUSH=0x81, ...) -> EINVAL  (op
+##          exclusivity; new).
+##        * fanotify_mark(_, ADD|MOUNT|FILESYSTEM=0x111, ...)
+##          -> EINVAL  (type exclusivity; new).
+##        * fanotify_mark(_, ADD|MOUNT|EVICTABLE=0x211, ...)
+##          -> EINVAL  (EVICTABLE+MOUNT; new).
+##        * fanotify_mark(_, ADD|IGNORE|IGNORED_MASK=0x421, ...)
+##          -> EINVAL  (mutually exclusive; new).
+##        * fanotify_mark(_, ADD|IGNORED_SURV_MODIFY=0x41, ...)
+##          -> EINVAL  (SURV_MODIFY without IGNORED_MASK/IGNORE; new).
+##        * fanotify_mark(_, ADD|IGNORED_MASK|IGNORED_SURV_MODIFY=0x61,
+##          ...) -> ENOSYS  (verifies the dependency, satisfied,
+##          lets the call through to the terminal; new).
+##        * fanotify_mark(_, FLUSH=0x80, ...) -> ENOSYS  (FLUSH
+##          alone is a valid op; new).
+##        * Emits "[syscall/linux]   fanotify_mark flag validation:
+##          OK".
+##
+##      Known limitations:
+##        * The mask argument (arg2) is not validated against
+##          FANOTIFY_EVENTS / FANOTIFY_EVENT_FLAGS.  Linux's
+##          fanotify_user.c::fanotify_events_supported() does a
+##          per-mark-type bitmask check that's specific to the mount
+##          flags of the target — we can't usefully replicate that
+##          without a real fanotify implementation behind it.  When
+##          the implementation lands, this needs the mask gate.
+##        * dirfd (arg3) is not validated.  We don't have a real
+##          fanotify fd in arg0 anyway (fanotify_init returns
+##          ENOSYS), so the fd table check would be vacuous against
+##          a probe's random fd values.  When fanotify_init returns
+##          a real fd this needs the validate_linux_fd gate plus a
+##          HandleKind::FanotifyFd check on arg0.
+##        * pathname's full string is not validated (only first
+##          byte).  Sufficient for EFAULT visibility on unmapped
+##          pages; not sufficient for ENAMETOOLONG.  Linux applies
+##          ENAMETOOLONG after looking up dirfd, which we can't
+##          do until real fanotify is wired up.
+##        * Terminal remains ENOSYS rather than the EBADF Linux
+##          gives for "not a fanotify fd."  EBADF would require
+##          us to first reject every fd as not-fanotify which is
+##          also true but less informative for "syscall isn't
+##          implemented" probes that drive userspace fallback paths.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   fanotify_mark flag
+##      validation: OK" in build/serial-test.txt.
+

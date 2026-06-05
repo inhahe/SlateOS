@@ -10493,7 +10493,84 @@ fn sys_fanotify_init(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `fanotify_mark(fanotify_fd, flags, mask, dirfd, pathname)`.
+///
+/// Linux's `fs/notify/fanotify/fanotify_user.c::SYSCALL_DEFINE5(fanotify_mark)`
+/// validates `flags` against `FANOTIFY_MARK_FLAGS` and applies
+/// several mutual-exclusion gates before consulting the fanotify fd.
+/// We mirror those gates ahead of the ENOSYS terminal so a probe
+/// passing `flags = FAN_MARK_ADD | FAN_MARK_REMOVE` sees the EINVAL
+/// Linux returns, not an undifferentiated ENOSYS.
+///
+/// Per Linux 6.10:
+///   * `FANOTIFY_MARK_FLAGS` = ADD | REMOVE | DONT_FOLLOW | ONLYDIR
+///     | MOUNT | IGNORED_MASK | IGNORED_SURV_MODIFY | FLUSH
+///     | FILESYSTEM | EVICTABLE | IGNORE  (= 0x7ff).
+///   * Unknown bits -> EINVAL.
+///   * Operation bits (ADD=1, REMOVE=2, FLUSH=0x80) — exactly one
+///     must be set.
+///   * Mark-type bits (MOUNT=0x10, FILESYSTEM=0x100) — at most one
+///     (the default is inode-type mark).
+///   * `FAN_MARK_EVICTABLE` (0x200) is incompatible with MOUNT and
+///     FILESYSTEM (only inode marks can be evictable).
+///   * `FAN_MARK_IGNORED_SURV_MODIFY` (0x40) requires
+///     `FAN_MARK_IGNORED_MASK` (0x20) or `FAN_MARK_IGNORE` (0x400).
+///   * `FAN_MARK_IGNORE` (0x400) is incompatible with
+///     `FAN_MARK_IGNORED_MASK` (0x20).
+///   * pathname, if non-NULL, must be a readable user string.
 fn sys_fanotify_mark(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg1 as u32;
+
+    const FAN_MARK_ADD: u32 = 0x1;
+    const FAN_MARK_REMOVE: u32 = 0x2;
+    const FAN_MARK_DONT_FOLLOW: u32 = 0x4;
+    const FAN_MARK_ONLYDIR: u32 = 0x8;
+    const FAN_MARK_MOUNT: u32 = 0x10;
+    const FAN_MARK_IGNORED_MASK: u32 = 0x20;
+    const FAN_MARK_IGNORED_SURV_MODIFY: u32 = 0x40;
+    const FAN_MARK_FLUSH: u32 = 0x80;
+    const FAN_MARK_FILESYSTEM: u32 = 0x100;
+    const FAN_MARK_EVICTABLE: u32 = 0x200;
+    const FAN_MARK_IGNORE: u32 = 0x400;
+    const FANOTIFY_MARK_FLAGS: u32 = FAN_MARK_ADD | FAN_MARK_REMOVE
+        | FAN_MARK_DONT_FOLLOW | FAN_MARK_ONLYDIR | FAN_MARK_MOUNT
+        | FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY
+        | FAN_MARK_FLUSH | FAN_MARK_FILESYSTEM | FAN_MARK_EVICTABLE
+        | FAN_MARK_IGNORE;
+
+    if flags & !FANOTIFY_MARK_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Exactly one operation bit (ADD | REMOVE | FLUSH).
+    const OP_BITS: u32 = FAN_MARK_ADD | FAN_MARK_REMOVE | FAN_MARK_FLUSH;
+    let op = flags & OP_BITS;
+    if op == 0 || op.count_ones() != 1 {
+        return linux_err(errno::EINVAL);
+    }
+    // At most one mark-type bit (MOUNT | FILESYSTEM).
+    const TYPE_BITS: u32 = FAN_MARK_MOUNT | FAN_MARK_FILESYSTEM;
+    if flags & TYPE_BITS == TYPE_BITS {
+        return linux_err(errno::EINVAL);
+    }
+    // EVICTABLE requires inode-type mark (no MOUNT, no FILESYSTEM).
+    if flags & FAN_MARK_EVICTABLE != 0 && flags & TYPE_BITS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // IGNORE and IGNORED_MASK are mutually exclusive (Linux 6.0+
+    // replaced IGNORED_MASK with IGNORE for new code; setting both
+    // is an explicit error).
+    if flags & FAN_MARK_IGNORE != 0 && flags & FAN_MARK_IGNORED_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // IGNORED_SURV_MODIFY requires one of IGNORED_MASK or IGNORE.
+    if flags & FAN_MARK_IGNORED_SURV_MODIFY != 0
+        && flags & (FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORE) == 0
+    {
+        return linux_err(errno::EINVAL);
+    }
+    // FLUSH does not take a path or mask — Linux ignores mask but
+    // we still validate the pathname for EFAULT visibility below.
+
     // Validate pathname if non-NULL so EFAULT surfaces correctly.
     if args.arg4 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 1) {
@@ -30560,14 +30637,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   fanotify_init flag validation: OK");
-        // fanotify_mark() -> ENOSYS.
+        // fanotify_mark with no op bit (flags=0) -> EINVAL (see todo 183).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_mark not ENOSYS");
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark no-op not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // fanotify_mark with FAN_MARK_ADD (1) only -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark ADD not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with unknown flag bit (0x800) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x801, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark bad flag not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with ADD | REMOVE -> EINVAL (op exclusivity).
+        let a = SyscallArgs { arg0: 0, arg1: 0x3, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark ADD|REMOVE not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with ADD | FLUSH -> EINVAL (op exclusivity).
+        let a = SyscallArgs { arg0: 0, arg1: 0x81, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark ADD|FLUSH not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with ADD | MOUNT | FILESYSTEM -> EINVAL (type exclusivity).
+        let a = SyscallArgs { arg0: 0, arg1: 0x111, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark MOUNT|FILESYSTEM not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with ADD | MOUNT | EVICTABLE -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x211, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark MOUNT|EVICTABLE not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with ADD | IGNORE | IGNORED_MASK -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x421, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark IGNORE|IGNORED_MASK not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with ADD | IGNORED_SURV_MODIFY (no IGNORED_MASK/IGNORE) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x41, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark SURV_MODIFY alone not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with ADD | IGNORED_MASK | IGNORED_SURV_MODIFY -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0x61, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark IGNORED+SURV not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // fanotify_mark with FLUSH alone -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0x80, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark FLUSH not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   fanotify_mark flag validation: OK");
     }
 
     // sendfile / splice / tee / vmsplice / copy_file_range / AIO /

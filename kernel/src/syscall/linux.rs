@@ -15311,14 +15311,50 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `mseal(addr, len, flags)`.
+///
+/// Linux's `mm/mseal.c::do_mseal()` validates in this order, *before* it
+/// walks the VMA tree:
+///
+///   1. `if (flags)` — unknown flags reject with `-EINVAL`.
+///   2. `if (!PAGE_ALIGNED(start))` — unaligned addr rejects with
+///      `-EINVAL`.
+///   3. `end = start + PAGE_ALIGN(len);` — overflow on rounding or on
+///      the final add rejects with `-EINVAL`.
+///   4. `if (end == start) return 0;` — zero-length call is a documented
+///      no-op success path, not a failure.
+///
+/// We mirror that order so an unprivileged probe (libc's "is mseal
+/// available" detector) sees the same errnos for each malformed shape
+/// it constructs.  After validation we still return `-ENOSYS` because
+/// we do not have a VMA sealing implementation yet.
+///
+/// Linux's `PAGE_SIZE` for x86_64 is 4096, which is what userspace
+/// alignment checks assume; our internal frame size (16 KiB) is not
+/// observable through this ABI.
 fn sys_mseal(args: &SyscallArgs) -> SyscallResult {
+    const ABI_PAGE_SIZE: u64 = 4096;
+
     // flags must be 0 in current Linux.
     if args.arg2 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // len must not overflow when added to addr.
-    if args.arg0.checked_add(args.arg1).is_none() {
+    // addr must be page-aligned.
+    if args.arg0 & (ABI_PAGE_SIZE - 1) != 0 {
         return linux_err(errno::EINVAL);
+    }
+    // len is rounded up to a page boundary before the end calculation.
+    // The rounding itself can overflow (e.g. len = u64::MAX - 1024).
+    let len_aligned = match args.arg1.checked_add(ABI_PAGE_SIZE - 1) {
+        Some(v) => v & !(ABI_PAGE_SIZE - 1),
+        None => return linux_err(errno::EINVAL),
+    };
+    // addr + len_aligned must not overflow.
+    if args.arg0.checked_add(len_aligned).is_none() {
+        return linux_err(errno::EINVAL);
+    }
+    // Zero-length call is a documented no-op success.
+    if len_aligned == 0 {
+        return SyscallResult::ok(0);
     }
     linux_err(errno::ENOSYS)
 }
@@ -33231,10 +33267,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mseal flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // mseal addr+len overflow -> EINVAL.
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        // mseal addr+len overflow -> EINVAL.  arg0 is page-aligned
+        // (rounded down) so the alignment gate doesn't preempt the
+        // overflow gate.
+        let a = SyscallArgs {
+            arg0: u64::MAX & !0xFFFu64,
+            arg1: 0x2000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
         if dispatch_linux(nr::MSEAL, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: mseal overflow not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mseal unaligned addr -> EINVAL (Linux's PAGE_ALIGNED(start)
+        // check fires ahead of any VMA walk; see todo 174).
+        let a = SyscallArgs { arg0: 0x1001, arg1: 0x1000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSEAL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mseal unaligned addr not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // mseal len=0 -> 0 (Linux's `end == start` short-circuit; not a
+        // failure).
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSEAL, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mseal len=0 not 0");
             return Err(KernelError::InternalError);
         }
         // mseal valid -> ENOSYS.
@@ -33243,6 +33302,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mseal valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   mseal addr/len validation: OK");
 
         // map_shadow_stack non-multiple-of-8 size -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 13, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

@@ -15524,3 +15524,66 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   swapon flags validation: OK"
 ##      at line 441 of build/serial-test.txt.
 
+## 174. Linux ABI: mseal(2) addr-alignment and len=0 success path
+##      (Batch 145, 2026-06-05)
+##
+##      Issue:  sys_mseal validated only `flags == 0` and a raw
+##              `addr.checked_add(len)` overflow, returning ENOSYS for
+##              everything else.  Linux's mm/mseal.c::do_mseal()
+##              actually enforces, ahead of any VMA walk:
+##                * `if (!PAGE_ALIGNED(start)) return -EINVAL;`
+##                * `end = start + PAGE_ALIGN(len);` (the PAGE_ALIGN
+##                  rounding can overflow on its own — Linux catches
+##                  this via the `end < start` check).
+##                * `if (end == start) return 0;` — zero-length call
+##                  is an explicit no-op success, NOT a failure.
+##              Probes seeing ENOSYS for `mseal(unaligned, anything)`
+##              or `mseal(addr, 0)` were unable to tell that the
+##              alignment gate exists, and `mseal(addr, 0)` callers
+##              would have failed where Linux silently succeeds.
+##
+##      Fix:    Inserted the two gates and the success path:
+##                const ABI_PAGE_SIZE: u64 = 4096;
+##                if args.arg2 != 0 { ... EINVAL }
+##                if args.arg0 & (ABI_PAGE_SIZE - 1) != 0 { EINVAL }
+##                let len_aligned = match args.arg1
+##                    .checked_add(ABI_PAGE_SIZE - 1) {
+##                    Some(v) => v & !(ABI_PAGE_SIZE - 1),
+##                    None => return EINVAL,
+##                };
+##                if args.arg0.checked_add(len_aligned).is_none() {
+##                    return EINVAL;
+##                }
+##                if len_aligned == 0 { return Ok(0); }
+##                ENOSYS
+##              The overflow check now uses the page-aligned length,
+##              matching Linux exactly (e.g. mseal(addr, u64::MAX) is
+##              EINVAL because PAGE_ALIGN(u64::MAX) overflows).
+##
+##      Self-tests (boot-time):
+##        * mseal(0, 0, flags=1) -> EINVAL (unchanged).
+##        * mseal(u64::MAX & ~0xFFF, 0x2000, 0) -> EINVAL (overflow
+##          using a page-aligned addr so the alignment gate doesn't
+##          preempt).
+##        * mseal(0x1001, 0x1000, 0) -> EINVAL (unaligned addr; new).
+##        * mseal(0x1000, 0, 0) -> 0 (zero-length success; new).
+##        * mseal(0x1000, 0x1000, 0) -> ENOSYS (unchanged).
+##        * Emits "[syscall/linux]   mseal addr/len validation: OK".
+##
+##      Known limitations:
+##        * The actual VMA walk that mseal performs on Linux — checking
+##          every VMA in [start, end) is mapped (else -ENOMEM) and then
+##          recording the seal bit on each — remains unimplemented.
+##          Until we have a VMA list with seal bits, the answer for any
+##          valid non-empty range stays ENOSYS.  Documented in todo 130
+##          / 131 / 132 territory.
+##        * `PAGE_ALIGN(len)` is computed using Linux's 4 KiB ABI page
+##          size, not our 16 KiB internal frame size.  This is what
+##          probes expect; an internal seal implementation would need
+##          to round the validated range up to the next 16 KiB frame
+##          boundary before consulting the VMA list.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   mseal addr/len validation:
+##      OK" at line 443 of build/serial-test.txt.
+

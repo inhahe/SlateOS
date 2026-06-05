@@ -11470,21 +11470,48 @@ fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
 ///   * `EBADF` — kernel-context invocation (no caller PCB).
 ///   * `EMFILE` — caller's Linux fd table is full.
 fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
+    // Linux's mm/memfd.c SYSCALL_DEFINE2(memfd_create) order:
+    //
+    //   1. flags & ~MFD_ALL_FLAGS (with optional HUGE_MASK when
+    //      MFD_HUGETLB is set)        -> EINVAL
+    //   2. MFD_EXEC & MFD_NOEXEC_SEAL  -> EINVAL (mutually exclusive
+    //                                    since Linux 6.3)
+    //   3. check_sysctl_memfd_noexec  -> EACCES (policy)
+    //   4. strnlen_user(uname, ...)   -> EFAULT or EINVAL (too long)
+    //
+    // Pre-batch we validated the user pointer (NULL -> EFAULT) and
+    // its readability BEFORE the flags check, so callers probing with
+    // (name=NULL, flags=garbage) saw EFAULT where Linux returns
+    // EINVAL.  And we never gated MFD_EXEC + MFD_NOEXEC_SEAL, so
+    // glibc 2.37+ which probes that combination saw a success-shape
+    // EBADF (kernel-context fd install) where Linux returns EINVAL.
+    // Reorder + add the EXEC/NOEXEC_SEAL mutex.
+    const MFD_CLOEXEC: u64 = 0x01;
+    const MFD_ALLOW_SEALING: u64 = 0x02;
+    const MFD_HUGETLB: u64 = 0x04;
+    const MFD_NOEXEC_SEAL: u64 = 0x08;
+    const MFD_EXEC: u64 = 0x10;
+    const MFD_ALL_FLAGS: u64 =
+        MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_NOEXEC_SEAL | MFD_EXEC;
+    const HUGE_SIZE_MASK: u64 = 0x3F << 26;
+    let flags = args.arg1;
+    if (flags & MFD_HUGETLB) == 0 {
+        if flags & !MFD_ALL_FLAGS != 0 {
+            return linux_err(errno::EINVAL);
+        }
+    } else if flags & !(MFD_ALL_FLAGS | HUGE_SIZE_MASK) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if (flags & MFD_EXEC) != 0 && (flags & MFD_NOEXEC_SEAL) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Now the user pointer.  NULL surfaces as EFAULT (Linux's
+    // strnlen_user(NULL, _) returns -EFAULT after access_ok fails).
     if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
         return linux_err(linux_errno_for(e));
-    }
-    // MFD_CLOEXEC=1, ALLOW_SEALING=2, HUGETLB=4, NOEXEC_SEAL=8, EXEC=16,
-    // plus huge-page-size bits 26..31 (we accept those without parsing).
-    const MFD_CLOEXEC: u64 = 1;
-    const MFD_ALLOW_SEALING: u64 = 2;
-    const VALID_LOW_FLAGS: u64 = 1 | 2 | 4 | 8 | 16;
-    const HUGE_SIZE_MASK: u64 = 0x3F << 26;
-    let flags = args.arg1;
-    if flags & !(VALID_LOW_FLAGS | HUGE_SIZE_MASK) != 0 {
-        return linux_err(errno::EINVAL);
     }
     // Resolve the caller before reading user-space.  In kernel-context
     // (no owning process) we'd have no fd table to install into anyway,
@@ -32831,12 +32858,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   userfaultfd privilege gate: OK");
 
-        // memfd_create(NULL,_) -> EFAULT.
+        // memfd_create(NULL, flags=0) -> EFAULT: flags pass the gate
+        // (no reserved bits, no EXEC+NOEXEC_SEAL collision), then the
+        // NULL name pointer fires.  Matches Linux's strnlen_user(NULL)
+        // -> -EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MEMFD_CREATE, &a).value
             != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: memfd_create(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // memfd_create(NULL, bogus flag) -> EINVAL: flags are validated
+        // BEFORE the user pointer, so a junk reserved bit shadows the
+        // NULL EFAULT.  Pre-batch this returned EFAULT (we touched the
+        // name first).
+        let a = SyscallArgs { arg0: 0, arg1: 0x100_0000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMFD_CREATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_create(NULL, bogus flag) -> {} (want EINVAL)",
+                dispatch_linux(nr::MEMFD_CREATE, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
         // memfd_create(name, bogus flag) -> EINVAL.
@@ -32845,6 +32889,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::MEMFD_CREATE, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: memfd_create(bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // memfd_create(_, MFD_EXEC | MFD_NOEXEC_SEAL) -> EINVAL: the
+        // two are mutually exclusive on Linux 6.3+.  Pre-batch we
+        // accepted the combination and fell through to the kernel-
+        // context EBADF.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x10 | 0x08, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMFD_CREATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_create(EXEC+NOEXEC_SEAL) -> {} (want EINVAL)",
+                dispatch_linux(nr::MEMFD_CREATE, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // memfd_create(_, MFD_HUGETLB | huge-size bits) -> EBADF: the
+        // hugepage bits are only legal when MFD_HUGETLB is set.  This
+        // doubles as confirmation that the HUGETLB-conditional flag
+        // gate accepts the wider mask.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0x04 | (2u64 << 26), arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMFD_CREATE, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_create(HUGETLB+hugesize) -> {} (want EBADF)",
+                dispatch_linux(nr::MEMFD_CREATE, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // memfd_create(_, huge-size bits WITHOUT MFD_HUGETLB) -> EINVAL.
+        // Pre-batch we accepted hugepage bits unconditionally, so this
+        // fell through to EBADF.  Linux requires MFD_HUGETLB to unlock
+        // the wider mask.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 2u64 << 26, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMFD_CREATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_create(hugesize w/o HUGETLB) -> {} (want EINVAL)",
+                dispatch_linux(nr::MEMFD_CREATE, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
         // memfd_create(name, 0) -> EBADF in kernel context.  We need a
@@ -32869,17 +32955,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: memfd_create cloexec+seal not EBADF");
             return Err(KernelError::InternalError);
         }
-        // memfd_create(name, huge-size bits set) -> EBADF.  Tests that
-        // the HUGE_SIZE_MASK bits (bits 26..31) are passed through the
-        // flag gate.  Using shift 26 with value 2 (8 KiB) for vague
-        // realism — we ignore the page-size hint regardless.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 2 << 26, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MEMFD_CREATE, &a).value
-            != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: memfd_create hugesize not EBADF");
-            return Err(KernelError::InternalError);
-        }
+        serial_println!(
+            "[syscall/linux]   memfd_create flags-first / EXEC+NOEXEC_SEAL / HUGETLB: OK"
+        );
         // memfd_secret(0) -> ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

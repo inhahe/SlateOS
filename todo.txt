@@ -18372,3 +18372,72 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          pid namespaces yet.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 220. Linux ABI: memfd_create flags-first / EXEC+NOEXEC_SEAL
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's mm/memfd.c SYSCALL_DEFINE2(memfd_create) order:
+##          1. flags & ~MFD_ALL_FLAGS (or, with MFD_HUGETLB,
+##             & ~(MFD_ALL_FLAGS | MFD_HUGE_MASK))   -> EINVAL
+##          2. MFD_EXEC & MFD_NOEXEC_SEAL collision  -> EINVAL
+##             (since Linux 6.3)
+##          3. check_sysctl_memfd_noexec policy      -> EACCES
+##          4. strnlen_user(uname, NAME_MAX+1)       -> EFAULT
+##                                                       or EINVAL
+##          5. allocate + fd install
+##
+##      Pre-batch sys_memfd_create checked the user pointer
+##      (arg0==0 -> EFAULT, then validate_user_read) BEFORE the
+##      flags gate, so a probe calling memfd_create(NULL, junk_flag)
+##      saw EFAULT where Linux returns EINVAL.  We also accepted
+##      MFD_EXEC | MFD_NOEXEC_SEAL together (no mutex check), so
+##      glibc 2.37+ which probes that combination as a feature
+##      detector saw a kernel-context EBADF rather than the EINVAL
+##      Linux returns.  And the HUGE_SIZE_MASK bits were accepted
+##      unconditionally rather than only when MFD_HUGETLB is set.
+##
+##      Fix:
+##        * Hoist the flag gate above any user-pointer touch.
+##        * Make the wider HUGE_SIZE_MASK acceptance conditional
+##          on MFD_HUGETLB.
+##        * Add the MFD_EXEC | MFD_NOEXEC_SEAL mutual exclusion.
+##        * MFD_ALL_FLAGS spelled out as
+##          CLOEXEC(1) | ALLOW_SEALING(2) | HUGETLB(4) |
+##          NOEXEC_SEAL(8) | EXEC(0x10) = 0x1F.
+##
+##      Self-tests added / updated (3 new, 1 unchanged in shape):
+##        * MEMFD_CREATE(name=NULL, flags=bogus reserved bit)
+##          -> EINVAL (new).  Confirms flags fire before NULL.
+##        * MEMFD_CREATE(_, MFD_EXEC | MFD_NOEXEC_SEAL) -> EINVAL
+##          (new).  Pre-batch fell through to EBADF.
+##        * MEMFD_CREATE(_, MFD_HUGETLB | huge-size bits)
+##          -> EBADF (new).  Confirms the HUGETLB-conditional
+##          wider mask actually accepts hugepage bits when the
+##          gate flag is set.
+##        * MEMFD_CREATE(_, hugesize without MFD_HUGETLB) -> EINVAL
+##          (replaces the old unconditional-hugesize-EBADF test,
+##          which was wrong for Linux semantics).
+##        * MEMFD_CREATE(NULL, 0) -> EFAULT (unchanged in shape;
+##          now arrives via the post-flags NULL gate).
+##        * MEMFD_CREATE(name, junk flag) -> EINVAL (unchanged).
+##        * MEMFD_CREATE(name, 0) -> EBADF and
+##          MEMFD_CREATE(name, CLOEXEC|ALLOW_SEALING) -> EBADF
+##          (unchanged kernel-context terminal paths).
+##      Marker emitted: "memfd_create flags-first / EXEC+NOEXEC_SEAL
+##      / HUGETLB: OK".
+##
+##      Known limitations:
+##        * MFD_NOEXEC_SEAL behaviour past the gate (the actual
+##          sealing of the underlying memfd against PROT_EXEC
+##          mappings) is not implemented — we accept the flag and
+##          return EBADF / a fresh memfd; once memfd_seal_executable
+##          lands the flag should drive it.
+##        * check_sysctl_memfd_noexec (the global memfd_noexec
+##          sysctl) is not modelled — we never emit EACCES from
+##          policy, only EINVAL from the gate.
+##        * In kernel context the install path is unreachable so
+##          the successful-create case still surfaces EBADF.
+##
+##      Build clean; first background boot run timed out (apparent
+##      QEMU flake — no panic line in the output), re-run PASSED
+##      (BOOT_OK at 23s).

@@ -8947,13 +8947,24 @@ fn adjtimex_fill_read(tx_ptr: u64) -> SyscallResult {
 /// is zero so the answer is identical to `CLOCK_REALTIME`, which we
 /// reflect by accepting both clocks against the same backend.
 fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
-    const CLOCK_REALTIME: u64 = 0;
-    const CLOCK_TAI: u64 = 11;
+    // Mirror Linux's SYSCALL_DEFINE2(clock_adjtime) + do_clock_adjtime
+    // (kernel/time/posix-timers.c) gate order:
+    //   1. if (copy_from_user(&ktx, utx, sizeof(ktx))) return -EFAULT;
+    //   2. kc = clockid_to_kclock(id);  if (!kc) return -EINVAL;
+    //   3. if (!kc->clock_adj) return -EOPNOTSUPP;
+    //   4. kc->clock_adj(&ktx): CAP_SYS_TIME enforced for write modes.
+    //   5. if (copy_to_user(utx, &ktx, sizeof(ktx))) return -EFAULT;
+    //
+    // Pre-batch we rejected every clockid except REALTIME/TAI up front
+    // with EINVAL, so:
+    //   * (clockid=99,  tx=NULL)  -> us: EINVAL; Linux: EFAULT (copy
+    //     fails first).
+    //   * (clockid=MONOTONIC=1, tx=valid) -> us: EINVAL; Linux:
+    //     EOPNOTSUPP (k_clock entry exists but has no .clock_adj).
+    //   * (clockid=SGI_CYCLE=10, tx=valid) -> us: EINVAL; Linux:
+    //     EINVAL (k_clock entry is NULL).  Same answer, but for the
+    //     right reason — keep an explicit gate.
 
-    let clk = args.arg0;
-    if clk != CLOCK_REALTIME && clk != CLOCK_TAI {
-        return linux_err(errno::EINVAL);
-    }
     let tx = args.arg1;
     if tx == 0 {
         return linux_err(errno::EFAULT);
@@ -8961,19 +8972,34 @@ fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(tx, TIMEX_STRUCT_SIZE) {
         return linux_err(linux_errno_for(e));
     }
-    if let Err(e) = crate::mm::user::validate_user_write(tx, TIMEX_STRUCT_SIZE) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Just read the modes field (offset 0, 4 bytes) — mirrors the part of
+    // Linux's full-struct copy_from_user that we actually consult.
     let mut modes_buf = [0u8; 4];
-    // SAFETY: validated readable for 208 bytes, including offset 0..4.
-    let r = unsafe { crate::mm::user::copy_from_user(tx, modes_buf.as_mut_ptr(), 4) };
-    if let Err(e) = r {
+    // SAFETY: validated readable for 208 bytes including offset 0..4.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(tx, modes_buf.as_mut_ptr(), 4) }
+    {
         return linux_err(linux_errno_for(e));
     }
     let modes = u32::from_le_bytes(modes_buf);
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid = args.arg0 as i32;
+    if !(0..=11).contains(&clockid) || clockid == 10 {
+        return linux_err(errno::EINVAL);
+    }
+    // Only CLOCK_REALTIME(0) and CLOCK_TAI(11) have .clock_adj in
+    // Linux's posix_clocks[].  Everything else in range is EOPNOTSUPP.
+    if !matches!(clockid, 0 | 11) {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+
     if modes != 0 {
         // Any adjustment requires CAP_SYS_TIME; we never grant it.
         return linux_err(errno::EPERM);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(tx, TIMEX_STRUCT_SIZE) {
+        return linux_err(linux_errno_for(e));
     }
     adjtimex_fill_read(tx)
 }
@@ -30506,13 +30532,61 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // clock_adjtime(BAD_CLOCK, _) -> EINVAL.
-        let a = SyscallArgs { arg0: 5, arg1: tx_ptr, arg2: 0, arg3: 0,
+        // clock_adjtime(out-of-range clockid, _) -> EINVAL.  Pre-batch
+        // any clockid != {0,11} returned EINVAL; now only out-of-range
+        // and SGI_CYCLE do.  99 still triggers it.
+        let a = SyscallArgs { arg0: 99, arg1: tx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!(
                 "[syscall/linux]   FAIL: clock_adjtime bad clock not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_adjtime(SGI_CYCLE=10, _) -> EINVAL.  Linux's posix_clocks[10]
+        // is NULL (clockid_to_kclock returns NULL).
+        let a = SyscallArgs { arg0: 10, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime SGI_CYCLE not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_adjtime(MONOTONIC=1, valid tx) -> EOPNOTSUPP.
+        // Linux's clock_monotonic has no .clock_adj.  Pre-batch we
+        // returned EINVAL here.
+        let a = SyscallArgs { arg0: 1, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime MONOTONIC not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_adjtime(REALTIME_COARSE=5, valid tx) -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 5, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime REALTIME_COARSE not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_adjtime(invalid clockid, NULL tx) -> EFAULT.
+        // Linux's copy_from_user runs before clockid_to_kclock, so NULL
+        // tx wins over the EINVAL clockid would otherwise return.
+        // Pre-batch we returned EINVAL here.
+        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime bad clockid+NULL not EFAULT"
             );
             return Err(KernelError::InternalError);
         }
@@ -30566,6 +30640,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   clock_adjtime copy-first/EOPNOTSUPP gating: OK"
+        );
     }
 
     // clock_nanosleep — Linux gate order: clockid -> EINVAL/EOPNOTSUPP,

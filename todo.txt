@@ -18085,3 +18085,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          timer support will add the cap gate.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 214. Linux ABI: clock_adjtime copy-first/EOPNOTSUPP gating
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's SYSCALL_DEFINE2(clock_adjtime) + do_clock_adjtime
+##      (kernel/time/posix-timers.c) gate order:
+##        1. if (copy_from_user(&ktx, utx, sizeof(ktx))) return -EFAULT;
+##        2. kc = clockid_to_kclock(id);  if (!kc) return -EINVAL;
+##        3. if (!kc->clock_adj) return -EOPNOTSUPP;
+##        4. kc->clock_adj(&ktx): CAP_SYS_TIME for write modes -> EPERM.
+##        5. if (copy_to_user(utx, &ktx, sizeof(ktx))) return -EFAULT.
+##
+##      Pre-batch sys_clock_adjtime rejected every clockid except
+##      REALTIME(0) / TAI(11) up front with EINVAL, which mismatched
+##      Linux in two ways:
+##        * (clockid=99, tx=NULL) returned EINVAL; Linux returns
+##          EFAULT because copy_from_user runs before clockid lookup.
+##        * (clockid=MONOTONIC=1 / coarse / monotonic_raw, tx=valid)
+##          returned EINVAL; Linux returns EOPNOTSUPP — these clocks
+##          have a k_clock entry but no .clock_adj.
+##      SGI_CYCLE(10) was already covered by our EINVAL gate but only
+##      incidentally (it was outside {0,11}); the new code rejects it
+##      via the same explicit "no k_clock entry" path Linux uses.
+##
+##      Fix: reorder to do tx pointer/copy first, then clockid range
+##      gate (EINVAL for out-of-range or SGI_CYCLE), then
+##      clock_adj-presence gate (EOPNOTSUPP for clockids in {1..9}\{10}),
+##      then modes-driven EPERM, then validate_user_write +
+##      adjtimex_fill_read.
+##
+##      Self-tests added/updated (6):
+##        * CLOCK_ADJTIME(clockid=99, tx_valid) -> EINVAL (was already
+##          EINVAL via old gate, now via the explicit range gate).
+##        * CLOCK_ADJTIME(clockid=10 SGI_CYCLE, tx_valid) -> EINVAL.
+##        * CLOCK_ADJTIME(clockid=1 MONOTONIC, tx_valid) -> EOPNOTSUPP
+##          (was EINVAL).
+##        * CLOCK_ADJTIME(clockid=5 REALTIME_COARSE, tx_valid)
+##          -> EOPNOTSUPP (was EINVAL).
+##        * CLOCK_ADJTIME(clockid=99, tx=NULL) -> EFAULT (was EINVAL).
+##        * CLOCK_ADJTIME(clockid=REALTIME, tx=NULL) -> EFAULT
+##          (unchanged).
+##        * Pre-existing CLOCK_REALTIME/CLOCK_TAI modes=0 -> TIME_ERROR
+##          tests and modes=1 -> EPERM test still hold.
+##        * Emits "[syscall/linux]   clock_adjtime
+##          copy-first/EOPNOTSUPP gating: OK".
+##
+##      Known limitations:
+##        * sys_adjtimex (no clockid) is the CLOCK_REALTIME entry and
+##          already had the right order — left alone.
+##        * The full copy_from_user only reads 4 bytes (modes field).
+##          Linux's reads the whole 208-byte struct, so a torn page
+##          past offset 4 wouldn't EFAULT in our stub.  Acceptable
+##          because validate_user_read covers the whole struct
+##          immediately above.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

@@ -4322,6 +4322,21 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             };
             SyscallResult::ok(i64::from(v))
         }
+        // PR_TASK_PERF_EVENTS_DISABLE (31) — disable all perf events
+        // attached to the calling task.  PR_TASK_PERF_EVENTS_ENABLE
+        // (32) — re-enable them.  Linux's syscall path ignores
+        // arg2..arg5 for both (no validation).  We do not implement
+        // a perf-event subsystem at all, so there is nothing
+        // attached to disable / enable — return success.
+        //
+        // Returning 0 (instead of falling through to EINVAL) keeps
+        // perf-aware userspace happy: `perf stat -p $$`, valgrind's
+        // CALLGRIND_START/STOP_INSTRUMENTATION wrappers, and the
+        // glibc `__libc_pre_main` hot-restart hooks all call these.
+        // EINVAL makes them warn ("could not disable perf events,
+        // continuing") even though the disable has no observable
+        // effect on us.
+        31 | 32 => SyscallResult::ok(0),
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -17419,6 +17434,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_mce_kill_policy(test_pid), None);
             assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), None);
+        }
+
+        // Batch 75: PR_TASK_PERF_EVENTS_DISABLE (31) /
+        // PR_TASK_PERF_EVENTS_ENABLE (32) — bare success (we don't
+        // implement perf events, so there's nothing to disable, but
+        // the option must succeed so perf-aware userspace doesn't
+        // warn).  Linux ignores arg2..arg5 for both; we do too.
+        {
+            for option in &[31u64, 32] {
+                // Linux ignores extra args — verify we do too even
+                // with garbage in arg2..arg5.
+                let a = SyscallArgs {
+                    arg0: *option,
+                    arg1: 0xdead_beef,
+                    arg2: 0xdead_beef,
+                    arg3: 0xdead_beef,
+                    arg4: 0xdead_beef,
+                    arg5: 0xdead_beef,
+                };
+                if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_TASK_PERF_EVENTS_{}, garbage) not 0 ({})",
+                        option, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
         }
     }
 

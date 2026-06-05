@@ -10015,3 +10015,34 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
 
 
+## 104. Linux ABI batch 75: PR_TASK_PERF_EVENTS_DISABLE /
+##      PR_TASK_PERF_EVENTS_ENABLE — bare success.
+##
+##      Before this batch, options 31 and 32 fell through to
+##      EINVAL in sys_prctl.  Perf-aware userspace (`perf stat
+##      -p $$`, valgrind's CALLGRIND_START/STOP_INSTRUMENTATION
+##      wrappers, glibc's __libc_pre_main hot-restart hooks)
+##      calls these to bracket measurement regions.  EINVAL
+##      makes them emit "could not disable perf events,
+##      continuing" warnings on every run.
+##
+##      Fix: return 0 from both.  We do not implement a perf
+##      event subsystem, so there is nothing attached to
+##      disable / enable.  No per-PCB state is needed — there
+##      is no corresponding PR_GET for these options on Linux,
+##      so the bit is purely a side-effect command.  If we
+##      ever add perf events, the disable/enable handlers
+##      will iterate the per-task event list at that time;
+##      until then, success is the correct user-visible
+##      answer.
+##
+##      Linux ignores arg2..arg5 for both options; we mirror
+##      exactly (no validation), so probe code that passes
+##      garbage in the extra args still sees success.
+##
+##      Self-tests cover both options with garbage in
+##      arg1..arg5 — must return 0.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+

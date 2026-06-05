@@ -17907,3 +17907,34 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms marker in build/serial-test.txt.
+
+## 210. Batch 181: sys_nanosleep timespec64_valid gating
+##      -------------------------------------------------
+##      Linux's SYSCALL_DEFINE2(nanosleep) (kernel/time/hrtimer.c)
+##      gates: get_timespec64 -> EFAULT; !timespec64_valid -> EINVAL;
+##      then hrtimer_nanosleep.  Our pre-batch stub copied the
+##      timespec then called to_nanos() which silently clamps
+##      malformed values (tv_sec < 0 or tv_nsec outside
+##      [0, NSEC_PER_SEC)) to 0 — a probe with negative tv_sec saw
+##      success (yield + return 0) where Linux returns -EINVAL.
+##
+##      Implementation: insert timespec64_valid gate
+##      (tv_sec >= 0 AND tv_nsec in [0, NSEC_PER_SEC)) between
+##      read_timespec and to_nanos.
+##
+##      Self-tests added (6):
+##        * nanosleep(NULL) -> EFAULT (existing read_timespec gate).
+##        * tv_nsec = 1_000_000_000 -> EINVAL (boundary, exact).
+##        * tv_nsec = -1 -> EINVAL.
+##        * tv_sec = -1 -> EINVAL.
+##        * tv_nsec = 999_999_999 (just below boundary) -> 0.
+##        * All-zero req -> 0 (yields).
+##        * Emits "[syscall/linux]   nanosleep timespec64_valid gating: OK".
+##
+##      Known limitations:
+##        * Linux's nanosleep writes the remaining time to rem on
+##          signal interruption; ours doesn't model interruption
+##          (no signal infrastructure), so rem is always untouched.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).
+##      Serial confirms marker in build/serial-test.txt.

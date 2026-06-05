@@ -4538,11 +4538,24 @@ fn sys_sched_yield(_args: &SyscallArgs) -> SyscallResult {
 /// `rem` (remainder on signal interruption) is left untouched — our
 /// sleep is not currently interruptible.
 fn sys_nanosleep(args: &SyscallArgs) -> SyscallResult {
+    // Linux's `SYSCALL_DEFINE2(nanosleep)` (kernel/time/hrtimer.c):
+    //   if (get_timespec64(&tu, rqtp)) return -EFAULT;
+    //   if (!timespec64_valid(&tu)) return -EINVAL;
+    //   return hrtimer_nanosleep(&tu, HRTIMER_MODE_REL, CLOCK_MONOTONIC);
+    // Pre-batch we copied the timespec then called `to_nanos()` which
+    // silently clamps malformed values (tv_sec < 0 or
+    // tv_nsec not in [0, NSEC_PER_SEC)) to 0 — so a probe passing a
+    // negative tv_sec saw success (yield + return 0) where Linux
+    // returns -EINVAL.
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
     let req_ptr = args.arg0;
     let req = match read_timespec(req_ptr) {
         Ok(t) => t,
         Err(e) => return linux_err(linux_errno_for(e)),
     };
+    if req.tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&req.tv_nsec) {
+        return linux_err(errno::EINVAL);
+    }
     let ns = req.to_nanos();
     if ns == 0 {
         crate::sched::yield_now();
@@ -30597,6 +30610,82 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   clock_nanosleep clockid/EOPNOTSUPP/validity/flags gating: OK"
+        );
+    }
+
+    // nanosleep — Linux gate order: get_timespec64 -> EFAULT, then
+    // timespec64_valid -> EINVAL, then sleep.
+    {
+        // NULL req -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NANOSLEEP, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: nanosleep(NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tv_nsec = 1_000_000_000 (boundary; exact value invalid) -> EINVAL.
+        let mut bad_nsec = [0u8; 16];
+        bad_nsec[8..16].copy_from_slice(&1_000_000_000i64.to_ne_bytes());
+        let a = SyscallArgs { arg0: bad_nsec.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: nanosleep bad nsec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tv_nsec = -1 -> EINVAL.
+        let mut neg_nsec = [0u8; 16];
+        neg_nsec[8..16].copy_from_slice(&(-1i64).to_ne_bytes());
+        let a = SyscallArgs { arg0: neg_nsec.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: nanosleep neg nsec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tv_sec = -1 -> EINVAL.
+        let mut neg_sec = [0u8; 16];
+        neg_sec[0..8].copy_from_slice(&(-1i64).to_ne_bytes());
+        let a = SyscallArgs { arg0: neg_sec.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NANOSLEEP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: nanosleep neg sec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tv_nsec = 999_999_999 (just below boundary) -> 0 (valid, yields
+        // or sleeps briefly).
+        let mut just_below = [0u8; 16];
+        just_below[8..16].copy_from_slice(&999_999_999i64.to_ne_bytes());
+        let a = SyscallArgs { arg0: just_below.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NANOSLEEP, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: nanosleep nsec=999_999_999 not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // All-zero req -> 0 (yield).
+        let zero_ts = [0u8; 16];
+        let a = SyscallArgs { arg0: zero_ts.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NANOSLEEP, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: nanosleep zero not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   nanosleep timespec64_valid gating: OK"
         );
     }
 

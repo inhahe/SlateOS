@@ -17049,15 +17049,22 @@ fn eventfd_create_with_flags(initval: u32, flags: u32) -> SyscallResult {
     }
 }
 
-/// `eventfd(initval, flags)` — legacy form.  On Linux this is the
-/// pre-2.6.27 syscall and ignores flags entirely (treats arg1 as
-/// "must be zero" for forward compat).  We enforce arg1 == 0.
+/// `eventfd(count)` — legacy 1-arg syscall.
+///
+/// Linux's `SYSCALL_DEFINE1(eventfd, unsigned int, count)` in
+/// `fs/eventfd.c` does exactly `return do_eventfd(count, 0)` — it
+/// never looks at any second register.  Pre-batch we enforced
+/// `arg1 == 0` "for forward compat", which rejected a caller that
+/// happened to leave garbage in rsi when invoking
+/// `syscall(SYS_eventfd, count)`; Linux would create the eventfd
+/// regardless.  Drop the spurious check so we match Linux byte-for-
+/// byte on the legacy entry.
 fn sys_eventfd(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let initval = args.arg0 as u32;
-    if args.arg1 != 0 {
-        return linux_err(errno::EINVAL);
-    }
+    // arg1 is intentionally ignored: the legacy entry is 1-arg, and
+    // Linux passes 0 as the flags to do_eventfd unconditionally.
+    let _ = args.arg1;
     eventfd_create_with_flags(initval, 0)
 }
 
@@ -36665,10 +36672,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // install an fd — it surfaces -EBADF, which is what
         // `eventfd_create_with_flags` returns when caller_pid() is None.
 
-        // eventfd legacy non-zero flags -> EINVAL.
+        // eventfd legacy: arg1 is intentionally ignored — Linux's
+        // SYSCALL_DEFINE1(eventfd, count) never consults the second
+        // register.  Pre-batch we rejected arg1!=0 with EINVAL; Linux
+        // creates the eventfd regardless and reaches the fd-install
+        // path, which surfaces -EBADF in kernel context.
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::EVENTFD, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: eventfd flags!=0 not EINVAL");
+        if dispatch_linux(nr::EVENTFD, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: eventfd arg1!=0 not EBADF");
             return Err(KernelError::InternalError);
         }
         // eventfd valid in kernel context -> EBADF (no PCB to install into).

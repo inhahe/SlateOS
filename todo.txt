@@ -18282,3 +18282,43 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          addition; the existing pidfd test block is the validator).
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+## 218. Linux ABI: eventfd legacy arg1 ignored
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's legacy eventfd syscall is declared as
+##          SYSCALL_DEFINE1(eventfd, unsigned int, count)
+##      in fs/eventfd.c and its body is literally
+##          return do_eventfd(count, 0);
+##      The kernel never reads the second register at all — only
+##      eventfd2 takes a flags argument.
+##
+##      Pre-batch sys_eventfd enforced "arg1 == 0" "for forward
+##      compat", rejecting any caller that invoked
+##      syscall(SYS_eventfd, count) while rsi held leftover data
+##      (very common with libc shims that zero only the arguments
+##      they were told about).  Linux happily creates the eventfd in
+##      that case, so a probe sniffing for SYS_eventfd saw EINVAL on
+##      us where Linux returns a valid fd.
+##
+##      Fix: drop the arg1!=0 EINVAL gate; explicitly bind
+##      `let _ = args.arg1;` and call eventfd_create_with_flags
+##      with flags=0 unconditionally, matching SYSCALL_DEFINE1.
+##
+##      Self-test updated (1):
+##        * EVENTFD(initval=0, arg1=1) used to expect EINVAL;
+##          it now expects EBADF (the kernel-context fd-install
+##          failure mode).  Comment updated to explain that arg1 is
+##          intentionally ignored and that the EBADF surfaces from
+##          caller_pid()==None rather than from any flag gate.
+##
+##      Known limitations:
+##        * In kernel context (caller_pid=None) the fd cannot be
+##          installed, so the test cannot observe the successful
+##          creation path — only that the gate is gone and the
+##          syscall reaches fd install.
+##        * sys_eventfd2 (which does take real flags) is unchanged
+##          and continues to honour EFD_CLOEXEC | EFD_NONBLOCK |
+##          EFD_SEMAPHORE.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

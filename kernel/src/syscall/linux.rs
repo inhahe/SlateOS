@@ -12277,7 +12277,35 @@ fn sys_msgget(_args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `msgsnd(msqid, msgp, msgsz, msgflg)`.
+///
+/// Linux's `ipc/msg.c::do_msgsnd()` validates, ahead of the queue
+/// lookup and any pointer touch:
+///
+///   `if (msgsz > ns->msg_ctlmax || (long) msgsz < 0 || msqid < 0)
+///        return -EINVAL;`
+///
+/// `msg_ctlmax` defaults to `MSGMAX = 8192`.  The `(long) msgsz < 0`
+/// cast catches `size_t` values above `LONG_MAX` (i.e. callers who
+/// pass `(size_t)-1` hoping to overflow downstream).
+///
+/// Re-ordering the checks so the size/qid gates fire before the NULL
+/// pointer gate matches Linux exactly and surfaces -EINVAL to probes
+/// that fuzz the size argument.
 fn sys_msgsnd(args: &SyscallArgs) -> SyscallResult {
+    const MSGMAX: u64 = 8192;
+    if args.arg2 > MSGMAX {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let msgsz_signed = args.arg2 as i64;
+    if msgsz_signed < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let msqid = args.arg0 as i32;
+    if msqid < 0 {
+        return linux_err(errno::EINVAL);
+    }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -12289,7 +12317,25 @@ fn sys_msgsnd(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `msgrcv(msqid, msgp, msgsz, msgtyp, msgflg)`.
+///
+/// Same shape as `msgsnd(2)`: Linux validates `msgsz > MSGMAX`,
+/// `(long) msgsz < 0`, and `msqid < 0` ahead of the queue lookup and
+/// the destination-buffer access.  Mirror that order here.
 fn sys_msgrcv(args: &SyscallArgs) -> SyscallResult {
+    const MSGMAX: u64 = 8192;
+    if args.arg2 > MSGMAX {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let msgsz_signed = args.arg2 as i64;
+    if msgsz_signed < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let msqid = args.arg0 as i32;
+    if msqid < 0 {
+        return linux_err(errno::EINVAL);
+    }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -31807,6 +31853,30 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: msgsnd(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // msgsnd(_, _, MSGMAX+1, _) -> EINVAL (size cap; see todo 178).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8193, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGSND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: msgsnd(size>MSGMAX) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // msgsnd(_, _, (size_t)-1, _) -> EINVAL ((long) msgsz < 0 check).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: u64::MAX, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGSND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: msgsnd(size=-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // msgsnd(msqid=-1, _, valid size, _) -> EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 8, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGSND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: msgsnd(msqid<0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
         // msgrcv(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -31815,6 +31885,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: msgrcv(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // msgrcv(_, _, MSGMAX+1, _, _) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 8193, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGRCV, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: msgrcv(size>MSGMAX) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // msgrcv(msqid=-1, _, valid size, _, _) -> EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 8, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGRCV, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: msgrcv(msqid<0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   msgsnd/msgrcv size/qid validation: OK");
         // msgctl(_,_,NULL) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

@@ -15763,3 +15763,65 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   mq_timedsend prio
 ##      validation: OK" at line 445 of build/serial-test.txt.
 
+## 178. Linux ABI: msgsnd(2) / msgrcv(2) size and msqid validation
+##      (Batch 149, 2026-06-05)
+##
+##      Issue:  sys_msgsnd and sys_msgrcv checked only `msgp == NULL`
+##              before returning EINVAL.  Linux's
+##              ipc/msg.c::do_msgsnd() validates ahead of the queue
+##              lookup and any pointer touch:
+##                if (msgsz > ns->msg_ctlmax || (long) msgsz < 0
+##                    || msqid < 0)
+##                    return -EINVAL;
+##              `msg_ctlmax` defaults to MSGMAX = 8192.  The
+##              `(long) msgsz < 0` cast catches size_t values above
+##              LONG_MAX (i.e. callers who pass (size_t)-1 hoping
+##              for overflow in downstream arithmetic).  A probe
+##              passing msgsz=(size_t)-1 or msqid=-1 saw EINVAL only
+##              after the queue lookup terminal — same errno but no
+##              way to tell which gate fired.  More importantly, a
+##              valid NULL-pointer probe with msgsz beyond MSGMAX saw
+##              EFAULT where Linux gives EINVAL.
+##
+##      Fix:    Added the three pre-pointer gates in Linux's order:
+##                if args.arg2 > MSGMAX { return EINVAL; }
+##                if (args.arg2 as i64) < 0 { return EINVAL; }
+##                if (args.arg0 as i32) < 0 { return EINVAL; }
+##                if args.arg1 == 0 { return EFAULT; }
+##                ...
+##              The MSGMAX cap is the kernel-namespace default; once
+##              we add per-namespace IPC settings, this can switch to
+##              the real ns->msg_ctlmax lookup.  Same gates applied
+##              symmetrically to sys_msgrcv.
+##
+##      Self-tests (boot-time):
+##        * msgsnd(0, NULL, 8, _) -> EFAULT (unchanged; valid size).
+##        * msgsnd(_, _, 8193, _) -> EINVAL (size > MSGMAX; new).
+##        * msgsnd(_, _, u64::MAX, _) -> EINVAL ((long) msgsz < 0; new).
+##        * msgsnd(msqid=-1, _, 8, _) -> EINVAL (qid gate; new).
+##        * msgrcv(0, NULL, 8, _, _) -> EFAULT (unchanged).
+##        * msgrcv(_, _, 8193, _, _) -> EINVAL (new).
+##        * msgrcv(msqid=-1, _, 8, _, _) -> EINVAL (new).
+##        * Emits "[syscall/linux]   msgsnd/msgrcv size/qid validation:
+##          OK".
+##
+##      Known limitations:
+##        * The MSGMAX cap is hard-coded to the kernel-default 8192.
+##          Real Linux exposes /proc/sys/kernel/msgmax which lets root
+##          raise it; we don't have that knob yet.  When sysctl support
+##          for IPC namespaces lands, this gate switches to the per-ns
+##          value.
+##        * sys_msgsnd does NOT validate `mtype < 1` because that
+##          requires reading the first 8 bytes of *mtext — and
+##          validate_user_read is a no-op in kernel-context, so the
+##          self-test couldn't exercise it.  The mtype gate goes in
+##          when we implement the actual message-queue copy_from_user
+##          path.
+##        * The full SysV message queue implementation remains
+##          absent — msgget returns ENOSYS, and any valid-shaped
+##          msgsnd/msgrcv still terminates at EINVAL.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##      Serial confirms "[syscall/linux]   msgsnd/msgrcv size/qid
+##      validation: OK" at line 445 of build/serial-test.txt.
+

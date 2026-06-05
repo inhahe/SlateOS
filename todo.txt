@@ -14331,3 +14331,112 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
 
+## 156. Linux ABI: memfd_create with HandleKind::MemFd backing store
+##      (batch 127).
+##
+##      sys_memfd_create is now a full implementation rather than the
+##      previous ENOSYS stub.  An anonymous in-memory regular file is
+##      allocated by the new `crate::ipc::memfd` subsystem (modelled on
+##      `crate::ipc::eventfd`) and installed in the caller's Linux fd
+##      table as `HandleKind::MemFd`.  The new fd is fully wired through
+##      the dispatch layer:
+##
+##         * read / write / pread64 / pwrite64 / preadv / pwritev /
+##            preadv2 / pwritev2 — full I/O, with the v* variants walking
+##            the iovec array via new `preadv_memfd_walk` /
+##            `pwritev_memfd_walk` helpers (file-walker shape, partial-
+##            result semantics on short read / EOF mid-iov).
+##         * lseek — SET / CUR / END all honoured (memfd has a real
+##            shared offset, like a regular file).
+##         * fsync / fdatasync — succeed (no backing store to sync).
+##         * fstat / statx — S_IFREG | 0o777, blksize 4096, st_size
+##            reports the live `data.len()` so libraries that
+##            ftruncate-then-fstat to size a mapping see the size they
+##            just set.
+##         * ftruncate — grow / shrink with RLIMIT_FSIZE enforced;
+##            F_SEAL_GROW / F_SEAL_SHRINK rejected with EPERM.
+##         * fcntl(F_SETLK*) — accepted (advisory locks against memfd
+##            are allowed on Linux; we no-op them as on files).
+##         * poll / select / epoll — POLLIN | POLLOUT always set for
+##            live memfds (a memfd is a regular file — never blocks).
+##         * cachestat — accepted (memfd is page-cache-backed on Linux)
+##            and reports five zero counters (no page cache here).
+##         * pidfd_getfd dup — bumps the memfd refcount via
+##            `ipc::memfd::dup` so cross-process fd copy works.
+##         * close / handle release / `release_handle_ref` rollback —
+##            all route through `ipc::memfd::close`.
+##
+##      Flag handling (sys_memfd_create):
+##         * MFD_CLOEXEC=1   — sets FD_CLOEXEC on the install entry.
+##         * MFD_ALLOW_SEALING=2 — passed to `create_with_flags`; when
+##            false, F_SEAL_SEAL is implicit so add_seals returns
+##            EPERM forever.
+##         * MFD_HUGETLB=4 / MFD_NOEXEC_SEAL=8 / MFD_EXEC=16 — accepted
+##            but ignored (we have one page size and no exec bit).
+##         * Huge-page-size mask (bits 26..31) — accepted, ignored.
+##         * Any other bit → EINVAL.
+##         * Name argument: read_user_cstr capped at 249 bytes
+##            (NAME_MAX 255 minus the "memfd:" prefix).
+##         * caller_pid() probed BEFORE read_user_cstr so kernel-context
+##            callers fail with EBADF rather than dereferencing a
+##            kernel-address-as-user-address (validate_user_read
+##            bypasses validation in kernel context).
+##         * Install failure (table full) releases the memfd handle so
+##            no leak on the error path.
+##
+##      Self-tests:
+##         * `crate::ipc::memfd::self_test` runs at boot from main.rs
+##            step 15b, just after the eventfd self-test, and covers:
+##                1.  create / close round-trip and stale-handle EBADF.
+##                2.  read / write / shared offset advance.
+##                3.  read_at / write_at (pread / pwrite shape).
+##                4.  seek SET / CUR / END semantics.
+##                5.  truncate grow / shrink (with zero-fill on grow).
+##                6.  dup refcount: two close()s required after dup.
+##                7.  F_SEAL_WRITE blocks subsequent write.
+##                8.  F_SEAL_SEAL blocks future add_seals.
+##                9.  allow_sealing=false rejects add_seals with EPERM.
+##               10.  poll_status reports POLLIN|POLLOUT live, 0 closed.
+##               11.  Caller-supplied name round-trips through name().
+##         * Dispatch-layer self-tests in syscall::linux::self_test:
+##              - memfd_create(NULL, _)         → EFAULT.
+##              - memfd_create(name, bogus bit) → EINVAL.
+##              - memfd_create(name, 0)         → EBADF in kernel ctx.
+##              - memfd_create(name, MFD_CLOEXEC|MFD_ALLOW_SEALING)
+##                                              → EBADF in kernel ctx.
+##              - memfd_create(name, hugesize bits) → EBADF.
+##
+##      Known limitations:
+##         * fcntl(F_ADD_SEALS) / fcntl(F_GET_SEALS) plumbing is NOT
+##            wired through `sys_fcntl` yet — the underlying
+##            `ipc::memfd::add_seals` / `get_seals` are implemented and
+##            sealing is enforced on writes / truncates / future_writes,
+##            but only callers who reach memfd directly (kernel-side)
+##            can install seals.  Fcntl-cmd routing is the next batch.
+##         * No `mmap(MAP_SHARED, memfd_fd)` integration — mmap of a
+##            memfd is not yet supported; callers that mmap will fail
+##            inside the mmap path (memfd is not in the mmap fd dispatch).
+##            Plain read/write/pread/pwrite covers Wayland buffer-sharing
+##            for the common SHM-protocol case (where the consumer
+##            reads the bytes, not mmaps).  Real Wayland clients mmap
+##            and depend on it; full support follows when fs-backed
+##            mmap lands generically.
+##         * No `register_ipc_handle` — class bug shared with EventFd
+##            and Pipe in linux.rs (eventfd_create_with_flags and
+##            pipe_common skip the registration too).  Consequence:
+##            memfd handles leak on process exit if the linux-fd table
+##            cleanup misses them, and refcount is not bumped at fork.
+##            The fork() / process-exit reaper does walk the linux-fd
+##            table and call close_handle on each entry, which routes
+##            to ipc::memfd::close, so single-process lifecycles are
+##            correct.  The class fix (uniform register_ipc_handle for
+##            EventFd / Pipe / MemFd) is intentionally deferred to a
+##            future batch so all three are fixed together with a
+##            single new helper.
+##         * memfd_secret is still ENOSYS — that's a separate, much
+##            more security-sensitive primitive (memory unmapped from
+##            the kernel direct map).  Not in this batch.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+
+

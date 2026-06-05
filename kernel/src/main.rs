@@ -545,6 +545,15 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 15b: Memfd subsystem.
+    // Anonymous in-memory regular file backing memfd_create(2).  Exercises
+    // create/close/dup refcounting, read/write/seek, pread/pwrite,
+    // truncate grow/shrink, F_SEAL_* enforcement, and poll readiness.
+    if let Err(e) = ipc::memfd::self_test() {
+        serial_println!("FATAL: Memfd self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 16: Initialize completion port subsystem.
     // Completion ports provide unified wait on heterogeneous kernel
     // objects (channels, pipes, eventfds, future timers/process exit).

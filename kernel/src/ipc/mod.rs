@@ -24,6 +24,7 @@ pub mod completion;
 pub mod eventfd;
 pub mod futex;
 pub mod io_ring;
+pub mod memfd;
 pub mod namespace;
 pub mod pipe;
 pub mod semaphore;

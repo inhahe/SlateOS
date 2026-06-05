@@ -2390,6 +2390,17 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_close(&a))
         }
         HandleKind::EventFd => {
+            // Deregister from the per-process ipc_handles list so a
+            // future fork() doesn't try to dup a handle we're about to
+            // drop the last refcount on.  Mirrors `handlers::
+            // sys_eventfd_close`, which is what the native ABI uses.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::EventFd,
+                    entry.raw_handle,
+                );
+            }
             let h = crate::ipc::eventfd::EventFdHandle::from_raw(entry.raw_handle);
             crate::ipc::eventfd::close(h);
             SyscallResult::ok(0)
@@ -2400,6 +2411,15 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             SyscallResult::ok(0)
         }
         HandleKind::MemFd => {
+            // Deregister from the per-process ipc_handles list — same
+            // rationale as the EventFd arm above.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::MemFd,
+                    entry.raw_handle,
+                );
+            }
             let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
             crate::ipc::memfd::close(h);
             SyscallResult::ok(0)
@@ -10760,6 +10780,21 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
     let allow_sealing = (flags & MFD_ALLOW_SEALING) != 0;
     let handle = crate::ipc::memfd::create_with_flags(name, allow_sealing);
 
+    // Register the memfd in the caller's per-process IPC handle list so
+    // (a) process-exit cleanup releases it via `ipc::cleanup_handles`
+    //     even if the linux_fd_table layer somehow loses the entry, and
+    // (b) `fork::build_fork_child` sees it in the snapshot and runs
+    //     `dup_one` (which routes through `ipc::memfd::dup`) to bump the
+    //     memfd refcount in the child.  Without this the child's
+    //     inherited fd is a dangling reference once the parent closes.
+    //     This mirrors what `handlers::sys_pipe_create` /
+    //     `handlers::sys_eventfd_create` already do for the native ABI.
+    pcb::register_ipc_handle(
+        caller,
+        crate::cap::ResourceType::MemFd,
+        handle.raw(),
+    );
+
     // O_RDWR by convention — memfds are always both readable and writable.
     let mut entry = crate::proc::linux_fd::FdEntry::memfd(handle.raw(), oflags::O_RDWR);
     if (flags & MFD_CLOEXEC) != 0 {
@@ -10770,7 +10805,13 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
         Ok(fd) => SyscallResult::ok(i64::from(fd)),
         Err(e) => {
             // Install failed (e.g. table full).  Release the memfd we
-            // just allocated so we don't leak it.
+            // just allocated and drop the just-registered ipc_handles
+            // entry so the next fork doesn't see a phantom handle.
+            pcb::deregister_ipc_handle(
+                caller,
+                crate::cap::ResourceType::MemFd,
+                handle.raw(),
+            );
             crate::ipc::memfd::close(handle);
             linux_err(linux_errno_for(e))
         }
@@ -15593,6 +15634,21 @@ fn eventfd_create_with_flags(initval: u32, flags: u32) -> SyscallResult {
     };
     let handle =
         crate::ipc::eventfd::create_with_flags(u64::from(initval), semaphore);
+    // Register the eventfd in the caller's per-process IPC handle list so
+    // (a) process-exit cleanup releases it via `ipc::cleanup_handles`
+    //     even if the linux_fd_table layer somehow loses the entry, and
+    // (b) `fork::build_fork_child` sees it in the snapshot and runs
+    //     `dup_one` to bump the eventfd refcount in the child.  Without
+    //     this the child's inherited fd is a dangling reference: the
+    //     parent's `close` (or exit) drops the last refcount and the
+    //     handle table reclaims the slot, after which child operations
+    //     see InvalidHandle / EBADF.  This mirrors what
+    //     `handlers::sys_eventfd_create` already does for the native ABI.
+    pcb::register_ipc_handle(
+        pid,
+        crate::cap::ResourceType::EventFd,
+        handle.raw(),
+    );
     let mut status = oflags::O_RDWR;
     if nonblock {
         status |= oflags::O_NONBLOCK;
@@ -15606,7 +15662,13 @@ fn eventfd_create_with_flags(initval: u32, flags: u32) -> SyscallResult {
         Ok(fd) => SyscallResult::ok(i64::from(fd)),
         Err(e) => {
             // Failed to install — release the kernel-side eventfd so it
-            // doesn't leak.
+            // doesn't leak, and drop the just-registered ipc_handles
+            // entry so the next fork doesn't see a phantom handle.
+            pcb::deregister_ipc_handle(
+                pid,
+                crate::cap::ResourceType::EventFd,
+                handle.raw(),
+            );
             crate::ipc::eventfd::close(handle);
             linux_err(linux_errno_for(e))
         }
@@ -25908,6 +25970,146 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         crate::ipc::memfd::close(h);
         serial_println!("[syscall/linux]   fcntl F_ADD_SEALS/F_GET_SEALS gate: OK");
+    }
+
+    // Batch 129: register_ipc_handle wiring for EventFd / MemFd
+    // (class-bug fix).
+    //
+    // Until this batch, `eventfd_create_with_flags` and
+    // `sys_memfd_create` in this file installed handles into the
+    // caller's linux_fd_table but did NOT call `register_ipc_handle`.
+    // Two consequences:
+    //   * process exit's `cleanup_handles(ipc_handles)` would walk a
+    //     list that never contained the eventfd / memfd handle, so the
+    //     handle leaked indefinitely if userspace exited without
+    //     calling close(2);
+    //   * fork's `build_fork_child` snapshots the parent's ipc_handles
+    //     list and calls `dup_one` per entry to refcount-bump the
+    //     resource into the child.  Without an entry, the parent's
+    //     subsequent close (or exit) would drop the only refcount,
+    //     after which child operations would see InvalidHandle / EBADF
+    //     — a silent fd-table corruption.
+    //
+    // The fix:
+    //   * Added `ResourceType::MemFd = 17` so memfd handles have a
+    //     well-known type tag.
+    //   * `eventfd_create_with_flags` now calls
+    //     `register_ipc_handle(pid, EventFd, raw)`; install-failure
+    //     rolls back via `deregister_ipc_handle` before closing.
+    //   * `sys_memfd_create` does the same with the MemFd type.
+    //   * `close_handle` deregisters before dropping the native
+    //     reference for both kinds.
+    //   * `ipc::cleanup_handles` got a MemFd arm routing to
+    //     `memfd::close`.
+    //   * `proc::fork::dup_one` / `close_one` got MemFd arms calling
+    //     `memfd::dup` / `memfd::close`.
+    //
+    // What's tested here:
+    {
+        // (a) The new discriminant value is what cleanup_handles /
+        //     fork dispatch tables key on.  Anyone renumbering this
+        //     without also reviewing those tables breaks the world.
+        assert_eq!(crate::cap::ResourceType::MemFd as u16, 17);
+
+        // (b) cleanup_handles dispatches MemFd correctly.  Create a
+        //     real memfd, run cleanup_handles with a synthetic
+        //     ipc_handles entry pointing at it, then prove the
+        //     subsystem dropped the last refcount.  `poll_status`
+        //     returns 0 when the handle is gone.
+        let mh = crate::ipc::memfd::create_with_flags(
+            b"batch129-cleanup".to_vec(),
+            false,
+        );
+        crate::ipc::cleanup_handles(&[
+            (crate::cap::ResourceType::MemFd, mh.raw()),
+        ]);
+        if crate::ipc::memfd::poll_status(mh) != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd survived cleanup_handles dispatch",
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) cleanup_handles dispatches EventFd correctly (regression
+        //     guard — the arm was already present but the new test
+        //     locks it in alongside MemFd).  `poll_status` returns
+        //     0x0008 (POLLERR) when the eventfd is gone.
+        let eh = crate::ipc::eventfd::create_with_flags(0, false);
+        crate::ipc::cleanup_handles(&[
+            (crate::cap::ResourceType::EventFd, eh.raw()),
+        ]);
+        if crate::ipc::eventfd::poll_status(eh) != 0x0008 {
+            serial_println!(
+                "[syscall/linux]   FAIL: eventfd survived cleanup_handles dispatch",
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) Fork's dup_one / close_one rely on `memfd::dup` returning
+        //     the same handle and bumping refcount, and on `close`
+        //     symmetrically dropping one.  Verify the contract: dup
+        //     then close once → still alive; close again → gone.  This
+        //     is the invariant that lets fork share a memfd between
+        //     parent and child without copying.
+        let mh2 = crate::ipc::memfd::create_with_flags(
+            b"batch129-fork".to_vec(),
+            false,
+        );
+        let mh2_dup = crate::ipc::memfd::dup(mh2)?;
+        assert_eq!(mh2.raw(), mh2_dup.raw());
+        crate::ipc::memfd::close(mh2_dup);
+        if crate::ipc::memfd::poll_status(mh2) == 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd refcount dropped too early after dup+close",
+            );
+            return Err(KernelError::InternalError);
+        }
+        crate::ipc::memfd::close(mh2);
+        if crate::ipc::memfd::poll_status(mh2) != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd survived final close after dup",
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (e) register/deregister round-trip on a real PCB.  Spawn a
+        //     fake process, register a fabricated MemFd entry, verify
+        //     it appears in `ipc_handles_snapshot`, deregister, verify
+        //     it's gone.  Catches a regression where the deregister
+        //     keyed on the wrong tuple or the snapshot accessor was
+        //     edited to drop MemFd.
+        let test_pid = pcb::create("batch129-regdereg", 0);
+        pcb::register_ipc_handle(
+            test_pid, crate::cap::ResourceType::MemFd, 0xDEAD_BEEF,
+        );
+        let snap = pcb::ipc_handles_snapshot(test_pid).unwrap_or_default();
+        if !snap.iter().any(|&(rt, h)| {
+            rt == crate::cap::ResourceType::MemFd && h == 0xDEAD_BEEF
+        }) {
+            serial_println!(
+                "[syscall/linux]   FAIL: MemFd register didn't land in ipc_handles",
+            );
+            pcb::destroy(test_pid);
+            return Err(KernelError::InternalError);
+        }
+        pcb::deregister_ipc_handle(
+            test_pid, crate::cap::ResourceType::MemFd, 0xDEAD_BEEF,
+        );
+        let snap2 = pcb::ipc_handles_snapshot(test_pid).unwrap_or_default();
+        if snap2.iter().any(|&(rt, h)| {
+            rt == crate::cap::ResourceType::MemFd && h == 0xDEAD_BEEF
+        }) {
+            serial_println!(
+                "[syscall/linux]   FAIL: MemFd deregister left a phantom entry",
+            );
+            pcb::destroy(test_pid);
+            return Err(KernelError::InternalError);
+        }
+        pcb::destroy(test_pid);
+
+        serial_println!(
+            "[syscall/linux]   register_ipc_handle EventFd/MemFd wiring: OK",
+        );
     }
 
     // Batch 92: fcntl(F_GET_RW_HINT / F_SET_RW_HINT /

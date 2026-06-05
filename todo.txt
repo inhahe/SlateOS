@@ -14524,3 +14524,101 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           distinction is moot today.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+
+
+
+## 158. Linux ABI: register_ipc_handle wiring for EventFd / MemFd —
+##      class-bug fix (batch 129).
+##
+##      Closes the known limitation flagged in todo entries 156 and 157:
+##      `eventfd_create_with_flags` and `sys_memfd_create` in
+##      syscall/linux.rs installed handles into the caller's linux fd
+##      table but did NOT call `pcb::register_ipc_handle`, so the
+##      per-process ipc_handles list did not see them.
+##
+##      Consequences before this batch:
+##        * Process-exit cleanup walks `ipc_handles` via
+##          `ipc::cleanup_handles`.  Eventfd / memfd handles installed
+##          by the Linux ABI never appeared in that list, so they
+##          leaked indefinitely if userspace exited without explicitly
+##          calling close(2) on each fd.
+##        * fork's `build_fork_child` snapshots the parent's ipc_handles
+##          list and runs `dup_one` per entry to bump the underlying
+##          resource refcount into the child.  With no entry, the
+##          parent's subsequent close (or exit) would drop the only
+##          refcount, after which child operations would see
+##          InvalidHandle / EBADF — silent fd-table corruption.
+##
+##      The proper fix (no band-aids — restructured the type system so
+##      memfd has the same first-class story as pipe/eventfd):
+##
+##        * `cap::ResourceType::MemFd = 17` — new discriminant so memfd
+##           handles have a well-known type tag for cleanup_handles and
+##           fork dispatch tables.
+##        * `eventfd_create_with_flags` (linux.rs) now calls
+##           `register_ipc_handle(pid, EventFd, raw)` immediately after
+##           creating the handle.  Install-failure rolls back via
+##           `deregister_ipc_handle` before `ipc::eventfd::close`.
+##        * `sys_memfd_create` (linux.rs) does the same with the MemFd
+##           type and rollback path.
+##        * `close_handle` (linux.rs) — the dispatch sink for fd table
+##           removals — now calls `deregister_ipc_handle` for both
+##           EventFd and MemFd before invoking the native close.  This
+##           mirrors what `handlers::sys_eventfd_close` and
+##           `handlers::sys_pipe_close` already do for the native ABI.
+##        * `ipc::cleanup_handles` (ipc/mod.rs) — new MemFd arm
+##           routing to `memfd::close`.  EventFd / Pipe / File arms
+##           were already present.
+##        * `proc::fork::dup_one` — new MemFd arm calling
+##           `ipc::memfd::dup` (which returns the same handle and
+##           bumps the refcount, identical to eventfd::dup's contract).
+##        * `proc::fork::close_one` — symmetric MemFd arm calling
+##           `ipc::memfd::close` for fork-rollback paths.
+##
+##      After this batch the invariant from pcb.rs:1131 ("every Linux
+##      ABI install path calls register_ipc_handle exactly once per
+##      kernel handle per process before installing into the fd table")
+##      holds for EventFd and MemFd as well as Pipe and File.
+##
+##      Self-tests (syscall::linux::self_test, after the batch-128 block):
+##        * Discriminant check: ResourceType::MemFd as u16 == 17.
+##        * cleanup_handles MemFd dispatch: create a real memfd, call
+##          cleanup_handles with a synthetic (MemFd, raw) entry, prove
+##          the memfd is gone via `memfd::poll_status == 0`.
+##        * cleanup_handles EventFd dispatch (regression guard): same
+##          shape, prove `eventfd::poll_status == POLLERR (0x0008)`
+##          after cleanup.
+##        * Fork dup contract: dup a memfd, close once → still alive
+##          (poll_status nonzero); close again → gone.  Catches a
+##          future regression where memfd::dup forgets to bump
+##          refcount or close oversteps.
+##        * Register/deregister round-trip via a synthetic PCB:
+##          register a fabricated MemFd entry, snapshot ipc_handles,
+##          verify presence, deregister, verify absence.  Catches
+##          tuple-keying regressions in deregister_ipc_handle.
+##
+##      Known limitations / follow-ups:
+##        * `register_ipc_handle` runs unconditionally — it does not
+##          check if the caller already has an entry for the same
+##          (kind, raw).  That's correct for the create paths covered
+##          here (each create mints a fresh handle), but a future
+##          patch that calls `register_ipc_handle` from a duplicating
+##          path (e.g. a future `socketpair`-equivalent that returns
+##          two refcounted ends sharing one entry) must take care to
+##          register exactly the right number of entries to match the
+##          refcount bump pattern.  The pipe install path already
+##          documents this discipline (handlers::sys_pipe_create
+##          registers BOTH ends because pipe::create returns two
+##          handles with distinct refcounts).
+##        * pidfd is intentionally NOT registered because it has no
+##          per-fork dup_one path (it carries a pid value, not a
+##          refcounted kernel resource).  Process exit cleanup just
+##          drops the pid value with the fd table.
+##        * The fix does not retroactively close memfd / eventfd
+##          handles that were leaked in earlier kernels.  Reboot
+##          flushes everything; we don't carry persistent state
+##          across boots.
+##        * memfd_secret remains ENOSYS as in batch 127.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

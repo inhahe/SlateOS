@@ -195,6 +195,15 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             )?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::MemFd => {
+            // Bump the memfd refcount so the child gets its own
+            // independent reference.  Same id — memfd has no per-process
+            // identity, just a shared in-memory file.
+            crate::ipc::memfd::dup(
+                crate::ipc::memfd::MemFdHandle::from_raw(id),
+            )?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::Channel
@@ -238,6 +247,11 @@ fn close_one(rtype: ResourceType, id: u64) {
         ResourceType::StreamSocket => {
             crate::ipc::stream_socket::close(
                 crate::ipc::stream_socket::StreamSocketHandle::from_raw(id),
+            );
+        }
+        ResourceType::MemFd => {
+            crate::ipc::memfd::close(
+                crate::ipc::memfd::MemFdHandle::from_raw(id),
             );
         }
         // Nothing was duped for these in `dup_one`.

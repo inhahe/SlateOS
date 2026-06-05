@@ -145,6 +145,15 @@ pub enum ResourceType {
     /// authority.  Tracked per-process so the endpoint is closed when an
     /// owning process dies.
     StreamSocket = 16,
+    /// An anonymous in-memory file (memfd).
+    ///
+    /// Created via `memfd_create(2)` on the Linux ABI.  The handle is a
+    /// refcounted reference into [`crate::ipc::memfd`]; no capability is
+    /// required to create one — the handle itself is the authority.
+    /// Tracked per-process so the memfd is released when an owning
+    /// process dies, and so `fork()` knows to bump the refcount in the
+    /// child.
+    MemFd = 17,
 }
 
 // ---------------------------------------------------------------------------

@@ -16457,3 +16457,84 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   mount_setattr attr
 ##      validation: OK" in build/serial-test.txt.
 
+
+## 186. Linux ABI: open_by_handle_at handle/fd validation.
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_open_by_handle_at.
+##
+##      Problem: sys_open_by_handle_at validated `handle != NULL`
+##              and that the 8-byte header was readable, then
+##              jumped straight to the terminal EPERM.  It did
+##              not validate `handle_bytes` (the first field of
+##              struct file_handle) and did not check `mountdirfd`
+##              at all.  Linux's fs/fhandle.c::handle_to_path
+##              enforces gates ahead of the privilege check:
+##                * `handle_bytes == 0` -> EINVAL.
+##                * `handle_bytes > MAX_HANDLE_SZ (128)` -> EINVAL.
+##                * `mountdirfd` (unless AT_FDCWD) must be a
+##                  valid fd -> EBADF otherwise.
+##                * The full `8 + handle_bytes` payload must be
+##                  readable.
+##              A glibc `open_by_handle_at` wrapper, libmount
+##              probe, or `name_to_handle_at`/`open_by_handle_at`
+##              round-trip test walking handle sizes to find the
+##              kernel's limit saw EPERM for everything (including
+##              obvious garbage like handle_bytes=0xffffffff),
+##              missing the EINVAL signal that Linux gives for
+##              malformed handle headers.
+##
+##      Fix:    Mirrored Linux's gate order:
+##                1. mountdirfd != AT_FDCWD (-100): validate_linux_fd
+##                   -> EBADF if not in the fd table.  AT_FDCWD is
+##                   allowed (Linux's get_path_anchor short-circuits
+##                   to current->fs->pwd).
+##                2. handle == NULL -> EFAULT (kept).
+##                3. validate_user_read(handle, 8) -> EFAULT (kept).
+##                4. copy_from_user the 8-byte header and parse
+##                   handle_bytes as u32 from offset 0.
+##                5. handle_bytes == 0 -> EINVAL.
+##                6. handle_bytes > MAX_HANDLE_SZ (128) -> EINVAL.
+##                7. validate_user_read(handle, 8 + handle_bytes)
+##                   -> EFAULT.
+##                8. Terminal: EPERM (CAP_DAC_READ_SEARCH; unchanged).
+##
+##              No flag gate added — Linux's file_open_root
+##              silently ignores O_CREAT/O_TRUNC/O_EXCL for handle
+##              opens, so they're not malformed inputs.
+##
+##      Self-tests (boot-time):
+##        * open_by_handle_at(0, NULL, 0) -> EFAULT  (kept).
+##        * open_by_handle_at(0, handle_ptr_with_handle_bytes=0, 0)
+##          -> EINVAL  (replaces old "valid -> EPERM" test which
+##          now correctly EINVALs since the all-zero buffer has
+##          handle_bytes=0; new).
+##        * open_by_handle_at(0, handle_ptr_with_handle_bytes=129, 0)
+##          -> EINVAL  (above MAX_HANDLE_SZ; new).
+##        * open_by_handle_at(0, valid_handle_ptr_with_handle_bytes=8,
+##          0) -> EPERM  (terminal; full 16-byte buffer readable; new).
+##        * open_by_handle_at(AT_FDCWD=-100, valid_handle, 0)
+##          -> EPERM  (AT_FDCWD bypasses fd-table check; new).
+##        * Emits "[syscall/linux]   open_by_handle_at handle
+##          validation: OK".
+##
+##      Known limitations:
+##        * `flags` (arg2) are not validated.  Linux's
+##          build_open_flags applies the same masking as openat
+##          and silently clears O_CREAT/O_TRUNC/O_EXCL.  When
+##          we wire up real file-handle dispatch this needs the
+##          openat flag-mask check.
+##        * `mountdirfd != AT_FDCWD` is only checked for fd-table
+##          validity, not that it refers to a mount.  Linux's
+##          get_path_anchor walks the file's mnt and rejects with
+##          EINVAL for non-mount fds.  When real mount fds exist
+##          this needs a HandleKind::MountFd check.
+##        * Terminal remains EPERM rather than EINVAL/ENOENT
+##          that Linux would give for a non-decodable handle.
+##          EPERM is the correct early answer for our "no
+##          file-handle support, no CAP_DAC_READ_SEARCH ever"
+##          stub.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).
+##      Serial confirms "[syscall/linux]   open_by_handle_at
+##      handle validation: OK" in build/serial-test.txt.
+

@@ -13740,17 +13740,57 @@ fn sys_name_to_handle_at(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `open_by_handle_at(mount_fd, handle*, flags)`.
+///
+/// Mirrors Linux's fs/fhandle.c gates in `do_handle_open` /
+/// `handle_to_path` ahead of the privilege check:
+///   1. `mountdirfd` is validated unless it's `AT_FDCWD (-100)`.
+///   2. `handle` must be non-NULL with at least 8 readable bytes
+///      (the struct file_handle header).
+///   3. `handle_bytes` (first 4 bytes of the header) must be > 0 and
+///      ≤ `MAX_HANDLE_SZ (128)` — Linux rejects both extremes with
+///      `EINVAL` before any further work.
+///   4. The full handle payload (`8 + handle_bytes`) must be readable.
+///   5. Terminal: `EPERM` — open-by-handle requires `CAP_DAC_READ_SEARCH`
+///      which we never grant.
 fn sys_open_by_handle_at(args: &SyscallArgs) -> SyscallResult {
+    const AT_FDCWD: i32 = -100;
+    const MAX_HANDLE_SZ: u32 = 128;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let mountdirfd = args.arg0 as i32;
+    if mountdirfd != AT_FDCWD {
+        if let Err(r) = validate_linux_fd(mountdirfd) {
+            return r;
+        }
+    }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
         return linux_err(linux_errno_for(e));
     }
-    // Same flags as openat (O_RDONLY/RDWR/WRONLY plus mode bits); we don't
-    // re-validate them here — Linux only sanity-checks the access mode.
-    // Real open-by-handle requires CAP_DAC_READ_SEARCH, which we don't
-    // grant; mirror Linux's EPERM in that case.
+    // struct file_handle { __u32 handle_bytes; int handle_type; ... }.
+    let mut header = [0u8; 8];
+    // SAFETY: validate_user_read above confirmed 8 bytes are readable.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg1, header.as_mut_ptr(), 8)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let handle_bytes = u32::from_ne_bytes(match <[u8; 4]>::try_from(&header[0..4]) {
+        Ok(b) => b,
+        Err(_) => return linux_err(errno::EINVAL),
+    });
+    if handle_bytes == 0 || handle_bytes > MAX_HANDLE_SZ {
+        return linux_err(errno::EINVAL);
+    }
+    let total = 8usize.saturating_add(handle_bytes as usize);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Same flags as openat (O_RDONLY/RDWR/WRONLY plus mode bits); Linux's
+    // file_open_root ignores O_CREAT/O_TRUNC/O_EXCL silently for handle
+    // opens, so no flag gate fires here.  Real open-by-handle requires
+    // CAP_DAC_READ_SEARCH, which we don't grant; mirror Linux's EPERM.
     linux_err(errno::EPERM)
 }
 
@@ -33155,12 +33195,47 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: open_by_handle_at NULL not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // open_by_handle_at with valid handle -> EPERM.
+        // open_by_handle_at with handle_bytes=0 -> EINVAL (Linux rejects
+        // zero-length handles ahead of the privilege check).
         let a = SyscallArgs { arg0: 0, arg1: handle_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: open_by_handle_at handle_bytes=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // open_by_handle_at with handle_bytes > MAX_HANDLE_SZ (129) -> EINVAL.
+        let big_handle: [u8; 8] = {
+            let mut b = [0u8; 8];
+            b[0..4].copy_from_slice(&129u32.to_ne_bytes());
+            b
+        };
+        let big_handle_ptr = big_handle.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: big_handle_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: open_by_handle_at handle_bytes>MAX not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // open_by_handle_at with handle_bytes=8 and the full 16-byte
+        // buffer available -> EPERM (terminal; no CAP_DAC_READ_SEARCH).
+        let valid_handle: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..4].copy_from_slice(&8u32.to_ne_bytes());
+            b
+        };
+        let valid_handle_ptr = valid_handle.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: valid_handle_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: open_by_handle_at valid not EPERM");
             return Err(KernelError::InternalError);
         }
+        // open_by_handle_at with mountdirfd=AT_FDCWD(-100) and valid
+        // handle -> EPERM (AT_FDCWD bypasses the fd-table check,
+        // matching Linux's get_path_anchor).
+        let a = SyscallArgs { arg0: -100i64 as u64, arg1: valid_handle_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_by_handle_at AT_FDCWD not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   open_by_handle_at handle validation: OK");
 
         // fsopen with bad flags -> EINVAL.
         let a = SyscallArgs { arg0: path_ptr, arg1: 0xff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

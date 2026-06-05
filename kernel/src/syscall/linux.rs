@@ -15012,8 +15012,24 @@ fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `landlock_restrict_self(ruleset_fd, flags)`.
+///
+/// `flags` carries optional logging-control bits introduced over the
+/// 6.10 → 6.12 series:
+///   * `LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF`     = `1 << 0` (6.10)
+///   * `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`       = `1 << 1` (6.10)
+///   * `LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF`    = `1 << 2` (6.12)
+///
+/// Pre-batch we rejected any non-zero `flags`, which made
+/// `landlock_restrict_self(fd, LANDLOCK_RESTRICT_SELF_LOG_*)` fail with
+/// `EINVAL` on a kernel that ought to accept the bit, masking a runtime
+/// behavioural difference behind a parse error.  Now we accept the
+/// documented bits and reject only undefined ones, surfacing the
+/// terminal `EBADF` (no real ruleset fd ever exists) for any well-
+/// formed call.
 fn sys_landlock_restrict_self(args: &SyscallArgs) -> SyscallResult {
-    if args.arg1 != 0 {
+    const LANDLOCK_RESTRICT_SELF_FLAGS: u64 =
+        (1 << 0) | (1 << 1) | (1 << 2);
+    if args.arg1 & !LANDLOCK_RESTRICT_SELF_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -33636,18 +33652,51 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid not EBADF");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self non-zero flags -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        // landlock_restrict_self undefined flag bit (0x8) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self flags not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self undef flag not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self valid -> EBADF.
+        // landlock_restrict_self valid (flags=0) -> EBADF.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
             serial_println!("[syscall/linux]   FAIL: landlock_restrict_self valid not EBADF");
             return Err(KernelError::InternalError);
         }
+        // landlock_restrict_self LOG_SAME_EXEC_OFF=0x1 -> EBADF
+        // (well-formed; Linux 6.10).
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_SAME_EXEC_OFF not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_restrict_self LOG_NEW_EXEC_ON=0x2 -> EBADF (Linux 6.10).
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_NEW_EXEC_ON not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_restrict_self LOG_SUBDOMAINS_OFF=0x4 -> EBADF (Linux 6.12).
+        let a = SyscallArgs { arg0: 0, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_SUBDOMAINS_OFF not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_restrict_self all three log flags (0x7) -> EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: 7, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self all log flags not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // landlock_restrict_self LOG_SAME_EXEC_OFF + undef high bit
+        // (0x101) -> EINVAL (mask is bit-precise).
+        let a = SyscallArgs { arg0: 0, arg1: 0x101, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self high bit not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   landlock_restrict_self log flags: OK");
 
         // kcmp bad type -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };

@@ -16614,3 +16614,70 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   landlock_create_ruleset
 ##      flag dispatch: OK" in build/serial-test.txt.
 
+
+## 188. Linux ABI: landlock_restrict_self log flags (6.10 + 6.12).
+##
+##      Where:  kernel/src/syscall/linux.rs::sys_landlock_restrict_self.
+##
+##      Problem: sys_landlock_restrict_self rejected any non-zero
+##              `flags` with EINVAL.  Linux 6.10 introduced
+##              LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF (1<<0) and
+##              LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON (1<<1) for
+##              audit-log control during the no-new-privs exec
+##              transition, and Linux 6.12 added
+##              LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF (1<<2)
+##              to suppress audit logs in child rulesets.  Probes
+##              calling `landlock_restrict_self(fd,
+##              LANDLOCK_RESTRICT_SELF_LOG_*)` to set up sane
+##              audit defaults saw EINVAL on a kernel that ought
+##              to accept the bits, masking a behavioural difference
+##              behind a parse error.  Since `landlock_create_ruleset`
+##              honestly reports ABI version 0, no caller can
+##              actually reach a state where this matters today —
+##              but the parse error surfaces on probes that
+##              optimistically pass log flags without checking the
+##              ABI version first.
+##
+##      Fix:    Defined LANDLOCK_RESTRICT_SELF_FLAGS = 0x7 and
+##              switched to `flags & !FLAGS != 0 -> EINVAL`.  The
+##              terminal EBADF (no real ruleset fd) is preserved
+##              for any well-formed call.
+##
+##      Self-tests (boot-time):
+##        * landlock_restrict_self(fd=0, flags=8) -> EINVAL
+##          (undefined bit 0x8; new — replaces old
+##          "flags=1 -> EINVAL" test which now correctly EBADFs).
+##        * landlock_restrict_self(fd=0, flags=0) -> EBADF  (kept).
+##        * landlock_restrict_self(fd=0, flags=1 = LOG_SAME_EXEC_OFF)
+##          -> EBADF  (Linux 6.10; new).
+##        * landlock_restrict_self(fd=0, flags=2 = LOG_NEW_EXEC_ON)
+##          -> EBADF  (Linux 6.10; new).
+##        * landlock_restrict_self(fd=0, flags=4 = LOG_SUBDOMAINS_OFF)
+##          -> EBADF  (Linux 6.12; new).
+##        * landlock_restrict_self(fd=0, flags=7 = all log) -> EBADF
+##          (new).
+##        * landlock_restrict_self(fd=0, flags=0x101 = LOG_SAME +
+##          undefined 0x100) -> EINVAL  (mask is bit-precise; new).
+##        * Emits "[syscall/linux]   landlock_restrict_self log
+##          flags: OK".
+##
+##      Known limitations:
+##        * The log flags are accepted but have no effect — we
+##          never actually restrict the process or emit audit
+##          logs, since Landlock is reported absent at ABI version 0.
+##          When real Landlock lands, this needs the per-flag
+##          semantics: SAME_EXEC_OFF disables the audit-log entry
+##          on the calling exec, NEW_EXEC_ON enables it on the
+##          next exec, and SUBDOMAINS_OFF inhibits audit emission
+##          from rules layered on top by descendant tasks.
+##        * Terminal remains EBADF rather than EOPNOTSUPP that
+##          a real "Landlock missing" kernel would give.  EBADF
+##          is correct given the ruleset_fd is never a real
+##          Landlock fd (landlock_create_ruleset never produces
+##          one), and probes ordering EBADF before kernel-feature
+##          checks see a meaningful "fd doesn't exist" signal.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   landlock_restrict_self
+##      log flags: OK" in build/serial-test.txt.
+

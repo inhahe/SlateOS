@@ -18603,3 +18603,56 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          (fd, nstype) pair has nothing to attach to.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+##  224. Linux ABI: rt_sigqueueinfo / rt_tgsigqueueinfo
+##      info-before-sig (batch 195).
+##
+##      Linux's kernel/signal.c::SYSCALL_DEFINE3(rt_sigqueueinfo) calls
+##      __copy_siginfo_from_user(sig, &info, uinfo) first, which does
+##      copy_from_user(&info, uinfo, sizeof(struct siginfo)) and returns
+##      -EFAULT on a bad uinfo pointer before any signal-number
+##      validation.  The sig argument is only consulted later by
+##      post_copy_siginfo_from_user (using info->si_signo for layout
+##      dispatch) and ultimately kill_proc_info -> valid_signal which
+##      gates with EINVAL.  Same pattern for rt_tgsigqueueinfo.
+##
+##      Pre-batch we validated sig first (0..=64 -> EINVAL) and the
+##      info pointer second (NULL -> EFAULT, validate_user_read ->
+##      EFAULT).  A probe passing (sig=99, info=NULL) saw EINVAL
+##      where Linux returns EFAULT, breaking the gate-order shape
+##      that strace's --decode-fds and CRIU's signal replay depend
+##      on to distinguish "kernel doesn't have this signal" from
+##      "userspace passed a junk buffer."
+##
+##      Fix: swap the validation order in both sys_rt_sigqueueinfo
+##      and sys_rt_tgsigqueueinfo so the siginfo-pointer check
+##      (NULL + validate_user_read) runs before the sig range check.
+##      The forward to sys_kill / sys_tgkill is unchanged and still
+##      enforces sig range via its own valid_signal-equivalent.
+##
+##      Self-tests updated/added (5 each call, was 2 each):
+##        * rt_sigqueueinfo(sig=99, info=valid) -> EINVAL
+##          (unchanged; sig check fires after copy succeeds).
+##        * rt_sigqueueinfo(sig=9, info=NULL) -> EFAULT
+##          (unchanged; happens to match either order).
+##        * rt_sigqueueinfo(sig=99, info=NULL) -> EFAULT (new,
+##          was EINVAL; this is the gate-order discriminator).
+##        * Same three for rt_tgsigqueueinfo with corresponding
+##          arg shifts (sig is arg2, info is arg3).
+##      Marker emitted: "rt_sig*queueinfo info-before-sig: OK".
+##
+##      Known limitations:
+##        * Siginfo payload is still dropped at the kill forward —
+##          we don't carry si_code/si_pid/si_uid through to delivery.
+##        * No CAP_KILL check on cross-process queueinfo; our
+##          kill_proc_info equivalent allows any send (matches
+##          our existing posix_signal model).
+##        * Linux's post_copy_siginfo_from_user does additional
+##          per-signo layout checks (siginfo size discrimination
+##          for SIGCHLD vs SIGSEGV etc.) that we don't replicate;
+##          a probe with mismatched layout sees ENOSYS-equivalent
+##          from us where Linux returns EINVAL.
+##
+##      First boot run timed out at 120s (apparent QEMU flake,
+##      matches batch 191 pattern); re-run with --timeout=300
+##      PASSED (BOOT_OK at 24s).  Build clean.

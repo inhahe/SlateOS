@@ -16455,17 +16455,34 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `rt_sigqueueinfo(pid, sig, info*)`.
+///
+/// Linux's `kernel/signal.c::SYSCALL_DEFINE3(rt_sigqueueinfo)` calls
+/// `__copy_siginfo_from_user(sig, &info, uinfo)` *first*, which does
+/// `copy_from_user(&info, uinfo, sizeof(struct siginfo))` and returns
+/// `-EFAULT` for a bad `uinfo` pointer before any signal-number
+/// validation happens.  The sig argument is only consulted later, by
+/// `post_copy_siginfo_from_user` (layout dispatch using
+/// `info->si_signo`) and `kill_proc_info` (where `valid_signal(sig)`
+/// finally gates with EINVAL).
+///
+/// Pre-batch we validated sig first and the info pointer second, so
+/// a probe passing `sig=99, info=NULL` saw EINVAL where Linux returns
+/// EFAULT.  Swap the order to match.
 fn sys_rt_sigqueueinfo(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let sig = args.arg1 as i32;
-    if !(0..=64).contains(&sig) {
-        return linux_err(errno::EINVAL);
-    }
+    // 1. Mirror Linux's copy_from_user(uinfo, sizeof(struct siginfo)):
+    //    EFAULT for NULL or unmapped buffer comes before sig validation.
     if args.arg2 == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 128) {
         return linux_err(linux_errno_for(e));
+    }
+    // 2. sig validation matches Linux's eventual valid_signal() check
+    //    inside the kill_proc_info path.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sig = args.arg1 as i32;
+    if !(0..=64).contains(&sig) {
+        return linux_err(errno::EINVAL);
     }
     // Forward to kill semantics — the signal goes through, the siginfo
     // payload is dropped because our dispatch doesn't carry it.
@@ -16481,17 +16498,21 @@ fn sys_rt_sigqueueinfo(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `rt_tgsigqueueinfo(tgid, tid, sig, info*)`.
+///
+/// Same gate order as `rt_sigqueueinfo`: Linux copies the siginfo
+/// buffer in `__copy_siginfo_from_user` before sig validation, so a
+/// bad `info` pointer surfaces EFAULT regardless of sig shape.
 fn sys_rt_tgsigqueueinfo(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let sig = args.arg2 as i32;
-    if !(0..=64).contains(&sig) {
-        return linux_err(errno::EINVAL);
-    }
     if args.arg3 == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 128) {
         return linux_err(linux_errno_for(e));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sig = args.arg2 as i32;
+    if !(0..=64).contains(&sig) {
+        return linux_err(errno::EINVAL);
     }
     // Forward to tgkill semantics.
     let tgkill_args = SyscallArgs {
@@ -36535,20 +36556,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // rt_sigqueueinfo bad sig -> EINVAL.
+        // rt_sigqueueinfo bad sig + valid info -> EINVAL (sig range
+        // check fires after the info-copy succeeds).
         let a = SyscallArgs { arg0: 1, arg1: 99, arg2: siginfo_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RT_SIGQUEUEINFO, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: rt_sigqueueinfo bad sig not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // rt_sigqueueinfo NULL info -> EFAULT.
+        // rt_sigqueueinfo NULL info -> EFAULT (copy_from_user fires
+        // before sig validation in Linux).
         let a = SyscallArgs { arg0: 1, arg1: 9, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RT_SIGQUEUEINFO, &a).value != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: rt_sigqueueinfo NULL info not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // rt_sigqueueinfo bad sig + NULL info -> EFAULT (info pointer
+        // check runs *before* sig validation; pre-batch returned EINVAL).
+        let a = SyscallArgs { arg0: 1, arg1: 99, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGQUEUEINFO, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigqueueinfo bad sig + NULL info not EFAULT");
+            return Err(KernelError::InternalError);
+        }
 
-        // rt_tgsigqueueinfo bad sig -> EINVAL.
+        // rt_tgsigqueueinfo bad sig + valid info -> EINVAL.
         let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 99, arg3: siginfo_ptr, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RT_TGSIGQUEUEINFO, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: rt_tgsigqueueinfo bad sig not EINVAL");
@@ -36560,6 +36590,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: rt_tgsigqueueinfo NULL info not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // rt_tgsigqueueinfo bad sig + NULL info -> EFAULT (info pointer
+        // check runs *before* sig validation; pre-batch returned EINVAL).
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_TGSIGQUEUEINFO, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: rt_tgsigqueueinfo bad sig + NULL info not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   rt_sig*queueinfo info-before-sig: OK");
 
         // timer_create bad clockid -> EINVAL.
         let a = SyscallArgs { arg0: 99, arg1: 0, arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0 };

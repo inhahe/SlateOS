@@ -11626,36 +11626,49 @@ fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
 ///   * `ESRCH` / `EPERM` — propagated from the underlying signal send
 ///     (target gone, or caller lacks authority).
 fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
-    // flags must be 0 per current Linux.
+    // Linux kernel/signal.c SYSCALL_DEFINE4(pidfd_send_signal) gate
+    // order, mirrored here so feature-probes see Linux-shaped errnos:
+    //
+    //   1. flags & ~(supported_bits)         -> EINVAL
+    //   2. fdget(pidfd)                      -> EBADF (no such fd)
+    //   3. pidfd_to_pid(f.file)              -> EBADF (fd isn't a pidfd)
+    //   4. if (info) copy_siginfo_from_user  -> EFAULT
+    //   5. kill_pid_info_type / valid_signal -> EINVAL (sig > NSIG)
+    //
+    // Previously we validated the signal range and the siginfo pointer
+    // BEFORE looking up the fd, so callers probing with a bogus
+    // (fd=anything, sig=999) saw EINVAL where Linux returns EBADF
+    // (fdget fires first).  Reorder to match.
     if args.arg3 != 0 {
         return linux_err(errno::EINVAL);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let sig = args.arg1 as i32;
-    if !(0..=64).contains(&sig) {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg2 != 0 {
-        // struct siginfo_t = 128 bytes.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 128) {
-            return linux_err(linux_errno_for(e));
-        }
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    // Now look up the entry — kernel-context (no caller PCB) surfaces
-    // EBADF here, matching the eventfd / pidfd_open install paths.
+    // fdget — kernel-context (no caller PCB) surfaces EBADF here,
+    // matching the eventfd / pidfd_open install paths.
     let entry = match lookup_caller_fd(fd) {
         Ok(e) => e,
         Err(r) => return r,
     };
     if entry.kind != HandleKind::PidFd {
-        // Linux returns EBADF when pidfd_send_signal is called on a
-        // non-pidfd file descriptor.
+        // pidfd_to_pid returns ERR_PTR(-EBADF) when the file isn't a
+        // pidfd; the syscall propagates it as EBADF.
         return linux_err(errno::EBADF);
+    }
+    if args.arg2 != 0 {
+        // copy_siginfo_from_user_any — struct siginfo_t = 128 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 128) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sig = args.arg1 as i32;
+    if !(0..=64).contains(&sig) {
+        // valid_signal() inside kill_pid_info; surfaced after fd & info.
+        return linux_err(errno::EINVAL);
     }
     // entry.raw_handle holds the target PID as a u64 (set by
     // `FdEntry::pidfd`).  Hand off to sys_kill, which dispatches the
@@ -32927,20 +32940,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pidfd_open(missing pid) not ESRCH");
             return Err(KernelError::InternalError);
         }
-        // pidfd_send_signal bogus sig -> EINVAL.
+        // pidfd_send_signal bogus sig -> EBADF: Linux validates the fd
+        // (fdget + pidfd_to_pid) before reaching kill_pid_info's
+        // valid_signal check, so an out-of-range signal on a missing
+        // fd surfaces EBADF, not EINVAL.  In kernel context our fd
+        // lookup always fails with EBADF.
         let a = SyscallArgs { arg0: 0, arg1: 999, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: pidfd_send_signal(bad sig) not EINVAL");
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_send_signal(bad sig) -> {} (want EBADF)",
+                dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
-        // pidfd_send_signal nonzero flags -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 9, arg2: 0, arg3: 1,
+        // pidfd_send_signal nonzero flags -> EINVAL.  Flags are checked
+        // before fdget, so this still fires even with a junk fd.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 9, arg2: 0, arg3: 1,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: pidfd_send_signal(flags) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // pidfd_send_signal with bogus siginfo pointer + bogus sig +
+        // flags=0 -> EBADF: fdget fires before copy_siginfo_from_user
+        // and before valid_signal, so the fd-lookup failure shadows
+        // both the EFAULT and EINVAL paths.  This was specifically
+        // EINVAL pre-batch (we checked sig first).
+        let a = SyscallArgs { arg0: 0, arg1: 999, arg2: 0x1, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_send_signal(bad sig+info) -> {} (want EBADF)",
+                dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
         // pidfd_send_signal valid args in kernel context -> EBADF: no
@@ -32957,6 +32993,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   pidfd_send_signal flags/fd/sig gate order: OK"
+        );
         // pidfd_getfd nonzero flag -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };

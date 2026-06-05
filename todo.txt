@@ -18322,3 +18322,53 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          EFD_SEMAPHORE.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+## 219. Linux ABI: pidfd_send_signal flags/fd/sig gate order
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's SYSCALL_DEFINE4(pidfd_send_signal) in
+##      kernel/signal.c gates in this order:
+##          1. flags & ~PIDFD_SIGNAL_* -> EINVAL
+##          2. fdget(pidfd)            -> EBADF (no such fd)
+##          3. pidfd_to_pid(f.file)    -> EBADF (fd isn't a pidfd)
+##          4. access_pidfd_pidns      -> EINVAL
+##          5. switch on flags
+##          6. if (info) copy_siginfo_from_user -> EFAULT
+##          7. kill_pid_info_type / valid_signal(sig) -> EINVAL
+##
+##      Pre-batch sys_pidfd_send_signal checked sig range and the
+##      siginfo pointer BEFORE looking up the fd, so callers probing
+##      pidfd_send_signal with (fd=anything, sig=999) saw EINVAL
+##      where Linux returns EBADF (fdget fires first).  Likewise a
+##      bogus siginfo pointer with a junk fd surfaced EFAULT
+##      pre-batch where Linux returns EBADF.
+##
+##      Fix: reorder so flags -> fd validate -> fd lookup ->
+##      pidfd-kind -> siginfo readability -> sig range.  Keep
+##      flags as the first gate (Linux does this before fdget).
+##
+##      Self-tests updated/added (4):
+##        * PIDFD_SEND_SIGNAL(fd=0, sig=999, flags=0) now expects
+##          EBADF (was EINVAL).  Confirms fd lookup precedes sig
+##          validation.
+##        * PIDFD_SEND_SIGNAL(fd=u64::MAX, sig=9, flags=1) -> EINVAL.
+##          Confirms flags-check is still first.
+##        * PIDFD_SEND_SIGNAL(fd=0, sig=999, info=0x1, flags=0) ->
+##          EBADF (new).  Confirms fd lookup shadows both the EFAULT
+##          and EINVAL paths for the siginfo + sig combination.
+##        * PIDFD_SEND_SIGNAL(fd=3, sig=9, flags=0) -> EBADF
+##          (unchanged) — kernel-context lookup_caller_fd.
+##      Marker emitted: "pidfd_send_signal flags/fd/sig gate order: OK".
+##
+##      Known limitations:
+##        * In kernel context (caller_pid=None) every fd lookup is
+##          EBADF, so the (valid pidfd, bad sig) -> EINVAL terminal
+##          path is unreachable from the boot self-test.
+##        * PIDFD_SIGNAL_THREAD / PIDFD_SIGNAL_THREAD_GROUP /
+##          PIDFD_SIGNAL_PROCESS_GROUP (Linux 6.9+) are still
+##          rejected as EINVAL by the flags gate; once thread-pidfd
+##          semantics land they should be accepted.
+##        * pidns access check (#4) is not modelled — we have no
+##          pid namespaces yet.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

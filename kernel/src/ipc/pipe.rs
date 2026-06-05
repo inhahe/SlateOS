@@ -54,8 +54,20 @@ use spin::Mutex;
 /// this is exactly 4 pages.
 const DEFAULT_BUFFER_CAPACITY: usize = 64 * 1024;
 
-/// Maximum pipe buffer capacity (for future `fcntl`-style resizing).
-const _MAX_BUFFER_CAPACITY: usize = 1024 * 1024; // 1 MiB
+/// Minimum pipe buffer capacity exposed to userspace via
+/// `fcntl(F_SETPIPE_SZ)`.  Linux requires the requested size to be
+/// at least one page (typically 4096 bytes); below that it returns
+/// EINVAL.  We mirror the same lower bound so userspace probes get
+/// the same error code they would on Linux.
+pub const MIN_PIPE_BUFFER_CAPACITY: usize = 4096;
+
+/// Maximum pipe buffer capacity exposed to userspace via
+/// `fcntl(F_SETPIPE_SZ)`.  Linux's default `/proc/sys/fs/pipe-max-size`
+/// is 1 MiB; raising that on Linux requires `CAP_SYS_RESOURCE`.  We
+/// treat this as a hard upper bound: anything above returns EPERM,
+/// matching what an unprivileged Linux caller would see at the
+/// default sysctl.
+pub const MAX_PIPE_BUFFER_CAPACITY: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Pipe ID and Handle
@@ -817,6 +829,95 @@ pub fn close(handle: PipeHandle) {
 }
 
 // ---------------------------------------------------------------------------
+// Capacity query / resize (for fcntl F_GETPIPE_SZ / F_SETPIPE_SZ)
+// ---------------------------------------------------------------------------
+
+/// Return the byte capacity of the ring buffer behind `handle`.
+///
+/// Linux's `fcntl(F_GETPIPE_SZ)` reports the size of the kernel-side
+/// pipe buffer regardless of which end the caller holds — the read
+/// end and the write end share one buffer.  We mirror that: the
+/// `handle.end()` is not consulted.
+///
+/// # Returns
+///
+/// - `Ok(cap)` — the buffer's current capacity in bytes.
+/// - `Err(InvalidHandle)` — the pipe no longer exists.
+pub fn capacity(handle: PipeHandle) -> KernelResult<usize> {
+    let table = PIPES.lock();
+    let pipe = table
+        .get(&handle.pipe_id())
+        .ok_or(KernelError::InvalidHandle)?;
+    Ok(pipe.buf.len())
+}
+
+/// Resize the ring buffer behind `handle` to exactly `new_cap`
+/// bytes, preserving any data currently buffered.
+///
+/// This helper enforces only the invariant that data must not be
+/// silently dropped:
+///
+/// - `new_cap < currently buffered bytes` → `DeviceBusy`.
+///
+/// User-facing policy (the per-page lower bound and the
+/// `MAX_PIPE_BUFFER_CAPACITY` upper bound that Linux distinguishes
+/// as EINVAL vs EPERM) lives in the syscall layer — see
+/// `sys_fcntl`'s `F_SETPIPE_SZ` arm.  Kernel callers that need to
+/// resize within the [`MIN_PIPE_BUFFER_CAPACITY`, `MAX_PIPE_BUFFER_CAPACITY`]
+/// window should consult those constants themselves.
+///
+/// On success the call replaces the underlying `Vec<u8>` and returns
+/// the realised capacity (the same value as `new_cap`).  Linux rounds
+/// the requested size up to a power of two; we keep the caller's
+/// exact value because our buffer is a plain `Vec` and nothing else
+/// relies on a power-of-two size.
+///
+/// `handle.end()` is not consulted: read and write ends share one
+/// buffer, so resizing through either is semantically identical.
+///
+/// # Returns
+///
+/// - `Ok(new_cap)` — the new buffer capacity.
+/// - `Err(InvalidHandle)` — the pipe no longer exists.
+/// - `Err(DeviceBusy)` — buffered data wouldn't fit in `new_cap`.
+pub fn set_capacity(handle: PipeHandle, new_cap: usize) -> KernelResult<usize> {
+    let mut table = PIPES.lock();
+    let pipe = table
+        .get_mut(&handle.pipe_id())
+        .ok_or(KernelError::InvalidHandle)?;
+
+    if new_cap < pipe.len {
+        return Err(KernelError::DeviceBusy);
+    }
+
+    // Allocate the new buffer and copy logical contents starting from
+    // `head`.  After the move the new buffer is unwrapped: data sits
+    // at indices [0, len) and head resets to 0.
+    let mut new_buf = vec![0u8; new_cap];
+    if pipe.len > 0 {
+        let old_cap = pipe.buf.len();
+        let head = pipe.head;
+        let len = pipe.len;
+        // First chunk: head..end-of-old-buffer (or len if no wrap).
+        let first = len.min(old_cap.saturating_sub(head));
+        // SAFETY-equivalent: indices computed from old_cap/head/len
+        // which are all consistent within the pipe; `new_buf` has
+        // exactly `new_cap >= len` slots, so writes stay in-bounds.
+        new_buf[..first].copy_from_slice(&pipe.buf[head..head + first]);
+        let second = len - first;
+        if second > 0 {
+            new_buf[first..first + second].copy_from_slice(&pipe.buf[..second]);
+        }
+    }
+
+    pipe.buf = new_buf;
+    pipe.head = 0;
+    // pipe.len is unchanged — same number of bytes still buffered.
+
+    Ok(new_cap)
+}
+
+// ---------------------------------------------------------------------------
 // Polling helpers (for completion port)
 // ---------------------------------------------------------------------------
 
@@ -922,6 +1023,9 @@ pub fn readable_bytes(handle: PipeHandle) -> u64 {
 /// 4. Read-end close detection (broken pipe).
 /// 5. Non-blocking operations.
 /// 6. Blocking write + read via spawned task.
+/// 7. `dup`/`close` refcount semantics.
+/// 8. `capacity`/`set_capacity` round-trip (covers
+///    `fcntl(F_GETPIPE_SZ)` and `F_SETPIPE_SZ` at the helper layer).
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[pipe] Running pipe self-test...");
 
@@ -932,8 +1036,124 @@ pub fn self_test() -> KernelResult<()> {
     test_nonblocking()?;
     test_blocking_roundtrip()?;
     test_dup_refcount()?;
+    test_capacity_roundtrip()?;
 
     serial_println!("[pipe] Pipe self-test PASSED");
+    Ok(())
+}
+
+/// Test: `capacity` / `set_capacity` cover the `F_GETPIPE_SZ` /
+/// `F_SETPIPE_SZ` semantics.  We verify:
+///
+/// 1. A fresh pipe reports `DEFAULT_BUFFER_CAPACITY` on both ends.
+/// 2. Growing preserves buffered data.
+/// 3. Shrinking below buffered data returns `DeviceBusy`.
+/// 4. Shrinking to (or above) buffered data succeeds and unwraps
+///    the ring (head resets to 0; data still readable in order).
+/// 5. A closed pipe surfaces `InvalidHandle` from both queries.
+#[allow(clippy::cognitive_complexity)]
+fn test_capacity_roundtrip() -> KernelResult<()> {
+    let (rh, wh) = create();
+
+    // (1) Default capacity, observable from either end.
+    if capacity(rh)? != DEFAULT_BUFFER_CAPACITY
+        || capacity(wh)? != DEFAULT_BUFFER_CAPACITY
+    {
+        serial_println!("[pipe]   FAIL: default capacity wrong");
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+
+    // (2) Grow to MAX, then verify the new size sticks and prior
+    //     state survives.  Write a payload first so the resize copy
+    //     path is exercised.
+    let payload = b"capacity-roundtrip-payload";
+    write(wh, payload)?;
+    let grown = set_capacity(wh, MAX_PIPE_BUFFER_CAPACITY)?;
+    if grown != MAX_PIPE_BUFFER_CAPACITY
+        || capacity(rh)? != MAX_PIPE_BUFFER_CAPACITY
+    {
+        serial_println!("[pipe]   FAIL: grow returned {}", grown);
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+
+    // Read back the payload — must be byte-for-byte unchanged.
+    let mut buf = [0u8; 64];
+    let n = read(rh, &mut buf)?;
+    if n != payload.len() || &buf[..n] != payload {
+        serial_println!("[pipe]   FAIL: payload corrupted on grow");
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+
+    // (3) Buffer some data, then attempt to shrink below the
+    //     buffered count — must fail without dropping bytes.
+    write(wh, b"keep-me")?;
+    match set_capacity(wh, MIN_PIPE_BUFFER_CAPACITY) {
+        Ok(_) => {} // 4096 >= 7, so this is allowed; verify below.
+        Err(e) => {
+            serial_println!("[pipe]   FAIL: shrink rejected unexpectedly: {:?}", e);
+            close(rh);
+            close(wh);
+            return Err(KernelError::InternalError);
+        }
+    }
+    if capacity(rh)? != MIN_PIPE_BUFFER_CAPACITY {
+        serial_println!("[pipe]   FAIL: shrink capacity wrong");
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+    // Data must survive shrink.
+    let n = read(rh, &mut buf)?;
+    if n != 7 || &buf[..n] != b"keep-me" {
+        serial_println!("[pipe]   FAIL: data lost across shrink");
+        close(rh);
+        close(wh);
+        return Err(KernelError::InternalError);
+    }
+
+    // (4) Now force a DeviceBusy: write more than 8 bytes, then ask
+    //     for a 4-byte buffer (below MIN — would also fail at the
+    //     syscall layer, but here we go straight to the helper to
+    //     prove the data-fit check fires; we use exactly the
+    //     buffered byte-count threshold).
+    //
+    //     The helper itself does NOT enforce MIN_PIPE_BUFFER_CAPACITY
+    //     — that lives in `sys_fcntl` — so we can request an
+    //     arbitrarily small value to trip the buffered-bytes check.
+    write(wh, b"twelve_bytes")?; // 12 bytes
+    let busy = set_capacity(wh, 4);
+    match busy {
+        Err(KernelError::DeviceBusy) => {} // expected
+        other => {
+            serial_println!("[pipe]   FAIL: expected DeviceBusy, got {:?}", other);
+            close(rh);
+            close(wh);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Drain to leave the pipe clean before close.
+    let _ = read(rh, &mut buf)?;
+
+    // (5) After close, both queries surface InvalidHandle.
+    close(rh);
+    close(wh);
+    if !matches!(capacity(rh), Err(KernelError::InvalidHandle))
+        || !matches!(
+            set_capacity(rh, DEFAULT_BUFFER_CAPACITY),
+            Err(KernelError::InvalidHandle)
+        )
+    {
+        serial_println!("[pipe]   FAIL: closed pipe didn't return InvalidHandle");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[pipe]   capacity/set_capacity round-trip: OK");
     Ok(())
 }
 

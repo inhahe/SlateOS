@@ -10931,3 +10931,87 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        * Constant sanity for all 6 ioprio constants.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+## 117. Linux ABI batch 88: fcntl(F_GETPIPE_SZ / F_SETPIPE_SZ) —
+##      per-pipe kernel ring-buffer query / resize. (DONE)
+##
+##      Motivation: glibc / musl / busybox and many performance
+##      tools (e.g. `dd`, `pv`, shell builtins that bench pipes)
+##      probe `F_GETPIPE_SZ` to learn the kernel pipe capacity and
+##      use `F_SETPIPE_SZ` to grow it for bulk copies.  Before
+##      this batch our fcntl dispatch fell through to the EINVAL
+##      catch-all (post-batch 86), so even a "what is my pipe
+##      capacity?" probe couldn't succeed.
+##
+##      Constants:
+##        F_SETPIPE_SZ = 1031
+##        F_GETPIPE_SZ = 1032
+##        ipc::pipe::MIN_PIPE_BUFFER_CAPACITY = 4096    (one page)
+##        ipc::pipe::MAX_PIPE_BUFFER_CAPACITY = 1 MiB   (matches Linux
+##          default /proc/sys/fs/pipe-max-size)
+##
+##      Wiring:
+##        * `ipc::pipe::capacity(handle)` — returns the underlying
+##          `Vec<u8>` length.  Both read and write ends share one
+##          buffer; `handle.end()` is not consulted.
+##        * `ipc::pipe::set_capacity(handle, new_cap)` — allocates
+##          a fresh buffer, copies the logical contents starting
+##          from `head` (unwrapping the ring), replaces the old
+##          `Vec<u8>`.  Returns DeviceBusy if `new_cap < pipe.len`
+##          so data is never silently dropped.  Does NOT enforce
+##          MIN/MAX — those gates live in the syscall layer so
+##          internal kernel callers can resize freely.
+##        * `sys_fcntl` arms:
+##          - F_GETPIPE_SZ: fd lookup; non-pipe -> EBADF; returns
+##            capacity as i64.
+##          - F_SETPIPE_SZ: fd lookup; non-pipe -> EBADF;
+##            arg as i64 < 0 -> EINVAL; arg < MIN -> EINVAL;
+##            arg > MAX -> EPERM (matches Linux's unprivileged
+##            response to size > pipe-max-size); else calls
+##            set_capacity, returns the new size.
+##
+##      Linux semantics matched:
+##        * EBADF for non-pipe / closed fd (fs/pipe.c).
+##        * EINVAL for size below page minimum.
+##        * EPERM for size above hard cap.
+##        * EBUSY for shrink that would drop buffered data.
+##        * Both ends report the same capacity.
+##
+##      Linux semantics deliberately NOT matched:
+##        * Linux rounds the requested size up to a power of two;
+##          we use the caller's exact value.  Nothing else in our
+##          pipe ring buffer relies on power-of-two sizes, and
+##          userspace observes the realised value via the syscall
+##          return.
+##        * Linux's hard cap is configurable via
+##          /proc/sys/fs/pipe-max-size; ours is a compile-time
+##          constant.  When sysctl wiring exists for pipe-max-size
+##          we can swap MAX_PIPE_BUFFER_CAPACITY for a runtime
+##          read; the syscall-arm structure does not change.
+##
+##      Known limitation: none beyond the deliberate non-matches
+##      above.  Data preservation is total — a grow + read-back
+##      test confirms byte-for-byte fidelity, and shrink rejects
+##      the request instead of dropping data.
+##
+##      Self-test (boot path):
+##        ipc::pipe::test_capacity_roundtrip exercises the helper:
+##          * Default capacity on fresh pipe = 64 KiB on both ends.
+##          * Grow to MAX preserves a buffered payload byte-for-byte.
+##          * Shrink to MIN preserves "keep-me" across the resize.
+##          * 12-byte buffered + shrink to 4 -> DeviceBusy.
+##          * Closed pipe -> InvalidHandle for both capacity and
+##            set_capacity.
+##        syscall/linux batch 88 block adds:
+##          * Constant sanity for F_GETPIPE_SZ / F_SETPIPE_SZ.
+##          * Kernel-context (caller_pid None) -> EBADF for both
+##            new cmds (proves they share the early-exit).
+##          * Synthetic Linux process with a real pipe fd:
+##            - linux_fd_lookup confirms HandleKind::Pipe.
+##            - capacity == DEFAULT (64 KiB).
+##            - Grow to MAX, then back to MIN, capacity tracks.
+##            - Constant sanity for MIN/MAX bounds.
+##            - try_write seeds 8 KiB, shrink under -> DeviceBusy.
+##            - stdio fd != Pipe (sanity for the kind-gate).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).

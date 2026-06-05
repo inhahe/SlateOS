@@ -10728,4 +10728,55 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
 
+## 114. Linux ABI batch 85: arch_prctl(ARCH_SET_GS / ARCH_GET_GS)
+##      via IA32_KERNEL_GS_BASE.
+##
+##      Motivation: pre-batch ARCH_SET_GS (0x1001) and ARCH_GET_GS
+##      (0x1004) returned ENOSYS.  The x86_64 Go runtime stores
+##      goroutine-local state via GS; rust's tokio with thread-
+##      pinned locals occasionally pokes it; gVisor uses GS for
+##      its user/kernel split; some BPF JIT scratch areas live
+##      there too.  ENOSYS forces all of these to either panic
+##      or fall back to a slow generic path.
+##
+##      Wired up: ARCH_SET_GS / ARCH_GET_GS now write/read the
+##      same MSR Linux uses — IA32_KERNEL_GS_BASE (0xC000_0102),
+##      not IA32_GS_BASE (0xC000_0101).  This is the canonical
+##      x86_64 implementation:
+##        * At SYSCALL entry the kernel issues SWAPGS, exchanging
+##          IA32_GS_BASE (userspace value) with
+##          IA32_KERNEL_GS_BASE (kernel per-CPU pointer).
+##        * While in the syscall, the userspace value is in
+##          KERNEL_GS_BASE.  Writing it here installs the new
+##          userspace GS.
+##        * SYSRETQ's trailing SWAPGS swaps them again, so the
+##          value we just wrote becomes the active GS_BASE on
+##          return to userspace.
+##      Mirrors arch/x86/kernel/process_64.c::do_arch_prctl_64.
+##
+##      Validation matches ARCH_SET_FS exactly:
+##        * addr >= USER_FS_BASE_MAX -> EPERM (covers (1<<47),
+##          kernel high half, u64::MAX).
+##        * NULL out pointer for ARCH_GET_GS -> EFAULT.
+##
+##      Self-test (boot path):
+##        * ARCH_SET_GS with 1<<47, kernel-half addr, u64::MAX
+##          -> EPERM for each.
+##        * ARCH_SET_GS with (1<<47) - 0x2000 -> 0; subsequent
+##          rdmsr verifies the MSR holds the written value.
+##        * ARCH_GET_GS with NULL -> EFAULT.
+##
+##      CAVEAT (boot self-test only): the test runs in kernel
+##      context before any userspace exists, so no SWAPGS has
+##      happened — IA32_KERNEL_GS_BASE currently holds the
+##      kernel's per-CPU pointer (set during syscall::entry::init).
+##      A successful ARCH_SET_GS overwrites it; the next syscall
+##      trampoline would then SWAPGS that garbage into IA32_GS_BASE
+##      and crash dereferencing PER_CPU.  The test brackets every
+##      success path with rdmsr-save / wrmsr-restore (same pattern
+##      as the ARCH_SET_FS test, except that one is benign
+##      because the kernel doesn't use FS).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
 

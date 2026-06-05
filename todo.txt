@@ -10322,3 +10322,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      todo 101).
 
 
+## 109. Linux ABI batch 80: PR_GET_SPECULATION_CTRL /
+##      PR_SET_SPECULATION_CTRL — consistent "not affected"
+##      stance.
+##
+##      Before this batch options 52 and 53 fell through to
+##      the generic EINVAL catch-all in sys_prctl.  Container
+##      runtimes (podman, cri-o), browsers (Chromium
+##      renderer sandbox), and OpenSSL since CVE-2018-3639
+##      (Spectre v4) probe PR_GET_SPECULATION_CTRL at init
+##      to learn whether the per-task SSBD / IBRS / L1D
+##      mitigations are installed.  EINVAL there looks like
+##      a kernel bug and forces them to install the
+##      mitigation themselves, which on a non-affected CPU
+##      is a measurable performance regression for nothing.
+##
+##      Linux semantics:
+##        * PR_GET_SPECULATION_CTRL (52):
+##          - arg2 (our arg1) = which:
+##              PR_SPEC_STORE_BYPASS = 0
+##              PR_SPEC_INDIRECT_BRANCH = 1
+##              PR_SPEC_L1D_FLUSH = 2
+##            Unknown -> ENODEV.
+##          - arg3/arg4/arg5 must be 0 or EINVAL.
+##          - Returns a bitfield:
+##              PR_SPEC_NOT_AFFECTED = 0
+##              PR_SPEC_PRCTL = 1
+##              PR_SPEC_ENABLE = 2
+##              PR_SPEC_DISABLE = 4
+##              PR_SPEC_FORCE_DISABLE = 8
+##              PR_SPEC_DISABLE_NOEXEC = 16
+##            On a CPU that doesn't need the mitigation
+##            (Apple Silicon, modern Intel post-mitigations,
+##            most AMD), Linux returns NOT_AFFECTED (0).
+##
+##        * PR_SET_SPECULATION_CTRL (53):
+##          - arg2 (our arg1) = which (same constants).
+##          - arg3 (our arg2) = ctrl (ENABLE/DISABLE/…).
+##          - arg4/arg5 must be 0 or EINVAL.
+##          - Unknown which -> ENODEV.
+##          - Known which on a NOT_AFFECTED CPU -> ENXIO
+##            ("the mitigation isn't controllable because
+##            the CPU isn't vulnerable").
+##
+##      Our stance: PR_SPEC_NOT_AFFECTED for all three
+##      supported features.  ENODEV for unknown features.
+##      ENXIO from PR_SET for known features (matching the
+##      PR_GET NOT_AFFECTED report — internally consistent).
+##
+##      Known limitation (IMPORTANT, deferred): we report
+##      NOT_AFFECTED even on CPUs that ARE affected (most
+##      x86_64).  This is defensible for a hypervisor-only
+##      kernel running in QEMU where the host already
+##      mitigates, but if we ever boot on bare metal and
+##      expose raw indirect branches we MUST either:
+##        a. Implement IBRS/SSBD/L1D-flush ourselves and
+##           report PR_SPEC_PRCTL | PR_SPEC_ENABLE (or
+##           whatever the current state is), or
+##        b. Restrict bare-metal boot to AMD CPUs known not
+##           to need IBRS.
+##      Otherwise sandbox callers will trust our "not
+##      affected" report and skip the mitigation they
+##      should have installed.  Track when we add bare-metal
+##      boot support.
+##
+##      Self-tests cover:
+##        * PR_GET valid which (0, 1, 2) -> 0.
+##        * PR_GET arg2..arg4 != 0 -> EINVAL.
+##        * PR_GET unknown which (3, 0xff, u64::MAX) ->
+##          ENODEV.
+##        * PR_SET known which (0/1/2) with any ctrl
+##          (ENABLE/DISABLE/FORCE_DISABLE) -> ENXIO.
+##        * PR_SET arg3/arg4 != 0 -> EINVAL.
+##        * PR_SET unknown which -> ENODEV.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
+

@@ -4512,6 +4512,78 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             let v = caller_pid().and_then(pcb::get_io_flusher).unwrap_or(0);
             SyscallResult::ok(i64::from(v))
         }
+        // PR_GET_SPECULATION_CTRL (52) — query per-task speculative
+        // execution mitigations.  Called by container runtimes
+        // (podman/cri-o sysctl policy), browsers (Chromium renderer
+        // sandbox), and OpenSSL since CVE-2018-3639 to learn whether
+        // a per-task mitigation has been installed.
+        //
+        // Linux semantics:
+        //   * arg2 (our arg1) = "which": PR_SPEC_STORE_BYPASS (0),
+        //     PR_SPEC_INDIRECT_BRANCH (1), PR_SPEC_L1D_FLUSH (2).
+        //     Unknown values -> ENODEV.
+        //   * arg3/arg4/arg5 (our arg2/arg3/arg4) must be 0 or EINVAL.
+        //   * Returns a bitfield: PR_SPEC_NOT_AFFECTED (0) if the
+        //     CPU isn't vulnerable; otherwise PR_SPEC_PRCTL (1) |
+        //     state bits (PR_SPEC_ENABLE=2, PR_SPEC_DISABLE=4,
+        //     PR_SPEC_FORCE_DISABLE=8, PR_SPEC_DISABLE_NOEXEC=16).
+        //
+        // We don't model speculative-execution vulnerabilities at
+        // all and don't have CPU-specific mitigation state, so the
+        // truthful answer for every supported `which` is
+        // PR_SPEC_NOT_AFFECTED (0).  This is what libraries see on
+        // a "not affected" CPU (Apple Silicon, modern Intel post-
+        // mitigations) and what they expect to fall back from
+        // gracefully.  ENODEV for unknown `which` matches Linux's
+        // strict feature-id check exactly.
+        //
+        // Known limitation: we report NOT_AFFECTED even on CPUs
+        // that ARE affected (most x86_64).  This is a defensible
+        // stance for a hypervisor-only kernel running in QEMU
+        // where the host already mitigates, but if we ever expose
+        // raw indirect branches on bare metal we MUST either
+        // implement IBRS/SSBD ourselves and report PR_SPEC_PRCTL,
+        // or restrict to AMD CPUs known not to need IBRS.
+        52 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            match args.arg1 {
+                0 | 1 | 2 => SyscallResult::ok(0), // PR_SPEC_NOT_AFFECTED
+                _ => linux_err(errno::ENODEV),
+            }
+        }
+        // PR_SET_SPECULATION_CTRL (53) — install a per-task
+        // speculative-execution mitigation control.  Linux
+        // semantics:
+        //   * arg2 (our arg1) = "which" (same constants as GET).
+        //   * arg3 (our arg2) = "ctrl": PR_SPEC_ENABLE,
+        //     PR_SPEC_DISABLE, PR_SPEC_FORCE_DISABLE,
+        //     PR_SPEC_DISABLE_NOEXEC.
+        //   * arg4/arg5 (our arg3/arg4) must be 0 or EINVAL.
+        //   * Unknown which -> ENODEV.
+        //   * Known which on a "not affected" CPU -> ENXIO ("the
+        //     mitigation is not controllable because the CPU
+        //     isn't vulnerable").  That's the path we take for
+        //     every supported `which`: PR_GET reports
+        //     NOT_AFFECTED, so PR_SET truthfully reports the
+        //     control is unavailable.
+        //
+        // This means a sandbox that calls
+        // PR_SET_SPECULATION_CTRL after a PR_GET that reported
+        // NOT_AFFECTED sees the consistent answer "this CPU
+        // doesn't need a per-task mitigation; you don't need to
+        // install one."  No security regression because PR_GET
+        // already told it nothing was active.
+        53 => {
+            if args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            match args.arg1 {
+                0 | 1 | 2 => linux_err(errno::ENXIO),
+                _ => linux_err(errno::ENODEV),
+            }
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -17990,6 +18062,119 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             pcb::destroy(test_pid);
             assert_eq!(pcb::get_io_flusher(test_pid), None);
             assert_eq!(pcb::set_io_flusher(test_pid, 1), None);
+        }
+
+        // Batch 80: PR_GET_SPECULATION_CTRL / PR_SET_SPECULATION_CTRL —
+        // consistent "not affected" stance.
+        // Verifications:
+        //   1. PR_GET_SPECULATION_CTRL(STORE_BYPASS / INDIRECT_BRANCH
+        //      / L1D_FLUSH) -> 0 (PR_SPEC_NOT_AFFECTED).
+        //   2. PR_GET_SPECULATION_CTRL with arg2..arg4 != 0 -> EINVAL.
+        //   3. PR_GET_SPECULATION_CTRL with unknown which -> ENODEV.
+        //   4. PR_SET_SPECULATION_CTRL(known which, …) -> ENXIO.
+        //   5. PR_SET_SPECULATION_CTRL with arg3/arg4 != 0 -> EINVAL.
+        //   6. PR_SET_SPECULATION_CTRL with unknown which -> ENODEV.
+        {
+            // PR_GET valid which -> 0.
+            for which in [0u64, 1, 2] {
+                let a = SyscallArgs { arg0: 52, arg1: which, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, {}) not 0 ({})",
+                        which,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET arg2..arg4 != 0 -> EINVAL.
+            for (idx, a) in [
+                SyscallArgs { arg0: 52, arg1: 0, arg2: 1, arg3: 0,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 52, arg1: 0, arg2: 0, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 52, arg1: 0, arg2: 0, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, …{}=1) not EINVAL ({})",
+                        idx + 3,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET unknown which -> ENODEV.
+            for which in [3u64, 0xff, u64::MAX] {
+                let a = SyscallArgs { arg0: 52, arg1: which, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value
+                    != -i64::from(errno::ENODEV)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, which={}) not ENODEV ({})",
+                        which,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET known which -> ENXIO.  Try each known which
+            // with a representative ctrl value.
+            for which in [0u64, 1, 2] {
+                for ctrl in [2u64, 4, 8] {
+                    let a = SyscallArgs { arg0: 53, arg1: which, arg2: ctrl,
+                        arg3: 0, arg4: 0, arg5: 0 };
+                    if dispatch_linux(nr::PRCTL, &a).value
+                        != -i64::from(errno::ENXIO)
+                    {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, which={}, ctrl={}) not ENXIO ({})",
+                            which, ctrl,
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+            }
+            // PR_SET arg3/arg4 != 0 -> EINVAL.  arg3/arg4 take
+            // precedence over the which/ctrl validation in Linux.
+            for (idx, a) in [
+                SyscallArgs { arg0: 53, arg1: 0, arg2: 2, arg3: 1,
+                    arg4: 0, arg5: 0 },
+                SyscallArgs { arg0: 53, arg1: 0, arg2: 2, arg3: 0,
+                    arg4: 1, arg5: 0 },
+            ].iter().enumerate() {
+                if dispatch_linux(nr::PRCTL, a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, …{}=1) not EINVAL ({})",
+                        idx + 4,
+                        dispatch_linux(nr::PRCTL, a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET unknown which -> ENODEV.
+            for which in [3u64, 0xff, u64::MAX] {
+                let a = SyscallArgs { arg0: 53, arg1: which, arg2: 2,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value
+                    != -i64::from(errno::ENODEV)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, which={}) not ENODEV ({})",
+                        which,
+                        dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
         }
     }
 

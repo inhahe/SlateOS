@@ -11638,3 +11638,65 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      we have no terminal device with column/row state yet.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+## 125. Batch 96: ioctl(FIONBIO = 0x5421).
+##      FIONBIO is the legacy BSD ioctl for toggling
+##      O_NONBLOCK on any fd: `arg` is a pointer to int,
+##      non-zero sets O_NONBLOCK, zero clears it.  Apache,
+##      dovecot, OpenSSH's libssh build, Redis tests, and most
+##      BSD-style network frameworks emit this directly
+##      instead of fcntl(F_SETFL, O_NONBLOCK).  Pre-batch
+##      sys_ioctl returned -ENOTTY for FIONBIO (post-batch 95
+##      after the caller_pid gate, -EBADF in kernel context
+##      and -ENOTTY for user-space callers with valid fds),
+##      breaking those callers.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##        * Added FIONBIO = 0x5421 constant to ioctl_cmd with
+##          a doc comment citing the BSD socket-code use case.
+##        * New arm in sys_ioctl after FIONCLEX:
+##          - Look up `fd` in the caller's Linux fd table;
+##            EBADF if missing.  Snapshot current status_flags.
+##          - Validate `arg` is a non-NULL user pointer of
+##            at least 4 bytes; EFAULT otherwise.
+##          - copy_from_user(arg, &flag, 4) into a kernel i32.
+##          - If flag != 0, set O_NONBLOCK on the snapshot;
+##            else clear it.  Preserve all other bits
+##            (access mode, O_APPEND).
+##          - pcb::linux_fd_set_status_flags with the new
+##            value; return 0 on success.
+##        * Doc table updated to mention FIONBIO alongside
+##          FIOCLEX / FIONCLEX.
+##
+##      Self-test (boot path, batch 96 block in linux.rs
+##      after the batch 95 FIOCLEX / FIONCLEX block):
+##        * Constant sanity (FIONBIO == 0x5421); drift would
+##          re-route to the catch-all -ENOTTY.
+##        * dispatch_linux(IOCTL, FIONBIO, fd=0, arg=NULL) in
+##          kernel context returns -EBADF (caller_pid gate
+##          fires before the arm body, so EFAULT from the
+##          NULL arg is masked by EBADF — same as for an
+##          ioctl on a closed fd in real Linux).
+##        * Synthetic Linux process with stdio:
+##          - Initial state: O_NONBLOCK clear on fd 0.
+##          - Apply the set-O_NONBLOCK helper (mirroring the
+##            arm body's linux_fd_set_status_flags call) and
+##            verify O_NONBLOCK appears in fd 0's status_flags.
+##          - Apply the clear-O_NONBLOCK helper and verify the
+##            bit is gone.
+##          - Verify the access-mode bits (O_ACCMODE) are
+##            preserved across both toggles.
+##          - linux_fd_set_status_flags(fd=99, O_NONBLOCK)
+##            fails (Err), proving the helper rejects invalid
+##            fds and the EBADF guarantee in the arm body is
+##            not vacuous.
+##
+##      Known limitation: FIONREAD (bytes available to read)
+##      still returns -ENOTTY.  Wiring it requires
+##      per-HandleKind bytes-available accounting
+##      (pipe::available, socket::available, eventfd value,
+##      etc.) — that's a per-kind dispatch table best done
+##      as its own batch.  TIOCGWINSZ also remains -ENOTTY
+##      until we have a terminal device with column/row state.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

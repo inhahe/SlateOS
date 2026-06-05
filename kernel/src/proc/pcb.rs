@@ -450,6 +450,31 @@ pub struct Process {
     /// its priority decisions (that lives under the scheduler
     /// roadmap).
     pub linux_nice: i32,
+    /// Linux `prctl(PR_SET_DUMPABLE)` flag.  Controls whether the
+    /// process is core-dumpable and, on Linux, whether its
+    /// `/proc/<pid>/{maps,mem,…}` are owned by the real uid (1) or
+    /// by root (2 = SUID_DUMP_ROOT, set after `execve` of a setuid
+    /// binary).
+    ///
+    /// Valid stored values (rejected at the `PR_SET_DUMPABLE`
+    /// surface, not here):
+    ///   - 0 = `SUID_DUMP_DISABLE` (no core dump, /proc/self/* owned by
+    ///     root)
+    ///   - 1 = `SUID_DUMP_USER` (the default for every normal process —
+    ///     dumpable, /proc/self/* owned by real uid)
+    ///   - 2 = `SUID_DUMP_ROOT` (Linux sets this transiently after
+    ///     execve of a setuid binary; user-callable only with privilege)
+    ///
+    /// Default 1 (`SUID_DUMP_USER`) so a freshly-forked process matches
+    /// what Linux userspace expects to read back from
+    /// `PR_GET_DUMPABLE`.  Inherited verbatim across fork (Linux
+    /// semantics).  Linux *resets* dumpable to 1 on every successful
+    /// `execve`, regardless of the prior value, unless the binary is
+    /// setuid (then 2) or PR_SET_DUMPABLE(0) is "sticky" through
+    /// /proc/sys/fs/suid_dumpable — we don't model setuid binaries
+    /// and we don't have an exec hook for this yet, so the exec-time
+    /// reset is a known limitation tracked in todo.txt.
+    pub linux_dumpable: u32,
 }
 
 impl Process {
@@ -503,6 +528,10 @@ impl Process {
             // Default nice value is 0 on Linux for every freshly
             // exec'd binary that hasn't inherited a non-zero value.
             linux_nice: 0,
+            // Linux default: SUID_DUMP_USER (1) — process is
+            // core-dumpable and /proc/self entries are owned by the
+            // real uid.  PR_SET_DUMPABLE may flip this to 0 or 2.
+            linux_dumpable: 1,
         }
     }
 }
@@ -617,6 +646,7 @@ pub fn fork_create(
         linux_sched_policy,
         linux_sched_priority,
         linux_nice,
+        linux_dumpable,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -643,6 +673,7 @@ pub fn fork_create(
             parent.linux_sched_policy,
             parent.linux_sched_priority,
             parent.linux_nice,
+            parent.linux_dumpable,
         )
     };
 
@@ -739,6 +770,13 @@ pub fn fork_create(
         // preserved across exec.  Forked children start with the
         // same nice as their parent.
         linux_nice,
+        // Linux: PR_SET_DUMPABLE state propagates verbatim across
+        // fork.  Linux RESETS it to 1 on execve (unless the binary
+        // is setuid, in which case it becomes 2) — we don't model
+        // setuid binaries and we don't have an exec-time hook for
+        // this yet, so exec preserves rather than resets.  Known
+        // limitation tracked in todo.txt.
+        linux_dumpable,
     };
 
     table.insert(pid, child);
@@ -1292,6 +1330,29 @@ pub fn set_nice(pid: ProcessId, nice: i32) -> Option<i32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_nice;
     proc.linux_nice = nice;
+    Some(old)
+}
+
+/// Read the recorded `prctl(PR_SET_DUMPABLE)` flag for `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(1)` is the documented
+/// default (`SUID_DUMP_USER` — process is dumpable and its
+/// `/proc/self/*` entries are owned by the real uid).
+#[must_use]
+pub fn get_dumpable(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_dumpable)
+}
+
+/// Install a new dumpable flag for `pid`, returning the prior
+/// value.  Caller is responsible for validating the value is one
+/// of 0 (`SUID_DUMP_DISABLE`), 1 (`SUID_DUMP_USER`), or 2
+/// (`SUID_DUMP_ROOT`); this helper stores whatever it is given.
+/// Returns `None` if `pid` is unknown.
+pub fn set_dumpable(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_dumpable;
+    proc.linux_dumpable = val;
     Some(old)
 }
 

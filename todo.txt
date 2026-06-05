@@ -9493,3 +9493,64 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     Build clean; boot test PASSED (BOOT_OK at 21s).
 
 
+## 94. Linux ABI batch 66: real per-PCB PR_SET_DUMPABLE /
+##     PR_GET_DUMPABLE round-trip with proper default.
+##
+##     Before this batch, prctl(PR_SET_DUMPABLE, …) silently
+##     accepted anything and returned 0, and prctl(
+##     PR_GET_DUMPABLE) always returned 0 (the
+##     "SUID_DUMP_DISABLE" sentinel).  Two real problems:
+##
+##       (a) Programs that read PR_GET_DUMPABLE see 0 and
+##           conclude the process opted out of core dumps —
+##           Linux defaults to 1 (SUID_DUMP_USER).  systemd
+##           reads this during service start to decide whether
+##           to install a coredump handler; getting 0 back
+##           where Linux returns 1 trips its "process is in
+##           a weird state" path.
+##
+##       (b) The value didn't round-trip at all: PR_SET_DUMPABLE
+##           followed by PR_GET_DUMPABLE always returned 0
+##           even if the caller set 1.  Programs that use
+##           this as a flag (e.g. setting it to 0 before
+##           dropping privileges, checking it back later to
+##           confirm) saw their write silently ignored.
+##
+##     Fix: add `linux_dumpable: u32` to the PCB (default 1 =
+##     SUID_DUMP_USER, matching Linux), with `pcb::get_dumpable`
+##     / `pcb::set_dumpable` helpers.  Inherited verbatim
+##     across fork (Linux: fork preserves dumpable).
+##     PR_SET_DUMPABLE now validates user range (0 or 1 only;
+##     2 = SUID_DUMP_ROOT is privileged and Linux rejects it
+##     from userspace) and persists via the helper.
+##     PR_GET_DUMPABLE reads the helper and returns the
+##     stored value; kernel context falls back to the
+##     SUID_DUMP_USER default.
+##
+##     Known limitation (deferred): Linux RESETS dumpable to 1
+##     on every successful execve (unless the binary is
+##     setuid, in which case it becomes 2 transiently).  We
+##     preserve across exec instead of resetting, because we
+##     don't have a Linux-ABI exec-time hook for this yet.
+##     Equivalent to PR_SET_DUMPABLE(0) being "sticky across
+##     exec" — a userspace program that disables dumpability
+##     and then execve's a child will see dumpable=0 in the
+##     child where Linux would reset to 1.  None of the
+##     userspace we test against currently relies on the
+##     reset semantics; flag as a small follow-up when we add
+##     the exec-time PCB cleanup hook (which will also need
+##     to reset linux_personality among others, per the
+##     existing `personality` doc comment).
+##
+##     Self-tests cover both layers:
+##       * PR_SET_DUMPABLE rejects 2, 3, 1000, u64::MAX with
+##         EINVAL (gate fires before the pcb store).
+##       * PR_SET_DUMPABLE(0) and (1) both succeed.
+##       * PR_GET_DUMPABLE returns the default (1) in kernel
+##         context (no PCB).
+##       * pcb::{get,set}_dumpable round-trips through
+##         0 -> 1 -> 2 -> destroy -> None.
+##
+##     Build clean; boot test PASSED (BOOT_OK at 19s).
+
+

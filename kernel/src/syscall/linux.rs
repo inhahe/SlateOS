@@ -3807,10 +3807,41 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             }
             SyscallResult::ok(0)
         }
-        // PR_SET_DUMPABLE, PR_SET_KEEPCAPS — accept silently.
-        4 | 8 => SyscallResult::ok(0),
-        // PR_GET_DUMPABLE — not dumpable.
-        3 => SyscallResult::ok(0),
+        // PR_SET_DUMPABLE (4) — install the dumpable flag.  Linux
+        // accepts 0 (SUID_DUMP_DISABLE) and 1 (SUID_DUMP_USER) from
+        // userspace; 2 (SUID_DUMP_ROOT) is privileged and rejected
+        // with EINVAL from userspace (the kernel itself sets it
+        // transiently after execve of a setuid binary).  Anything
+        // else is EINVAL.  We persist the value per-PCB so a
+        // subsequent PR_GET_DUMPABLE round-trips correctly; kernel
+        // context (no PCB) silently succeeds without storing.
+        4 => {
+            let new_dumpable = args.arg1 as u32;
+            // 2 would mean SUID_DUMP_ROOT; user-callable set of 2
+            // is EINVAL on Linux (see prctl(2): "the value 2 cannot
+            // be set via prctl(); only the kernel sets this value
+            // automatically after execve(2) of a set-user-ID … file").
+            if new_dumpable > 1 {
+                return linux_err(errno::EINVAL);
+            }
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_dumpable(pid, new_dumpable);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_DUMPABLE (3) — return the per-process flag.  Kernel
+        // context (no PCB) reports the SUID_DUMP_USER default (1),
+        // matching what a fresh userspace process would observe.
+        3 => {
+            let v = match caller_pid() {
+                Some(pid) => pcb::get_dumpable(pid).unwrap_or(1),
+                None => 1,
+            };
+            SyscallResult::ok(i64::from(v))
+        }
+        // PR_SET_KEEPCAPS (8) — accept silently.  We do not model
+        // POSIX capability flags yet so there is no flag to flip.
+        8 => SyscallResult::ok(0),
         // PR_GET_KEEPCAPS — we don't track it.
         7 => SyscallResult::ok(0),
         // PR_SET_NAME — install up to 16 bytes (NUL-terminated within
@@ -16012,6 +16043,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_pdeathsig(test_pid), None);
             assert_eq!(pcb::set_pdeathsig(test_pid, 1), None);
+        }
+
+        // Batch 66: PR_SET_DUMPABLE / PR_GET_DUMPABLE round-trip.
+        //
+        //   1. PR_SET_DUMPABLE rejects 2, 3, u32::MAX with EINVAL
+        //      (only 0 and 1 are user-callable; 2 = SUID_DUMP_ROOT
+        //      is reserved for the kernel's post-execve hook).
+        //   2. PR_SET_DUMPABLE(0) and PR_SET_DUMPABLE(1) both succeed.
+        //   3. PR_GET_DUMPABLE in kernel context (no PCB) reports the
+        //      SUID_DUMP_USER default (1) — matching what a freshly
+        //      forked userspace process would see.
+        //   4. The pcb::{get,set}_dumpable storage layer round-trips
+        //      cleanly across the full 0..=2 range (the helper has no
+        //      validation; the syscall surface gates the user range).
+        {
+            // Out-of-range -> EINVAL.
+            for bad in [2u64, 3, 1_000, u64::MAX] {
+                let a = SyscallArgs { arg0: 4, arg1: bad, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, {}) not EINVAL ({})",
+                        bad, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // 0 (DUMP_DISABLE) accepted.
+            let a = SyscallArgs { arg0: 4, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, 0) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // 1 (DUMP_USER) accepted.
+            let a = SyscallArgs { arg0: 4, arg1: 1, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, 1) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_GET_DUMPABLE in kernel context -> default 1.
+            let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 1 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_DUMPABLE) not 1 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("dumpable-test", 0);
+            // Default is 1 (SUID_DUMP_USER).
+            assert_eq!(pcb::get_dumpable(test_pid), Some(1));
+            // Install 0 (DUMP_DISABLE).  set returns the prior value.
+            assert_eq!(pcb::set_dumpable(test_pid, 0), Some(1));
+            assert_eq!(pcb::get_dumpable(test_pid), Some(0));
+            // Cycle back to 1.
+            assert_eq!(pcb::set_dumpable(test_pid, 1), Some(0));
+            assert_eq!(pcb::get_dumpable(test_pid), Some(1));
+            // The helper itself stores anything — the 2 (SUID_DUMP_ROOT)
+            // sentinel must be reachable for the eventual exec-time
+            // setuid hook, even though the syscall surface refuses it
+            // from userspace.
+            assert_eq!(pcb::set_dumpable(test_pid, 2), Some(1));
+            assert_eq!(pcb::get_dumpable(test_pid), Some(2));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_dumpable(test_pid), None);
+            assert_eq!(pcb::set_dumpable(test_pid, 1), None);
         }
     }
 

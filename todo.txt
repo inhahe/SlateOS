@@ -12024,3 +12024,65 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        rather than a band-aid.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
+## 130. [Batch 101] get_mempolicy: single-node UMA answer (was ENOSYS)
+##
+##      Pre-batch sys_get_mempolicy returned -ENOSYS after validating
+##      arguments.  That made libnuma, jemalloc, tcmalloc, and glibc's
+##      NUMA tunable parser conclude "the kernel doesn't understand
+##      NUMA" and skip NUMA-aware placement / arena binding entirely.
+##      That outcome is functionally fine (we are UMA), but loses
+##      information: those callers want to know the *node id* of
+##      their data (always 0 here) and the *allowed nodes mask*
+##      (bit 0 set) for their bookkeeping.
+##
+##      The new implementation mirrors Linux's UMA behaviour exactly
+##      (kernel/sys.c::do_get_mempolicy):
+##        * No flags + NULL pointers -> 0 (probe succeeds, nothing
+##          written).
+##        * No flags + non-NULL mode -> *mode = MPOL_DEFAULT (0).
+##        * No flags + non-NULL nodemask -> mask cleared (default
+##          policy has no node binding).
+##        * MPOL_F_NODE (with or without MPOL_F_ADDR) -> *mode = 0
+##          (every page is on node 0 in UMA).
+##        * MPOL_F_MEMS_ALLOWED -> *nodemask has bit 0 set, *mode is
+##          not written.
+##        * MPOL_F_MEMS_ALLOWED combined with MPOL_F_NODE or
+##          MPOL_F_ADDR -> -EINVAL (Linux's mutual exclusion).
+##        * MPOL_F_ADDR with addr == 0 -> -EFAULT.
+##        * Unknown flag bit -> -EINVAL.
+##
+##      The arm allocates a heap Vec<u8> sized to the user-requested
+##      nodemask bit-count (capped at 1 << 23 bits to match
+##      MAX_NUMNODES headroom) before issuing copy_to_user, so a
+##      bogus maxnode value is bounded by the existing validation
+##      cap.  Bit 0 of byte 0 is set for MPOL_F_MEMS_ALLOWED; this
+##      matches Linux's `unsigned long` bit ordering for indices
+##      0..7 on little-endian x86_64.
+##
+##      Boot self-test "(9e) Batch 101" covers seven cases:
+##        1. all-NULL probe -> 0
+##        2. MPOL_F_MEMS_ALLOWED -> 0, mask = 0x1
+##        3. MPOL_F_NODE -> 0, mode = 0
+##        4. no flags + both pointers -> 0, mode = 0, mask = 0
+##        5. MPOL_F_MEMS_ALLOWED | MPOL_F_NODE -> -EINVAL
+##        6. bogus flag bit (0x10) -> -EINVAL
+##        7. MPOL_F_ADDR with NULL addr -> -EFAULT
+##
+##      Also updated the pre-existing legacy test at line 26131 that
+##      asserted "get_mempolicy(all-NULL) -> -ENOSYS"; now expects 0.
+##
+##      Known limitation: we do not store per-thread / per-VMA
+##      mempolicy state, so there is no `set_mempolicy` round-trip.
+##      `sys_set_mempolicy` still returns -ENOSYS — fine because
+##      libnuma's "do I have NUMA?" probe is satisfied by
+##      `get_mempolicy(MPOL_F_MEMS_ALLOWED)` succeeding, and
+##      libnuma's "set my policy" calls will fall through to the
+##      ENOSYS fallback path that means "use the default policy"
+##      — which is what we're already doing kernel-internally.
+##      If we ever add a real per-thread default-policy slot,
+##      sys_set_mempolicy should accept MPOL_DEFAULT with an empty
+##      mask as a successful no-op and reject other modes with
+##      -EINVAL (we have no other modes implementable on UMA).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

@@ -11255,32 +11255,179 @@ fn sys_set_mempolicy(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
-/// `get_mempolicy(mode*, nodemask*, maxnode, addr, flags)`.
+/// `get_mempolicy(mode*, nodemask*, maxnode, addr, flags)` — query the
+/// calling thread's NUMA mempolicy or the policy applying to a specific
+/// virtual address.
+///
+/// Pre-batch this returned `-ENOSYS` after argument validation, which
+/// libnuma, glibc's `__libc_init_first` NUMA tunable parser, jemalloc's
+/// `je_extent_init`, and tcmalloc's NUMA-affinity startup probes all
+/// treat as "this kernel does not understand NUMA" — they then skip
+/// NUMA-aware placement entirely.  That is functionally correct for our
+/// UMA kernel but loses information: those callers still want to know
+/// the *node id* of their data (always 0 here) and the *allowed nodes
+/// mask* (bit 0 set) for their bookkeeping.
+///
+/// Linux on a single-node UMA system returns exactly:
+///   * No flags: `*mode = MPOL_DEFAULT (0)`, `*nodemask` cleared (default
+///     policy has no node binding).
+///   * `MPOL_F_MEMS_ALLOWED`: `*nodemask` filled with the set of nodes
+///     this task is allowed to use — on UMA the single bit 0.  Mode is
+///     not written (the flag combines exclusively).
+///   * `MPOL_F_NODE` without `MPOL_F_ADDR`: returns the *current
+///     interleave node* in `*mode` (0 for MPOL_DEFAULT — we never
+///     interleave).
+///   * `MPOL_F_NODE | MPOL_F_ADDR`: returns the node id of the page
+///     backing `addr` in `*mode` (always 0 on UMA).
+///   * `MPOL_F_ADDR` alone: returns the policy applying to `addr` (we
+///     have no per-VMA policy, so MPOL_DEFAULT).
+///
+/// `MPOL_F_MEMS_ALLOWED` is mutually exclusive with the other two
+/// flags; Linux rejects the combination with `-EINVAL`.  `MPOL_F_ADDR`
+/// requires a readable user address.
+///
+/// We mirror these answers exactly.  A successful return cannot create
+/// a stale per-thread policy because we have no policy storage to
+/// poison — the answer is computed from the kernel topology, not from
+/// per-process state.
 fn sys_get_mempolicy(args: &SyscallArgs) -> SyscallResult {
     const MPOL_F_NODE: u32 = 1;
     const MPOL_F_ADDR: u32 = 2;
     const MPOL_F_MEMS_ALLOWED: u32 = 4;
+    const MPOL_DEFAULT: i32 = 0;
+
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg4 as u32;
     if flags & !(MPOL_F_NODE | MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED) != 0 {
         return linux_err(errno::EINVAL);
     }
-    if args.arg0 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 4) {
+    // MPOL_F_MEMS_ALLOWED is mutually exclusive with NODE / ADDR.
+    if flags & MPOL_F_MEMS_ALLOWED != 0
+        && flags & (MPOL_F_NODE | MPOL_F_ADDR) != 0
+    {
+        return linux_err(errno::EINVAL);
+    }
+
+    let mode_ptr = args.arg0;
+    let nodemask_ptr = args.arg1;
+    let maxnode = args.arg2;
+    let addr = args.arg3;
+
+    // MPOL_F_ADDR requires a valid user pointer — Linux dereferences
+    // it to find the VMA before looking up the policy.
+    if flags & MPOL_F_ADDR != 0 {
+        if addr == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(addr, 1) {
             return linux_err(linux_errno_for(e));
         }
     }
-    let maxnode = args.arg2;
-    if maxnode > 0 && args.arg1 != 0 {
+
+    // Pre-validate the mode output pointer (an int* in Linux's ABI).
+    if mode_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(mode_ptr, 4) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Pre-validate the nodemask output range.  Linux caps at
+    // MAX_NUMNODES rounded up; we keep the existing 1 << 23-bit cap.
+    let mask_bytes: usize = if maxnode > 0 && nodemask_ptr != 0 {
         if maxnode > (1 << 23) {
             return linux_err(errno::EINVAL);
         }
         let bytes = ((maxnode + 7) / 8) as usize;
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, bytes) {
+        if let Err(e) = crate::mm::user::validate_user_write(nodemask_ptr, bytes) {
             return linux_err(linux_errno_for(e));
         }
+        bytes
+    } else {
+        0
+    };
+
+    // Helper: write a 32-bit value to *mode if the user gave us a
+    // mode pointer.  copy_to_user does the SMAP-safe transfer.
+    let write_mode = |v: i32| -> Option<SyscallResult> {
+        if mode_ptr == 0 {
+            return None;
+        }
+        // SAFETY: validate_user_write above confirmed the 4-byte
+        // writable range at mode_ptr.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(
+                (&raw const v).cast::<u8>(),
+                mode_ptr,
+                4,
+            )
+        };
+        if let Err(e) = r {
+            return Some(linux_err(linux_errno_for(e)));
+        }
+        None
+    };
+
+    // Helper: write `mask_bytes` to *nodemask, optionally setting
+    // bit 0 (our only node).  Bit 0 lives in byte 0 bit 0 on x86_64
+    // little-endian, which matches Linux's unsigned long bit layout
+    // for bit indices 0..7.
+    let write_nodemask = |set_bit_zero: bool| -> Option<SyscallResult> {
+        if mask_bytes == 0 {
+            return None;
+        }
+        // Stack-resident scratch is bounded by the (1 << 23) cap above,
+        // which is well in excess of any sane kernel stack; spill onto
+        // a heap Vec to be safe.  alloc::vec is available in our
+        // no_std + alloc kernel build.
+        let mut mask = alloc::vec![0u8; mask_bytes];
+        if set_bit_zero {
+            // Byte 0 bit 0 = node 0 set.
+            mask[0] = 1;
+        }
+        // SAFETY: validate_user_write above confirmed the byte range.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(
+                mask.as_ptr(),
+                nodemask_ptr,
+                mask_bytes,
+            )
+        };
+        if let Err(e) = r {
+            return Some(linux_err(linux_errno_for(e)));
+        }
+        None
+    };
+
+    if flags & MPOL_F_MEMS_ALLOWED != 0 {
+        // Allowed-nodes query: write the cpuset-allowed mask
+        // (bit 0 = our single node).  Mode is NOT written for this
+        // flag combination per Linux's get_mempolicy(2).
+        if let Some(err) = write_nodemask(true) {
+            return err;
+        }
+        return SyscallResult::ok(0);
     }
-    linux_err(errno::ENOSYS)
+
+    if flags & MPOL_F_NODE != 0 {
+        // Return node id in *mode.  With or without MPOL_F_ADDR the
+        // answer is 0 (UMA — every page is on node 0).
+        if let Some(err) = write_mode(0) {
+            return err;
+        }
+        // Linux does not also fill nodemask for MPOL_F_NODE; we don't
+        // either.
+        return SyscallResult::ok(0);
+    }
+
+    // No mempolicy-introspection flag set: return the calling task's
+    // own policy.  We have no per-thread / per-VMA policy storage,
+    // so the answer is always MPOL_DEFAULT with an empty nodemask.
+    if let Some(err) = write_mode(MPOL_DEFAULT) {
+        return err;
+    }
+    if let Some(err) = write_nodemask(false) {
+        return err;
+    }
+    SyscallResult::ok(0)
 }
 
 /// `migrate_pages(pid, maxnode, old_nodes*, new_nodes*)` — migrate all
@@ -16488,6 +16635,138 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+        }
+    }
+
+    // (9e) Batch 101: get_mempolicy returns a single-node UMA answer
+    // instead of -ENOSYS.  libnuma, jemalloc, tcmalloc, and glibc's
+    // NUMA tunable parser probe this at startup.
+    {
+        const MPOL_F_NODE: u64 = 1;
+        const MPOL_F_ADDR: u64 = 2;
+        const MPOL_F_MEMS_ALLOWED: u64 = 4;
+
+        // Case 1: no flags, no addr, no buffers.  Must return 0 (we
+        // wrote nothing because both pointers are NULL — Linux
+        // accepts this as a "just verify NUMA is supported" probe).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(NULL,NULL,0,0,0) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 2: MPOL_F_MEMS_ALLOWED with a kernel-resident u64
+        // nodemask of width 64.  Must write bit 0 (our single node).
+        let mut mask: u64 = 0xdead_beef_dead_beef;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: (&raw mut mask).addr() as u64,
+            arg2: 64,
+            arg3: 0,
+            arg4: MPOL_F_MEMS_ALLOWED,
+            arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(MEMS_ALLOWED) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        if mask != 0x1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: MEMS_ALLOWED mask {:#x} (expected 0x1)",
+                mask,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 3: MPOL_F_NODE without MPOL_F_ADDR.  Writes node id
+        // (= 0 on UMA) to *mode.
+        let mut mode: i32 = -1;
+        let a = SyscallArgs {
+            arg0: (&raw mut mode).addr() as u64,
+            arg1: 0, arg2: 0, arg3: 0,
+            arg4: MPOL_F_NODE, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != 0 || mode != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(F_NODE) -> ret {} mode {} (expected 0/0)",
+                r.value, mode,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 4: no flags, asking for both mode and mask.
+        // Expect MPOL_DEFAULT (0) in mode and an all-zero nodemask
+        // (default policy has no node binding).
+        mode = -1;
+        mask = 0xdead_beef_dead_beef;
+        let a = SyscallArgs {
+            arg0: (&raw mut mode).addr() as u64,
+            arg1: (&raw mut mask).addr() as u64,
+            arg2: 64,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != 0 || mode != 0 || mask != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(default) -> ret {} mode {} mask {:#x}",
+                r.value, mode, mask,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 5: flag combination MEMS_ALLOWED | F_NODE -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: MPOL_F_MEMS_ALLOWED | MPOL_F_NODE, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(MEMS_ALLOWED|F_NODE) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 6: unknown flag bit -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0x10, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(bogus flag) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 7: MPOL_F_ADDR with NULL addr -> -EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: MPOL_F_ADDR, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(F_ADDR,NULL) -> {} (expected -EFAULT)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
         }
     }
 
@@ -25849,10 +26128,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: get_mempolicy bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // get_mempolicy valid -> ENOSYS.
+        // get_mempolicy valid (all-NULL probe) -> 0 (UMA answer; see
+        // batch 101).  Pre-batch this expected ENOSYS; updated when
+        // sys_get_mempolicy was upgraded to a real single-node answer.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GET_MEMPOLICY, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: get_mempolicy valid not ENOSYS");
+        if dispatch_linux(nr::GET_MEMPOLICY, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: get_mempolicy valid not 0");
             return Err(KernelError::InternalError);
         }
         // migrate_pages negative pid -> EINVAL.

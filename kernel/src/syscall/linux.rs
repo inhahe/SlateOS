@@ -10496,18 +10496,51 @@ fn sys_inotify_init1(args: &SyscallArgs) -> SyscallResult {
 
 /// `inotify_add_watch(fd, pathname, mask)`.
 fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
-    let path_ptr = args.arg1;
-    if path_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    // mask 0 -> EINVAL per Linux (nothing to watch for).
-    if args.arg2 == 0 {
+    // Mirror Linux's `SYSCALL_DEFINE3(inotify_add_watch)` gate order
+    // (fs/notify/inotify/inotify_user.c):
+    //   1. if (mask & ~ALL_INOTIFY_BITS) return -EINVAL;
+    //   2. if ((mask & (IN_MASK_ADD|IN_MASK_CREATE)) ==
+    //          (IN_MASK_ADD|IN_MASK_CREATE)) return -EINVAL;
+    //   3. fdget(fd) — EBADF if fd is invalid;
+    //   4. f.file->f_op != inotify_fops → EINVAL;
+    //   5. user_path_at(pathname) → EFAULT on bad ptr, ENOENT, etc.
+    //
+    // Pre-batch sys_inotify_add_watch did (a) NULL path → EFAULT, (b)
+    // validate_user_read(path) → EFAULT, (c) mask == 0 → EINVAL, (d)
+    // fd lookup → EBADF.  That diverged from Linux in three ways:
+    //   * (fd=0, path=NULL, mask=valid): Linux returns EBADF (the fd
+    //     is stdin, not an inotify fd; user_path_at hasn't run yet
+    //     when the fdget/f_op check fires); we returned EFAULT.
+    //   * (fd=any, path=valid, mask=0): Linux accepts mask=0 (it just
+    //     filters down to no events; the watch is still added).  We
+    //     rejected it with EINVAL.  Pulled from a guess, not Linux.
+    //   * No bit-validity check for mask, so a probe with bogus
+    //     high bits walked past us to EBADF where Linux returns
+    //     EINVAL.
+    //
+    // ALL_INOTIFY_BITS layout from include/uapi/linux/inotify.h:
+    //   IN_ACCESS=0x1 .. IN_MOVE_SELF=0x800 (low events: 0xFFF),
+    //   IN_UNMOUNT=0x2000, IN_Q_OVERFLOW=0x4000, IN_IGNORED=0x8000,
+    //   IN_ONLYDIR=0x0100_0000, IN_DONT_FOLLOW=0x0200_0000,
+    //   IN_EXCL_UNLINK=0x0400_0000, IN_MASK_CREATE=0x1000_0000,
+    //   IN_MASK_ADD=0x2000_0000, IN_ISDIR=0x4000_0000,
+    //   IN_ONESHOT=0x8000_0000.
+    const ALL_INOTIFY_BITS: u32 = 0xF007_EFFF;
+    const IN_MASK_CREATE: u32 = 0x1000_0000;
+    const IN_MASK_ADD: u32 = 0x2000_0000;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let mask = args.arg2 as u32;
+    if mask & !ALL_INOTIFY_BITS != 0 {
         return linux_err(errno::EINVAL);
     }
-    // No inotify fd exists; report EBADF on real fd validation.
+    if (mask & (IN_MASK_ADD | IN_MASK_CREATE)) == (IN_MASK_ADD | IN_MASK_CREATE) {
+        return linux_err(errno::EINVAL);
+    }
+
+    // fd lookup — in kernel context, caller_pid is None and we return
+    // EBADF before touching the path pointer, matching Linux's order
+    // (fdget runs before user_path_at).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let pid = match caller_pid() {
@@ -10516,6 +10549,17 @@ fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
     };
     if pcb::linux_fd_lookup(pid, fd).is_none() {
         return linux_err(errno::EBADF);
+    }
+
+    // Real fd that isn't an inotify fd → EINVAL (Linux's f_op check).
+    // Before that, validate the path pointer (mirrors user_path_at's
+    // EFAULT in the kernel-context case where we have no real fd).
+    let path_ptr = args.arg1;
+    if path_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
+        return linux_err(linux_errno_for(e));
     }
     linux_err(errno::EINVAL)
 }
@@ -31918,22 +31962,60 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: inotify_init1 not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // inotify_add_watch(NULL path) -> EFAULT.
+        // inotify_add_watch(fd=0, path=NULL, mask=IN_ACCESS) -> EBADF.
+        // Pre-batch returned EFAULT (path-first gate); Linux's fdget
+        // runs before user_path_at, so the EBADF answer (stdin isn't
+        // an inotify fd) wins in kernel context where caller_pid is
+        // None and the fd lookup short-circuits to EBADF.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: inotify_add_watch(NULL) not EFAULT");
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: inotify_add_watch(NULL,mask=1) not EBADF"
+            );
             return Err(KernelError::InternalError);
         }
-        // inotify_add_watch(_, path, 0) -> EINVAL.
+        // inotify_add_watch(_, path, mask=0) -> EBADF.  Pre-batch returned
+        // EINVAL on mask=0, but Linux accepts mask=0 (the watch is added
+        // and filters down to no events).  Now the fd lookup is the gate
+        // that fires.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: inotify_add_watch(mask=0) not EINVAL");
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: inotify_add_watch(mask=0) not EBADF"
+            );
             return Err(KernelError::InternalError);
         }
+        // inotify_add_watch(_, path, mask with bit outside ALL_INOTIFY_BITS)
+        // -> EINVAL.  Bit 0x1000 (between IN_IGNORED and IN_ONLYDIR) is
+        // reserved/unused.  Linux's mask & ~ALL_INOTIFY_BITS check rejects
+        // it before fdget.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0x1000, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: inotify_add_watch bad mask bit not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // inotify_add_watch(_, path, IN_MASK_ADD | IN_MASK_CREATE) -> EINVAL.
+        // The two flags are mutually exclusive; Linux rejects the combo.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000,
+            arg2: 0x1000_0000 | 0x2000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: inotify_add_watch ADD+CREATE not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   inotify_add_watch mask/EBADF gating: OK"
+        );
         // inotify_rm_watch in kernel context -> EBADF.
         let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

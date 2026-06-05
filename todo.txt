@@ -18186,3 +18186,61 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          implement.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+## 216. Linux ABI: inotify_add_watch mask/EBADF gating
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's SYSCALL_DEFINE3(inotify_add_watch)
+##      (fs/notify/inotify/inotify_user.c) gate order:
+##        1. if (mask & ~ALL_INOTIFY_BITS) return -EINVAL;
+##        2. if ((mask & (IN_MASK_ADD|IN_MASK_CREATE)) ==
+##               (IN_MASK_ADD|IN_MASK_CREATE)) return -EINVAL;
+##        3. fdget(fd) -> EBADF;
+##        4. f.file->f_op != inotify_fops -> EINVAL;
+##        5. user_path_at(pathname) -> EFAULT, ENOENT, etc.
+##
+##      Pre-batch sys_inotify_add_watch did path NULL/validate
+##      first, then mask==0 -> EINVAL, then fd lookup.  Divergences:
+##        * (fd=0, path=NULL, mask=IN_ACCESS) returned EFAULT;
+##          Linux returns EBADF (the f_op check / EBADF fdget result
+##          fires before user_path_at).
+##        * (fd=any, path=valid, mask=0) returned EINVAL;
+##          Linux accepts mask=0 (no events filter, watch still
+##          added).  The mask==0 rejection was a guess, not Linux.
+##        * Probes with unknown high bits walked past us to EBADF;
+##          Linux gates them with the ~ALL_INOTIFY_BITS check
+##          before fdget.
+##
+##      ALL_INOTIFY_BITS resolves to 0xF007_EFFF on Linux:
+##        events: 0x0FFF (IN_ACCESS .. IN_MOVE_SELF)
+##        meta:   0xE000 (IN_UNMOUNT, Q_OVERFLOW, IGNORED)
+##        flags:  0x0700_0000 (ONLYDIR, DONT_FOLLOW, EXCL_UNLINK)
+##        meta2:  0xF000_0000 (MASK_CREATE, MASK_ADD, ISDIR, ONESHOT)
+##
+##      Fix: reorder so mask bit-validity runs first, then the
+##      IN_MASK_ADD+IN_MASK_CREATE mutual-exclusion check, then fd
+##      lookup, then path validation, then terminal EINVAL (would-be
+##      "not an inotify fd").  Drop the spurious mask==0 EINVAL.
+##
+##      Self-tests added/updated (5):
+##        * INOTIFY_ADD_WATCH(fd=0, path=NULL, mask=1) -> EBADF
+##          (was EFAULT).
+##        * INOTIFY_ADD_WATCH(fd=0, path=0x1000, mask=0) -> EBADF
+##          (was EINVAL).
+##        * INOTIFY_ADD_WATCH(_, path, mask=0x1000) -> EINVAL
+##          (NEW: reserved bit between IGNORED and ONLYDIR).
+##        * INOTIFY_ADD_WATCH(_, path, mask=MASK_ADD|MASK_CREATE)
+##          -> EINVAL  (NEW).
+##        * Emits "[syscall/linux]   inotify_add_watch mask/EBADF
+##          gating: OK".
+##
+##      Known limitations:
+##        * In kernel context (caller_pid=None) every fd lookup is
+##          EBADF, so the (valid fd, not inotify_fops) -> EINVAL
+##          path is unreachable from the boot self-test.  Once
+##          inotify support lands the test will need a real
+##          non-inotify fd to exercise that gate.
+##        * Still no real inotify implementation behind the gates;
+##          inotify_init / init1 return ENOSYS.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 25s).

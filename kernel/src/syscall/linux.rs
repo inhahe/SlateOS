@@ -12581,11 +12581,62 @@ fn sys_unshare(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `setns(fd, nstype)`.
+///
+/// Linux's `kernel/nsproxy.c::SYSCALL_DEFINE2(setns)` accepts an `fd`
+/// referring to either a `/proc/PID/ns/*` namespace file or a pidfd,
+/// and validates `nstype` against the namespace-type mask:
+///
+///   * `CLONE_NEWNS`     = 0x0002_0000
+///   * `CLONE_NEWCGROUP` = 0x0200_0000
+///   * `CLONE_NEWUTS`    = 0x0400_0000
+///   * `CLONE_NEWIPC`    = 0x0800_0000
+///   * `CLONE_NEWUSER`   = 0x1000_0000
+///   * `CLONE_NEWPID`    = 0x2000_0000
+///   * `CLONE_NEWNET`    = 0x4000_0000
+///   * `CLONE_NEWTIME`   = 0x0000_0080
+///
+/// Validation differs per fd kind:
+///   * `proc_ns_file` path: `nstype == 0` is accepted (matches any
+///     type); non-zero must exactly equal the file's `ns->ops->type`.
+///   * pidfd path: `check_setns_flags` requires `nstype != 0` AND
+///     `nstype & ~CLONE_NEWNS_FLAGS == 0`.
+///
+/// We can't distinguish the two fd kinds in kernel context (no real
+/// fds exist), but **both paths uniformly reject** any bit outside the
+/// `CLONE_NEWNS_FLAGS` mask.  Pre-batch we skipped nstype validation
+/// entirely, so a probe passing `nstype = 0xDEAD_BEEF` saw EPERM
+/// instead of the EINVAL Linux returns.  Mirror the mask check ahead
+/// of the terminal EPERM so feature-detection sees the same shape.
+///
+/// `nstype == 0` is left to flow through to EPERM: it's accepted on
+/// the proc_ns_file path and rejected on the pidfd path, and we have
+/// no way to choose between them.  Linux's behaviour for an
+/// unprivileged caller is EPERM on either path (the ns_capable check
+/// runs after the flag check on the pidfd path but before any work on
+/// the proc_ns_file path), so EPERM is the truthful answer.
 fn sys_setns(args: &SyscallArgs) -> SyscallResult {
+    // Union of CLONE_NEW* namespace bits.  Any nstype bit outside this
+    // mask is rejected by both setns code paths in Linux.
+    const CLONE_NEWNS_FLAGS: u64 = 0x0002_0000  // NEWNS
+        | 0x0200_0000  // NEWCGROUP
+        | 0x0400_0000  // NEWUTS
+        | 0x0800_0000  // NEWIPC
+        | 0x1000_0000  // NEWUSER
+        | 0x2000_0000  // NEWPID
+        | 0x4000_0000  // NEWNET
+        | 0x0000_0080; // NEWTIME
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
         return r;
+    }
+    // Reject any bit outside the documented CLONE_NEW* mask.  Linux
+    // returns EINVAL on both paths for such inputs; the kind-specific
+    // checks (proc_ns_file: exact type match; pidfd: must be non-zero)
+    // are unreachable in our kernel-context model since no real ns
+    // files or pidfds with namespace bindings exist.
+    if args.arg1 & !CLONE_NEWNS_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
     }
     linux_err(errno::EPERM)
 }
@@ -33993,7 +34044,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: unshare not EPERM");
             return Err(KernelError::InternalError);
         }
-        // setns in kernel context -> EPERM.
+        // setns(fd=0, nstype=0) -> EPERM (nstype=0 is accepted on the
+        // proc_ns_file path and only rejected on the pidfd path; we
+        // can't distinguish, so EPERM is the truthful terminal).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETNS, &a).value
@@ -34001,6 +34054,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: setns not EPERM");
             return Err(KernelError::InternalError);
         }
+        // setns(fd=0, nstype=CLONE_NEWNS) -> EPERM (valid single bit).
+        let a = SyscallArgs { arg0: 0, arg1: 0x0002_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETNS, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: setns(CLONE_NEWNS) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // setns(fd=0, nstype=CLONE_NEWNS|CLONE_NEWUTS) -> EPERM
+        // (multiple valid bits — subset of CLONE_NEWNS_FLAGS).
+        let a = SyscallArgs { arg0: 0, arg1: 0x0402_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETNS, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: setns(NEWNS|NEWUTS) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // setns(fd=0, nstype=0xDEAD_BEEF) -> EINVAL (bogus bits outside
+        // CLONE_NEWNS_FLAGS; Linux rejects on both paths before any
+        // privilege check or fd-kind dispatch).
+        let a = SyscallArgs { arg0: 0, arg1: 0xDEAD_BEEF, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETNS, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: setns(bogus nstype) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // setns(fd=0, nstype=1) -> EINVAL (bit 0 = 1 is not any CLONE_NEW*).
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETNS, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: setns(nstype=1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   setns nstype mask: OK");
 
         // mount(NULL target) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

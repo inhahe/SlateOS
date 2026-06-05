@@ -18550,3 +18550,56 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        * No PR_SET_PTRACER / Yama policy enforcement.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 25s).
+
+##  223. Linux ABI: setns nstype mask check (batch 194).
+##      Linux's kernel/nsproxy.c::SYSCALL_DEFINE2(setns) routes on the
+##      fd kind:
+##        * proc_ns_file path: nstype=0 OK; non-zero must equal the
+##          file's ns->ops->type bit, else EINVAL.
+##        * pidfd path: check_setns_flags requires nstype != 0 AND
+##          nstype is a subset of CLONE_NEWNS_FLAGS, else EINVAL.
+##      Both paths uniformly reject any bit outside the
+##      CLONE_NEWNS_FLAGS mask before the ns_capable check (EPERM).
+##
+##      Pre-batch sys_setns validated the fd then went straight to
+##      EPERM, skipping nstype entirely.  A probe walking nstype
+##      values (e.g. nspawn, util-linux's `nsenter --setns`) saw
+##      EPERM for any input — including 0xDEAD_BEEF and other
+##      clearly-bogus bit patterns Linux rejects with EINVAL.
+##
+##      Fix: between the fd check and the terminal EPERM, reject any
+##      bit outside CLONE_NEWNS_FLAGS (union of NEWNS/NEWCGROUP/
+##      NEWUTS/NEWIPC/NEWUSER/NEWPID/NEWNET/NEWTIME).  nstype=0
+##      flows through to EPERM because we can't distinguish
+##      proc_ns_file (accepts 0) from pidfd (rejects 0) in our
+##      kernel-context model; EPERM is the truthful answer on
+##      either path for an unprivileged caller.
+##
+##      Self-tests updated/added (5):
+##        * setns(fd=0, nstype=0) -> EPERM (existing, unchanged).
+##        * setns(fd=0, nstype=CLONE_NEWNS=0x20000) -> EPERM (new,
+##          confirms single valid bit passes).
+##        * setns(fd=0, nstype=CLONE_NEWNS|CLONE_NEWUTS) -> EPERM
+##          (new, confirms multi-bit subset is accepted at this
+##          gate — Linux's proc_ns_file path would later reject
+##          for not matching the file's ns type, but we have no
+##          proc_ns_files to dispatch on).
+##        * setns(fd=0, nstype=0xDEAD_BEEF) -> EINVAL (new, was
+##          EPERM; bogus high bits outside the mask).
+##        * setns(fd=0, nstype=1) -> EINVAL (new, bit 0 is not any
+##          CLONE_NEW* — confirms the gate catches single-bit
+##          garbage too, not just multi-bit nonsense).
+##      Marker emitted: "setns nstype mask: OK".
+##
+##      Known limitations:
+##        * We don't model the per-path validation difference
+##          (proc_ns_file requires exact ns-type match; pidfd
+##          requires nstype != 0).  When real ns files / pidfds
+##          land, sys_setns must check the fd kind and apply the
+##          stricter per-path gate.
+##        * No CAP_SYS_ADMIN path to grant privilege; EPERM is the
+##          only terminal an unprivileged caller can reach.
+##        * No namespace subsystem at all yet, so even a valid
+##          (fd, nstype) pair has nothing to attach to.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

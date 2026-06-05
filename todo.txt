@@ -9070,5 +9070,44 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          return ESRCH for truly-missing TIDs, which
 ##          would let strace surface a more accurate
 ##          message.
+##
+##   87. getrandom flag validation tightened to match
+##      Linux EINVAL behaviour (batch 60).
+##      Status: known flags only; mutually-exclusive
+##              source bits rejected.
+##
+##      Before batch 60, sys_getrandom blindly ignored
+##      its `flags` argument: any bit pattern was
+##      accepted, including future Linux flags we do not
+##      know about and the explicitly-illegal
+##      GRND_RANDOM | GRND_INSECURE combination.  Letting
+##      unknown bits silently slip through meant any
+##      future Linux extension would appear to "work" on
+##      our kernel while doing none of the requested
+##      behaviour — a silent ABI drift trap.
+##
+##      What was done:
+##        - sys_getrandom now rejects flags that contain
+##          any bit outside (GRND_NONBLOCK | GRND_RANDOM
+##          | GRND_INSECURE) with EINVAL.
+##        - GRND_RANDOM | GRND_INSECURE together is also
+##          rejected with EINVAL (matches Linux >= 5.6:
+##          the two flags request mutually-exclusive
+##          entropy semantics).
+##        - Self-tests exercise: unknown bit (0x10) ->
+##          EINVAL, RANDOM|INSECURE -> EINVAL, buflen 0
+##          with NONBLOCK -> 0, valid 8-byte read with
+##          no flags -> 8, valid reads with each of the
+##          three single-source flags -> 4.
+##
+##      Known limitations:
+##        - We still do not distinguish behaviour between
+##          GRND_RANDOM, GRND_NONBLOCK, and GRND_INSECURE
+##          at runtime — they all draw from the same
+##          ChaCha20 CSPRNG.  This is consistent with how
+##          modern Linux behaves once entropy is
+##          initialised (urandom == random == insecure
+##          for byte stream quality), so we are not
+##          misleading callers.
 
 

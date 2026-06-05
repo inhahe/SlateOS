@@ -13362,19 +13362,48 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
 /// boot), and falls back to TSC+HPET lazy-seeding if a caller somehow
 /// races early boot.
 ///
-/// `flags` is accepted but not interpreted:
-///   - `GRND_NONBLOCK` (0x0001) — we never block, so it's a no-op.
+/// `flags` validation matches Linux:
+///   - `GRND_NONBLOCK` (0x0001) — we never block, so it's effectively
+///                                a no-op, but the flag is accepted.
 ///   - `GRND_RANDOM`   (0x0002) — we don't distinguish urandom vs
 ///                                 random sources; same CSPRNG either
 ///                                 way.
 ///   - `GRND_INSECURE` (0x0004) — accepted for API compatibility.
+///   - `GRND_RANDOM | GRND_INSECURE` together is rejected with EINVAL
+///     because those flags request mutually-exclusive entropy sources
+///     (this matches Linux's behaviour since 5.6).
+///   - Any other bit set in `flags` is rejected with EINVAL.  Returning
+///     EINVAL — rather than silently ignoring unknown bits — surfaces
+///     ABI drift: a future Linux flag we don't yet know about should
+///     cause callers to fall back rather than blindly trust an
+///     unrelated CSPRNG path.
 ///
 /// Returns the number of bytes written (always equal to `buflen`
 /// capped at 256, matching Linux's `getrandom` per-call cap).
 fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
+    const GRND_NONBLOCK: u32 = 0x0001;
+    const GRND_RANDOM: u32 = 0x0002;
+    const GRND_INSECURE: u32 = 0x0004;
+    const VALID_FLAGS: u32 = GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE;
+
     let buf_ptr = args.arg0;
     let buf_len = args.arg1 as usize;
-    // arg2 = flags (ignored — see doc comment above).
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+
+    // Reject unknown flag bits — matches Linux EINVAL behaviour and
+    // prevents future Linux extensions from silently slipping through
+    // as a no-op.
+    if flags & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // GRND_RANDOM and GRND_INSECURE are mutually exclusive: the former
+    // requests blocking-style entropy, the latter explicitly waives
+    // entropy requirements.  Linux 5.6+ rejects the combination.
+    if flags & GRND_RANDOM != 0 && flags & GRND_INSECURE != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
     if buf_len == 0 {
         return SyscallResult::ok(0);
     }
@@ -19965,6 +19994,69 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node valid not ENOSYS");
             return Err(KernelError::InternalError);
+        }
+
+        // Batch 60: getrandom flag validation.
+        //   - Unknown flag bit (0x10) -> EINVAL.
+        //   - GRND_RANDOM | GRND_INSECURE together -> EINVAL.
+        //   - buflen == 0 with any valid flags -> 0 (no-op).
+        //   - Valid flags (GRND_NONBLOCK or 0) with a writable scratch
+        //     buffer -> positive byte count.
+        {
+            let rand_buf = [0u8; 32];
+            let rand_ptr = rand_buf.as_ptr() as u64;
+
+            // Unknown bit set.
+            let a = SyscallArgs { arg0: rand_ptr, arg1: 16, arg2: 0x10, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETRANDOM, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrandom unknown flag not EINVAL ({})",
+                    dispatch_linux(nr::GETRANDOM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // GRND_RANDOM | GRND_INSECURE = 0x6.
+            let a = SyscallArgs { arg0: rand_ptr, arg1: 16, arg2: 0x6, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETRANDOM, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrandom RANDOM|INSECURE not EINVAL ({})",
+                    dispatch_linux(nr::GETRANDOM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // buflen 0, GRND_NONBLOCK -> 0.
+            let a = SyscallArgs { arg0: rand_ptr, arg1: 0, arg2: 0x1, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETRANDOM, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrandom(0,NONBLOCK) not 0 ({})",
+                    dispatch_linux(nr::GETRANDOM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Valid 8-byte read with no flags -> 8.
+            let a = SyscallArgs { arg0: rand_ptr, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            let r = dispatch_linux(nr::GETRANDOM, &a).value;
+            if r != 8 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrandom(8,0) returned {} (expected 8)",
+                    r
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Valid read with all three accepted single-source flags
+            // (GRND_NONBLOCK alone, GRND_RANDOM alone, GRND_INSECURE
+            // alone).  Each must succeed.
+            for flag in [0x1u64, 0x2, 0x4] {
+                let a = SyscallArgs { arg0: rand_ptr, arg1: 4, arg2: flag, arg3: 0, arg4: 0, arg5: 0 };
+                let r = dispatch_linux(nr::GETRANDOM, &a).value;
+                if r != 4 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: getrandom(4, flag=0x{:x}) returned {} (expected 4)",
+                        flag, r
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
         }
     }
 

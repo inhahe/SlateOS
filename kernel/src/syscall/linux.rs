@@ -15558,12 +15558,20 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     const SCHED_DEADLINE: u32 = 6;
     const SCHED_EXT: u32 = 7;
 
-    if args.arg2 != 0 {
-        return linux_err(errno::EINVAL);
-    }
+    // Linux kernel/sched/syscalls.c::SYSCALL_DEFINE3(sched_setattr)
+    // opens with a single combined gate:
+    //   if (!uattr || pid < 0 || flags) return -EINVAL;
+    // All three failure modes share EINVAL — including a NULL uattr,
+    // which userspace would naively expect to be EFAULT.  Pre-batch
+    // we returned EFAULT for NULL uattr and didn't check pid<0 at
+    // all, so probes saw:
+    //   (uattr=NULL)            -> EFAULT vs Linux EINVAL
+    //   (pid<0, valid uattr)    -> 0      vs Linux EINVAL
     let attr_ptr = args.arg1;
-    if attr_ptr == 0 {
-        return linux_err(errno::EFAULT);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = args.arg0 as i32;
+    if args.arg2 != 0 || attr_ptr == 0 || pid_i32 < 0 {
+        return linux_err(errno::EINVAL);
     }
     // Read the 4-byte size prefix to know how much is readable.
     if let Err(e) = crate::mm::user::validate_user_read(attr_ptr, 4) {
@@ -36911,12 +36919,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: sched_setattr bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // sched_setattr NULL attr -> EFAULT.
+        // sched_setattr NULL attr -> EINVAL.  Linux folds (!uattr ||
+        // pid<0 || flags) into one combined EINVAL gate at the top of
+        // SYSCALL_DEFINE3(sched_setattr); NULL uattr does NOT yield
+        // EFAULT here (despite the user-pointer parameter).  Batch
+        // 217 reorders to match.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: sched_setattr NULL not EFAULT");
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sched_setattr NULL not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // sched_setattr negative pid -> EINVAL (same combined gate).
+        // Pre-batch we accepted neg pid silently because pid<0 was
+        // never validated; only ESRCH from the later pcb::state lookup
+        // could fire, and that requires reaching the dispatch tail.
+        // Use a valid attr buffer so we can prove the pid<0 gate
+        // fires BEFORE the size/policy read.
+        let mut good_pid_attr = [0u8; 48];
+        good_pid_attr[0..4].copy_from_slice(&48u32.to_le_bytes());
+        let gpap = good_pid_attr.as_ptr() as u64;
+        let a = SyscallArgs { arg0: u64::MAX, arg1: gpap, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sched_setattr neg pid not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setattr combined !uattr|pid<0|flags EINVAL: OK"
+        );
         // sched_setattr(size = 0) -> EINVAL (batch 107 upgrade: was
         // EPERM after a no-op return; now sub-48 size is rejected
         // before we even look at the policy).

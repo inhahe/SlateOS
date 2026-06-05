@@ -19658,3 +19658,40 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      firing AFTER the EPERM gate.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 246. [DONE 2026-06-05] Linux ABI: sys_sched_setattr combined
+##      !uattr | pid<0 | flags EINVAL gate.
+##
+##      Linux `kernel/sched/syscalls.c::SYSCALL_DEFINE3(
+##      sched_setattr)` opens with a single combined gate:
+##         if (!uattr || pid < 0 || flags) return -EINVAL;
+##      All three failure modes share EINVAL — including a NULL
+##      uattr (despite the user-pointer parameter, no EFAULT) and
+##      a negative pid (NOT ESRCH, despite the later
+##      find_task_by_vpid path).  Pre-batch sys_sched_setattr
+##      (kernel/src/syscall/linux.rs):
+##         * flags != 0 -> EINVAL (correct).
+##         * attr_ptr == 0 -> EFAULT (diverges; Linux EINVAL).
+##         * pid<0 was never validated up-front; flow proceeded
+##           into size/policy read, then the later pcb::state
+##           lookup gave ESRCH only for unknown positive pids.
+##           Negative pid was silently accepted as `pid=0` cast
+##           (caller_pid) effectively, returning 0 on success.
+##
+##      Fix: combine the three failure modes into one EINVAL gate
+##      at the top of the function, matching Linux's literal
+##      `if (!uattr || pid<0 || flags)` check.
+##
+##      Self-tests added/updated:
+##      - sched_setattr(NULL uattr) -> EINVAL (was tested as EFAULT).
+##      - sched_setattr(pid=u64::MAX, valid uattr) -> EINVAL (new).
+##      Marker: "sched_setattr combined !uattr|pid<0|flags EINVAL: OK".
+##
+##      Known limitation: per-task ptrace EPERM gate inside the
+##      Linux deadline/check_for_caller path isn't tested — those
+##      gates fire after sched_copy_attr in __sched_setscheduler
+##      and only matter when SCHED_DEADLINE / SCHED_EXT land.  Our
+##      SCHED_DEADLINE / SCHED_EXT path still returns EOPNOTSUPP
+##      (compiled-out class) so the EPERM gate is unreachable.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

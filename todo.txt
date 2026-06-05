@@ -17360,3 +17360,48 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   lsm_list_modules
 ##      flags-first gating: OK" in build/serial-test.txt.
+
+## 198. syscall/linux: lsm_get_self_attr size_t pointer width
+##      4 -> 8 bytes (batch 169).
+##
+##      Symptom: sys_lsm_get_self_attr validated only 4 bytes of
+##               the size pointer.  Linux's signature is
+##               `size_t __user *size`, which on x86_64 is 8
+##               bytes.  A user passing a pointer to the last 4
+##               bytes of a mapped region would clear our 4-byte
+##               validate_user_read/write and then fault on the
+##               (eventual) put_user(total_size, size) of the
+##               full 8 bytes — divergent EFAULT timing vs. Linux,
+##               and on a write-protected page would have skipped
+##               our write check entirely.
+##
+##               This was the limitation flagged at the bottom of
+##               todo entry 195 and again in 197 as the next
+##               fix-up batch.
+##
+##      Fix:    Bumped both validate_user_read and
+##              validate_user_write probes from 4 to 8 bytes,
+##              matching Linux's get_user/put_user width.  The
+##              shared size_buf test fixture was already widened
+##              to 8 bytes in batch 168 (entry 197), so no test
+##              fixture changes were needed.
+##
+##      Self-tests:  No new tests.  In kernel context our
+##                   validate_user_read/write bypass returns Ok
+##                   unconditionally (mm::user::is_kernel_context),
+##                   so a width mismatch is not directly testable
+##                   from self-tests.  The existing nine
+##                   lsm_get_self_attr self-tests (entry 195) all
+##                   still pass with the wider probes.  Real
+##                   user-context coverage will come when we have
+##                   a way to launch a userspace probe with
+##                   controllable mappings (carried as a global
+##                   testing-infra limitation, not specific to
+##                   this batch).
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).  Serial
+##      confirms all three LSM markers
+##      ("lsm_get_self_attr UNDEF/SINGLE gating: OK",
+##       "lsm_set_self_attr flags/size/E2BIG gating: OK",
+##       "lsm_list_modules flags-first gating: OK")
+##      in build/serial-test.txt.

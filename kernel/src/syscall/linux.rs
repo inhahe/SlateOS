@@ -17377,13 +17377,18 @@ fn sys_lsm_get_self_attr(args: &SyscallArgs) -> SyscallResult {
     if args.arg2 == 0 {
         return linux_err(errno::EINVAL);
     }
-    // size* is a size_t read-modify-write.  Linux issues get_user
-    // first; the corresponding fault is EFAULT.  We also need to be
-    // able to write back the resolved size, hence the write check.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 4) {
+    // size* is a `size_t __user *` read-modify-write: Linux's
+    // signature is `size_t __user *size`, which is 8 bytes on
+    // x86_64.  Linux issues get_user(usize, size) first (EFAULT on
+    // fault) and later put_user(total, size).  Pre-batch we
+    // validated only 4 bytes here; a user passing a pointer to
+    // the last 4 bytes of a mapped region would clear validation
+    // while the high 4 bytes of size_t lived in unmapped memory,
+    // and the put_user later would fault unexpectedly.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 8) {
         return linux_err(linux_errno_for(e));
     }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 4) {
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 8) {
         return linux_err(linux_errno_for(e));
     }
     // flags: only LSM_FLAG_SINGLE (1) is defined.  Any other bit

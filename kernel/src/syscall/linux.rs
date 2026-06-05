@@ -16280,23 +16280,42 @@ fn sys_rt_tgsigqueueinfo(args: &SyscallArgs) -> SyscallResult {
 
 /// `timer_create(clockid, sigevent*, timerid_t*)`.
 fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
-    // Valid Linux clockids: REALTIME(0), MONOTONIC(1), PROCESS_CPUTIME_ID(2),
-    // THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4), REALTIME_COARSE(5),
-    // MONOTONIC_COARSE(6), BOOTTIME(7), REALTIME_ALARM(8),
-    // BOOTTIME_ALARM(9), SGI_CYCLE(10), TAI(11).
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let clockid = args.arg0 as i32;
-    if !(0..=11).contains(&clockid) {
-        return linux_err(errno::EINVAL);
-    }
-    // sigevent is optional (NULL = use SIGALRM); when non-NULL it's 64
-    // bytes on x86_64.
+    // Mirror Linux's `SYSCALL_DEFINE3(timer_create)` and `do_timer_create`
+    // (kernel/time/posix-timers.c) gate order:
+    //   1. if (timer_event_spec) copy_from_user(...) -> EFAULT on fail
+    //   2. clockid_to_kclock(which_clock) == NULL                 -> EINVAL
+    //      (rejects clockids outside the table, including SGI_CYCLE=10
+    //       which has no k_clock entry)
+    //   3. !kc->timer_create                                      -> EOPNOTSUPP
+    //      (MONOTONIC_RAW=4, REALTIME_COARSE=5, MONOTONIC_COARSE=6 are
+    //       reader-only clocks: their k_clock has no .timer_create)
+    //   4. ... timer creation work; copy_to_user(created_timer_id)
+    //                                                             -> EFAULT
+    //
+    // Pre-batch we (a) checked clockid before sigevent (mismatch when both
+    // are bad — Linux returns EFAULT, we returned EINVAL), (b) accepted
+    // SGI_CYCLE=10 as valid (would have entered the table on Linux but
+    // there's no entry → EINVAL), and (c) returned ENOSYS for clockids
+    // 4/5/6 where Linux returns EOPNOTSUPP.
     if args.arg1 != 0 {
+        // sigevent on x86_64 Linux is 64 bytes (union sigval inside).
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 64) {
             return linux_err(linux_errno_for(e));
         }
     }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid = args.arg0 as i32;
+    // Linux clockids 0..=11; SGI_CYCLE(10) has no entry in posix_clocks[].
+    if !(0..=11).contains(&clockid) || clockid == 10 {
+        return linux_err(errno::EINVAL);
+    }
+    // Reader-only clocks have no .timer_create — Linux returns EOPNOTSUPP.
+    if matches!(clockid, 4 | 5 | 6) {
+        return linux_err(errno::EOPNOTSUPP);
+    }
     // timerid_t output ptr is required (4 bytes for a kernel_timer_t).
+    // Linux only touches it via copy_to_user after creation succeeds, so
+    // a NULL/bad ptr surfaces as EFAULT only when everything above passes.
     if args.arg2 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -35978,6 +35997,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: timer_create valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // timer_create SGI_CYCLE (10) -> EINVAL (no .clock_set/.timer_create
+        // entry in Linux's posix_clocks[]; clockid_to_kclock returns NULL).
+        let a = SyscallArgs { arg0: 10, arg1: 0, arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_create SGI_CYCLE not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // timer_create MONOTONIC_RAW (4) -> EOPNOTSUPP (no .timer_create).
+        let a = SyscallArgs { arg0: 4, arg1: 0, arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: timer_create MONOTONIC_RAW not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // timer_create REALTIME_COARSE (5) -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 5, arg1: 0, arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create REALTIME_COARSE not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // timer_create MONOTONIC_COARSE (6) -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 6, arg1: 0, arg2: timerid_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timer_create MONOTONIC_COARSE not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // timer_create TAI (11) with NULL timerid ptr -> EFAULT (clockid is
+        // valid + has .timer_create, so we reach the output-ptr check).
+        let a = SyscallArgs { arg0: 11, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_CREATE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: timer_create TAI NULL timerid not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   timer_create sigevent/clockid/EOPNOTSUPP gating: OK"
+        );
         // timer_delete -> EINVAL (no timers).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMER_DELETE, &a).value != -i64::from(errno::EINVAL) {

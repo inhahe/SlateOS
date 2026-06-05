@@ -18031,3 +18031,57 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          terminal EBADF stands in for "epfd is not a valid fd".
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+## 213. Linux ABI: timer_create sigevent/clockid/EOPNOTSUPP gating
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's SYSCALL_DEFINE3(timer_create) + do_timer_create
+##      (kernel/time/posix-timers.c) order:
+##        1. if (timer_event_spec)
+##               if (copy_from_user(&event, ...)) return -EFAULT;
+##        2. kc = clockid_to_kclock(which_clock);
+##           if (!kc) return -EINVAL;
+##        3. if (!kc->timer_create) return -EOPNOTSUPP;
+##        4. ... create timer ...
+##        5. if (copy_to_user(created_timer_id, ...)) return -EFAULT;
+##
+##      Pre-batch sys_timer_create diverged in three places:
+##        a) clockid range was checked BEFORE the sigevent copy, so
+##           (sigevent=bad_ptr, clockid=99) returned EINVAL where
+##           Linux returns EFAULT.
+##        b) SGI_CYCLE (clockid=10) was accepted by our `(0..=11)`
+##           gate, but Linux has no k_clock entry for it
+##           (posix_clocks[CLOCK_SGI_CYCLE] is unset) → EINVAL.
+##        c) MONOTONIC_RAW(4), REALTIME_COARSE(5),
+##           MONOTONIC_COARSE(6) — reader-only clocks with no
+##           .timer_create — returned ENOSYS where Linux returns
+##           EOPNOTSUPP.
+##
+##      Fix: reorder so sigevent validation runs first, exclude
+##      SGI_CYCLE from the accepted set, add an EOPNOTSUPP gate for
+##      {4,5,6}, and keep the timerid_t output-ptr EFAULT check after
+##      the clockid gates (mirroring Linux's copy_to_user position).
+##
+##      Self-tests added (5 new):
+##        * TIMER_CREATE(clockid=10) -> EINVAL  (SGI_CYCLE rejection)
+##        * TIMER_CREATE(clockid=4)  -> EOPNOTSUPP  (MONOTONIC_RAW)
+##        * TIMER_CREATE(clockid=5)  -> EOPNOTSUPP  (REALTIME_COARSE)
+##        * TIMER_CREATE(clockid=6)  -> EOPNOTSUPP  (MONOTONIC_COARSE)
+##        * TIMER_CREATE(clockid=11, timerid=NULL) -> EFAULT  (TAI
+##          reaches the output-ptr gate)
+##        * Emits "[syscall/linux]   timer_create
+##          sigevent/clockid/EOPNOTSUPP gating: OK".
+##
+##      Known limitations:
+##        * Valid (clockid, timer_id) still returns ENOSYS because we
+##          have no POSIX timer subsystem.  Linux would return 0 and
+##          deposit a kernel_timer_t.  Self-tests can't distinguish
+##          (sigevent=bad_ptr, clockid=valid) → EFAULT in kernel
+##          context because validate_user_read is bypassed; the
+##          reorder is observable from userspace.
+##        * Capability checks for REALTIME_ALARM(8) /
+##          BOOTTIME_ALARM(9) (CAP_WAKE_ALARM in Linux) are not
+##          modelled — we accept them through to ENOSYS.  Real
+##          timer support will add the cap gate.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).

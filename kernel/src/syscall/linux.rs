@@ -842,6 +842,35 @@ pub mod fcntl_cmd {
     /// fresh pipe).
     pub const F_GETPIPE_SZ: u32 = 1032;
 
+    /// POSIX advisory record-lock commands.  All three take a
+    /// `struct flock *` in `arg` and operate on a half-open byte
+    /// range of the file behind the fd.  Linux numbers them 5/6/7
+    /// in `<asm-generic/fcntl.h>` (these are the architecture-neutral
+    /// values used on x86_64; the `_64` aliases share the same
+    /// numbers when off_t is already 64-bit).
+    ///
+    /// In our kernel only one process can hold a Linux fd table at
+    /// a time (no cross-process visibility yet), so no other holder
+    /// can conflict.  `F_SETLK` / `F_SETLKW` always grant; `F_GETLK`
+    /// always reports `F_UNLCK` ("no conflict").  Callers that use
+    /// flock-style locking on /var/run pidfiles, sqlite WAL locking,
+    /// and Postgres backend startup all proceed without modification.
+    pub const F_GETLK: u32 = 5;
+    pub const F_SETLK: u32 = 6;
+    pub const F_SETLKW: u32 = 7;
+
+    /// Open File Description (OFD) lock variants — Linux 3.15+.
+    /// Same `struct flock` shape but locks are owned by the open
+    /// file description rather than the (pid, inode) pair, which
+    /// makes them inheritable across fork/dup and safe to use
+    /// between threads in the same process.  Numbers come from
+    /// `<linux/fcntl.h>`.  The OFD ABI requires `l_pid == 0` on
+    /// input; we enforce that and otherwise behave identically to
+    /// the POSIX variants (always granted / always no-conflict).
+    pub const F_OFD_GETLK: u32 = 36;
+    pub const F_OFD_SETLK: u32 = 37;
+    pub const F_OFD_SETLKW: u32 = 38;
+
     /// `type` field values for `struct f_owner_ex` used by
     /// `F_GETOWN_EX` / `F_SETOWN_EX`.  Numeric values match Linux's
     /// `<bits/fcntl.h>`.
@@ -2807,6 +2836,28 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
                 && self_entry.raw_handle == other_entry.raw_handle;
             SyscallResult::ok(if same { 1 } else { 0 })
         }
+        fcntl_cmd::F_GETLK
+        | fcntl_cmd::F_SETLK
+        | fcntl_cmd::F_SETLKW
+        | fcntl_cmd::F_OFD_GETLK
+        | fcntl_cmd::F_OFD_SETLK
+        | fcntl_cmd::F_OFD_SETLKW => {
+            let entry = match pcb::linux_fd_lookup(pid, fd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            };
+            let is_getlk = matches!(
+                cmd,
+                fcntl_cmd::F_GETLK | fcntl_cmd::F_OFD_GETLK,
+            );
+            let is_ofd = matches!(
+                cmd,
+                fcntl_cmd::F_OFD_GETLK
+                    | fcntl_cmd::F_OFD_SETLK
+                    | fcntl_cmd::F_OFD_SETLKW,
+            );
+            fcntl_flock_apply(arg, entry, is_getlk, is_ofd)
+        }
         // Linux `kernel/fcntl.c` returns -EINVAL (not -ENOSYS) for
         // unknown `cmd` values.  Match the reference behaviour so
         // glibc / musl probes that try a command we don't implement
@@ -2814,6 +2865,129 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
         // doesn't recognise the command (e.g. an older one).
         _ => linux_err(errno::EINVAL),
     }
+}
+
+/// Apply a POSIX advisory record lock (`F_SETLK` / `F_SETLKW` /
+/// `F_GETLK`) or its OFD variant (`F_OFD_SETLK` / `F_OFD_SETLKW` /
+/// `F_OFD_GETLK`) to the file behind `entry`.
+///
+/// This kernel does not yet track per-file lock state, and a Linux
+/// fd table only ever has one process holding it (no cross-process
+/// sharing yet), so no holder can conflict with the caller.  The
+/// honest answer for "is there a conflict?" is "no":
+///
+///   * `F_SETLK` / `F_SETLKW`: validate the `struct flock`
+///     contents, then return 0 ("granted").  `F_SETLKW` is identical
+///     to `F_SETLK` because there is no contention to wait for.
+///     Releases (`l_type == F_UNLCK`) also return 0 — releasing a
+///     lock that was never installed is a no-op, matching Linux.
+///   * `F_GETLK` / `F_OFD_GETLK`: validate the `struct flock`,
+///     overwrite `l_type` with `F_UNLCK`, zero `l_pid`, and return
+///     0.  Linux's contract: "the lock that would prevent us from
+///     acquiring `l_type` at `[l_start, l_start + l_len)` is …" —
+///     `F_UNLCK` means "no conflict, you'd get the lock".
+///
+/// fd kind gate:
+///   * `HandleKind::File` — accepted (regular files are lockable).
+///   * `HandleKind::Console` / `HandleKind::Pipe` — Linux returns
+///     EBADF for advisory locks on pipes and character devices that
+///     don't implement `->lock`; mirror that.
+///
+/// Layout: `struct flock` on x86_64 is 32 bytes:
+///   off 0 : i16 l_type
+///   off 2 : i16 l_whence
+///   off 4 : 4 bytes padding (off_t is 8-byte aligned)
+///   off 8 : i64 l_start
+///   off 16: i64 l_len
+///   off 24: i32 l_pid
+///   off 28: 4 bytes trailing padding
+fn fcntl_flock_apply(
+    flock_ptr: u64,
+    entry: crate::proc::linux_fd::FdEntry,
+    is_getlk: bool,
+    is_ofd: bool,
+) -> SyscallResult {
+    use crate::proc::linux_fd::HandleKind;
+    // Lockable kind gate.  Locks on non-files report EBADF the same
+    // way Linux does for unsupported fd types.
+    match entry.kind {
+        HandleKind::File => {}
+        HandleKind::Console | HandleKind::Pipe => {
+            return linux_err(errno::EBADF);
+        }
+    }
+    if flock_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    const FLOCK_SIZE: usize = 32;
+    if let Err(e) = crate::mm::user::validate_user_read(flock_ptr, FLOCK_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    if is_getlk {
+        if let Err(e) = crate::mm::user::validate_user_write(flock_ptr, FLOCK_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    let mut buf = [0u8; FLOCK_SIZE];
+    // SAFETY: validate_user_read confirmed [flock_ptr, +32) is a
+    // readable user range; copy_from_user re-checks under SMAP and
+    // writes exactly 32 bytes into the stack-local buffer.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(flock_ptr, buf.as_mut_ptr(), FLOCK_SIZE)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let l_type = i16::from_le_bytes([buf[0], buf[1]]) as i32;
+    let l_whence = i16::from_le_bytes([buf[2], buf[3]]) as i32;
+    // l_start / l_len are stored but we don't act on them (no
+    // per-range tracking).  Validate they're well-formed integers
+    // (any bit pattern is legal at the ABI level — Linux clamps
+    // pathological ranges later in conflict detection).
+    let _l_start = i64::from_le_bytes([
+        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+    ]);
+    let _l_len = i64::from_le_bytes([
+        buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
+    ]);
+    let l_pid = i32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+    // l_type must be F_RDLCK(0), F_WRLCK(1), or F_UNLCK(2).
+    if !matches!(
+        l_type,
+        fcntl_cmd::lease_type::F_RDLCK
+            | fcntl_cmd::lease_type::F_WRLCK
+            | fcntl_cmd::lease_type::F_UNLCK
+    ) {
+        return linux_err(errno::EINVAL);
+    }
+    // l_whence must be SEEK_SET(0) / SEEK_CUR(1) / SEEK_END(2).
+    if !(0..=2).contains(&l_whence) {
+        return linux_err(errno::EINVAL);
+    }
+    // OFD locks require l_pid == 0 on input; Linux returns EINVAL
+    // otherwise.  POSIX locks ignore l_pid on input (it's an output
+    // field of F_GETLK).
+    if is_ofd && l_pid != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if is_getlk {
+        // Report "no conflict": overwrite l_type with F_UNLCK and
+        // zero l_pid.  Other fields (l_whence / l_start / l_len) are
+        // unchanged per Linux semantics — the kernel only writes
+        // l_type and l_pid (and clears l_start/l_len on Linux but
+        // many libcs don't rely on it; we preserve the input).
+        let unlck = fcntl_cmd::lease_type::F_UNLCK as i16;
+        buf[0..2].copy_from_slice(&unlck.to_le_bytes());
+        buf[24..28].copy_from_slice(&0i32.to_le_bytes());
+        // SAFETY: validate_user_write confirmed [flock_ptr, +32) is
+        // a writable user range.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_to_user(buf.as_ptr(), flock_ptr, FLOCK_SIZE)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // SETLK / SETLKW / GETLK / SETLK(F_UNLCK) all succeed: 0.
+    SyscallResult::ok(0)
 }
 
 /// `lseek(fd, offset, whence)` — only meaningful for `File` handles.
@@ -27081,6 +27255,227 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::PROCESS_MRELEASE, &a).value
             != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: process_mrelease not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Batch 113: fcntl(F_GETLK / F_SETLK / F_SETLKW) and OFD
+    // variants — single-process advisory record locks.  No other
+    // holder can conflict, so SET succeeds and GET reports
+    // F_UNLCK.  Verify the constants, the kernel-ctx EBADF early
+    // exit, and the inner helper across the full validation
+    // surface (kind gate, NULL ptr, bad l_type / l_whence, OFD
+    // l_pid != 0 rule, F_GETLK writeback).
+    {
+        use crate::proc::linux_fd::FdEntry;
+
+        // Constant sanity (numeric values from
+        // <asm-generic/fcntl.h> + <linux/fcntl.h>).
+        assert_eq!(fcntl_cmd::F_GETLK, 5);
+        assert_eq!(fcntl_cmd::F_SETLK, 6);
+        assert_eq!(fcntl_cmd::F_SETLKW, 7);
+        assert_eq!(fcntl_cmd::F_OFD_GETLK, 36);
+        assert_eq!(fcntl_cmd::F_OFD_SETLK, 37);
+        assert_eq!(fcntl_cmd::F_OFD_SETLKW, 38);
+
+        // Kernel-context dispatch: caller_pid is None, so all six
+        // cmds short-circuit at the early-exit EBADF that gates
+        // every fcntl arm.  This confirms the new arms participate
+        // in the same gate as the existing ones.
+        for cmd in [
+            fcntl_cmd::F_GETLK,
+            fcntl_cmd::F_SETLK,
+            fcntl_cmd::F_SETLKW,
+            fcntl_cmd::F_OFD_GETLK,
+            fcntl_cmd::F_OFD_SETLK,
+            fcntl_cmd::F_OFD_SETLKW,
+        ] {
+            let a = SyscallArgs {
+                arg0: 0, arg1: u64::from(cmd), arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::FCNTL, &a);
+            if r.value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fcntl(F_*LK={}) kernel-ctx -> {} (expected -EBADF)",
+                    cmd, r.value,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Exercise the inner helper directly: build a stack-allocated
+        // struct flock and synthesise FdEntry instances for each
+        // HandleKind.  No real backing handle is needed because the
+        // helper never dereferences raw_handle (locks have no
+        // per-file state in this kernel).
+        let file_entry = FdEntry::file(0xDEAD_BEEF, oflags::O_RDWR);
+        let console_entry = FdEntry::console(oflags::O_RDONLY);
+        let pipe_entry = FdEntry::pipe(0, oflags::O_RDONLY);
+
+        // Lockable-kind gate: Console / Pipe -> EBADF.
+        let flock_zero = [0u8; 32];
+        let r = fcntl_flock_apply(
+            flock_zero.as_ptr() as u64, console_entry, false, false,
+        );
+        if r.value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: F_SETLK on Console not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        let r = fcntl_flock_apply(
+            flock_zero.as_ptr() as u64, pipe_entry, false, false,
+        );
+        if r.value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: F_SETLK on Pipe not EBADF");
+            return Err(KernelError::InternalError);
+        }
+
+        // NULL flock_ptr on a File kind -> EFAULT.
+        let r = fcntl_flock_apply(0, file_entry, false, false);
+        if r.value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: F_SETLK(NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+
+        // F_SETLK with well-formed F_WRLCK + SEEK_SET, range [0,100)
+        // -> success (0).
+        let mut flock = [0u8; 32];
+        flock[0..2].copy_from_slice(
+            &(fcntl_cmd::lease_type::F_WRLCK as i16).to_le_bytes(),
+        );
+        flock[2..4].copy_from_slice(&0i16.to_le_bytes());
+        flock[8..16].copy_from_slice(&0i64.to_le_bytes());
+        flock[16..24].copy_from_slice(&100i64.to_le_bytes());
+        flock[24..28].copy_from_slice(&0i32.to_le_bytes());
+        let r = fcntl_flock_apply(
+            flock.as_mut_ptr() as u64, file_entry, false, false,
+        );
+        if r.value != 0 {
+            serial_println!("[syscall/linux]   FAIL: F_SETLK F_WRLCK -> {} (expected 0)", r.value);
+            return Err(KernelError::InternalError);
+        }
+
+        // Bogus l_type (3) -> EINVAL.
+        let mut flock = [0u8; 32];
+        flock[0..2].copy_from_slice(&3i16.to_le_bytes());
+        let r = fcntl_flock_apply(
+            flock.as_mut_ptr() as u64, file_entry, false, false,
+        );
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: F_SETLK bad l_type not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // Bogus l_whence (3) -> EINVAL.
+        let mut flock = [0u8; 32];
+        flock[0..2].copy_from_slice(&0i16.to_le_bytes());
+        flock[2..4].copy_from_slice(&3i16.to_le_bytes());
+        let r = fcntl_flock_apply(
+            flock.as_mut_ptr() as u64, file_entry, false, false,
+        );
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: F_SETLK bad l_whence not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // OFD lock with l_pid != 0 -> EINVAL (OFD contract).
+        let mut flock = [0u8; 32];
+        flock[0..2].copy_from_slice(&0i16.to_le_bytes());
+        flock[24..28].copy_from_slice(&42i32.to_le_bytes());
+        let r = fcntl_flock_apply(
+            flock.as_mut_ptr() as u64, file_entry, false, true,
+        );
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: F_OFD_SETLK l_pid!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // POSIX (non-OFD) ignores l_pid on input -> success.
+        let r = fcntl_flock_apply(
+            flock.as_mut_ptr() as u64, file_entry, false, false,
+        );
+        if r.value != 0 {
+            serial_println!("[syscall/linux]   FAIL: F_SETLK with l_pid!=0 (POSIX) not 0");
+            return Err(KernelError::InternalError);
+        }
+
+        // F_GETLK overwrites l_type with F_UNLCK and zeros l_pid.
+        let mut flock = [0u8; 32];
+        flock[0..2].copy_from_slice(
+            &(fcntl_cmd::lease_type::F_WRLCK as i16).to_le_bytes(),
+        );
+        flock[2..4].copy_from_slice(&0i16.to_le_bytes());
+        flock[8..16].copy_from_slice(&0i64.to_le_bytes());
+        flock[16..24].copy_from_slice(&500i64.to_le_bytes());
+        flock[24..28].copy_from_slice(&1234i32.to_le_bytes());
+        let r = fcntl_flock_apply(
+            flock.as_mut_ptr() as u64, file_entry, true, false,
+        );
+        if r.value != 0 {
+            serial_println!("[syscall/linux]   FAIL: F_GETLK -> {} (expected 0)", r.value);
+            return Err(KernelError::InternalError);
+        }
+        let written_l_type = i16::from_le_bytes([flock[0], flock[1]]);
+        let written_l_pid = i32::from_le_bytes([flock[24], flock[25], flock[26], flock[27]]);
+        if written_l_type != fcntl_cmd::lease_type::F_UNLCK as i16 {
+            serial_println!(
+                "[syscall/linux]   FAIL: F_GETLK l_type={} (expected F_UNLCK=2)",
+                written_l_type,
+            );
+            return Err(KernelError::InternalError);
+        }
+        if written_l_pid != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: F_GETLK l_pid={} (expected 0)",
+                written_l_pid,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // l_whence / l_start / l_len preserved.
+        let preserved_whence = i16::from_le_bytes([flock[2], flock[3]]);
+        let preserved_start = i64::from_le_bytes([
+            flock[8], flock[9], flock[10], flock[11],
+            flock[12], flock[13], flock[14], flock[15],
+        ]);
+        let preserved_len = i64::from_le_bytes([
+            flock[16], flock[17], flock[18], flock[19],
+            flock[20], flock[21], flock[22], flock[23],
+        ]);
+        if preserved_whence != 0 || preserved_start != 0 || preserved_len != 500 {
+            serial_println!("[syscall/linux]   FAIL: F_GETLK clobbered l_whence/l_start/l_len");
+            return Err(KernelError::InternalError);
+        }
+
+        // F_SETLK with F_UNLCK on a never-installed range succeeds
+        // (no-op release matches Linux semantics).
+        let mut flock = [0u8; 32];
+        flock[0..2].copy_from_slice(
+            &(fcntl_cmd::lease_type::F_UNLCK as i16).to_le_bytes(),
+        );
+        let r = fcntl_flock_apply(
+            flock.as_mut_ptr() as u64, file_entry, false, false,
+        );
+        if r.value != 0 {
+            serial_println!("[syscall/linux]   FAIL: F_SETLK F_UNLCK -> {} (expected 0)", r.value);
+            return Err(KernelError::InternalError);
+        }
+
+        // F_OFD_GETLK with l_pid=0 + F_RDLCK behaves identically to
+        // F_GETLK: writes back F_UNLCK.
+        let mut flock = [0u8; 32];
+        flock[0..2].copy_from_slice(
+            &(fcntl_cmd::lease_type::F_RDLCK as i16).to_le_bytes(),
+        );
+        let r = fcntl_flock_apply(
+            flock.as_mut_ptr() as u64, file_entry, true, true,
+        );
+        if r.value != 0 {
+            serial_println!("[syscall/linux]   FAIL: F_OFD_GETLK -> {} (expected 0)", r.value);
+            return Err(KernelError::InternalError);
+        }
+        let ofd_l_type = i16::from_le_bytes([flock[0], flock[1]]);
+        if ofd_l_type != fcntl_cmd::lease_type::F_UNLCK as i16 {
+            serial_println!("[syscall/linux]   FAIL: F_OFD_GETLK didn't write F_UNLCK");
             return Err(KernelError::InternalError);
         }
     }

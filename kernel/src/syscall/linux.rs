@@ -21178,6 +21178,19 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
 
 /// `clock_gettime(clockid, tp)` — fills `struct timespec`.
 fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
+    // Linux's `SYSCALL_DEFINE2(clock_gettime)` (kernel/time/posix-timers.c):
+    //   kc = clockid_to_kclock(which_clock);
+    //   if (!kc) return -EINVAL;
+    //   error = kc->clock_get_timespec(which_clock, &kernel_tp);
+    //   if (!error && put_timespec64(&kernel_tp, tp)) error = -EFAULT;
+    //
+    // Every clockid 0..=11 except SGI_CYCLE(10) has a .clock_get_timespec
+    // entry: REALTIME(0), MONOTONIC(1), PROCESS_CPUTIME_ID(2),
+    // THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4), REALTIME_COARSE(5),
+    // MONOTONIC_COARSE(6), BOOTTIME(7), REALTIME_ALARM(8),
+    // BOOTTIME_ALARM(9), TAI(11).  Pre-batch we returned EINVAL for
+    // ALARM(8), ALARM(9), and TAI(11), diverging from Linux which fills
+    // them all in.
     const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
     const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
@@ -21186,16 +21199,28 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
     const CLOCK_REALTIME_COARSE: u64 = 5;
     const CLOCK_MONOTONIC_COARSE: u64 = 6;
     const CLOCK_BOOTTIME: u64 = 7;
+    const CLOCK_REALTIME_ALARM: u64 = 8;
+    const CLOCK_BOOTTIME_ALARM: u64 = 9;
+    const CLOCK_TAI: u64 = 11;
 
     let clockid = args.arg0;
     let tp_ptr = args.arg1;
 
     let ns: u64 = match clockid {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => crate::timekeeping::clock_realtime(),
+        // Wall-clock family.  TAI is realtime + TAI offset; our offset
+        // is 0 so it coincides with realtime.  REALTIME_ALARM mirrors
+        // realtime in Linux (alarm_clock_get_timespec).
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM
+        | CLOCK_TAI => crate::timekeeping::clock_realtime(),
+        // Monotonic family + BOOTTIME and its ALARM twin (both track
+        // monotonic-since-boot in Linux for clock_gettime purposes).
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE
-        | CLOCK_BOOTTIME | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
+        | CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM
+        | CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
             crate::hrtimer::now_ns()
         }
+        // Anything else (out-of-range or SGI_CYCLE=10) -> EINVAL,
+        // matching Linux's clockid_to_kclock NULL return.
         _ => return linux_err(errno::EINVAL),
     };
 
@@ -21670,6 +21695,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
+    // (8a) clock_gettime ALARM/TAI clocks were rejected pre-batch with
+    // EINVAL but Linux fills them in.  Validate the new accept path:
+    // REALTIME_ALARM(8), BOOTTIME_ALARM(9), TAI(11) all need to fall
+    // through the match and reach write_timespec.  We pass a NULL tp
+    // so write_timespec returns EFAULT — confirming the clockid is no
+    // longer rejected as EINVAL.  Pre-batch return: EINVAL.
+    for clockid in [8u64, 9, 11] {
+        let a = SyscallArgs { arg0: clockid, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::CLOCK_GETTIME, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_gettime({}, NULL) -> {} (expected -EFAULT)",
+                clockid, v
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // (8b) clock_gettime SGI_CYCLE(10) -> EINVAL.  No k_clock entry
+    // for it in Linux's posix_clocks[].
+    let a = SyscallArgs { arg0: 10, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::CLOCK_GETTIME, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: clock_gettime(SGI_CYCLE) not EINVAL"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   clock_gettime ALARM/TAI accept + SGI_CYCLE reject: OK"
+    );
 
     // (9) arch_prctl with an unknown code → -EINVAL.
     let bad_prctl = SyscallArgs { arg0: 0x42, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

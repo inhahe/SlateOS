@@ -18141,3 +18141,48 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          immediately above.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
+
+## 215. Linux ABI: clock_gettime ALARM/TAI accept + SGI_CYCLE reject
+##      (kernel/src/syscall/linux.rs)
+##
+##      Linux's clockid_to_kclock + .clock_get_timespec covers every
+##      clockid 0..=11 except SGI_CYCLE(10), which has no posix_clocks[]
+##      entry.  Pre-batch sys_clock_gettime only matched clockids
+##      0..=7 and returned EINVAL for everything else, diverging from
+##      Linux on CLOCK_REALTIME_ALARM(8), CLOCK_BOOTTIME_ALARM(9),
+##      and CLOCK_TAI(11).  Real userspace (systemd-timesyncd, glibc
+##      clock-feature probes) hits this when checking whether the
+##      kernel supports CLOCK_TAI.
+##
+##      Fix:
+##        * CLOCK_REALTIME_ALARM(8), CLOCK_TAI(11) join the wall-clock
+##          family (return clock_realtime()).  Our TAI offset is 0 so
+##          TAI == REALTIME, matching Linux's tai_get_timespec when
+##          tai_offset is unset.
+##        * CLOCK_BOOTTIME_ALARM(9) joins the monotonic family
+##          (alarm_clock_get_timespec returns the BOOTTIME equivalent).
+##        * SGI_CYCLE(10) and anything outside 0..=11 still return
+##          EINVAL — matches Linux's clockid_to_kclock NULL branch.
+##
+##      Self-tests added:
+##        * For clockid in {8, 9, 11}: CLOCK_GETTIME(clockid, NULL_tp)
+##          -> EFAULT (was EINVAL).  Confirms the clockid is no longer
+##          rejected up front; write_timespec fires instead.
+##        * CLOCK_GETTIME(10, NULL_tp) -> EINVAL (unchanged but now
+##          gated explicitly).
+##        * Pre-existing CLOCK_GETTIME(999) -> EINVAL still holds.
+##        * Emits "[syscall/linux]   clock_gettime ALARM/TAI accept +
+##          SGI_CYCLE reject: OK".
+##
+##      Known limitations:
+##        * CLOCK_PROCESS_CPUTIME_ID(2) / CLOCK_THREAD_CPUTIME_ID(3)
+##          still return monotonic ns instead of the actual
+##          process/thread CPU usage.  Tracking CPU time per task is
+##          a real scheduler change, out of scope for this batch.
+##        * CLOCK_REALTIME_ALARM(8) and CLOCK_BOOTTIME_ALARM(9) in
+##          Linux differ from their non-alarm twins only when timers
+##          armed on them fire while the system is in suspend; for
+##          a bare clock_gettime they're identical, which is what we
+##          implement.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

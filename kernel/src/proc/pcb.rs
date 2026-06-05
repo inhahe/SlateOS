@@ -788,6 +788,34 @@ pub struct Process {
     /// fixtures can install arbitrary masks.  The syscall surface
     /// enforces `cap <= LINUX_CAP_LAST_CAP`.
     pub linux_cap_bset: u64,
+
+    /// Packed Linux `ioprio_set(2)` / `ioprio_get(2)` value for
+    /// this process.
+    ///
+    /// Layout (matches `linux/include/uapi/linux/ioprio.h`):
+    /// `(class << 13) | data`, where `class` is one of
+    /// `IOPRIO_CLASS_NONE=0`, `_RT=1`, `_BE=2`, `_IDLE=3` (top 3
+    /// bits) and `data` is a 0..=7 sub-priority within the class
+    /// (low 13 bits).
+    ///
+    /// We do not run a per-task I/O scheduler — the block layer
+    /// is currently FIFO — so this is a **stored-only** ABI
+    /// round-trip.  `ionice -p $$ -c 1 -n 0` followed by
+    /// `ionice -p $$` will see the value it just installed; the
+    /// underlying I/O traffic is unaffected.  Once a CFQ / BFQ
+    /// equivalent lands, this field becomes the source of truth
+    /// for scheduling-class decisions.
+    ///
+    /// Default: `LINUX_IOPRIO_DEFAULT = (IOPRIO_CLASS_BE << 13) | 4`
+    /// — Linux's documented default for tasks that have not
+    /// called `ioprio_set` (the middle of the best-effort band).
+    ///
+    /// Fork inheritance: verbatim copy.  Linux propagates the
+    /// I/O context across `clone()` unless `CLONE_IO` is unset
+    /// and a fresh context is allocated; either way the initial
+    /// class/data are inherited from the parent, so a plain copy
+    /// is correct.
+    pub linux_ioprio: i32,
 }
 
 /// Highest valid Linux capability number — fixed at
@@ -805,6 +833,34 @@ pub const LINUX_CAP_LAST_CAP: u32 = 40;
 /// `LINUX_CAP_LAST_CAP + 1` automatically if Linux extends the
 /// capability range.
 pub const LINUX_CAP_FULL_SET: u64 = (1u64 << (LINUX_CAP_LAST_CAP + 1)) - 1;
+
+/// Linux I/O priority class: "no specific class" — fall back to
+/// the process scheduler's class hint.  Matches
+/// `IOPRIO_CLASS_NONE` (0) in `linux/uapi/linux/ioprio.h`.
+pub const LINUX_IOPRIO_CLASS_NONE: i32 = 0;
+/// Linux I/O priority class: real-time.  Matches
+/// `IOPRIO_CLASS_RT` (1).
+pub const LINUX_IOPRIO_CLASS_RT: i32 = 1;
+/// Linux I/O priority class: best-effort (the default).  Matches
+/// `IOPRIO_CLASS_BE` (2).
+pub const LINUX_IOPRIO_CLASS_BE: i32 = 2;
+/// Linux I/O priority class: idle.  Matches
+/// `IOPRIO_CLASS_IDLE` (3).
+pub const LINUX_IOPRIO_CLASS_IDLE: i32 = 3;
+
+/// Shift count for the class field in the packed ioprio word.
+pub const LINUX_IOPRIO_CLASS_SHIFT: i32 = 13;
+/// Mask for the data (priority-within-class) field of the
+/// packed ioprio word.  Linux limits user-meaningful data to
+/// 0..=7 but the field itself is 13 bits wide.
+pub const LINUX_IOPRIO_DATA_MASK: i32 = (1 << LINUX_IOPRIO_CLASS_SHIFT) - 1;
+
+/// Default packed ioprio for every fresh task — best-effort
+/// class at priority 4 (the middle of the BE band).  Matches
+/// what `ionice -p $$` prints on a stock Linux task that has
+/// never called `ioprio_set`.
+pub const LINUX_IOPRIO_DEFAULT: i32 =
+    (LINUX_IOPRIO_CLASS_BE << LINUX_IOPRIO_CLASS_SHIFT) | 4;
 
 /// Securebit: uid 0 does not grant capabilities (bit 0).
 pub const LINUX_SECBIT_NOROOT: u32 = 1 << 0;
@@ -951,6 +1007,10 @@ impl Process {
             // bounding set (CAP_FULL_SET).  Userspace narrows
             // this by calling PR_CAPBSET_DROP at startup.
             linux_cap_bset: LINUX_CAP_FULL_SET,
+            // Linux default for I/O priority: best-effort class
+            // (2) at priority 4 — the middle of the BE band.
+            // Matches `ionice -p $$` on a stock task.
+            linux_ioprio: LINUX_IOPRIO_DEFAULT,
         }
     }
 }
@@ -1108,6 +1168,7 @@ pub fn fork_create(
         linux_ambient_caps,
         linux_securebits,
         linux_cap_bset,
+        linux_ioprio,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1148,6 +1209,7 @@ pub fn fork_create(
             parent.linux_ambient_caps,
             parent.linux_securebits,
             parent.linux_cap_bset,
+            parent.linux_ioprio,
         )
     };
 
@@ -1329,6 +1391,15 @@ pub fn fork_create(
         // Preserved across exec (that is the bounding set's
         // defining property).
         linux_cap_bset,
+        // Linux: I/O priority class/data are inherited by the
+        // child either via the shared io_context (CLONE_IO) or
+        // via the io_context_clone path on a fresh context.
+        // Either way the *initial* class/data the child observes
+        // equal the parent's, so a verbatim copy is correct.
+        // Preserved across exec (the io_context survives exec
+        // unless O_CLOEXEC-like behaviour is opted in, which we
+        // don't model).
+        linux_ioprio,
     };
 
     table.insert(pid, child);
@@ -2277,6 +2348,27 @@ pub fn set_securebits(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_securebits;
     proc.linux_securebits = val;
+    Some(old)
+}
+
+/// Read the packed `ioprio_set(2)` / `ioprio_get(2)` value for
+/// `pid`.  Returns `None` if `pid` is unknown; `Some(LINUX_IOPRIO_DEFAULT)`
+/// is the value every fresh task starts with.
+#[must_use]
+pub fn get_ioprio(pid: ProcessId) -> Option<i32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_ioprio)
+}
+
+/// Install the packed ioprio value for `pid`, returning the
+/// prior value.  Returns `None` if `pid` is unknown.  Bypasses
+/// the class/data validity check so test fixtures can install
+/// arbitrary words; the syscall surface enforces the Linux rules
+/// (class in 0..=3, data in 0..=7).
+pub fn set_ioprio(pid: ProcessId, val: i32) -> Option<i32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_ioprio;
+    proc.linux_ioprio = val;
     Some(old)
 }
 

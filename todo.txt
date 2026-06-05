@@ -10857,3 +10857,77 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        * Helpers on a destroyed pid -> NoSuchProcess.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
+
+## 116. Linux ABI batch 87: ioprio_set / ioprio_get round-trip
+##      via per-PCB storage (replaces pre-batch stub).
+##
+##      Motivation: pre-batch sys_ioprio_set returned 0 for any
+##      well-formed argument and sys_ioprio_get unconditionally
+##      returned `(IOPRIO_CLASS_BE << 13) | 4` — the documented
+##      Linux default.  This is a documented-but-incorrect ABI:
+##      `ionice -p $$ -c 1 -n 0` followed by `ionice -p $$`
+##      should print the value just installed, not the default.
+##      Probing utilities that issue set/get pairs to confirm a
+##      kernel actually honours their request would conclude
+##      (incorrectly) that this kernel does not — and they often
+##      then disable their I/O priority logic.
+##
+##      Wired up:
+##        * New PCB field `linux_ioprio: i32` (packed
+##          class<<13|data).  Default `LINUX_IOPRIO_DEFAULT =
+##          (IOPRIO_CLASS_BE << 13) | 4` — matches Linux's
+##          documented default for a fresh task.
+##        * Fork inheritance: verbatim copy (CLONE_IO sharing
+##          and io_context_clone both produce the same observable
+##          initial value).
+##        * sys_ioprio_set validates class in 0..=3, data in
+##          0..=7, then stores via pcb::set_ioprio on the
+##          resolved target.
+##        * sys_ioprio_get reads via pcb::get_ioprio on the
+##          resolved target.
+##        * "who" resolution: IOPRIO_WHO_PROCESS (1) with who=0
+##          -> caller; who>0 -> that exact pid (ESRCH if not
+##          live); who<0 -> ESRCH.  IOPRIO_WHO_PGRP (2) /
+##          _USER (3) with who=0 -> caller; non-zero who ->
+##          ESRCH (no pgrp/uid model).  Catch-all "which" out
+##          of {1,2,3} -> EINVAL (unchanged).
+##        * Catch-all kernel context (caller_pid() == None) ->
+##          ESRCH (no target PCB).  Previously: 0 from set, default
+##          from get.  This is a behaviour change in the kernel-
+##          self-test surface but reflects Linux semantics
+##          ("no such process") more accurately and only affects
+##          callers running outside any Linux process — which is
+##          either the boot self-test or a buggy caller.
+##
+##      Constants:
+##        LINUX_IOPRIO_CLASS_NONE = 0
+##        LINUX_IOPRIO_CLASS_RT   = 1
+##        LINUX_IOPRIO_CLASS_BE   = 2
+##        LINUX_IOPRIO_CLASS_IDLE = 3
+##        LINUX_IOPRIO_CLASS_SHIFT = 13
+##        LINUX_IOPRIO_DATA_MASK   = (1 << 13) - 1
+##        LINUX_IOPRIO_DEFAULT     = (BE << 13) | 4
+##
+##      Known limitation: still no real I/O scheduler — values
+##      are stored for round-trip but the block layer ignores
+##      them.  When a CFQ/BFQ equivalent lands, this field
+##      becomes the source of truth for scheduling-class
+##      decisions; no surface change is needed at that point.
+##
+##      Self-test (boot path):
+##        * Bad which (99) -> EINVAL on both set and get.
+##        * Bad class (4 << 13) -> EINVAL.
+##        * Kernel context who=0 -> ESRCH on both set and get
+##          (caller_pid() is None).
+##        * Per-PCB round-trip on a real process:
+##          - Default get -> LINUX_IOPRIO_DEFAULT.
+##          - Set/get of (class, data) for (RT,0), (BE,7),
+##            (IDLE,4), (NONE,0) — each round-trips exactly.
+##          - data in {8, 9, 0xFF, DATA_MASK} -> EINVAL.
+##          - class in {4, 5, 6, 7} -> EINVAL.
+##          - who=-1 -> ESRCH.
+##          - which=2/3 with who>0 -> ESRCH.
+##        * pcb helpers: get/set/destroy/None round-trip.
+##        * Constant sanity for all 6 ioprio constants.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 24s).

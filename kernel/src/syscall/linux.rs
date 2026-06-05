@@ -13322,46 +13322,112 @@ fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
 /// `ioprio_set(which, who, ioprio)` — set I/O scheduling priority.
 ///
 /// which ∈ {IOPRIO_WHO_PROCESS=1, _PGRP=2, _USER=3}.
-/// ioprio packs class (top 3 bits, 1..=3 for RT/BE/IDLE) and data
-/// (bottom 13 bits, 0..=7 priority).
+/// ioprio packs class (top 3 bits, 0..=3 for NONE/RT/BE/IDLE) and
+/// data (bottom 13 bits, 0..=7 priority).
 ///
 /// We don't run a per-task I/O scheduler yet (storage I/O is FIFO
-/// through the block layer), so honour-the-set is a no-op.  Return 0
-/// for any well-formed argument so utilities like `ionice` succeed and
-/// their settings are simply ignored — matches a kernel that has no
-/// CFQ/BFQ-equivalent I/O scheduler.
+/// through the block layer), so the stored value has no scheduling
+/// effect — but `ionice -p N -c 1 -n 0 ; ionice -p N` round-trips
+/// the value through the per-PCB store so probing utilities see
+/// the value they installed (rather than the immutable default the
+/// pre-batch stub returned).
+///
+/// `who` semantics:
+///   - `IOPRIO_WHO_PROCESS` (1): `who == 0` -> caller; `who > 0`
+///     -> that exact pid (ESRCH if it does not exist).
+///   - `IOPRIO_WHO_PGRP` (2) / `_USER` (3): `who == 0` -> caller;
+///     `who > 0` -> ESRCH (no pgrp/uid model yet).  Same surface
+///     behaviour as Linux returns when no process matches the
+///     pgrp/uid; differs from Linux only in that Linux can match
+///     when the pgrp/uid happens to have live processes.
 fn sys_ioprio_set(args: &SyscallArgs) -> SyscallResult {
     let which = args.arg0 as i32;
-    let _who = args.arg1 as i32;
+    let who = args.arg1 as i32;
     let ioprio = args.arg2 as i32;
     if !(1..=3).contains(&which) {
         return linux_err(errno::EINVAL);
     }
-    let class = (ioprio >> 13) & 0x7;
-    let data = ioprio & 0x1FFF;
+    let class = (ioprio >> pcb::LINUX_IOPRIO_CLASS_SHIFT) & 0x7;
+    let data = ioprio & pcb::LINUX_IOPRIO_DATA_MASK;
+    // Class 0 = NONE (use scheduler hint), 1 = RT, 2 = BE, 3 = IDLE.
     if !(0..=3).contains(&class) {
-        // 0 = none (use class hint from process scheduler), 1=RT, 2=BE, 3=IDLE.
         return linux_err(errno::EINVAL);
     }
     if !(0..=7).contains(&data) {
         return linux_err(errno::EINVAL);
     }
-    SyscallResult::ok(0)
+    let target_pid = match resolve_ioprio_target(which, who) {
+        Ok(pid) => pid,
+        Err(r) => return r,
+    };
+    match pcb::set_ioprio(target_pid, ioprio) {
+        Some(_) => SyscallResult::ok(0),
+        None => linux_err(errno::ESRCH),
+    }
 }
 
 /// `ioprio_get(which, who)` — read I/O scheduling priority.
 ///
-/// Return the default best-effort class (2 << 13) at priority 4 — the
-/// kernel's documented default when no per-task ioprio has been set.
-/// Matches `ionice -p $$` output on stock Linux.
+/// Returns the per-PCB stored value, defaulting to
+/// `(IOPRIO_CLASS_BE << 13) | 4` (Linux's documented default
+/// for tasks that have not called `ioprio_set`).  Same `who`
+/// resolution rules as [`sys_ioprio_set`].
 fn sys_ioprio_get(args: &SyscallArgs) -> SyscallResult {
     let which = args.arg0 as i32;
+    let who = args.arg1 as i32;
     if !(1..=3).contains(&which) {
         return linux_err(errno::EINVAL);
     }
-    // class=BE (2), data=4 (middle priority).
-    let ioprio: i64 = (2 << 13) | 4;
-    SyscallResult::ok(ioprio)
+    let target_pid = match resolve_ioprio_target(which, who) {
+        Ok(pid) => pid,
+        Err(r) => return r,
+    };
+    match pcb::get_ioprio(target_pid) {
+        Some(v) => SyscallResult::ok(i64::from(v)),
+        None => linux_err(errno::ESRCH),
+    }
+}
+
+/// Resolve the (which, who) pair from `ioprio_set` / `ioprio_get`
+/// to a single target pid.  See [`sys_ioprio_set`] for the
+/// semantics this enforces.
+///
+/// `Err(SyscallResult)` is an already-formatted error response
+/// (currently always `-ESRCH`).
+fn resolve_ioprio_target(which: i32, who: i32) -> Result<u64, SyscallResult> {
+    // Linux: which=1 -> who is a tid; we treat it as a pid.
+    // which in {2,3} -> who is a pgid / uid; we don't model
+    // either yet, so any non-zero who returns ESRCH.
+    if who == 0 {
+        // Caller's own task.  Kernel context (no PCB) has no
+        // ioprio storage; ESRCH matches Linux's behaviour for a
+        // pid that does not exist.
+        return caller_pid().ok_or_else(|| linux_err(errno::ESRCH));
+    }
+    if who < 0 {
+        // Negative who is invalid for all three "which" values
+        // (Linux returns EINVAL for who<0 on _PROCESS; ESRCH on
+        // _PGRP because no negative pgid is valid).  We collapse
+        // to ESRCH to keep the surface uniform.
+        return Err(linux_err(errno::ESRCH));
+    }
+    match which {
+        1 => {
+            // IOPRIO_WHO_PROCESS: who is a pid.  Check it exists.
+            let target = who as u64;
+            if pcb::get_ioprio(target).is_some() {
+                Ok(target)
+            } else {
+                Err(linux_err(errno::ESRCH))
+            }
+        }
+        // No pgrp / uid model yet; non-zero who has nothing to
+        // match.
+        2 | 3 => Err(linux_err(errno::ESRCH)),
+        // Caller already filtered which in 1..=3, so this is
+        // unreachable.  Return ESRCH defensively.
+        _ => Err(linux_err(errno::ESRCH)),
+    }
 }
 
 /// `io_pgetevents(ctx_id, min_nr, nr, events*, timeout*, sig*)` —
@@ -24996,16 +25062,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: ioprio_set bad class not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // ioprio_set valid -> 0.
+        // ioprio_set kernel context with who=0 -> ESRCH (no caller PCB).
+        // This replaces the pre-batch behaviour where the stub
+        // returned 0 unconditionally; the batch-87 round-trip
+        // implementation surfaces "no such target" instead.
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: (2 << 13) | 4, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::IOPRIO_SET, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: ioprio_set valid not 0");
+        if dispatch_linux(nr::IOPRIO_SET, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: ioprio_set kernel-ctx who=0 not ESRCH ({})",
+                dispatch_linux(nr::IOPRIO_SET, &a).value
+            );
             return Err(KernelError::InternalError);
         }
-        // ioprio_get valid -> (BE << 13) | 4.
+        // ioprio_get kernel context with who=0 -> ESRCH for the
+        // same reason.
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::IOPRIO_GET, &a).value != ((2 << 13) | 4) {
-            serial_println!("[syscall/linux]   FAIL: ioprio_get valid not (BE|4)");
+        if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: ioprio_get kernel-ctx who=0 not ESRCH ({})",
+                dispatch_linux(nr::IOPRIO_GET, &a).value
+            );
             return Err(KernelError::InternalError);
         }
         // ioprio_get bad which -> EINVAL.
@@ -25013,6 +25089,164 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::IOPRIO_GET, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: ioprio_get bad which not EINVAL");
             return Err(KernelError::InternalError);
+        }
+
+        // Batch 87 round-trip via a real PCB.
+        //
+        //   1. Fresh process observes IOPRIO_DEFAULT = (BE << 13) | 4.
+        //   2. ioprio_set(IOPRIO_WHO_PROCESS, target_pid, (RT << 13) | 0)
+        //      succeeds; ioprio_get returns the same value.
+        //   3. Same with class=NONE (0), class=IDLE (3), and a range
+        //      of data values.
+        //   4. data > 7 -> EINVAL.
+        //   5. class > 3 (class==4, 5, 6, 7) -> EINVAL.
+        //   6. who < 0 -> ESRCH.
+        //   7. IOPRIO_WHO_PGRP / _USER with who > 0 -> ESRCH.
+        //   8. ioprio_set on a destroyed pid -> ESRCH.
+        {
+            let test_pid = pcb::create("ioprio-test", 0);
+            // Default value.
+            let a = SyscallArgs {
+                arg0: 1, arg1: test_pid, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::IOPRIO_GET, &a).value
+                != i64::from(pcb::LINUX_IOPRIO_DEFAULT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: ioprio_get default not LINUX_IOPRIO_DEFAULT ({})",
+                    dispatch_linux(nr::IOPRIO_GET, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Set RT/0, BE/7, IDLE/4, NONE/0 — each must round-trip.
+            for (class, data) in [(1, 0), (2, 7), (3, 4), (0, 0)] {
+                let packed: i32 = (class << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                let a = SyscallArgs {
+                    arg0: 1, arg1: test_pid, arg2: packed as u64,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_SET, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_set({},{}) not 0 ({})",
+                        class, data,
+                        dispatch_linux(nr::IOPRIO_SET, &a).value,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                let a = SyscallArgs {
+                    arg0: 1, arg1: test_pid, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                };
+                let r = dispatch_linux(nr::IOPRIO_GET, &a).value;
+                if r != i64::from(packed) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_get after set({},{}) -> {}, expected {}",
+                        class, data, r, packed,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // data > 7 -> EINVAL.
+            for bad_data in [8i32, 9, 0xFF, pcb::LINUX_IOPRIO_DATA_MASK] {
+                let packed: i32 = (2 << pcb::LINUX_IOPRIO_CLASS_SHIFT) | bad_data;
+                let a = SyscallArgs {
+                    arg0: 1, arg1: test_pid, arg2: packed as u64,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_SET, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_set bad data {} not EINVAL ({})",
+                        bad_data,
+                        dispatch_linux(nr::IOPRIO_SET, &a).value,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // class > 3 -> EINVAL.
+            for bad_class in [4i32, 5, 6, 7] {
+                let packed: i32 = bad_class << pcb::LINUX_IOPRIO_CLASS_SHIFT;
+                let a = SyscallArgs {
+                    arg0: 1, arg1: test_pid, arg2: packed as u64,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_SET, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_set bad class {} not EINVAL ({})",
+                        bad_class,
+                        dispatch_linux(nr::IOPRIO_SET, &a).value,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // who < 0 -> ESRCH.
+            let a = SyscallArgs {
+                arg0: 1, arg1: (-1i64) as u64, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::IOPRIO_GET, &a).value
+                != -i64::from(errno::ESRCH)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: ioprio_get who=-1 not ESRCH ({})",
+                    dispatch_linux(nr::IOPRIO_GET, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // IOPRIO_WHO_PGRP / _USER with who > 0 -> ESRCH.
+            for which in [2u64, 3] {
+                let a = SyscallArgs {
+                    arg0: which, arg1: test_pid, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_GET, &a).value
+                    != -i64::from(errno::ESRCH)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_get which={} who>0 not ESRCH ({})",
+                        which,
+                        dispatch_linux(nr::IOPRIO_GET, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // pcb helper round-trip.  The last successful syscall-
+            // level set in the loop above installed class=NONE/data=0
+            // (packed value 0), so that's what we read back here.
+            assert_eq!(pcb::get_ioprio(test_pid), Some(0));
+            // Helper bypass: install an arbitrary value; returns the
+            // prior value (the 0 we just confirmed above).
+            assert_eq!(pcb::set_ioprio(test_pid, 0x1234_5678), Some(0));
+            assert_eq!(pcb::get_ioprio(test_pid), Some(0x1234_5678));
+
+            // Destroy and verify ESRCH from both surfaces.
+            pcb::destroy(test_pid);
+            assert_eq!(pcb::get_ioprio(test_pid), None);
+            assert_eq!(pcb::set_ioprio(test_pid, 0), None);
+            let a = SyscallArgs {
+                arg0: 1, arg1: test_pid, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::IOPRIO_GET, &a).value
+                != -i64::from(errno::ESRCH)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: ioprio_get on dead pid not ESRCH ({})",
+                    dispatch_linux(nr::IOPRIO_GET, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Constant sanity.
+            assert_eq!(pcb::LINUX_IOPRIO_CLASS_NONE, 0);
+            assert_eq!(pcb::LINUX_IOPRIO_CLASS_RT, 1);
+            assert_eq!(pcb::LINUX_IOPRIO_CLASS_BE, 2);
+            assert_eq!(pcb::LINUX_IOPRIO_CLASS_IDLE, 3);
+            assert_eq!(pcb::LINUX_IOPRIO_CLASS_SHIFT, 13);
+            assert_eq!(pcb::LINUX_IOPRIO_DATA_MASK, (1 << 13) - 1);
+            assert_eq!(pcb::LINUX_IOPRIO_DEFAULT, (2 << 13) | 4);
         }
 
         // io_pgetevents bad nr ordering -> EINVAL.

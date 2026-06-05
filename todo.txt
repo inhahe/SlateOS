@@ -19778,3 +19778,63 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      semantics on every observable path.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 249. [DONE 2026-06-05] Linux ABI: sys_perf_event_open flags-first +
+##      size-E2BIG-both-bounds + size=0 ABI quirk.
+##
+##      Linux gate order (kernel/events/core.c::SYSCALL_DEFINE5(perf_event_open)
+##      + perf_copy_attr):
+##         1. `flags & ~PERF_FLAG_ALL`           -> -EINVAL  (first statement)
+##         2. `get_user(size, &uattr->size)`     -> -EFAULT
+##         3. ABI quirk: `if (!size) size = PERF_ATTR_SIZE_VER0;`
+##         4. `size < VER0 || size > PAGE_SIZE`  -> -E2BIG   (both bounds)
+##         5. (...deeper validation; we stub to ENOSYS)
+##         6. `pid == -1 && cpu == -1`           -> -EINVAL  (in perf_event_alloc)
+##
+##      Pre-batch divergences in sys_perf_event_open:
+##      - Flag-mask EINVAL fired AFTER attr.size validation, so a
+##        probe with `(NULL, flags=bad)` saw `EFAULT` and a probe
+##        with `(huge size, flags=bad)` saw `E2BIG` where Linux
+##        returns `EINVAL` for both (flag check is statement #1
+##        in SYSCALL_DEFINE5).
+##      - `attr_size < PERF_ATTR_SIZE_VER0` returned `EINVAL`,
+##        where Linux's `perf_copy_attr` unifies both `< VER0` and
+##        `> PAGE_SIZE` under the err_size jump returning `-E2BIG`.
+##      - `attr_size == 0` returned `EINVAL` (same arm as < VER0),
+##        but Linux's documented ABI quirk normalises size=0 to
+##        VER0 so the call falls through to the deeper handler.
+##        Common feature-detection sniff pattern (libbpf, perf
+##        tools) submits an all-zero attr to test for support.
+##
+##      Fix:
+##      - Move the `flags & ~PERF_FLAG_MASK -> EINVAL` gate to the
+##        top of the function ahead of every attr-reading step.
+##      - Add the `raw_size == 0 -> VER0` normalisation before the
+##        bounds check.
+##      - Collapse the two bound checks into a single
+##        `< VER0 || > PAGE_SIZE -> E2BIG` arm.
+##
+##      Self-tests updated/added (~line 33868):
+##      - perf_event_open(NULL, flags=0)        -> EFAULT (kept).
+##      - perf_event_open(NULL, flags=0x10)     -> EINVAL (new;
+##        flag mask fires ahead of NULL EFAULT).
+##      - perf_event_open(size=0, pid=0, cpu=0) -> ENOSYS (was EINVAL;
+##        ABI quirk normalises to VER0, deeper gates all pass).
+##      - perf_event_open(size=8)               -> E2BIG (new; sub-VER0
+##        bound now returns E2BIG, was EINVAL).
+##      - perf_event_open(size=8192)            -> E2BIG (kept).
+##      - perf_event_open(size=8192, flags=bad) -> EINVAL (new; flag
+##        mask fires ahead of E2BIG).
+##      - perf_event_open(bad flag, valid attr) -> EINVAL (kept).
+##      - perf_event_open(pid=-1, cpu=-1)       -> EINVAL (kept).
+##      - perf_event_open(valid attr)           -> ENOSYS (kept).
+##      Marker: "perf_event_open flags-first / size-E2BIG-both-bounds /
+##              size=0-quirk: OK".
+##
+##      Known limitations: we still do not have a real perf subsystem,
+##      so the terminal answer for any valid call remains ENOSYS.
+##      That matches glibc's perf_event_open wrapper's fallback path
+##      (libbpf already treats ENOSYS as "kernel has no CONFIG_PERF").
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+

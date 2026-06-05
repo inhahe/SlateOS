@@ -9708,3 +9708,64 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     Build clean; boot test PASSED (BOOT_OK at 21s).
 
 
+## 98. Linux ABI batch 70: real per-PCB PR_SET_THP_DISABLE /
+##     PR_GET_THP_DISABLE round-trip with strict argument
+##     validation matching Linux.
+##
+##     Before this batch, both options fell through to the
+##     generic `_ => EINVAL` catch-all in sys_prctl.  Programs
+##     that probe for THP control (notably JVMs, some database
+##     init scripts, and systemd-oomd's tuning helpers) take
+##     EINVAL as "this kernel doesn't support the option" and
+##     either skip the optimisation or print scary warnings.
+##
+##     Fix: add `linux_thp_disable: u32` to the PCB (default 0
+##     — THP enabled, system-wide policy applies).  Inherited
+##     verbatim across fork (Linux copies MMF_DISABLE_THP from
+##     parent mm_struct).  Preserved across exec for now —
+##     Linux clears it on execve (new mm gets default flags),
+##     so we'll lose strict ABI parity until we have an
+##     exec-time PCB cleanup hook.  Same caveat as
+##     dumpable/keepcaps; tracked in their entries too.
+##
+##     PR_SET_THP_DISABLE (41) — Linux normalises arg2 to
+##     `!!arg2`, so any non-zero stores 1 and 0 clears.
+##     arg3/arg4/arg5 must all be 0 or EINVAL.  We mirror
+##     exactly and persist via pcb::set_thp_disable.
+##
+##     PR_GET_THP_DISABLE (42) — UNLIKE PR_GET_CHILD_SUBREAPER,
+##     this one returns the flag *directly* as the syscall
+##     return value (Linux's prctl(2) is not consistent about
+##     PR_GET_* shapes — some return through the return value,
+##     some write through a user pointer; THP_DISABLE is in the
+##     former camp).  arg2/arg3/arg4/arg5 must all be 0 or
+##     EINVAL — arg1 is *also* gated here because there is no
+##     user pointer to receive the value.
+##
+##     Known limitation (deferred): we don't actually implement
+##     transparent huge pages — every page in our design is a
+##     16 KiB base page.  The flag is stored per-PCB purely for
+##     ABI round-trip and has no effect on actual page
+##     allocation.  If we ever add THP, the bit will already be
+##     in the right place to consult.
+##
+##     Known limitation (deferred): exec-time reset.  Linux
+##     clears MMF_DISABLE_THP on execve because the new mm
+##     gets default flags.  We preserve across exec until the
+##     exec hook is in place.  Same root cause as entries
+##     94/95 (dumpable, keepcaps); will be fixed in the same
+##     batch when the exec hook lands.
+##
+##     Self-tests cover:
+##       * PR_SET arg3/arg4/arg5 != 0 -> EINVAL (each in turn).
+##       * PR_SET(0), (1), (42) all succeed (normalisation).
+##       * PR_GET arg1/arg2/arg3/arg4/arg5 != 0 -> EINVAL
+##         (each in turn — arg1 included because there's no
+##         user pointer here).
+##       * PR_GET all-zero -> 0 (kernel context default).
+##       * pcb storage layer round-trips 0 -> 1 -> 0 -> destroy
+##         -> None.
+##
+##     Build clean; boot test PASSED (BOOT_OK at 22s).
+
+

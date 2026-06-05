@@ -530,6 +530,22 @@ pub struct Process {
     /// lifecycle (no per-PCB "find subreaper ancestor" walk).
     /// Tracked in todo.txt.
     pub linux_child_subreaper: u32,
+    /// Linux `prctl(PR_SET_THP_DISABLE)` flag.  When set, transparent
+    /// huge pages are disabled for the process's address space.  On
+    /// Linux this is stored as `MMF_DISABLE_THP` on the `mm_struct`;
+    /// we store it per-PCB instead.
+    ///
+    /// Default 0 (THP enabled — the system-wide policy applies).
+    /// Inherited verbatim across fork (Linux: mm flags are copied
+    /// from parent's mm_struct when the child mm is set up).
+    /// Linux *clears* this on execve (the new mm gets default
+    /// flags); we preserve across exec for now — same exec-hook
+    /// limitation as the other prctl-flag entries.
+    ///
+    /// We do not implement THP at all (every page is a single 16
+    /// KiB base page in our design), so the flag has no effect on
+    /// actual page allocation.  It exists purely for ABI round-trip.
+    pub linux_thp_disable: u32,
 }
 
 impl Process {
@@ -598,6 +614,9 @@ impl Process {
             // etc., opt in via PR_SET_CHILD_SUBREAPER(1).  NOT inherited
             // across fork.
             linux_child_subreaper: 0,
+            // Linux default: THP enabled (system-wide policy applies).
+            // PR_SET_THP_DISABLE(1) opts the process out.
+            linux_thp_disable: 0,
         }
     }
 }
@@ -715,6 +734,7 @@ pub fn fork_create(
         linux_dumpable,
         linux_keepcaps,
         linux_no_new_privs,
+        linux_thp_disable,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -744,6 +764,7 @@ pub fn fork_create(
             parent.linux_dumpable,
             parent.linux_keepcaps,
             parent.linux_no_new_privs,
+            parent.linux_thp_disable,
         )
     };
 
@@ -864,6 +885,13 @@ pub fn fork_create(
         // in via prctl if it wants the role.  A forked child
         // therefore always starts with the flag cleared.
         linux_child_subreaper: 0,
+        // Linux: MMF_DISABLE_THP is copied from the parent's
+        // mm_struct when the child mm is set up, so PR_SET_THP_DISABLE
+        // propagates verbatim across fork.  Linux CLEARS it on
+        // execve (the new mm gets default flags); we preserve
+        // across exec for now — same exec-hook limitation as the
+        // other prctl-flag entries.  Tracked in todo.txt.
+        linux_thp_disable,
     };
 
     table.insert(pid, child);
@@ -1511,6 +1539,31 @@ pub fn set_child_subreaper(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_child_subreaper;
     proc.linux_child_subreaper = val;
+    Some(old)
+}
+
+/// Read the recorded `prctl(PR_SET_THP_DISABLE)` flag for `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
+/// default (THP enabled — system-wide policy applies).  The flag is a
+/// per-process opt-out for transparent huge pages; we don't implement
+/// THP at all, so the value is round-tripped for ABI compatibility
+/// only and has no effect on actual page allocation.
+#[must_use]
+pub fn get_thp_disable(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_thp_disable)
+}
+
+/// Install the THP-disable flag for `pid`, returning the prior value.
+/// Linux's `PR_SET_THP_DISABLE` normalises the input to `!!arg2` (any
+/// non-zero argument becomes 1); we leave that normalisation to the
+/// syscall surface and store whatever value the caller provides here.
+/// Returns `None` if `pid` is unknown.
+pub fn set_thp_disable(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_thp_disable;
+    proc.linux_thp_disable = val;
     Some(old)
 }
 

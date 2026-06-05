@@ -4033,6 +4033,42 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             }
             SyscallResult::ok(0)
         }
+        // PR_SET_THP_DISABLE (41) — opt the process out of (or back
+        // into) transparent huge pages.  Linux normalises arg2 to
+        // !!arg2 (any non-zero stores 1; 0 clears).  arg3/arg4/arg5
+        // must all be 0 or EINVAL.  We do not implement THP at all
+        // (every page is a 16 KiB base page), so the flag is stored
+        // per-PCB purely for ABI round-trip and has no effect on
+        // actual page allocation.
+        41 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            let normalised: u32 = if args.arg1 == 0 { 0 } else { 1 };
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_thp_disable(pid, normalised);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_THP_DISABLE (42) — return the recorded flag *directly*
+        // as the syscall return value (unlike PR_GET_CHILD_SUBREAPER,
+        // which writes through a user pointer — Linux's prctl(2) is
+        // not consistent about this).  arg2/arg3/arg4/arg5 must all
+        // be 0 or EINVAL.  Kernel context (no PCB) reports 0 (default).
+        42 => {
+            if args.arg1 != 0
+                || args.arg2 != 0
+                || args.arg3 != 0
+                || args.arg4 != 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            let v = match caller_pid() {
+                Some(pid) => pcb::get_thp_disable(pid).unwrap_or(0),
+                None => 0,
+            };
+            SyscallResult::ok(i64::from(v))
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -16555,6 +16591,123 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_child_subreaper(test_pid), None);
             assert_eq!(pcb::set_child_subreaper(test_pid, 1), None);
+        }
+
+        // Batch 70: PR_SET_THP_DISABLE / PR_GET_THP_DISABLE round-trip
+        // with strict argument validation matching Linux.
+        //
+        //   1. PR_SET_THP_DISABLE rejects non-zero arg3..arg5 with EINVAL.
+        //   2. PR_SET_THP_DISABLE(0) / (1) / (42) all succeed (Linux
+        //      normalises arg2 to !!arg2).
+        //   3. PR_GET_THP_DISABLE rejects non-zero arg2..arg5 with EINVAL
+        //      (this one returns directly, not via a user pointer).
+        //   4. PR_GET_THP_DISABLE with all-zero auxiliaries returns 0
+        //      (kernel context has no PCB so default applies).
+        //   5. pcb storage layer: default 0, set 1, query 1, set 0,
+        //      query 0, destroy -> None.
+        {
+            // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_THP_DISABLE.
+            for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                let mut a = SyscallArgs { arg0: 41, arg1: 1, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET_THP_DISABLE(0): accepted (clears flag).
+            let a = SyscallArgs { arg0: 41, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 0) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_THP_DISABLE(1): accepted (sets flag).
+            let a = SyscallArgs { arg0: 41, arg1: 1, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 1) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_THP_DISABLE(42): accepted (normalises to 1).
+            let a = SyscallArgs { arg0: 41, arg1: 42, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 42) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // arg2/arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_THP_DISABLE.
+            // (Note: unlike SUBREAPER, GET_THP_DISABLE returns the flag
+            // directly via the syscall return — arg1 is also gated.)
+            for (slot, name) in &[
+                (1u8, "arg2"),
+                (2, "arg3"),
+                (3, "arg4"),
+                (4, "arg5"),
+            ] {
+                let mut a = SyscallArgs { arg0: 42, arg1: 0, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    1 => a.arg1 = 1,
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_THP_DISABLE, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET_THP_DISABLE with all-zero auxiliaries -> 0
+            // (kernel context: no PCB, default applies).
+            let a = SyscallArgs { arg0: 42, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_THP_DISABLE) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("thp-disable-test", 0);
+            // Default is 0 (THP enabled — system-wide policy applies).
+            assert_eq!(pcb::get_thp_disable(test_pid), Some(0));
+            // Install 1 (disable THP for this process).  set returns
+            // the prior value.
+            assert_eq!(pcb::set_thp_disable(test_pid, 1), Some(0));
+            assert_eq!(pcb::get_thp_disable(test_pid), Some(1));
+            // Clear back to 0.
+            assert_eq!(pcb::set_thp_disable(test_pid, 0), Some(1));
+            assert_eq!(pcb::get_thp_disable(test_pid), Some(0));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_thp_disable(test_pid), None);
+            assert_eq!(pcb::set_thp_disable(test_pid, 1), None);
         }
     }
 

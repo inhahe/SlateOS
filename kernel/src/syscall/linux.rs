@@ -14522,6 +14522,47 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
         buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
     ]);
 
+    // Forward-compat zero check (batch 227).  Linux's
+    // `copy_struct_from_user` checks bytes [ksize .. usize) for all-
+    // zero and returns -E2BIG if any are non-zero — the signal a
+    // probe expects when "you're trying to use a newer field the
+    // running kernel doesn't recognise."  Pre-batch 227 we silently
+    // ignored trailing bytes, so a probe that set a non-zero byte
+    // at offset 24 (deliberately, to verify the upstream zero check)
+    // saw success here and E2BIG on Linux.
+    if args.arg3 > 24 {
+        let excess_addr = args.arg2.wrapping_add(24);
+        #[allow(clippy::cast_possible_truncation)]
+        let excess_len = (args.arg3 - 24) as usize;
+        if let Err(e) = crate::mm::user::validate_user_read(excess_addr, excess_len) {
+            return linux_err(linux_errno_for(e));
+        }
+        // Walk in 64-byte chunks looking for any non-zero byte.  A
+        // single non-zero byte is sufficient evidence that the
+        // caller is using a newer ABI than we understand.
+        let mut chunk = [0u8; 64];
+        let mut off: usize = 0;
+        while off < excess_len {
+            let take = core::cmp::min(64, excess_len - off);
+            // SAFETY: validate_user_read above confirmed `excess_len`
+            // bytes are readable at `excess_addr`, and (off, take) is
+            // within that range.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_from_user(
+                    excess_addr.wrapping_add(off as u64),
+                    chunk.as_mut_ptr(),
+                    take,
+                )
+            } {
+                return linux_err(linux_errno_for(e));
+            }
+            if chunk[..take].iter().any(|&b| b != 0) {
+                return linux_err(errno::E2BIG);
+            }
+            off += take;
+        }
+    }
+
     // Gate 4: build_open_flags — unknown resolve bits -> EINVAL.
     // Linux rejects unknown bits strictly to keep future flag
     // additions detectable.
@@ -37004,22 +37045,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 226 discriminator: (filename=valid, how=valid, size=32)
-        // -> NOT EINVAL.  Linux accepts forward-compatible sizes in
-        // [VER0, PAGE_SIZE].  We read only the first 24 bytes and
-        // forward to sys_openat which surfaces ENOENT for the
-        // non-existent path.  Pre-batch this returned EINVAL because
-        // size != 24.
-        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_ptr, arg3: 32, arg4: 0, arg5: 0 };
+        // Batch 226 discriminator: (filename=valid, how=valid, size=32,
+        // trailing zero) -> NOT EINVAL.  Linux accepts forward-
+        // compatible sizes in [VER0, PAGE_SIZE] provided the trailing
+        // bytes are all zero.  We read the first 24 bytes and forward
+        // to sys_openat which surfaces ENOENT for the non-existent
+        // path.  Pre-batch 226 this returned EINVAL because size != 24.
+        let how_pad_zero = [0u8; 32];
+        let how_pad_zero_ptr = how_pad_zero.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_pad_zero_ptr,
+            arg3: 32, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::OPENAT2, &a).value;
-        if v == -i64::from(errno::EINVAL) {
+        if v == -i64::from(errno::EINVAL) || v == -i64::from(errno::E2BIG) {
             serial_println!(
-                "[syscall/linux]   FAIL: openat2 size=32 still EINVAL (forward-compat broken)"
+                "[syscall/linux]   FAIL: openat2 size=32 (zero pad) returned {} (want forward-compat success)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 227 discriminator: (filename=valid, how=valid, size=32,
+        // trailing byte non-zero) -> E2BIG.  Linux's
+        // copy_struct_from_user checks `[ksize, usize)` are all zero
+        // and surfaces E2BIG when not — the signal a userspace probe
+        // expects to detect newer-than-kernel ABI additions.  Pre-
+        // batch 227 we silently ignored the trailing bytes.
+        let mut how_pad_nonzero = [0u8; 32];
+        how_pad_nonzero[24] = 1;
+        let how_pad_nonzero_ptr = how_pad_nonzero.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: how_pad_nonzero_ptr,
+            arg3: 32, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPENAT2, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: openat2 size=32 (nonzero pad) not E2BIG"
             );
             return Err(KernelError::InternalError);
         }
         serial_println!(
             "[syscall/linux]   openat2 size-EINVAL > size-E2BIG > how-EFAULT > resolve-EINVAL > filename-EFAULT gate order: OK"
+        );
+        serial_println!(
+            "[syscall/linux]   openat2 forward-compat trailing-zero E2BIG: OK"
         );
 
         // execveat with bad flags -> EINVAL.

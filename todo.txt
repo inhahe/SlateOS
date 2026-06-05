@@ -20171,5 +20171,49 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
+## 256. [DONE 2026-06-05] Linux ABI: sys_openat2 forward-compat trailing-zero
+##      E2BIG check — addresses limitation noted in entry 255.
+##
+##      Linux's `copy_struct_from_user` (lib/usercopy.c) walks the
+##      bytes in `[ksize, usize)` looking for any non-zero byte and
+##      returns -E2BIG when it finds one.  This is the canonical
+##      signal a userspace probe uses to detect that it's trying to
+##      pass a newer ABI field the kernel doesn't yet understand.
+##      Batch 226 fixed the size bounds but left this check as a
+##      known limitation.
+##
+##      Pre-batch divergence:
+##      - (filename=valid, how points to 32 bytes with byte[24]=1,
+##        size=32) returned the result of forwarding to sys_openat
+##        (typically ENOENT for non-existent paths) where Linux
+##        returns E2BIG via copy_struct_from_user's trailing-zero
+##        check.  A glibc that fuzzes trailing bytes to detect the
+##        upstream ABI cap would see no E2BIG signal and conclude
+##        the running kernel supports an undefined newer ABI.
+##
+##      Fix: between the 24-byte struct read and the resolve mask
+##      gate, when `size > 24` walk the trailing `size - 24` bytes
+##      in 64-byte chunks and return E2BIG if any byte is non-zero.
+##      Matches Linux's `check_zeroed_user`-then-E2BIG sequence in
+##      copy_struct_from_user.
+##
+##      Self-tests added/updated (~line 36955):
+##      - Updated: size=32 with a properly-sized 32-byte zero buffer
+##        now exercises the new check and forwards successfully (was
+##        passing accidentally because we never read past byte 23).
+##      - New: size=32 with byte[24]=1 -> E2BIG  (was forwarded to
+##        sys_openat and surfaced ENOENT or similar).
+##      Marker: "openat2 forward-compat trailing-zero E2BIG: OK".
+##
+##      Known limitations: trailing bytes are read in 64-byte chunks
+##      via copy_from_user — each chunk pays SMAP STAC/CLAC overhead.
+##      For the worst case (size = PAGE_SIZE = 4096), that's ~64
+##      STAC/CLAC pairs.  This is a one-time cost per syscall and
+##      matches the asymptotic shape of Linux's check_zeroed_user
+##      (which also walks bytewise).  No optimisation needed for
+##      stub-stage code; revisit if openat2 ever becomes a hot path.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

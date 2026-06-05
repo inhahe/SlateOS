@@ -3946,12 +3946,45 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         23 => SyscallResult::ok(1),
         // PR_CAPBSET_DROP — silent success.
         24 => SyscallResult::ok(0),
-        // PR_SET_NO_NEW_PRIVS — silent success.
-        38 => SyscallResult::ok(0),
-        // PR_GET_NO_NEW_PRIVS — return 1 (the paranoid answer; we
-        // don't honour setuid bits so "no new privs" is true by
-        // construction).
-        39 => SyscallResult::ok(1),
+        // PR_SET_NO_NEW_PRIVS (38) — install the sticky NNP flag.
+        // Linux enforces a strict argument shape: arg2 (== arg1
+        // here) MUST be 1, and arg3, arg4, arg5 (== arg2, arg3,
+        // arg4) MUST all be 0; anything else is EINVAL.  Once set,
+        // the flag can never be cleared (the only "set" value is 1
+        // by construction, so there is no clear path through this
+        // surface).  We persist per-PCB; kernel context (no PCB)
+        // silently succeeds.
+        38 => {
+            if args.arg1 != 1
+                || args.arg2 != 0
+                || args.arg3 != 0
+                || args.arg4 != 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            if let Some(pid) = caller_pid() {
+                let _ = pcb::set_no_new_privs(pid, 1);
+            }
+            SyscallResult::ok(0)
+        }
+        // PR_GET_NO_NEW_PRIVS (39) — return the per-process sticky
+        // flag.  Linux also gates the auxiliary arguments here: all
+        // of arg2..arg5 must be 0, otherwise EINVAL.  Kernel context
+        // (no PCB) reports the cleared default (0).
+        39 => {
+            if args.arg1 != 0
+                || args.arg2 != 0
+                || args.arg3 != 0
+                || args.arg4 != 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            let v = match caller_pid() {
+                Some(pid) => pcb::get_no_new_privs(pid).unwrap_or(0),
+                None => 0,
+            };
+            SyscallResult::ok(i64::from(v))
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -15881,12 +15914,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // PR_GET_NO_NEW_PRIVS (39) — return 1.
+        // PR_GET_NO_NEW_PRIVS (39) in kernel context — returns the
+        // cleared default (0).  Batch 68 wired this through the PCB;
+        // kernel context has no PCB so the default applies.
         let a = SyscallArgs { arg0: 39, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PRCTL, &a).value != 1 {
+        if dispatch_linux(nr::PRCTL, &a).value != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: prctl(PR_GET_NO_NEW_PRIVS) not 1"
+                "[syscall/linux]   FAIL: prctl(PR_GET_NO_NEW_PRIVS) not 0 ({})",
+                dispatch_linux(nr::PRCTL, &a).value
             );
             return Err(KernelError::InternalError);
         }
@@ -16212,6 +16248,132 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_keepcaps(test_pid), None);
             assert_eq!(pcb::set_keepcaps(test_pid, 1), None);
+        }
+
+        // Batch 68: PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS sticky
+        // round-trip with strict argument validation matching Linux.
+        //
+        //   1. PR_SET_NO_NEW_PRIVS rejects arg2 != 1 with EINVAL
+        //      (including 0 — "clear" is not a thing, the flag is
+        //      sticky).
+        //   2. PR_SET_NO_NEW_PRIVS rejects non-zero arg3..arg5
+        //      with EINVAL (Linux gates the auxiliary args).
+        //   3. PR_SET_NO_NEW_PRIVS with arg2 == 1 and zero
+        //      auxiliaries succeeds.
+        //   4. PR_GET_NO_NEW_PRIVS rejects non-zero arg2..arg5
+        //      with EINVAL.
+        //   5. PR_GET_NO_NEW_PRIVS in kernel context returns 0
+        //      (default).
+        //   6. pcb storage layer: default 0, set to 1, query 1,
+        //      destroy -> None.  Also verify that set_no_new_privs
+        //      with a non-1 value works at the helper level (the
+        //      surface gates 1-only; helper has no validation so
+        //      future code can manipulate).
+        {
+            // arg2 == 0 -> EINVAL (no "clear" path).
+            let a = SyscallArgs { arg0: 38, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 0) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // arg2 == 2 -> EINVAL.
+            let a = SyscallArgs { arg0: 38, arg1: 2, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 2) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // arg2 == u64::MAX -> EINVAL.
+            let a = SyscallArgs { arg0: 38, arg1: u64::MAX, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_NNP, MAX) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // arg2 == 1 but non-zero auxiliary -> EINVAL.  Check each
+            // slot to prove the gate covers all four.
+            for (slot, name) in &[
+                (1u8, "arg3"), (2, "arg4"), (3, "arg5"),
+            ] {
+                let mut a = SyscallArgs { arg0: 38, arg1: 1, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    1 => a.arg2 = 1,
+                    2 => a.arg3 = 1,
+                    3 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 1, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // arg2 == 1 with all auxiliaries == 0 -> 0.
+            let a = SyscallArgs { arg0: 38, arg1: 1, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 1) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // PR_GET_NO_NEW_PRIVS: non-zero auxiliary -> EINVAL.
+            let a = SyscallArgs { arg0: 39, arg1: 1, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_NNP, …arg2=1) not EINVAL ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // All-zero auxiliaries: kernel context -> 0 (default).
+            // (already exercised above with the existing test, but
+            // explicit re-check for batch coverage.)
+            let a = SyscallArgs { arg0: 39, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_NNP) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("nnp-test", 0);
+            // Default is 0 (NNP cleared).
+            assert_eq!(pcb::get_no_new_privs(test_pid), Some(0));
+            // Install 1 (set NNP).  set returns the prior value.
+            assert_eq!(pcb::set_no_new_privs(test_pid, 1), Some(0));
+            assert_eq!(pcb::get_no_new_privs(test_pid), Some(1));
+            // The helper itself is not sticky — only the syscall
+            // surface enforces stickiness.  Verify the helper
+            // accepts a "clear" so future exec-time code can
+            // legitimately reset the flag if Linux ever permits it
+            // (it currently doesn't, but the helper layer must not
+            // hard-code policy).
+            assert_eq!(pcb::set_no_new_privs(test_pid, 0), Some(1));
+            assert_eq!(pcb::get_no_new_privs(test_pid), Some(0));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_no_new_privs(test_pid), None);
+            assert_eq!(pcb::set_no_new_privs(test_pid, 1), None);
         }
     }
 

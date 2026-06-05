@@ -492,6 +492,25 @@ pub struct Process {
     /// ABI round-trip so that programs which set and then read it
     /// back observe the value they wrote.
     pub linux_keepcaps: u32,
+    /// Linux `prctl(PR_SET_NO_NEW_PRIVS)` sticky flag.  Once set to
+    /// 1, execve(2) cannot grant privileges that the caller didn't
+    /// already have (setuid bits become no-ops, file capabilities
+    /// become non-functional, AT_SECURE is forced).  Once 1, **can
+    /// never be unset** — Linux explicitly refuses to ever clear it,
+    /// and the documented sticky semantics let sandboxes rely on
+    /// the bit being monotonically increasing.
+    ///
+    /// Default 0.  Inherited verbatim across fork (Linux semantics).
+    /// Also preserved across execve (Linux semantics — unlike
+    /// `linux_dumpable` and `linux_keepcaps`, NNP propagates through
+    /// exec by design so a sandbox parent can `fork`+`execve` an
+    /// untrusted child without the child being able to escape NNP).
+    ///
+    /// We do not model setuid binaries so NNP has no effect on
+    /// actual privilege transitions; it exists purely for ABI
+    /// round-trip.  systemd, dbus, and chromium's sandbox all probe
+    /// this flag during startup.
+    pub linux_no_new_privs: u32,
 }
 
 impl Process {
@@ -553,6 +572,9 @@ impl Process {
             // cleared on uid-change-from-root.  PR_SET_KEEPCAPS(1)
             // opts out so caps survive setuid.
             linux_keepcaps: 0,
+            // Linux default: NNP cleared (0).  PR_SET_NO_NEW_PRIVS(1)
+            // sets it; once set, sticky forever.
+            linux_no_new_privs: 0,
         }
     }
 }
@@ -669,6 +691,7 @@ pub fn fork_create(
         linux_nice,
         linux_dumpable,
         linux_keepcaps,
+        linux_no_new_privs,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -697,6 +720,7 @@ pub fn fork_create(
             parent.linux_nice,
             parent.linux_dumpable,
             parent.linux_keepcaps,
+            parent.linux_no_new_privs,
         )
     };
 
@@ -805,6 +829,11 @@ pub fn fork_create(
         // for the same reason as dumpable above — pending exec-time
         // PCB cleanup hook.  Tracked in todo.txt.
         linux_keepcaps,
+        // Linux: PR_SET_NO_NEW_PRIVS propagates across fork AND
+        // across exec by design (it is a sticky monotone flag —
+        // sandboxes rely on it being preserved through exec).  Fork
+        // verbatim covers both.
+        linux_no_new_privs,
     };
 
     table.insert(pid, child);
@@ -1402,6 +1431,34 @@ pub fn set_keepcaps(pid: ProcessId, val: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_keepcaps;
     proc.linux_keepcaps = val;
+    Some(old)
+}
+
+/// Read the recorded `prctl(PR_SET_NO_NEW_PRIVS)` sticky flag for
+/// `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(0)` is the documented
+/// default (NNP cleared — execve may grant new privileges).
+#[must_use]
+pub fn get_no_new_privs(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_no_new_privs)
+}
+
+/// Install the no-new-privs flag for `pid`, returning the prior
+/// value.
+///
+/// **Sticky semantics**: this helper itself does not enforce stickiness
+/// — the syscall surface for `PR_SET_NO_NEW_PRIVS` always passes 1
+/// (Linux rejects any other value with EINVAL) and the bit, once set,
+/// is never cleared by any other ABI path.  The helper accepts an
+/// arbitrary value so that future code (test fixtures, exec-time
+/// hooks) can manipulate it; the surface must not.  Returns `None` if
+/// `pid` is unknown.
+pub fn set_no_new_privs(pid: ProcessId, val: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_no_new_privs;
+    proc.linux_no_new_privs = val;
     Some(old)
 }
 

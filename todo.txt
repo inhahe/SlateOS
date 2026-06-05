@@ -9593,3 +9593,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     Build clean; boot test PASSED (BOOT_OK at 21s).
 
 
+## 96. Linux ABI batch 68: real per-PCB PR_SET_NO_NEW_PRIVS
+##     sticky-flag round-trip with strict Linux argument
+##     validation, and corrected default for PR_GET.
+##
+##     Before this batch, PR_SET_NO_NEW_PRIVS silently
+##     accepted anything and PR_GET_NO_NEW_PRIVS always
+##     returned 1 (the "paranoid" answer chosen on the theory
+##     that we don't honour setuid so NNP is "true by
+##     construction").  Both wrong:
+##
+##       (a) Returning 1 always is a lie when userspace never
+##           set the bit.  Linux's default is 0; sandbox-aware
+##           code that reads PR_GET_NO_NEW_PRIVS to decide
+##           "should I tighten the seatbelt before exec'ing
+##           an untrusted child?" got the wrong answer.
+##
+##       (b) PR_SET_NO_NEW_PRIVS accepted any value with no
+##           argument validation.  Linux enforces a strict
+##           shape: arg2 == 1, arg3 == arg4 == arg5 == 0; any
+##           deviation is EINVAL.  We accepted PR_SET_NO_NEW_PRIVS(0)
+##           silently, which is a "clear NNP" call Linux never
+##           supports (the bit is monotone-sticky).
+##
+##     Fix: add `linux_no_new_privs: u32` to the PCB (default
+##     0, matching Linux), with `pcb::get_no_new_privs` /
+##     `pcb::set_no_new_privs` helpers.  Inherited verbatim
+##     across fork.  Preserved across exec by design (sticky
+##     monotone semantics — sandbox parents rely on NNP
+##     propagating through `fork`+`execve`).
+##
+##     PR_SET_NO_NEW_PRIVS now mirrors Linux's argument check:
+##     arg2 must be 1, arg3/arg4/arg5 must all be 0, otherwise
+##     EINVAL.  PR_GET_NO_NEW_PRIVS likewise rejects non-zero
+##     arg2..arg5 with EINVAL.  Both read/write through the
+##     PCB; kernel context falls back to the cleared default.
+##
+##     The sticky semantics ("once 1, never 0") fall out of
+##     the surface — the only successful PR_SET path stores 1,
+##     and there is no other ABI path that touches the flag.
+##     The pcb helper itself is *not* sticky (it stores any
+##     u32) so future exec-time code can manipulate it
+##     legitimately.
+##
+##     Self-tests cover:
+##       * PR_SET arg2 in {0, 2, u64::MAX} -> EINVAL.
+##       * PR_SET arg2=1 with arg3/arg4/arg5 == 1 (each in
+##         turn) -> EINVAL.
+##       * PR_SET arg2=1 with all auxiliaries 0 -> 0.
+##       * PR_GET with any non-zero auxiliary -> EINVAL.
+##       * PR_GET in kernel context -> 0 (default).
+##       * pcb storage layer round-trips 0 -> 1 -> 0 -> destroy
+##         -> None.  (Existing PR_GET_NO_NEW_PRIVS test that
+##         expected 1 was updated to expect 0 — flagged here
+##         as a deliberate ABI-correctness fix, not a
+##         regression.)
+##
+##     Build clean; boot test PASSED (BOOT_OK at 21s).
+
+

@@ -18728,3 +18728,72 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      First boot run timed out at 120s (apparent QEMU flake,
 ##      matches batches 191 and 195); re-run with --timeout=300
 ##      PASSED (BOOT_OK at 23s).  Build clean.
+
+## 226. Linux ABI: rseq sig mismatch = EPERM, re-register
+##      ptr/len = EINVAL (batch 197).
+##      Linux's kernel/rseq.c::SYSCALL_DEFINE4(rseq) discriminates
+##      three failure modes that we collapsed into one:
+##
+##      On the UNREGISTER path:
+##        * ptr != current->rseq        -> -EINVAL
+##        * rseq_len != current->rseq_len -> -EINVAL
+##        * sig != current->rseq_sig    -> -EPERM   (was EINVAL pre-batch)
+##
+##      On the register path when a registration already exists:
+##        * ptr != current->rseq        -> -EINVAL  (was EBUSY pre-batch)
+##        * rseq_len != current->rseq_len -> -EINVAL (was EBUSY)
+##        * sig != current->rseq_sig    -> -EPERM   (was EBUSY)
+##        * all three match             -> -EBUSY
+##
+##      The EPERM-vs-EINVAL discrimination is the kernel's way of
+##      saying "your syscall is well-formed, but you don't own this
+##      rseq slot" — a probe that registered with sig=A and tries
+##      to unregister with sig=B is doing something semantically
+##      different from one that passed garbage in the args.
+##
+##      Also restructured the function so that alignment / access_ok
+##      validation runs only on the first-time-register path.  Linux
+##      does NOT validate alignment or access_ok on UNREGISTER (the
+##      pointer is implicitly known to be valid because it had to
+##      pass validation at register time).  Pre-batch we ran those
+##      checks unconditionally, so an unregister with an unmapped
+##      (but previously-valid) pointer would see EFAULT where Linux
+##      returns EINVAL.
+##
+##      New gate order (matches Linux):
+##        1. flags & UNREGISTER set ->
+##           a. Other flag bits      -> EINVAL
+##           b. No prior reg         -> EINVAL
+##           c. Stored ptr != rseq   -> EINVAL
+##           d. Stored len != len    -> EINVAL
+##           e. Stored sig != sig    -> EPERM
+##           f. Clear and return 0
+##        2. UNREGISTER bit clear:
+##           a. Any flag bit          -> EINVAL
+##           b. Already registered:
+##              - ptr/len mismatch    -> EINVAL
+##              - sig mismatch        -> EPERM
+##              - else                -> EBUSY
+##           c. Validate len/ptr/align/access_ok
+##           d. Store + init runtime fields
+##
+##      Self-tests updated/added in dispatch_linux self-test:
+##        * Re-register sig mismatch  -> EPERM (was EBUSY pre-batch).
+##        * Re-register ptr mismatch  -> EINVAL (was EBUSY).
+##        * Unregister sig mismatch   -> EPERM (was EINVAL).
+##        * Unregister ptr mismatch   -> EINVAL.
+##      Marker emitted:
+##        "rseq sig-mismatch=EPERM / re-reg ptr=EINVAL: OK".
+##
+##      Known limitations:
+##        * Linux's rseq_len validation is a range
+##          (ORIG_RSEQ_SIZE=20 <= len <= PAGE_SIZE=4096), permitting
+##          older callers that use the deprecated 20-byte layout.
+##          We still require exactly RSEQ_STRUCT_SIZE=32.  A musl or
+##          legacy-glibc caller passing rseq_len=20 sees EINVAL where
+##          Linux would accept and only zero the 20-byte subset.
+##          Documented for a follow-up if such a caller appears.
+##        * The cpu_id / cpu_id_start / mm_cid context-switch hook
+##          is still deferred — see todo entries from batch 121.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 26s on first try).

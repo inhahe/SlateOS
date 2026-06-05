@@ -16095,6 +16095,33 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
 ///   arg3 = sig      (32-bit signature, must match abort handler's
 ///                    preceding word; we store but never check
 ///                    because we never invoke an abort handler)
+///
+/// Gate order (matches Linux's `kernel/rseq.c::SYSCALL_DEFINE4(rseq)`):
+///   1. If `flags & RSEQ_FLAG_UNREGISTER`:
+///      a. Any other flag bit -> EINVAL.
+///      b. No prior registration -> EINVAL.
+///      c. Stored ptr != rseq -> EINVAL.
+///      d. Stored len != rseq_len -> EINVAL.
+///      e. Stored sig != sig -> **EPERM** (not EINVAL — discriminates
+///         "tried to unregister someone else's rseq" from "wrong
+///         syscall args").
+///      f. Reset, return 0.
+///   2. Register path (UNREGISTER bit clear):
+///      a. Any flag bit -> EINVAL.
+///      b. If already registered:
+///         - ptr/len mismatch -> EINVAL.
+///         - sig mismatch    -> EPERM.
+///         - else            -> EBUSY.
+///      c. Validate len/ptr/alignment/access_ok.
+///      d. Store registration, initialise kernel-owned runtime fields.
+///
+/// Pre-batch we both returned EINVAL on sig mismatch for unregister
+/// (Linux: EPERM) and returned EBUSY unconditionally on any second
+/// register (Linux: EINVAL for ptr/len mismatch, EPERM for sig
+/// mismatch, EBUSY only when everything matches).  We also did the
+/// alignment/access_ok validation BEFORE branching on UNREGISTER,
+/// so an unregister with an unmapped (but previously-valid) pointer
+/// would return EFAULT where Linux returns EINVAL.
 fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
     const RSEQ_STRUCT_SIZE: u64 = 32;
     const RSEQ_FLAG_UNREGISTER: u64 = 1;
@@ -16106,37 +16133,29 @@ fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let sig = args.arg3 as u32;
 
-    if flags & !RSEQ_FLAG_UNREGISTER != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if len != RSEQ_STRUCT_SIZE {
-        return linux_err(errno::EINVAL);
-    }
-    if rseq_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if rseq_ptr & (RSEQ_STRUCT_ALIGN - 1) != 0 {
-        // Linux rejects unaligned rseq pointers with EINVAL.
-        return linux_err(errno::EINVAL);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(rseq_ptr, RSEQ_STRUCT_SIZE as usize) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(rseq_ptr, RSEQ_STRUCT_SIZE as usize) {
-        return linux_err(linux_errno_for(e));
-    }
-
     let task_id = crate::sched::current_task_id();
 
     if flags & RSEQ_FLAG_UNREGISTER != 0 {
-        // Unregister: must match stored (ptr, len, sig) triple.
+        // Reject any other flag bit alongside UNREGISTER.
+        if flags & !RSEQ_FLAG_UNREGISTER != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        // Linux does NOT validate alignment / access_ok on the
+        // unregister path — the pointer is implicitly known to be
+        // valid because it had to be validated at register time.
+        // We match that order so a probe unregistering with the same
+        // args it registered with sees the same errno Linux does.
         match crate::proc::thread_clone::lookup_rseq(task_id) {
             Some((stored_ptr, stored_len, stored_sig)) => {
-                if stored_ptr != rseq_ptr
-                    || u64::from(stored_len) != len
-                    || stored_sig != sig
-                {
+                if stored_ptr != rseq_ptr {
                     return linux_err(errno::EINVAL);
+                }
+                if u64::from(stored_len) != len {
+                    return linux_err(errno::EINVAL);
+                }
+                if stored_sig != sig {
+                    // Sig mismatch on unregister: Linux returns EPERM.
+                    return linux_err(errno::EPERM);
                 }
                 crate::proc::thread_clone::unregister_rseq(task_id);
                 return SyscallResult::ok(0);
@@ -16145,11 +16164,41 @@ fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Register.  Linux returns -EBUSY for any second registration,
-    // even when the parameters match exactly (idempotent re-register
-    // is not allowed — userspace must unregister first).
-    if crate::proc::thread_clone::lookup_rseq(task_id).is_some() {
+    // Register path: no flag bits should be set (UNREGISTER already
+    // handled above; any remaining bit is rejected).
+    if flags != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Already registered: discriminate ptr/len (EINVAL) from sig
+    // (EPERM) from "everything matches" (EBUSY).
+    if let Some((stored_ptr, stored_len, stored_sig)) =
+        crate::proc::thread_clone::lookup_rseq(task_id)
+    {
+        if stored_ptr != rseq_ptr || u64::from(stored_len) != len {
+            return linux_err(errno::EINVAL);
+        }
+        if stored_sig != sig {
+            return linux_err(errno::EPERM);
+        }
         return linux_err(errno::EBUSY);
+    }
+
+    // First-time registration: validate len/ptr/alignment/access_ok.
+    if len != RSEQ_STRUCT_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+    if rseq_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if rseq_ptr & (RSEQ_STRUCT_ALIGN - 1) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(rseq_ptr, RSEQ_STRUCT_SIZE as usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(rseq_ptr, RSEQ_STRUCT_SIZE as usize) {
+        return linux_err(linux_errno_for(e));
     }
 
     // Store before writing user space so a copy_to_user fault leaves
@@ -36394,7 +36443,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: rseq overwrote padding");
             return Err(KernelError::InternalError);
         }
-        // Re-register (any value) -> EBUSY.
+        // Re-register with matching ptr/len/sig -> EBUSY (idempotent
+        // re-register is not allowed; userspace must unregister first).
         let a = SyscallArgs {
             arg0: rseq_buf_ptr, arg1: 32, arg2: 0, arg3: 0x5305_3053,
             arg4: 0, arg5: 0,
@@ -36403,15 +36453,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: rseq double-register not EBUSY");
             return Err(KernelError::InternalError);
         }
-        // Unregister with mismatched sig -> EINVAL.
+        // Re-register with matching ptr/len but different sig -> EPERM
+        // (batch 197: Linux discriminates sig mismatch from arg
+        // mismatch on the already-registered path).
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr, arg1: 32, arg2: 0, arg3: 0xDEAD_BEEF,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq re-register sig-mismatch not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Re-register with mismatched ptr -> EINVAL (ptr/len takes
+        // precedence over sig when both differ).
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr.wrapping_add(32), arg1: 32, arg2: 0,
+            arg3: 0xDEAD_BEEF, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq re-register ptr-mismatch not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Unregister with mismatched sig -> EPERM (batch 197: was
+        // EINVAL pre-batch; Linux's kernel/rseq.c returns -EPERM
+        // for sig mismatch on the unregister path).
         let a = SyscallArgs {
             arg0: rseq_buf_ptr, arg1: 32, arg2: 1, arg3: 0xDEAD_BEEF,
             arg4: 0, arg5: 0,
         };
-        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: rseq unregister-mismatch not EINVAL");
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq unregister sig-mismatch not EPERM"
+            );
             return Err(KernelError::InternalError);
         }
+        // Unregister with mismatched ptr -> EINVAL (ptr mismatch is
+        // still EINVAL — only sig mismatch flips to EPERM).
+        let a = SyscallArgs {
+            arg0: rseq_buf_ptr.wrapping_add(32), arg1: 32, arg2: 1,
+            arg3: 0x5305_3053, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq unregister ptr-mismatch not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   rseq sig-mismatch=EPERM / re-reg ptr=EINVAL: OK"
+        );
         // Unregister with matching sig -> 0.
         let a = SyscallArgs {
             arg0: rseq_buf_ptr, arg1: 32, arg2: 1, arg3: 0x5305_3053,

@@ -17691,3 +17691,40 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Serial confirms "[syscall/linux]   timer_settime
 ##      NULL/itimerspec/flags-last gating: OK" in
 ##      build/serial-test.txt.
+
+## 205. Batch 176: sys_timer_gettime lookup-first gating
+##      ----------------------------------------------------
+##      Reordered sys_timer_gettime to match Linux's
+##      SYSCALL_DEFINE2(timer_gettime) in
+##      kernel/time/posix-timers.c:
+##        int ret = do_timer_gettime(timer_id, &cur_setting);
+##        if (!ret) { if (put_itimerspec64(...)) ret = -EFAULT; }
+##        return ret;
+##      do_timer_gettime looks up the timer via posix_timer_by_id;
+##      with no timer it returns -EINVAL before put_itimerspec64
+##      touches curr_value.  Our pre-batch gate returned EFAULT
+##      for NULL/bad curr_value, masking the EINVAL terminal.
+##
+##      Implementation: dropped the upfront NULL/validate_user_write
+##      checks.  With no POSIX timer subsystem, every timer id is
+##      unknown and the terminal EINVAL fires for all callers.
+##
+##      Self-tests updated/added:
+##        * timer_gettime(timerid=0, curr=NULL) -> EINVAL (was EFAULT).
+##        * timer_gettime(timerid=0, curr=valid) -> EINVAL (unchanged).
+##        * timer_gettime(timerid=0, curr=0x1 bogus) -> EINVAL (new;
+##          proves the lookup-first ordering — the user ptr is never
+##          touched).
+##        * Emits "[syscall/linux]   timer_gettime lookup-first
+##          gating: OK".
+##
+##      Known limitations:
+##        * The EFAULT path (valid timer id, bad user ptr) is not
+##          reachable until a POSIX timer subsystem exists.  Once
+##          timer_create returns real timer ids, this stub needs
+##          the put_itimerspec64-style write validation re-added
+##          AFTER the timer lookup succeeds.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 35s).
+##      Serial confirms "[syscall/linux]   timer_gettime
+##      lookup-first gating: OK" in build/serial-test.txt.

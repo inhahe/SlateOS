@@ -16271,12 +16271,17 @@ fn sys_timer_settime(args: &SyscallArgs) -> SyscallResult {
 
 /// `timer_gettime(timerid, curr_value*)`.
 fn sys_timer_gettime(args: &SyscallArgs) -> SyscallResult {
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 32) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Linux's `SYSCALL_DEFINE2(timer_gettime)` (kernel/time/posix-timers.c):
+    //   int ret = do_timer_gettime(timer_id, &cur_setting);
+    //   if (!ret) { if (put_itimerspec64(...)) ret = -EFAULT; }
+    //   return ret;
+    // `do_timer_gettime` looks up the timer first and returns EINVAL when
+    // the timer id is unknown — BEFORE put_itimerspec64 ever touches the
+    // user pointer.  Our pre-batch gate returned EFAULT for NULL/bad
+    // curr_value, but with no POSIX timers in this kernel every timer id
+    // is unknown, so Linux returns EINVAL regardless of the user ptr.
+    // Drop the upfront pointer checks so the terminal EINVAL fires first.
+    let _ = args.arg1;
     linux_err(errno::EINVAL)
 }
 
@@ -35437,10 +35442,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   timer_settime NULL/itimerspec/flags-last gating: OK"
         );
-        // timer_gettime NULL -> EFAULT.
+        // timer_gettime NULL -> EINVAL (Linux looks up the timer FIRST in
+        // do_timer_gettime; with no timers, every timer id is unknown
+        // and EINVAL is returned before put_itimerspec64 touches the
+        // user pointer).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::TIMER_GETTIME, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: timer_gettime NULL not EFAULT");
+        if dispatch_linux(nr::TIMER_GETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_gettime NULL not EINVAL");
             return Err(KernelError::InternalError);
         }
         // timer_gettime valid -> EINVAL.
@@ -35449,6 +35457,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: timer_gettime valid not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // timer_gettime bogus user ptr -> EINVAL (still EINVAL because
+        // timer lookup fails first, never touches the pointer).
+        let a = SyscallArgs { arg0: 0, arg1: 0x1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMER_GETTIME, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: timer_gettime bogus ptr not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   timer_gettime lookup-first gating: OK"
+        );
         // timer_getoverrun -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMER_GETOVERRUN, &a).value != -i64::from(errno::EINVAL) {

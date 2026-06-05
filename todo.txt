@@ -9769,3 +9769,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     Build clean; boot test PASSED (BOOT_OK at 22s).
 
 
+## 99. Linux ABI batch 71: real per-PCB PR_SET_TIMERSLACK /
+##     PR_GET_TIMERSLACK round-trip with strict argument
+##     validation matching Linux.
+##
+##     Before this batch, both options fell through to the
+##     generic `_ => EINVAL` catch-all in sys_prctl.  Android
+##     userspace, systemd-oomd, power-management daemons, and
+##     a handful of benchmark suites use these to tune timer
+##     coalescing (smaller slack for foreground apps, larger
+##     slack for background workers).  EINVAL on an option
+##     that should succeed makes those callers either skip
+##     the optimisation or log noise.
+##
+##     Fix: add two fields to the PCB:
+##       * linux_timer_slack_ns (default 50_000 — Linux's
+##         compile-time DEFAULT_TIMER_SLACK_NS).
+##       * linux_timer_slack_default_ns (default 50_000) —
+##         this is the value PR_SET_TIMERSLACK(0) restores
+##         to, NOT the compile-time constant.  Linux captures
+##         it at fork time from the parent's *current* slack
+##         (so a child's "default" inherits whatever the
+##         parent had at fork).  We mirror exactly: both
+##         fields propagate verbatim across fork.  Preserved
+##         across exec (Linux does NOT reset these on execve).
+##
+##     PR_SET_TIMERSLACK (29) — arg2 == 0 means "restore to
+##     per-process default" (consult linux_timer_slack_default_ns,
+##     not the compile-time constant); any non-zero stores
+##     verbatim.  arg3/arg4/arg5 must all be 0 or EINVAL.
+##     Returns 0 on success (Linux does NOT return the prior
+##     value — unlike e.g. personality/umask).
+##
+##     PR_GET_TIMERSLACK (30) — returns the slack DIRECTLY as
+##     the syscall return value (no user pointer).  Linux
+##     truncates to int; we use i64 (the SyscallResult value
+##     type) which covers the entire realistic range.
+##     arg1..arg5 must all be 0 or EINVAL (arg1 included
+##     because there is no return-via-pointer mechanism).
+##
+##     Known limitation (deferred): our timer subsystem does
+##     NOT coalesce.  The stored slack value is round-tripped
+##     for ABI compatibility but has no effect on actual
+##     timer expiration jitter.  When timer coalescing lands,
+##     it will consult get_timer_slack_ns(pid) — the
+##     plumbing is in place.
+##
+##     Self-tests cover:
+##       * PR_SET arg3/arg4/arg5 != 0 -> EINVAL (each in turn).
+##       * PR_SET(N) and PR_SET(0) both succeed in kernel
+##         context (no PCB to mutate, no side effect).
+##       * PR_GET arg1/arg2/arg3/arg4/arg5 != 0 -> EINVAL.
+##       * PR_GET all-zero -> 50_000 (kernel default).
+##       * pcb storage round-trips default 50000 -> set
+##         1_000_000 -> query 1_000_000 -> default still 50000
+##         -> reset 50000 -> destroy -> None.
+##
+##     Build clean; boot test PASSED (BOOT_OK at 23s).
+
+

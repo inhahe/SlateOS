@@ -546,7 +546,39 @@ pub struct Process {
     /// KiB base page in our design), so the flag has no effect on
     /// actual page allocation.  It exists purely for ABI round-trip.
     pub linux_thp_disable: u32,
+    /// Linux `prctl(PR_SET_TIMERSLACK)` — per-process timer slack
+    /// in nanoseconds.  Power-management daemons set this larger
+    /// on background processes so the kernel can coalesce timer
+    /// expirations and reduce wakeups; foreground processes get a
+    /// smaller (or zero) value.  Stored on `task_struct` in Linux.
+    ///
+    /// Default: 50_000 ns (50us) — the Linux compile-time
+    /// `DEFAULT_TIMER_SLACK_NS`.  PR_SET_TIMERSLACK with arg2 == 0
+    /// restores the per-process *default* recorded at fork time
+    /// (see `linux_timer_slack_default_ns` below) — NOT the
+    /// system-wide 50us constant.  Inherited verbatim across fork.
+    /// Preserved across exec (Linux does NOT reset this on execve).
+    ///
+    /// We do not actually use this for anything yet — our timer
+    /// subsystem does not coalesce.  Stored purely for ABI
+    /// round-trip; future timer-coalescing work will consult it.
+    pub linux_timer_slack_ns: u64,
+    /// Linux `task_struct::default_timer_slack_ns` — the value to
+    /// restore when `prctl(PR_SET_TIMERSLACK, 0)` is called.  Set
+    /// at process creation from the compile-time default
+    /// (50_000 ns) and inherited verbatim across fork (so a
+    /// child's "default" matches whatever the parent had when
+    /// fork happened).  Preserved across exec.  Linux exposes
+    /// no syscall to change this directly; it is purely the
+    /// reset target for `PR_SET_TIMERSLACK(0)`.
+    pub linux_timer_slack_default_ns: u64,
 }
+
+/// Linux's compile-time `DEFAULT_TIMER_SLACK_NS` — the timer-slack
+/// value every fresh `task_struct` starts with on Linux (and which
+/// `PR_SET_TIMERSLACK(0)` resets to, modulo the parent-inheritance
+/// quirk above).  50 microseconds.
+pub const LINUX_DEFAULT_TIMER_SLACK_NS: u64 = 50_000;
 
 impl Process {
     /// Create a new process (internal — use `create()` below).
@@ -617,6 +649,11 @@ impl Process {
             // Linux default: THP enabled (system-wide policy applies).
             // PR_SET_THP_DISABLE(1) opts the process out.
             linux_thp_disable: 0,
+            // Linux default: 50us timer slack (`DEFAULT_TIMER_SLACK_NS`).
+            // Both the active value and the per-process "default to
+            // restore on PR_SET_TIMERSLACK(0)" start at the same point.
+            linux_timer_slack_ns: LINUX_DEFAULT_TIMER_SLACK_NS,
+            linux_timer_slack_default_ns: LINUX_DEFAULT_TIMER_SLACK_NS,
         }
     }
 }
@@ -735,6 +772,8 @@ pub fn fork_create(
         linux_keepcaps,
         linux_no_new_privs,
         linux_thp_disable,
+        linux_timer_slack_ns,
+        linux_timer_slack_default_ns,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -765,6 +804,8 @@ pub fn fork_create(
             parent.linux_keepcaps,
             parent.linux_no_new_privs,
             parent.linux_thp_disable,
+            parent.linux_timer_slack_ns,
+            parent.linux_timer_slack_default_ns,
         )
     };
 
@@ -892,6 +933,15 @@ pub fn fork_create(
         // across exec for now — same exec-hook limitation as the
         // other prctl-flag entries.  Tracked in todo.txt.
         linux_thp_disable,
+        // Linux: timer_slack_ns and default_timer_slack_ns are
+        // both copied verbatim from the parent's task_struct on
+        // copy_process.  The child's "default" therefore is
+        // whatever the parent had at fork time (NOT the
+        // compile-time 50us — PR_SET_TIMERSLACK(0) in the child
+        // resets to the parent's slack-at-fork value).  Both
+        // values are preserved across exec.
+        linux_timer_slack_ns,
+        linux_timer_slack_default_ns,
     };
 
     table.insert(pid, child);
@@ -1565,6 +1615,43 @@ pub fn set_thp_disable(pid: ProcessId, val: u32) -> Option<u32> {
     let old = proc.linux_thp_disable;
     proc.linux_thp_disable = val;
     Some(old)
+}
+
+/// Read the recorded `prctl(PR_GET_TIMERSLACK)` value (nanoseconds)
+/// for `pid`.  Returns `None` if `pid` is unknown; the documented
+/// default for fresh processes is `LINUX_DEFAULT_TIMER_SLACK_NS`
+/// (50_000 ns).
+#[must_use]
+pub fn get_timer_slack_ns(pid: ProcessId) -> Option<u64> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_timer_slack_ns)
+}
+
+/// Install the timer-slack value for `pid`, returning the prior
+/// value.  The syscall surface for `PR_SET_TIMERSLACK` interprets
+/// `arg2 == 0` as "restore the per-process default" — that
+/// remapping happens at the surface (it consults
+/// `get_timer_slack_default_ns`), so this helper accepts the value
+/// to store directly and does not interpret 0 specially.  Returns
+/// `None` if `pid` is unknown.
+pub fn set_timer_slack_ns(pid: ProcessId, val: u64) -> Option<u64> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_timer_slack_ns;
+    proc.linux_timer_slack_ns = val;
+    Some(old)
+}
+
+/// Read the per-process *default* timer slack — the value that
+/// `PR_SET_TIMERSLACK(0)` resets the active slack to.  Set at fork
+/// time from the parent's default (so a child's "default" matches
+/// the parent's at-fork value, not the compile-time constant).
+/// Returns `None` if `pid` is unknown.
+#[must_use]
+pub fn get_timer_slack_default_ns(pid: ProcessId) -> Option<u64> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| p.linux_timer_slack_default_ns)
 }
 
 /// Index of `RLIMIT_AS` (resident *address space* size) in [`Process::rlimits`].

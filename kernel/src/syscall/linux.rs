@@ -4069,6 +4069,74 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             };
             SyscallResult::ok(i64::from(v))
         }
+        // PR_SET_TIMERSLACK (29) — set the per-process timer-slack
+        // (nanoseconds) used to coalesce timer expirations.  Linux
+        // semantics: arg2 == 0 means "restore the per-process
+        // default" (which was captured at fork time — NOT the
+        // compile-time 50us); any non-zero value is stored verbatim.
+        // arg3/arg4/arg5 must all be 0 or EINVAL.  Linux returns 0
+        // on success (the prior value is *not* returned, unlike
+        // some other PR_SET_* options).
+        //
+        // We persist via pcb::set_timer_slack_ns and consult
+        // pcb::get_timer_slack_default_ns for the reset semantics.
+        // Our timer subsystem does not coalesce yet — the stored
+        // value is round-tripped purely for ABI compatibility.
+        29 => {
+            if args.arg2 != 0 || args.arg3 != 0 || args.arg4 != 0 {
+                return linux_err(errno::EINVAL);
+            }
+            let Some(pid) = caller_pid() else {
+                // Kernel context has no PCB to mutate.  Linux's
+                // syscall path is never entered from kernel context,
+                // so the only way we reach this is during self-test;
+                // report success with no side effect.
+                return SyscallResult::ok(0);
+            };
+            let target_ns: u64 = if args.arg1 == 0 {
+                // Reset to per-process default.  If the PCB has
+                // vanished (impossible while syscall is in flight,
+                // but be defensive), fall through to the
+                // compile-time default.
+                pcb::get_timer_slack_default_ns(pid)
+                    .unwrap_or(pcb::LINUX_DEFAULT_TIMER_SLACK_NS)
+            } else {
+                args.arg1
+            };
+            let _ = pcb::set_timer_slack_ns(pid, target_ns);
+            SyscallResult::ok(0)
+        }
+        // PR_GET_TIMERSLACK (30) — return the per-process timer
+        // slack (nanoseconds) directly as the syscall return value.
+        // Linux truncates `task->timer_slack_ns` (u64) to int for
+        // the return — we preserve as i64 since SyscallResult is
+        // i64; values exceeding i64::MAX would appear negative but
+        // realistic slack values are tens of microseconds, well
+        // within range.  arg2/arg3/arg4/arg5 must all be 0 or
+        // EINVAL.  arg1 has no meaning here (Linux ignores it,
+        // but the consistent thing for our surface is to also gate
+        // it to 0 since there is no return-via-pointer mechanism).
+        //
+        // Kernel context (no PCB) reports the default
+        // (LINUX_DEFAULT_TIMER_SLACK_NS = 50_000).
+        30 => {
+            if args.arg1 != 0
+                || args.arg2 != 0
+                || args.arg3 != 0
+                || args.arg4 != 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            let v: u64 = match caller_pid() {
+                Some(pid) => pcb::get_timer_slack_ns(pid)
+                    .unwrap_or(pcb::LINUX_DEFAULT_TIMER_SLACK_NS),
+                None => pcb::LINUX_DEFAULT_TIMER_SLACK_NS,
+            };
+            // Cast to i64.  Linux's prctl(2) return type is `int`
+            // so very large values wrap; we use i64 (the syscall
+            // return type) which fits the entire realistic range.
+            SyscallResult::ok(v as i64)
+        }
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -16708,6 +16776,130 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_thp_disable(test_pid), None);
             assert_eq!(pcb::set_thp_disable(test_pid, 1), None);
+        }
+
+        // Batch 71: PR_SET_TIMERSLACK / PR_GET_TIMERSLACK round-trip
+        // with strict argument validation matching Linux.
+        //
+        //   1. PR_SET_TIMERSLACK rejects non-zero arg3/arg4/arg5 with EINVAL.
+        //   2. PR_GET_TIMERSLACK rejects non-zero arg1..arg5 with EINVAL
+        //      (returns directly via syscall return).
+        //   3. Kernel-context dispatch reports 50_000 (default).
+        //   4. pcb storage layer: default 50_000, set 1_000_000,
+        //      query 1_000_000, query default still 50_000,
+        //      destroy -> None.
+        {
+            // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_TIMERSLACK.
+            for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                let mut a = SyscallArgs { arg0: 29, arg1: 100_000, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_SET_TIMERSLACK(100_000): kernel context — returns 0
+            // (no PCB to mutate but Linux's success path is mirrored).
+            let a = SyscallArgs { arg0: 29, arg1: 100_000, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, 100000) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PR_SET_TIMERSLACK(0): kernel context still returns 0
+            // (reset to default — no PCB to consult, no side effect).
+            let a = SyscallArgs { arg0: 29, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, 0) not 0 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // arg1/arg2/arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_TIMERSLACK.
+            // (Returns directly via syscall return, no user pointer.)
+            for (slot, name) in &[
+                (1u8, "arg2"),
+                (2, "arg3"),
+                (3, "arg4"),
+                (4, "arg5"),
+            ] {
+                let mut a = SyscallArgs { arg0: 30, arg1: 0, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                match slot {
+                    1 => a.arg1 = 1,
+                    2 => a.arg2 = 1,
+                    3 => a.arg3 = 1,
+                    4 => a.arg4 = 1,
+                    _ => unreachable!(),
+                }
+                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl(PR_GET_TIMERSLACK, …{}=1) not EINVAL ({})",
+                        name, dispatch_linux(nr::PRCTL, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // PR_GET_TIMERSLACK with all-zero auxiliaries -> 50_000
+            // (kernel context: no PCB, compile-time default applies).
+            let a = SyscallArgs { arg0: 30, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::PRCTL, &a).value != 50_000 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_GET_TIMERSLACK) not 50000 ({})",
+                    dispatch_linux(nr::PRCTL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Storage-layer round-trip via pcb helpers directly.
+            let test_pid = pcb::create("timerslack-test", 0);
+            // Default is 50_000 (Linux DEFAULT_TIMER_SLACK_NS).
+            assert_eq!(pcb::get_timer_slack_ns(test_pid), Some(50_000));
+            assert_eq!(
+                pcb::get_timer_slack_default_ns(test_pid),
+                Some(50_000),
+            );
+            // Install 1_000_000 ns (1ms slack).  set returns the prior.
+            assert_eq!(
+                pcb::set_timer_slack_ns(test_pid, 1_000_000),
+                Some(50_000),
+            );
+            assert_eq!(
+                pcb::get_timer_slack_ns(test_pid),
+                Some(1_000_000),
+            );
+            // Default is unchanged — only the active value moves.
+            assert_eq!(
+                pcb::get_timer_slack_default_ns(test_pid),
+                Some(50_000),
+            );
+            // Reset back to default via the helper directly.
+            assert_eq!(
+                pcb::set_timer_slack_ns(test_pid, 50_000),
+                Some(1_000_000),
+            );
+            assert_eq!(pcb::get_timer_slack_ns(test_pid), Some(50_000));
+            pcb::destroy(test_pid);
+            // After destroy the PCB is gone.
+            assert_eq!(pcb::get_timer_slack_ns(test_pid), None);
+            assert_eq!(pcb::get_timer_slack_default_ns(test_pid), None);
+            assert_eq!(pcb::set_timer_slack_ns(test_pid, 1), None);
         }
     }
 

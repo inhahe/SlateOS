@@ -13310,3 +13310,136 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 
+## 146. [LINUX ABI BATCH 117 - DONE] Implement select(2) and pselect6(2)
+##      on top of the readiness engine introduced in batch 116.  Both
+##      were stub ENOSYS returns; with poll() now wired up there is no
+##      reason for the older multiplexing APIs not to work for the same
+##      File / Console / Pipe handle kinds.
+##
+##      Implementation (kernel/src/syscall/linux.rs):
+##
+##      * New helper `select_core(nfds, rd*, wr*, ex*, len, timeout_ms)`
+##        — the moral equivalent of poll_core for fd_set bitmaps.  It:
+##          - Quick-returns 0 when nfds == 0 or len == 0, optionally
+##            sleeping for a positive timeout (Linux: no fds + finite
+##            timeout = a plain timed sleep that returns 0).
+##          - Snapshots three input fd_sets via copy_from_user.  A
+##            NULL pointer is treated as the all-zero set (Linux
+##            convention; you don't have to pass all three).
+##          - Allocates three output fd_set buffers (each `len`
+##            bytes), zeroed before each polling iteration so a
+##            transient earlier readiness doesn't bleed through.
+##          - Iterates fds in [0, nfds), synthesises a poll events
+##            mask (POLLIN|POLLRDNORM for want_r, POLLOUT|POLLWRNORM
+##            for want_w, POLLPRI for want_x), and dispatches through
+##            the same `poll_compute_revents` engine poll/ppoll use.
+##            One shared readiness oracle for both APIs — no code
+##            duplication, no chance for the two to drift.
+##          - Maps revents back to the three Linux fd_set categories:
+##              * readable  if want_r AND
+##                  revents & (POLLIN|POLLRDNORM|POLLHUP|POLLERR) != 0
+##                (Linux treats HUP and ERR as "readable so the
+##                 caller's next read returns EOF / the error.")
+##              * writable  if want_w AND
+##                  revents & (POLLOUT|POLLWRNORM|POLLERR) != 0
+##                (ERR is reported writable so the caller's next
+##                 write surfaces the error.)
+##              * exceptional if want_x AND
+##                  revents & POLLPRI != 0
+##                (POLLPRI is the canonical out-of-band signal.)
+##          - **EBADF semantics** — unlike poll(2), which reports
+##            POLLNVAL in revents and keeps going, select(2)
+##            short-circuits with EBADF the moment any fd the caller
+##            asked about turns out to be invalid.  The first
+##            POLLNVAL we observe terminates the call with EBADF;
+##            output buffers are not written back.  This matches
+##            Linux's select(2) man-page contract:
+##              "EBADF  An invalid file descriptor was given in one
+##                       of the sets.  (Perhaps a file descriptor
+##                       that was already closed, or one on which
+##                       an error has occurred.)"
+##          - Same 10 ms re-poll slicing as poll_core: balances
+##            responsiveness against busy-waiting, no wakeup
+##            infrastructure needed.
+##          - On return, copy_to_user the three output buffers —
+##            but only for sets the caller actually supplied (NULL
+##            input stays NULL output; we do not synthesise a
+##            zero-filled buffer Linux didn't ask us to write to).
+##          - Return value is the count of fds with at least one
+##            output bit set, exactly like Linux.
+##
+##      * `sys_select(nfds, rd*, wr*, ex*, tv*)` — classic select.
+##        timeval is 16 bytes (i64 tv_sec + i64 tv_usec).  NULL tv =
+##        "wait forever" (-1).  Non-NULL: validate, copy_from_user,
+##        reject tv_sec < 0 or tv_usec out of [0, 1_000_000) with
+##        EINVAL.  Round non-zero microseconds *up* to whole ms so a
+##        1us timeout still gives at least 1 ms of waiting.  Total
+##        ms is capped at i32::MAX.  fd_set buffers are validated
+##        for write access up front via validate_user_write so we
+##        catch EFAULT before any work.
+##
+##      * `sys_pselect6(nfds, rd*, wr*, ex*, ts*, sigmask_arg*)` —
+##        same as select but with timespec (i64 tv_sec + i64 tv_nsec,
+##        nsec in [0, 1e9)) and an optional sigmask_arg pointing to
+##        `struct { const sigset_t *ss; size_t ss_len; }` (16 bytes).
+##        We validate sigmask_arg for read access if non-NULL but
+##        ignore its contents — we have no signal delivery yet, so
+##        masking signals during the wait is a no-op.  Timespec is
+##        converted to ms exactly like ppoll does.
+##
+##      * The mapping rule "POLLNVAL -> EBADF" is also documented in
+##        the readable/writable mapping comments inside select_core so
+##        the next session reading the code understands why poll and
+##        select diverge here.
+##
+##      Boot-time self-tests (kernel/src/syscall/linux.rs, replacing
+##      the old ENOSYS stubs):
+##
+##        * select(0, NULL, NULL, NULL, &{0,0}) -> 0
+##          (no fds, zero timeout = immediate return; Linux's
+##           well-known "timed sleep with no fds" idiom).
+##        * select(nfds < 0) -> EINVAL  (via fd_set_byte_len gate).
+##        * select(nfds > 1<<20) -> EINVAL  (same gate, sanity cap
+##          matching the kernel's own select(2) limit).
+##        * select with timeval{-1, 0} -> EINVAL  (tv_sec < 0).
+##        * select with timeval{0, 1_000_000} -> EINVAL
+##          (tv_usec out of [0,1e6)).
+##        * select with timeval{0, -1} -> EINVAL  (tv_usec negative).
+##        * select with bit 3 set in readfds + tv={0,0} from kernel
+##          context (no PCB -> no fd table -> every fd is invalid)
+##          -> -EBADF.  Exercises the POLLNVAL short-circuit.
+##        * pselect6(0, NULL, NULL, NULL, &{0,0}, NULL) -> 0.
+##        * pselect6 with timespec{0, 1e9} -> EINVAL.
+##        * pselect6 with timespec{-1, 0} -> EINVAL.
+##
+##      Known limitations / documented for follow-on work:
+##        * Inherits the 10 ms wakeup-latency limitation from
+##          poll_core — when a pipe transitions empty->non-empty
+##          from another task, the polling task finds out on the
+##          next re-poll slice.  Fixed when pipe::write_one_byte
+##          gains a ready-queue wakeup hook.
+##        * pselect6 silently ignores the supplied signal mask
+##          because the kernel still has no Linux-style signal
+##          delivery surface.  Once we wire up signals, the mask
+##          needs to be installed for the duration of the wait
+##          and restored on return (the whole reason pselect6
+##          exists vs. select+sigprocmask).
+##        * No POLLPRI traffic ever generated by any HandleKind,
+##          so the exceptional fd_set will always come back empty
+##          in practice.  This matches what poll/ppoll report and
+##          is the correct answer until OOB data (console BREAK,
+##          TCP urgent) gets a real source.
+##        * select still uses the historical 1<<20 fd cap (128 KiB
+##          per fd_set).  That's plenty for any realistic process
+##          today and matches Linux's hard cap; the more usual
+##          1024-fd RLIMIT_NOFILE limit applies at a higher layer.
+##        * In kernel context (no caller PCB) select cannot tell
+##          the difference between "really invalid fd" and "we are
+##          in the kernel self-test where there is no fd table" —
+##          both look like EBADF.  Real fd-level testing requires
+##          a real Linux process which the boot self-test does
+##          not construct; the engine itself is exercised in batch
+##          116 via direct calls to poll_revents_from_entry.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 23s).
+

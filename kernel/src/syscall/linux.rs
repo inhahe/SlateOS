@@ -11270,6 +11270,197 @@ fn fd_set_byte_len(nfds: i32) -> Result<usize, SyscallResult> {
     Ok(((nfds_u + 7) / 8) as usize)
 }
 
+/// Shared core for `sys_select` / `sys_pselect6` — does the
+/// readfds/writefds/exceptfds copy_from_user, the per-fd readiness
+/// check using `poll_compute_revents`, the write-back, and the timed
+/// re-poll loop.  `len` is the byte size of each fd_set (matches
+/// `fd_set_byte_len`).
+///
+/// `timeout_ms_signed` follows the same convention as `poll_core`:
+/// positive = ms deadline, 0 = no wait, negative = wait forever.
+fn select_core(
+    nfds: i32,
+    readfds_ptr: u64,
+    writefds_ptr: u64,
+    exceptfds_ptr: u64,
+    len: usize,
+    timeout_ms_signed: i64,
+) -> SyscallResult {
+    use alloc::vec::Vec;
+
+    // Quick path: no fds, just a timed sleep.
+    if nfds == 0 || len == 0 {
+        if timeout_ms_signed > 0 {
+            #[allow(clippy::cast_sign_loss)]
+            crate::sched::sleep_ms(timeout_ms_signed as u64);
+        }
+        return SyscallResult::ok(0);
+    }
+
+    // Snapshot the three input fd_sets.  Each is `len` bytes.  An
+    // input pointer that is NULL is treated as the all-zero set.
+    let mut rd: Vec<u8> = Vec::new();
+    rd.resize(len, 0);
+    let mut wr: Vec<u8> = Vec::new();
+    wr.resize(len, 0);
+    let mut ex: Vec<u8> = Vec::new();
+    ex.resize(len, 0);
+
+    for (ptr, dst) in [(readfds_ptr, &mut rd), (writefds_ptr, &mut wr), (exceptfds_ptr, &mut ex)] {
+        if ptr != 0 {
+            let r = unsafe {
+                crate::mm::user::copy_from_user(ptr, dst.as_mut_ptr(), len)
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+        }
+    }
+
+    // Output fd_sets — Linux semantics: only bits for ready fds are
+    // set; all other bits are zero.  Start from all-zero and OR in
+    // the ready bits.
+    let mut rd_out: Vec<u8> = Vec::new();
+    rd_out.resize(len, 0);
+    let mut wr_out: Vec<u8> = Vec::new();
+    wr_out.resize(len, 0);
+    let mut ex_out: Vec<u8> = Vec::new();
+    ex_out.resize(len, 0);
+
+    let pid = caller_pid();
+    let mut remaining_ms: i64 = timeout_ms_signed;
+    #[allow(clippy::cast_sign_loss)]
+    let nfds_usize = nfds as usize;
+
+    loop {
+        // Reset the output buffers each iteration so a transient
+        // earlier-iteration readiness doesn't bleed through.
+        for b in rd_out.iter_mut() { *b = 0; }
+        for b in wr_out.iter_mut() { *b = 0; }
+        for b in ex_out.iter_mut() { *b = 0; }
+
+        let mut count: i64 = 0;
+        for fd_usize in 0..nfds_usize {
+            let byte = fd_usize >> 3;
+            let bit = 1u8 << (fd_usize & 7);
+            if byte >= len {
+                break;
+            }
+            let want_r = rd[byte] & bit != 0;
+            let want_w = wr[byte] & bit != 0;
+            let want_x = ex[byte] & bit != 0;
+            if !(want_r || want_w || want_x) {
+                continue;
+            }
+
+            // Build the equivalent poll events mask and dispatch
+            // through the same readiness engine poll/ppoll use.
+            let mut events: u16 = 0;
+            if want_r {
+                events |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+            }
+            if want_w {
+                events |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
+            }
+            if want_x {
+                events |= poll_bits::POLLPRI;
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let fd_i32 = fd_usize as i32;
+            let revents = poll_compute_revents(pid, fd_i32, events);
+
+            // Linux select(2) treats any invalid fd in any of the
+            // three sets as an immediate hard error (EBADF) — unlike
+            // poll(2), which reports POLLNVAL in revents for that fd
+            // and keeps going.  Mirror that: as soon as we observe
+            // POLLNVAL for a fd the caller actually asked about, fail
+            // the whole call.
+            if revents & poll_bits::POLLNVAL != 0 {
+                return linux_err(errno::EBADF);
+            }
+
+            // Map revents back to the three Linux fd_set categories.
+            //
+            //   * readable: POLLIN | POLLRDNORM | POLLHUP | POLLERR
+            //     (Linux reports a hung-up or errored fd as readable
+            //     so the next read returns EOF / error.)
+            //   * writable: POLLOUT | POLLWRNORM | POLLERR
+            //     (an errored fd is reported writable so the next
+            //     write surfaces the error.)
+            //   * exceptional: POLLPRI
+            //     (Linux maps POLLPRI — out-of-band data — to the
+            //     exceptional set.  POLLNVAL is handled above.)
+            let mut bumped = false;
+            if want_r
+                && revents
+                    & (poll_bits::POLLIN
+                        | poll_bits::POLLRDNORM
+                        | poll_bits::POLLHUP
+                        | poll_bits::POLLERR)
+                    != 0
+            {
+                rd_out[byte] |= bit;
+                bumped = true;
+            }
+            if want_w
+                && revents
+                    & (poll_bits::POLLOUT | poll_bits::POLLWRNORM | poll_bits::POLLERR)
+                    != 0
+            {
+                wr_out[byte] |= bit;
+                bumped = true;
+            }
+            if want_x
+                && revents & poll_bits::POLLPRI != 0
+            {
+                ex_out[byte] |= bit;
+                bumped = true;
+            }
+            if bumped {
+                count = count.saturating_add(1);
+            }
+        }
+
+        if count > 0 || remaining_ms == 0 {
+            // Write back: only the sets the caller actually passed
+            // (Linux preserves NULL — it doesn't make NULL into a
+            // zero-filled buffer).
+            for (ptr, src) in [
+                (readfds_ptr, &rd_out),
+                (writefds_ptr, &wr_out),
+                (exceptfds_ptr, &ex_out),
+            ] {
+                if ptr != 0 {
+                    let w = unsafe {
+                        crate::mm::user::copy_to_user(src.as_ptr(), ptr, len)
+                    };
+                    if let Err(e) = w {
+                        return linux_err(linux_errno_for(e));
+                    }
+                }
+            }
+            return SyscallResult::ok(count);
+        }
+
+        // Same 10 ms slicing as poll_core.
+        let slice_ms: u64 = if remaining_ms < 0 {
+            10
+        } else {
+            #[allow(clippy::cast_sign_loss)]
+            core::cmp::min(remaining_ms as u64, 10)
+        };
+        crate::sched::sleep_ms(slice_ms);
+        if remaining_ms > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            let consumed = slice_ms as i64;
+            remaining_ms = remaining_ms.saturating_sub(consumed);
+            if remaining_ms < 0 {
+                remaining_ms = 0;
+            }
+        }
+    }
+}
+
 /// `select(nfds, readfds*, writefds*, exceptfds*, timeval*)` — classic
 /// readiness multiplexing.  timeval is 16 bytes (sec + usec).
 fn sys_select(args: &SyscallArgs) -> SyscallResult {
@@ -11286,12 +11477,36 @@ fn sys_select(args: &SyscallArgs) -> SyscallResult {
             }
         }
     }
-    if args.arg4 != 0 {
+    // Translate timeval -> int ms.  NULL = wait forever (-1).
+    let timeout_ms_signed: i64 = if args.arg4 == 0 {
+        -1
+    } else {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg4, 16) {
             return linux_err(linux_errno_for(e));
         }
-    }
-    linux_err(errno::ENOSYS)
+        let mut tv = [0u8; 16];
+        let r = unsafe {
+            crate::mm::user::copy_from_user(args.arg4, tv.as_mut_ptr(), 16)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        let tv_sec = i64::from_ne_bytes([
+            tv[0], tv[1], tv[2], tv[3], tv[4], tv[5], tv[6], tv[7],
+        ]);
+        let tv_usec = i64::from_ne_bytes([
+            tv[8], tv[9], tv[10], tv[11], tv[12], tv[13], tv[14], tv[15],
+        ]);
+        if tv_sec < 0 || !(0..1_000_000).contains(&tv_usec) {
+            return linux_err(errno::EINVAL);
+        }
+        // Round non-zero microseconds up to whole milliseconds so a
+        // 1-us timeout still means "wait at least 1 ms".
+        let extra_ms: i64 = if tv_usec == 0 { 0 } else { (tv_usec - 1) / 1_000 + 1 };
+        let total_ms = tv_sec.saturating_mul(1000).saturating_add(extra_ms);
+        core::cmp::min(total_ms, i64::from(i32::MAX))
+    };
+    select_core(nfds, args.arg1, args.arg2, args.arg3, len, timeout_ms_signed)
 }
 
 /// `pselect6(nfds, readfds*, writefds*, exceptfds*, timespec*, sigmask_arg*)`
@@ -11310,19 +11525,41 @@ fn sys_pselect6(args: &SyscallArgs) -> SyscallResult {
             }
         }
     }
-    if args.arg4 != 0 {
-        // struct timespec is 16 bytes.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
     if args.arg5 != 0 {
-        // { const sigset_t *ss; size_t ss_len; } = 16 bytes
+        // { const sigset_t *ss; size_t ss_len; } = 16 bytes.  We
+        // validate it but ignore the mask (no signal delivery).
         if let Err(e) = crate::mm::user::validate_user_read(args.arg5, 16) {
             return linux_err(linux_errno_for(e));
         }
     }
-    linux_err(errno::ENOSYS)
+    // Translate timespec -> int ms.  NULL = wait forever (-1).
+    let timeout_ms_signed: i64 = if args.arg4 == 0 {
+        -1
+    } else {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
+            return linux_err(linux_errno_for(e));
+        }
+        let mut ts = [0u8; 16];
+        let r = unsafe {
+            crate::mm::user::copy_from_user(args.arg4, ts.as_mut_ptr(), 16)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        let tv_sec = i64::from_ne_bytes([
+            ts[0], ts[1], ts[2], ts[3], ts[4], ts[5], ts[6], ts[7],
+        ]);
+        let tv_nsec = i64::from_ne_bytes([
+            ts[8], ts[9], ts[10], ts[11], ts[12], ts[13], ts[14], ts[15],
+        ]);
+        if tv_sec < 0 || !(0..1_000_000_000).contains(&tv_nsec) {
+            return linux_err(errno::EINVAL);
+        }
+        let extra_ms: i64 = if tv_nsec == 0 { 0 } else { (tv_nsec - 1) / 1_000_000 + 1 };
+        let total_ms = tv_sec.saturating_mul(1000).saturating_add(extra_ms);
+        core::cmp::min(total_ms, i64::from(i32::MAX))
+    };
+    select_core(nfds, args.arg1, args.arg2, args.arg3, len, timeout_ms_signed)
 }
 
 /// `epoll_create(size)` — historical, size is now ignored but must be > 0.
@@ -28522,11 +28759,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
-        // select(0, NULL, NULL, NULL, NULL) -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SELECT, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: select(0,...) not ENOSYS");
-            return Err(KernelError::InternalError);
+        // select(0, NULL, NULL, NULL, &{0,0}) -> 0 (no fds, no wait).
+        {
+            let tv: [i64; 2] = [0, 0];
+            let tv_ptr = (&raw const tv[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: tv_ptr, arg5: 0 };
+            if dispatch_linux(nr::SELECT, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: select(0,...,{{0,0}}) not 0");
+                return Err(KernelError::InternalError);
+            }
         }
         // select with negative nfds -> EINVAL.
         let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
@@ -28534,11 +28775,92 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: select negative nfds not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pselect6(0, NULL, NULL, NULL, NULL, NULL) -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PSELECT6, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: pselect6 not ENOSYS");
+        // select with nfds > 1<<20 -> EINVAL.
+        let a = SyscallArgs { arg0: (1u64 << 20) + 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SELECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: select huge nfds not EINVAL");
             return Err(KernelError::InternalError);
+        }
+        // select with timeval{-1, 0} -> EINVAL (tv_sec < 0).
+        {
+            let tv: [i64; 2] = [-1, 0];
+            let tv_ptr = (&raw const tv[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: tv_ptr, arg5: 0 };
+            if dispatch_linux(nr::SELECT, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: select neg tv_sec not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // select with timeval{0, 1_000_000} -> EINVAL (tv_usec out of range).
+        {
+            let tv: [i64; 2] = [0, 1_000_000];
+            let tv_ptr = (&raw const tv[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: tv_ptr, arg5: 0 };
+            if dispatch_linux(nr::SELECT, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: select bad tv_usec not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // select with timeval{0, -1} -> EINVAL (tv_usec negative).
+        {
+            let tv: [i64; 2] = [0, -1];
+            let tv_ptr = (&raw const tv[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: tv_ptr, arg5: 0 };
+            if dispatch_linux(nr::SELECT, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: select neg tv_usec not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // select with fd=3 set in readfds (unknown fd from kernel
+        // context where there is no PCB) -> EBADF, matching Linux:
+        // any invalid fd in any of the three sets is a hard error.
+        {
+            let mut rd_mut: [u8; 1] = [0b0000_1000]; // fd 3 only.
+            let mut wr: [u8; 1] = [0];
+            let mut ex: [u8; 1] = [0];
+            let rd_mut_ptr = (&raw mut rd_mut[0]) as u64;
+            let wr_ptr = (&raw mut wr[0]) as u64;
+            let ex_ptr = (&raw mut ex[0]) as u64;
+            let tv: [i64; 2] = [0, 0];
+            let tv_ptr = (&raw const tv[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 4, arg1: rd_mut_ptr, arg2: wr_ptr, arg3: ex_ptr, arg4: tv_ptr, arg5: 0,
+            };
+            let v = dispatch_linux(nr::SELECT, &a).value;
+            if v != -i64::from(errno::EBADF) {
+                serial_println!("[syscall/linux]   FAIL: select bad-fd ret {} != -EBADF", v);
+                return Err(KernelError::InternalError);
+            }
+        }
+        // pselect6(0, NULL, NULL, NULL, &{0,0}, NULL) -> 0.
+        {
+            let ts: [i64; 2] = [0, 0];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: ts_ptr, arg5: 0 };
+            if dispatch_linux(nr::PSELECT6, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: pselect6(0,...,{{0,0}}) not 0");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // pselect6 with timespec{0, 1_000_000_000} -> EINVAL.
+        {
+            let ts: [i64; 2] = [0, 1_000_000_000];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: ts_ptr, arg5: 0 };
+            if dispatch_linux(nr::PSELECT6, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: pselect6 bad tv_nsec not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // pselect6 with timespec{-1, 0} -> EINVAL.
+        {
+            let ts: [i64; 2] = [-1, 0];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: ts_ptr, arg5: 0 };
+            if dispatch_linux(nr::PSELECT6, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: pselect6 neg tv_sec not EINVAL");
+                return Err(KernelError::InternalError);
+            }
         }
         // epoll_create(0) -> EINVAL (size must be > 0 historically).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

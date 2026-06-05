@@ -19023,3 +19023,49 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          difference.  When NUMA lands, this needs a real VMA scan.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 231. [DONE 2026-06-05] Linux ABI: sys_mq_notify sigev_notify / valid_signal.
+##      sys_mq_notify only validated that the sevp pointer was readable
+##      then fell through to the fd lookup.  Linux's
+##      ipc/mqueue.c::SYSCALL_DEFINE2(mq_notify) -> do_mq_notify gates
+##      ahead of the fd lookup:
+##        (1) copy_from_user the whole sigevent struct (64 bytes) -> EFAULT
+##        (2) sigev_notify must be SIGEV_NONE (1), SIGEV_SIGNAL (0), or
+##            SIGEV_THREAD (2) -> EINVAL otherwise.  Notably this REJECTS
+##            SIGEV_THREAD_ID (4).
+##        (3) For SIGEV_SIGNAL: sigev_signo must be in 1..=NSIG (64 on
+##            x86_64) -> EINVAL otherwise.
+##        (4) fdget(mqdes) -> EBADF.
+##      Pre-batch a probe passing (sigev_notify=99, fd=-1) saw -EBADF
+##      where Linux returns -EINVAL.  This is the classic feature-probe
+##      discriminator for "kernel implements mq_notify".
+##
+##      Fix: in sys_mq_notify, after the validate_user_read(64), do a
+##      copy_from_user of the leading 16 bytes (covers sival_ptr +
+##      sigev_signo + sigev_notify) and apply the two gates above
+##      ahead of the fd lookup.
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * sigev_notify=99 + fd=-1    -> EINVAL (was EBADF).
+##        * sigev_notify=4 (SIGEV_THREAD_ID) -> EINVAL.
+##        * SIGEV_SIGNAL + sigev_signo=99  -> EINVAL.
+##        * SIGEV_SIGNAL + sigev_signo=0   -> EINVAL.
+##        * SIGEV_NONE   + sigev_signo=99  -> EBADF (signo gate scoped
+##          to SIGEV_SIGNAL only).
+##        * SIGEV_THREAD + sigev_signo=99  -> EBADF (same scope check).
+##      Marker emitted: "mq_notify sigev_notify / valid_signal: OK".
+##
+##      Known limitations:
+##        * NSIG_MAX = 64 hardcoded.  When real signal infrastructure
+##          lands and NSIG becomes parameterised, replace the literal.
+##        * SIGEV_THREAD's netlink-socket cookie path isn't validated
+##          beyond the sigev_notify gate.  Linux's do_mq_notify reads
+##          sigev_value.sival_ptr as an fd and validates it as a
+##          netlink socket.  Add when sockets exist.
+##        * We don't enforce that the leading 8 bytes (sigev_value)
+##          and the 48-byte _sigev_un are all accessible — Linux's
+##          copy_from_user covers the whole 64 bytes, but the
+##          validate_user_read(64) we do is enough for our needs
+##          (any byte unreadable -> EFAULT, just like Linux).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

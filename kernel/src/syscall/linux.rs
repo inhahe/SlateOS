@@ -13228,11 +13228,70 @@ fn sys_mq_timedreceive(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `mq_notify(mqd, sevp)`.
+///
+/// Linux's `ipc/mqueue.c::SYSCALL_DEFINE2(mq_notify)` gate order:
+///   1. If `u_notification != NULL`:
+///      `copy_from_user(&n, u_notification, sizeof(struct sigevent))`
+///      -> EFAULT on unreadable.
+///   2. `do_mq_notify`: `sigev_notify` must be one of `SIGEV_NONE`,
+///      `SIGEV_SIGNAL`, `SIGEV_THREAD` -> EINVAL otherwise.
+///   3. If `sigev_notify == SIGEV_SIGNAL`:
+///      `valid_signal(sigev_signo)` (1..=NSIG) -> EINVAL otherwise.
+///   4. `fdget(mqdes)` -> EBADF on bad fd.
+///
+/// `struct sigevent` is 64 bytes on x86_64:
+///   `sigev_value` (8) | `sigev_signo` (4) | `sigev_notify` (4) |
+///   `_sigev_un` (48).
+///
+/// Pre-batch we only validated that the sevp pointer was readable
+/// then fell through to the fd check.  A probe passing
+/// `sigev_notify = 99` (junk) + `fd = -1` saw -EBADF where Linux
+/// returns -EINVAL.  Batch 202 adds the sigev_notify / valid_signal
+/// gates ahead of the fd lookup.
 fn sys_mq_notify(args: &SyscallArgs) -> SyscallResult {
+    // Linux SIGEV_* constants (include/uapi/asm-generic/siginfo.h).
+    const SIGEV_SIGNAL: i32 = 0;
+    const SIGEV_NONE: i32 = 1;
+    const SIGEV_THREAD: i32 = 2;
+    // x86_64 NSIG = 64 (Linux's valid_signal upper bound).
+    const NSIG_MAX: i32 = 64;
+
     if args.arg1 != 0 {
         // struct sigevent = 64 bytes.
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 64) {
             return linux_err(linux_errno_for(e));
+        }
+        // Inspect sigev_signo (offset 8) and sigev_notify (offset 12).
+        let mut buf = [0u8; 16];
+        // SAFETY: validate_user_read above confirmed 64 bytes readable,
+        // so the 16 leading bytes are also readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg1, buf.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let read_i32 = |o: usize| -> i32 {
+            match <[u8; 4]>::try_from(&buf[o..o + 4]) {
+                Ok(b) => i32::from_ne_bytes(b),
+                Err(_) => 0,
+            }
+        };
+        let sigev_signo = read_i32(8);
+        let sigev_notify = read_i32(12);
+        // sigev_notify must be SIGEV_{NONE,SIGNAL,THREAD}.  Linux also
+        // rejects SIGEV_THREAD_ID (=4) here — only the three values
+        // above are accepted by do_mq_notify.
+        if sigev_notify != SIGEV_NONE
+            && sigev_notify != SIGEV_SIGNAL
+            && sigev_notify != SIGEV_THREAD
+        {
+            return linux_err(errno::EINVAL);
+        }
+        // For SIGEV_SIGNAL the signal number must be in 1..=NSIG.
+        if sigev_notify == SIGEV_SIGNAL
+            && !(1..=NSIG_MAX).contains(&sigev_signo)
+        {
+            return linux_err(errno::EINVAL);
         }
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -35004,6 +35063,135 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mq_notify not EBADF");
             return Err(KernelError::InternalError);
         }
+        // Batch 202: sigevent validation gates ahead of fd lookup.
+        //   * sigev_notify ∈ {SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD}
+        //   * For SIGEV_SIGNAL: 1 <= sigev_signo <= NSIG (64)
+        // Stack-allocated sigevent; in kernel context copy_from_user
+        // tolerates kernel pointers.
+        #[repr(C)]
+        struct Sigevent {
+            sival_ptr: u64,
+            sigev_signo: i32,
+            sigev_notify: i32,
+            _pad: [u8; 48],
+        }
+        // (a) sigev_notify = 99 (junk) -> EINVAL, NOT EBADF.
+        let ev_bad_notify = Sigevent {
+            sival_ptr: 0,
+            sigev_signo: 0,
+            sigev_notify: 99,
+            _pad: [0u8; 48],
+        };
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX), // fd = -1 cast; would normally yield EBADF
+            arg1: (&raw const ev_bad_notify) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_NOTIFY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_notify bad sigev_notify not EINVAL ({})",
+                dispatch_linux(nr::MQ_NOTIFY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) SIGEV_THREAD_ID = 4 (not accepted by do_mq_notify) -> EINVAL.
+        let ev_thread_id = Sigevent {
+            sival_ptr: 0,
+            sigev_signo: 0,
+            sigev_notify: 4,
+            _pad: [0u8; 48],
+        };
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX),
+            arg1: (&raw const ev_thread_id) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_NOTIFY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_notify SIGEV_THREAD_ID not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) SIGEV_SIGNAL (=0) with sigev_signo = 99 (>NSIG) -> EINVAL.
+        let ev_bad_signo = Sigevent {
+            sival_ptr: 0,
+            sigev_signo: 99,
+            sigev_notify: 0,
+            _pad: [0u8; 48],
+        };
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX),
+            arg1: (&raw const ev_bad_signo) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_NOTIFY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_notify SIGEV_SIGNAL bad signo not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) SIGEV_SIGNAL with sigev_signo = 0 -> EINVAL (0 is not a
+        // valid signal).
+        let ev_zero_signo = Sigevent {
+            sival_ptr: 0,
+            sigev_signo: 0,
+            sigev_notify: 0,
+            _pad: [0u8; 48],
+        };
+        let a = SyscallArgs {
+            arg0: u64::from(u32::MAX),
+            arg1: (&raw const ev_zero_signo) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_NOTIFY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_notify SIGEV_SIGNAL signo=0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (e) SIGEV_NONE (=1) with junk sigev_signo -> falls through
+        // to the fd lookup and yields EBADF.  Proves the signo gate
+        // ONLY fires for SIGEV_SIGNAL (matches Linux).
+        let ev_none = Sigevent {
+            sival_ptr: 0,
+            sigev_signo: 99,
+            sigev_notify: 1, // SIGEV_NONE
+            _pad: [0u8; 48],
+        };
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: (&raw const ev_none) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_NOTIFY, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_notify SIGEV_NONE not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (f) SIGEV_THREAD (=2) with junk signo -> EBADF (signo
+        // unchecked for SIGEV_THREAD; Linux validates the cookie path,
+        // not the signo).
+        let ev_thread = Sigevent {
+            sival_ptr: 0,
+            sigev_signo: 99,
+            sigev_notify: 2,
+            _pad: [0u8; 48],
+        };
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: (&raw const ev_thread) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MQ_NOTIFY, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_notify SIGEV_THREAD not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mq_notify sigev_notify / valid_signal: OK"
+        );
         // mq_getsetattr in kernel context -> EBADF.
         if dispatch_linux(nr::MQ_GETSETATTR, &a).value
             != -i64::from(errno::EBADF) {

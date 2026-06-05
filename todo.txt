@@ -17578,3 +17578,60 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##      Serial confirms "[syscall/linux]   init_module ELF len
 ##      gating: OK" in build/serial-test.txt.
+
+## 202. syscall/linux: timerfd_settime itimerspec64_valid
+##      ahead-of-fd gating (batch 173).
+##
+##      Symptom: Pre-batch sys_timerfd_settime validated that the
+##               new_value buffer was readable but never parsed
+##               it.  A probe passing a malformed itimerspec
+##               (tv_sec < 0, tv_nsec outside [0, NSEC_PER_SEC))
+##               saw EBADF in our kernel-context tests (caller_pid
+##               is None) or the terminal EINVAL only after fd
+##               lookup — instead of the early-gate EINVAL Linux
+##               returns via fs/timerfd.c::do_timerfd_settime's
+##               itimerspec64_valid check, which fires BEFORE the
+##               fd lookup.
+##
+##      Fix:    After validate_user_read(new, 32) and before the
+##              fd lookup, copy the 32-byte itimerspec into a
+##              kernel buffer, parse the four i64s
+##              (it_interval.{tv_sec, tv_nsec},
+##              it_value.{tv_sec, tv_nsec}), and reject with
+##              EINVAL when any timespec has tv_sec < 0 or
+##              tv_nsec not in [0, 1_000_000_000).  Matches
+##              Linux's timespec64_valid applied to both members
+##              of the itimerspec exactly.
+##
+##      Self-tests (boot-time):
+##        * timerfd_settime(_, _, valid_itspec, _) -> EBADF
+##          (new baseline; clears validity, fd lookup fails in
+##          kernel context).
+##        * it_interval.tv_nsec = 2_000_000_000 -> EINVAL  (new;
+##          above NSEC_PER_SEC).
+##        * it_interval.tv_sec = -1 -> EINVAL  (new; negative).
+##        * it_value.tv_nsec = -1 -> EINVAL  (new; negative).
+##        * it_value.tv_nsec = 1_000_000_000 -> EINVAL  (new;
+##          boundary half-open, exact value invalid).
+##        * it_value.tv_nsec = 999_999_999 -> EBADF  (new; just
+##          below boundary, clears gate to fd lookup).
+##        * Pre-existing tests (bad flag -> EINVAL, NULL new ->
+##          EFAULT) all still pass.
+##        * Emits "[syscall/linux]   timerfd_settime
+##          itimerspec64_valid: OK".
+##
+##      Known limitations:
+##        * In kernel context the terminal EBADF is reached for
+##          any valid-shaped itimerspec because caller_pid()
+##          returns None.  Real user-context fd lookup will exhibit
+##          the proper EBADF vs EINVAL distinction once timerfd
+##          fds are implemented.
+##        * No timerfd implementation yet; the terminal at the
+##          bottom of the function (EINVAL for "fd is real but
+##          not a timerfd") is unreachable from kernel-context
+##          tests.  Will become exercisable once timerfd_create
+##          actually returns a real fd.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 22s).
+##      Serial confirms "[syscall/linux]   timerfd_settime
+##      itimerspec64_valid: OK" in build/serial-test.txt.

@@ -10286,10 +10286,22 @@ fn sys_timerfd_create(args: &SyscallArgs) -> SyscallResult {
 
 /// `timerfd_settime(fd, flags, new_value, old_value)`.
 ///
-/// `struct itimerspec` is two `struct timespec` = 32 bytes.
+/// `struct itimerspec` is two `struct timespec` = 32 bytes
+/// (it_interval.{tv_sec, tv_nsec} then it_value.{tv_sec, tv_nsec},
+/// each i64 little-endian on x86_64).
+///
+/// Linux's `fs/timerfd.c::do_timerfd_settime` gates
+/// `itimerspec64_valid(new)` (both timespecs satisfying tv_sec >= 0
+/// and tv_nsec in [0, 1_000_000_000)) ahead of the fd lookup,
+/// returning EINVAL.  Pre-batch we validated the buffer was
+/// readable but never parsed it, so a probe passing a malformed
+/// itimerspec (e.g. tv_nsec = 2_000_000_000) saw EBADF (in our
+/// kernel-context tests) or the terminal EINVAL only after the
+/// fd lookup, instead of the early-gate EINVAL Linux returns.
 fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
     // TFD_TIMER_ABSTIME=1, TFD_TIMER_CANCEL_ON_SET=2.
     const VALID_FLAGS: u64 = 1 | 2;
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
     if args.arg1 & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -10299,6 +10311,34 @@ fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_read(new_ptr, 32) {
         return linux_err(linux_errno_for(e));
+    }
+    // Parse the itimerspec and apply Linux's itimerspec64_valid
+    // check ahead of the fd lookup.
+    let mut buf = [0u8; 32];
+    // SAFETY: validate_user_read above confirmed 32 bytes readable.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(new_ptr, buf.as_mut_ptr(), 32) }
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    let read_i64 = |offset: usize| -> i64 {
+        // Each field is contiguous 8 bytes; offsets 0/8/16/24.
+        match <[u8; 8]>::try_from(&buf[offset..offset + 8]) {
+            Ok(b) => i64::from_ne_bytes(b),
+            Err(_) => 0,
+        }
+    };
+    let it_interval_sec = read_i64(0);
+    let it_interval_nsec = read_i64(8);
+    let it_value_sec = read_i64(16);
+    let it_value_nsec = read_i64(24);
+    let valid = |sec: i64, nsec: i64| -> bool {
+        sec >= 0 && (0..NSEC_PER_SEC).contains(&nsec)
+    };
+    if !valid(it_interval_sec, it_interval_nsec)
+        || !valid(it_value_sec, it_value_nsec)
+    {
+        return linux_err(errno::EINVAL);
     }
     if args.arg3 != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 32) {
@@ -31033,6 +31073,92 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: timerfd_settime(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // itimerspec validity: Linux's itimerspec64_valid rejects
+        // any timespec with tv_sec < 0 or tv_nsec outside
+        // [0, 1_000_000_000) ahead of the fd lookup.  Pre-batch
+        // we validated the buffer was readable but never parsed
+        // it, so a probe with malformed timespec saw EBADF in
+        // kernel context instead of EINVAL.
+        //
+        // Valid baseline first: all-zero itimerspec is the "stop
+        // the timer" form and is valid; expect EBADF in kernel
+        // context (no caller pid).
+        let valid_itspec = [0u8; 32];
+        let valid_ptr = valid_itspec.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: valid_ptr, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime(valid) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // it_interval.tv_nsec = 2e9 (>= NSEC_PER_SEC) -> EINVAL.
+        let mut bad_iv_nsec = [0u8; 32];
+        bad_iv_nsec[8..16].copy_from_slice(&2_000_000_000i64.to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: bad_iv_nsec.as_ptr() as u64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime bad interval nsec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // it_interval.tv_sec = -1 -> EINVAL.
+        let mut bad_iv_sec = [0u8; 32];
+        bad_iv_sec[0..8].copy_from_slice(&(-1_i64).to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: bad_iv_sec.as_ptr() as u64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime negative interval sec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // it_value.tv_nsec = -1 -> EINVAL (negative).
+        let mut bad_val_nsec = [0u8; 32];
+        bad_val_nsec[24..32].copy_from_slice(&(-1_i64).to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: bad_val_nsec.as_ptr() as u64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime negative value nsec not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // it_value.tv_nsec = NSEC_PER_SEC (exactly) -> EINVAL
+        // (range is half-open: nsec < 1e9).
+        let mut at_boundary = [0u8; 32];
+        at_boundary[24..32].copy_from_slice(&1_000_000_000i64.to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: at_boundary.as_ptr() as u64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime value nsec=1e9 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // it_value.tv_nsec = 999_999_999 -> EBADF (just below
+        // boundary; clears validity gate, fd lookup fails).
+        let mut just_below = [0u8; 32];
+        just_below[24..32].copy_from_slice(&999_999_999i64.to_ne_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: just_below.as_ptr() as u64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime value nsec=999_999_999 not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   timerfd_settime itimerspec64_valid: OK"
+        );
         // timerfd_gettime with NULL curr -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

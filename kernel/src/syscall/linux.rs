@@ -1278,15 +1278,29 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
     /// any plausible future extension of `struct clone_args`.
     const CLONE_ARGS_SIZE_MAX: u64 = 4096;
 
+    // Gate order matches Linux's `copy_clone_args_from_user`
+    // (kernel/fork.c):
+    //   1. `usize > PAGE_SIZE` -> -E2BIG
+    //   2. `usize < CLONE_ARGS_SIZE_VER0` -> -EINVAL
+    //   3. `copy_struct_from_user(...)` -> -EFAULT on NULL/unmapped
+    //
+    // Pre-batch we mapped `size > MAX` to `EINVAL` and rejected NULL
+    // ahead of any size check, so a probe with `(NULL, size=8192)`
+    // saw `EFAULT` where Linux returns `E2BIG`, and a probe with
+    // `(buf, size=8192)` saw `EINVAL` where Linux returns `E2BIG`.
+    if size > CLONE_ARGS_SIZE_MAX {
+        return Err(errno::E2BIG);
+    }
+    if size < CLONE_ARGS_SIZE_VER0 {
+        return Err(errno::EINVAL);
+    }
     if cl_args_ptr == 0 {
         return Err(errno::EFAULT);
     }
-    if size < CLONE_ARGS_SIZE_VER0 || size > CLONE_ARGS_SIZE_MAX {
-        return Err(errno::EINVAL);
-    }
     // The struct must be 8-byte aligned (every field is __u64) and
     // size must itself be a multiple of 8 — Linux rounds up but we
-    // reject so callers see their bug.
+    // reject so callers see their bug.  These are our own gates and
+    // fire after Linux's documented errno discriminators above.
     if cl_args_ptr & 0x7 != 0 || size & 0x7 != 0 {
         return Err(errno::EINVAL);
     }
@@ -37472,7 +37486,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   ptrace TRACEME-first / pid-lookup / no-request-gate: OK"
         );
 
-        // clone3 NULL args -> EFAULT.
+        // clone3 NULL args, valid size -> EFAULT (size gates pass, then
+        // copy_struct_from_user faults).
         let a = SyscallArgs { arg0: 0, arg1: 88, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: clone3 NULL not EFAULT");
@@ -37484,10 +37499,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: clone3 small size not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // clone3 huge size (8192) -> EINVAL (above 4 KiB cap).
+        // clone3 huge size (8192) -> E2BIG (Linux: usize > PAGE_SIZE
+        // discriminates `E2BIG` ahead of `< VER0` EINVAL and ahead of the
+        // copy_struct_from_user EFAULT).  Pre-batch this returned EINVAL.
         let a = SyscallArgs { arg0: buf_ptr, arg1: 8192, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: clone3 huge size not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 NULL + huge size -> E2BIG (size gate fires before NULL EFAULT).
+        let a = SyscallArgs { arg0: 0, arg1: 8192, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!("[syscall/linux]   FAIL: clone3 NULL+huge size not E2BIG");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 NULL + sub-VER0 size -> EINVAL (size < VER0 fires before NULL).
+        let a = SyscallArgs { arg0: 0, arg1: 16, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: clone3 huge size not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: clone3 NULL+small size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // clone3 size exactly PAGE_SIZE (4096) with NULL -> EFAULT
+        // (4096 is the inclusive max — passes size gate, then NULL faults).
+        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLONE3, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: clone3 NULL+PAGE_SIZE not EFAULT");
             return Err(KernelError::InternalError);
         }
         // clone3 unaligned ptr -> EINVAL.
@@ -37586,6 +37622,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+        serial_println!(
+            "[syscall/linux]   clone3 size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK"
+        );
 
         // -----------------------------------------------------------------
         // classic futex(2) — FUTEX_WAIT_BITSET / FUTEX_WAKE_BITSET (batch 119)

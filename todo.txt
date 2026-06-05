@@ -19731,3 +19731,50 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Marker: "sched_getattr combined !uattr|pid<0|size|flags EINVAL: OK".
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 248. [DONE 2026-06-05] Linux ABI: sys_clone3 size E2BIG ahead of EINVAL
+##      and ahead of NULL EFAULT (gate order).
+##
+##      Linux gate order (kernel/fork.c::copy_clone_args_from_user):
+##         1. `usize > PAGE_SIZE`              -> -E2BIG
+##         2. `usize < CLONE_ARGS_SIZE_VER0`   -> -EINVAL
+##         3. `copy_struct_from_user(...)`     -> -EFAULT on NULL/unmapped
+##
+##      Pre-batch divergences in `validate_clone3_args`:
+##      - NULL `cl_args_ptr` was checked BEFORE any size gate, so a
+##        probe with `(NULL, size=8192)` saw `EFAULT` where Linux
+##        returns `E2BIG` (size check fires first).
+##      - `size > MAX (4096)` was folded into the `< VER0` arm and
+##        returned `EINVAL`, where Linux's `usize > PAGE_SIZE` arm
+##        returns `E2BIG` as a distinct discriminator.
+##      - `size > MAX` also fired AFTER NULL EFAULT, so a NULL probe
+##        with a huge size could not observe the `E2BIG` arm at all.
+##
+##      Fix: split the size range into two separate gates, in Linux
+##      order, with the NULL check moved BELOW both size gates so
+##      huge-size and sub-VER0-size discriminators fire ahead of
+##      NULL EFAULT, matching Linux's literal source order.  The
+##      alignment gates (Linux doesn't reject misalignment because
+##      `copy_struct_from_user` doesn't care) remain after Linux's
+##      gates as our own additional bug-finder.
+##
+##      Self-tests updated/added (~line 37475):
+##      - clone3(buf, size=8192) -> E2BIG (was EINVAL).
+##      - clone3(NULL, size=8192) -> E2BIG (new; demonstrates the
+##        size gate firing ahead of NULL EFAULT).
+##      - clone3(NULL, size=16) -> EINVAL (new; demonstrates the
+##        sub-VER0 gate firing ahead of NULL EFAULT).
+##      - clone3(NULL, size=4096) -> EFAULT (new; size==PAGE_SIZE
+##        is the inclusive max, passes size gate, then NULL faults).
+##      - clone3(NULL, size=88) -> EFAULT (kept; unchanged).
+##      Marker: "clone3 size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK".
+##
+##      Known limitations: alignment and size%8 still EINVAL after
+##      Linux's gates; Linux accepts these because copy_struct_from_user
+##      uses byte-granularity access.  Acceptable: our gate fires only
+##      after Linux's documented errno discriminators have already
+##      been ruled out, so callers that pass aligned + multiple-of-8
+##      sizes (which all real glibc/musl call sites do) see Linux
+##      semantics on every observable path.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

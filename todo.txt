@@ -19996,5 +19996,63 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 253. [DONE 2026-06-05] Linux ABI: sys_landlock_create_ruleset gate order —
+##      split size bounds into EINVAL/E2BIG, tighten upper bound to PAGE_SIZE.
+##
+##      Linux security/landlock/syscalls.c::SYSCALL_DEFINE3(
+##      landlock_create_ruleset) forwards the user buffer to
+##      `copy_min_struct_from_user` which gates in this literal
+##      statement order:
+##        1. `if (!src) return -EFAULT;`
+##        2. `if (usize < ksize_min) return -EINVAL;`  (ksize_min = 8 =
+##           offsetofend(handled_access_fs)).
+##        3. `if (usize > PAGE_SIZE) return -E2BIG;`   (PAGE_SIZE = 4096
+##           on x86_64).
+##
+##      Pre-batch divergences:
+##      - (attr=valid, size=8192) returned ENOSYS instead of E2BIG,
+##        because our upper bound was 1 MiB (`arg1 > (1 << 20)`), so
+##        8192 fell through the size gate and reached the terminal
+##        ENOSYS return.  A probe expecting Linux's E2BIG cap at
+##        PAGE_SIZE would falsely conclude no cap exists.
+##      - (attr=valid, size=4097) returned ENOSYS instead of E2BIG,
+##        same reason — 4097 is between PAGE_SIZE (4096) and our
+##        wrong 1 MiB ceiling.
+##      - (attr=valid, size=2 MiB) returned EINVAL instead of E2BIG,
+##        because we collapsed both size bounds into a single EINVAL
+##        gate.  A probe sending a deliberately huge size to verify
+##        the E2BIG behaviour would see the wrong errno.
+##
+##      Fix: split the gate into `size<8 -> EINVAL` and
+##      `size>PAGE_SIZE -> E2BIG`, using LINUX_PAGE_SIZE=4096 to match
+##      the ABI consumer's expectation (not our 16 KiB internal frame
+##      size).  EFAULT for NULL `attr` already preceded both, matching
+##      Linux's `!src` check at the top of `copy_min_struct_from_user`.
+##
+##      Self-tests added (~line 37322):
+##      - (attr=valid, size=4)     -> EINVAL  (confirms size<ksize_min
+##                                             still fires when in
+##                                             the rejected range).
+##      - (attr=valid, size=4097)  -> E2BIG   (was ENOSYS — pre-batch
+##                                             the upper bound was
+##                                             1 MiB so 4097 passed).
+##      - (attr=valid, size=2 MiB) -> E2BIG   (was EINVAL — pre-batch
+##                                             the 1 MiB cap returned
+##                                             the wrong errno).
+##      - kept: NULL attr -> EFAULT; size=8 valid -> ENOSYS;
+##        VERSION/ERRATA flag-dispatch -> 0; VERSION|ERRATA -> EINVAL;
+##        VERSION with non-NULL attr -> EINVAL; ERRATA with non-zero
+##        size -> EINVAL; bad flags -> EINVAL.
+##      Marker: "landlock_create_ruleset NULL-EFAULT > size-EINVAL >
+##              size-E2BIG gate order: OK".
+##
+##      Known limitations: terminal return is ENOSYS rather than a
+##      real ruleset fd — we have no Landlock implementation, and
+##      the VERSION/ERRATA queries return 0 to advertise "Landlock
+##      not available".  When a real implementation lands the size
+##      gates here will continue to apply ahead of the allocator.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

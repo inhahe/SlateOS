@@ -15899,13 +15899,33 @@ fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
         }
         return linux_err(errno::EINVAL);
     }
-    // Real-ruleset path requires a non-NULL attr of at least sizeof
-    // landlock_ruleset_attr = 8 (u64 handled_access_fs).
+    // Real-ruleset path: Linux security/landlock/syscalls.c
+    // SYSCALL_DEFINE3(landlock_create_ruleset) forwards the user
+    // buffer to `copy_min_struct_from_user` which gates in this
+    // literal statement order:
+    //   1. `if (!src) return -EFAULT;`
+    //   2. `if (usize < ksize_min) return -EINVAL;` (ksize_min = 8 =
+    //      offsetofend(handled_access_fs)).
+    //   3. `if (usize > PAGE_SIZE) return -E2BIG;` (PAGE_SIZE = 4096
+    //      on x86_64 — userspace expects this fixed cap, not our
+    //      16 KiB internal frame size).
+    // Prior to batch 224 we collapsed both size bounds into a single
+    // EINVAL gate and used an oversized 1 MiB upper bound, so:
+    //   * (attr=valid, size=8192) returned ENOSYS instead of E2BIG.
+    //   * (attr=valid, size=4097) returned ENOSYS instead of E2BIG.
+    //   * (attr=valid, size=2097152) returned EINVAL instead of
+    //     E2BIG.
+    // Splitting the gate and tightening the cap restores Linux's
+    // discriminators.
     if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
-    if args.arg1 < 8 || args.arg1 > (1 << 20) {
+    if args.arg1 < 8 {
         return linux_err(errno::EINVAL);
+    }
+    const LINUX_PAGE_SIZE: u64 = 4096;
+    if args.arg1 > LINUX_PAGE_SIZE {
+        return linux_err(errno::E2BIG);
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, args.arg1 as usize) {
         return linux_err(linux_errno_for(e));
@@ -37320,6 +37340,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // Batch 224 discriminator: (attr=valid, size=4) — usize <
+        // ksize_min (8) so copy_min_struct_from_user returns -EINVAL.
+        // Confirms the lower-bound EINVAL still fires when the size
+        // is in the rejected range.
+        let a = SyscallArgs { arg0: size_ptr, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock (attr, size=4) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 224 discriminator: (attr=valid, size=4097) — usize >
+        // PAGE_SIZE so copy_min_struct_from_user returns -E2BIG.
+        // Pre-batch the upper bound was 1 MiB (with the same EINVAL
+        // errno collapsed in), so 4097 fell through to ENOSYS.
+        let a = SyscallArgs { arg0: size_ptr, arg1: 4097, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock (attr, size=4097) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 224 discriminator: (attr=valid, size=2 MiB) — also
+        // > PAGE_SIZE, must surface as E2BIG.  Pre-batch this hit our
+        // 1 MiB upper bound which returned EINVAL with the wrong
+        // errno.
+        let a = SyscallArgs { arg0: size_ptr, arg1: 1 << 21, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock (attr, size=2MiB) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   landlock_create_ruleset NULL-EFAULT > size-EINVAL > size-E2BIG gate order: OK"
+        );
         // landlock_add_rule bad rule_type -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {

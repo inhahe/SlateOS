@@ -18797,3 +18797,70 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          is still deferred — see todo entries from batch 121.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 26s on first try).
+
+## 227. Linux ABI: mq_timed{send,receive} timespec64_valid
+##      gate ahead of fd lookup (batch 198).
+##      Linux's ipc/mqueue.c::SYSCALL_DEFINE5(mq_timedsend) and
+##      SYSCALL_DEFINE5(mq_timedreceive) call prepare_timeout on
+##      the abs_timeout pointer as the very first step:
+##
+##        int res = prepare_timeout(u_abs_timeout, &ts);
+##        if (res) return res;
+##
+##      prepare_timeout copies in the timespec and runs
+##      timespec64_valid:
+##        tv_sec  >= 0
+##        tv_nsec in [0, NSEC_PER_SEC=1_000_000_000)
+##      EFAULT on copy fail, EINVAL on bad value.  Only after that
+##      do they descend into do_mq_timed{send,receive}, which does
+##      the prio gate (send only) and the fdget(mqdes) -> EBADF.
+##
+##      Pre-batch our mq_timed{send,receive} only checked that the
+##      abs_timeout pointer was readable; the value (tv_sec >= 0,
+##      tv_nsec < 1e9) was never inspected.  A probe passing a
+##      malformed timespec (tv_nsec = 2_000_000_000 or tv_sec = -1)
+##      with a junk fd saw -EBADF where Linux returns -EINVAL.
+##
+##      Factored a small helper validate_user_timespec64(ptr) ->
+##      Result<(), SyscallResult> that:
+##        1. validate_user_read(ptr, 16) -> EFAULT on fail
+##        2. copy_from_user the 16 bytes
+##        3. parse as two i64 LE values
+##        4. apply timespec64_valid; EINVAL on fail
+##      This is the same gate timerfd_settime (batch 156) and
+##      nanosleep already use; this batch lifts it into a helper
+##      and calls it from both mq_timed{send,receive} ahead of any
+##      fd or buffer touch.
+##
+##      Send-path order now matches Linux exactly:
+##        abs_timeout EINVAL -> prio EINVAL -> msg EFAULT ->
+##        msg-buffer EFAULT -> fd EBADF.
+##
+##      Receive-path order:
+##        abs_timeout EINVAL -> msg EFAULT -> msg-buffer EFAULT ->
+##        prio-ptr EFAULT -> fd EBADF.
+##      (Linux has no priority validation on receive — the kernel
+##      writes the priority back to userspace; nothing to range-
+##      check on input.)
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * mq_timedsend(good_prio, valid_msg, ts.tv_nsec=2e9) -> EINVAL
+##          (was EBADF pre-batch; this is the discriminator).
+##        * mq_timedsend(good_prio, valid_msg, ts.tv_sec=-1) -> EINVAL.
+##        * mq_timedsend(prio=70000, ts=valid) -> EINVAL (prio gate
+##          still fires when timeout passes).
+##        * mq_timedreceive(prio_ptr=0, valid_msg, ts.tv_nsec=2e9)
+##          -> EINVAL (proves the helper is wired on receive too).
+##      Marker emitted:
+##        "mq_timed{send,receive} timespec64_valid: OK".
+##
+##      Known limitations:
+##        * We still treat abs_timeout purely as a validation step;
+##          when actual mqueue I/O is implemented we need to honour
+##          the deadline.
+##        * Linux's prepare_timeout normalises in monotonic time
+##          (it's an *absolute* timeout); we just validate the
+##          shape, which is enough for an unimplemented stub but
+##          not for a real wait.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

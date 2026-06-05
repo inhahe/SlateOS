@@ -13039,20 +13039,64 @@ fn sys_mq_unlink(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOENT)
 }
 
+/// Validate a user-space `struct timespec64` per Linux's
+/// `timespec64_valid`: tv_sec >= 0 AND tv_nsec in [0, NSEC_PER_SEC).
+/// Returns `Err(SyscallResult)` to short-circuit the caller with the
+/// Linux-style errno (EFAULT for unreadable; EINVAL for invalid).
+fn validate_user_timespec64(ptr: u64) -> Result<(), SyscallResult> {
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
+    let mut buf = [0u8; 16];
+    if let Err(e) = crate::mm::user::validate_user_read(ptr, 16) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    // SAFETY: validate_user_read above confirmed 16 bytes readable.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(ptr, buf.as_mut_ptr(), 16) }
+    {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    let read_i64 = |o: usize| -> i64 {
+        match <[u8; 8]>::try_from(&buf[o..o + 8]) {
+            Ok(b) => i64::from_ne_bytes(b),
+            Err(_) => 0,
+        }
+    };
+    let tv_sec = read_i64(0);
+    let tv_nsec = read_i64(8);
+    if tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&tv_nsec) {
+        return Err(linux_err(errno::EINVAL));
+    }
+    Ok(())
+}
+
 /// `mq_timedsend(mqd, msg, len, prio, abs_timeout)`.
 ///
-/// Linux's `ipc/mqueue.c::do_mq_timedsend()` validates the message
-/// priority *before* any fd lookup:
+/// Linux's `ipc/mqueue.c::SYSCALL_DEFINE5(mq_timedsend)` gate order:
+///   1. If `u_abs_timeout != NULL`: `prepare_timeout(u_abs_timeout, &ts)`
+///      copies in the timespec and runs `timespec64_valid`
+///      (tv_sec >= 0 AND tv_nsec in [0, NSEC_PER_SEC)).
+///      EFAULT on copy fail; EINVAL on bad value.
+///   2. `do_mq_timedsend()`: `msg_prio >= MQ_PRIO_MAX` -> EINVAL.
+///   3. `fdget(mqdes)` -> EBADF on bad fd.
+///   4. `copy_from_user(msg)` -> EFAULT on bad msg pointer.
 ///
-///   `if (unlikely(msg_prio >= (unsigned long) MQ_PRIO_MAX))
-///       return -EINVAL;`
+/// `MQ_PRIO_MAX` is `32768` (15 bits) on Linux x86_64.
 ///
-/// `MQ_PRIO_MAX` is `32768` (15 bits) on Linux x86_64.  A probe
-/// passing `prio = 70000` with a junk fd sees -EINVAL ahead of the
-/// -EBADF that would otherwise apply.  Enforcing the gate here keeps
-/// the priority validation visible to feature-detection probes.
+/// Pre-batch we only checked that the abs_timeout pointer was
+/// readable; a probe passing a malformed timespec (e.g.
+/// tv_nsec = 2_000_000_000) with a junk fd saw -EBADF where Linux
+/// returns -EINVAL.  Batch 198 adds the `timespec64_valid` gate
+/// ahead of the fd lookup.
 fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
     const MQ_PRIO_MAX: u64 = 32768;
+    // 1. Validate abs_timeout shape ahead of any fd touch (Linux's
+    //    prepare_timeout runs first in the syscall entry).
+    if args.arg4 != 0 {
+        if let Err(r) = validate_user_timespec64(args.arg4) {
+            return r;
+        }
+    }
+    // 2. Priority gate.
     if args.arg3 >= MQ_PRIO_MAX {
         return linux_err(errno::EINVAL);
     }
@@ -13065,11 +13109,7 @@ fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    if args.arg4 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+    // 3. fd lookup.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
@@ -13079,7 +13119,19 @@ fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `mq_timedreceive(mqd, msg, len, prio_ptr, abs_timeout)`.
+///
+/// Same `prepare_timeout` gate as [`sys_mq_timedsend`] — Linux's
+/// `ipc/mqueue.c::SYSCALL_DEFINE5(mq_timedreceive)` runs
+/// `timespec64_valid(abs_timeout)` ahead of the fd lookup.  There
+/// is no priority validation on the receive path (the kernel writes
+/// the priority back to userspace; nothing to range-check on input).
 fn sys_mq_timedreceive(args: &SyscallArgs) -> SyscallResult {
+    // 1. Validate abs_timeout shape ahead of any fd touch.
+    if args.arg4 != 0 {
+        if let Err(r) = validate_user_timespec64(args.arg4) {
+            return r;
+        }
+    }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -13094,11 +13146,7 @@ fn sys_mq_timedreceive(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    if args.arg4 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+    // 2. fd lookup.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
@@ -34660,6 +34708,71 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   mq_timedsend prio validation: OK");
+
+        // Batch 198: abs_timeout validation runs ahead of the fd
+        // lookup.  Linux's prepare_timeout calls timespec64_valid
+        // (tv_sec >= 0 AND tv_nsec in [0, NSEC_PER_SEC)).
+        //
+        // Build a bad timespec on the stack (tv_sec=0, tv_nsec=2e9)
+        // and a good one (tv_sec=1, tv_nsec=500_000_000).
+        #[repr(C)]
+        struct Ts64 { tv_sec: i64, tv_nsec: i64 }
+        let bad_ts = Ts64 { tv_sec: 0, tv_nsec: 2_000_000_000 };
+        let bad_ts_ptr = (&raw const bad_ts).cast::<u8>() as u64;
+        let neg_ts = Ts64 { tv_sec: -1, tv_nsec: 0 };
+        let neg_ts_ptr = (&raw const neg_ts).cast::<u8>() as u64;
+        let good_ts = Ts64 { tv_sec: 1, tv_nsec: 500_000_000 };
+        let good_ts_ptr = (&raw const good_ts).cast::<u8>() as u64;
+        // mq_timedsend with valid prio, valid msg shape, bad tv_nsec
+        // -> EINVAL (was EBADF pre-batch because fd validation in
+        // kernel context returns Ok and we fell through to the
+        // terminal EBADF).
+        let a = SyscallArgs { arg0: 5, arg1: 0x1000, arg2: 1, arg3: 10,
+            arg4: bad_ts_ptr, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedsend(bad tv_nsec) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mq_timedsend with negative tv_sec -> EINVAL.
+        let a = SyscallArgs { arg0: 5, arg1: 0x1000, arg2: 1, arg3: 10,
+            arg4: neg_ts_ptr, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedsend(neg tv_sec) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mq_timedsend with bad prio AND good timespec -> EINVAL
+        // (prio fires after timeout validation; result is still
+        // EINVAL — this exercises the prio gate now that the
+        // timeout passes).
+        let a = SyscallArgs { arg0: 5, arg1: 0x1000, arg2: 1,
+            arg3: 70000, arg4: good_ts_ptr, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedsend(good ts, bad prio) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mq_timedreceive with bad tv_nsec -> EINVAL.
+        let a = SyscallArgs { arg0: 5, arg1: 0x1000, arg2: 1, arg3: 0,
+            arg4: bad_ts_ptr, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDRECEIVE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedreceive(bad tv_nsec) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mq_timed{{send,receive}} timespec64_valid: OK"
+        );
+
         // mq_timedreceive(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };

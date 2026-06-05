@@ -17938,3 +17938,39 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 24s).
 ##      Serial confirms marker in build/serial-test.txt.
+
+## 211. Batch 182: epoll_wait/pwait/pwait2 EP_MAX_EVENTS gating
+##      -----------------------------------------------------------
+##      Linux's do_epoll_wait (fs/eventpoll.c) gates:
+##        if (maxevents <= 0 || maxevents > EP_MAX_EVENTS)
+##            return -EINVAL;
+##      where EP_MAX_EVENTS = INT_MAX / sizeof(struct epoll_event)
+##      = INT_MAX / 12 = 178956970.  Our stubs gated maxevents <= 0
+##      but not the upper bound; a probe with INT_MAX maxevents
+##      passed the lower check, saturating_mul to ~25 GiB of length,
+##      validate_user_write was a no-op in kernel context, then hit
+##      the terminal EBADF — where Linux returns EINVAL.
+##
+##      Implementation: define module-level
+##      `const EP_MAX_EVENTS: i32 = i32::MAX / 12;` and gate
+##      `maxevents > EP_MAX_EVENTS` alongside the existing
+##      `maxevents <= 0` check in sys_epoll_wait, sys_epoll_pwait,
+##      and sys_epoll_pwait2.  Single source of truth for the cap.
+##
+##      Self-tests added (5):
+##        * epoll_wait(_, _, INT_MAX) -> EINVAL (was EBADF).
+##        * epoll_pwait(_, _, INT_MAX, _, _, sigsetsize=8) -> EINVAL.
+##        * epoll_pwait2(_, _, INT_MAX, _, _, sigsetsize=8) -> EINVAL.
+##        * epoll_wait(_, _, EP_MAX_EVENTS) -> EBADF (boundary, valid).
+##        * epoll_wait(_, _, EP_MAX_EVENTS+1) -> EINVAL (boundary+1).
+##        * Emits "[syscall/linux]   epoll_wait/pwait/pwait2
+##          EP_MAX_EVENTS gating: OK".
+##
+##      Known limitations:
+##        * No real epoll implementation; the terminal EBADF stands
+##          for "epfd is not a valid fd".  Once epoll_create returns
+##          real fds, this stub should resolve the fd, verify it's
+##          an epoll fd (EINVAL on non-epoll), and actually wait.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 25s).
+##      Serial confirms marker in build/serial-test.txt.

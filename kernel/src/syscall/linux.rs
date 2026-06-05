@@ -13660,14 +13660,29 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EBADF)
 }
 
+/// Linux's `EP_MAX_EVENTS` cap from fs/eventpoll.c — the maximum
+/// `maxevents` accepted by epoll_wait / epoll_pwait / epoll_pwait2
+/// before they return EINVAL.  Equals `INT_MAX / sizeof(struct
+/// epoll_event)`; struct epoll_event is packed 12 bytes on x86_64.
+const EP_MAX_EVENTS: i32 = i32::MAX / 12;
+
 /// `epoll_wait(epfd, events*, maxevents, timeout_ms)`.
 fn sys_epoll_wait(args: &SyscallArgs) -> SyscallResult {
+    // Linux's `do_epoll_wait` (fs/eventpoll.c):
+    //   if (maxevents <= 0 || maxevents > EP_MAX_EVENTS) return -EINVAL;
+    //   if (!access_ok(events, maxevents * sizeof(struct epoll_event)))
+    //       return -EFAULT;
+    //   ... fdget(epfd) -> -EBADF on bad fd;
+    //   ... is_file_epoll -> -EINVAL on non-epoll fd.
+    // EP_MAX_EVENTS = INT_MAX / sizeof(struct epoll_event) = INT_MAX/12.
+    // Pre-batch we skipped the upper bound; a probe with maxevents close
+    // to INT_MAX saw EBADF (or EFAULT) where Linux returns EINVAL.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let maxevents = args.arg2 as i32;
-    if maxevents <= 0 {
+    if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
         return linux_err(errno::EINVAL);
     }
-    // struct epoll_event is 12 bytes.
+    // struct epoll_event is packed 12 bytes on x86_64 (u32 events + u64 data).
     let len = (maxevents as u64).saturating_mul(12);
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
         return linux_err(linux_errno_for(e));
@@ -13679,7 +13694,8 @@ fn sys_epoll_wait(args: &SyscallArgs) -> SyscallResult {
 fn sys_epoll_pwait(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let maxevents = args.arg2 as i32;
-    if maxevents <= 0 {
+    // Same maxevents range as epoll_wait (see EP_MAX_EVENTS comment there).
+    if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
         return linux_err(errno::EINVAL);
     }
     let len = (maxevents as u64).saturating_mul(12);
@@ -13701,7 +13717,8 @@ fn sys_epoll_pwait(args: &SyscallArgs) -> SyscallResult {
 fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let maxevents = args.arg2 as i32;
-    if maxevents <= 0 {
+    // Same maxevents range as epoll_wait (see EP_MAX_EVENTS comment there).
+    if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
         return linux_err(errno::EINVAL);
     }
     let len = (maxevents as u64).saturating_mul(12);
@@ -34293,6 +34310,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: epoll_wait valid args not EBADF");
             return Err(KernelError::InternalError);
         }
+        // epoll_wait with maxevents > EP_MAX_EVENTS (INT_MAX/12) -> EINVAL.
+        // i32::MAX is well above the cap, so just over the cap suffices.
+        // Use INT_MAX directly — beats the cap and exercises the new gate.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: u64::from(u32::MAX) >> 1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_wait maxevents>EP_MAX_EVENTS not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Same gate on epoll_pwait.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: u64::from(u32::MAX) >> 1,
+            arg3: 0, arg4: 0, arg5: 8 };
+        if dispatch_linux(nr::EPOLL_PWAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_pwait maxevents>EP_MAX_EVENTS not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Same gate on epoll_pwait2.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: u64::from(u32::MAX) >> 1,
+            arg3: 0, arg4: 0, arg5: 8 };
+        if dispatch_linux(nr::EPOLL_PWAIT2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_pwait2 maxevents>EP_MAX_EVENTS not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Boundary: maxevents = EP_MAX_EVENTS exactly -> EBADF (passes range
+        // gate, falls through to terminal EBADF in kernel context).
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: (i32::MAX / 12) as u64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_WAIT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_wait maxevents=EP_MAX_EVENTS not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Boundary+1: maxevents = EP_MAX_EVENTS + 1 -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: (i32::MAX / 12) as u64 + 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: epoll_wait maxevents=EP_MAX_EVENTS+1 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   epoll_wait/pwait/pwait2 EP_MAX_EVENTS gating: OK"
+        );
     }
 
     // -----------------------------------------------------------------

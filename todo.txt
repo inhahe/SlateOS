@@ -19250,3 +19250,39 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          Add when proper threads/PIDs land.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).
+
+## 236. [DONE 2026-06-05] Linux ABI: sys_io_setup get_user + ctx-zero gate.
+##      sys_io_setup ran `nr_events == 0 -> EINVAL` BEFORE the ctxp
+##      readability check and never read *ctxp.  Linux's
+##      fs/aio.c::SYSCALL_DEFINE2(io_setup) order:
+##        (1) get_user(ctx, ctxp) -> EFAULT on unreadable ctxp.
+##        (2) if (ctx || nr_events == 0) -> EINVAL.
+##            (*ctxp must start out zero — non-zero is rejected as
+##            "context handle already in use".)
+##        (3) Allocate ring (EAGAIN/ENOMEM possible).
+##        (4) copy_to_user(ctxp, &new_ctx) -> EFAULT.
+##      Pre-batch:
+##        * (nr_events=0, ctxp=NULL)         -> EINVAL [us] / EFAULT [Linux]
+##        * (nr_events=8, *ctxp=0xdeadbeef)  -> ENOSYS [us] / EINVAL [Linux]
+##
+##      Fix: reorder so ctxp NULL/EFAULT runs first, then
+##      copy_from_user the 8-byte value, then apply the
+##      ctx_in!=0 || nr_events==0 EINVAL.
+##
+##      Self-tests added in dispatch_linux self-test:
+##        * (nr_events=0, ctxp=NULL)         -> EFAULT (was EINVAL).
+##        * (nr_events=8, *ctxp=0xdeadbeef)  -> EINVAL (was ENOSYS).
+##        * (nr_events=0, *ctxp=non-zero)    -> EINVAL (both reasons).
+##      Existing tests rewritten to use a stack [u8; 8] for ctxp
+##      instead of 0x1000 (which is unmapped and would fault when
+##      copy_from_user runs).
+##      Marker emitted: "io_setup get_user / ctx-zero gate: OK".
+##
+##      Known limitations:
+##        * The per-user nr_events cap (aio_max_nr) isn't modelled.
+##          Linux returns EAGAIN if the per-user reservation overflows;
+##          we just fall through to ENOSYS.  Add when AIO lands.
+##        * io_pgetevents has analogous timespec gating that we don't
+##          yet validate — candidate for a follow-up batch.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on first try).

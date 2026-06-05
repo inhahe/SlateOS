@@ -10977,18 +10977,46 @@ fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `io_setup(nr_events, ctx_idp)`.
+///
+/// Linux's `fs/aio.c::SYSCALL_DEFINE2(io_setup)` gate order:
+///   1. `get_user(ctx, ctxp)` -> EFAULT on unreadable ctxp.  Reads
+///      8 bytes (`aio_context_t` is `__kernel_ulong_t`).
+///   2. `if (ctx || nr_events == 0) return -EINVAL.`
+///      The syscall requires `*ctxp == 0` on entry — userspace must
+///      hand in a zeroed slot for the kernel to fill in.  A non-zero
+///      value is rejected as "you've reused an existing context handle
+///      for a new setup", which is always a bug.
+///   3. Allocate ring -> may return EAGAIN/ENOMEM.
+///   4. `copy_to_user(ctxp, &new_ctx)` -> EFAULT.
+///
+/// Pre-batch we ran `nr_events == 0 -> EINVAL` BEFORE the ctxp
+/// readability check, so a probe passing
+/// (nr_events=0, ctxp=BADPTR) saw -EINVAL where Linux returns -EFAULT.
+/// We also never read `*ctxp`, so `(nr_events=10, *ctxp=0xdeadbeef)`
+/// fell through to our terminal ENOSYS where Linux returns EINVAL.
+/// Batch 207 reorders to match Linux.
 fn sys_io_setup(args: &SyscallArgs) -> SyscallResult {
-    // nr_events == 0 -> EINVAL per man-page.
-    if args.arg0 == 0 {
-        return linux_err(errno::EINVAL);
-    }
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
-    // ctx_idp is an aio_context_t * (8 bytes).
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 8) {
+    // 1. get_user(ctx, ctxp): 8 bytes from ctxp.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
         return linux_err(linux_errno_for(e));
     }
+    let mut buf = [0u8; 8];
+    // SAFETY: validate_user_read above confirmed 8 bytes readable.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg1, buf.as_mut_ptr(), 8)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    let ctx_in = u64::from_ne_bytes(buf);
+    // 2. ctx != 0 || nr_events == 0 -> EINVAL.
+    if ctx_in != 0 || args.arg0 == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 3+4. We have no AIO backend.  Terminal ENOSYS so glibc's
+    // io_setup wrapper falls back to userspace AIO emulation.
     linux_err(errno::ENOSYS)
 }
 
@@ -32969,8 +32997,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // io_setup(0,_) -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+        // Batch 207: io_setup reordered to match Linux's
+        // SYSCALL_DEFINE2(io_setup) — get_user(ctx, ctxp) runs BEFORE
+        // the (ctx || nr_events == 0) -> EINVAL check.  Tests that
+        // exercise the EINVAL path must supply a readable ctxp.
+        let mut io_ctx = [0u8; 8];
+        let io_ctx_ptr = io_ctx.as_mut_ptr() as u64;
+        // io_setup(0, valid ctxp with *ctxp=0) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: io_ctx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IO_SETUP, &a).value
             != -i64::from(errno::EINVAL) {
@@ -32985,11 +33019,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_setup(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // io_setup(8, ctx) in kernel context -> ENOSYS.
-        let mut ctx = [0u8; 8];
+        // io_setup(8, ctx with *ctx=0) -> ENOSYS terminal.
         let a = SyscallArgs {
-            arg0: 8,
-            arg1: ctx.as_mut_ptr() as u64,
+            arg0: 8, arg1: io_ctx_ptr,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::IO_SETUP, &a).value
@@ -32997,6 +33029,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_setup not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // Batch 207 discriminators:
+        //   * (nr_events=0, ctxp=NULL) -> EFAULT (was EINVAL).
+        //     Linux's get_user(ctx, ctxp) fails BEFORE the EINVAL gate.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::IO_SETUP, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_setup(0,NULL) not EFAULT ({})",
+                dispatch_linux(nr::IO_SETUP, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * (nr_events=8, *ctxp=0xdeadbeef) -> EINVAL (was ENOSYS).
+        //     Linux requires *ctxp to start out zero.
+        let mut io_ctx_nz = [0u8; 8];
+        io_ctx_nz[0] = 0xef;
+        io_ctx_nz[1] = 0xbe;
+        io_ctx_nz[2] = 0xad;
+        io_ctx_nz[3] = 0xde;
+        let a = SyscallArgs {
+            arg0: 8, arg1: io_ctx_nz.as_mut_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_setup non-zero *ctxp not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * (nr_events=0, *ctxp=non-zero) -> EINVAL (both fail; either
+        //     reason).  Sanity check the combined gate fires.
+        let a = SyscallArgs {
+            arg0: 0, arg1: io_ctx_nz.as_mut_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_setup(0,*ctx!=0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   io_setup get_user / ctx-zero gate: OK"
+        );
         // io_destroy(_) -> EINVAL.
         let a = SyscallArgs { arg0: 0xdeadbeef, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

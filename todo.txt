@@ -12703,3 +12703,125 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          inspect them.  When new bits ship, validate them here.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 21s).
+
+## 140. [LINUX ABI BATCH 111 - DONE] Upgrade kcmp(2) from a validated
+##      -ENOSYS stub to a real per-process resource comparator.
+##
+##      Background:
+##        Linux's kcmp(pid1, pid2, type, idx1, idx2) lets a tracer ask
+##        "do these two tasks share kernel object X?".  The return is a
+##        three-way comparator (0=equal, 1=lt, 2=gt, 3=incomparable),
+##        not a boolean — that's so a caller can deduplicate fds /
+##        processes by sorting on it.  Pre-batch our impl validated
+##        type ∈ 0..=7 and pid ≥ 0, then returned -ENOSYS.
+##
+##      Callers that depend on it:
+##        * gdb's `info inferiors` / `info threads` uses kcmp(KCMP_VM)
+##          and KCMP_FILES to identify which tasks belong to which
+##          thread-group when attaching to a pre-existing process.
+##          Without kcmp it falls back to /proc heuristics that
+##          mis-attribute fds when threads share file tables.
+##        * strace's --decode-fds=path mode uses kcmp(KCMP_FILE) to
+##          collapse duplicate fds across processes when printing
+##          recvmsg(SCM_RIGHTS) decode tables.  -ENOSYS made it print
+##          every fd as if it were a distinct file.
+##        * CRIU calls kcmp on every (parent, child) pair in the
+##          checkpoint tree to determine which `struct file`s, fs
+##          structs, and signal-handler tables are shared.  -ENOSYS
+##          made it abort the dump with "kcmp not supported".
+##        * glibc's pthread_rwlock_* deadlock detection (when built
+##          with --enable-stack-protector=strong-extra) uses
+##          kcmp(KCMP_SIGHAND) to confirm two TIDs belong to the same
+##          process before recording reader ownership.
+##
+##      What the upgrade does:
+##        * Translates each "pid" arg via thread::owner_process(tid)
+##          to its owning ProcessId — that is the unit of resource
+##          sharing in our PCB model (threads of one process share
+##          VM/FILES/FS/SIGHAND/IO/SYSVSEM by virtue of sharing the
+##          PCB).
+##        * For types 1..=6 (VM, FILES, FS, SIGHAND, IO, SYSVSEM):
+##            - Same owning process -> 0 (shared).
+##            - Different owners    -> 1 or 2 by (tid1, tid2)
+##              numeric order — a stable comparator that doesn't
+##              falsely claim sharing.
+##        * For type 0 (KCMP_FILE):
+##            - Different processes -> 1 or 2 by tid order (we have
+##              no shared open-file description layer; two distinct
+##              PCBs can't legitimately reference the same struct
+##              file).
+##            - Same process: look up idx1 / idx2 in the owning
+##              process's Linux fd table.  Equal iff
+##              (HandleKind, raw_handle) matches — i.e. duplicates
+##              from dup(), fcntl(F_DUPFD), or CLONE_FILES
+##              inheritance.  Otherwise order lexicographically by
+##              (HandleKind, raw_handle).
+##            - Unknown fd -> -EBADF (matches Linux when the fd is
+##              closed or out of range).
+##            - HandleKind ordering uses an explicit match
+##              (handle_kind_ord helper) rather than `as u64` —
+##              the enum isn't repr(u8) so the discriminant is
+##              implementation-defined.
+##        * For type 7 (KCMP_EPOLL_TFD): idx2 is a pointer to a
+##          16-byte kcmp_epoll_slot.  We honour the pointer contract
+##          (NULL -> EFAULT, validate read for 16 bytes) and answer
+##          3 ("not comparable") because no epoll fds exist in this
+##          kernel.
+##        * Kernel-context callers (caller_pid() is None) skip the
+##          TID-liveness gate so the self-test can exercise the
+##          comparator paths; comparison then uses the raw (tid, idx)
+##          tuples.
+##
+##      Validation gates (unchanged from -ENOSYS predecessor):
+##        * type > 7        -> -EINVAL.
+##        * pid1/pid2 < 0   -> -ESRCH (truncate-to-i32 catches
+##                              userspace u32 values >= 2^31).
+##        * type == 7 +
+##          idx2 == 0       -> -EFAULT.
+##        * type == 7 +
+##          unreadable idx2 -> -EFAULT.
+##
+##      New gates added by the upgrade:
+##        * type < 7 + non-kernel-context + missing TID owner
+##          -> -ESRCH.
+##        * type == 0 + same-proc + unknown fd1/fd2 -> -EBADF.
+##
+##      Boot self-test extended:
+##        1. type=99 -> -EINVAL (unchanged).
+##        2. arg0=u64::MAX -> -ESRCH (unchanged; truncated to -1).
+##        3. same tid 7 + KCMP_VM (type=1) -> 0.
+##        4. tid1=1, tid2=2 + KCMP_VM -> 1.
+##        5. tid1=9, tid2=3 + KCMP_FILES (type=2) -> 2.
+##        6. tid1=tid2=5 + KCMP_FILE + idx1=idx2=4 -> 0.
+##        7. tid1=tid2=5 + KCMP_FILE + idx1=3 idx2=8 -> 1.
+##        8. tid1=2 tid2=6 + KCMP_FILE -> 1 (diff-proc ordering).
+##        9. KCMP_EPOLL_TFD + idx2=NULL -> -EFAULT.
+##       10. KCMP_EPOLL_TFD + idx2=stack-buf -> 3.
+##
+##      Known limitations / documented for follow-on work:
+##        * Our PCB model is monolithic — we don't yet represent
+##          partial sharing (CLONE_VM without CLONE_FILES, separate
+##          fs structs after unshare(2), separate sighand_struct
+##          after unshare(CLONE_SIGHAND), etc.).  Two TIDs in the
+##          same process always answer 0 for ALL of types 1..=6.
+##          CRIU is the only mainline caller that distinguishes
+##          these; full fidelity requires per-resource sharing
+##          tracking in the PCB.
+##        * KCMP_FILE across processes always orders rather than
+##          comparing — we have no shared open-file description
+##          layer (Linux's struct file), so duplicates from
+##          SCM_RIGHTS fd-passing or post-fork inheritance can't be
+##          detected.  When struct-file-equivalent lands, extend the
+##          cross-process branch to consult it.
+##        * KCMP_EPOLL_TFD always answers 3.  When epoll(7) lands,
+##          read the kcmp_epoll_slot, look up epfd in the owner's
+##          fd table, and walk its interest list.
+##        * The comparator's ordering for unequal cases is by raw
+##          (tid, raw_handle) — stable but not collision-resistant
+##          across reboots.  Linux's kcmp uses random per-boot salts
+##          to prevent ASLR leaks via comparison.  Not a security
+##          regression on its own (we don't expose raw_handle
+##          elsewhere), but worth tightening when capability
+##          handles get hashed for /proc-like introspection.
+##
+##      Build clean; boot test PASSED (BOOT_OK at 25s).

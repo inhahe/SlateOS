@@ -15759,15 +15759,41 @@ fn sys_msgrcv(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Linux's `ipc/msg.c::ksys_msgctl()` gate order:
 ///   1. `if (msqid < 0 || cmd < 0) return -EINVAL;`
-///   2. switch on cmd; buf is only touched inside per-cmd handlers
-///      after the queue lookup (which fails with -EINVAL when no
-///      queue with that id exists).
+///   2. switch on cmd:
+///        * IPC_INFO (3) / MSG_INFO (12): GLOBAL info queries.  No
+///          queue lookup — `msgctl_info` zeros a stack struct and
+///          then `copy_to_user(buf, &msginfo, sizeof(struct
+///          msginfo))` runs UNCONDITIONALLY.  buf == NULL or
+///          unmapped -> -EFAULT.  With a valid buf, Linux returns
+///          the highest queue index (0 when no queues) and
+///          populates buf.
+///        * MSG_STAT (11) / MSG_STAT_ANY (13) / IPC_STAT (2) /
+///          IPC_SET (1) / IPC_RMID (0): PER-QUEUE cmds.  Each
+///          looks up `msqid` first; with no queues, the lookup
+///          returns -EINVAL before buf is touched.
+///        * default (unknown cmd): -EINVAL.
 ///
-/// Pre-batch we pre-validated `buf` with `validate_user_read(buf, 1)`
-/// for any non-NULL buf, diverging from Linux for the
-/// (msqid>=0, cmd>=0, buf=invalid) case where Linux returns EINVAL
-/// (no queue) but we returned EFAULT.  Removed.
+/// Pre-batch (Batch 200) removed an over-eager
+/// `validate_user_read(buf, 1)` pre-validation, but the resulting
+/// "every cmd returns EINVAL after the gate" terminal is still
+/// wrong for IPC_INFO and MSG_INFO: those two cmds don't depend on
+/// any queue existing and Linux always reaches the
+/// copy_to_user(buf, ...).  Probe shapes:
+///
+///   * msgctl(0, IPC_INFO, NULL) -> EFAULT (Linux) vs EINVAL
+///     (pre-batch).
+///   * msgctl(0, IPC_INFO, &valid) -> 0 success (Linux) vs
+///     EINVAL (pre-batch).
+///
+/// Batch 370 routes IPC_INFO and MSG_INFO through buf validation,
+/// then returns ENOSYS (no SysV IPC backing — same pattern as
+/// shmctl IPC_INFO/SHM_INFO from batch 369, and shmget / msgget /
+/// semget after their respective gates).  The per-queue cmds keep
+/// their EINVAL terminal, since the queue lookup truly fails
+/// first before buf would be touched.
 fn sys_msgctl(args: &SyscallArgs) -> SyscallResult {
+    const IPC_INFO: i32 = 3;
+    const MSG_INFO: i32 = 12;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let msqid = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -15775,9 +15801,22 @@ fn sys_msgctl(args: &SyscallArgs) -> SyscallResult {
     if msqid < 0 || cmd < 0 {
         return linux_err(errno::EINVAL);
     }
-    // No queues exist; every msqid lookup fails with EINVAL.  Buf
-    // is intentionally NOT validated here — Linux defers that to
-    // the per-cmd handler.
+    if cmd == IPC_INFO || cmd == MSG_INFO {
+        // Global info query: Linux's `copy_to_user(buf, &msginfo,
+        // sizeof(struct msginfo))` is unconditional.  buf == NULL
+        // or unmapped -> EFAULT.
+        if args.arg2 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+        // Valid buf, but we have no SysV IPC backing.
+        return linux_err(errno::ENOSYS);
+    }
+    // Per-queue cmd: no queues exist, every msqid lookup fails
+    // with EINVAL.  Buf is intentionally NOT validated here —
+    // Linux defers that to the per-cmd handler.
     linux_err(errno::EINVAL)
 }
 
@@ -46466,6 +46505,83 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   msgctl id/cmd<0, no pre-buf validate: OK"
+        );
+        // Batch 370: msgctl(0, IPC_INFO=3, NULL) -> EFAULT.
+        // Linux's `msgctl_info` -> `copy_to_user(buf=NULL, &msginfo,
+        // ...)` is unconditional; no queue lookup precedes it.
+        // Pre-batch returned EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 3, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(0,IPC_INFO,NULL) not EFAULT ({})",
+                dispatch_linux(nr::MSGCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgctl(0, MSG_INFO=12, NULL) -> EFAULT (same gate).
+        let a = SyscallArgs { arg0: 0, arg1: 12, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(0,MSG_INFO,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgctl(0, IPC_INFO=3, &stack_buf) -> ENOSYS.
+        // Linux would copy msginfo and return 0 (max idx).  We
+        // have no SysV IPC backing; return ENOSYS terminal after
+        // buf validation (matches shmctl IPC_INFO from batch 369
+        // and the shmget/msgget/semget pattern).
+        let stack_buf: [u8; 64] = [0; 64];
+        let buf_addr = stack_buf.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 3, arg2: buf_addr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(0,IPC_INFO,valid) not ENOSYS ({})",
+                dispatch_linux(nr::MSGCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgctl(0, MSG_INFO=12, &stack_buf) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 12, arg2: buf_addr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(0,MSG_INFO,valid) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgctl(0, IPC_STAT=2, &stack_buf) -> EINVAL.
+        // Per-queue cmd: queue lookup fails with EINVAL before
+        // buf is touched, so even a valid buf yields EINVAL.
+        // VERIFIES the IPC_INFO/MSG_INFO routing is not over-broad.
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: buf_addr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(0,IPC_STAT,valid) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // msgctl(0, MSG_STAT_ANY=13, NULL) -> EINVAL (per-queue).
+        let a = SyscallArgs { arg0: 0, arg1: 13, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgctl(0,MSG_STAT_ANY,NULL) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   msgctl IPC_INFO/MSG_INFO buf-first gate (EFAULT/ENOSYS), per-queue EINVAL: OK"
         );
 
         // mq_open(NULL) -> EFAULT.

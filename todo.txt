@@ -33393,3 +33393,82 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.62s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+400. [BATCH 370 — 2026-06-06 — sys_msgctl IPC_INFO/MSG_INFO buf-first
+     gate routing (kernel/src/syscall/linux.rs)]
+
+     Linux divergence: pre-batch sys_msgctl (after batch 200's
+     removal of an over-eager validate_user_read) terminated
+     every cmd>=0 / msqid>=0 shape with a flat EINVAL.  That is
+     correct for the per-queue cmds (IPC_RMID/IPC_SET/IPC_STAT/
+     MSG_STAT/MSG_STAT_ANY) and Linux's default arm — those run
+     `ipc_obtain_object_check(msqid)` first which returns
+     -EINVAL when no queue with that id exists.
+
+     But it is WRONG for IPC_INFO (cmd=3) and MSG_INFO (cmd=12).
+     Those are GLOBAL info queries — Linux's ksys_msgctl runs
+     `msgctl_info(ns, msqid, cmd, &msginfo)` which zeros a stack
+     struct, then `copy_to_user(buf, &msginfo, sizeof(struct
+     msginfo))` UNCONDITIONALLY.  So:
+
+       * msgctl(0, IPC_INFO, NULL) -> EFAULT (copy_to_user
+         faults), not EINVAL.
+       * msgctl(0, IPC_INFO, &valid_buf) -> 0 (success,
+         struct msginfo populated; max idx returned = 0 when
+         no queues).  Pre-batch returned EINVAL.
+
+     Source: ipc/msg.c::ksys_msgctl ->
+       case IPC_INFO: case MSG_INFO: { msgctl_info;
+                                       copy_to_user(buf, ...); }
+       case MSG_STAT: case MSG_STAT_ANY: case IPC_STAT:
+                       { ipc_obtain_object_check -> EINVAL; }
+       case IPC_SET: case IPC_RMID: { msgctl_down -> EINVAL; }
+       default: -EINVAL;
+
+     Parallels batch 369's fix to sys_shmctl IPC_INFO/SHM_INFO.
+
+     Fix: route IPC_INFO and MSG_INFO through a buf-first gate:
+
+       1. cmd<0 || msqid<0 -> EINVAL (unchanged).
+       2. if cmd == IPC_INFO || cmd == MSG_INFO:
+              buf == NULL -> EFAULT
+              validate_user_write(buf, 1) fail -> EFAULT
+              else -> ENOSYS  (no SysV IPC backing, same
+                                pattern as msgget after its
+                                ipcget gate)
+       3. else (per-queue cmds + default unknown cmd):
+              -> EINVAL  (queue lookup fails first; default
+                          arm also EINVAL)
+
+     Probes added (6 new) after the existing
+     "msgctl id/cmd<0, no pre-buf validate: OK" stamp:
+
+       * msgctl(0, IPC_INFO=3, NULL) -> EFAULT (was EINVAL).
+       * msgctl(0, MSG_INFO=12, NULL) -> EFAULT (was EINVAL).
+       * msgctl(0, IPC_INFO=3, &stack_buf) -> ENOSYS (was
+         EINVAL; the most important fix — buf-with-data path
+         matches translator pattern).
+       * msgctl(0, MSG_INFO=12, &stack_buf) -> ENOSYS (was
+         EINVAL).
+       * msgctl(0, IPC_STAT=2, &stack_buf) -> EINVAL (per-
+         queue cmd: lookup fails before buf touched;
+         pre-batch EINVAL preserved — VERIFIES the new
+         routing is not over-broad).
+       * msgctl(0, MSG_STAT_ANY=13, NULL) -> EINVAL (per-
+         queue cmd: lookup fails before buf touched;
+         pre-batch EINVAL preserved).
+
+     The unmapped-non-NULL EFAULT case (e.g., buf=0xDEAD)
+     cannot be tested in kernel-context boot self-test because
+     validate_user_write is a no-op for bare kernel tasks
+     (mm/user.rs::is_kernel_context).  Only NULL is reliably
+     distinguishable from valid-stack-buffer; that's sufficient
+     to exercise both arms of the new gate.
+
+     Final boot-time stamp:
+         "[syscall/linux]   msgctl IPC_INFO/MSG_INFO buf-first
+          gate (EFAULT/ENOSYS), per-queue EINVAL: OK"
+
+     Build: cargo build -p kernel clean (38.70s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

@@ -31438,3 +31438,91 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (47.36s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+380. syscall/linux batch 350 — prctl option int truncation at Linux's
+     declared signature.
+
+     Linux ABI (kernel/sys.c):
+
+       SYSCALL_DEFINE5(prctl, int, option,
+                              unsigned long, arg2, unsigned long, arg3,
+                              unsigned long, arg4, unsigned long, arg5)
+
+     The `option` argument is declared `int`, so the x86_64 syscall
+     ABI truncates rdi to its low 32 bits before the body runs.
+     Linux's switch on `option` matches against `PR_*` constants
+     (all positive, all fit in 31 bits).
+
+     Pre-batch divergence:
+
+       fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
+           let option = args.arg0;          // u64, no truncation
+           match option {
+               1 => ..., 2 => ..., ..., 0x5961_6d61 => ...,
+               _ => linux_err(EINVAL),
+           }
+       }
+
+     A caller passing option = 0x1_0000_0001 (high-half garbage
+     register + PR_SET_PDEATHSIG=1 in the low 32) saw EINVAL where
+     Linux truncates to int=1 and dispatches PR_SET_PDEATHSIG.
+
+     Fix:
+
+       #[allow(...)]
+       let option_i32 = args.arg0 as i32;
+       #[allow(...)]
+       let option = u64::from(option_i32 as u32);
+       match option { /* unchanged arms */ }
+
+     The i32 -> u32 -> u64 widening preserves the bit pattern of
+     the low 32 bits and zeroes the upper 32, so the existing match
+     arm literals (all <= 0x5961_6d61, well within 31 bits) still
+     match correctly.  Negative i32 values (high bit set) widen to
+     large u32 (e.g. 0xDEAD_BEEF) which doesn't match any PR_* arm
+     -> EINVAL default, matching Linux's behaviour for unrecognised
+     PR_* codes.
+
+     All match arm literals surveyed (1, 2, 3, 4, 7, 8, 13, 14, 15,
+     16, 21, 23..30, 33, 34, 36..42, 47, 52, 53, 57, 58, 62, 65..68,
+     0x4155_5856 "AUXV", 0x5356_4d41 "SVMA", 0x5961_6d61 "Yama")
+     fit in 31 bits, so truncation is safe across the full arm set.
+
+     Self-test probes (5, labelled a..e):
+
+       a. prctl(option=0x1_0000_0001, sig=0) -> 0
+          (high garbage + PR_SET_PDEATHSIG; sig=0 disables, returns 0).
+       b. prctl(option=0x1_0000_0007) -> 0
+          (high garbage + PR_GET_KEEPCAPS; default KEEPCAPS_CLEAR=0).
+       c. prctl(option=0xFFFF_FFFF_5961_6d61, 0, 0, 0, 0) -> 0
+          (sign-extended-looking high + PR_SET_PTRACER "Yama";
+          truncates to positive 0x5961_6d61, dispatches PTRACER arm
+          which requires arg2/3/4 = 0 (we pass them as 0) -> 0).
+       d. prctl(option=0xDEAD_BEEF) -> EINVAL
+          (regression guard: unrecognised low-32 value still hits
+          the EINVAL default arm post-batch).
+       e. 5-case cast-isolation table verifies the i32 -> u32 -> u64
+          widening preserves the low-32 bit pattern across high-
+          garbage, sign-extended-looking, and already-truncated
+          inputs (5 inputs, 5 expected u64 outputs).
+
+     Known limitations / kernel-context bypasses:
+
+       - caller_pid() returns None in kernel context, so PR_SET_*
+         arms that store per-PCB state become silent no-ops, but
+         the ABI return value is correct.  Probes (a), (b), (c)
+         exercise the dispatch path; they don't exercise the
+         per-PCB persistence path (covered by separate probes
+         earlier in the batch series, e.g. batches 268/269).
+
+     This is the tenth instance of the int-truncation shape after
+     batches 308 (mlockall), 309 (msync), 310 (mlock2), 311
+     (fchmodat), 312 (fchownat), 313 (unlinkat), 314 (renameat2),
+     340 (unshare), 348 (lseek), 349 (splice/tee/vmsplice).  The
+     shape is identical: int/uint args declared in Linux's
+     SYSCALL_DEFINE expand to register-truncated values at the
+     syscall boundary, so our gates must mask the high half.
+
+     Build: cargo build -p kernel clean (41.10s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 27s).

@@ -5422,7 +5422,31 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
 /// integration) will see empty names.  Tracked in todo.txt as needing
 /// per-thread name storage on the TCB plus a procfs string field.
 fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
-    let option = args.arg0;
+    // Linux signature (kernel/sys.c):
+    //   SYSCALL_DEFINE5(prctl, int, option,
+    //                          unsigned long, arg2, unsigned long, arg3,
+    //                          unsigned long, arg4, unsigned long, arg5)
+    //
+    // `option` is declared `int` so the x86_64 syscall ABI truncates
+    // rdi to its low 32 bits before the body runs.  Pre-batch (349)
+    // we matched `args.arg0` at full u64 width, so a caller passing
+    // option=0x1_0000_0001 (high-half garbage + PR_SET_PDEATHSIG=1)
+    // fell through to the EINVAL default arm — Linux truncates to
+    // int=1 and dispatches PR_SET_PDEATHSIG.
+    //
+    // Truncate to i32 (matching Linux's declared type), then widen
+    // through u32 to u64 for the match.  All known PR_* arms
+    // (including 0x4155_5856 "AUXV", 0x5356_4d41 "SVMA", and
+    // 0x5961_6d61 "Yama") fit in 31 bits, so high-bit-set negative
+    // option values still hit the EINVAL default arm — matching
+    // Linux's behaviour for unrecognised PR_* codes.
+    //
+    // Tenth instance of the int-truncation shape after batches 308,
+    // 309, 310, 311, 312, 313, 314, 340, 348, 349.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let option_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let option = u64::from(option_i32 as u32);
     match option {
         // PR_SET_PDEATHSIG (1) — install the signal to deliver when
         // the parent process exits.  Linux validates 0..=64 and
@@ -52829,6 +52853,104 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   prctl(PR_SET_NAME) NULL-arg2 gating: OK"
+            );
+        }
+
+        // Batch 350: prctl option int truncation.
+        //
+        // Linux's `SYSCALL_DEFINE5(prctl, int option, ...)` truncates
+        // rdi to its low 32 bits before dispatch.  Pre-batch we matched
+        // args.arg0 at full u64 width, so high-half garbage in the
+        // option register fell through to the EINVAL default arm
+        // instead of dispatching the truncated PR_* code.
+        {
+            // (a) option = 0x1_0000_0001 (high garbage + PR_SET_PDEATHSIG)
+            //     with sig=0 (disable).  Pre-batch: EINVAL (default arm
+            //     because 0x1_0000_0001 doesn't match `1 =>`).
+            //     Post-batch: truncates to 1, dispatches PR_SET_PDEATHSIG
+            //     with sig=0, returns 0.  Kernel context has no PCB so
+            //     the set is a silent no-op, but the arm still returns 0.
+            let a = SyscallArgs {
+                arg0: 0x1_0000_0001, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(high|PDEATHSIG, sig=0) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (b) option = 0x1_0000_0007 (high garbage + PR_GET_KEEPCAPS).
+            //     Pre-batch: EINVAL.  Post-batch: truncates to 7,
+            //     returns the default KEEPCAPS_CLEAR (0) in kernel ctx.
+            let a = SyscallArgs {
+                arg0: 0x1_0000_0007, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(high|GET_KEEPCAPS) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (c) option = 0xFFFF_FFFF_5961_6d61 (sign-extended-looking
+            //     high half + PR_SET_PTRACER "Yama").  Truncates to
+            //     i32 = 0x5961_6d61 (positive), widens to u64 =
+            //     0x5961_6d61, matches the PTRACER arm with arg2/3/4=0
+            //     -> ok(0).  Pre-batch saw the full u64 not match the
+            //     arm literal -> EINVAL default arm.
+            let a = SyscallArgs {
+                arg0: 0xFFFF_FFFF_5961_6d61, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(high|PR_SET_PTRACER) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (d) option = 0xDEAD_BEEF (no high half, but unrecognised
+            //     PR_* code).  Regression guard: even with truncation
+            //     applied, an unrecognised low-32 value must still
+            //     return EINVAL (post-batch parity with pre-batch).
+            //     0xDEAD_BEEF as i32 = -559038737 -> as u32 = 0xDEAD_BEEF
+            //     -> doesn't match any arm -> EINVAL default.
+            let a = SyscallArgs {
+                arg0: 0xDEAD_BEEF, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(bogus low-32) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (e) Cast isolation: verify the i32 -> u32 -> u64 widening
+            //     produces what the match expects for representative
+            //     option values.
+            let cases: [(u64, u64); 5] = [
+                (0x1_0000_0001, 1),                    // high garbage + 1
+                (0x1_0000_0007, 7),                    // high garbage + 7
+                (0xFFFF_FFFF_0000_0001, 1),            // sign-ext high + 1
+                (0xFFFF_FFFF_5961_6d61, 0x5961_6d61),  // sign-ext high + Yama
+                (0xDEAD_BEEF, 0xDEAD_BEEF),            // already in low 32
+            ];
+            for &(input, expect) in &cases {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let i = input as i32;
+                #[allow(clippy::cast_sign_loss)]
+                let got = u64::from(i as u32);
+                if got != expect {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: prctl trunc cast {:#x} -> {:#x} (want {:#x})",
+                        input, got, expect
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            serial_println!(
+                "[syscall/linux]   prctl option int truncation: OK"
             );
         }
 

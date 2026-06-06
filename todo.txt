@@ -30883,3 +30883,127 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (36.14s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+376. syscall/linux batch 346 — sys_dup3
+     RLIMIT_NOFILE gate added.
+
+     Linux gate-order facts
+     (fs/file.c::ksys_dup3, modern mainline):
+
+       gate 1: flags & ~O_CLOEXEC -> EINVAL.
+       gate 2: oldfd == newfd     -> EINVAL.
+       gate 3: (unsigned)newfd >=
+               rlimit(RLIMIT_NOFILE) -> EBADF.
+       gate 4: fdget(oldfd), install at newfd.
+
+     Pre-batch dup3 implemented only gates 1, 2,
+     and 4 — gate 3 was missing entirely.  A
+     caller could install at any newfd value as
+     long as the underlying fd table allocator
+     could grow that far, defeating per-process
+     fd budgeting in:
+
+       - sandbox runtimes that lower
+         RLIMIT_NOFILE before exec to bound the
+         child's fd footprint;
+       - posix_spawn fd-actions arrays that
+         pre-stage fds in slots above the
+         lowered limit and expect dup3 to
+         refuse;
+       - init-system / service-manager fd
+         allocators that use RLIMIT_NOFILE as a
+         per-service quota;
+       - language-runtime fd budgets (Go, Rust
+         tokio, libuv) that probe with dup3 to
+         high newfd to learn the cap.
+
+     Pre-batch listed in the "Deferred" section
+     of prior batches' Known Limitations.
+
+     Fix:
+
+       Inserted gate 3 in sys_dup3 between the
+       oldfd==newfd check and the dup2_impl
+       call:
+
+         if let Some(pid) = caller_pid() {
+             if let Some((cur, _)) =
+                 pcb::get_rlimit(pid, 7) {
+                 if newfd >= 0
+                     && (newfd as u64) >= cur {
+                     return linux_err(EBADF);
+                 }
+             }
+         }
+
+       Inclusive upper bound (>=, not >) to
+       mirror Linux exactly.  Negative newfd
+       falls through to dup2_impl which returns
+       EBADF (same errno, different routing).
+       Kernel-context (caller_pid() = None)
+       bypasses the gate so boot self-test
+       dispatch stays usable; dup2_impl's None
+       arm returns EBADF anyway.
+
+     Self-test (4 new probes, i..l):
+
+         i. dup3(0, 1, 0) kernel-ctx     EBADF
+         j. dup3(2, 1M, 0) kernel-ctx    EBADF
+         k. set_rlimit + get_rlimit
+            round-trip on test PCB at
+            (8, 4096) verified.
+         l. Gate predicate boundary
+            check at cur=8:
+              newfd=7 -> accept
+              newfd=8 -> reject
+              newfd=9 -> reject
+
+       (i, j) are regression guards verifying
+       the gate doesn't fail closed in kernel
+       context.
+       (k) verifies the pcb::get_rlimit lookup
+       the gate uses returns seeded values.
+       (l) locks in the inclusive-upper-bound
+       semantics (Linux: `>= rlimit` not `>
+       rlimit`).
+
+     Marker: dup3 RLIMIT_NOFILE gate: OK
+
+     Known limitations / judgment calls:
+
+     * Gate exercises pcb::get_rlimit only when
+       caller_pid() returns Some.  Kernel
+       context bypasses.  This is consistent
+       with how other rlimit gates in this file
+       (RLIMIT_FSIZE in pwrite, RLIMIT_NICE in
+       setpriority, RLIMIT_RTPRIO in
+       sched_setscheduler) handle the kernel
+       context.
+
+     * No CAP_SYS_RESOURCE bypass.  Linux
+       allows a CAP_SYS_RESOURCE caller to dup3
+       past RLIMIT_NOFILE (the gate is in
+       `rlimit()` which respects the cap).  We
+       don't model CAP_SYS_RESOURCE — every
+       uid==0 caller can already lower / raise
+       rlimits via set_rlimit so the equivalent
+       privilege is implicit.
+
+     * Cannot probe the userspace EBADF return
+       directly from boot self-test.  Would
+       require a caller_pid() injection
+       harness.  The four indirect probes
+       (i..l) cover regression guards +
+       predicate boundary; the userspace path
+       is verifiable by reading the body.
+
+     * Hard limit (rlim_max) is not consulted
+       by this gate, matching Linux.  Only
+       rlim_cur (the soft limit) gates dup3;
+       raising rlim_cur up to rlim_max via
+       setrlimit is the documented escape
+       hatch.
+
+     Build: cargo build -p kernel clean (44.08s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

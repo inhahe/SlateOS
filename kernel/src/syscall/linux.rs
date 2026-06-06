@@ -22361,31 +22361,49 @@ fn sys_ioperm(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `set_thread_area(user_desc*)`.
-fn sys_set_thread_area(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    // struct user_desc is 16 bytes.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 16) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 16) {
-        return linux_err(linux_errno_for(e));
-    }
-    // x86_64 uses arch_prctl(ARCH_SET_FS) for TLS, not GDT slot
-    // allocation.
+/// `set_thread_area(user_desc*)` — x86_64 native: not in syscall table.
+///
+/// On x86_64 native, slots 205 (set_thread_area) and 211
+/// (get_thread_area) in arch/x86/entry/syscalls/syscall_64.tbl map to
+/// `sys_ni_syscall`, which returns `-ENOSYS` unconditionally without
+/// inspecting any argument.  These syscalls only exist for the i386
+/// ABI; x86_64 userspace uses `arch_prctl(ARCH_SET_FS|ARCH_SET_GS)`
+/// for TLS instead.
+///
+/// Pre-batch we validated `arg0` (NULL -> EFAULT, then
+/// validate_user_read/write of the 16-byte user_desc) BEFORE the
+/// ENOSYS terminal.  That is divergent: Linux's `sys_ni_syscall` is
+/// a one-liner that returns -ENOSYS without ever touching userspace.
+///
+/// Concrete divergences fixed:
+///   * set_thread_area(NULL)    Linux: ENOSYS  Pre: EFAULT.
+///   * set_thread_area(0xDEAD)  Linux: ENOSYS  Pre: EFAULT
+///                              (validate_user_read fails on the
+///                               unmapped pointer).
+///   * get_thread_area(NULL)    Linux: ENOSYS  Pre: EFAULT.
+///   * get_thread_area(0xDEAD)  Linux: ENOSYS  Pre: EFAULT.
+///
+/// Why this matters: glibc's TLS init on AMD64 first tries
+/// `arch_prctl(ARCH_SET_FS)`; a few legacy CRT shims, valgrind's
+/// libc-probe pass, and the LSB-probe suites also issue
+/// `set_thread_area(NULL)` purely as a "does this kernel speak the
+/// i386-compat ABI?" feature-probe and branch on ENOSYS vs.
+/// EFAULT.  ENOSYS means "this kernel does not provide the syscall"
+/// (correct for x86_64 native) and skips the entire compat path.
+/// EFAULT means "this kernel speaks the syscall, but you passed it
+/// a bad pointer" — which causes the probe to try harder by allocating
+/// a real `user_desc` and re-issuing the call, only to be told
+/// ENOSYS on the second try.  Wasted work and confused logs.
+///
+/// Architectural directive: x86_64 native syscall, no pointer touch.
+fn sys_set_thread_area(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
-/// `get_thread_area(user_desc*)`.
-fn sys_get_thread_area(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 16) {
-        return linux_err(linux_errno_for(e));
-    }
+/// `get_thread_area(user_desc*)` — x86_64 native: not in syscall table.
+/// See `sys_set_thread_area` for the full rationale; the mechanism
+/// is identical (slot 211 -> sys_ni_syscall, ENOSYS without arg touch).
+fn sys_get_thread_area(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
@@ -53184,24 +53202,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   ioperm turn_on=0 revoke path: OK"
         );
 
-        // set_thread_area NULL -> EFAULT.
+        // Batch 377: set_thread_area / get_thread_area are x86_64-native
+        // sys_ni_syscall slots (205 / 211 -> -ENOSYS in
+        // arch/x86/entry/syscalls/syscall_64.tbl).  Linux returns
+        // ENOSYS without inspecting arg0; pre-batch we did EFAULT-on-NULL
+        // + validate_user_read/write before the ENOSYS terminal, which
+        // diverged for both NULL and bogus-non-NULL probes.
+        //
+        // set_thread_area(NULL) -> ENOSYS (was EFAULT pre-batch).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SET_THREAD_AREA, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: set_thread_area NULL not EFAULT");
+        if dispatch_linux(nr::SET_THREAD_AREA, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: set_thread_area NULL not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // set_thread_area valid -> ENOSYS.
+        // set_thread_area(0xDEAD) -> ENOSYS (bogus non-NULL ptr; verifies
+        // no validate_user_read runs before the ENOSYS terminal).
+        let a = SyscallArgs { arg0: 0xDEAD, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_THREAD_AREA, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: set_thread_area bogus ptr not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // set_thread_area valid ptr -> ENOSYS (existing terminal).
         let a = SyscallArgs { arg0: user_desc_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SET_THREAD_AREA, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: set_thread_area valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // get_thread_area valid -> ENOSYS.
+        // get_thread_area(NULL) -> ENOSYS (was EFAULT pre-batch).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GET_THREAD_AREA, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: get_thread_area NULL not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // get_thread_area(0xDEAD) -> ENOSYS (bogus non-NULL ptr).
+        let a = SyscallArgs { arg0: 0xDEAD, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GET_THREAD_AREA, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: get_thread_area bogus ptr not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // get_thread_area valid ptr -> ENOSYS (existing terminal).
         let a = SyscallArgs { arg0: user_desc_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::GET_THREAD_AREA, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: get_thread_area valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   set/get_thread_area sys_ni_syscall ENOSYS no-validate: OK"
+        );
 
         // Batch 344: kexec_load / kexec_file_load gate-order
         // inversion fix.  Linux's kexec_load_check() runs

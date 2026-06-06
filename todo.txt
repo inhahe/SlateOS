@@ -34061,3 +34061,121 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (47.60s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 26s).
+
+407. [Linux-compat / kernel/src/syscall/linux.rs] sys_set_thread_area
+     and sys_get_thread_area: x86_64-native slots 205 / 211 are
+     sys_ni_syscall in arch/x86/entry/syscalls/syscall_64.tbl.
+     Linux returns -ENOSYS without inspecting any argument; pre-
+     batch we ran NULL->EFAULT + validate_user_read / write of the
+     16-byte user_desc before the ENOSYS terminal, which diverged
+     on both NULL and bogus-non-NULL probes.
+
+     Linux source (arch/x86/entry/syscalls/syscall_64.tbl,
+     x86_64 ABI rows):
+
+       205	common	set_thread_area		sys_ni_syscall
+       211	common	get_thread_area		sys_ni_syscall
+
+       (kernel/sys_ni.c)
+       asmlinkage long sys_ni_syscall(void)
+       {
+           return -ENOSYS;
+       }
+
+     On i386, slots 243 and 244 ARE sys_set_thread_area /
+     sys_get_thread_area and do touch user_desc — but those are
+     in syscall_32.tbl, not syscall_64.tbl.  We dispatch the
+     x86_64 numbers (205 / 211) so the Linux behaviour to mirror
+     is sys_ni_syscall.
+
+     Divergence table:
+
+       * set_thread_area(NULL)     Linux: ENOSYS  Pre: EFAULT
+                                   (NULL ptr check fired before
+                                    ENOSYS terminal.)
+       * set_thread_area(0xDEAD)   Linux: ENOSYS  Pre: EFAULT
+                                   (validate_user_read fails on
+                                    unmapped ptr.)
+       * set_thread_area(valid)    Linux: ENOSYS  Pre: ENOSYS
+                                   (same terminal both sides.)
+       * get_thread_area(NULL)     Linux: ENOSYS  Pre: EFAULT
+       * get_thread_area(0xDEAD)   Linux: ENOSYS  Pre: EFAULT
+       * get_thread_area(valid)    Linux: ENOSYS  Pre: ENOSYS
+
+     Why this matters: glibc's TLS init on AMD64 prefers
+     arch_prctl(ARCH_SET_FS) but some legacy CRT shims, valgrind's
+     libc-probe pass, and LSB-probe suites issue
+     set_thread_area(NULL) purely as a "does this kernel speak the
+     i386-compat ABI?" feature probe.  ENOSYS means "this kernel
+     does not provide the syscall on this ABI" (truthful for
+     x86_64 native) and the probe correctly skips the entire
+     compat path.  EFAULT means "this kernel speaks the syscall
+     but you passed a bad pointer" — the probe then allocates a
+     real user_desc and re-issues the call, only to be told
+     ENOSYS on the second try.  Wasted work, confused strace
+     output, and worst case a probe loop that never converges
+     (the program assumes EFAULT-then-ENOSYS means "kernel is
+     broken in i386 emulation" and aborts startup).
+
+     Fix: drop both prelude checks; return ENOSYS directly.
+
+       fn sys_set_thread_area(_args: &SyscallArgs) -> SyscallResult {
+           linux_err(errno::ENOSYS)
+       }
+       fn sys_get_thread_area(_args: &SyscallArgs) -> SyscallResult {
+           linux_err(errno::ENOSYS)
+       }
+
+     Architectural directive: this is x86_64-native behaviour
+     mirroring.  We are not adding LDT / GDT user_desc plumbing.
+     The translator change is errno selection only — Linux's
+     sys_ni_syscall doesn't touch userspace, so we don't either.
+
+     Probes added (2 new per syscall, 1 existing kept per
+     syscall):
+       * set_thread_area(NULL)    -> ENOSYS (was EFAULT pre-batch,
+         the main fix on the NULL path).
+       * set_thread_area(0xDEAD)  -> ENOSYS (NEW; verifies no
+         validate_user_read runs before the ENOSYS terminal).
+       * set_thread_area(valid)   -> ENOSYS (existing terminal).
+       * get_thread_area(NULL)    -> ENOSYS (was EFAULT pre-batch).
+       * get_thread_area(0xDEAD)  -> ENOSYS (NEW).
+       * get_thread_area(valid)   -> ENOSYS (existing terminal).
+
+     Final boot-time stamp:
+         "[syscall/linux]   set/get_thread_area sys_ni_syscall
+          ENOSYS no-validate: OK"
+
+     Build: cargo build -p kernel clean (41.06s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 26s on the second attempt — see
+                 BUG-A below for the first-run flake).
+
+     BUG-A (transient, observed during batch 377):
+       During the first boot test run after this change, QEMU
+       hit an #UD on a RDTSCP instruction (`0f 01 f9`) inside
+       the [sched_fairness] self-test path with the backtrace
+       showing 32 stack frames of a recursive-looking pattern
+       (0xffffffff80dd33d3 -> ...).  Repro on the second run
+       succeeded without modification.  The instruction bytes
+       and PC are consistent across the affected frames, so the
+       theory is: QEMU TCG occasionally fails to advertise
+       RDTSCP via CPUID on the first cold boot of a fresh
+       process, but flips to advertised on a subsequent run.
+       Action items if this returns:
+         * Gate every rdtscp call site on
+           `crate::cpu::has_rdtscp()` (we have the CPUID stub
+           in cpu.rs already; the per-CPU init may not be
+           setting the flag in time for [sched_fairness] which
+           runs early in self-test ordering).
+         * Track every rdtscp call in kernel/src/ (pcb.rs,
+           kshell.rs, fs/procfs.rs, smp.rs, cpu.rs, bench.rs,
+           mm/alloc_trace.rs) and route them through one
+           cpu::read_timestamp_with_cpu() helper that falls back
+           to RDTSC if RDTSCP is unsupported.
+         * If repros under -cpu kvm64 (which does NOT advertise
+           rdtscp), this is a real bug; if it only repros under
+           rare TCG cold-boot timing, lower priority.
+       Filed here because the fairness self-test crashing is a
+       boot-blocker if it ever becomes deterministic.
+

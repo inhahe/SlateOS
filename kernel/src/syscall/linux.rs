@@ -3620,12 +3620,33 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
         Ok(e) => e,
         Err(r) => return r,
     };
+    // Linux ABI: `off_t lseek(int fd, off_t offset, int whence)`.
+    // `whence` is declared `int`, delivered in rdx; the x86_64 syscall
+    // entry leaves the high 32 bits undefined.  Linux's
+    // fs/read_write.c::SYSCALL_DEFINE3(lseek) takes whence as
+    // `unsigned int` after a narrowing cast, then matches against
+    // SEEK_SET/CUR/END/DATA/HOLE.  The high half of rdx must not
+    // influence the match.
+    //
+    // Pre-batch (this batch) we passed args.arg2 (u64) through to
+    // sys_fs_seek's whence comparison directly, so a caller passing
+    // whence=0x1_0000_0000 (high-half garbage + SEEK_SET) saw EINVAL
+    // where Linux truncates to int=0 → SEEK_SET → success.  Same
+    // shape as the seven prior int-truncation batches
+    // (308 mlockall, 309 msync, 310 mlock2, 311 fchmodat, 312
+    // fchownat, 313 unlinkat, 314 renameat2).  MemFd arm already
+    // did `args.arg2 as u32` so it was correct; File arm was the
+    // outlier.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let whence_i32 = args.arg2 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let whence_u32 = whence_i32 as u32;
     match entry.kind {
         HandleKind::File => {
             let a = SyscallArgs {
                 arg0: entry.raw_handle,
                 arg1: args.arg1,
-                arg2: args.arg2,
+                arg2: u64::from(whence_u32),
                 arg3: 0, arg4: 0, arg5: 0,
             };
             linux_from_native(handlers::sys_fs_seek(&a))
@@ -3634,8 +3655,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
             let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let pos = args.arg1 as i64;
-            #[allow(clippy::cast_possible_truncation)]
-            let whence = args.arg2 as u32;
+            let whence = whence_u32;
             match crate::ipc::memfd::seek(h, pos, whence) {
                 Ok(off) => {
                     #[allow(clippy::cast_possible_wrap)]
@@ -38857,6 +38877,117 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   renameat2 EXCHANGE mutex + WHITEOUT CAP gates: OK"
+        );
+    }
+
+    // Batch 348 — sys_lseek whence int truncation in File arm.
+    // Linux's fs/read_write.c::SYSCALL_DEFINE3(lseek) declares
+    // whence as `int` (rdx); the x86_64 syscall entry leaves the
+    // high half of rdx undefined.  Pre-batch the File arm of
+    // sys_lseek forwarded args.arg2 (u64) directly into
+    // sys_fs_seek's whence comparison, so a caller passing
+    // whence=0x1_0000_0000 (high-half garbage + SEEK_SET) saw
+    // EINVAL where Linux truncates to int=0 -> SEEK_SET -> success.
+    // The MemFd arm was already correct (`args.arg2 as u32`);
+    // the File arm was the outlier in this seven-syscall family.
+    //
+    // Direct dispatch from boot self-test (kernel context) cannot
+    // probe the truncation because lookup_caller_fd returns EBADF
+    // before the whence parse — kernel tasks have no Linux fd
+    // table.  Instead we (i) verify kernel-context EBADF is
+    // preserved (regression guard for the lookup-first ordering),
+    // and (ii) verify the int truncation cast pattern in isolation
+    // for the sentinel values that motivated this batch.  Userspace
+    // dispatch will exercise the full path.
+    {
+        // (a) lseek(fd=5, off=0, whence=0x1_0000_0000) — kernel
+        //     context.  Pre-batch and post-batch both return EBADF
+        //     because lookup_caller_fd fires first.  Regression
+        //     guard: the new whence truncation must NOT promote
+        //     this to EINVAL (a future restructure that does the
+        //     whence parse before the fd lookup would break the
+        //     EBADF-before-EINVAL ordering the man page documents).
+        let a = SyscallArgs {
+            arg0: 5, arg1: 0, arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::LSEEK, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lseek(fd=5, whence=high-half-0) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) lseek(fd=5, off=0, whence=0x1_0000_0003) — kernel
+        //     context, high-half garbage + an invalid (for our FS)
+        //     low value (SEEK_DATA).  Same EBADF-first guarantee.
+        let a = SyscallArgs {
+            arg0: 5, arg1: 0, arg2: 0x1_0000_0003,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::LSEEK, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lseek(fd=5, whence=high-half-3) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) Truncation logic isolation: verify that the i32
+        //     reinterpret + u32 cast pattern sys_lseek now uses
+        //     produces the expected low-half value for the
+        //     sentinels that motivated this batch.  Locks in the
+        //     cast semantics independently of the dispatch path.
+        let cases: &[(u64, u32)] = &[
+            // (raw_rdx, expected_low_after_truncation)
+            (0x1_0000_0000, 0),        // high|SEEK_SET -> 0
+            (0x1_0000_0001, 1),        // high|SEEK_CUR -> 1
+            (0x1_0000_0002, 2),        // high|SEEK_END -> 2
+            (0x1_0000_0003, 3),        // high|SEEK_DATA -> 3
+            (0x1_0000_0004, 4),        // high|SEEK_HOLE -> 4
+            (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF),  // all-ones
+            (0x8000_0000_0000_0000, 0),  // sign-bit only -> 0
+        ];
+        for &(input, expected) in cases {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let w_i32 = input as i32;
+            #[allow(clippy::cast_sign_loss)]
+            let w_u32 = w_i32 as u32;
+            if w_u32 != expected {
+                serial_println!(
+                    "[syscall/linux]   FAIL: lseek truncation: input={:#x} got {:#x} expected {:#x}",
+                    input, w_u32, expected
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (d) Cross-check: the SEEK_SET/CUR/END constants in
+        //     number.rs are u64 literals 0/1/2.  The post-batch
+        //     code converts whence_u32 to u64 via u64::from(...),
+        //     which zero-extends — so a truncated 0 still matches
+        //     SEEK_SET, 1 matches SEEK_CUR, 2 matches SEEK_END.
+        //     This verifies the zero-extension is correct and not
+        //     a sign-extension (i.e. the chain is u64 -> i32 -> u32
+        //     -> u64-via-u64::from, NOT u64 -> i32 -> i64 -> u64).
+        if u64::from(0u32) != crate::syscall::number::SEEK_SET
+            || u64::from(1u32) != crate::syscall::number::SEEK_CUR
+            || u64::from(2u32) != crate::syscall::number::SEEK_END
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: lseek constants drift (SEEK_SET={} CUR={} END={})",
+                crate::syscall::number::SEEK_SET,
+                crate::syscall::number::SEEK_CUR,
+                crate::syscall::number::SEEK_END,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   lseek whence int truncation (File arm): OK"
         );
     }
 

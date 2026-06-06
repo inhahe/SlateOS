@@ -31147,3 +31147,159 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (36.70s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+378. syscall/linux batch 348 — sys_lseek whence
+     int truncation in File arm.
+
+     Linux ABI fact
+     (fs/read_write.c::SYSCALL_DEFINE3(lseek)):
+
+       off_t lseek(int fd, off_t offset,
+                   int whence)
+
+       whence is declared `int`, delivered in
+       rdx by the x86_64 syscall entry.  The
+       high 32 bits of rdx are caller-
+       uninitialised garbage.  Linux narrows
+       to unsigned int via the calling
+       convention and matches against
+       SEEK_SET/CUR/END/DATA/HOLE at 32-bit
+       width.
+
+     Our pre-batch behaviour:
+
+       sys_lseek File arm:
+
+         let a = SyscallArgs {
+             arg0: entry.raw_handle,
+             arg1: args.arg1,
+             arg2: args.arg2,   // u64, NOT cast
+             arg3: 0, ...
+         };
+         linux_from_native(
+             handlers::sys_fs_seek(&a))
+
+       sys_fs_seek then matched whence (u64)
+       against `super::number::SEEK_SET`
+       (u64 const, value 0).  A caller passing
+       whence=0x1_0000_0000 (high-half garbage,
+       low-half 0=SEEK_SET) saw EINVAL where
+       Linux truncates to int=0 -> SEEK_SET ->
+       success.
+
+       sys_lseek MemFd arm was already correct
+       (`args.arg2 as u32`).  The File arm was
+       the outlier; this is the eighth instance
+       of the same int-truncation shape after
+       batches 308 (mlockall), 309 (msync),
+       310 (mlock2), 311 (fchmodat), 312
+       (fchownat), 313 (unlinkat), 314
+       (renameat2), and 340 (unshare).
+
+     Why this matters for userspace porting:
+
+       libc's lseek(3), glibc's __libc_lseek64,
+       musl's lseek implementation, and Rust's
+       std::io::Seek backend all pass the
+       whence value straight through from
+       user code without zero-extending the
+       32-bit constant to 64 bits.  Any caller
+       that stores SEEK_SET in a `long` or
+       passes it via a JIT-generated syscall
+       can leak high-bit garbage into rdx.
+       Linux's behaviour is well-defined under
+       this leak; ours was not.
+
+     Fix:
+
+       Hoisted whence cast above the arm
+       dispatch:
+
+         let whence_i32 = args.arg2 as i32;
+         let whence_u32 = whence_i32 as u32;
+
+         match entry.kind {
+             HandleKind::File => {
+                 let a = SyscallArgs {
+                     arg0: entry.raw_handle,
+                     arg1: args.arg1,
+                     arg2: u64::from(whence_u32),
+                     ...
+                 };
+                 linux_from_native(
+                     handlers::sys_fs_seek(&a))
+             }
+             HandleKind::MemFd => {
+                 // use whence_u32 directly
+             }
+         }
+
+       Both arms now share the same truncation
+       logic, eliminating the File/MemFd
+       divergence.
+
+     Self-test (4 probes, a..d):
+
+         (a) lseek(fd=5,
+             whence=0x1_0000_0000)   EBADF
+             (kernel ctx, lookup-first
+              ordering preserved)
+         (b) lseek(fd=5,
+             whence=0x1_0000_0003)   EBADF
+             (same; SEEK_DATA-shaped low)
+         (c) Truncation isolation: verify
+             (input as i32 as u32) maps:
+                0x1_0000_0000 -> 0
+                0x1_0000_0001 -> 1
+                0x1_0000_0002 -> 2
+                0x1_0000_0003 -> 3
+                0x1_0000_0004 -> 4
+                u64::MAX      -> 0xFFFF_FFFF
+                0x8000_0000_0000_0000 -> 0
+         (d) Constant drift guard: verify
+             u64::from(0u32) == SEEK_SET,
+             u64::from(1u32) == SEEK_CUR,
+             u64::from(2u32) == SEEK_END
+             (locks in the zero-extension
+              semantics of the u32 -> u64
+              re-widen the File arm uses)
+
+       (a) and (b) are regression guards that
+       the lookup-first ordering is preserved.
+       (c) verifies the truncation cast
+       independently of the dispatch path.
+       (d) guards against a future restructure
+       that changes SEEK_* constants from u64
+       to a different integer type, which would
+       break the u64::from re-widen pattern
+       silently.
+
+     Marker: lseek whence int truncation
+             (File arm): OK
+
+     Known limitations / judgment calls:
+
+     * Cannot probe the userspace File-arm
+       truncation directly from boot self-test
+       because the kernel task has no PCB and
+       lookup_caller_fd returns EBADF first.
+       The four indirect probes (a..d) cover
+       regression + isolation + drift guards;
+       userspace dispatch will exercise the
+       full File-arm whence parse.
+
+     * SEEK_DATA (3) and SEEK_HOLE (4) are
+       still rejected by sys_fs_seek (only
+       SEEK_SET/CUR/END handled in the seek
+       backend; dedicated sys_fs_seek_data /
+       sys_fs_seek_hole exist for the
+       Linux-style sparse-file probes but
+       aren't wired into the lseek dispatch
+       path).  Userspace SEEK_DATA/HOLE will
+       see EINVAL for File arm; a future batch
+       can route SEEK_DATA/HOLE through the
+       dedicated backends.
+
+     Build: cargo build -p kernel clean (41.08s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

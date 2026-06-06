@@ -23528,26 +23528,51 @@ fn sys_getegid(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success, negative errno otherwise.
 fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
-    let pid = args.arg0;
-    let resource = args.arg1;
+    // Linux SYSCALL_DEFINE4(prlimit64) declares:
+    //   pid_t pid             — truncated to (int)pid_t
+    //   unsigned int resource — truncated to u32
+    //   const struct rlimit64 __user *new_rlim
+    //   struct rlimit64 __user *old_rlim
+    // The x86_64 ABI truncates the first two args to 32 bits before
+    // the body runs.  Pre-batch we held both as raw u64 and matched
+    // against them, so probes saw divergences:
+    //   pid      = 0x1_0000_0000 → Linux (int)pid = 0 → self path.
+    //                              Ours: raw != 0 → EPERM.
+    //   resource = 0x1_0000_0000 → Linux (uint)res = 0 = RLIMIT_CPU →
+    //                              valid.  Ours: raw >> NUM_RLIMITS
+    //                              → EINVAL.
+    //   pid      = u64::MAX     → Linux (int)pid = -1 → find_task_by_vpid
+    //                              returns NULL → ESRCH.  Ours: cross-pid
+    //                              → EPERM.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let resource_u32 = args.arg1 as u32;
     let new_limit_ptr = args.arg2;
     let old_limit_ptr = args.arg3;
 
     // Resource validation up front — Linux rejects unknown resources
     // before touching any user pointer.
-    if resource >= u64::from(pcb::NUM_RLIMITS) {
+    if resource_u32 >= pcb::NUM_RLIMITS {
         return linux_err(errno::EINVAL);
     }
-    #[allow(clippy::cast_possible_truncation)]
-    let resource_u32 = resource as u32;
 
     // Cross-process queries: only allow when targeting self (pid == 0
     // or pid == caller's PID).  Otherwise EPERM (matches Linux's
     // behaviour for unprivileged callers without CAP_SYS_RESOURCE).
+    // Negative pids cannot reference any task — Linux's
+    // find_task_by_vpid path returns NULL and the syscall reports
+    // ESRCH.  Pre-truncation we accidentally returned EPERM for
+    // u64::MAX (which compared unequal to the small me_pid); post-
+    // truncation pid_i32 = -1 routes through the explicit ESRCH gate.
     let me = caller_pid();
-    if pid != 0 {
-        let me_pid = me.unwrap_or(0);
-        if pid != me_pid {
+    if pid_i32 != 0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let me_i32: i32 = me.unwrap_or(0) as i32;
+        if pid_i32 != me_i32 {
+            if pid_i32 < 0 {
+                return linux_err(errno::ESRCH);
+            }
             return linux_err(errno::EPERM);
         }
     }
@@ -27287,6 +27312,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Batch 293 int-truncation probes.  Linux declares
+        //   long sys_prlimit64(pid_t pid, unsigned int resource,
+        //                      const struct rlimit64 __user *new_rlim,
+        //                      struct rlimit64 __user *old_rlim);
+        // The x86_64 ABI truncates pid and resource to their declared
+        // int / uint types before the body runs.
+
+        // Probe A — pid truncates to 0 → self path, ok(0).
+        // Pre-batch: raw 0x1_0000_0000 != 0 and != me_pid (0) → EPERM.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000, arg1: 3, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 pid truncates to 0 not ok(0) ({})",
+                dispatch_linux(nr::PRLIMIT64, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe B — resource truncates to 0 (= RLIMIT_CPU), valid.
+        // Pre-batch: raw 0x1_0000_0000 >= NUM_RLIMITS (16) → EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1_0000_0000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 resource truncates to RLIMIT_CPU not ok(0) ({})",
+                dispatch_linux(nr::PRLIMIT64, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe C — pid = u64::MAX → (int)pid = -1 → no task → ESRCH.
+        // Pre-batch: raw u64::MAX != me_pid → EPERM (wrong errno).
+        let a = SyscallArgs {
+            arg0: u64::MAX, arg1: 3, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 neg pid not ESRCH ({})",
+                dispatch_linux(nr::PRLIMIT64, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe D — pid truncates to 0 AND resource truncates to a
+        // valid value AND we read back the default RLIMIT_STACK via
+        // old_limit.  Proves both truncations cooperate end-to-end.
+        let mut trunc_out = [0u64; 2];
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0x1_0000_0003,  // truncates to 3 = RLIMIT_STACK
+            arg2: 0,
+            arg3: trunc_out.as_mut_ptr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PRLIMIT64, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 pid+res both truncate not ok(0) ({})",
+                dispatch_linux(nr::PRLIMIT64, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if trunc_out[0] != def_cur || trunc_out[1] != def_max {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 trunc old_limit ({}, {}) (expected default ({}, {}))",
+                trunc_out[0], trunc_out[1], def_cur, def_max
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   prlimit64 pid_t/uint truncation: OK"
+        );
 
         // Direct pcb::set_rlimit / get_rlimit coverage on a dummy
         // process so we exercise the per-process store independent of

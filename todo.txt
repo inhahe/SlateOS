@@ -25539,3 +25539,151 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (44.23s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 25s).
+
+323. Linux ABI batch 293 — sys_prlimit64: pid_t and
+     unsigned int register truncation, plus negative-
+     pid ESRCH fallback.
+
+     Pre-batch divergences
+     ---------------------
+     Linux declares
+       long sys_prlimit64(pid_t pid,
+                          unsigned int resource,
+                          const struct rlimit64 __user *new_rlim,
+                          struct rlimit64 __user *old_rlim);
+     The x86_64 syscall ABI truncates pid to (int) and
+     resource to (unsigned int) before the body runs.
+     Pre-batch we held both as raw u64 and compared
+     against them:
+
+       Probe A — pid truncates to 0 (self):
+         pid = 0x1_0000_0000
+           Linux : (int)pid = 0 → self path → ok(0)
+           Ours  : raw != 0 → pid != me_pid (0 in
+                   kernel context) → EPERM
+
+       Probe B — resource truncates to a valid value:
+         resource = 0x1_0000_0000
+           Linux : (unsigned int)resource = 0 =
+                   RLIMIT_CPU → valid → ok(0)
+           Ours  : raw 0x1_0000_0000 >= NUM_RLIMITS
+                   (16) → EINVAL
+
+       Probe C — negative pid:
+         pid = u64::MAX
+           Linux : (int)pid = -1 → find_task_by_vpid
+                   returns NULL → ESRCH
+           Ours  : raw u64::MAX != me_pid → EPERM
+                   (wrong errno; same EPERM Linux uses
+                   only when the lookup succeeds but
+                   CAP_SYS_RESOURCE is missing)
+
+       Probe D — both pid and resource carry garbage
+       high bits:
+         pid = 0x1_0000_0000, resource = 0x1_0000_0003
+           Linux : (int)pid = 0 → self;
+                   (unsigned int)resource = 3 =
+                   RLIMIT_STACK; reads default → ok(0).
+           Ours  : both gates fired EPERM/EINVAL
+                   depending on order.
+
+     Fixes
+     -----
+     - Cast args.arg0 to i32 (pid_i32) at entry.
+     - Cast args.arg1 to u32 (resource_u32) at entry —
+       replaces the prior `if resource >= u64::from(
+       NUM_RLIMITS)` pattern (which already had a
+       u32 derivation below for the PCB calls but ran
+       the gate against the raw u64).
+     - Resource gate `resource_u32 >= pcb::NUM_RLIMITS`
+       now runs on the truncated value.
+     - Cross-pid resolution:
+         pid_i32 == 0 → self path (no checks)
+         pid_i32 != 0 with pid_i32 != me_i32 →
+            pid_i32 <  0 → ESRCH  (Linux find_task NULL)
+            pid_i32 >  0 → EPERM  (no CAP_SYS_RESOURCE)
+       me_i32 = caller_pid().unwrap_or(0) cast to i32 so
+       the equality test happens at the same width as
+       Linux's int compare.
+     - All downstream uses of `pid` (none) and
+       `resource_u32` (pcb::get_rlimit, pcb::set_rlimit,
+       DEFAULT_RLIMITS indexing) now key off the
+       post-truncation value.
+
+     Existing self-tests
+     -------------------
+     None required restructuring:
+       - prlimit64 bad resource = 16          → still EINVAL
+                                                 (16 still >= 16
+                                                  after u32 truncation)
+       - prlimit64 u64::MAX resource         → still EINVAL
+                                                 (truncated to 0xFFFFFFFF,
+                                                  still >= 16)
+       - prlimit64 cross-pid (pid=1, kernel ctx) →
+                                                still EPERM
+                                                 (pid_i32=1 > 0, !=
+                                                  me_i32=0)
+       - prlimit64 pid=0, both NULL, valid resource →
+                                                still ok(0)
+       - prlimit64 cur > max in new_limit    → still EINVAL
+       - prlimit64 set valid new_limit in kernel ctx →
+                                                still ok(0) with
+                                                pre-set old_limit
+       - Direct pcb::set_rlimit / get_rlimit coverage
+         on a dummy test_pid (unaffected; uses small
+         literal values).
+
+     New self-tests demonstrating the truncation
+     -------------------------------------------
+       - prlimit64(pid=0x1_0000_0000, res=3, NULL, NULL)
+         → ok(0)   (pid truncates to 0, self path)
+       - prlimit64(pid=0, res=0x1_0000_0000, NULL, NULL)
+         → ok(0)   (resource truncates to RLIMIT_CPU=0)
+       - prlimit64(pid=u64::MAX, res=3, NULL, NULL)
+         → ESRCH   (pid truncates to -1, NULL task)
+       - prlimit64(pid=0x1_0000_0000,
+                   res=0x1_0000_0003, NULL, &out)
+         → ok(0) AND out reflects the
+                                  DEFAULT_RLIMITS[3]
+                                  pair (proves both
+                                  truncations cooperate
+                                  end-to-end)
+
+     Marker:
+       "prlimit64 pid_t/uint truncation: OK"
+
+     Preserved self-tests
+     --------------------
+     All prior prlimit64 boot probes (above) plus the
+     getrlimit / setrlimit wrapper tests at the bottom
+     of dispatch_linux, all of which forward to
+     sys_prlimit64 with pid=0 and small literal
+     resources unaffected by truncation.
+
+     Known limitations
+     -----------------
+     - Linux's prlimit64 does a copy_from_user of
+       new_rlim BEFORE the find_task_by_vpid lookup,
+       so an EFAULT on a bad new_rlim ptr beats the
+       ESRCH for a non-existent pid in Linux's gate
+       order.  Our order is reversed (pid checks first,
+       then pointer reads).  This is a separate, gate-
+       ordering divergence independent of register
+       truncation and is deferred — documented here so
+       a future batch can pick it up.
+     - Linux additionally calls security_task_prlimit()
+       (LSM hook) between the task lookup and the
+       copy_from_user, which we have no equivalent for.
+       Not a divergence userspace can observe through
+       errno alone unless an LSM is loaded.
+     - getrlimit / setrlimit, ioprio_set / ioprio_get,
+       setpriority / getpriority, setresuid / setresgid,
+       setreuid / setregid have all been audited in
+       this batch's scope and are already correctly
+       truncating their declared int / uid_t args via
+       prior batches' `as i32` / `as u32` casts.  No
+       follow-up needed there.
+
+     Build: cargo build -p kernel clean (43.51s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 24s).

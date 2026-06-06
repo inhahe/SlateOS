@@ -32356,3 +32356,75 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.34s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 23s).
+
+390. syscall/linux batch 360 — sys_setpgid: implement the
+     full Linux gate ladder.  Pre-batch sys_setpgid checked
+     only `pgid < 0 ⇒ EINVAL` and returned 0 for everything
+     else, so setpgid(NONEXISTENT_PID, 0) silently
+     succeeded where Linux returns ESRCH via
+     find_task_by_vpid.  Programs that detect "did my child
+     still exist when I tried to put it in its own pgrp?"
+     by checking setpgid's return code got silent
+     corruption.
+
+     Linux gate order (kernel/sys.c::SYSCALL_DEFINE2(setpgid,
+     pid_t, pid, pid_t, pgid)):
+       1. pid==0 ⇒ use caller's pid.
+       2. pgid==0 ⇒ use resolved_pid.
+       3. pgid<0 ⇒ -EINVAL.
+       4. find_task_by_vpid(resolved_pid) ⇒ -ESRCH if no task.
+       5. permission / session / leader checks ⇒ EPERM/EACCES.
+
+     Pre-batch only ran step 3.  Also no pid_t truncation:
+     setpgid(0x1_0000_0001, 0) would have skipped the
+     would-be lookup entirely (we never did one) and
+     returned 0; post-batch the truncated pid_i32 = 1 goes
+     through the existence check, which is the Linux
+     observable.
+
+     Fix: sys_setpgid now executes steps 1-4 in order:
+       - Truncate args.arg0/arg1 to i32 (matches the
+         pid_t int ABI).
+       - resolved_pid = pid_i32==0 ? caller_pid_as_i32 : pid_i32.
+         In kernel context caller_pid()==None ⇒ 0, which
+         flows through step 4's pid_i32==0 self-reference
+         path and silently succeeds — matches every other
+         Linux-ABI call's contextless-boot behavior.
+       - resolved_pgid = pgid_i32==0 ? resolved_pid : pgid_i32.
+       - if resolved_pgid<0 ⇒ EINVAL.
+       - existence: pid_i32<0 ⇒ ESRCH; pid_i32>0 ⇒
+         pcb::state lookup, None/Zombie ⇒ ESRCH.
+     Step 5 is still unmodeled — we have no sessions or
+     process groups — so a successful gate run is a silent
+     no-op, returning 0.
+
+     Limitation (unchanged from before, still tracked in
+     todo.txt): we don't track group membership.  Programs
+     that fork a worker pool and use a common pgid for
+     collective signalling won't observe the side-effect.
+
+     Probes added (4, two scaffolded PCBs — live_pid stays
+     alive across the test, dead_pid is destroyed before
+     the probes so we have a known-nonexistent pid):
+       (a) setpgid(dead, 0) ⇒ ESRCH.  Direct regression probe.
+       (b) setpgid(live, 0) ⇒ 0.  Positive control — proves
+           the existence gate doesn't false-reject live PCBs.
+       (c) setpgid(dead, -1) ⇒ EINVAL.  Gate-order regression
+           probe — pgid<0 fires before pid existence per
+           Linux.  A swap would surface ESRCH here.
+       (d) setpgid(0x1_0000_0000 | live, 0) ⇒ 0.  Truncation-
+           propagation probe — the existence gate must see
+           the truncated form, not the raw u64.  Mirrors the
+           sys_kill batch 359 pattern.
+     Both PCBs are pcb::destroy'd on every exit path
+     (success and each failure).  Guard:
+     live_pid/dead_pid ≤ i32::MAX asserted before the probes
+     so a future 32-bit-high pid allocator wouldn't silently
+     invalidate probe (d).
+
+     Final boot-time stamp:
+         "[syscall/linux]   setpgid existence + gate order: OK"
+
+     Build: cargo build -p kernel clean (44.67s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

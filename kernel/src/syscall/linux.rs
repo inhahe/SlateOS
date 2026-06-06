@@ -7561,30 +7561,102 @@ fn sys_getpgid(args: &SyscallArgs) -> SyscallResult {
 
 /// `setpgid(pid, pgid)` — set the process group of `pid` to `pgid`.
 ///
-/// We have no process groups; accept the call and silently no-op.
-/// Linux returns EINVAL for negative pgid and EPERM for cross-session
-/// moves; we don't validate either (no sessions, no groups), but we
-/// do reject obviously invalid values (negative-cast-from-i64 patterns
-/// like the high bit set).
+/// We have no process groups; the call is functionally a silent
+/// no-op, but the *gate surface* must match Linux exactly so
+/// programs that probe their own permissions (login shells, job-
+/// control wrappers, sandbox launchers) get truthful answers.
+///
+/// Linux's gate order (kernel/sys.c::SYSCALL_DEFINE2(setpgid, ...)):
+///   1. `pid == 0` → use the caller's pid.
+///   2. `pgid == 0` → use the resolved pid.
+///   3. `pgid < 0` → -EINVAL.
+///   4. `find_task_by_vpid(pid)` → -ESRCH if no such task.
+///   5. permission / session / leader checks → EPERM / EACCES.
+///
+/// Pre-batch (359) we ran only step 3, so:
+///   - setpgid(NONEXISTENT_PID, 0) → ok(0) where Linux returns
+///     -ESRCH.  Programs that detect "did my child still exist
+///     when I tried to put it in its own pgrp?" by checking
+///     setpgid's return code got silent corruption.
+///   - args.arg0 was never truncated; setpgid(0x1_0000_0001, 0)
+///     would have looked up pcb::state(0x1_0000_0001) which is
+///     guaranteed None — but we never did the lookup, so it
+///     returned ok(0).
 ///
 /// Limitation: programs that fork a worker pool and then move all
-/// workers into a common pgrp for collective signalling won't see
-/// the effect — a `kill(-pgid)` would still ESRCH because we treat
-/// every process as its own group.  Tracked alongside process-group
-/// infrastructure in todo.txt.
+/// workers into a common pgrp for collective signalling still
+/// won't see the effect — `kill(-pgid)` ESRCHs because we treat
+/// every process as its own group.  Tracked alongside process-
+/// group infrastructure in todo.txt.
 fn sys_setpgid(args: &SyscallArgs) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE2(setpgid, pid_t, pid, pid_t, pgid)`.
-    // pid_t is int; the kernel rejects `pgid < 0` after truncation.
-    // Pre-batch we cast args.arg1 to i64 and tested < 0, which only
-    // caught values with bit 63 set — values with bit 31 set (negative
-    // int after truncation) sneaked through.  Probe pgid =
-    // 0x0000_0000_8000_0000 → Linux sees (int)-2147483648 → EINVAL;
-    // we saw positive i64 → ok(0).
+    // Both args truncate to int on the x86_64 ABI; we mirror that
+    // explicitly so probes with high bits set hit the same gate
+    // their post-truncation values would.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let pgid = args.arg1 as i32;
-    if pgid < 0 {
+    let pid_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pgid_i32 = args.arg1 as i32;
+
+    // Step 1: pid==0 means "the calling process".  In kernel
+    // context (no caller pid) we have nothing to resolve against;
+    // fall through with pid_i32 left at 0 — the steps below treat
+    // it as a self-reference that silently succeeds, matching how
+    // every other Linux-ABI call in this file handles boot self-
+    // test context.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let resolved_pid: i32 = if pid_i32 == 0 {
+        // caller_pid() returns u64 (real PIDs fit in 31 bits) or
+        // None in kernel context.  Cast is safe because all PIDs
+        // we issue are well under i32::MAX.
+        caller_pid().map_or(0, |p| p as i32)
+    } else {
+        pid_i32
+    };
+
+    // Step 2: pgid==0 means "use the resolved pid as the target
+    // pgid".  We need this resolution to happen *before* the
+    // pgid<0 gate so a call like setpgid(0, 0) — common
+    // shell idiom for "put me in my own pgrp" — never spuriously
+    // EINVALs even when caller_pid is None (resolved_pid==0).
+    let resolved_pgid: i32 = if pgid_i32 == 0 { resolved_pid } else { pgid_i32 };
+
+    // Step 3: pgid<0 → EINVAL.  This fires before the existence
+    // check on pid, matching Linux's order so a probe like
+    // setpgid(nonexistent, -1) returns EINVAL, not ESRCH.
+    if resolved_pgid < 0 {
         return linux_err(errno::EINVAL);
     }
+
+    // Step 4: find_task_by_vpid(pid) → ESRCH if no such task.
+    //
+    // pid_i32 < 0: no valid task — Linux's find_task_by_vpid
+    // returns NULL for any pid<0.  ESRCH.
+    //
+    // pid_i32 > 0: explicit pcb::state lookup.  None or Zombie →
+    // ESRCH (Zombie because we can't put a reaped task into a
+    // pgrp; matches Linux's "task->signal->leader" gate's
+    // observable behavior when the leader has exited).
+    //
+    // pid_i32 == 0 + kernel-context caller (resolved_pid still
+    // 0): treat as a self-reference no-op, no lookup needed.
+    if pid_i32 < 0 {
+        return linux_err(errno::ESRCH);
+    }
+    if pid_i32 > 0 {
+        #[allow(clippy::cast_sign_loss)]
+        let pid_u = pid_i32 as u64;
+        match crate::proc::pcb::state(pid_u) {
+            None => return linux_err(errno::ESRCH),
+            Some(crate::proc::pcb::ProcessState::Zombie) => {
+                return linux_err(errno::ESRCH);
+            }
+            _ => {}
+        }
+    }
+
+    // We don't model process groups; the actual "set the pgid"
+    // step is a silent no-op.  Returning 0 with all gates passed.
     SyscallResult::ok(0)
 }
 
@@ -36375,6 +36447,113 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   getpgid/getsid/setpgid int truncation: OK"
+        );
+    }
+
+    // Batch 360: setpgid existence-check + gate order.
+    //
+    // Pre-batch sys_setpgid validated only `pgid < 0` and otherwise
+    // returned 0 — a positive pid that didn't exist silently
+    // succeeded, where Linux's find_task_by_vpid → ESRCH catches it.
+    // Programs that detect "did my child still exist when I tried
+    // to put it in its own pgrp?" by checking setpgid's return code
+    // got silent corruption.
+    //
+    // Linux's gate order is:
+    //   pid==0 → caller; pgid==0 → resolved_pid;
+    //   pgid<0 → EINVAL; find_task_by_vpid(pid) → ESRCH; perm checks.
+    //
+    // Probes:
+    //   (a) setpgid(NONEXISTENT_PID, 0) → ESRCH (the regression
+    //       probe).  Uses a freshly-created PCB that is then
+    //       destroyed so we have a *known-dead* pid; same trick
+    //       sys_execveat tests use.
+    //   (b) setpgid(EXISTING_PID, 0) → 0 (positive control —
+    //       proves the existence gate isn't false-rejecting
+    //       live PCBs).
+    //   (c) setpgid(NONEXISTENT_PID, -1) → EINVAL.  This guards
+    //       the gate *order*: pgid<0 fires before pid existence
+    //       per Linux.  A regression that swapped them would
+    //       surface ESRCH here.
+    //   (d) setpgid(0x1_0000_0000 | EXISTING_PID, 0) → 0.
+    //       Existence-gate truncation-propagation probe —
+    //       matches the pattern used for sys_kill in batch 359.
+    //       Pre-batch the existence check didn't exist; post-
+    //       batch it does, and it must see the truncated form,
+    //       not the raw u64.
+    {
+        use crate::proc::pcb;
+        let live_pid = pcb::create("setpgid-live-test", 0);
+        if live_pid > i32::MAX as u64 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid live_pid too large ({})",
+                live_pid
+            );
+            pcb::destroy(live_pid);
+            return Err(KernelError::InternalError);
+        }
+        let dead_pid = pcb::create("setpgid-dead-test", 0);
+        if dead_pid > i32::MAX as u64 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid dead_pid too large ({})",
+                dead_pid
+            );
+            pcb::destroy(live_pid);
+            pcb::destroy(dead_pid);
+            return Err(KernelError::InternalError);
+        }
+        pcb::destroy(dead_pid); // make it actually nonexistent
+
+        // (a) setpgid(dead_pid, 0) → ESRCH.
+        let a = SyscallArgs { arg0: dead_pid, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SETPGID, &a).value;
+        if v != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid(dead, 0) want ESRCH got {}", v
+            );
+            pcb::destroy(live_pid);
+            return Err(KernelError::InternalError);
+        }
+        // (b) setpgid(live_pid, 0) → 0.
+        let a = SyscallArgs { arg0: live_pid, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SETPGID, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid(live, 0) want 0 got {}", v
+            );
+            pcb::destroy(live_pid);
+            return Err(KernelError::InternalError);
+        }
+        // (c) setpgid(dead_pid, -1) → EINVAL (pgid<0 wins).
+        #[allow(clippy::cast_sign_loss)]
+        let neg = (-1i64) as u64;
+        let a = SyscallArgs { arg0: dead_pid, arg1: neg,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SETPGID, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid(dead, -1) want EINVAL got {}", v
+            );
+            pcb::destroy(live_pid);
+            return Err(KernelError::InternalError);
+        }
+        // (d) setpgid(0x1_0000_0000 | live_pid, 0) → 0.
+        let raw_arg0 = 0x1_0000_0000u64 | live_pid;
+        let a = SyscallArgs { arg0: raw_arg0, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SETPGID, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid(0x1_0000_0000|live, 0) want 0 got {}", v
+            );
+            pcb::destroy(live_pid);
+            return Err(KernelError::InternalError);
+        }
+        pcb::destroy(live_pid);
+        serial_println!(
+            "[syscall/linux]   setpgid existence + gate order: OK"
         );
     }
 

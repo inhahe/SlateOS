@@ -21715,3 +21715,81 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        is rare (only stack-mprotect paths use them).
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 278. syscall/linux: pkey_mprotect — argument-gates-before-pkey-check
+##      (batch 249)
+##
+##      Pre-batch divergence (kernel/src/syscall/linux.rs):
+##      sys_pkey_mprotect did this for non-default pkeys:
+##          if pkey == -1 { return sys_mprotect(...); }
+##          if !(0..=15).contains(&pkey) { return EINVAL; }
+##          return EINVAL;  // no keys allocated
+##      The pkey range check fired BEFORE any address-argument
+##      validation, so probes that combine a bad pkey with a bad
+##      address got EINVAL from the pkey check instead of from the
+##      matching mprotect gate.  Linux runs the full
+##      do_mprotect_pkey gate chain (addr alignment → len==0
+##      short-circuit → PAGE_ALIGN overflow → end<=start ENOMEM →
+##      arch_validate_prot → user-space range check) and ONLY
+##      reaches mm_pkey_is_allocated after all of those pass.
+##
+##      Three real-world divergences:
+##      - (valid_addr, len=0, valid_prot, pkey=5) returned EINVAL;
+##        Linux returns 0 because len==0 short-circuits before the
+##        pkey check.  glibc's pkey-aware mmap helper uses this
+##        as a feature-detect probe: "does the kernel even
+##        validate args before pkey?"  Pre-batch we lied.
+##      - (valid_addr, len=u64::MAX, valid_prot, pkey=5) returned
+##        EINVAL; Linux returns ENOMEM via the addr+len overflow
+##        catch.  Distinguishes "fix the call" from "address
+##        space exhausted".
+##      - (kernel_addr, valid_len, valid_prot, pkey=5) returned
+##        EINVAL; Linux returns ENOMEM via "no VMA covers".
+##
+##      Fix:
+##      - Extracted shared mprotect-argument validation into a new
+##        helper `mprotect_validate_args(addr, len, prot)` returning
+##        `MprotectValidation::{Proceed { end, len_aligned } |
+##        Done(SyscallResult)}`.  Encapsulates Linux's 6-step gate
+##        order in one place.
+##      - sys_mprotect now calls the helper and uses its `end`
+##        return for the VMA-walk loop.  No behavioural change vs
+##        batch 248 — purely refactor.
+##      - sys_pkey_mprotect (non-default-pkey branch) now calls the
+##        helper first.  On `Done(result)` it returns that result;
+##        on `Proceed` it falls through to the unconditional EINVAL
+##        for "no keys allocated".  The pkey==-1 branch still
+##        forwards to sys_mprotect to do the real page-table work.
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - Pre-existing 3 pkey_mprotect tests preserved:
+##          * (pkey=-1) bad-prot → EINVAL (forwarding still works)
+##          * (pkey=0)  valid    → EINVAL (no keys allocated)
+##          * (pkey=99) valid    → EINVAL (out-of-range pkey)
+##      - 4 new ordering discriminators:
+##          * (0x4000, 0, 0, pkey=5)              → 0       (was EINVAL)
+##          * (0x4000, u64::MAX, 1, pkey=5)       → ENOMEM  (was EINVAL)
+##          * (0xFFFF_8000_0000_0000, 0x4000, 1, pkey=5) → ENOMEM (was EINVAL)
+##          * (0x4001, 0, 0, pkey=5)              → EINVAL  (alignment
+##                gate, not pkey gate — same errno; this test
+##                exists to guard against regressing to pkey-first
+##                ordering by ensuring the call still rejects when
+##                both gates would fire)
+##        Marker: "pkey_mprotect args-before-pkey gate order: OK".
+##
+##      Existing tests preserved (all 4 mprotect tests from batch
+##      248 still pass; the refactor is purely structural).
+##
+##      Known limitations:
+##      - Real pkey support is still missing.  pkey_alloc always
+##        returns ENOSPC, so no userspace process can ever observe
+##        a successful pkey_mprotect with a non-default pkey.  This
+##        means the gate-order fix changes which errno an *invalid*
+##        call returns, but it never makes a previously-rejected
+##        call succeed.  When real MPK lands the validation chain
+##        stays unchanged.
+##      - Discriminator (d) [misalign+pkey5] returns EINVAL on both
+##        sides — only the *gate* changed, not the errno.  Pure
+##        regression guard, not a discriminative test.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

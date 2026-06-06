@@ -4115,75 +4115,102 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 /// than `MPROTECT_FULL_FLUSH_PAGES` 4 KiB pages we promote to a full
 /// `crate::tlb::flush_all` (one CR3 reload per CPU) since N×4 invlpg
 /// becomes more expensive than dumping the whole TLB.
-fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
+/// Outcome of mprotect argument validation.
+///
+/// `Proceed { end, len_aligned }` means all argument gates passed and
+/// the caller should proceed to the VMA walk.  `Done(result)` means
+/// the call short-circuits with the given result — covers both the
+/// `len == 0 → 0` success path and every argument-error path.
+///
+/// Shared between [`sys_mprotect`] and [`sys_pkey_mprotect`] so they
+/// run identical Linux-style gate sequences before diverging on the
+/// pkey-allocation check.
+enum MprotectValidation {
+    Proceed { end: u64, len_aligned: u64 },
+    Done(SyscallResult),
+}
+
+/// Run Linux's mprotect argument validation (Linux gate order from
+/// `mm/mprotect.c::do_mprotect_pkey`).  Does not touch page tables.
+///
+/// Gate order:
+///   1. addr & (PAGE_SIZE - 1)                → -EINVAL
+///   2. !len                                  → 0
+///   3. PAGE_ALIGN(len) overflow              → -ENOMEM
+///   4. addr + len_aligned overflow           → -ENOMEM
+///   5. prot & ~PROT_VALID_MASK               → -EINVAL  (arch_validate_prot)
+///   6. range outside user space              → -ENOMEM  (find_vma_intersection NULL)
+fn mprotect_validate_args(addr: u64, len: u64, prot: u64) -> MprotectValidation {
     use crate::mm::frame::FRAME_SIZE;
-    use crate::mm::page_table::{self, PageFlags, VirtAddr, USER_SPACE_END};
+    use crate::mm::page_table::USER_SPACE_END;
 
     const PROT_READ: u64 = 1;
     const PROT_WRITE: u64 = 2;
     const PROT_EXEC: u64 = 4;
     const PROT_VALID_MASK: u64 = PROT_READ | PROT_WRITE | PROT_EXEC;
 
+    let frame_size = FRAME_SIZE as u64;
+    // (1) addr must be frame-aligned.
+    if (addr & (frame_size - 1)) != 0 {
+        return MprotectValidation::Done(linux_err(errno::EINVAL));
+    }
+    // (2) POSIX: zero-length range succeeds without doing anything.
+    if len == 0 {
+        return MprotectValidation::Done(SyscallResult::ok(0));
+    }
+    // (3) Round len up to whole frames.  Linux silently wraps via
+    // PAGE_ALIGN and catches it in (4); we explicitly catch the wrap.
+    let len_aligned = match len
+        .checked_add(frame_size - 1)
+        .map(|v| v & !(frame_size - 1))
+    {
+        Some(v) => v,
+        None => return MprotectValidation::Done(linux_err(errno::ENOMEM)),
+    };
+    // (4) end = addr + len_aligned; overflow → ENOMEM.
+    let end = match addr.checked_add(len_aligned) {
+        Some(e) => e,
+        None => return MprotectValidation::Done(linux_err(errno::ENOMEM)),
+    };
+    // (5) Reject unknown prot bits (arch_validate_prot equivalent).
+    if (prot & !PROT_VALID_MASK) != 0 {
+        return MprotectValidation::Done(linux_err(errno::EINVAL));
+    }
+    // (6) Range must lie entirely in user space — Linux's
+    // find_vma_intersection returns NULL for kernel addresses and
+    // surfaces ENOMEM.
+    if addr >= USER_SPACE_END || end > USER_SPACE_END {
+        return MprotectValidation::Done(linux_err(errno::ENOMEM));
+    }
+    MprotectValidation::Proceed { end, len_aligned }
+}
+
+fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    const PROT_WRITE: u64 = 2;
+    const PROT_EXEC: u64 = 4;
+
     let addr = args.arg0;
     let len = args.arg1;
     let prot = args.arg2;
 
-    // Gate order matches Linux's mm/mprotect.c::do_mprotect_pkey:
-    //   1. start & ~PAGE_MASK                  → -EINVAL
-    //   2. !len                                → 0
-    //   3. len = PAGE_ALIGN(len)               (may wrap)
-    //   4. end = start + len; end <= start     → -ENOMEM
-    //   5. !arch_validate_prot(prot, start)    → -EINVAL
-    //   6. find_vma_intersection range miss    → -ENOMEM
-    //
-    // Pre-batch divergences fixed here:
-    //  - `len == 0 -> 0` ran *before* alignment, so a probe with a
-    //    misaligned addr and len=0 saw 0 where Linux returns EINVAL.
-    //  - len-PAGE_ALIGN overflow and addr+len overflow both returned
-    //    EINVAL; Linux returns ENOMEM via the end<=start check.
-    //  - Out-of-user-space returned EFAULT; Linux returns ENOMEM via
-    //    "no VMA covers this range" (find_vma_intersection NULL).
+    // All Linux gate-order validation is delegated to
+    // [`mprotect_validate_args`] so that [`sys_pkey_mprotect`] can
+    // share the exact same gate sequence before its pkey check.
+    // See that fn's doc comment for the full Linux gate order.
     //
     // Address alignment still uses our 16 KiB internal frame size
     // rather than the 4 KiB Linux ABI PAGE_SIZE; the page tables
     // genuinely operate at 16 KiB granularity so accepting a
     // 4-KiB-aligned-but-not-16K input would either fail the VMA walk
     // or apply the change to too wide a range.
-
-    // (1) addr must be frame-aligned.
+    let end = match mprotect_validate_args(addr, len, prot) {
+        MprotectValidation::Proceed { end, len_aligned: _ } => end,
+        MprotectValidation::Done(result) => return result,
+    };
     let frame_size = FRAME_SIZE as u64;
-    if (addr & (frame_size - 1)) != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // (2) POSIX: zero-length range succeeds without doing anything.
-    if len == 0 {
-        return SyscallResult::ok(0);
-    }
-    // (3) Round len up to whole frames.  Linux silently wraps via
-    // PAGE_ALIGN and catches it in (4); we explicitly catch the wrap
-    // and report the same ENOMEM the (4) gate would have reported.
-    let len_aligned = match len
-        .checked_add(frame_size - 1)
-        .map(|v| v & !(frame_size - 1))
-    {
-        Some(v) => v,
-        None => return linux_err(errno::ENOMEM),
-    };
-    // (4) end = addr + len_aligned; overflow → ENOMEM.
-    let end = match addr.checked_add(len_aligned) {
-        Some(e) => e,
-        None => return linux_err(errno::ENOMEM),
-    };
-    // (5) Reject unknown prot bits (arch_validate_prot equivalent).
-    if (prot & !PROT_VALID_MASK) != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // (6) Range must lie entirely in user space — Linux's
-    // find_vma_intersection returns NULL for kernel addresses and
-    // surfaces ENOMEM.
-    if addr >= USER_SPACE_END || end > USER_SPACE_END {
-        return linux_err(errno::ENOMEM);
-    }
 
     // Resolve the caller's PML4.
     let task_id = crate::sched::current_task_id();
@@ -18763,25 +18790,56 @@ fn sys_pkey_free(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `pkey_mprotect(addr, len, prot, pkey)`.
+///
+/// Linux's `mm/mprotect.c::SYSCALL_DEFINE4(pkey_mprotect)` forwards
+/// to `do_mprotect_pkey(addr, len, prot, pkey)`, which runs all the
+/// mprotect argument gates (addr alignment, len==0 short-circuit,
+/// PAGE_ALIGN overflow, end<=start ENOMEM, arch_validate_prot, VMA
+/// lookup) BEFORE the pkey-allocation check
+/// (`mm_pkey_is_allocated(mm, pkey) → false → -EINVAL`).
+///
+/// Pre-batch we ran the pkey range check ahead of every mprotect
+/// argument gate, so probes like `(misaligned, valid_len, valid_prot,
+/// pkey=5)` got EINVAL from the pkey check rather than the alignment
+/// check, and probes like `(valid_addr, 0, valid_prot, pkey=5)` got
+/// EINVAL where Linux returns 0 (len==0 short-circuits before pkey).
 fn sys_pkey_mprotect(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let len = args.arg1;
+    let prot = args.arg2;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pkey = args.arg3 as i32;
-    // pkey == -1 means "default key" → forward to mprotect.
+
+    // pkey == -1 means "default key" → forward to mprotect (which
+    // does the actual page-table work after validation).
     if pkey == -1 {
         let mp_args = SyscallArgs {
-            arg0: args.arg0,
-            arg1: args.arg1,
-            arg2: args.arg2,
+            arg0: addr,
+            arg1: len,
+            arg2: prot,
             arg3: 0,
             arg4: 0,
             arg5: 0,
         };
         return sys_mprotect(&mp_args);
     }
-    if !(0..=15).contains(&pkey) {
-        return linux_err(errno::EINVAL);
+
+    // Non-default pkey: run mprotect's full argument-validation gate
+    // chain first.  If validation short-circuits (zero-length success
+    // or any error), return that result — matches Linux's ordering.
+    match mprotect_validate_args(addr, len, prot) {
+        MprotectValidation::Done(result) => return result,
+        MprotectValidation::Proceed { .. } => {}
     }
-    // Non-default pkey, but no keys are allocated.
+
+    // All argument gates passed.  In Linux, the next check is
+    // `mm_pkey_is_allocated(mm, pkey)`.  Pkeys 0..=15 fit in the
+    // PKRU bitmap; values outside that range are unallocated by
+    // construction.  This kernel never allocates a non-default pkey
+    // (pkey_alloc returns ENOSPC for everyone), so any
+    // pkey != -1 is unallocated → EINVAL.  Including out-of-range
+    // pkeys, which Linux also surfaces as EINVAL via the same
+    // bitmap-bit-out-of-range path.
     linux_err(errno::EINVAL)
 }
 
@@ -41406,6 +41464,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pkey_mprotect bad pkey not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 249: mprotect-style argument gates fire BEFORE the
+        // pkey-allocation check (matches Linux's do_mprotect_pkey).
+        // Discriminators are picked so the pre-batch implementation
+        // returned EINVAL via the pkey check while Linux returns a
+        // different result via the earlier gate.
+        // (a) valid addr + len=0 + pkey=5 → 0 (was EINVAL).
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0, arg3: 5, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_MPROTECT, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: pkey_mprotect aligned+len0+pkey5 not 0");
+            return Err(KernelError::InternalError);
+        }
+        // (b) valid addr + len=u64::MAX + pkey=5 → ENOMEM (was EINVAL).
+        let a = SyscallArgs { arg0: 0x4000, arg1: u64::MAX, arg2: 1, arg3: 5, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_MPROTECT, &a).value != -i64::from(errno::ENOMEM) {
+            serial_println!("[syscall/linux]   FAIL: pkey_mprotect len-overflow+pkey5 not ENOMEM");
+            return Err(KernelError::InternalError);
+        }
+        // (c) kernel addr + valid len + pkey=5 → ENOMEM (was EINVAL).
+        let a = SyscallArgs {
+            arg0: 0xFFFF_8000_0000_0000,
+            arg1: 0x4000, arg2: 1, arg3: 5, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PKEY_MPROTECT, &a).value != -i64::from(errno::ENOMEM) {
+            serial_println!("[syscall/linux]   FAIL: pkey_mprotect kernel-addr+pkey5 not ENOMEM");
+            return Err(KernelError::InternalError);
+        }
+        // (d) misaligned addr + len=0 + pkey=5 → EINVAL via alignment
+        // (pre-batch returned EINVAL via pkey check — same errno but
+        // a different code path; this test guards against regressing
+        // to the pkey-first ordering).  No new errno to assert, just
+        // that the call still rejects.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0, arg2: 0, arg3: 5, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PKEY_MPROTECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pkey_mprotect misalign+pkey5 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   pkey_mprotect args-before-pkey gate order: OK");
 
         // get_robust_list negative pid -> ESRCH.
         // Linux's find_task_by_vpid rejects pid<0 with NULL; the

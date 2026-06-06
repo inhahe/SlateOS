@@ -24326,3 +24326,127 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          the silent hang into an observable panic.
 ##
 
+313. [2026-06-06] Batch 283: Linux ABI translation —
+     sys_mincore: introduce explicit ENOMEM gate for
+     (addr+length) leaving user address space, ordered
+     BEFORE the NULL-vec EFAULT gate so probes see Linux's
+     documented errno.
+
+     Pre-batch divergence
+     --------------------
+     Linux's mm/mincore.c::SYSCALL_DEFINE3(mincore) runs
+     gates in this order:
+       1. start & ~PAGE_MASK                -> -EINVAL
+       2. !access_ok(start, len)             -> -ENOMEM
+       3. pages = compute_from(len)
+       4. !access_ok(vec, pages)             -> -EFAULT
+     Our pre-batch stub ran them as:
+       1. addr % PAGE_SIZE                   -> -EINVAL
+       2. length == 0                        -> 0
+       3. vec_ptr == 0                       -> -EFAULT
+       4. validate_user_write(vec, pages)    -> errno
+       5. validate_user_read(addr, length)   -> -ENOMEM
+     The ENOMEM gate corresponded to Linux's gate 2 but
+     fired LAST, after the NULL-vec gate.  Worse, it went
+     through validate_user_read which is a no-op in
+     kernel context — meaning kernel-context probes never
+     observed the ENOMEM path at all.  Two probe shapes
+     surfaced the divergence:
+       - (USER_SPACE_END, 0x4000, NULL):
+           pre-batch -> -EFAULT
+           Linux     -> -ENOMEM (access_ok fails on a
+                        range crossing TASK_SIZE)
+       - (u64::MAX & !0x3FFF, 0x4000, NULL):
+           pre-batch -> -EFAULT
+           Linux     -> -ENOMEM (access_ok fails on a
+                        range that wraps past 2^64)
+
+     Fix
+     ---
+     Inserted a new gate between the alignment check and
+     the length==0 short-circuit:
+         if length != 0 {
+             let fits = match addr.checked_add(length) {
+                 Some(end) => end
+                              <= USER_SPACE_END,
+                 None => false,
+             };
+             if !fits {
+                 return linux_err(errno::ENOMEM);
+             }
+         }
+     USER_SPACE_END = 0x0000_8000_0000_0000 is our x86_64
+     TASK_SIZE equivalent.  checked_add(...) returning
+     None catches the addr+len > 2^64 wraparound case;
+     `end > USER_SPACE_END` catches the more common
+     "range crosses into kernel half" case.  The gate is
+     pre-bypass (no validate_user_* call), so
+     kernel-context self-tests can drive it.  The
+     length==0 short-circuit was preserved so callers
+     that legitimately pass len=0 (a documented "this
+     does nothing" idiom on Linux) keep getting 0 back.
+
+     Tail of the routine is unchanged: vec_ptr == 0
+     -> EFAULT, validate_user_write(vec, pages),
+     residency byte-stream writes, etc.  The
+     validate_user_read(addr, length) call that
+     previously stood for the ENOMEM gate is removed —
+     the new pre-bypass check supersedes it, and keeping
+     a bypassable check downstream would have been dead
+     code in self-tests.
+
+     New self-tests (probe-distinguishable in kernel
+     context, fire before validate_user_* bypass):
+       - mincore(USER_SPACE_END, 0x4000, NULL) -> ENOMEM
+         (addr+len just barely exits user space; pre-fix
+         this returned EFAULT)
+       - mincore(u64::MAX & !0x3FFF, 0x4000, NULL)
+         -> ENOMEM
+         (addr+len overflows past u64::MAX; pre-fix this
+         returned EFAULT)
+
+     Marker: "mincore addr+len ENOMEM gating: OK"
+
+     Preserved self-tests (still pass post-batch):
+       - mincore misaligned addr (0x4001) -> EINVAL
+         (gate 1 still fires first)
+       - mincore length=0 -> 0
+         (the new gate is conditional on length != 0;
+         length==0 short-circuits before the NULL-vec
+         gate)
+       - mincore(0x4000, 0x4000, NULL) -> EFAULT
+         (in-bounds backing range, so the new ENOMEM gate
+         passes, then NULL-vec gate fires)
+       - mincore(0x4000, 0x4000, vec) -> 0 with vec[0]==1
+         and untouched 0xCC sentinel beyond page 0
+       - mincore(0x4000, 5*0x4000, vec) -> 0 with all
+         five vec bytes == 0x01 and untouched sentinel
+
+     Known limitations
+     -----------------
+     - Page size for the bounds-check granularity is
+       still 16 KiB (matching our PAGE_SIZE), not Linux's
+       4 KiB.  An addr that's 16 KiB-aligned but not
+       4 KiB-aligned can't exist (16 is a multiple of 4),
+       so the alignment gate is strictly stricter than
+       Linux's — calls Linux would accept with a
+       4 KiB-aligned but not 16 KiB-aligned addr still
+       see EINVAL here.  Documented under "Page size
+       divergences" in earlier batches; not addressed
+       by this batch.
+     - validate_user_read(addr, length) is no longer
+       called.  In a real-user-context process this had
+       no observable effect: it ran AFTER the routine
+       had already decided to write resident bytes (we
+       had already validated the vec buffer and started
+       writing).  Linux's loop walks the actual VMA and
+       can return ENOMEM mid-write for the unmapped
+       case; our kernel has no swap and no demand
+       paging, so every mapped page is unconditionally
+       resident and any unmapped page would be visible
+       earlier through the explicit bounds check.
+
+     Build: cargo build -p kernel clean.
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 24s).
+

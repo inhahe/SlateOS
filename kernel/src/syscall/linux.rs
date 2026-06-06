@@ -20432,26 +20432,54 @@ fn sys_mincore(args: &SyscallArgs) -> SyscallResult {
     let addr = args.arg0;
     let length = args.arg1;
     let vec_ptr = args.arg2;
-    // addr must be 16 KiB aligned.
+    // (1) addr must be page-aligned (16 KiB here).  Linux: `start &
+    // ~PAGE_MASK → -EINVAL` is the first gate.
     if addr % 0x4000 != 0 {
         return linux_err(errno::EINVAL);
     }
+    // (2) Backing range [addr, addr+length) must lie inside user
+    // address space.  Linux's mm/mincore.c::SYSCALL_DEFINE3(mincore)
+    // runs `!access_ok((void __user *) start, len) → -ENOMEM` BEFORE
+    // it checks the `vec` pointer; a probe with `(addr=TASK_SIZE,
+    // len=0x4000, vec=NULL)` therefore sees ENOMEM on Linux, not
+    // EFAULT.  Pre-batch we deferred the backing-range test until
+    // AFTER the NULL-vec gate (and used validate_user_read, which the
+    // kernel-context bypass turns into a no-op for self-tests, so the
+    // ENOMEM path could never fire from in-kernel probes at all).
+    // Switch to an explicit checked-add bound against USER_SPACE_END
+    // (= 0x0000_8000_0000_0000, our x86_64 TASK_SIZE equivalent):
+    //   - addr.checked_add(length) overflowing past u64::MAX → ENOMEM
+    //   - addr + length > USER_SPACE_END                       → ENOMEM
+    // This gate is pre-bypass (it doesn't go through validate_user_*),
+    // so kernel-context self-tests can drive it.  length==0 is
+    // explicitly allowed through (matches Linux access_ok semantics
+    // and the short-circuit below).
+    if length != 0 {
+        let fits = match addr.checked_add(length) {
+            Some(end) => end <= crate::mm::page_table::USER_SPACE_END,
+            None => false,
+        };
+        if !fits {
+            return linux_err(errno::ENOMEM);
+        }
+    }
+    // (3) length == 0 short-circuit.  Linux: pages = 0 → both access_ok
+    // calls trivially succeed → returns 0.  Pull it out as an explicit
+    // gate so the rest of the routine doesn't have to reason about
+    // div_ceil(0) corner cases.
     if length == 0 {
         return SyscallResult::ok(0);
     }
+    // (4) vec is one byte per page; pages = ceil(length / 16 KiB).
+    let pages = length.div_ceil(0x4000);
+    // (5) NULL vec → EFAULT (matches Linux's access_ok(vec, pages)
+    // failure for the NULL case, where pages > 0 here).  Explicit
+    // because validate_user_write below is a no-op in kernel context.
     if vec_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-    // vec is one byte per page; pages = ceil(length / 16 KiB).
-    let pages = length.div_ceil(0x4000);
     if let Err(e) = crate::mm::user::validate_user_write(vec_ptr, pages as usize) {
         return linux_err(linux_errno_for(e));
-    }
-    // Backing range must lie in user space; if validate_user_read of
-    // the page-aligned span fails we report ENOMEM (Linux's documented
-    // "addr+length spans an unmapped region" error).
-    if let Err(_e) = crate::mm::user::validate_user_read(addr, length as usize) {
-        return linux_err(errno::ENOMEM);
     }
     // Write one byte of 0x01 (bit 0 = resident, bits 1..7 = reserved)
     // per page.  We have no swap and no demand paging, so every page
@@ -44283,12 +44311,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mincore len=0 not 0");
             return Err(KernelError::InternalError);
         }
-        // mincore NULL vec -> EFAULT.
+        // mincore NULL vec -> EFAULT.  In-bounds backing range (0x4000
+        // + 0x4000 = 0x8000 < USER_SPACE_END), so the new ENOMEM gate
+        // passes and the literal NULL-vec gate fires — preserving the
+        // pre-batch errno discriminator for this case.
         let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MINCORE, &a).value != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: mincore NULL vec not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // Batch 283: mincore addr+len out of user space -> ENOMEM
+        // (Linux's access_ok(start, len) gate fires before the vec
+        // check).  USER_SPACE_END = 0x0000_8000_0000_0000 on our
+        // x86_64 layout; (addr=USER_SPACE_END, len=0x4000) overflows
+        // past the user/kernel boundary, so Linux returns ENOMEM.
+        // Pre-batch we returned EFAULT here because the NULL-vec gate
+        // fired before any backing-range check — probe-distinguishable.
+        let a = SyscallArgs {
+            arg0: crate::mm::page_table::USER_SPACE_END,
+            arg1: 0x4000,
+            arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MINCORE, &a).value != -i64::from(errno::ENOMEM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mincore TASK_SIZE+len not ENOMEM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 283: mincore addr+len wraparound past u64::MAX -> ENOMEM
+        // (checked_add returning None mirrors Linux's access_ok
+        // overflow path).  Use a page-aligned addr near u64::MAX so we
+        // pass gate 1 and provoke the overflow exclusively.
+        let a = SyscallArgs {
+            arg0: u64::MAX & !0x3FFFu64,
+            arg1: 0x4000,
+            arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MINCORE, &a).value != -i64::from(errno::ENOMEM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mincore addr+len overflow not ENOMEM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mincore addr+len ENOMEM gating: OK"
+        );
         // mincore(addr, 1 page, vec) -> 0 with vec[0] == 0x01
         // (batch 109 upgrade: pre-batch returned -ENOSYS
         // unconditionally; post-batch returns "page resident" because

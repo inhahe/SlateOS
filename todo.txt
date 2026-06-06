@@ -31579,3 +31579,77 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.72s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+382. syscall/linux batch 352 — sys_futex op int truncation.
+
+     Linux ABI (kernel/futex/syscalls.c):
+
+       SYSCALL_DEFINE6(futex, u32 __user *, uaddr, int, op,
+                              u32, val,
+                              struct __kernel_timespec __user *, utime,
+                              u32 __user *, uaddr2, u32, val3)
+
+     `op` is declared `int`, so the x86_64 syscall ABI truncates rsi
+     to its low 32 bits before the switch.
+
+     Pre-batch divergence:
+
+       let uaddr = args.arg0;
+       let raw_op = args.arg1;                  // u64, no truncation
+       let op = raw_op & FUTEX_CMD_MASK;
+       match op { FUTEX_WAIT(0) => ..., FUTEX_WAKE(1) => ...,
+                  FUTEX_WAIT_BITSET(9) => ..., FUTEX_WAKE_BITSET(10) => ...,
+                  _ => linux_err(ENOSYS) }
+
+     A caller passing op=0x1_0000_0001 (high garbage + FUTEX_WAKE) saw
+     ENOSYS where Linux truncates to int=1 and dispatches FUTEX_WAKE.
+
+     Fix:
+
+       #[allow(clippy::cast_possible_truncation)]
+       let raw_op = u64::from(args.arg1 as u32);
+       let op = raw_op & FUTEX_CMD_MASK;
+
+     Both FUTEX_CLOCK_REALTIME (0x100) and FUTEX_PRIVATE_FLAG (0x80)
+     live in the low 9 bits, so the truncated raw_op still carries
+     them; the existing CMD_MASK strips them cleanly into op.
+
+     Self-test probes (5, labelled a..e):
+
+       a. op=0x1_0000_0001 -> truncates to 1 (FUTEX_WAKE), no waiters
+          -> 0.  Pre-batch: ENOSYS.
+       b. op=0xFFFF_FFFF_0000_0009 -> truncates to 9 (FUTEX_WAIT_
+          BITSET) with mask=0xFFFFFFFF, val=1, futex=0 (mismatch) -> 0.
+          Pre-batch: ENOSYS.
+       c. op=0x1_0000_000B -> truncates to 11 (FUTEX_LOCK_PI2, not
+          implemented) -> ENOSYS regression guard.
+       d. op=0x1_0000_0081 (FUTEX_WAKE | FUTEX_PRIVATE_FLAG with
+          high garbage) -> truncates to 0x81, CMD_MASK strips 0x80
+          leaving op=1, dispatches FUTEX_WAKE -> 0.  Verifies the
+          PRIVATE flag bit survives truncation and is stripped
+          correctly.
+       e. 4-case cast-isolation table verifies the u64 -> u32 -> u64
+          widening across high-garbage, sign-extended-looking, and
+          PRIVATE-flag-carrying inputs.
+
+     First-build correction: probe (d) initially used op=0x89
+     (FUTEX_WAIT_BITSET | PRIVATE = 0x09|0x80) by mistake.  With
+     val3=arg5=0 the WAIT_BITSET arm rejects mask==0 with EINVAL
+     before the cast even matters, so the probe failed.  Corrected
+     to op=0x81 (FUTEX_WAKE_OP | PRIVATE_FLAG), which is the actual
+     case the comment describes.  Caught by the boot self-test on
+     the first run — the test infrastructure works.
+
+     Known limitations / kernel-context observations:
+
+       - FUTEX_WAKE with val=0 returns 0 (no waiters, 0 woken),
+         matching Linux.  Probes (a) and (d) exploit this to verify
+         the truncated op dispatches to the correct handler without
+         needing an actual waiter.
+
+     Twelfth int-truncation batch after 308, 309, 310, 311, 312,
+     313, 314, 340, 348, 349, 350, 351.
+
+     Build: cargo build -p kernel clean (39.68s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

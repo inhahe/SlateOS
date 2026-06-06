@@ -25200,7 +25200,25 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
     const FUTEX_CMD_MASK: u64 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
     let uaddr = args.arg0;
-    let raw_op = args.arg1;
+    // Linux signature (kernel/futex/syscalls.c):
+    //   SYSCALL_DEFINE6(futex, u32 __user *, uaddr, int, op, u32, val,
+    //                          struct __kernel_timespec __user *, utime,
+    //                          u32 __user *, uaddr2, u32, val3)
+    //
+    // `op` is declared `int`, so the x86_64 syscall ABI truncates rsi
+    // to its low 32 bits before the body runs.  Pre-batch (351) we
+    // kept `raw_op = args.arg1` at full u64 width, so a caller passing
+    // op = 0x1_0000_0001 (high-half garbage + FUTEX_WAKE=1) saw the
+    // default arm `_ => ENOSYS` where Linux truncates to int=1 and
+    // dispatches FUTEX_WAKE.  FUTEX_CLOCK_REALTIME (0x100) and
+    // FUTEX_PRIVATE_FLAG (0x80) both live in the low 9 bits, so
+    // truncating raw_op to its low 32 bits preserves the clockid
+    // check at the same gate.
+    //
+    // Twelfth instance of the int-truncation shape after batches
+    // 308..314, 340, 348, 349, 350, 351.
+    #[allow(clippy::cast_possible_truncation)]
+    let raw_op = u64::from(args.arg1 as u32);
     let op = raw_op & FUTEX_CMD_MASK;
     let val = args.arg2;
     let timeout_ptr = args.arg3;
@@ -47652,6 +47670,100 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT regression not 0");
                 return Err(KernelError::InternalError);
             }
+
+            // Batch 352: FUTEX op int truncation.
+            //
+            // Linux's SYSCALL_DEFINE6(futex, ..., int op, ...) truncates
+            // rsi to its low 32 bits before the switch.  Pre-batch we
+            // kept raw_op = args.arg1 at u64 width, so high-half garbage
+            // skipped past every match arm to the ENOSYS default arm
+            // where Linux would dispatch the truncated op.
+
+            // (a) op = 0x1_0000_0001 (high garbage + FUTEX_WAKE_OP=1)
+            //     with futex_ptr/val=0 -> truncates to 1, dispatches
+            //     FUTEX_WAKE, no waiters -> 0.  Pre-batch: ENOSYS.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: 0x1_0000_0001,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX(high|WAKE) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (b) op = 0xFFFF_FFFF_0000_0009 (sign-extended-looking high
+            //     half + FUTEX_WAIT_BITSET=9) with mask=0xFFFFFFFF,
+            //     val=1, futex_ptr value=0 (mismatch) -> 0.
+            //     Pre-batch: ENOSYS.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: 0xFFFF_FFFF_0000_0009,
+                arg2: 1, arg3: 0, arg4: 0, arg5: 0xFFFF_FFFF,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX(sxhigh|WAIT_BITSET) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (c) op = 0x1_0000_000B (high garbage + 11 = FUTEX_LOCK_PI2,
+            //     unsupported).  Truncates to 11 -> still ENOSYS.
+            //     Regression guard: an unsupported truncated op must
+            //     still return ENOSYS.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: 0x1_0000_000B,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value
+                != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX(high|LOCK_PI2) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (d) op = 0x1_0000_0081 (high garbage + FUTEX_WAKE_OP=1 |
+            //     FUTEX_PRIVATE_FLAG=0x80) -> truncates to 0x81, FUTEX_
+            //     CMD_MASK strips 0x80 leaving op=1, dispatches
+            //     FUTEX_WAKE -> 0.  Verifies that the PRIVATE flag bit
+            //     survives truncation and stripping in the right order.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: 0x1_0000_0081,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX(high|WAKE|PRIVATE) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (e) Cast-isolation: 4-case table verifying the u64 -> u32
+            //     -> u64 widening preserves the low-32 bit pattern and
+            //     zeroes the high half.
+            let cases: [(u64, u64); 4] = [
+                (0x1_0000_0001,         1),
+                (0xFFFF_FFFF_0000_0009, 9),
+                (0x1_0000_000B,         11),
+                (0x1_0000_0081,         0x81),
+            ];
+            for &(input, expect) in &cases {
+                #[allow(clippy::cast_possible_truncation)]
+                let got = u64::from(input as u32);
+                if got != expect {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: futex trunc {:#x} -> {:#x} (want {:#x})",
+                        input, got, expect
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            serial_println!(
+                "[syscall/linux]   futex op int truncation: OK"
+            );
         }
 
         // membarrier (batch 114): full cmd set.

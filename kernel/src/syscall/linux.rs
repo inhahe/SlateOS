@@ -12366,16 +12366,28 @@ fn sys_io_uring_setup(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     // Gate 4 (io_uring_create): entries == 0 -> EINVAL.
-    if args.arg0 == 0 {
+    //
+    // Linux signature: SYSCALL_DEFINE2(io_uring_setup, u32, entries,
+    // struct io_uring_params __user *, params).  `entries` is C `u32`,
+    // delivered in rdi.  The AMD64 syscall ABI does not zero-extend
+    // `u32` args before issuing syscall, so only the low 32 bits of
+    // `entries` are defined; the high half is caller-supplied garbage.
+    // Mask to u32 before any range comparison so high-half garbage
+    // doesn't spuriously trip the `entries > IORING_MAX_ENTRIES` reject
+    // and surface EINVAL where Linux would accept a low-half-valid
+    // entries count and fall through to ENOSYS.
+    #[allow(clippy::cast_possible_truncation)]
+    let entries = args.arg0 as u32;
+    if entries == 0 {
         return linux_err(errno::EINVAL);
     }
     // Gate 5 (io_uring_create): entries > IORING_MAX_ENTRIES -> EINVAL
     // unless IORING_SETUP_CLAMP is set, in which case Linux silently
     // clamps and proceeds.  Mirror the no-CLAMP case here (we return
     // ENOSYS anyway, so the CLAMP path also terminates as ENOSYS).
-    const IORING_MAX_ENTRIES: u64 = 32768;
+    const IORING_MAX_ENTRIES: u32 = 32768;
     const IORING_SETUP_CLAMP: u32 = 1 << 4;
-    if args.arg0 > IORING_MAX_ENTRIES && flags & IORING_SETUP_CLAMP == 0 {
+    if entries > IORING_MAX_ENTRIES && flags & IORING_SETUP_CLAMP == 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -39868,6 +39880,85 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   io_uring_setup read > resv > flags > entries gate order: OK"
         );
+
+        // io_uring_setup entries is C `u32` in the Linux prototype,
+        // delivered in rdi.  The AMD64 syscall ABI does not zero-extend
+        // `u32` args before issuing syscall, so high-half garbage must
+        // be masked off before any range comparison.  Pre-batch a raw
+        // `args.arg0 > IORING_MAX_ENTRIES` comparison surfaced EINVAL
+        // for any high-bit-set entries (e.g. 0x1_0000_0008) where Linux
+        // would mask the high half, accept entries=8, and fall through
+        // to ENOSYS in this kernel.
+        //
+        // (Use a fresh zero-filled 120-byte params buffer so we exercise
+        // entries gates 4/5 in isolation — copy_from_user, resv, and
+        // flag-mask gates all pass with the zero buffer.)
+        let mut entries_params = [0u8; 120];
+        let entries_params_ptr = entries_params.as_mut_ptr() as u64;
+        core::hint::black_box(&entries_params);
+        // (a) entries=0x1_0000_0000 (high-only, low=0) -> low-half is 0,
+        //     gate 4 (entries==0) -> EINVAL.  Pre-batch path was
+        //     gate 5 (raw u64 > MAX) -> EINVAL; same errno but the
+        //     correct gate now fires.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: entries_params_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(entries=0x1_0000_0000) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) entries=0x1_0000_0008 (high|valid-8) -> low-half=8, gates
+        //     4 and 5 pass, terminal ENOSYS.  Pre-batch raw u64 >
+        //     IORING_MAX_ENTRIES tripped EINVAL — primary discriminator.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0008,
+            arg1: entries_params_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(entries=0x1_0000_0008) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) entries=0x1_0000_8001 (high|low > MAX) -> low-half=32769
+        //     > IORING_MAX_ENTRIES -> EINVAL preserved.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_8001,
+            arg1: entries_params_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(entries=0x1_0000_8001) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) entries=0xFFFF_FFFF_0000_0008 (all-high|valid-8) -> ENOSYS.
+        let a = SyscallArgs {
+            arg0: 0xFFFF_FFFF_0000_0008,
+            arg1: entries_params_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(entries=0xFFFF_FFFF_0000_0008) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        core::hint::black_box(&entries_params);
+        serial_println!(
+            "[syscall/linux]   io_uring_setup entries u32-truncation (high-half ignored): OK"
+        );
+
         // io_uring_enter — input validation + EBADF (no ring fds exist).
         //
         // Pre-batch-132 these returned bare ENOSYS with no input

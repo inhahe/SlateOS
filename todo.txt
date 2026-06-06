@@ -29372,3 +29372,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (40.84s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+363. Batch 333 — sys_io_uring_setup unsigned-int
+     truncation (high-half ignored).
+
+     Divergence: Linux's prototype is
+       SYSCALL_DEFINE2(io_uring_setup,
+                       u32, entries,
+                       struct io_uring_params __user *, params)
+     where `entries` is `u32`, delivered in rdi.  The
+     AMD64 syscall ABI does not zero-extend `u32` args
+     before issuing syscall, so only the low 32 bits
+     of `entries` are defined; the high half is
+     caller-supplied garbage that the kernel must mask
+     off before any range comparison.
+
+     Pre-batch sys_io_uring_setup gated entries at u64
+     width:
+       if args.arg0 == 0 { ... EINVAL }
+       const IORING_MAX_ENTRIES: u64 = 32768;
+       if args.arg0 > IORING_MAX_ENTRIES && ... { EINVAL }
+     Any high-bit garbage in arg0 (e.g.
+     0x1_0000_0008) made the raw u64 > 32768 comparison
+     trip and surface EINVAL where Linux would mask
+     entries to 8 (a valid count below MAX), accept the
+     call, and fall through to ENOSYS in this kernel.
+
+     Fix: cast `args.arg0` to `u32` at entry with
+     `#[allow(clippy::cast_possible_truncation)]`,
+     change `IORING_MAX_ENTRIES` from `u64` to `u32` so
+     the comparison happens at the correct width, and
+     run both entries==0 and entries>MAX gates against
+     the masked value.  This was logged as a known
+     limitation in batch 332's todo entry (entry 362).
+
+     Tests: four boot-time probes added after the
+     existing "io_uring_setup read > resv > flags >
+     entries gate order: OK" marker, all using a fresh
+     120-byte zero-filled params buffer so copy_from_user,
+     resv, and flag-mask gates all pass and the
+     discriminator is solely the post-mask entries
+     value:
+       (a) entries=0x1_0000_0000 (high-only, low=0)
+           -> EINVAL via gate 4 (entries==0).  Pre-batch
+           tripped gate 5 (raw u64 > MAX) with the same
+           errno but via the wrong gate; post-batch the
+           correct gate fires.
+       (b) entries=0x1_0000_0008 (high|valid-8)
+           -> ENOSYS (was EINVAL pre-batch).  Primary
+           discriminator.
+       (c) entries=0x1_0000_8001 (high|low=32769>MAX)
+           -> EINVAL preserved (low-half still exceeds
+           IORING_MAX_ENTRIES).
+       (d) entries=0xFFFF_FFFF_0000_0008 (all-high|
+           valid-8) -> ENOSYS (was EINVAL pre-batch).
+     Marker: "[syscall/linux]   io_uring_setup entries
+              u32-truncation (high-half ignored): OK".
+
+     Preserved: existing io_uring_setup gate-order
+     probes still pass:
+       - (entries=0, valid params) -> EINVAL (gate 4).
+       - (entries=8, NULL params) -> EFAULT (gate 1).
+       - (entries=0, NULL params) -> EFAULT (gate 1
+         beats gate 4).
+       - (entries=65536, NULL params) -> EFAULT (gate 1
+         beats gate 5).
+       - (entries=65536, valid params) -> EINVAL via
+         gate 5 — 65536 fits in u32, so the mask is
+         transparent.
+       - (entries=8, valid params, bad flag) -> EINVAL.
+       - (entries=8, valid params, non-zero resv)
+         -> EINVAL.
+       - (entries=8, valid params, both bad flag and
+         non-zero resv) -> EINVAL (resv gate fires
+         first).
+       - (entries=8, valid params, all zero) -> ENOSYS.
+
+     Known limitations:
+     - `params` (arg1) is a user pointer (u64) — no
+       truncation issue.
+     - Cleared one item from the batch 332 follow-up
+       list.
+
+     Build: cargo build -p kernel clean (35.53s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 25s).

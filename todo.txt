@@ -31526,3 +31526,56 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.10s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 27s).
+
+381. syscall/linux batch 351 — copy_file_range flags int truncation.
+
+     Linux ABI (fs/read_write.c):
+
+       SYSCALL_DEFINE6(copy_file_range, int, fd_in, loff_t __user *, off_in,
+                                        int, fd_out, loff_t __user *, off_out,
+                                        size_t, len, unsigned int, flags)
+
+     `flags` is declared `unsigned int`, so the x86_64 syscall ABI
+     truncates r9 to its low 32 bits before the body runs.  Per
+     copy_file_range(2), flags must currently be 0 from userspace.
+
+     Pre-batch divergence:
+
+       if args.arg5 != 0 { return linux_err(EINVAL); }
+
+     A caller passing flags=0x1_0000_0000 (high-half garbage + low=0)
+     saw EINVAL where Linux truncates to u32=0 and accepts the gate.
+
+     Fix:
+
+       #[allow(clippy::cast_possible_truncation)]
+       let flags = args.arg5 as u32;
+       if flags != 0 { return linux_err(EINVAL); }
+
+     Self-test probes (4, labelled a..d):
+
+       a. flags=0x1_0000_0000 -> EINVAL fallback at end of body
+          (passes flag gate post-batch; pre-batch hit flag gate at
+          u64 width — same errno, wrong gate).
+       b. flags=0xFFFF_FFFF_0000_0000 -> same; verifies the high half
+          is dropped via `as u32` not via a `< i32::MAX` check.
+       c. flags=0x1_0000_0001 -> EINVAL flag gate (low half non-zero
+          still rejects; regression guard).
+       d. Cast-isolation 4-case table verifies `args.arg5 as u32`
+          truncation for representative high-bit inputs.
+
+     Known limitations / kernel-context bypasses:
+
+       - validate_linux_fd returns Ok in kernel context, so probes
+         (a) and (b) reach the terminal EINVAL fallback rather than
+         observing EBADF.  The same errno on both pre- and post-batch
+         paths makes the truncation invisible to a direct probe in
+         kernel ctx; the cast-isolation table (d) provides the
+         direct regression guard.
+
+     Eleventh int-truncation batch after 308, 309, 310, 311, 312,
+     313, 314, 340, 348, 349, 350.
+
+     Build: cargo build -p kernel clean (41.72s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

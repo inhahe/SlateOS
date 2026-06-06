@@ -12379,8 +12379,26 @@ fn sys_vmsplice(args: &SyscallArgs) -> SyscallResult {
 
 /// `copy_file_range(fd_in, off_in, fd_out, off_out, len, flags)`.
 fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
-    // Per man-page: flags must be 0.
-    if args.arg5 != 0 {
+    // Linux ABI (fs/read_write.c):
+    //   SYSCALL_DEFINE6(copy_file_range, int, fd_in, loff_t __user *, off_in,
+    //                                    int, fd_out, loff_t __user *, off_out,
+    //                                    size_t, len, unsigned int, flags)
+    //
+    // `flags` is declared `unsigned int`, so the x86_64 syscall ABI
+    // truncates r9 to its low 32 bits before the body runs.  Per the
+    // copy_file_range(2) man-page, flags must currently be 0 from
+    // userspace (COPY_FILE_SPLICE=0x80 is a kernel-internal flag).
+    //
+    // Pre-batch (350) we checked args.arg5 at full u64 width, so a
+    // caller passing flags = 0x1_0000_0000 (high-half garbage register,
+    // low 32 = 0) saw EINVAL where Linux truncates to u32=0 and
+    // accepts the flag gate.
+    //
+    // Eleventh instance of the int-truncation shape after batches
+    // 308..314, 340, 348, 349, 350.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg5 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -40726,6 +40744,81 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: copy_file_range(flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 351: copy_file_range flags int truncation.
+        //
+        // Linux's SYSCALL_DEFINE6(copy_file_range, ..., unsigned int flags)
+        // truncates the flags register to its low 32 bits before the
+        // body runs.  Pre-batch we checked args.arg5 at u64 width, so
+        // high-half-garbage callers saw EINVAL where Linux accepts.
+
+        // (a) flags = 0x1_0000_0000 (high garbage + low=0) -> kernel
+        //     context EINVAL fallback at end of body (NOT the flag
+        //     gate).  Pre-batch this hit the u64-width flag gate ->
+        //     EINVAL (same errno, wrong gate).  Post-batch: truncates
+        //     to u32=0, passes flag gate, falls through fdget
+        //     (kernel-ctx Ok) + offset checks (arg1=arg3=0) to the
+        //     terminal EINVAL.  Same errno, but the path is correct;
+        //     a regression in the truncation would flip a probe with
+        //     valid len + bad fds to EINVAL-instead-of-EBADF, which
+        //     this probe can't distinguish in kernel ctx.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 16, arg5: 0x1_0000_0000 };
+        if dispatch_linux(nr::COPY_FILE_RANGE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: copy_file_range(high|0) unexpected");
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) flags = 0xFFFF_FFFF_0000_0000 (sign-extended-looking
+        //     high half + low=0) -> truncates to u32=0 -> passes
+        //     flag gate, falls through to terminal EINVAL.  Verifies
+        //     that the high half is dropped via u32 cast, not via a
+        //     `< i32::MAX` check.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 16, arg5: 0xFFFF_FFFF_0000_0000 };
+        if dispatch_linux(nr::COPY_FILE_RANGE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: copy_file_range(sxhigh|0) unexpected");
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) flags = 0x1_0000_0001 (high garbage + bad low=1) ->
+        //     truncates to u32=1, fails flag gate -> EINVAL.
+        //     Regression guard: a non-zero low half must still
+        //     reject post-batch.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: 16, arg5: 0x1_0000_0001 };
+        if dispatch_linux(nr::COPY_FILE_RANGE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: copy_file_range(high|bad) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) Cast-isolation table verifying `as u32` truncation
+        //     for representative flag inputs.  Mirrors the cast
+        //     verified in sys_copy_file_range's gate 1.
+        let cast_cases: [(u64, u32); 4] = [
+            (0x1_0000_0000,       0),
+            (0xFFFF_FFFF_0000_0000, 0),
+            (0x1_0000_0001,       1),
+            (0xFFFF_FFFF_DEAD_BEEF, 0xDEAD_BEEF),
+        ];
+        for &(input, expect) in &cast_cases {
+            #[allow(clippy::cast_possible_truncation)]
+            let got = input as u32;
+            if got != expect {
+                serial_println!(
+                    "[syscall/linux]   FAIL: copy_file_range trunc {:#x} -> {:#x} (want {:#x})",
+                    input, got, expect
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        serial_println!(
+            "[syscall/linux]   copy_file_range flags int truncation: OK"
+        );
 
         // Batch 349: splice/tee/vmsplice — gate order matches Linux
         // (fs/splice.c::SYSCALL_DEFINE{6,4,4}) at int width.

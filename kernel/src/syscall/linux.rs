@@ -15214,6 +15214,15 @@ fn sys_fspick(args: &SyscallArgs) -> SyscallResult {
 /// `open_tree(dirfd, path*, flags)` — clone a mount subtree into a new
 /// detached fd.  flags include OPEN_TREE_CLONE (1), OPEN_TREE_CLOEXEC
 /// (O_CLOEXEC = 0o2_000_000), plus AT_* path-walking bits.
+///
+/// Linux gate order (fs/namespace.c::SYSCALL_DEFINE3(open_tree)):
+///   1. `flags & ~OPEN_TREE_VALID -> -EINVAL`
+///   2. `(flags & (AT_RECURSIVE | OPEN_TREE_CLONE)) == AT_RECURSIVE`
+///        -> -EINVAL  (AT_RECURSIVE requires OPEN_TREE_CLONE: recursive
+///        mode is only meaningful when cloning a subtree; a plain
+///        non-clone open of an existing mount is inherently a single
+///        node).
+///   3. `user_path_at()` (or LOOKUP_EMPTY with AT_EMPTY_PATH).
 fn sys_open_tree(args: &SyscallArgs) -> SyscallResult {
     const OPEN_TREE_CLONE: u32 = 1;
     const O_CLOEXEC: u32 = 0o2_000_000;
@@ -15226,9 +15235,21 @@ fn sys_open_tree(args: &SyscallArgs) -> SyscallResult {
         | AT_NO_AUTOMOUNT | AT_RECURSIVE;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg2 as u32;
+    // Gate 1: unknown flag bits.
     if flags & !OPEN_TREE_MASK != 0 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 2 (batch 244): AT_RECURSIVE requires OPEN_TREE_CLONE.
+    // Pre-batch we accepted AT_RECURSIVE without CLONE and silently
+    // advanced to EPERM, mis-training probes that depend on the
+    // EINVAL discriminator (e.g. a user-mount tool that uses
+    // AT_RECURSIVE for non-cloned opens by mistake should see EINVAL,
+    // not EPERM — EPERM suggests "you don't have permission" rather
+    // than "your flags are wrong").
+    if flags & (AT_RECURSIVE | OPEN_TREE_CLONE) == AT_RECURSIVE {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 3: path / EMPTY_PATH validation.
     if args.arg1 != 0 {
         if let Err(e) = validate_user_str(args.arg1) {
             return linux_err(linux_errno_for(e));
@@ -38447,6 +38468,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: open_tree valid not EPERM");
             return Err(KernelError::InternalError);
         }
+        // Batch 244: AT_RECURSIVE alone (without OPEN_TREE_CLONE) -> EINVAL.
+        // Linux fs/namespace.c: (flags & (AT_RECURSIVE | OPEN_TREE_CLONE))
+        // == AT_RECURSIVE returns -EINVAL because recursive mode only
+        // makes sense when cloning a subtree.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x8000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: open_tree AT_RECURSIVE alone not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 244: AT_RECURSIVE | OPEN_TREE_CLONE -> EPERM (gate passes
+        // when CLONE is set alongside RECURSIVE).
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x8001, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_tree AT_RECURSIVE|CLONE not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   open_tree flag-mask > AT_RECURSIVE-requires-CLONE gate order: OK"
+        );
 
         // move_mount bad flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: path_ptr, arg4: 0xffff_ffff, arg5: 0 };

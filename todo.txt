@@ -21338,5 +21338,57 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
+## 273. syscall/linux: open_tree — AT_RECURSIVE requires
+##      OPEN_TREE_CLONE gate (batch 244).
+##
+##      Pre-batch divergences:
+##      - `sys_open_tree` validated the OPEN_TREE_MASK flag bits and
+##        then advanced straight to the terminal EPERM.  Linux has
+##        a second gate (fs/namespace.c::SYSCALL_DEFINE3(open_tree)):
+##          if ((flags & (AT_RECURSIVE | OPEN_TREE_CLONE))
+##                == AT_RECURSIVE)
+##              return -EINVAL;
+##        i.e. AT_RECURSIVE only makes sense when cloning a subtree
+##        (a plain non-clone open of an existing mount is inherently
+##        a single node, so recursion is meaningless).  Pre-batch a
+##        userspace probe that passed AT_RECURSIVE without
+##        OPEN_TREE_CLONE saw EPERM instead of EINVAL — the wrong
+##        errno discriminator (suggesting "you don't have permission"
+##        rather than "your flags are wrong").
+##
+##      Fix:
+##      - Added Gate 2 after the OPEN_TREE_MASK gate:
+##          if flags & (AT_RECURSIVE | OPEN_TREE_CLONE) == AT_RECURSIVE
+##              -> -EINVAL
+##      - Expanded the function doc comment to spell out Linux's
+##        3-step gate order (flag-mask, recursive-requires-clone,
+##        path / EMPTY_PATH validation).
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - arg2 = 0x8000 (AT_RECURSIVE alone)        -> EINVAL  (new
+##                                                              gate
+##                                                              fires)
+##      - arg2 = 0x8001 (AT_RECURSIVE | CLONE)      -> EPERM   (gate
+##                                                              passes,
+##                                                              terminal
+##                                                              EPERM)
+##        Marker: "open_tree flag-mask > AT_RECURSIVE-requires-CLONE
+##        gate order: OK".
+##
+##      Existing tests preserved:
+##      - open_tree bad flags (bit 30, outside mask) -> EINVAL (Gate 1)
+##      - open_tree valid (arg2=1, CLONE alone)      -> EPERM
+##
+##      Known limitations:
+##      - open_tree is still terminal EPERM — we have no real mount
+##        cloning or detached-fd machinery.  Validation only.
+##      - We don't validate dirfd, AT_EMPTY_PATH semantics, or path
+##        component depth ahead of the EPERM.  Linux performs
+##        user_path_at()-style resolution before reaching the
+##        capable() check; we short-circuit at EPERM because
+##        unprivileged probes will never get past it anyway.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
 
 

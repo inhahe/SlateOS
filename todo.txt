@@ -22686,3 +22686,71 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      EAGAIN requires a handler-side change tracked separately.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 25s).
+
+## 292. syscall/linux: rt_sigtimedwait — timespec value validation
+##      (batch 263)
+##
+##      Pre-batch divergence:
+##        Linux's `kernel/signal.c::SYSCALL_DEFINE4(rt_sigtimedwait)`
+##        forwards to `do_sigtimedwait(&these, uinfo, ts)`, which
+##        gates on `timespec64_valid(ts)` (tv_sec >= 0 AND
+##        tv_nsec in [0, NSEC_PER_SEC)) before computing the
+##        ktime deadline.  Out-of-range values return -EINVAL.
+##        Our pre-batch path only ran `validate_user_read(arg2, 16)`
+##        on the timespec pointer; bogus values like
+##        `{tv_sec=-1, 0}` or `{0, 1_000_000_000}` slipped through
+##        and the syscall returned its terminal EAGAIN as though
+##        a finite timeout had elapsed — silently wrong vs. Linux
+##        EINVAL.
+##
+##      Fix:
+##        Replaced the readable-only check with a call to the
+##        shared `validate_user_timespec64` helper (already used by
+##        futex2_wait, mq_timedsend, mq_timedreceive, semtimedop,
+##        epoll_pwait2, recvmmsg, ppoll).  The helper performs the
+##        validate_user_read + copy_from_user + timespec64_valid
+##        sequence and returns the precomputed SyscallResult
+##        (EFAULT for unreadable; EINVAL for invalid).  Terminal
+##        EAGAIN behaviour for valid finite/NULL timeouts is
+##        preserved.
+##
+##      Self-tests added/updated:
+##
+##        Pre-existing tests preserved:
+##          - rt_sigtimedwait sigsetsize=16 -> EINVAL
+##          - rt_sigtimedwait NULL mask -> EFAULT
+##          - rt_sigtimedwait valid (mask=valid, ts=NULL,
+##            sigsetsize=8) -> EAGAIN
+##
+##        New discriminators (inserted right after the valid
+##        EAGAIN probe):
+##          A. (mask=valid, info=NULL, ts={tv_sec=-1, 0},
+##              sigsetsize=8) -> Linux EINVAL via
+##              do_sigtimedwait->timespec64_valid; pre-batch EAGAIN.
+##          B. (ts={0, 1_000_000_000}) -> Linux EINVAL (tv_nsec
+##              out of range); pre-batch EAGAIN.
+##          C. (ts={0, 0}) -> EAGAIN (acceptance: confirms the new
+##              gate doesn't falsely reject well-formed timespecs;
+##              the NULL-ts acceptance is already covered above).
+##
+##      Marker:
+##        "[syscall/linux]   rt_sigtimedwait timespec value gating: OK"
+##
+##      Existing tests preserved: rt_sigsuspend gate suite,
+##      rt_sigqueueinfo / rt_tgsigqueueinfo / rt_sigreturn /
+##      POSIX timer family probes following this block.
+##
+##      Known limitations: rt_sigtimedwait still terminates with
+##      EAGAIN for any well-formed timeout because we never deliver
+##      signals into this path.  When the signal-delivery path is
+##      wired up, the do_sigtimedwait emulation will need to walk
+##      pending signals and respect the absolute timeout.  Also
+##      note Linux's gate order is uthese -> timespec -> uinfo, but
+##      our siginfo writability check still fires before the
+##      timespec value check; that's an EFAULT-vs-EFAULT swap with
+##      no externally visible difference, but if a probe ever
+##      passes a bad info pointer alongside a bad timespec value,
+##      it should see EINVAL (Linux) not EFAULT (us).  Track as a
+##      future cleanup if observable.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s).

@@ -18003,9 +18003,16 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
         }
     }
     if args.arg2 != 0 {
-        // struct timespec is 16 bytes.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 16) {
-            return linux_err(linux_errno_for(e));
+        // Linux's `do_sigtimedwait` runs `timespec64_valid` on the
+        // copied-in timespec: tv_sec >= 0 AND
+        // tv_nsec in [0, NSEC_PER_SEC).  Pre-batch we only validated
+        // readability, so a malformed value (e.g. {tv_sec=-1, 0} or
+        // {0, 1_000_000_000}) sailed through and returned the same
+        // EAGAIN as a well-formed finite timeout — silently wrong
+        // vs Linux's EINVAL.  Use the shared helper for parity with
+        // futex2_wait, mq_timedsend, recvmmsg, etc.
+        if let Err(r) = validate_user_timespec64(args.arg2) {
+            return r;
         }
     }
     // Documented: returns EAGAIN when the timeout expires without a
@@ -41332,6 +41339,70 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: rt_sigtimedwait valid not EAGAIN");
             return Err(KernelError::InternalError);
         }
+        // rt_sigtimedwait discriminator A: bogus timespec {tv_sec=-1, 0}
+        // -> Linux EINVAL via do_sigtimedwait->timespec64_valid;
+        // pre-batch returned EAGAIN because the timespec was only
+        // checked for readability.
+        {
+            let bad_ts: [i64; 2] = [-1, 0];
+            let bad_ts_ptr = (&raw const bad_ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: buf_ptr, arg1: 0, arg2: bad_ts_ptr,
+                arg3: 8, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&bad_ts);
+            if dispatch_linux(nr::RT_SIGTIMEDWAIT, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rt_sigtimedwait neg tv_sec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // rt_sigtimedwait discriminator B: tv_nsec = NSEC_PER_SEC
+        // -> Linux EINVAL (out of [0, NSEC_PER_SEC) range);
+        // pre-batch silently EAGAIN.
+        {
+            let bad_ts: [i64; 2] = [0, 1_000_000_000];
+            let bad_ts_ptr = (&raw const bad_ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: buf_ptr, arg1: 0, arg2: bad_ts_ptr,
+                arg3: 8, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&bad_ts);
+            if dispatch_linux(nr::RT_SIGTIMEDWAIT, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rt_sigtimedwait bad tv_nsec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // rt_sigtimedwait discriminator C: valid {tv_sec=0, 0}
+        // timespec -> EAGAIN (confirms the new gate doesn't falsely
+        // reject well-formed timespecs).
+        {
+            let good_ts: [i64; 2] = [0, 0];
+            let good_ts_ptr = (&raw const good_ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: buf_ptr, arg1: 0, arg2: good_ts_ptr,
+                arg3: 8, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&good_ts);
+            if dispatch_linux(nr::RT_SIGTIMEDWAIT, &a).value
+                != -i64::from(errno::EAGAIN)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rt_sigtimedwait valid ts not EAGAIN"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   rt_sigtimedwait timespec value gating: OK"
+        );
 
         // rt_sigqueueinfo bad sig + valid info -> EINVAL (sig range
         // check fires after the info-copy succeeds).

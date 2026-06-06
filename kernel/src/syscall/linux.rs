@@ -4767,15 +4767,28 @@ fn sys_exit_group(args: &SyscallArgs) -> SyscallResult {
 ///     supported; we return -EINVAL the same way the native handler
 ///     does (process groups are a job-control feature we lack).
 fn sys_kill(args: &SyscallArgs) -> SyscallResult {
-    let sig = args.arg1;
-    // sig=0 is the existence probe.  Route it through a no-op send
-    // that still performs the existence + authority checks so the
-    // caller gets a truthful 0 / -ESRCH / -EPERM answer.  We rewrite
-    // sig to 1 (SIGHUP) for the inner check — classify_post treats
-    // SIGHUP exactly the way the existence-probe path needs (it
-    // either Drops or Delivers depending on disposition, both of
-    // which we'll discard).  Then short-circuit a 0 return on
-    // success.  On error, propagate the errno.
+    // Linux signature: `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)`.
+    // `sig` is declared `int`, so the x86_64 syscall ABI truncates
+    // args.arg1 to its low 32 bits before the body runs.  Pre-batch
+    // (288) we held `sig` as a raw u64, so probes with the high half
+    // set (e.g. sig = 0x1_0000_0000) bypassed the `sig == 0`
+    // existence-probe gate and fell into signal_send, which rejected
+    // them as EINVAL where Linux would have run the probe.  Same
+    // `int` truncation thread as batches 285/286/287.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let sig = args.arg1 as i32;
+    // Linux's `valid_signal()` rejects any sig < 0 as EINVAL before
+    // touching the target.  Pre-batch this was caught implicitly by
+    // "sig > NSIG" on the raw-u64 path (negatives appeared as huge
+    // unsigned), but only when the high bits were already set; bit-31-
+    // only values (e.g. sig = 0x0000_0000_8000_0000) were "positive
+    // huge" pre-truncation and EINVAL anyway, while bit-31-set inputs
+    // that happened to fall inside 0..=NSIG after truncation (none, at
+    // NSIG=64) still need an explicit lower bound now that the cast
+    // surfaces the int sign.
+    if sig < 0 {
+        return linux_err(errno::EINVAL);
+    }
     if sig == 0 {
         let probe_args = SyscallArgs {
             arg0: args.arg0,
@@ -4818,8 +4831,24 @@ fn sys_kill(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     // Real signal: delegate to native.  Native SYS_SIGNAL_SEND:
-    // arg0 = target pid, arg1 = signum.
-    linux_from_native(handlers::sys_signal_send(args))
+    // arg0 = target pid, arg1 = signum.  Pass the truncated sig (sig
+    // is non-negative here) so signal_send sees the post-ABI value;
+    // otherwise a probe with sig = 0x1_0000_007F (truncates to 127,
+    // i.e. > NSIG → EINVAL on Linux) would still produce EINVAL —
+    // same answer — but a probe with sig = 0x1_0000_0009 (truncates
+    // to 9 = SIGKILL) must enter the SIGKILL path.  Forwarding the
+    // raw u64 would diverge.
+    #[allow(clippy::cast_sign_loss)]
+    let sig_u = sig as u64;
+    let send_args = SyscallArgs {
+        arg0: args.arg0,
+        arg1: sig_u,
+        arg2: args.arg2,
+        arg3: args.arg3,
+        arg4: args.arg4,
+        arg5: args.arg5,
+    };
+    linux_from_native(handlers::sys_signal_send(&send_args))
 }
 
 /// `rt_sigpending(set, sigsetsize)` — report the pending-signal mask
@@ -26368,6 +26397,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+
+        // Batch 288: sig truncation to int.  Linux's
+        // `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)` truncates
+        // args.arg1 to its low 32 bits before any gate runs.
+        //
+        // sig = 0x1_0000_0000 truncates to (int)0 → existence probe.
+        // Pre-batch we held sig as raw u64, so this probe missed the
+        // sig==0 gate and went to signal_send, which rejected it as
+        // EINVAL (sig > NSIG).  Post-batch: existence probe of the
+        // (nonexistent) PROBE_PID → ESRCH.
+        let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x1_0000_0000,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill(PROBE,0x1_0000_0000) want ESRCH, got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sig = 0x1_0000_0009 truncates to (int)9 = SIGKILL.  Must
+        // NOT be EINVAL (the signal-number gate at NSIG=64 accepts
+        // 9 once truncation is applied).  Pre-batch this saw sig =
+        // 0x1_0000_0009 > NSIG → EINVAL.
+        let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x1_0000_0009,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill(PROBE,0x1_0000_0009) rejected EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sig = 0x0000_0000_8000_0000 truncates to (int)INT_MIN < 0
+        // → EINVAL via the explicit lower-bound gate added in this
+        // batch.  Pre-batch the raw u64 path saw "huge unsigned >
+        // NSIG" → also EINVAL, so both paths agree on EINVAL; this
+        // test guards against a regression where someone "fixes" the
+        // negative-sig handling by widening before testing.
+        let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x0000_0000_8000_0000,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill(PROBE,0x8000_0000) want EINVAL, got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   kill sig int truncation: OK");
     }
 
     // rt_sigreturn:

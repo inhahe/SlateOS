@@ -24864,4 +24864,128 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 22s).
 
+318. [2026-06-06] Batch 288: Linux ABI translation —
+     sys_kill now truncates its `int sig` argument to i32
+     before the existence-probe / signal-number gates,
+     mirroring Linux's
+       SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
+     signature.  Continuation of the `int` truncation
+     audit started in batches 285/286/287.  This batch
+     narrows to sig only; pid truncation is deferred
+     because the existing kill self-tests use a
+     "definitely-nonexistent" probe pid (0xDEAD_BEEF)
+     whose post-truncation interpretation (process group)
+     would change the gate-ordering semantics and require
+     restructuring those tests.  Tracked in this todo as
+     a follow-up.
+
+     Pre-batch divergence
+     --------------------
+     Linux's `kill(pid_t pid, int sig)` truncates the
+     64-bit args.arg1 register to its low 32 bits before
+     any gate runs.  Pre-batch we held `sig` as raw u64,
+     so probes with the high half set diverged:
+
+       Probe A — sig truncates to 0 (existence probe):
+         kill(PROBE_PID, 0x1_0000_0000)
+           Linux : (int)sig = 0 → existence/perm probe
+                   → ESRCH for nonexistent PROBE_PID
+           Ours  : raw sig != 0 → signal_send with sig =
+                   0x1_0000_0000 → EINVAL (sig > NSIG)
+
+       Probe B — sig truncates to a valid signal:
+         kill(PROBE_PID, 0x1_0000_0009)
+           Linux : (int)sig = 9 = SIGKILL → signal-number
+                   gate accepts → target lookup → ESRCH
+           Ours  : raw sig = 0x1_0000_0009 > NSIG → EINVAL
+
+     For sig = 0x0000_0000_8000_0000 (bit-31 only) the
+     pre-batch path also produced EINVAL ("huge unsigned
+     > NSIG"), but post-truncation it is INT_MIN, which
+     must still produce EINVAL via the new explicit
+     lower-bound gate.  Linux rejects any sig < 0 with
+     EINVAL before touching the target, so both pre- and
+     post-batch behave the same on bit-31-only probes;
+     the regression-guard test below documents the
+     invariant.
+
+     Fixes
+     -----
+     - Cast args.arg1 to i32 at the top of sys_kill.
+     - Add explicit `sig < 0 → EINVAL` gate (mirrors
+       Linux's `valid_signal()` lower bound).
+     - Move the existing `sig == 0` existence-probe
+       branch to operate on the post-cast value.
+     - For the real-signal delegation to signal_send,
+       rebuild SyscallArgs with the truncated sig value
+       widened back to u64 (positive int → u64 is the
+       same bit pattern), so the inner gate sees the
+       post-ABI signal number, not the raw register.
+
+     New self-tests (appended to the existing kill
+     dispatch block):
+       - kill(PROBE_PID, 0x1_0000_0000) -> ESRCH
+         (sig truncates to 0 → existence probe; pre-batch
+          returned EINVAL because the raw sig missed the
+          sig==0 gate)
+       - kill(PROBE_PID, 0x1_0000_0009) -> not EINVAL
+         (sig truncates to 9 = SIGKILL; pre-batch
+          rejected EINVAL because raw sig > NSIG)
+       - kill(PROBE_PID, 0x0000_0000_8000_0000) -> EINVAL
+         (sig truncates to INT_MIN < 0; regression guard
+          that a future "fix" doesn't widen-before-test
+          and accidentally accept the value)
+
+     Marker:
+       "kill sig int truncation: OK"
+
+     Preserved self-tests (still pass):
+       - kill(PROBE, sig=0) -> not EINVAL (existence
+         probe path — same code, same answer post-cast)
+       - kill(PROBE, sig=65) -> EINVAL (NSIG+1; post-
+         cast still 65 > NSIG)
+       - kill(PROBE, sig=u64::MAX) -> EINVAL (post-cast
+         (int)-1 < 0 → caught by new explicit lower
+         bound; pre-batch caught implicitly by raw >
+         NSIG; same answer either way)
+       - kill(PROBE, sig in [9,15,17,64]) -> not EINVAL
+         (positive valid signals; post-cast = original)
+
+     Known limitations
+     -----------------
+     - pid is still held as raw u64 — sys_kill does NOT
+       yet apply int truncation to args.arg0.  The
+       existing tests probe with pid = 0xDEAD_BEEF whose
+       post-truncation int value is negative, which would
+       trigger Linux's process-group semantics (pid < -1
+       → send to pgroup |pid|; pid == -1 → send to all).
+       We have no pgroup model, so adding pid truncation
+       would have to either reject all negative pids as
+       EINVAL (breaking the existing sig-gate tests that
+       expect ESRCH from the nonexistent-pid path) or
+       restructure the existing tests around a positive
+       probe value like 0x7FFF_FFFE.  Doing it right is a
+       separate, larger batch.  Tracked here.
+     - sys_tkill and sys_tgkill also still hold tid /
+       tgid / sig as raw u64 (tkill / tgkill currently
+       forward the raw args to sys_kill, so they pick up
+       the sig fix transitively only along paths where
+       owner_process(tid) succeeds — in kernel-context
+       boot self-tests with u64::MAX tids this is moot
+       because the lookup bails ESRCH before reaching
+       sys_kill's sig gate).  Same audit, deferred to
+       its own batch alongside the existing-test
+       restructuring.
+     - sig == 0 existence probe still hard-rolls the
+       target-pid / parent / capability checks against
+       the raw target pid (args.arg0).  After a future
+       pid-truncation batch, the target lookup will use
+       the post-cast pid; for now it sees raw u64.  The
+       SIGHUP placeholder for signal_send is unchanged
+       and remains documented as a no-op marker.
+
+     Build: cargo build -p kernel clean.
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 22s).
+
 

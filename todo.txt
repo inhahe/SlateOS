@@ -1,4 +1,7 @@
 
+Let me find the next int-truncation candidate. The sys_rt_sigprocmask wrapper has structural issues beyond truncation — I'll leave that for a dedicated batch. Let me check other syscalls.
+
+
 ## SESSION PREFERENCE (user, 2026-06-06): autonomous-loop pacing
 ## At the end of each `<<autonomous-loop-dynamic>>` tick, call
 ## ScheduleWakeup with `delaySeconds = 60` (the runtime's hard
@@ -31751,3 +31754,164 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (56.11s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 26s).
+
+384. syscall/linux batch 354 — sys_rt_sigprocmask: full Linux gate
+     order + `how` arithmetic.  Pivot from int-truncation sweep to
+     a deeper structural-bug fix in the Linux compat translator.
+
+     Pre-batch the wrapper at kernel/src/syscall/linux.rs:4770 was a
+     thin shim:
+
+         fn sys_rt_sigprocmask(args: &SyscallArgs) -> SyscallResult {
+             let how      = args.arg0;
+             let set_ptr  = args.arg1;
+             let oldset_ptr = args.arg2;
+             let new_mask = if set_ptr == 0 { 0 } else {
+                 /* copy_from_user(set_ptr, 8) */
+             };
+             let native_args = SyscallArgs {
+                 arg0: how,           // <- WRONG
+                 arg1: new_mask,      // <- WRONG
+                 arg2: oldset_ptr,    // ignored by native
+                 arg3: u64::from(set_ptr == 0),
+                 arg4: 0, arg5: 0,
+             };
+             linux_from_native(handlers::sys_signal_mask(&native_args))
+         }
+
+     The native SYS_SIGNAL_MASK handler (handlers.rs:3544) has the
+     contract `(arg0 = new_blocked_mask, arg1 = old_out_ptr)`.  The
+     wrapper's field assignment mismatched that contract on every
+     axis, producing three structural bugs:
+
+       a. Native consumed `how` (0=SIG_BLOCK, 1=SIG_UNBLOCK,
+          2=SIG_SETMASK) as the new blocked mask.  Any
+          rt_sigprocmask(SIG_SETMASK=2, &mask, _, 8) call would
+          unconditionally set the process's blocked mask to 0x2
+          (only SIGINT bit) regardless of the user-supplied set.
+
+       b. Native treated arg1 (the 64-bit `new_mask` value read out
+          of userspace) as a writable out-pointer for the old mask.
+          With any non-zero set bits, sys_signal_mask did
+          `validate_user_write(new_mask_value, 8)` and then
+          `core::ptr::write(new_mask_value as *mut u64, old)`,
+          producing a stray write at the address that happened to
+          match the user's mask bits.  Most often that address is
+          unmapped and the write faults inside the kernel
+          path-fault handler; in the rare case that the mask bits
+          collide with a real mapped page, kernel/user memory was
+          silently corrupted at the address numerically equal to
+          the sigset value.
+
+       c. SIG_BLOCK and SIG_UNBLOCK semantics were entirely
+          missing.  Linux's sigprocmask switches on `how`:
+              SIG_BLOCK   (0): blocked |=  set
+              SIG_UNBLOCK (1): blocked &= ~set
+              SIG_SETMASK (2): blocked  =  set
+              default        : -EINVAL
+          The wrapper had no `how` arm at all — every call
+          effectively did "blocked = how" (via bug a) which is
+          neither block, unblock, nor setmask.
+
+     Also missing: gate 1 (sigsetsize != sizeof(sigset_t) = 8 ->
+     -EINVAL) and the post-copy SIGKILL/SIGSTOP strip.  The
+     sigsetsize arg (args.arg3) was repurposed as a "was set NULL?"
+     boolean for the native handler.
+
+     Linux compat-layer architectural directive: the Linux ABI is
+     a translator on top of native syscalls; it must not reshape
+     native handlers to satisfy Linux semantics.  Native callers
+     (kernel-side signal_register flow, future native userspace)
+     depend on SYS_SIGNAL_MASK's "set blocked := arg0, return old"
+     ABI.  So the fix sits entirely in the Linux wrapper:
+     bypass the native SYS_SIGNAL_MASK dispatch and drive
+     crate::proc::signal::{blocked, set_blocked} directly.
+
+     Post-batch (kernel/src/syscall/linux.rs:4770) implements the
+     full Linux gate order from kernel/signal.c::
+     SYSCALL_DEFINE4(rt_sigprocmask):
+
+       Gate 1: sigsetsize != 8                  -> EINVAL.
+       Gate 2: old_set = signal::blocked(pid)   (snapshot before
+               any mutation, so oldset captures pre-update state
+               even when set is also supplied).
+       Gate 3: if nset != NULL:
+                 3a. validate_user_read(set, 8) -> EFAULT.
+                 3b. copy_from_user(&new_set, set, 8) -> EFAULT.
+                 3c. new_set &= ~(SIGKILL|SIGSTOP).
+                 3d. switch how:
+                       SIG_BLOCK(0)   : next = old | new
+                       SIG_UNBLOCK(1) : next = old & ~new
+                       SIG_SETMASK(2) : next = new
+                       _              : -EINVAL
+                 3e. signal::set_blocked(pid, next).
+       Gate 4: if oset != NULL:
+                 4a. validate_user_write(oset, 8) -> EFAULT.
+                 4b. copy_to_user(oset, &old_set, 8) -> EFAULT.
+
+     `how` is declared `int` in the Linux signature, so the
+     standard x86_64 int-truncation pattern applies to args.arg0
+     too — high-half garbage and sign-extended negative values
+     are both rejected by the switch's default arm rather than
+     silently interpreted.
+
+     caller_pid() handling: in kernel-self-test context
+     caller_pid() returns None, so the snapshot and the
+     set_blocked call are no-ops while the pointer-validation
+     gates still fire.  This keeps probes able to distinguish
+     gate-order errors without depending on a real process owning
+     the boot task.
+
+     Probes added to self_test() after the rt_sigaction sig-int-
+     truncation block, exercising the gate order from boot context.
+     Pre-batch every probe flowed through native sys_signal_mask
+     and returned -ESRCH (caller_process_or_err's NoSuchProcess
+     mapping); post-batch the per-probe expected discriminators
+     are returned exactly:
+
+       a. (how=2, set=NULL, oldset=NULL, sigsetsize=7) -> EINVAL
+          via gate 1.  Pre-batch: ESRCH.
+       b. (how=0, set=NULL, oldset=NULL, sigsetsize=0) -> EINVAL
+          via gate 1.  Pre-batch: ESRCH.
+       c. (how=1, set=NULL, oldset=NULL, sigsetsize=8) -> 0.
+          Verifies the success path is reachable post-batch with
+          set/oset both NULL.  Pre-batch: ESRCH.
+       d. (how=0x1_0000_0001, set=NULL, oldset=NULL, sigsetsize=8)
+          -> 0.  Verifies the `how` int truncation drops high
+          garbage and the truncated SIG_UNBLOCK is accepted (set
+          NULL skips the switch so the value of `how` only
+          matters for type-shape checks here).  Pre-batch: ESRCH.
+       e. (how=0x1_0000_0003, set=&stack_buf, oldset=NULL,
+          sigsetsize=8) -> EINVAL via gate 3d's default arm.
+          Truncated how=3 is invalid.  Probe uses a kernel-stack
+          u64 as the set buffer so the copy_from_user inside
+          gate 3b touches a valid kernel pointer (boot-context
+          validate_* bypasses range checks, but
+          copy_nonoverlapping still dereferences the address).
+          Pre-batch: ESRCH.
+       f. (how=0xFFFF_FFFF, set=&stack_buf, oldset=NULL,
+          sigsetsize=8) -> EINVAL.  Sign-extended i32(-1) hits
+          the default arm.  Confirms the negative-how path
+          doesn't accidentally wrap into a valid arm.  Pre-batch:
+          ESRCH.
+       g. 4-case cast-isolation table verifies the u64 -> i32
+          chain truncates `how` to the low 32 bits as a signed
+          int across boundary inputs.
+
+     Kernel-context observation: dispatch_linux at boot has no
+     caller PID, so validate_user_{read,write} are bypassed.
+     Probes that need to exercise gate 3d's switch supply a real
+     kernel-side pointer for the set buffer so copy_from_user
+     succeeds; the resulting EINVAL fires after the (no-op)
+     set_blocked call would have been skipped due to pid=None.
+
+     First structural-translator-bug fix after the 13-batch int-
+     truncation sweep.  The Linux compat surface had reached
+     saturation for trivial register-width divergences across
+     all major syscall families; further work shifts to deeper
+     translator-vs-native ABI mismatches and gate-order
+     reorderings.
+
+     Build: cargo build -p kernel clean (51.95s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

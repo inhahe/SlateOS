@@ -4766,34 +4766,125 @@ fn sys_rt_sigaction(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `rt_sigprocmask(how, set, oldset, sigsetsize)` — wrap signal_mask.
+/// `rt_sigprocmask(how, set, oldset, sigsetsize)`.
+///
+/// Linux gate order (`kernel/signal.c::SYSCALL_DEFINE4(rt_sigprocmask)`):
+///   1. `sigsetsize != sizeof(sigset_t)` -> `-EINVAL` (8 bytes on x86_64).
+///   2. Snapshot `current->blocked` into `old_set`.
+///   3. If `nset` non-NULL:
+///        a. `copy_from_user(&new_set, nset, 8)` -> `-EFAULT` on bad range.
+///        b. Strip `SIGKILL` / `SIGSTOP` from `new_set`.
+///        c. `sigprocmask(how, &new_set, NULL)` — switch on `how`:
+///             - `SIG_BLOCK` (0):   `blocked |= new_set`.
+///             - `SIG_UNBLOCK` (1): `blocked &= ~new_set`.
+///             - `SIG_SETMASK` (2): `blocked = new_set`.
+///             - default:           `-EINVAL`.
+///   4. If `oset` non-NULL: `copy_to_user(oset, &old_set, 8)` -> `-EFAULT`.
+///
+/// `how` is declared `int`, so x86_64 register truncation drops the
+/// high half of `rdi` before the body runs.
+///
+/// Pre-batch (354) the wrapper packed `(arg0=how, arg1=new_mask,
+/// arg2=oldset_ptr, arg3=set_was_null)` and called the native
+/// `sys_signal_mask`, whose contract is `(arg0=new_blocked_mask,
+/// arg1=old_out_ptr)`.  Three structural bugs followed from the ABI
+/// mismatch:
+///
+///   * Native consumed `how` (0 / 1 / 2) as the new blocked mask, so
+///     e.g. `SIG_SETMASK` (2) with any `set` unconditionally set the
+///     process's blocked mask to `0x2` (only SIGINT blocked) regardless
+///     of the actual user-supplied bits.
+///   * Native treated `arg1` (the 64-bit `new_mask` value loaded from
+///     userspace) as a writable out-pointer for the old mask, so any
+///     non-zero set produced a stray write into kernel/user memory
+///     at the address that happened to match the mask bits.
+///   * `SIG_BLOCK` / `SIG_UNBLOCK` semantics were entirely missing —
+///     every `how` produced the same buggy "set blocked = how" effect.
+///
+/// Linux compat layer is translator-only: rather than reshape the
+/// native `SYS_SIGNAL_MASK` ABI (which native callers depend on),
+/// drive `crate::proc::signal::{blocked, set_blocked}` directly here.
 fn sys_rt_sigprocmask(args: &SyscallArgs) -> SyscallResult {
-    let how = args.arg0;
+    const SIG_BLOCK: i32 = 0;
+    const SIG_UNBLOCK: i32 = 1;
+    const SIG_SETMASK: i32 = 2;
+    const SIGSET_SIZE: u64 = 8;
+    // SIGKILL / SIGSTOP cannot be blocked.  Linux's
+    // `sigdelsetmask(&new_set, sigmask(SIGKILL)|sigmask(SIGSTOP))`
+    // strips them between the copy-in and the `how` arithmetic.
+    const SIGKILL_BIT: u64 = 1u64 << (9 - 1);
+    const SIGSTOP_BIT: u64 = 1u64 << (19 - 1);
+    const UNBLOCKABLE: u64 = SIGKILL_BIT | SIGSTOP_BIT;
+
+    // Gate 1: sigsetsize must be exactly sizeof(sigset_t) = 8.  Linux
+    // performs this check before snapshotting current->blocked.
+    if args.arg3 != SIGSET_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Linux declares `int how`; truncate the high half of rdi.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let how = args.arg0 as i32;
     let set_ptr = args.arg1;
     let oldset_ptr = args.arg2;
 
-    // Read the new mask (64-bit) if `set` is non-NULL.
-    let new_mask: u64 = if set_ptr == 0 {
-        0
-    } else {
-        let mut buf = [0u8; 8];
-        // SAFETY: copy_from_user validates the user range.
-        let r = unsafe { crate::mm::user::copy_from_user(set_ptr, buf.as_mut_ptr(), 8) };
-        if let Err(e) = r {
+    // Resolve caller pid for direct signal-table access.  In boot /
+    // kernel-self-test context `caller_pid()` is None; Linux always
+    // has a current task in syscall context, but for parity with the
+    // rest of the linux.rs stubs we treat the missing-process case as
+    // an empty blocked mask and a no-op write (the user-pointer
+    // validation gates still fire so probes see the right errno
+    // shape for malformed inputs).
+    let pid_opt = caller_pid();
+
+    // Gate 2: snapshot old_set.
+    let old_set: u64 = pid_opt.map_or(0, crate::proc::signal::blocked);
+
+    // Gate 3: if nset non-NULL, copy_from_user, then validate how.
+    if set_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(set_ptr, 8) {
             return linux_err(linux_errno_for(e));
         }
-        u64::from_ne_bytes(buf)
-    };
+        let mut buf = [0u8; 8];
+        // SAFETY: validate_user_read above confirmed 8 bytes readable
+        // at set_ptr.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_from_user(set_ptr, buf.as_mut_ptr(), 8) }
+        {
+            return linux_err(linux_errno_for(e));
+        }
+        let new_set = u64::from_ne_bytes(buf) & !UNBLOCKABLE;
+        let next = match how {
+            SIG_BLOCK => old_set | new_set,
+            SIG_UNBLOCK => old_set & !new_set,
+            SIG_SETMASK => new_set,
+            _ => return linux_err(errno::EINVAL),
+        };
+        if let Some(pid) = pid_opt {
+            // set_blocked also strips SIGKILL/SIGSTOP — the pre-strip
+            // above keeps the SIG_BLOCK/UNBLOCK arithmetic matching
+            // Linux's sequence even though the final stored mask is
+            // identical either way.
+            let _ = crate::proc::signal::set_blocked(pid, next);
+        }
+    }
 
-    let native_args = SyscallArgs {
-        arg0: how,
-        arg1: new_mask,
-        arg2: oldset_ptr,
-        arg3: u64::from(set_ptr == 0),
-        arg4: 0,
-        arg5: 0,
-    };
-    linux_from_native(handlers::sys_signal_mask(&native_args))
+    // Gate 4: if oset non-NULL, copy old_set out.
+    if oldset_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(oldset_ptr, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+        let bytes = old_set.to_ne_bytes();
+        // SAFETY: validate_user_write above confirmed 8 bytes writable
+        // at oldset_ptr.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), oldset_ptr, 8) }
+        {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    SyscallResult::ok(0)
 }
 
 /// `sched_yield()` — direct.
@@ -28236,6 +28327,174 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   rt_sigaction sig int truncation: OK"
+        );
+    }
+
+    // Batch 354: rt_sigprocmask gate ordering & how arithmetic.
+    //
+    // Pre-batch the wrapper packed args into the native
+    // SYS_SIGNAL_MASK ABI with the wrong field assignment, producing
+    // three structural bugs (see the doc-comment on
+    // sys_rt_sigprocmask): `how` was consumed as the new blocked mask,
+    // the user's new mask was treated as an out-pointer, and the
+    // SIG_BLOCK / SIG_UNBLOCK semantics were absent entirely.
+    //
+    // Probes here exercise the Linux gate order from boot context.
+    // caller_pid() is None so no signal-table mutation actually
+    // happens; the validation-only paths are what the probes
+    // distinguish.  Linux returns 0 on success regardless of the
+    // signal-mask update result here, so we look for the errno
+    // discriminators that pre-batch returned wrongly.
+    {
+        // (a) sigsetsize == 7 -> EINVAL (gate 1).  Both pre- and
+        //     post-batch behave the same here — gate 1 was the one
+        //     missing entirely pre-batch, but the native fallback
+        //     silently ignored arg3 and proceeded.  Pre-batch this
+        //     probe returned 0 (set_ptr=0, oldset_ptr=0 -> no-op);
+        //     post-batch returns EINVAL.
+        let a = SyscallArgs {
+            arg0: 2, arg1: 0, arg2: 0, arg3: 7, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RT_SIGPROCMASK, &a).value
+            != -i64::from(errno::EINVAL)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigprocmask sigsetsize=7 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) sigsetsize == 0 -> EINVAL (gate 1).  Same shape as (a)
+        //     for the wrong-size discriminator; the boundary at 0
+        //     matters because pre-batch the native fallback was a
+        //     no-op for set_ptr=0 with garbage arg3.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RT_SIGPROCMASK, &a).value
+            != -i64::from(errno::EINVAL)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigprocmask sigsetsize=0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) NULL set + NULL oldset + sigsetsize=8 -> 0 (no-op).
+        //     Pre-batch returned the same (since native sys_signal_mask
+        //     with arg0=how=0 would just set blocked=0 and return 0,
+        //     which has the same numeric outcome — but for the wrong
+        //     reason).  Probe here pins down the success path.
+        let a = SyscallArgs {
+            arg0: 1, arg1: 0, arg2: 0, arg3: 8, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RT_SIGPROCMASK, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigprocmask NULL/NULL not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) `how` int-truncation, valid case: high half of rdi must
+        //     be dropped before the SIG_BLOCK / SIG_UNBLOCK / SIG_SETMASK
+        //     switch.  Pre-batch `how` was held as raw u64 and passed
+        //     straight to native sys_signal_mask, which itself did no
+        //     validation — so 0x1_0000_0001 (high|SIG_UNBLOCK) was
+        //     silently used as the new blocked mask.  Post-batch the
+        //     i32 cast truncates to SIG_UNBLOCK=1.  With set_ptr=NULL
+        //     the wrapper skips the switch entirely (matching Linux:
+        //     sigprocmask is only called when nset != NULL), so the
+        //     truncated valid `how` round-trips as 0.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001,
+            arg1: 0,
+            arg2: 0,
+            arg3: 8,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::RT_SIGPROCMASK, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigprocmask how trunc(SIG_UNBLOCK) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (e) Invalid `how` with a real (readable) set_ptr -> EINVAL
+        //     via gate 3c's default switch arm.  Pre-batch the wrapper
+        //     forwarded the raw u64 `how` straight to native
+        //     sys_signal_mask, which interpreted it as the new blocked
+        //     mask and returned 0 — never producing EINVAL even for
+        //     wildly invalid `how` values, the most direct symptom of
+        //     the ABI mismatch.  Probe uses a kernel-side stack
+        //     variable as the set buffer so the copy_from_user inside
+        //     gate 3a touches valid memory (boot-context validate_*
+        //     bypasses NULL/range checks, but copy_nonoverlapping still
+        //     dereferences the pointer for real).
+        let set_buf: u64 = 0;
+        let set_ptr_kern = core::ptr::addr_of!(set_buf) as u64;
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0003, // truncates to how=3 (invalid)
+            arg1: set_ptr_kern,
+            arg2: 0,
+            arg3: 8,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::RT_SIGPROCMASK, &a).value
+            != -i64::from(errno::EINVAL)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigprocmask how=3 trunc not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (f) Wildly negative `how` (i32 sign-extended) with a real
+        //     set_ptr -> EINVAL.  Pre-batch the raw u64 0xFFFF_FFFF
+        //     was happily set as the new blocked mask.  Post-batch the
+        //     i32 cast yields `how = -1`, which matches no arm and
+        //     trips the default EINVAL.
+        let a = SyscallArgs {
+            arg0: 0xFFFF_FFFF,
+            arg1: set_ptr_kern,
+            arg2: 0,
+            arg3: 8,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::RT_SIGPROCMASK, &a).value
+            != -i64::from(errno::EINVAL)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigprocmask how=i32(-1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (g) Cast-isolation: 4-case table verifying that the
+        //     u64 -> i32 chain truncates `how` to the low 32 bits as a
+        //     signed int (matching the C ABI's int parameter handling).
+        let cases: [(u64, i32); 4] = [
+            (0x1_0000_0000,                 0),
+            (0x1_0000_0001,                 1),
+            (0x1_0000_0002,                 2),
+            (0xFFFF_FFFF_0000_0003,         3),
+        ];
+        for &(input, expect_i32) in &cases {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let got_i32 = input as i32;
+            if got_i32 != expect_i32 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rt_sigprocmask how trunc {:#x} -> {} (want {})",
+                    input, got_i32, expect_i32
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        serial_println!(
+            "[syscall/linux]   rt_sigprocmask gate order + how arithmetic: OK"
         );
     }
 

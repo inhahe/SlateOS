@@ -20556,5 +20556,63 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 264. [DONE 2026-06-05] Linux ABI: sched_setaffinity / sched_getaffinity
+##      gate order — match kernel/sched/syscalls.c.
+##
+##      Linux source:
+##        SYSCALL_DEFINE3(sched_setaffinity):
+##          1. copy_from_user(mask_ptr, len) -> EFAULT (len==0 with
+##             NULL is a no-op).
+##          2. find_process_by_pid(pid) -> ESRCH.
+##        SYSCALL_DEFINE3(sched_getaffinity):
+##          1. (len * 8) < nr_cpu_ids -> EINVAL (size too small).
+##          2. len & (sizeof(unsigned long) - 1) -> EINVAL (alignment).
+##          3. find_process_by_pid(pid) -> ESRCH.
+##          4. copy_to_user(mask_ptr, ..., retlen) -> EFAULT.
+##
+##      Pre-batch divergences:
+##      - setaffinity: pid-ESRCH fired ahead of mask-EFAULT.  Probe
+##        (pid=bogus, len=8, mask=NULL) saw ESRCH where Linux returns
+##        EFAULT.  Also, mask=NULL was rejected unconditionally as
+##        EFAULT even when len==0; Linux accepts that as a no-op.
+##      - getaffinity: pid-ESRCH and mask-EFAULT both fired before
+##        size-EINVAL.  Probe (pid=bogus, len=0, mask=NULL) saw
+##        ESRCH where Linux returns EINVAL.  Linux's alignment check
+##        (len & 7 != 0 -> EINVAL on x86_64) was missing entirely;
+##        probes with len=15 silently fell through to the mask write.
+##
+##      Fix:
+##      - setaffinity: gate `if cpusetsize > 0` around the mask
+##        readability check (so len==0 with NULL succeeds), then pid
+##        ESRCH check.
+##      - getaffinity: reordered to size-EINVAL -> alignment-EINVAL
+##        -> pid-ESRCH -> mask-EFAULT.  Added `cpusetsize & 7 != 0`
+##        gate for the alignment requirement.
+##
+##      Self-tests added (after the existing setaffinity NULL-mask
+##      assertion):
+##      - setaffinity(bogus pid, NULL mask, len=8)      -> EFAULT
+##                                                       (was ESRCH).
+##      - setaffinity(0, len=0, NULL)                   -> 0
+##                                                       (was EFAULT).
+##        Marker: "sched_setaffinity len>0->mask-EFAULT > pid-ESRCH
+##        gate order: OK".
+##      - getaffinity(bogus pid, len=0, NULL)           -> EINVAL
+##                                                       (was ESRCH).
+##      - getaffinity(0, len=15, NULL)                  -> EINVAL
+##                                                       (alignment;
+##                                                        was EFAULT).
+##      - getaffinity(bogus pid, len=8 aligned, NULL)   -> ESRCH
+##                                                       (covers pid
+##                                                        gate after
+##                                                        EINVAL).
+##        Marker: "sched_getaffinity size-EINVAL > align-EINVAL >
+##        pid-ESRCH > mask-EFAULT gate order: OK".
+##
+##      Existing tests (size=0 -> EINVAL, NULL mask len=16 -> EFAULT
+##      for both syscalls) still hold under the new ordering.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s).
+
 
 

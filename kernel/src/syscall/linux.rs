@@ -8159,10 +8159,42 @@ fn sys_sched_rr_get_interval(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns the number of bytes written (Linux convention).
 fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/sched/syscalls.c::SYSCALL_DEFINE3):
+    //
+    //   1. `(len * BITS_PER_BYTE) < nr_cpu_ids`        -> -EINVAL
+    //   2. `len & (sizeof(unsigned long) - 1)`         -> -EINVAL
+    //      (Linux requires the mask buffer length to be a multiple of
+    //      `sizeof(long)` so it can copy whole words.)
+    //   3. sched_getaffinity(pid, mask):
+    //        find_process_by_pid(pid)                  -> -ESRCH
+    //   4. copy_to_user(user_mask_ptr, mask, retlen)   -> -EFAULT
+    //
+    // Pre-batch divergences fixed here:
+    //   * pid-ESRCH fired ahead of size-EINVAL, so probes passing
+    //     a bogus pid with len=tiny saw ESRCH where Linux returns
+    //     EINVAL.
+    //   * The alignment check (len & 7 != 0 on x86_64) was missing
+    //     entirely, so probes passing len=15 silently fell through
+    //     to the mask write where Linux returns EINVAL.
+    //   * NULL mask was reported as EFAULT before the size/pid gates,
+    //     so probes with `(bogus_pid, len=tiny, mask=NULL)` saw
+    //     ESRCH instead of EINVAL.
     let pid = args.arg0;
     let cpusetsize = args.arg1 as usize;
     let mask_ptr = args.arg2;
 
+    let n_cpus = crate::smp::cpu_count().max(1);
+    // Round up to whole bytes.
+    let needed_bytes = (n_cpus + 7) / 8;
+    if cpusetsize < needed_bytes {
+        return linux_err(errno::EINVAL);
+    }
+    // Linux's `len & (sizeof(unsigned long) - 1)` alignment check
+    // (sizeof(unsigned long) == 8 on x86_64, so the low 3 bits must
+    // be zero).  This protects the kernel's whole-word copy loop.
+    if cpusetsize & 7 != 0 {
+        return linux_err(errno::EINVAL);
+    }
     if pid != 0 {
         if crate::proc::pcb::state(pid).is_none() {
             return linux_err(errno::ESRCH);
@@ -8171,14 +8203,6 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     if mask_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-
-    let n_cpus = crate::smp::cpu_count().max(1);
-    // Round up to whole bytes.
-    let needed_bytes = (n_cpus + 7) / 8;
-    if cpusetsize < needed_bytes {
-        return linux_err(errno::EINVAL);
-    }
-
     if let Err(e) = crate::mm::user::validate_user_write(mask_ptr, cpusetsize) {
         return linux_err(linux_errno_for(e));
     }
@@ -8225,19 +8249,38 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
 ///   - `-EFAULT` on bad mask pointer.
 ///   - `-ESRCH` on bad pid.
 fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/sched/syscalls.c::SYSCALL_DEFINE3):
+    //
+    //   1. (cpumask alloc — internal, can't observe.)
+    //   2. get_user_cpu_mask: copy_from_user(mask_ptr, len) -> -EFAULT.
+    //      Note: `len == 0` is a no-op even with NULL mask (Linux
+    //      clamps len to cpumask_size() then copy_from_user(0) returns
+    //      0 immediately).
+    //   3. sched_setaffinity(pid, mask): find_process_by_pid(pid)
+    //      -> -ESRCH.
+    //
+    // Pre-batch divergences fixed here:
+    //   * pid-ESRCH fired ahead of mask-EFAULT, so probes passing
+    //     a bogus pid with mask=NULL/len=8 saw ESRCH where Linux
+    //     returns EFAULT.
+    //   * mask=NULL was rejected unconditionally as EFAULT, including
+    //     when `len == 0`.  Linux accepts (mask=NULL, len=0) as a
+    //     no-op since copy_from_user with len=0 doesn't fault.
     let pid = args.arg0;
     let cpusetsize = args.arg1 as usize;
     let mask_ptr = args.arg2;
+    if cpusetsize > 0 {
+        if mask_ptr == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, cpusetsize) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
     if pid != 0 {
         if crate::proc::pcb::state(pid).is_none() {
             return linux_err(errno::ESRCH);
         }
-    }
-    if mask_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, cpusetsize) {
-        return linux_err(linux_errno_for(e));
     }
     SyscallResult::ok(0)
 }
@@ -31589,6 +31632,81 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 235 gate-order discriminators.
+        //
+        // sched_setaffinity Linux order: copy_from_user(mask, len) ->
+        // EFAULT first, then find_process_by_pid -> ESRCH.  Pre-batch
+        // we checked pid first.
+        //
+        // Case A: setaffinity(pid=bogus, len=8, mask=NULL) -> EFAULT
+        // (Linux); was ESRCH pre-batch.
+        let a = SyscallArgs { arg0: 999_999, arg1: 8, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETAFFINITY, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setaffinity(bogus pid, NULL mask, len=8) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case B: setaffinity(pid=0, len=0, mask=NULL) -> 0 (Linux
+        // accepts copy_from_user(NULL, 0) as a no-op); was EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETAFFINITY, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setaffinity(0, len=0, NULL) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setaffinity len>0->mask-EFAULT > pid-ESRCH gate order: OK"
+        );
+        // sched_getaffinity Linux order: size-EINVAL -> alignment-
+        // EINVAL -> pid-ESRCH -> mask-EFAULT.  Pre-batch we checked
+        // pid first, then mask=NULL, then size.
+        //
+        // Case C: getaffinity(pid=bogus, len=0, mask=NULL) -> EINVAL
+        // (size too small) (Linux); was ESRCH pre-batch.
+        let a = SyscallArgs { arg0: 999_999, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETAFFINITY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(bogus pid, len=0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case D: getaffinity(pid=0, len=15, mask=NULL) -> EINVAL
+        // (alignment).  Linux requires len to be a multiple of
+        // sizeof(unsigned long) = 8 bytes on x86_64.  Pre-batch the
+        // alignment check was missing entirely, so this fell through
+        // to the mask check and returned EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 15, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETAFFINITY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(len=15 alignment) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case E: getaffinity(pid=bogus, len=8, aligned, mask=NULL)
+        // -> ESRCH (Linux); pid lookup fires after EINVAL gates pass.
+        // Pre-batch this also returned ESRCH (we checked pid first),
+        // but the underlying gate path is now correct.
+        let a = SyscallArgs { arg0: 999_999, arg1: 8, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETAFFINITY, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(bogus pid, len=8) not ESRCH"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_getaffinity size-EINVAL > align-EINVAL > pid-ESRCH > mask-EFAULT gate order: OK"
+        );
     }
 
     // Filesystem sync-family validation (batch 50).

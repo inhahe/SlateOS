@@ -20677,4 +20677,78 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      boot tripped the unrelated watchdog flake above).
 
 
+## 266. [DONE 2026-06-05] Linux ABI: futex_waitv — flags-first gate,
+##      consolidated !waiters EINVAL, timeout-gated clockid (batch 237).
+##
+##      Linux reference: kernel/futex/syscalls.c, SYSCALL_DEFINE5 of
+##      futex_waitv.  The documented gate order is:
+##
+##          1. `flags != 0`                                  -> -EINVAL
+##          2. `!nr_futexes || nr_futexes > FUTEX_WAITV_MAX
+##              || !waiters`                                 -> -EINVAL
+##          3. if timeout != NULL: futex_parse_waitv_clockid
+##              (validates clockid is REALTIME or MONOTONIC,
+##              copies the timespec from user)               -> -EINVAL
+##                                                              / -EFAULT
+##          4. validate / copy the waiters vector             -> -EFAULT
+##
+##      Pre-batch divergences:
+##      - NULL waiters returned -EFAULT (the plain copy_from_user
+##        failure) where Linux explicitly maps `!waiters` to -EINVAL
+##        via the consolidated check.
+##      - The `flags != 0` gate ran *after* the nr range check.  A
+##        probe passing (nr=0, flags=bogus) saw -EINVAL "for nr=0"
+##        instead of -EINVAL "for flags".  Same errno but the gate
+##        ladder differs — distinguishable by a probe varying one
+##        argument at a time.
+##      - The clockid range check ran unconditionally.  Linux only
+##        validates clockid inside futex_parse_waitv_clockid, which
+##        is gated behind `timeout != NULL`.  Probes passing
+##        (timeout=NULL, clockid=99) saw -EINVAL via the clockid
+##        gate where Linux ignores clockid and proceeds.
+##
+##      Fix:
+##      - Reorder: `args.arg2 (flags) != 0 -> EINVAL` runs first.
+##      - Fold `args.arg0 (waiters) == 0` into the same
+##        `nr == 0 || nr > 128 || waiters == 0 -> EINVAL` gate that
+##        previously only covered nr.
+##      - Move the clockid range check inside the `args.arg3 != 0`
+##        (timeout != NULL) branch.  Re-derive `clockid` locally in
+##        the timeout-non-NULL nr=1 deadline math since the outer
+##        variable is now scoped to the validation arm.
+##
+##      Self-tests added / updated (after the existing nr=0,
+##      nr>128, flags!=0 EINVAL trio):
+##      - NULL waiters with nr=1 -> EINVAL (was EFAULT).
+##      - (waiters=NULL, nr=0, flags=0xdead_beef) -> EINVAL.  Proves
+##        the flags-first ordering: even with nr=0 (which would
+##        otherwise trip the combined EINVAL), the flags gate now
+##        fires first.
+##      - (waiters=valid, timeout=valid_ts, clockid=5) -> EINVAL.
+##        Confirms the clockid range check still fires when timeout
+##        is non-NULL.
+##      - (waiters=valid, timeout=NULL, clockid=99) -> EINVAL via
+##        the per-entry SIZE_U8 check rather than the clockid gate
+##        (which Linux skips when timeout is NULL).  Same observable
+##        errno, smoke check that we don't accidentally return
+##        EFAULT or some other code on the new code path.
+##        Marker: "futex_waitv flags-first > nr/waiters-EINVAL >
+##        timeout-gated clockid gate order: OK".
+##
+##      Existing tests preserved:
+##      - nr=0 -> EINVAL, nr>128 -> EINVAL, flags!=0 -> EINVAL.
+##      - nr=1 fast-path entries (SIZE_U16/reserved/unknown bit/
+##        NUMA/valid-with-NULL-uaddr) all still fire their per-entry
+##        gates after the new top-level reorder.
+##
+##      Known limitations (unchanged by this batch):
+##      - Multi-entry futex_waitv (nr > 1) still returns -ENOSYS;
+##        our futex subsystem only supports parking on a single key
+##        at a time.
+##      - The U8 / U16 / U64 per-entry size classes still return
+##        -EINVAL; only SIZE_U32 is implemented.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+
 

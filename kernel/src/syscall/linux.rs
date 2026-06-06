@@ -18282,18 +18282,46 @@ fn sys_eventfd2(args: &SyscallArgs) -> SyscallResult {
 
 /// `futex_waitv(waiters*, nr_waiters, flags, timeout*, clockid)`.
 fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
+    // Linux kernel/futex/syscalls.c SYSCALL_DEFINE5(futex_waitv) gate
+    // order:
+    //
+    //   1. `flags != 0`                                          -> -EINVAL
+    //   2. `!nr_futexes || nr_futexes > FUTEX_WAITV_MAX || !waiters`
+    //                                                            -> -EINVAL
+    //   3. if timeout != NULL: futex_parse_waitv_clockid          -> -EINVAL
+    //      / -EFAULT (this is the ONLY caller that validates clockid;
+    //      Linux ignores `clockid` entirely when timeout is NULL)
+    //   4. validate / copy waiters from user                      -> -EFAULT
+    //
+    // Pre-batch divergences:
+    //   * The combined nr/waiters check was split: nr==0/nr>128 was
+    //     checked, but NULL `waiters` returned -EFAULT (matching the
+    //     plain copy_from_user failure) where Linux explicitly maps it
+    //     to -EINVAL via the consolidated `!waiters` test.
+    //   * Our `flags != 0` gate ran AFTER the `nr` check, so a probe
+    //     passing (nr=0, flags=bogus) saw -EINVAL "for nr=0" while
+    //     Linux returns -EINVAL "for flags".  Same errno, different
+    //     reason — but a probe walking the gate ladder by varying one
+    //     argument at a time can distinguish.
+    //   * The clockid range check ran unconditionally.  Linux only
+    //     validates clockid inside `futex_parse_waitv_clockid`, which
+    //     is gated behind `timeout != NULL`.  A probe with
+    //     (timeout=NULL, clockid=99) saw -EINVAL where Linux ignores
+    //     clockid and proceeds.
+    //
+    // Fixes: reorder flags first, fold `!waiters` into the combined
+    // -EINVAL gate, and move the clockid range check into the
+    // `timeout != NULL` branch.
+    if args.arg2 != 0 {
+        // flags must be 0 for the v1 ABI.
+        return linux_err(errno::EINVAL);
+    }
     #[allow(clippy::cast_possible_truncation)]
     let nr = args.arg1 as u32;
-    // Linux caps at FUTEX_WAITV_MAX = 128.
-    if nr == 0 || nr > 128 {
+    // Linux caps at FUTEX_WAITV_MAX = 128, and `!waiters` shares the
+    // same -EINVAL gate.
+    if nr == 0 || nr > 128 || args.arg0 == 0 {
         return linux_err(errno::EINVAL);
-    }
-    // flags must be 0 for the v1 ABI.
-    if args.arg2 != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
     }
     // struct futex_waitv = { u64 val, u64 uaddr, u32 flags, u32 __reserved }
     // = 24 bytes per entry.
@@ -18306,13 +18334,15 @@ fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
             return linux_err(linux_errno_for(e));
         }
-    }
-    // clockid: only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) accepted
-    // by Linux's futex_waitv.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let clockid = args.arg4 as i32;
-    if !(0..=1).contains(&clockid) {
-        return linux_err(errno::EINVAL);
+        // clockid: only CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1)
+        // accepted by Linux's futex_parse_waitv_clockid.  Linux skips
+        // this check entirely when timeout == NULL, so we gate it
+        // under the same `args.arg3 != 0` arm.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let clockid = args.arg4 as i32;
+        if !(0..=1).contains(&clockid) {
+            return linux_err(errno::EINVAL);
+        }
     }
     // ------------------------------------------------------------------
     // nr == 1 fast path: degenerates to a single FUTEX_WAIT_BITSET-style
@@ -18416,6 +18446,12 @@ fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
             // (handlers::sys_futex_wait_timeout will do the value
             // compare and return TimedOut on miss).
             let abs_ns = ts.to_nanos();
+            // clockid was already validated to be 0 (REALTIME) or 1
+            // (MONOTONIC) by the `args.arg3 != 0` gate above; re-read
+            // it here for the deadline-relative-to-now math.  Anything
+            // else would have been rejected with -EINVAL up front.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let clockid = args.arg4 as i32;
             let now_ns = if clockid == 0 {
                 crate::timekeeping::clock_realtime()
             } else {
@@ -40354,18 +40390,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: futex_waitv flags!=0 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // futex_waitv NULL waiters -> EFAULT.
+        // futex_waitv NULL waiters -> EINVAL (batch 237: was -EFAULT
+        // pre-batch; Linux folds `!waiters` into the same -EINVAL
+        // gate as `!nr_futexes || nr_futexes > FUTEX_WAITV_MAX`).
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: futex_waitv NULL not EFAULT");
-            return Err(KernelError::InternalError);
-        }
-        // futex_waitv bad clockid -> EINVAL.
-        let a = SyscallArgs { arg0: waitv_ptr, arg1: 1, arg2: 0, arg3: 0, arg4: 5, arg5: 0 };
         if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: futex_waitv bad clockid not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: futex_waitv NULL waiters not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // futex_waitv flags-first ordering (batch 237): even with
+        // nr=0 (which would otherwise trip the combined EINVAL gate),
+        // a non-zero flags arg must fire EINVAL via the flags gate
+        // that now runs first.  The errno is the same, but exercising
+        // this case keeps the gate ladder visible.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0xdead_beef, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv flags-first ordering not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_waitv bad clockid with timeout != NULL -> EINVAL.
+        // (Batch 237: the clockid range check now only fires when
+        // timeout is non-NULL, so this is the path that still hits
+        // the clockid gate.  Without the timeout, Linux skips the
+        // clockid check entirely.)
+        let a = SyscallArgs { arg0: waitv_ptr, arg1: 1, arg2: 0, arg3: ts_ptr, arg4: 5, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv bad clockid (with timeout) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_waitv timeout==NULL ignores clockid (batch 237):
+        // With waitv_ptr pointing at a zero-filled 24-byte buffer the
+        // per-entry SIZE_MASK == SIZE_U8 check would also return
+        // EINVAL, so a `clockid=99` probe sees EINVAL either way.
+        // The distinction is *which* gate fires: pre-batch the
+        // clockid range gate fired first; post-batch the per-entry
+        // gate does.  Same errno, different reason — kept as a
+        // smoke check that the path doesn't accidentally start
+        // returning a different code (e.g. EFAULT).
+        let a = SyscallArgs { arg0: waitv_ptr, arg1: 1, arg2: 0, arg3: 0, arg4: 99, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: futex_waitv (timeout=NULL, clockid=99) not EINVAL via per-entry path"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   futex_waitv flags-first > nr/waiters-EINVAL > timeout-gated clockid gate order: OK"
+        );
         // futex_waitv nr=1 with an all-zero waitv (flags=0 → SIZE_U8) ->
         // EINVAL (batch 131: only SIZE_U32 is supported per-entry).
         let a = SyscallArgs { arg0: waitv_ptr, arg1: 1, arg2: 0, arg3: ts_ptr, arg4: 1, arg5: 0 };

@@ -26046,3 +26046,108 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (47.55s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 24s).
+
+327. Linux ABI batch 297 — fd-creator family
+     int/unsigned-int flags register truncation per
+     x86_64 syscall ABI.  Five syscalls share the
+     same shape: a declared 32-bit C-int flags arg
+     read as raw u64 and bit-masked against
+     VALID_FLAGS, so sentinel high bits 32+ produced
+     EINVAL where Linux truncates the high half away
+     and proceeds.
+
+     Affected syscalls and prototypes:
+       - sys_signalfd4   (int flags)
+       - sys_timerfd_create  (int flags)
+       - sys_inotify_init1   (int flags)
+       - sys_userfaultfd     (int flags)
+       - sys_memfd_create    (unsigned int flags)
+
+     Divergence
+     ----------
+     Each stub had `let flags = args.argN;` followed
+     by `if flags & !VALID_FLAGS != 0 { EINVAL; }`.
+     A probe with `flags = 0x1_0000_0800` (bit 32 +
+     SFD_NONBLOCK / TFD_NONBLOCK / IN_NONBLOCK) or
+     `0x1_0000_0001` (bit 32 + USER_MODE_ONLY /
+     MFD_CLOEXEC) returned EINVAL where Linux
+     truncates `flags` to the low 32 bits, sees the
+     valid bit, and proceeds to:
+       - signalfd4    -> ENOSYS (no signalfd backing)
+       - timerfd_create -> ENOSYS (no timerfd impl)
+       - inotify_init1  -> ENOSYS (no inotify impl)
+       - userfaultfd    -> ENOSYS (privilege gate
+                          passed but no impl)
+       - memfd_create   -> next gate (NULL-name
+                          EFAULT in the test probe).
+
+     Userfaultfd is doubly affected: a probe with
+     just bit 32 set (`flags = 0x1_0000_0000`)
+     truncates to 0, which then takes the
+     non-USER_MODE_ONLY -> EPERM branch (Linux
+     requires CAP_SYS_PTRACE).  Pre-batch: EINVAL via
+     unknown-flag gate.
+
+     Fix
+     ---
+     For each syscall, cast the flags arg at entry:
+       - signalfd4 (~11196):   args.arg3 as i32 -> u32 -> u64
+       - timerfd_create (~11215): args.arg1 as i32 -> u32 -> u64
+       - inotify_init1 (~11374):  args.arg0 as i32 -> u32 -> u64
+       - userfaultfd (~12541):    args.arg0 as i32 -> u32 -> u64
+       - memfd_create (~12583):   args.arg1 as u32 -> u64
+                                  (declared unsigned int)
+     Downstream bit-mask, MFD_HUGETLB / HUGE_SIZE_MASK
+     subset check, and UFFD_USER_MODE_ONLY check all
+     read the new truncated `flags` automatically via
+     shadowing.
+
+     New self-tests
+     --------------
+     One consolidated block after the memfd_create
+     "flags-first / EXEC+NOEXEC_SEAL / HUGETLB"
+     marker, with marker
+       "[syscall/linux]   fd-creator family int flags truncation: OK":
+       (a) signalfd4(fd=-1, mask=valid, sizemask=8,
+           flags=0x1_0000_0800) -> ENOSYS.
+       (b) timerfd_create(CLOCK_MONOTONIC,
+           flags=0x1_0000_0800) -> ENOSYS.
+       (c) inotify_init1(flags=0x1_0000_0800) -> ENOSYS.
+       (d) userfaultfd(flags=0x1_0000_0001) -> ENOSYS.
+       (d2) userfaultfd(flags=0x1_0000_0000) -> EPERM.
+       (e) memfd_create(name=NULL,
+           flags=0x1_0000_0001) -> EFAULT.
+
+     Preserved
+     ---------
+     - signalfd4's sizemask > mask-EFAULT > flag-mask
+       gate order (batch unrecorded).
+     - timerfd_create's clockid range check.
+     - userfaultfd's UFFD_USER_MODE_ONLY -> EPERM gate
+       (now reads the truncated flags).
+     - memfd_create's flags-first > EXEC|NOEXEC_SEAL
+       mutex > NULL-name EFAULT gate order (preserved
+       because flags shadowing happens before the
+       first gate).
+     - MFD_HUGETLB + HUGE_SIZE_MASK (bits 26..31)
+       remain valid because they sit entirely in the
+       low 32 bits.
+
+     Known limitations / out of scope
+     --------------------------------
+     - signalfd / signalfd4: HandleKind::SignalFd
+       still doesn't exist, so fd != -1 still returns
+       EINVAL (real signalfd plumbing deferred per
+       earlier entries).
+     - timerfd / inotify / userfaultfd: no backing
+       impl; ENOSYS surfaces for all valid inputs.
+     - memfd_create's strnlen_user uses
+       validate_user_read on the user pointer, which
+       has a kernel-context bypass — the kernel-ctx
+       memfd self-tests can only observe the flags
+       and EFAULT gates, not the full inode install
+       path.
+
+     Build: cargo build -p kernel clean (47.11s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 24s).

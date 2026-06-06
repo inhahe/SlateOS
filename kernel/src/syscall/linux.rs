@@ -11196,7 +11196,16 @@ fn sys_signalfd4(args: &SyscallArgs) -> SyscallResult {
     const SFD_NONBLOCK: u64 = 0o4000;
     const SFD_CLOEXEC: u64 = 0o2_000_000;
     const VALID_FLAGS: u64 = SFD_NONBLOCK | SFD_CLOEXEC;
-    if args.arg3 & !VALID_FLAGS != 0 {
+    // x86_64 syscall ABI: `int flags` truncates to i32; the high half
+    // of the register is invisible to Linux's gate.  Pre-batch a probe
+    // with `flags = 0x1_0000_0800` (high bit 32 + SFD_NONBLOCK)
+    // returned EINVAL where Linux truncates to SFD_NONBLOCK and
+    // proceeds (to ENOSYS in our stub).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg3 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags_u64: u64 = u64::from(flags_i32 as u32);
+    if flags_u64 & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     // Same fd semantics as signalfd(2) — see comment there.
@@ -11224,7 +11233,16 @@ fn sys_timerfd_create(args: &SyscallArgs) -> SyscallResult {
     const TFD_NONBLOCK: u64 = 0o4000;
     const TFD_CLOEXEC: u64 = 0o2_000_000;
     const VALID_FLAGS: u64 = TFD_NONBLOCK | TFD_CLOEXEC;
-    if args.arg1 & !VALID_FLAGS != 0 {
+    // x86_64 syscall ABI: `int flags` is delivered in a 64-bit
+    // register; the kernel function body sees only the low 32 bits.
+    // Pre-batch we masked args.arg1 raw, so a probe with
+    // `flags = 0x1_0000_0800` (high bit 32 + TFD_NONBLOCK) returned
+    // EINVAL where Linux truncates to TFD_NONBLOCK and proceeds.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg1 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags: u64 = u64::from(flags_i32 as u32);
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -11376,7 +11394,14 @@ fn sys_inotify_init1(args: &SyscallArgs) -> SyscallResult {
     const IN_NONBLOCK: u64 = 0o4000;
     const IN_CLOEXEC: u64 = 0o2_000_000;
     const VALID_FLAGS: u64 = IN_NONBLOCK | IN_CLOEXEC;
-    if args.arg0 & !VALID_FLAGS != 0 {
+    // x86_64 syscall ABI: Linux declares `int inotify_init1(int flags)`
+    // so only the low 32 bits of rdi are visible to the gate.  Probes
+    // with sentinel high bits saw EINVAL where Linux would proceed.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags: u64 = u64::from(flags_i32 as u32);
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -12542,7 +12567,18 @@ fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
     const UFFD_USER_MODE_ONLY: u64 = 1;
     // UFFD_USER_MODE_ONLY = 1, plus O_CLOEXEC | O_NONBLOCK.
     const VALID_FLAGS: u64 = UFFD_USER_MODE_ONLY | 0o4000 | 0o2_000_000;
-    let flags = args.arg0;
+    // x86_64 syscall ABI: Linux declares
+    //   int userfaultfd(int flags)
+    // so the high half of rdi is invisible to the kernel function
+    // body.  Pre-batch we masked args.arg0 raw, so a probe with
+    // `flags = 0x1_0000_0001` (high bit 32 + UFFD_USER_MODE_ONLY) hit
+    // EINVAL where Linux truncates to UFFD_USER_MODE_ONLY and
+    // proceeds (to ENOSYS in our stub since we have no userfaultfd
+    // backing).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags: u64 = u64::from(flags_i32 as u32);
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -12605,7 +12641,17 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
     const MFD_ALL_FLAGS: u64 =
         MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_NOEXEC_SEAL | MFD_EXEC;
     const HUGE_SIZE_MASK: u64 = 0x3F << 26;
-    let flags = args.arg1;
+    // x86_64 syscall ABI: Linux declares
+    //   int memfd_create(const char *name, unsigned int flags)
+    // so only the low 32 bits of rsi are visible to the kernel
+    // function body.  Pre-batch we masked args.arg1 raw, so a probe
+    // with `flags = 0x1_0000_0001` (high bit 32 + MFD_CLOEXEC) hit
+    // EINVAL where Linux truncates to MFD_CLOEXEC and proceeds.  Note
+    // that MFD_HUGETLB + HUGE_SIZE_MASK use bits 26..31, all within
+    // the low 32, so the truncated mask still represents Linux's full
+    // accepted set.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags: u64 = u64::from(args.arg1 as u32);
     if (flags & MFD_HUGETLB) == 0 {
         if flags & !MFD_ALL_FLAGS != 0 {
             return linux_err(errno::EINVAL);
@@ -38090,6 +38136,133 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   memfd_create flags-first / EXEC+NOEXEC_SEAL / HUGETLB: OK"
         );
+
+        // Batch 297: x86_64 syscall ABI register truncation for the
+        // fd-creator family's int/unsigned-int flags arg.  Pre-batch
+        // each of signalfd4, timerfd_create, inotify_init1,
+        // userfaultfd, and memfd_create read its declared
+        // 32-bit-C-type flags arg as a raw u64 and bit-masked against
+        // VALID_FLAGS, so a sentinel high bit (32+) produced EINVAL
+        // where Linux truncates the high half away and proceeds.
+
+        // (a) signalfd4: flags = 0x1_0000_0800 (high bit 32 +
+        //     SFD_NONBLOCK), sizemask=8, mask=valid.  Linux truncates
+        //     to SFD_NONBLOCK -> ENOSYS in our stub.  Pre-batch:
+        //     EINVAL via unknown-flag check.
+        let sigmask_b297 = [0u8; 8];
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: sigmask_b297.as_ptr() as u64,
+            arg2: 8,
+            arg3: 0x1_0000_0800,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD4, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: signalfd4 flags high-half not truncated"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) timerfd_create: clockid=CLOCK_MONOTONIC,
+        //     flags = 0x1_0000_0800 (high bit 32 + TFD_NONBLOCK).
+        //     Linux truncates -> ENOSYS.  Pre-batch: EINVAL.
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: 0x1_0000_0800,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::TIMERFD_CREATE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_create flags high-half not truncated"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) inotify_init1: flags = 0x1_0000_0800 (high bit 32 +
+        //     IN_NONBLOCK).  Linux truncates -> ENOSYS.  Pre-batch:
+        //     EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0800,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::INOTIFY_INIT1, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: inotify_init1 flags high-half not truncated"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) userfaultfd: flags = 0x1_0000_0001 (high bit 32 +
+        //     UFFD_USER_MODE_ONLY).  Linux truncates ->
+        //     UFFD_USER_MODE_ONLY, passes the privilege gate, ENOSYS
+        //     in our stub.  Pre-batch: EINVAL via unknown-flag check.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::USERFAULTFD, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: userfaultfd flags high-half not truncated"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d2) userfaultfd: flags = 0x1_0000_0000 (high bit 32 only).
+        //     Linux truncates to 0 -> EPERM via the
+        //     non-USER_MODE_ONLY -> CAP_SYS_PTRACE gate.  Pre-batch:
+        //     EINVAL via unknown-flag check.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::USERFAULTFD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: userfaultfd flags=high-half-only not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (e) memfd_create: name=NULL, flags = 0x1_0000_0001 (high
+        //     bit 32 + MFD_CLOEXEC).  Linux truncates to MFD_CLOEXEC,
+        //     valid -> hits the NULL-name EFAULT gate.  Pre-batch:
+        //     EINVAL via unknown-flag check (high bit 32 was outside
+        //     MFD_ALL_FLAGS).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1_0000_0001,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::MEMFD_CREATE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_create flags high-half not truncated"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   fd-creator family int flags truncation: OK"
+        );
+
         // memfd_secret(0) -> ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

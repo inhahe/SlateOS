@@ -26689,3 +26689,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        Build: cargo build -p kernel clean (35.51s).
        Boot test: bash scripts/boot-test.sh --no-build
                   --timeout=240 PASSED (BOOT_OK at 22s).
+
+  333. Batch 303 — sys_arch_prctl int code
+       truncation audit.
+
+       Divergence
+       ----------
+       Linux's `SYSCALL_DEFINE2(arch_prctl, int, option,
+       unsigned long, arg2)` truncates `option` to its
+       low 32 bits before the body runs.  Pre-batch we
+       held code as raw u64 and matched against the
+       u64-typed ARCH_* constants
+       (ARCH_GET_CPUID=0x1011, ARCH_GET_XCOMP_SUPP=
+       0x1021, etc.).  Probes with the high half set
+       (e.g. code=0x1_0000_1011) missed every arm and
+       fell to `_ => EINVAL` where Linux truncates and
+       reaches the matching arm.
+
+       Fix
+       ---
+       Cast args.arg0 to i32 at function entry, then
+       zero-extend back to u64 via the standard
+       i32->u32->u64 ladder for comparison with the
+       existing ARCH_* const table.  addr stays as
+       raw u64 because Linux declares arg2 as
+       `unsigned long`.  Negative code inputs zero-
+       extend to a huge u64 that misses every positive
+       ARCH_* arm — same default EINVAL Linux produces
+       on a signed match against negative integers.
+
+       New self-tests
+       --------------
+       Added a "Batch 303" block at the end of
+       dispatch_linux's Linux ABI self-tests with two
+       probes:
+         (a) arch_prctl(code=0x1_0000_1011, addr=0)
+             -> 1 (ARCH_GET_CPUID = enabled).
+         (b) arch_prctl(code=0x1_0000_1021, addr=0)
+             -> -EFAULT (ARCH_GET_XCOMP_SUPP gates
+             the user write on addr!=0).
+       Marker: "[syscall/linux]
+         arch_prctl int code truncation: OK".
+
+       Preserved
+       ---------
+       - ARCH_SET_FS / ARCH_SET_GS USER_FS_BASE_MAX
+         gate (EPERM for kernel-range addresses).
+       - ARCH_GET_FS / ARCH_GET_GS NULL-pointer EFAULT.
+       - ARCH_SET_CPUID enable/disable/EINVAL ladder.
+       - ARCH_REQ_XCOMP_PERM bit-index validation.
+
+       Known limitations / out of scope
+       --------------------------------
+       - sys_prctl(int option) has the same int-
+         truncation surface but the match block runs
+         from ~5350 to ~6809 (1459 lines, many arms
+         with side effects).  Lifting code-as-i32 to
+         the top is a one-line change but each arm
+         needs to be re-audited to confirm Linux's
+         post-truncation answer is preserved.
+         Deferred to its own batch.
+       - sys_ioprio_set/get already cast which/who/
+         ioprio to i32 at entry (missing #[allow]
+         attributes but functionally correct).  No
+         divergence.
+       - sys_personality already casts to u32 at
+         entry (Linux declares persona as unsigned
+         int).  No divergence.
+
+       Build: cargo build -p kernel clean (35.84s).
+       Boot test: bash scripts/boot-test.sh --no-build
+                  --timeout=240 PASSED (BOOT_OK at 24s).

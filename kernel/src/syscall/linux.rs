@@ -24404,7 +24404,22 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
     /// `arch/x86/kernel/process_64.c::do_arch_prctl_64`.
     const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
-    let code = args.arg0;
+    // Linux signature:
+    //   `SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)`
+    // option is declared `int` (32-bit), so the x86_64 syscall ABI
+    // truncates args.arg0 to its low 32 bits before the body runs.
+    // Pre-batch (303) we held code as raw u64 and matched against
+    // u64-typed ARCH_* constants, so a probe with
+    // code=0x1_0000_1011 (truncates to ARCH_GET_CPUID=0x1011) missed
+    // every arm and fell to `_ => EINVAL` where Linux truncates and
+    // returns 1 (CPUID enabled).  Same `int` truncation thread as
+    // batches 285/286/287/288.  Cast at entry to restore the 32-bit
+    // view; addr stays as raw u64 because Linux declares arg2 as
+    // `unsigned long` (already 64-bit).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let code_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let code: u64 = u64::from(code_i32 as u32);
     let addr = args.arg1;
 
     match code {
@@ -27868,6 +27883,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   finit_module/delete_module int/unsigned-int flag truncation: OK"
+        );
+    }
+
+    // Batch 303 — sys_arch_prctl int code truncation audit.
+    //
+    // Pre-batch read: `let code = args.arg0;` raw u64 against u64-
+    // typed ARCH_* constants (ARCH_GET_CPUID=0x1011, etc.).  Probes
+    // with code=0x1_0000_1011 (truncates to ARCH_GET_CPUID) missed
+    // every arm and fell to `_ => EINVAL`.  Post-batch: code
+    // truncates to 0x1011 and returns the CPUID-enabled answer.
+    {
+        // (a) arch_prctl(code=0x1_0000_1011, addr=0).  Pre-batch:
+        //     raw 0x1_0000_1011 didn't match ARCH_GET_CPUID=0x1011
+        //     -> `_ => EINVAL`.  Post-batch: code truncates to
+        //     0x1011, takes the ARCH_GET_CPUID arm and returns 1
+        //     (we never disable CPUID).
+        let a = SyscallArgs {
+            arg0: 0x1_0000_1011,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::ARCH_PRCTL, &a).value;
+        if v != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl high-half ARCH_GET_CPUID -> {} (expected 1)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) arch_prctl(code=0x1_0000_1021 ARCH_GET_XCOMP_SUPP,
+        //     addr=0).  Pre-batch: raw 0x1_0000_1021 != 0x1021
+        //     -> EINVAL.  Post-batch: code truncates to 0x1021,
+        //     takes the SUPP|PERM arm, hits the addr==0 -> EFAULT
+        //     gate before any user write.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_1021,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::ARCH_PRCTL, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl high-half ARCH_GET_XCOMP_SUPP -> {} (expected -EFAULT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   arch_prctl int code truncation: OK"
         );
     }
 

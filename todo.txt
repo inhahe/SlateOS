@@ -33206,3 +33206,99 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (39.39s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+398. syscall/linux batch 368 — sys_remap_file_pages: fix inverted
+     prot semantics (Linux REJECTS any non-zero prot) and remove
+     i32 truncation of `unsigned long prot`.
+
+     Pre-batch sys_remap_file_pages:
+
+         fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
+             let addr = args.arg0;
+             let prot = args.arg2 as i32;
+             if addr % 0x4000 != 0 {
+                 return linux_err(errno::EINVAL);
+             }
+             // "prot must contain at least one access bit; 0 here
+             // would be PROT_NONE which is not what callers want"
+             if prot != 0 && (prot as u32) & !0x37 != 0 {
+                 return linux_err(errno::EINVAL);
+             }
+             linux_err(errno::ENOSYS)
+         }
+
+     The pre-batch doc-comment inverts Linux's contract.  Linux's
+     SYSCALL_DEFINE5(remap_file_pages) in mm/mmap.c:
+
+         if (prot)
+             return ret;   /* ret = -EINVAL */
+         start = start & PAGE_MASK;
+         size  = size  & PAGE_MASK;
+         if (start + size <= start)
+             return ret;
+
+     ANY non-zero prot is rejected.  The reason: remap_file_pages
+     preserves the original VMA's protection bits — passing a
+     non-zero prot would suggest a protection change, which the
+     syscall does not support.  Userspace passing PROT_READ (1)
+     saw ENOSYS pre-batch where Linux returns EINVAL, masking
+     the "use mmap(MAP_FIXED) instead" signal the deprecation
+     path is meant to send.
+
+     Two pre-batch divergences:
+
+       * remap_file_pages(_, _, PROT_READ=1, _, _) -> ENOSYS
+         (Linux: EINVAL).  Pre-batch's 0x37 mask accepted any
+         combination of PROT_READ|WRITE|EXEC|SEM|GROWSDOWN|GROWSUP
+         as "valid" and fell through to ENOSYS terminal.
+
+       * remap_file_pages(_, _, 0x1_0000_0000, _, _) -> ENOSYS
+         (Linux: EINVAL).  Pre-batch cast args.arg2 to i32, so
+         high-bit-only prot values truncated to 0 and bypassed
+         even the bit-mask gate.  Linux's `unsigned long prot`
+         is 64-bit; the truncation was wrong.
+
+     Fix shape (mirrors Linux exactly):
+
+         let addr = args.arg0;
+         let prot = args.arg2;  // u64, no truncation
+         if addr % 0x4000 != 0 {
+             return linux_err(errno::EINVAL);
+         }
+         if prot != 0 {
+             return linux_err(errno::EINVAL);
+         }
+         linux_err(errno::ENOSYS)
+
+     The addr alignment check is retained as a fidelity-stricter
+     approximation of Linux's `start & PAGE_MASK` round-down:
+     Linux silently rounds misaligned addrs and continues to the
+     VMA lookup (which then EINVALs for missing VMAs), so
+     pre-batch's EINVAL-on-misalignment coincidentally yields the
+     same errno as Linux's likely terminal.
+
+     Probe rewrite — the existing "valid -> ENOSYS" probe used
+     prot=3 which Linux actually rejects with EINVAL.  Updated:
+
+       * misaligned addr + prot=0 -> EINVAL (isolates alignment
+         cause; previously used prot=3 which would also EINVAL
+         post-batch via the new gate, masking the alignment
+         path).
+       * prot=PROT_READ (1) -> EINVAL (was: ENOSYS pre-batch).
+       * prot=PROT_READ|WRITE|EXEC (7) -> EINVAL (was: ENOSYS
+         pre-batch — fully inside the 0x37 mask).
+       * prot=0x80 -> EINVAL (was: EINVAL pre-batch via the
+         bit-mask gate; same errno, new cause).
+       * prot=0x1_0000_0000 -> EINVAL (i32-truncation trap:
+         was ENOSYS pre-batch; now caught by the u64 compare).
+       * aligned + prot=0 -> ENOSYS (the actual "valid" path:
+         Linux's only accepted prot is 0, and we have no
+         non-linear mapping backing).
+
+     Final boot-time stamp:
+         "[syscall/linux]   remap_file_pages prot!=0 EINVAL
+          (all non-zero prots): OK"
+
+     Build: cargo build -p kernel clean (38.62s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

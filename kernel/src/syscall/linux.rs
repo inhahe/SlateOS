@@ -24373,24 +24373,60 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Deprecated since Linux 3.16 in favour of multiple `mmap` calls;
 /// glibc dropped its wrapper in 2.x and modern callers use either
-/// `mmap(MAP_FIXED)` directly or `mremap`.  Return ENOSYS after
-/// validating that addr is 16 KiB aligned (kernel page size) and prot
-/// is non-zero — the standard signal that "this kernel never
-/// implemented non-linear mappings".
+/// `mmap(MAP_FIXED)` directly or `mremap`.
+///
+/// Linux gate order (mm/mmap.c::SYSCALL_DEFINE5(remap_file_pages)):
+///
+///   SYSCALL_DEFINE5(remap_file_pages, unsigned long, start,
+///                   unsigned long, size, unsigned long, prot,
+///                   unsigned long, pgoff, unsigned long, flags)
+///   {
+///       ...
+///       if (prot)
+///           return ret;          // ret = -EINVAL
+///       start = start & PAGE_MASK;
+///       size  = size  & PAGE_MASK;
+///       if (start + size <= start)
+///           return ret;
+///       ...
+///   }
+///
+/// Two pre-batch divergences:
+///
+///   * prot validation was BACKWARDS.  The pre-batch doc-comment
+///     ("prot must contain at least one access bit; 0 here would
+///     be PROT_NONE which is not what callers want") inverts
+///     Linux's contract: Linux REJECTS any non-zero prot, because
+///     remap_file_pages preserves the original VMA's protection.
+///     Userspace passing PROT_READ (1) saw ENOSYS pre-batch where
+///     Linux returns EINVAL, masking the real "use mmap" signal.
+///     Post-batch: prot != 0 -> EINVAL.
+///
+///   * prot was cast to i32, truncating high bits.  Linux's
+///     `unsigned long prot` is 64-bit; a caller passing
+///     prot = 0x1_0000_0000 truncated to 0 pre-batch (now
+///     "accepted") but Linux sees non-zero -> EINVAL.  Compare
+///     against args.arg2 directly.
+///
+/// The addr alignment check is retained as a fidelity-stricter
+/// approximation of Linux's `start & PAGE_MASK` round-down: Linux
+/// silently rounds misaligned addrs and continues to the VMA
+/// lookup (which then EINVALs for missing VMAs), so pre-batch's
+/// EINVAL-on-misalignment yields the same errno as Linux's
+/// likely terminal in practice.  No probe-observable divergence.
 fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
     let addr = args.arg0;
     let _size = args.arg1;
-    let prot = args.arg2 as i32;
+    let prot = args.arg2;
     let _pgoff = args.arg3;
-    let _flags = args.arg4 as i32;
+    let _flags = args.arg4;
     // 16 KiB alignment — see CLAUDE.md architectural rules.
     if addr % 0x4000 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // prot must contain at least one access bit; 0 here would be
-    // PROT_NONE which is not what callers want (they should use mmap).
-    if prot != 0 && (prot as u32) & !0x37 != 0 {
-        // 0x37 = PROT_READ|WRITE|EXEC|SEM|GROWSDOWN|GROWSUP combined.
+    // Linux: `if (prot) return -EINVAL;` — any non-zero prot
+    // is rejected (the original VMA's protection is preserved).
+    if prot != 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -53961,23 +53997,62 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let waiters_ptr = waiters_buf.as_ptr() as u64;
 
         // remap_file_pages misaligned addr -> EINVAL.
-        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 3, arg3: 0, arg4: 0, arg5: 0 };
+        //   Pre-batch's alignment check (kept post-batch as a fidelity
+        //   approximation of Linux's `start & PAGE_MASK` round-down)
+        //   yields EINVAL ahead of the prot gate.  Use prot=0 here so
+        //   the test isolates the alignment cause.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: remap_file_pages misaligned not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // remap_file_pages bad prot -> EINVAL.
+        // Batch 368: Linux's remap_file_pages rejects ANY non-zero prot
+        // (`if (prot) return -EINVAL;`).  Pre-batch only rejected bits
+        // outside the PROT_* mask, so PROT_READ (1) etc. fell through
+        // to ENOSYS where Linux returns EINVAL.
+        // remap_file_pages prot=PROT_READ (1) -> EINVAL.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages prot=PROT_READ not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // remap_file_pages prot=PROT_READ|WRITE|EXEC (7) -> EINVAL.
+        //   Pre-batch fell through to ENOSYS (all bits in the 0x37 mask).
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 7, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages prot=RWX not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // remap_file_pages prot=0x80 (out of pre-batch's 0x37 mask) -> EINVAL.
+        //   Pre-batch caught this via the bit-mask gate; post-batch via
+        //   the new `prot != 0` gate.  Same errno, different cause.
         let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0x80, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: remap_file_pages bad prot not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages prot=0x80 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // remap_file_pages valid -> ENOSYS.
-        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 3, arg3: 0, arg4: 0, arg5: 0 };
+        // remap_file_pages prot=0x1_0000_0000 (i32 truncation trap) -> EINVAL.
+        //   Pre-batch cast prot to i32: 0x1_0000_0000 truncates to 0,
+        //   passes the bit-mask gate, falls through to ENOSYS.
+        //   Post-batch compares args.arg2 directly (u64): high bit set,
+        //   prot != 0 gate fires -> EINVAL (matches Linux's unsigned
+        //   long prot).
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages prot=0x1_0000_0000 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // remap_file_pages aligned + prot=0 -> ENOSYS.
+        //   The only "valid" prot in Linux is 0; we have no non-linear
+        //   mapping backing, so terminal ENOSYS.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: remap_file_pages valid not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages valid (prot=0) not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   remap_file_pages prot!=0 EINVAL (all non-zero prots): OK"
+        );
 
         // ioprio_set bad which -> EINVAL.
         let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

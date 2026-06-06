@@ -7514,9 +7514,33 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
     // 104..112  _f[8]
     let mut buf = [0u8; SYSINFO_SIZE];
 
-    // Uptime in seconds since boot.  uptime_secs is the canonical
-    // wrapper over clock_monotonic / 1e9.
-    let uptime_s: u64 = crate::timekeeping::uptime_secs();
+    // Uptime in seconds since boot.  Linux `kernel/sys.c::do_sysinfo`:
+    //
+    //     ktime_get_boottime_ts64(&tp);
+    //     timens_add_boottime(&tp);
+    //     info->uptime = tp.tv_sec + (tp.tv_nsec ? 1 : 0);
+    //
+    // The trailing `+ (tp.tv_nsec ? 1 : 0)` is a ceiling round-up on
+    // the seconds component, so a boottime of 23.500000001s reports
+    // 24 — NOT the truncated 23 our pre-batch `clock_monotonic / 1e9`
+    // path produced.  Userspace tools that key on uptime (`uptime(1)`,
+    // procps' `tload`, monit's "system uptime" trigger, Nagios'
+    // `check_uptime`, btrfs-progs' boot-age heuristic for transaction
+    // recovery) expect Linux's ceiling because they compare against
+    // wall-clock seconds derived from gettimeofday/CLOCK_REALTIME with
+    // sub-second precision rounded the same way.  Our truncation made
+    // uptime appear to LAG real elapsed time by up to 999_999_999 ns,
+    // which trips "clock skew" heuristics in the first few seconds
+    // after boot and intermittently throughout normal operation.
+    //
+    // Compute the exact ceiling via integer math: for ns ≠ 0 (anything
+    // with a sub-second remainder), `(ns + NSEC_PER_SEC - 1) /
+    // NSEC_PER_SEC` matches Linux's `tv_sec + (tv_nsec ? 1 : 0)` bit
+    // for bit.  Linux uses CLOCK_BOOTTIME (which adds suspend time);
+    // we have no suspend path, so CLOCK_MONOTONIC and BOOTTIME
+    // coincide.
+    let mono_ns: u64 = crate::hrtimer::now_ns();
+    let uptime_s: u64 = mono_ns.saturating_add(999_999_999) / 1_000_000_000;
     #[allow(clippy::cast_possible_wrap)]
     let uptime_i: i64 = uptime_s as i64;
     buf[0..8].copy_from_slice(&uptime_i.to_ne_bytes());
@@ -39126,6 +39150,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 dispatch_linux(nr::SYSINFO, &a).value
             );
             return Err(KernelError::InternalError);
+        }
+
+        // Batch 440: verify the uptime field uses Linux's
+        // tv_sec + (tv_nsec ? 1 : 0) ceiling round-up rather than
+        // raw clock_monotonic / 1e9 truncation.  We snapshot
+        // clock_monotonic before and after the call; the reported
+        // uptime must satisfy:
+        //   ceil(t_before/1e9) <= uptime <= ceil(t_after/1e9) + 1
+        // (the +1 absorbs a worst-case wraparound where t_after's
+        // ceiling lands exactly on a second boundary that
+        // clock_monotonic might tick past mid-call).  The strict
+        // lower bound is what catches the pre-batch truncation
+        // divergence: if uptime < ceil(t_before/1e9), we're using
+        // truncation rather than ceiling.
+        {
+            let mut sysinfo_buf = [0u8; 112];
+            let info_ptr = sysinfo_buf.as_mut_ptr() as u64;
+            let t_before_ns = crate::hrtimer::now_ns();
+            let a = SyscallArgs { arg0: info_ptr, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SYSINFO, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sysinfo(valid) not 0 ({})",
+                    dispatch_linux(nr::SYSINFO, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            let t_after_ns = crate::hrtimer::now_ns();
+            let uptime_reported = i64::from_ne_bytes(
+                match <[u8; 8]>::try_from(&sysinfo_buf[0..8]) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        serial_println!("[syscall/linux]   FAIL: sysinfo uptime slice");
+                        return Err(KernelError::InternalError);
+                    }
+                },
+            );
+            let ceil_before: i64 = (t_before_ns
+                .saturating_add(999_999_999)
+                / 1_000_000_000) as i64;
+            let ceil_after: i64 = (t_after_ns
+                .saturating_add(999_999_999)
+                / 1_000_000_000) as i64;
+            if uptime_reported < ceil_before || uptime_reported > ceil_after + 1 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sysinfo uptime {} outside [{}, {}+1] (Linux ceiling round-up)",
+                    uptime_reported, ceil_before, ceil_after
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   sysinfo uptime uses tv_sec+(tv_nsec?1:0) ceiling (Linux: do_sysinfo round-up; pre-batch truncated): OK"
+            );
         }
 
         // Batch 58: verify the storage layer that sysinfo's `procs`

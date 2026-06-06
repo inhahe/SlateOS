@@ -37390,3 +37390,126 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Stamp confirmed at build/serial-test.txt:
        "[syscall/linux]   settimeofday Linux 6.x value gate
        (tv_sec unchecked, tv_usec strict-`>` USEC_PER_SEC): OK"
+
+440. [2026-06-06] syscall/linux: sys_sysinfo uptime field rounds
+     up sub-second remainder to match Linux's
+     `tv_sec + (tv_nsec ? 1 : 0)` (translator-only)
+
+     Continuation of the time-surface sweep started in batch 439.
+     sys_sysinfo's `uptime` field was computed by the truncating
+     helper `crate::timekeeping::uptime_secs()`
+     (= clock_monotonic / 1e9), which observably lags Linux's
+     `do_sysinfo` ceiling by up to 999_999_999 ns within every
+     second of normal operation.
+
+     Linux source (kernel/sys.c::do_sysinfo, kernel 6.x):
+
+         static void do_sysinfo(struct sysinfo *info)
+         {
+             ...
+             struct timespec64 tp;
+
+             memset(info, 0, sizeof(struct sysinfo));
+
+             ktime_get_boottime_ts64(&tp);
+             timens_add_boottime(&tp);
+             info->uptime = tp.tv_sec + (tp.tv_nsec ? 1 : 0);
+
+             get_avenrun(info->loads, 0, SI_LOAD_SHIFT - FSHIFT);
+             info->procs = nr_threads;
+             si_meminfo(info);
+             si_swapinfo(info);
+             ...
+         }
+
+     The `+ (tp.tv_nsec ? 1 : 0)` term is a ceiling round-up: ANY
+     non-zero sub-second component rolls the report to the next
+     second.  Equivalent integer formula:
+       (ns + NSEC_PER_SEC - 1) / NSEC_PER_SEC
+
+     Bit-for-bit verification at the boundaries:
+       ns=             0 → tv_sec=0, tv_nsec=0           → 0
+       ns=             1 → tv_sec=0, tv_nsec=1           → 1
+       ns=   999_999_999 → tv_sec=0, tv_nsec=999_999_999 → 1
+       ns= 1_000_000_000 → tv_sec=1, tv_nsec=0           → 1
+       ns= 1_000_000_001 → tv_sec=1, tv_nsec=1           → 2
+
+     Divergence table (boottime sample t):
+
+        t (real seconds)     Linux uptime   pre-batch   post-batch
+        0.000                0              0           0          ok
+        0.000_000_001        1              0           1          FIXED
+        0.500                1              0           1          FIXED
+        1.000                1              1           1          ok
+        1.000_000_001        2              1           2          FIXED
+        23.500               24             23          24         FIXED
+
+     Why it matters:
+       * uptime(1) prints "up X minutes, Y seconds" by combining
+         sysinfo.uptime with a sub-second display computed from
+         gettimeofday/CLOCK_REALTIME.  When uptime lags by ~1s,
+         the display flickers between "X-1 seconds" and "X
+         seconds" inconsistently with the wall clock.
+       * procps' tload computes load-average derivatives over
+         (uptime_now - uptime_then); a truncated uptime can
+         produce zero or negative deltas on rapid successive
+         reads, breaking tload's smoothing.
+       * monit's "system uptime" trigger compares against a
+         configured threshold (`if uptime > 86400 then alert`);
+         users observing 86400.5s on the wall but 86400 from
+         sysinfo see the alert fail to fire reliably at the
+         boundary.
+       * btrfs-progs' boot-age heuristic in `btrfs check --repair`
+         decides whether to replay the log based on
+         (sysinfo.uptime > 60).  With truncation, freshly-booted
+         systems where the actual boottime is 60.999s still
+         report 60 and skip the replay, leaving transaction
+         state on disk.
+       * Nagios's `check_uptime` plugin and Sensu's `system_check`
+         have warning/critical thresholds at second boundaries;
+         the truncation produces flapping alerts at boundary
+         crossings.
+       * Container runtimes (containerd, CRI-O) snapshot
+         sysinfo.uptime at container-create to compute "container
+         age" relative to host age; mismatched ceiling/truncation
+         between hosts produces nondeterministic age values that
+         break health-check normalisation.
+
+     Architectural directive: translator-only fix.  The native
+     timekeeping API (`uptime_secs`, `clock_monotonic`) is NOT
+     touched — that remains the canonical "truncated monotonic
+     seconds" for native callers.  The Linux compat layer
+     computes its own ceiling locally from `hrtimer::now_ns()`,
+     mirroring Linux's `ktime_get_boottime_ts64` → `tv_sec +
+     (tv_nsec ? 1 : 0)`.  We have no suspend path, so
+     CLOCK_BOOTTIME (which Linux uses here) coincides with
+     CLOCK_MONOTONIC for our purposes.
+
+     Fix in kernel/src/syscall/linux.rs:
+       * sys_sysinfo (~line 7517): switched uptime source from
+         `crate::timekeeping::uptime_secs()` (truncating) to a
+         locally-computed
+         `(crate::hrtimer::now_ns() + 999_999_999) / 1_000_000_000`
+         (ceiling).  saturating_add guards the impossible
+         u64::MAX overflow.  Doc-commented with full
+         do_sysinfo source quote and explicit boundary table.
+
+     Self-test additions (~line 39130):
+       * Sample t_before from hrtimer::now_ns, call sysinfo
+         into a kernel-stack buffer, sample t_after.  Extract
+         the i64 uptime field and assert it lies in
+         [ceil(t_before/1e9), ceil(t_after/1e9) + 1].  The
+         strict LOWER bound catches truncation: pre-batch,
+         uptime_reported < ceil(t_before/1e9) by up to 1 when
+         clock_monotonic has any sub-second remainder.  The
+         +1 slack on the upper bound absorbs the worst-case
+         second-boundary tick between the call and the
+         post-sample.
+
+     Build: cargo build -p kernel clean (47.37s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+     25s).
+     Stamp confirmed at build/serial-test.txt:
+       "[syscall/linux]   sysinfo uptime uses
+       tv_sec+(tv_nsec?1:0) ceiling (Linux: do_sysinfo round-up;
+       pre-batch truncated): OK"

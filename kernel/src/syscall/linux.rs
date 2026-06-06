@@ -2938,9 +2938,32 @@ fn sys_dup2(args: &SyscallArgs) -> SyscallResult {
 /// sets FD_CLOEXEC on the new fd.  Unlike dup2, `oldfd == newfd` is
 /// an error (Linux returns EINVAL).
 fn sys_dup3(args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (fs/file.c::ksys_dup3):
+    //   1. `(flags & ~O_CLOEXEC) != 0`         -> -EINVAL
+    //   2. `oldfd == newfd`                    -> -EINVAL
+    //   3. `newfd >= rlimit(RLIMIT_NOFILE)`    -> -EBADF
+    //   4. fdget(oldfd) / install at newfd
+    //
+    // Pre-batch we skipped gate 1 entirely: any flag value was
+    // silently accepted and we used only the O_CLOEXEC bit when
+    // calling dup2_impl.  Probes like
+    //   dup3(oldfd=5, newfd=6, flags=0x10 /* bogus */)
+    // saw EBADF from the dup2_impl path (in kernel context) where
+    // Linux returns EINVAL via the flags gate.  Also, x86_64 ABI:
+    // Linux declares `int flags`, so the high half of rdx is
+    // invisible to the kernel body — cast to i32 first, then
+    // reinterpret as u32 for the bit-mask compare.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let oldfd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let newfd = args.arg1 as i32;
-    let flags = args.arg2 as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg2 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+    if flags & !oflags::O_CLOEXEC != 0 {
+        return linux_err(errno::EINVAL);
+    }
     if oldfd == newfd {
         return linux_err(errno::EINVAL);
     }
@@ -28239,6 +28262,102 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   setgroups int truncation + unsigned NGROUPS_MAX: OK"
+        );
+    }
+
+    // Batch 307 — sys_dup3 missing `flags & ~O_CLOEXEC` validation +
+    // int truncation.  Linux's ksys_dup3 gates the flags mask BEFORE
+    // the oldfd==newfd check; pre-batch we skipped the flags gate
+    // entirely and only consulted the O_CLOEXEC bit.  Probes with
+    // bogus flag bits saw EBADF (from the dup2_impl path in kernel
+    // context) where Linux returns EINVAL.
+    {
+        // (a) dup3(oldfd=5, newfd=6, flags=0x10) — bogus flag bit
+        //     (0x10 is not O_CLOEXEC and not in the accepted set).
+        //     Linux: EINVAL via the flags gate.  Pre-batch: kernel-
+        //     context dup2_impl → EBADF.
+        let a = SyscallArgs {
+            arg0: 5,
+            arg1: 6,
+            arg2: 0x10,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(5,6,flags=0x10) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) dup3(oldfd=5, newfd=6, flags=0x1_0000_0010) — high-half
+        //     sentinel + bogus low bit.  Linux truncates to (int)0x10
+        //     → EINVAL via flags gate.  Pre-batch: cast as u32 still
+        //     gave 0x10, but no gate fired → dup2_impl → EBADF.
+        let a = SyscallArgs {
+            arg0: 5,
+            arg1: 6,
+            arg2: 0x1_0000_0010,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(5,6,flags=high-half-0x10) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) dup3(oldfd=5, newfd=6, flags=0x1_0000_0000) — high-half
+        //     sentinel only, low bits zero.  Linux truncates to
+        //     (int)0 → flags gate passes → caller_pid()=None →
+        //     EBADF.  Same result as raw 0 — verifies int truncation
+        //     correctly strips the high bit so the flags gate doesn't
+        //     spuriously fire.
+        let a = SyscallArgs {
+            arg0: 5,
+            arg1: 6,
+            arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(5,6,flags=high-half-zero) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) dup3(oldfd=5, newfd=5, flags=0x10) — Linux's flags gate
+        //     fires BEFORE the oldfd==newfd gate, so this is EINVAL
+        //     "for flags" (Linux) vs EINVAL "for same fd" (pre-batch).
+        //     Same errno but the test verifies the *flags-first* gate
+        //     order; without the gate, pre-batch would have returned
+        //     EINVAL via the oldfd==newfd branch and the flag bit
+        //     would have been silently ignored.  We can't directly
+        //     observe gate order from a single probe, but combined
+        //     with probe (a) — which differs in errno from EBADF —
+        //     this locks in the post-batch behaviour.
+        let a = SyscallArgs {
+            arg0: 5,
+            arg1: 5,
+            arg2: 0x10,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(5,5,flags=0x10) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   dup3 flags-gate validation + int truncation: OK"
         );
     }
 

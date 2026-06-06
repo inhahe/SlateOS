@@ -26993,3 +26993,87 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (35.81s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 25s).
+
+337. Batch 307 — sys_dup3 missing flags-gate validation
+     + int truncation.
+
+     Divergence: Linux's
+     `fs/file.c::ksys_dup3(unsigned int oldfd, unsigned int newfd,
+                          int flags)`
+     gate order:
+       1. `(flags & ~O_CLOEXEC) != 0`           -> -EINVAL
+       2. `oldfd == newfd`                      -> -EINVAL
+       3. `newfd >= rlimit(RLIMIT_NOFILE)`      -> -EBADF
+       4. fdget(oldfd) / install at newfd
+
+     Pre-batch we skipped gate 1 entirely: any flag value was
+     silently accepted and we used only the O_CLOEXEC bit
+     when calling sys_dup2_impl.  Probes:
+       - dup3(oldfd=5, newfd=6, flags=0x10): Linux EINVAL via
+         flags gate; pre-batch dup2_impl → kernel-context
+         EBADF.  **Divergence.**
+       - dup3(oldfd=5, newfd=6, flags=0x1_0000_0010): Linux
+         truncates int flags to 0x10 → EINVAL; pre-batch
+         `as u32` gave 0x10 but no gate → EBADF.
+         **Divergence.**
+
+     Also fixes the x86_64 ABI int-truncation thread for
+     `flags`: cast args.arg2 to i32 first (matches Linux's
+     `int flags` declaration), then reinterpret as u32 for
+     the bit-mask comparison.  Bit pattern is preserved
+     either way for in-range values; the explicit cast
+     ladder documents the ABI step.  Also added explicit
+     #[allow] attributes for oldfd/newfd i32 casts (pre-
+     batch had silent casts without lint suppressions).
+
+     Fix:
+       - Cast args.arg2 → i32 → u32 (int truncation +
+         unsigned reinterpret).
+       - Add `if flags & !O_CLOEXEC != 0 -> EINVAL` BEFORE
+         the existing `oldfd == newfd` check.
+       - Pass `flags & O_CLOEXEC != 0` to dup2_impl
+         unchanged (cloexec semantics preserved).
+
+     Tests added in dispatch_linux:
+       - (a) dup3(5, 6, flags=0x10) → EINVAL (bogus bit
+             trips the flags gate).
+       - (b) dup3(5, 6, flags=0x1_0000_0010) → EINVAL
+             (high-half sentinel + bogus low bit; verifies
+             int truncation preserves the bogus 0x10 bit).
+       - (c) dup3(5, 6, flags=0x1_0000_0000) → EBADF
+             (high-half sentinel only; int truncation
+             yields flags=0 → flags gate passes → kernel-
+             context EBADF).  Regression guard against an
+             over-eager flag check that forgets to mask
+             before testing.
+       - (d) dup3(5, 5, flags=0x10) → EINVAL (the existing
+             dup3(0,0,0) probe at the fd-table block
+             confirms zero-flag same-fd → EINVAL; this
+             probe additionally locks in that bogus flags
+             with same-fd is still EINVAL).
+       Marker: "[syscall/linux]   dup3 flags-gate validation
+       + int truncation: OK".
+
+     Preserved behaviour:
+       - Existing dup3(0,0,0) probe at the dup3 same-fd
+         block still returns EINVAL (flags=0 passes new
+         gate; oldfd==newfd triggers same-fd EINVAL).
+       - Real userspace caller: dup3(5, 6, flags=O_CLOEXEC)
+         still successfully duplicates 5 onto 6 with
+         FD_CLOEXEC set.
+       - dup3(oldfd_invalid, newfd_valid, flags=0) still
+         returns EBADF via the dup2_impl path.
+
+     Known limitations (deferred):
+       - Linux's gate 3 (`newfd >= rlimit(RLIMIT_NOFILE)
+         → EBADF`) runs before fdget(oldfd) in Linux.  We
+         delegate to dup2_impl which checks `newfd < 0` →
+         EBADF but doesn't surface the RLIMIT_NOFILE
+         interlock — for in-range newfd values the dup
+         path's own table-capacity check (MAX_FDS) catches
+         it as EBADF (same errno).  Tracked alongside
+         broader RLIMIT_NOFILE enforcement work.
+
+     Build: cargo build -p kernel clean (38.22s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 26s).

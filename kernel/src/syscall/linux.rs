@@ -12254,14 +12254,30 @@ fn sys_process_vm_writev(args: &SyscallArgs) -> SyscallResult {
 }
 
 fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let pid = args.arg0 as i32;
-    if pid <= 0 {
-        return linux_err(errno::ESRCH);
-    }
+    // Linux gate order (mm/process_vm_access.c::process_vm_rw):
+    //
+    //   1. `flags != 0`                             -> -EINVAL (already
+    //                                                  gated by callers).
+    //   2. import_iovec(LOCAL): liovcnt > UIO_MAXIOV (1024) -> -EINVAL,
+    //      then NULL lvec / unreadable lvec        -> -EFAULT.
+    //   3. (Linux additionally short-circuits to 0 if the local
+    //      iov_iter has zero total bytes — not mirrored here yet, see
+    //      known limitations in todo.txt entry 262.)
+    //   4. import_iovec(REMOTE): riovcnt > UIO_MAXIOV -> -EINVAL,
+    //      then NULL rvec / unreadable rvec        -> -EFAULT.
+    //   5. mm_access(pid) -> -ESRCH if pid<=0 or no task.
+    //
+    // Pre-batch divergences fixed here:
+    //   * `pid <= 0` was checked at the top of the function, masking
+    //     iov validation errors.  A probe passing pid=-1 with NULL
+    //     lvec saw ESRCH where Linux returns EFAULT.
+    //   * The two `cnt > 1024` checks were combined into a single
+    //     OR'd gate, so `(pid=anything, lvec=NULL, liovcnt=2,
+    //     riovcnt=2000)` returned EINVAL where Linux returns EFAULT
+    //     (the local import fires first).
     let liovcnt = args.arg2 as usize;
     let riovcnt = args.arg4 as usize;
-    if liovcnt > 1024 || riovcnt > 1024 {
+    if liovcnt > 1024 {
         return linux_err(errno::EINVAL);
     }
     if liovcnt > 0 {
@@ -12272,6 +12288,9 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
+    if riovcnt > 1024 {
+        return linux_err(errno::EINVAL);
+    }
     if riovcnt > 0 {
         if args.arg3 == 0 {
             return linux_err(errno::EFAULT);
@@ -12279,6 +12298,11 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg3, riovcnt.saturating_mul(16)) {
             return linux_err(linux_errno_for(e));
         }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    if pid <= 0 {
+        return linux_err(errno::ESRCH);
     }
 
     // Decide whether the target lives in the caller's address space.
@@ -34914,6 +34938,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: process_vm_readv(flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 233 gate-order discriminators: Linux's process_vm_rw
+        // validates iov first (import_iovec for local then remote)
+        // before resolving the target pid via mm_access.  Pre-batch we
+        // checked pid<=0 at the top of the function, which masked iov
+        // errors.
+        //
+        // Case A: pid=-1, liovcnt=2 with lvec=NULL -> EFAULT.  Linux's
+        // import_iovec sees the NULL local pointer first and returns
+        // EFAULT before the pid check fires.  Pre-batch we returned
+        // ESRCH (pid<=0 first).
+        let a = SyscallArgs {
+            arg0: u64::MAX, // -1 as u64
+            arg1: 0, arg2: 2, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_vm_readv(pid=-1, lvec=NULL, liovcnt=2) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case B: pid=-1, liovcnt=2000 -> EINVAL.  Linux's import_iovec
+        // sees liovcnt > UIO_MAXIOV (1024) and returns EINVAL before
+        // the pid check.  Pre-batch we returned ESRCH.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0x1000, arg2: 2000, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_vm_readv(pid=-1, liovcnt=2000) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case C: pid=-1, liovcnt=0, riovcnt=2000 -> EINVAL.  Linux
+        // validates local-then-remote; local is empty (no-op), then
+        // remote sees riovcnt > UIO_MAXIOV and returns EINVAL.
+        // Pre-batch our combined `liovcnt > 1024 || riovcnt > 1024`
+        // would also return EINVAL, but with liovcnt=2 and
+        // riovcnt=2000 the new split now gives the right local-first
+        // discriminator (see case D).
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0, arg2: 0, arg3: 0x1000, arg4: 2000, arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_vm_readv(pid=-1, riovcnt=2000) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case D: pid=-1, lvec=NULL, liovcnt=2, riovcnt=2000 -> EFAULT.
+        // Linux's local import fires before remote, so NULL lvec wins
+        // over riovcnt > UIO_MAXIOV.  Pre-batch our combined OR'd
+        // count gate fired first and returned EINVAL — a real
+        // discriminator divergence.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0, arg2: 2, arg3: 0x1000, arg4: 2000, arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_vm_readv(pid=-1, lvec=NULL, riovcnt=2000) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   process_vm_readv local-iov-EINVAL/EFAULT > remote-iov-EINVAL/EFAULT > pid-ESRCH gate order: OK"
+        );
         // Batch 112: process_vm_readv / writev upgraded to perform
         // the same-address-space transfer.  In kernel-context the
         // owner-process lookup falls back to "same AS" so the copy

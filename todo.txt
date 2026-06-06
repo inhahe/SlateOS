@@ -20430,5 +20430,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 262. [DONE 2026-06-05] Linux ABI: sys_process_vm_readv/writev gate order —
+##      move pid check after iov validation, split combined cnt check.
+##
+##      Linux source: mm/process_vm_access.c::process_vm_rw.  Its
+##      validation order:
+##        1. flags != 0                          -> -EINVAL
+##        2. import_iovec(LOCAL):
+##           - liovcnt > UIO_MAXIOV (1024)        -> -EINVAL
+##           - NULL/unreadable lvec               -> -EFAULT
+##        3. (iov_iter empty -> return 0, not mirrored yet)
+##        4. import_iovec(REMOTE): same gates as local.
+##        5. mm_access(pid)                       -> -ESRCH if no task
+##           (pid<=0 yields find_get_task_by_vpid==NULL -> -ESRCH).
+##
+##      Pre-batch divergences:
+##      - `pid <= 0` was checked at the top of process_vm_impl, before
+##        any iov validation.  A probe passing pid=-1 with NULL local
+##        iov saw ESRCH where Linux's local import_iovec returns
+##        EFAULT first.  Similarly pid=-1 with liovcnt=2000 returned
+##        ESRCH where Linux returns EINVAL.
+##      - The two count limits were combined into a single
+##        `liovcnt > 1024 || riovcnt > 1024` -> EINVAL gate, which
+##        fired before the local NULL-lvec check.  Probe
+##        (pid=-1, lvec=NULL, liovcnt=2, riovcnt=2000) saw EINVAL
+##        where Linux's local import fires first and returns EFAULT.
+##
+##      Fix: reorder process_vm_impl to mirror Linux:
+##        - liovcnt > 1024 -> EINVAL
+##        - liovcnt > 0 && NULL lvec / unreadable -> EFAULT
+##        - riovcnt > 1024 -> EINVAL
+##        - riovcnt > 0 && NULL rvec / unreadable -> EFAULT
+##        - pid <= 0 -> ESRCH
+##      The same_addr_space resolution downstream is unchanged.
+##
+##      Self-tests added (after the existing flag-EINVAL test, before
+##      the same-AS copy tests):
+##      - pid=-1, lvec=NULL, liovcnt=2         -> EFAULT (was ESRCH).
+##      - pid=-1, liovcnt=2000                 -> EINVAL (was ESRCH).
+##      - pid=-1, riovcnt=2000                 -> EINVAL (matches
+##                                                pre-batch; covers
+##                                                remote-side gate).
+##      - pid=-1, lvec=NULL, liovcnt=2,
+##                          riovcnt=2000        -> EFAULT (was EINVAL).
+##      Marker: "process_vm_readv local-iov-EINVAL/EFAULT >
+##      remote-iov-EINVAL/EFAULT > pid-ESRCH gate order: OK".
+##
+##      Known limitations:
+##      - Linux additionally short-circuits to return 0 when the local
+##        iov_iter has zero total bytes (item 3 above).  We currently
+##        proceed to the pid check; a probe passing
+##        pid=-1 + liovcnt=0 + riovcnt=0 still sees ESRCH where Linux
+##        returns 0.  Fixing this requires summing iov len fields,
+##        which our same-AS copy loop already does — could be deferred
+##        to the existing copy code in a follow-up batch.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

@@ -21247,4 +21247,96 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean, boot test PASSED (BOOT_OK at 25s).
 
 
+## 272. (batch 243) syscall/linux: mount_setattr — port Linux's set/clr-
+##      overlap and userns_fd-without-IDMAP gates from fs/namespace.c::
+##      build_mount_kattr.
+##
+##      Pre-batch-243 sys_mount_setattr was already deep on the gate
+##      ladder (top-level flag mask, size E2BIG/EINVAL gates, NULL
+##      EFAULT, copy_struct_from_user trailing-zero E2BIG, attr_set/
+##      attr_clr individual masks, __ATIME exclusivity, propagation
+##      bit count).  Two Linux gates were still missing:
+##
+##      a) `attr_set & attr_clr != 0 -> EINVAL`.  Linux's
+##         build_mount_kattr() rejects "set bit X and clear bit X"
+##         upfront because the result would be undefined.  Pre-batch
+##         we accepted nonsense input like attr_set=RDONLY and
+##         attr_clr=RDONLY and silently advanced to the terminal
+##         ENOSYS.  This is observable to probes that populate both
+##         set and clear masks from a single user-supplied bitmask
+##         (a common bug pattern — the right errno tells them which
+##         side of the API misuse they're on).
+##
+##      b) `userns_fd != 0` without `MOUNT_ATTR_IDMAP` in `attr_set`
+##         -> EINVAL.  Linux: `else if (attr->userns_fd) return
+##         -EINVAL;`.  Pre-batch we never read userns_fd at all (only
+##         consumed bytes [0..24) for attr_set/attr_clr/propagation),
+##         so any value silently advanced to ENOSYS.  Container
+##         runtimes (Podman, Bubblewrap) doing ID-mapped mounts —
+##         the entire point of MOUNT_ATTR_IDMAP — set userns_fd
+##         alongside the IDMAP bit; the EINVAL path is what catches
+##         their bug when they forget the IDMAP bit.
+##
+##      Also added the `userns_fd > INT_MAX -> EINVAL` gate that
+##      Linux runs inside the IDMAP arm (`if (attr->userns_fd >
+##      INT_MAX) return -EINVAL;`).
+##
+##      Fix:
+##      - Read userns_fd from buf[24..32] alongside the other three
+##        u64 fields of struct mount_attr.
+##      - Added `attr_set & attr_clr` overlap gate right after the
+##        individual mask gates (matching Linux's literal order).
+##      - Added userns_fd validation arm at the end of attribute
+##        validation:
+##          if attr_set & IDMAP { userns_fd > INT_MAX -> EINVAL }
+##          else if userns_fd != 0 { EINVAL }
+##      - Named `MOUNT_ATTR_IDMAP = 0x100000` as a constant.
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - attr_set=RDONLY, attr_clr=RDONLY      -> EINVAL  (new
+##                                                          overlap
+##                                                          gate)
+##      - attr_set=RDONLY, attr_clr=NOSUID      -> ENOSYS  (overlap
+##                                                          gate
+##                                                          narrow:
+##                                                          distinct
+##                                                          bits OK)
+##      - attr_set=RDONLY, userns_fd=5
+##         (no IDMAP)                           -> EINVAL  (new
+##                                                          userns-
+##                                                          without-
+##                                                          IDMAP
+##                                                          gate)
+##      - attr_set=IDMAP, userns_fd=0x80000000  -> EINVAL  (new
+##                                                          userns-
+##                                                          INT_MAX
+##                                                          gate)
+##      - attr_set=IDMAP, userns_fd=5           -> ENOSYS  (happy
+##                                                          path with
+##                                                          IDMAP)
+##      - attr_set=IDMAP, userns_fd=0           -> ENOSYS  (fd=0 is
+##                                                          permitted
+##                                                          with
+##                                                          IDMAP set)
+##        Marker: "mount_setattr set/clr-overlap > userns-without-
+##        IDMAP > userns-INT_MAX gate order: OK".
+##
+##      Existing tests preserved (all 17 batch-115 / batch-223 /
+##      batch-229 tests for flag mask, size gates, NULL, attr_set/
+##      attr_clr mask gates, ATIME exclusivity/clear-without-set,
+##      propagation, forward-compat trailing-zero E2BIG).
+##
+##      Known limitations:
+##      - userns_fd validation stops at "is the value in range"; we
+##        don't actually look the fd up because userns plumbing
+##        isn't wired (we have no namespaces yet).  Real Linux would
+##        EBADF on a bogus fd before reaching ENOSYS; we'd surface
+##        ENOSYS instead.  Documented for whoever picks up real
+##        ID-mapped mount support.
+##      - The terminal is still ENOSYS — no actual mount attribute
+##        application happens.  Validation only.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+
 

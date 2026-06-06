@@ -21410,16 +21410,31 @@ fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
         Ok(b) => b,
         Err(_) => return linux_err(errno::EINVAL),
     });
+    let userns_fd = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[24..32]) {
+        Ok(b) => b,
+        Err(_) => return linux_err(errno::EINVAL),
+    });
     // MOUNT_ATTR_MASK from include/uapi/linux/mount.h:
     //   RDONLY=0x1, NOSUID=0x2, NODEV=0x4, NOEXEC=0x8,
     //   __ATIME=0x70 (RELATIME=0, NOATIME=0x10, STRICTATIME=0x20),
     //   NODIRATIME=0x80, IDMAP=0x100000, NOSYMFOLLOW=0x200000.
     const MOUNT_ATTR_MASK: u64 = 0x1 | 0x2 | 0x4 | 0x8
         | 0x70 | 0x80 | 0x100000 | 0x200000;
+    const MOUNT_ATTR_IDMAP: u64 = 0x100000;
     if attr_set & !MOUNT_ATTR_MASK != 0 {
         return linux_err(errno::EINVAL);
     }
     if attr_clr & !MOUNT_ATTR_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Batch 243: Linux fs/namespace.c::build_mount_kattr() rejects
+    // attr_set/attr_clr overlap upfront — "set bit X and clear bit X"
+    // is contradictory: `if (attr->attr_set & attr->attr_clr) return
+    // -EINVAL;`.  Pre-batch we accepted this nonsense input and
+    // proceeded to ENOSYS where Linux returns EINVAL.  Probes that
+    // populate both set and clear masks from a single user-supplied
+    // bitmask (a common bug pattern) saw the wrong errno.
+    if attr_set & attr_clr != 0 {
         return linux_err(errno::EINVAL);
     }
     // ATIME bits in attr_set are mutually exclusive — masked value must
@@ -21443,6 +21458,27 @@ fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
     //   MS_SLAVE      = 1 << 19 = 0x80000
     //   MS_SHARED     = 1 << 20 = 0x100000
     if !matches!(propagation, 0 | 0x20000 | 0x40000 | 0x80000 | 0x100000) {
+        return linux_err(errno::EINVAL);
+    }
+    // Batch 243: Linux build_mount_kattr() userns_fd validation:
+    //   if (attr->attr_set & MOUNT_ATTR_IDMAP) {
+    //       if (attr->userns_fd > INT_MAX) return -EINVAL;
+    //       ... fd lookup ...
+    //   } else if (attr->userns_fd) {
+    //       return -EINVAL;  // userns_fd set without IDMAP
+    //   }
+    // Pre-batch we never read userns_fd, so any value (including
+    // pathological u64::MAX with IDMAP unset) silently advanced to
+    // ENOSYS.  Container runtimes (Podman, Bubblewrap) that set
+    // userns_fd alongside MOUNT_ATTR_IDMAP for ID-mapped mounts saw
+    // ENOSYS rather than the documented EINVAL when they forgot the
+    // IDMAP bit.
+    if attr_set & MOUNT_ATTR_IDMAP != 0 {
+        // INT_MAX = 0x7FFF_FFFF; reject userns_fd above that.
+        if userns_fd > 0x7FFF_FFFF {
+            return linux_err(errno::EINVAL);
+        }
+    } else if userns_fd != 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -43214,6 +43250,142 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mount_setattr bogus prop not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 243: mount_setattr attr_set and attr_clr overlap on
+        // the same bit -> EINVAL.  Linux build_mount_kattr() rejects
+        // (attr_set & attr_clr) != 0 upfront because "set X and
+        // clear X" is contradictory.  Pre-batch we accepted this and
+        // advanced to ENOSYS.
+        let attr_set_clr_overlap: [u8; 32] = {
+            let mut b = [0u8; 32];
+            // attr_set = RDONLY (0x1)
+            b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+            // attr_clr = RDONLY (0x1) — same bit
+            b[8..16].copy_from_slice(&0x1u64.to_ne_bytes());
+            b
+        };
+        let attr_set_clr_overlap_ptr = attr_set_clr_overlap.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: 0,
+            arg3: attr_set_clr_overlap_ptr, arg4: 32, arg5: 0,
+        };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr set/clr overlap not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 243: distinct bits in attr_set and attr_clr -> ENOSYS
+        // (overlap gate doesn't fire when the bits are different).
+        // Proves the new gate is narrow (only fires on overlap) not
+        // broad (rejecting any set+clr combo).
+        let attr_set_clr_distinct: [u8; 32] = {
+            let mut b = [0u8; 32];
+            // attr_set = RDONLY (0x1)
+            b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+            // attr_clr = NOSUID (0x2)
+            b[8..16].copy_from_slice(&0x2u64.to_ne_bytes());
+            b
+        };
+        let attr_set_clr_distinct_ptr = attr_set_clr_distinct.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: 0,
+            arg3: attr_set_clr_distinct_ptr, arg4: 32, arg5: 0,
+        };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr set/clr distinct not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 243: userns_fd!=0 without MOUNT_ATTR_IDMAP in attr_set
+        // -> EINVAL.  Linux: `else if (attr->userns_fd) return -EINVAL;`.
+        // Pre-batch we never read userns_fd, so any value silently
+        // advanced to ENOSYS.
+        let userns_no_idmap: [u8; 32] = {
+            let mut b = [0u8; 32];
+            // attr_set = RDONLY (0x1) — IDMAP (0x100000) NOT set
+            b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
+            // userns_fd = 5 (some fd value)
+            b[24..32].copy_from_slice(&5u64.to_ne_bytes());
+            b
+        };
+        let userns_no_idmap_ptr = userns_no_idmap.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: 0,
+            arg3: userns_no_idmap_ptr, arg4: 32, arg5: 0,
+        };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr userns_fd without IDMAP not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 243: userns_fd > INT_MAX with IDMAP set -> EINVAL.
+        // Linux: `if (attr->userns_fd > INT_MAX) return -EINVAL;`.
+        let userns_overflow: [u8; 32] = {
+            let mut b = [0u8; 32];
+            // attr_set = IDMAP (0x100000)
+            b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
+            // userns_fd = INT_MAX + 1 = 0x80000000
+            b[24..32].copy_from_slice(&0x80000000u64.to_ne_bytes());
+            b
+        };
+        let userns_overflow_ptr = userns_overflow.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: 0,
+            arg3: userns_overflow_ptr, arg4: 32, arg5: 0,
+        };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr userns_fd > INT_MAX not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 243: userns_fd with IDMAP and a sane fd value -> ENOSYS
+        // (gate passes, full userns setup is unimplemented).
+        let userns_ok: [u8; 32] = {
+            let mut b = [0u8; 32];
+            // attr_set = IDMAP (0x100000)
+            b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
+            // userns_fd = 5
+            b[24..32].copy_from_slice(&5u64.to_ne_bytes());
+            b
+        };
+        let userns_ok_ptr = userns_ok.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: 0,
+            arg3: userns_ok_ptr, arg4: 32, arg5: 0,
+        };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr IDMAP+sane userns_fd not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 243: userns_fd = 0 with IDMAP set -> ENOSYS (Linux
+        // permits fd=0; the >INT_MAX check is the only fd value
+        // gate, not "fd must be > 0").
+        let userns_zero_with_idmap: [u8; 32] = {
+            let mut b = [0u8; 32];
+            // attr_set = IDMAP (0x100000)
+            b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
+            // userns_fd = 0
+            b
+        };
+        let userns_zero_with_idmap_ptr = userns_zero_with_idmap.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: 0,
+            arg3: userns_zero_with_idmap_ptr, arg4: 32, arg5: 0,
+        };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr IDMAP+fd=0 not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mount_setattr set/clr-overlap > userns-without-IDMAP > userns-INT_MAX gate order: OK"
+        );
         serial_println!("[syscall/linux]   mount_setattr attr validation: OK");
         serial_println!(
             "[syscall/linux]   mount_setattr flags-EINVAL > size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK"

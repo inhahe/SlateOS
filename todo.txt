@@ -25103,3 +25103,149 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean.
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 22s).
+
+320. [2026-06-06] Batch 290: Linux ABI translation —
+     sched_* family pid_t truncation, applied end-to-end
+     across sys_sched_getscheduler, sys_sched_getparam,
+     sys_sched_setscheduler, sys_sched_setparam, and
+     sys_sched_rr_get_interval.  All five now cast pid to
+     i32 at entry, reject pid<0 with EINVAL (or already
+     did), and use the truncated value for ALL downstream
+     decisions — caller-vs-explicit branch, pcb::state
+     lookup, target_pid resolution.  Pre-batch only the
+     EINVAL negative-check gate had been truncated;
+     subsequent lookups still saw the raw u64.
+
+     Pre-batch divergences
+     ---------------------
+     Linux's sched_* syscalls all declare pid as pid_t
+     (int), so the x86_64 ABI truncates args.arg0 to its
+     low 32 bits before find_process_by_pid runs.  The
+     mixed state (truncated for the <0 gate, raw for the
+     lookup) gave us two distinct families of probe
+     mismatches:
+
+       Probe A — pid truncates to 0 (caller path):
+         pid = 0x1_0000_0000
+           Linux : (int)pid = 0 → caller's policy/prio
+                   → SCHED_OTHER = 0 (sched_getscheduler)
+                   → writes 0 to buf (sched_getparam)
+                   → no-op caller-store (sched_set*)
+           Ours  : raw u64 != 0 →
+                   pcb::state(0x1_0000_0000) = None →
+                   ESRCH
+
+       Probe B — pid truncates to -1 (Linux EINVAL):
+         pid = u64::MAX
+           Linux : (int)pid = -1 → EINVAL via
+                   `if (pid < 0)` body-opener
+           Ours  : (pre-existing for set*/rr_get_interval
+                   only) the truncated gate already fired
+                   EINVAL.  For sched_getscheduler /
+                   sched_getparam, which had no <0 gate
+                   pre-batch, the raw u64 fell through to
+                   pcb::state(u64::MAX) = None → ESRCH.
+
+     Fixes
+     -----
+     - sys_sched_getscheduler: new — cast pid to i32 at
+       entry, reject pid<0 with EINVAL, widen back to u64
+       only for the pcb::state lookup on the explicit-pid
+       branch.
+     - sys_sched_getparam: new — same cast + pid<0
+       EINVAL gate.  The NULL-param branch still returns
+       EFAULT (Linux returns EINVAL there per the
+       `!param || pid<0` combined opener); that's a
+       separate, pre-existing semantic divergence and is
+       left untouched in this batch to keep the scope on
+       int truncation.  Documented under Known
+       Limitations below.
+     - sys_sched_setscheduler: gate-1/2 truncation was
+       already present.  Switched gate-4 (pcb::state)
+       and the target_pid resolution to use pid_i32
+       widened back to u64, so probes that pass the
+       gates with a high-bit-set raw pid now resolve to
+       the post-ABI int instead of the raw register.
+     - sys_sched_setparam: identical treatment to
+       sched_setscheduler at the lookup/target_pid step.
+     - sys_sched_rr_get_interval: removed the dead
+       `let pid = args.arg0` binding; switched the
+       pcb::state lookup to the pid_u widened from the
+       already-validated pid_i32.
+
+     Existing self-tests restructured
+     --------------------------------
+     The dispatch-side coverage block (after the per-PCB
+     round-trip test) used `pid = 0xdead_beef` as its
+     "bogus pid for ESRCH" probe against
+     sched_getscheduler.  Post-batch 0xdead_beef
+     truncates to a negative int and now produces EINVAL
+     via the new gate, masking the ESRCH path the test
+     wanted to assert.  Switched the probe to
+     `0x7fff_fffe` (positive INT_MAX-1, no registered
+     PCB) so the same lookup-miss → ESRCH path is still
+     exercised.
+
+     New self-tests demonstrating the truncation:
+       - sched_getscheduler(0x1_0000_0000) -> 0
+         (pid truncates to 0 → caller path)
+       - sched_getscheduler(u64::MAX)       -> EINVAL
+         (pid truncates to -1 → new <0 gate)
+       - sched_getparam(0x1_0000_0000, valid) -> 0
+       - sched_getparam(u64::MAX, valid)      -> EINVAL
+       - sched_setscheduler(0x1_0000_0000, 0, valid) -> 0
+       - sched_setparam(0x1_0000_0000, valid)        -> 0
+       - sched_rr_get_interval(0x1_0000_0000, valid) -> 0
+
+     Marker:
+       "sched_{get,set}{scheduler,param} / rr_get_interval
+        pid_t truncation: OK"
+
+     Preserved self-tests (still pass):
+       - sched_getscheduler(0) -> 0 (caller path,
+         kernel-context fallback to SCHED_OTHER)
+       - sched_get_priority_max/min on known policies
+         (untouched by this batch)
+       - sched_setscheduler gate-order discriminators
+         A/B/C from batch 254 (policy<0 → EINVAL,
+         NULL param → EINVAL, unknown pid → ESRCH).
+         All three use pid=0 or pid=12345 with the
+         high bits clean, so post-truncation behaviour
+         is identical to pre-batch.
+       - sched_setparam gate-order tests from batch 255
+         (same reasoning).
+       - sched_rr_get_interval batch-236 gate order
+         (pid=-1, valid ts; pid=-1, bogus ts; pid=
+         0x7fff_ffff, NULL ts).  The pid=-1 cases were
+         already truncation-aware; the bogus pid case
+         used `0x7fff_ffff` which is post-truncation
+         positive INT_MAX, unchanged.
+       - Real-PCB dispatch coverage (sched_getscheduler
+         / sched_getparam on a created test_pid) —
+         unaffected since the test_pid value is a small
+         positive int.
+
+     Known limitations
+     -----------------
+     - sched_getparam still returns EFAULT for NULL
+       param where Linux returns EINVAL via the combined
+       `!param || pid<0` body-opener.  The existing
+       self-test `sched_getparam(0, NULL) -> EFAULT`
+       documents the divergence and is preserved.
+       Fixing this requires moving the NULL check above
+       the EFAULT path and updating that test;
+       deliberately deferred to keep this batch focused
+       on int truncation.
+     - The sched_setscheduler / sched_setparam tests
+       above that assert "ok(0)" for the truncate-to-0
+       caller path don't actually verify a per-PCB
+       priority/policy update.  In kernel context
+       caller_pid()=None, so target_pid resolves to
+       None and the helpers silently no-op.  This is
+       consistent with the rest of this file's
+       kernel-context behaviour and matches the comment
+       on the function.
+
+     Build: cargo build -p kernel clean.
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 24s).

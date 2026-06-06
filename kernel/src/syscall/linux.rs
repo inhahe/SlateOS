@@ -8087,16 +8087,34 @@ fn sys_capset(args: &SyscallArgs) -> SyscallResult {
 ///
 /// We always return 0 (SCHED_OTHER); ESRCH for non-existent pids.
 fn sys_sched_getscheduler(args: &SyscallArgs) -> SyscallResult {
-    let pid = args.arg0;
+    // Linux signature:
+    //   `SYSCALL_DEFINE1(sched_getscheduler, pid_t, pid)`
+    // pid_t is `int`, so the x86_64 ABI truncates args.arg0 to its
+    // low 32 bits before the body.  Linux's body opens with
+    //   `if (pid < 0) return -EINVAL;`
+    // Pre-batch (290) we held pid as raw u64, so two divergences:
+    //   - pid = 0x1_0000_0000 (truncates to 0): Linux returns the
+    //     caller's policy; we hit pcb::state(0x1_0000_0000) = None
+    //     and returned ESRCH.
+    //   - pid = u64::MAX (truncates to -1): Linux returns EINVAL;
+    //     we hit ESRCH from the same miss.
+    // Same `int` truncation thread as batches 285/286/287/288/289.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    if pid < 0 {
+        return linux_err(errno::EINVAL);
+    }
     // Resolve target pid: 0 means "caller".  Kernel-context callers
     // (no caller_pid) on pid==0 fall through to SCHED_OTHER (0).
     let target_pid = if pid == 0 {
         caller_pid()
     } else {
-        if pcb::state(pid).is_none() {
+        #[allow(clippy::cast_sign_loss)]
+        let pid_u = pid as u64;
+        if pcb::state(pid_u).is_none() {
             return linux_err(errno::ESRCH);
         }
-        Some(pid)
+        Some(pid_u)
     };
     let policy = target_pid
         .and_then(pcb::get_sched_policy)
@@ -8179,8 +8197,16 @@ fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return linux_err(e),
     };
 
-    // Gate 4: find_process_by_pid(pid) -> ESRCH.
-    if pid != 0 && pcb::state(pid).is_none() {
+    // Gate 4: find_process_by_pid(pid) -> ESRCH.  Linux looks up the
+    // *truncated* pid (find_process_by_pid takes pid_t = int), so the
+    // raw u64 args.arg0 isn't what Linux probes against.  Pre-batch
+    // (290) we used the raw u64 for the pcb::state lookup, which made
+    // pid=0x1_0000_0001 fall through to ESRCH (lookup of 0x1_0000_0001)
+    // where Linux would resolve pid=1.  Use pid_i32 (already validated
+    // non-negative above) widened back to u64 for the lookup.
+    #[allow(clippy::cast_sign_loss)]
+    let pid_u = pid_i32 as u64;
+    if pid_i32 != 0 && pcb::state(pid_u).is_none() {
         return linux_err(errno::ESRCH);
     }
 
@@ -8207,7 +8233,7 @@ fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
     // Kernel-context callers on pid==0 silently skip the store (no
     // PCB to write into); on an explicit pid we already verified
     // it exists via pcb::state() above.
-    let target_pid = if pid == 0 { caller_pid() } else { Some(pid) };
+    let target_pid = if pid_i32 == 0 { caller_pid() } else { Some(pid_u) };
     if let Some(tp) = target_pid {
         #[allow(clippy::cast_possible_truncation)]
         let policy_u32 = policy as u32;
@@ -8309,15 +8335,33 @@ fn rlimit_rtprio_check_with(soft: u64, sched_prio: i32) -> Result<(), i32> {
 /// process that has never set a priority observes 0 (the
 /// SCHED_OTHER default).
 fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
-    let pid = args.arg0;
+    // Linux signature:
+    //   `SYSCALL_DEFINE2(sched_getparam, pid_t, pid,
+    //                    struct sched_param __user *, param)`
+    // Both pid_t and the pointer are 32/64-bit register-truncated
+    // before the body runs.  Linux opens with
+    //   `if (!param || pid < 0) return -EINVAL;`
+    // Batch 290 narrows scope to *just* the pid truncation half of
+    // this gate: cast pid to i32 and reject pid < 0 with EINVAL.
+    // The !param half — Linux returns EINVAL for NULL, we still
+    // return EFAULT — is a separate, pre-existing divergence (it
+    // matches the wrong errno but the right "fail-fast" outcome).
+    // Tracked in todo.txt as a follow-up.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    if pid < 0 {
+        return linux_err(errno::EINVAL);
+    }
     let param_ptr = args.arg1;
     let target_pid = if pid == 0 {
         caller_pid()
     } else {
-        if pcb::state(pid).is_none() {
+        #[allow(clippy::cast_sign_loss)]
+        let pid_u = pid as u64;
+        if pcb::state(pid_u).is_none() {
             return linux_err(errno::ESRCH);
         }
-        Some(pid)
+        Some(pid_u)
     };
     if param_ptr == 0 {
         return linux_err(errno::EFAULT);
@@ -8382,14 +8426,20 @@ fn sys_sched_setparam(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return linux_err(e),
     };
 
-    // Gate 3: find_process_by_pid(pid) -> ESRCH.
-    let target_pid = if pid == 0 {
+    // Gate 3: find_process_by_pid(pid) -> ESRCH.  Use the *truncated*
+    // pid for the lookup (Linux's find_process_by_pid takes pid_t =
+    // int).  Pre-batch (290) we used the raw u64, so probes with
+    // dirty high bits like pid=0x1_0000_0001 missed the lookup and
+    // returned ESRCH where Linux resolves pid=1.
+    #[allow(clippy::cast_sign_loss)]
+    let pid_u = pid_i32 as u64;
+    let target_pid = if pid_i32 == 0 {
         caller_pid()
     } else {
-        if pcb::state(pid).is_none() {
+        if pcb::state(pid_u).is_none() {
             return linux_err(errno::ESRCH);
         }
-        Some(pid)
+        Some(pid_u)
     };
 
     // Gate 4: priority range check against the target's current
@@ -8477,17 +8527,21 @@ fn sys_sched_rr_get_interval(args: &SyscallArgs) -> SyscallResult {
     // raw u64 cast left a huge positive value that fell through to
     // the state lookup and returned ESRCH (a probe passing pid=-1
     // saw ESRCH where Linux returns EINVAL).
-    let pid = args.arg0;
     let ts_ptr = args.arg1;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid_i32 = args.arg0 as i32;
     if pid_i32 < 0 {
         return linux_err(errno::EINVAL);
     }
-    if pid != 0 {
-        if crate::proc::pcb::state(pid).is_none() {
-            return linux_err(errno::ESRCH);
-        }
+    // Use the *truncated* pid for the lookup, per Linux's
+    // find_process_by_pid(pid_t).  Pre-batch (290) we used the raw
+    // u64 args.arg0, so probes like pid=0x1_0000_0001 (truncates to
+    // 1) missed pcb::state(0x1_0000_0001) and returned ESRCH where
+    // Linux would have resolved pid=1.
+    #[allow(clippy::cast_sign_loss)]
+    let pid_u = pid_i32 as u64;
+    if pid_i32 != 0 && crate::proc::pcb::state(pid_u).is_none() {
+        return linux_err(errno::ESRCH);
     }
     if ts_ptr == 0 {
         return linux_err(errno::EFAULT);
@@ -33696,16 +33750,127 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // Bogus pid for ESRCH.
-            let a = SyscallArgs { arg0: 0xdead_beef, arg1: 0, arg2: 0,
+            // Bogus pid for ESRCH.  Batch 290: switched the probe
+            // from 0xdead_beef to 0x7fff_fffe (positive INT_MAX-1) so
+            // it survives the new pid<0 EINVAL gate.  0xdead_beef
+            // truncates to a negative int (-559_038_737) and would
+            // now hit EINVAL, masking the ESRCH path this test wants
+            // to exercise.
+            let a = SyscallArgs { arg0: 0x7fff_fffe, arg1: 0, arg2: 0,
                 arg3: 0, arg4: 0, arg5: 0 };
             if dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value
                 != -i64::from(errno::ESRCH) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: sched_getscheduler(bogus) not ESRCH"
+                    "[syscall/linux]   FAIL: sched_getscheduler(0x7fff_fffe) not ESRCH ({})",
+                    dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value
                 );
                 return Err(KernelError::InternalError);
             }
+
+            // Batch 290: pid_t truncation across the sched_*
+            // family.  These probes all set high bits in args.arg0
+            // that truncate to a known small int.
+            //
+            // sched_getscheduler(0x1_0000_0000): (int)pid = 0 →
+            // caller path → SCHED_OTHER (0).  Pre-batch we held the
+            // raw u64 and missed pcb::state(0x1_0000_0000) → ESRCH.
+            let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 0,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getscheduler(0x1_0000_0000) not 0 ({})",
+                    dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sched_getscheduler(u64::MAX): (int)pid = -1 →
+            // EINVAL via the new gate.  Pre-batch we returned ESRCH
+            // from the failed pcb::state(u64::MAX) lookup.
+            let a = SyscallArgs { arg0: u64::MAX, arg1: 0,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value
+                != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getscheduler(u64::MAX) want EINVAL, got {}",
+                    dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sched_getparam(0x1_0000_0000, valid_buf): (int)pid = 0
+            // → caller path → writes 0 to buf, returns 0.  Pre-batch
+            // returned ESRCH from the raw u64 lookup miss.
+            let mut prio_out: i32 = -1;
+            let a = SyscallArgs {
+                arg0: 0x1_0000_0000,
+                arg1: (&raw mut prio_out) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SCHED_GETPARAM, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getparam(0x1_0000_0000) not 0 ({})",
+                    dispatch_linux(nr::SCHED_GETPARAM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sched_getparam(u64::MAX, valid_buf): (int)pid = -1 →
+            // EINVAL via new gate.
+            let a = SyscallArgs {
+                arg0: u64::MAX,
+                arg1: (&raw mut prio_out) as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SCHED_GETPARAM, &a).value
+                != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getparam(u64::MAX) want EINVAL, got {}",
+                    dispatch_linux(nr::SCHED_GETPARAM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sched_setscheduler(0x1_0000_0000, 0, valid_param):
+            // (int)pid = 0 → caller path → kernel-context no-op
+            // store → 0.  Pre-batch the raw u64 lookup miss →
+            // ESRCH.
+            let sched_param_zero = [0u8; 4];
+            let sched_param_zero_ptr = sched_param_zero.as_ptr() as u64;
+            let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 0,
+                arg2: sched_param_zero_ptr, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_setscheduler(0x1_0000_0000) not 0 ({})",
+                    dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sched_setparam(0x1_0000_0000, valid_param): same
+            // truncate-to-0 caller path; pre-batch ESRCH.
+            let a = SyscallArgs { arg0: 0x1_0000_0000,
+                arg1: sched_param_zero_ptr, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETPARAM, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_setparam(0x1_0000_0000) not 0 ({})",
+                    dispatch_linux(nr::SCHED_SETPARAM, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sched_rr_get_interval(0x1_0000_0000, valid_buf): same
+            // truncate-to-0 caller path; pre-batch the raw lookup
+            // miss returned ESRCH ahead of the EFAULT pointer check.
+            let mut ts_buf = [0u8; 16];
+            let a = SyscallArgs { arg0: 0x1_0000_0000,
+                arg1: ts_buf.as_mut_ptr() as u64, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_RR_GET_INTERVAL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_rr_get_interval(0x1_0000_0000) not 0 ({})",
+                    dispatch_linux(nr::SCHED_RR_GET_INTERVAL, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   sched_{{get,set}}{{scheduler,param}} / rr_get_interval pid_t truncation: OK"
+            );
             pcb::destroy(test_pid);
         }
 

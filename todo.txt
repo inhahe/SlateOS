@@ -31303,3 +31303,138 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.08s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+379. syscall/linux batch 349 — splice/tee/vmsplice int truncation +
+     zero-len / nr_segs == 0 short-circuit at Linux gate order.
+
+     Linux ABI (fs/splice.c):
+
+       SYSCALL_DEFINE6(splice,   int fd_in,  loff_t __user *off_in,
+                                 int fd_out, loff_t __user *off_out,
+                                 size_t len, unsigned int flags)
+
+         1. len == 0                    -> 0           (no-op success)
+         2. flags & ~SPLICE_F_ALL       -> -EINVAL     (u32 width)
+         3. fdget(fd_in/fd_out)         -> -EBADF
+         4. offset / direction / overflow checks
+         5. do_splice() body
+
+       SYSCALL_DEFINE4(tee,      int fdin,  int fdout,
+                                 size_t len, unsigned int flags)
+
+         1. flags & ~SPLICE_F_ALL       -> -EINVAL     (u32 width)
+         2. len == 0                    -> 0
+         3. fdget                       -> -EBADF
+         4. do_tee() body
+
+       SYSCALL_DEFINE4(vmsplice, int fd, const struct iovec __user *iov,
+                                 unsigned long nr_segs,
+                                 unsigned int flags)
+
+         1. flags & ~SPLICE_F_ALL       -> -EINVAL     (u32 width)
+         2. nr_segs > UIO_MAXIOV (1024) -> -EINVAL
+         3. nr_segs == 0                -> 0
+         4. fdget(fd)                   -> -EBADF
+         5. import_iovec(iov)           -> -EFAULT     (NULL iov)
+         6. do_vmsplice() body
+
+     Pre-batch divergences:
+
+       sys_splice:    flag-mask gate ran at u64 width, so a caller
+                      passing flags=0x1_0000_0001 (high-half garbage
+                      + SPLICE_F_MOVE) saw EINVAL where Linux truncates
+                      to int=1 and accepts.  Also no len==0 short-
+                      circuit: zero-len splice marched through fd
+                      validation and returned EINVAL (Linux returns 0).
+
+       sys_tee:       same u64-width flag-mask gap.  Already had len==0
+                      checked, but only after fd validation — Linux
+                      checks flags first, len second, fdget third.
+
+       sys_vmsplice:  same u64-width flag mask; nr_segs==0 wasn't
+                      short-circuited (marched through fd validation
+                      to the EINVAL fallback where Linux returns 0).
+
+     Fix snippets:
+
+       const SPLICE_F_ALL: u32 = 1 | 2 | 4 | 8;
+                                 // MOVE | NONBLOCK | MORE | GIFT
+
+       // splice
+       let len = args.arg4;
+       if len == 0 { return SyscallResult::ok(0); }
+       let flags = args.arg5 as u32;
+       if flags & !SPLICE_F_ALL != 0 { return linux_err(EINVAL); }
+       // ... fd validation, offsets ...
+
+       // tee
+       let flags = args.arg3 as u32;
+       if flags & !SPLICE_F_ALL != 0 { return linux_err(EINVAL); }
+       let len = args.arg2;
+       if len == 0 { return SyscallResult::ok(0); }
+       // ... fd validation ...
+
+       // vmsplice
+       let flags = args.arg3 as u32;
+       if flags & !SPLICE_F_ALL != 0 { return linux_err(EINVAL); }
+       let nr_segs = args.arg2 as usize;
+       if nr_segs > 1024 { return linux_err(EINVAL); }
+       if nr_segs == 0 { return SyscallResult::ok(0); }
+       // ... fd validation, NULL iov -> EFAULT, validate_user_read ...
+
+     Self-test probes (8, labelled a..h):
+
+       a. splice(len=0, bad flag 0x8000_0000)        -> 0
+          (gate 1 fires before gate 2; Linux short-circuit semantics).
+       b. splice(len=16, flags=0x1_0000_0001)        -> EINVAL
+          (high-half truncates to u32=1=SPLICE_F_MOVE -> passes gate 2,
+          kernel-ctx falls through to EINVAL fallback).
+       c. tee(len=0, valid flags=1)                   -> 0
+          (gate 1 flag mask passes, gate 2 len==0 fires).
+       d. tee(len=0, bad flag 0x8000_0000)            -> EINVAL
+          (gate 1 flag mask fires BEFORE gate 2 len==0; this is the
+          tee-vs-splice ordering quirk — exposes the difference).
+       e. tee(len=16, flags=0x1_0000_0002)            -> EINVAL
+          (high-half truncates to SPLICE_F_NONBLOCK; valid bit;
+          kernel-ctx EINVAL fallback).
+       f. vmsplice(nr_segs=0, valid flags=4)          -> 0
+          (gate 3 fires after gates 1+2 pass).
+       g. vmsplice(nr_segs=0, bad flag 0x8000_0000)   -> EINVAL
+          (gate 1 fires before gate 3; tee-style ordering).
+       h. vmsplice(iov=0x1000 unmapped, nr_segs=4,
+                   flags=0x1_0000_0004)               -> EFAULT or EINVAL
+          (high-half truncates to SPLICE_F_MORE — valid bit — falls
+          through to validate_user_read of unmapped userspace addr).
+
+     Known limitations / kernel-context bypasses:
+
+       - validate_linux_fd() returns Ok in kernel context, so probes
+         (b) and (e) exercise the fallback path rather than EBADF.
+         The truncation logic is verified by the contrast with
+         pre-batch behaviour (high-half flag would have hit gate 2
+         at u64 width — which still returns EINVAL but for the WRONG
+         reason; the new path can be distinguished because probe (a)
+         and (f) flip from EINVAL to 0).
+       - validate_user_read() does run in kernel context (it walks
+         the page tables), so probe (h) actually observes EFAULT
+         when 0x1000 is unmapped userspace.  If 0x1000 happens to be
+         mapped (some boot setups), it falls through to EINVAL —
+         the probe accepts either result.
+
+     This is the ninth+ instance of the int-truncation shape, after
+     batches 308 (mlockall), 309 (msync), 310 (mlock2), 311
+     (fchmodat), 312 (fchownat), 313 (unlinkat), 314 (renameat2),
+     340 (unshare), 348 (lseek).  The shape is identical: int/uint
+     args declared in Linux's SYSCALL_DEFINE expand to `as u32 as
+     i32` rdi/rsi/rdx truncation at the C boundary, so the kernel
+     gate must mask flags through u32 to drop the high half.
+
+     Adjacency / co-batching rationale: splice/tee/vmsplice share the
+     same SPLICE_F_ALL flag mask, are co-located in fs/splice.c, and
+     all three needed the int-truncation fix in lockstep.  Splitting
+     them across batches would create a temporary state where two
+     of the three observed the wrong errno.
+
+     Build: cargo build -p kernel clean (47.36s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

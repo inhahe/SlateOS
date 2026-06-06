@@ -26498,3 +26498,102 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        Build: cargo build -p kernel clean (38.61s).
        Boot test: bash scripts/boot-test.sh --no-build
                   --timeout=240 PASSED (BOOT_OK at 22s).
+
+  331. Batch 301 — sys_io_setup + sys_swapon +
+       sys_membarrier unsigned-int / int truncation
+       audit.
+
+       Divergence
+       ----------
+       Three Linux ABI stubs read 32-bit C-typed args
+       (unsigned int / int) as raw u64, so syscall
+       inputs whose high half is set (e.g. 0x1_0000_0001
+       or 0x1_0000_0000) miss gates that Linux's
+       narrowed view passes:
+       - sys_io_setup(unsigned nr_events, ctxp):
+         `args.arg0 == 0` compared raw, so
+         nr_events=0x1_0000_0000 (truncates to 0)
+         bypassed the EINVAL gate and reached our
+         terminal ENOSYS where Linux returns EINVAL.
+       - sys_swapon(specialfile, int swap_flags):
+         `args.arg1 & !SWAP_FLAGS_VALID != 0` ran
+         against raw u64, so swap_flags=0x1_0000_0000
+         hit EINVAL where Linux truncates to 0 and
+         reaches EPERM (no CAP_SYS_ADMIN).
+       - sys_membarrier(int cmd, unsigned flags,
+         int cpu_id): cmd / flags matched against
+         u64-typed bit constants
+         (MEMBARRIER_CMD_GLOBAL=1<<0, FLAG_CPU=1, ...).
+         A probe with cmd=0x1_0000_0001 missed every
+         arm and surfaced terminal EINVAL where Linux
+         truncates to GLOBAL=1 and runs the fence
+         (returns 0).  Likewise flags=0x1_0000_0000
+         failed `flags & !FLAG_CPU != 0` with EINVAL
+         where Linux truncates to 0 and passes.
+
+       Fix
+       ---
+       Cast each arg at function entry to its declared
+       Linux C type, then zero-extend back to u64 for
+       comparison with the existing const tables:
+       - sys_io_setup: `let nr_events_u32 = args.arg0 as
+         u32; let nr_events: u64 = u64::from(...);`.
+       - sys_swapon: standard i32->u32->u64 ladder for
+         `swap_flags`.
+       - sys_membarrier: same ladder for cmd (int) and
+         the u32->u64 form for flags (unsigned int).
+         Negative cmd inputs zero-extend to a huge u64
+         that misses every positive bit-constant arm,
+         falling through to the same default EINVAL
+         that Linux's signed switch produces — answer
+         shape preserved.
+
+       New self-tests
+       --------------
+       Added a "Batch 301" block at the end of
+       dispatch_linux's Linux ABI self-tests with four
+       probes:
+         (a) io_setup(nr_events=0x1_0000_0000,
+             ctxp=&u64::0) -> -EINVAL.
+         (b) swapon(specialfile=&buf, swap_flags=
+             0x1_0000_0000) -> -EPERM.
+         (c) membarrier(cmd=0x1_0000_0001, flags=0,
+             cpu_id=0) -> 0.
+         (d) membarrier(cmd=1, flags=0x1_0000_0000,
+             cpu_id=0) -> 0.
+       Marker: "[syscall/linux]
+         io_setup/swapon/membarrier unsigned-int/int
+         truncation: OK".
+
+       Preserved
+       ---------
+       - io_setup gate order (ctxp NULL -> EFAULT;
+         ctxp readability -> EFAULT; ctx_in!=0 ||
+         nr_events==0 -> EINVAL; terminal ENOSYS).
+       - swapon gate order (flag-mask EINVAL first,
+         then NULL-path EFAULT, then validate_user_read
+         EFAULT, then terminal EPERM).
+       - membarrier QUERY branch's `flags!=0 ||
+         cpu_id!=0 -> EINVAL` still correct because
+         post-truncation comparisons preserve the same
+         answer for the existing tests
+         (FLAG_CPU + EXPEDITED gate, register/global
+         match arms).
+
+       Known limitations / out of scope
+       --------------------------------
+       - sys_io_submit / sys_io_getevents `nr` /
+         `min_nr` are `long` (64-bit on x86_64), no
+         truncation needed — already correctly read
+         as i64.
+       - sys_io_uring_setup `entries` is unsigned int
+         but pre-batch divergence is masked by the
+         param-fetch order (see batch 300 todo).
+         Still deferred.
+       - sys_membarrier's `cpu_id` is int but unused
+         (we have one CPU); leaving as raw u64 since
+         it never enters a comparison.
+
+       Build: cargo build -p kernel clean (36.43s).
+       Boot test: bash scripts/boot-test.sh --no-build
+                  --timeout=240 PASSED (BOOT_OK at 26s).

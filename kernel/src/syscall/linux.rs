@@ -11905,6 +11905,18 @@ fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
 /// fell through to our terminal ENOSYS where Linux returns EINVAL.
 /// Batch 207 reorders to match Linux.
 fn sys_io_setup(args: &SyscallArgs) -> SyscallResult {
+    // Linux signature: `SYSCALL_DEFINE2(io_setup, unsigned, nr_events,
+    // aio_context_t __user *, ctxp)`.  `nr_events` is declared `unsigned
+    // int` (32-bit), so the x86_64 syscall ABI truncates args.arg0 to
+    // its low 32 bits before the body runs.  Pre-batch (301) we held
+    // it as raw u64, so a probe with `nr_events = 0x1_0000_0000`
+    // (high bit 32 set, low 32 zero) bypassed the `nr_events == 0`
+    // EINVAL gate and fell through to our terminal ENOSYS — Linux
+    // sees the truncated 0 and returns EINVAL.  Cast at entry to
+    // restore the ABI's 32-bit view.
+    #[allow(clippy::cast_possible_truncation)]
+    let nr_events_u32 = args.arg0 as u32;
+    let nr_events: u64 = u64::from(nr_events_u32);
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -11921,7 +11933,7 @@ fn sys_io_setup(args: &SyscallArgs) -> SyscallResult {
     }
     let ctx_in = u64::from_ne_bytes(buf);
     // 2. ctx != 0 || nr_events == 0 -> EINVAL.
-    if ctx_in != 0 || args.arg0 == 0 {
+    if ctx_in != 0 || nr_events == 0 {
         return linux_err(errno::EINVAL);
     }
     // 3+4. We have no AIO backend.  Terminal ENOSYS so glibc's
@@ -13958,7 +13970,19 @@ fn sys_pivot_root(args: &SyscallArgs) -> SyscallResult {
 /// Union = `0x7_FFFF` (`SWAP_FLAGS_VALID`).
 fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
     const SWAP_FLAGS_VALID: u64 = 0x7_FFFF;
-    if args.arg1 & !SWAP_FLAGS_VALID != 0 {
+    // Linux signature: `SYSCALL_DEFINE2(swapon, const char __user *,
+    // specialfile, int, swap_flags)`.  `swap_flags` is declared `int`
+    // (32-bit), so the x86_64 syscall ABI truncates args.arg1 to its
+    // low 32 bits before the body runs.  Pre-batch (301) we masked
+    // args.arg1 raw, so a probe with `swap_flags = 0x1_0000_0000`
+    // hit the `& !SWAP_FLAGS_VALID != 0` EINVAL gate where Linux
+    // truncates to 0, passes the flag-mask gate, and returns EPERM
+    // (no CAP_SYS_ADMIN).  Cast at entry to restore the 32-bit view.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let swap_flags_i32 = args.arg1 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let swap_flags: u64 = u64::from(swap_flags_i32 as u32);
+    if swap_flags & !SWAP_FLAGS_VALID != 0 {
         return linux_err(errno::EINVAL);
     }
     if args.arg0 == 0 {
@@ -18092,8 +18116,32 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
     const MEMBARRIER_CMD_GET_REGISTRATIONS: u64 = 1 << 9;
     const MEMBARRIER_CMD_FLAG_CPU: u64 = 1;
 
-    let cmd = args.arg0;
-    let flags = args.arg1;
+    // Linux signature: `SYSCALL_DEFINE3(membarrier, int, cmd, unsigned
+    // int, flags, int, cpu_id)`.  All three args are declared as 32-bit
+    // C types, so the x86_64 syscall ABI truncates each register to its
+    // low 32 bits before the body runs.  Pre-batch (301) we held cmd
+    // and flags as raw u64 and matched against u64-typed bit constants
+    // (MEMBARRIER_CMD_GLOBAL = 1<<0, etc.) — discriminators pre-batch:
+    //   * cmd = 0x1_0000_0001: Linux truncates to MEMBARRIER_CMD_GLOBAL
+    //     and runs the fence (returns 0).  Pre-batch: 0x1_0000_0001
+    //     didn't match any arm -> terminal EINVAL.
+    //   * cmd = 1 (GLOBAL), flags = 0x1_0000_0000: Linux truncates flags
+    //     to 0, passes the `flags & !FLAG_CPU` gate, runs the fence
+    //     (returns 0).  Pre-batch: 0x1_0000_0000 & !1 = 0x1_0000_0000
+    //     != 0 -> EINVAL.
+    // Cast each arg at entry to restore the 32-bit view.  Sign-extension
+    // would alias negative ints across the u64 constant range, but Linux
+    // never assigns negative cmd values and FLAG_CPU is bit 0; so zero-
+    // extending via `as u32` then `u64::from` preserves the same answer
+    // shape as Linux's signed switch (negatives still hit `default ->
+    // EINVAL` either way).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let cmd: u64 = u64::from(cmd_i32 as u32);
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_u32 = args.arg1 as u32;
+    let flags: u64 = u64::from(flags_u32);
     let _cpu_id = args.arg2;
 
     // QUERY enumerates the supported commands as a bitmask.  flags
@@ -27617,6 +27665,118 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   seccomp/quotactl/quotactl_fd unsigned-int truncation: OK"
+        );
+    }
+
+    // Batch 301 — sys_io_setup + sys_swapon + sys_membarrier
+    // unsigned-int / int truncation audit.
+    //
+    // Pre-batch reads:
+    //   sys_io_setup: `args.arg0 == 0` checked against raw u64, so a
+    //     probe with nr_events = 0x1_0000_0000 (truncates to 0) bypassed
+    //     the EINVAL gate and fell to ENOSYS.
+    //   sys_swapon: `args.arg1 & !SWAP_FLAGS_VALID != 0` checked against
+    //     raw u64, so a probe with swap_flags = 0x1_0000_0000 hit
+    //     EINVAL where Linux truncates to 0 and reaches EPERM.
+    //   sys_membarrier: cmd / flags matched against u64-typed bit
+    //     constants, so high-half-set inputs missed every arm and
+    //     surfaced EINVAL where Linux truncates and runs the fence.
+    {
+        // (a) io_setup(nr_events=0x1_0000_0000, ctxp=&zero_ctx).
+        //     Pre-batch: ctxp read OK (ctx=0), then raw nr_events !=
+        //     0 -> falls through past the EINVAL gate to ENOSYS.
+        //     Post-batch: nr_events truncates to 0, hits the
+        //     `nr_events == 0` EINVAL gate (Linux's answer).
+        let zero_ctx: u64 = 0;
+        let ctx_ptr = (&raw const zero_ctx) as u64;
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: ctx_ptr,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::IO_SETUP, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_setup high-half nr_events -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) swapon(specialfile=&buf, swap_flags=0x1_0000_0000).
+        //     Pre-batch: raw 0x1_0000_0000 & !0x7_FFFF != 0 -> EINVAL.
+        //     Post-batch: truncates to 0, passes flag-mask gate,
+        //     validate_user_read is a kernel-context no-op, and we
+        //     reach the terminal EPERM (no CAP_SYS_ADMIN).
+        let path_buf = [b'/'; 4];
+        let path_ptr = path_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: path_ptr,
+            arg1: 0x1_0000_0000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::SWAPON, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: swapon high-half swap_flags -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) membarrier(cmd=0x1_0000_0001, flags=0, cpu_id=0).
+        //     Pre-batch: raw cmd 0x1_0000_0001 didn't match any arm
+        //     (MEMBARRIER_CMD_GLOBAL=1 etc. are u64 constants whose
+        //     full 64-bit value differs) -> terminal EINVAL.
+        //     Post-batch: cmd truncates to 1 (GLOBAL), runs the
+        //     fence path and returns 0.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier high-half cmd -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) membarrier(cmd=1 GLOBAL, flags=0x1_0000_0000, cpu_id=0).
+        //     Pre-batch: raw flags 0x1_0000_0000 & !FLAG_CPU(1) =
+        //     0x1_0000_0000 != 0 -> EINVAL.  Post-batch: flags
+        //     truncates to 0, passes the flag-mask gate, runs the
+        //     fence and returns 0.
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: 0x1_0000_0000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier high-half flags -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   io_setup/swapon/membarrier unsigned-int/int truncation: OK"
         );
     }
 

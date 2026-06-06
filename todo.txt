@@ -32196,3 +32196,87 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (42.03s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+388. syscall/linux batch 358 — sys_kill: enforce
+     ESRCH-before-EINVAL gate order per Linux's
+     kill_something_info → kill_proc_info → find_vpid →
+     group_send_sig_info → check_kill_permission → valid_signal
+     call chain (kernel/signal.c).
+
+     Bug: pre-batch sys_kill ran
+         if sig < 0 { return EINVAL; }
+         forward to handlers::sys_signal_send;
+     and handlers::sys_signal_send checks is_valid_signal
+     *before* the target state lookup.  So
+         kill(NONEXISTENT_PID, BAD_SIG)
+     returned EINVAL where Linux returns ESRCH.  This is a
+     translator divergence: Linux explicitly resolves the
+     target first via find_vpid in kill_something_info, and
+     only the post-resolution group_send_sig_info path runs
+     valid_signal inside check_kill_permission.  Every libc
+     and test that distinguishes "no such process" from "bad
+     signal" was getting the wrong answer.
+
+     Also: target pid was forwarded as raw u64.  Per the
+     SYSCALL_DEFINE2(kill, pid_t, pid, int, sig) signature
+     the x86_64 ABI truncates pid to int (low 32 bits) before
+     the body runs.  Truncation now lives in sys_kill itself
+     (let pid_i32 = args.arg0 as i32) so all gates see the
+     post-ABI value.  This matters for both the sign test
+     (pid<=0 ⇒ broadcast/pgrp route ⇒ ESRCH in our model) and
+     for any future pcb::state(target_u) lookup once we get
+     real positive-pid signal queueing.
+
+     Fix: sys_kill now runs three explicit gates, in Linux
+     order:
+       1. truncate args.arg0/arg1 to i32 (pid_i32, sig);
+       2. resolve target — pid_i32 <= 0 ⇒ ESRCH (we don't
+          model pgrp targets); pid_i32 > 0 ⇒ pcb::state lookup,
+          None/Zombie ⇒ ESRCH;
+       3. validate sig: 0..=64 accepted, otherwise EINVAL.
+     Only after all three does the sig==0 existence-probe
+     path or the native sys_signal_send forward run.
+
+     Note (known limitation, see entry around batch 287):
+     pid<=0 ⇒ ESRCH is conservative.  Real Linux for pid==0
+     and pid<0 routes to process groups, which we don't
+     model.  ESRCH is the safer default (it matches "no such
+     pgrp" for pid<-1 and "no permitted targets" for pid==0
+     /pid==-1) and never claims a signal was delivered when
+     none was.  When pgrp support lands this gate needs to
+     split: pid==0 → kill_pgrp_info(current pgrp), pid==-1 →
+     broadcast, pid<-1 → kill_pgrp_info(-pid).
+
+     Probes (rewritten in this batch — PROBE_PID = 0xDEAD_BEEF
+     is negative as i32 (-559038737), so every probe below
+     hits the new ESRCH gate before sig validation; what's
+     asserted is that sig validation never *upstages* target
+     resolution):
+       - sig=0: must not be EINVAL (post-batch: ESRCH).
+       - sig=65 (NSIG+1): must be ESRCH, not EINVAL.  This
+         is the primary regression probe — pre-batch it was
+         EINVAL because the sig gate ran before target
+         resolution.
+       - sig=u64::MAX: must be ESRCH, not EINVAL.  Same
+         rationale as sig=65 but for "any junk above NSIG".
+       - sig=[9,15,17,64]: must not be EINVAL (the linux ABI
+         must never collapse to "SIGKILL/SIGTERM only";
+         post-batch result is ESRCH from the pid gate).
+       - sig=0x1_0000_0000 (truncates to 0): must be ESRCH.
+         Confirms truncation still wins and the sig==0
+         existence path is wired correctly under truncation.
+       - sig=0x1_0000_0009 (truncates to 9 = SIGKILL): must
+         not be EINVAL.  Pre-truncation-batch (288) this
+         saw raw u64 > NSIG → EINVAL.  Post-truncation +
+         post-gate-order this is ESRCH from the pid gate.
+       - sig=0x0000_0000_8000_0000 (truncates to INT_MIN <
+         0): must be ESRCH (was EINVAL pre-batch via the
+         explicit `if sig < 0` gate).  Direct gate-order
+         regression probe — a "fix" that restored sig-first
+         checks would surface EINVAL here.
+     Final boot-time stamp:
+         "[syscall/linux]   kill ESRCH-before-EINVAL gate order: OK"
+
+     Build: cargo build -p kernel clean (42.20s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 27s).

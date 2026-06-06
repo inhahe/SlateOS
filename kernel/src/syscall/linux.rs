@@ -4965,25 +4965,83 @@ fn sys_exit_group(args: &SyscallArgs) -> SyscallResult {
 ///     does (process groups are a job-control feature we lack).
 fn sys_kill(args: &SyscallArgs) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)`.
-    // `sig` is declared `int`, so the x86_64 syscall ABI truncates
-    // args.arg1 to its low 32 bits before the body runs.  Pre-batch
-    // (288) we held `sig` as a raw u64, so probes with the high half
-    // set (e.g. sig = 0x1_0000_0000) bypassed the `sig == 0`
-    // existence-probe gate and fell into signal_send, which rejected
-    // them as EINVAL where Linux would have run the probe.  Same
-    // `int` truncation thread as batches 285/286/287.
+    // Both `pid` and `sig` are `int`, so the x86_64 syscall ABI
+    // truncates args.arg0/arg1 to their low 32 bits before the body
+    // runs.
+    //
+    // Linux gate order
+    // (kernel/signal.c::SYSCALL_DEFINE2(kill, ...) →
+    //  kill_something_info → kill_proc_info →
+    //  kill_pid_info → group_send_sig_info → check_kill_permission):
+    //   1. (kill_something_info) route by sign of pid:
+    //        pid > 0  : kill_proc_info → find_vpid(pid)
+    //        pid == 0 : kill_pgrp_info(task_pgrp(current))
+    //        pid == -1: kill all processes (broadcast)
+    //        pid < -1 : kill_pgrp_info(find_vpid(-pid))
+    //   2. If the resolved target set is empty (no such task / no
+    //      such pgrp / "no one to broadcast to"), return -ESRCH
+    //      *before* any sig validation.
+    //   3. group_send_sig_info → check_kill_permission →
+    //      `if (!valid_signal(sig)) return -EINVAL;`
+    //   4. After permission + sig validation, do_send_sig_info.
+    //
+    // Critical: ESRCH precedes EINVAL when the target doesn't exist.
+    // Pre-batch (357) `sys_kill` checked `sig < 0` and then forwarded
+    // to `handlers::sys_signal_send`, which checks `is_valid_signal`
+    // *before* the target state lookup — so probes combining
+    // (nonexistent_pid, bad_sig) saw EINVAL where Linux gives ESRCH.
+    //
+    // Batch 358 fix: surface ESRCH as soon as target resolution
+    // would fail, before any sig validation.
+    //
+    // Same `int` truncation thread as batches 285/286/287/288/289.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let sig = args.arg1 as i32;
-    // Linux's `valid_signal()` rejects any sig < 0 as EINVAL before
-    // touching the target.  Pre-batch this was caught implicitly by
-    // "sig > NSIG" on the raw-u64 path (negatives appeared as huge
-    // unsigned), but only when the high bits were already set; bit-31-
-    // only values (e.g. sig = 0x0000_0000_8000_0000) were "positive
-    // huge" pre-truncation and EINVAL anyway, while bit-31-set inputs
-    // that happened to fall inside 0..=NSIG after truncation (none, at
-    // NSIG=64) still need an explicit lower bound now that the cast
-    // surfaces the int sign.
-    if sig < 0 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = args.arg0 as i32;
+
+    // Gate 1+2: resolve the target before touching sig.
+    //
+    //   pid > 0  : look up the specific pid; ESRCH if it isn't a
+    //              live process (None or Zombie).  We use the
+    //              truncated pid_i32 so kill(0x1_0000_0001, sig)
+    //              behaves like kill(1, sig), matching Linux's
+    //              find_vpid on the post-ABI pid_t value.
+    //   pid <= 0 : broadcast / pgrp targets.  We do not model
+    //              process groups; the resolved target set is
+    //              always empty in our model, so ESRCH is the
+    //              Linux-correct answer (it matches "no such
+    //              group" for pid<-1 and "no permitted targets"
+    //              for pid==-1, and is the safer default for
+    //              pid==0 since we have no caller pgrp either).
+    //              This is a known limitation, tracked in todo.txt.
+    //              Crucially this must come *before* sig validation.
+    if pid_i32 <= 0 {
+        return linux_err(errno::ESRCH);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let target_u: u64 = pid_i32 as u64;
+    match pcb::state(target_u) {
+        None => return linux_err(errno::ESRCH),
+        Some(pcb::ProcessState::Zombie) => {
+            // Zombie tasks are findable by Linux (find_vpid succeeds)
+            // and queueing onto them is technically allowed (Linux
+            // returns 0; the signal is just dropped when the task is
+            // reaped).  Without a real signal-queueing path against a
+            // zombie we surface ESRCH — same as the post-reap window
+            // — so callers don't think the signal was delivered.
+            return linux_err(errno::ESRCH);
+        }
+        _ => {}
+    }
+
+    // Gate 3: now validate sig (post-target-resolution).
+    //
+    // Linux's `valid_signal()` rejects any sig outside [0, NSIG=64]
+    // as EINVAL inside check_kill_permission.  This fires *after*
+    // the target has been resolved, so we reach it only when the
+    // target is a live process.
+    if !(0..=64).contains(&sig) {
         return linux_err(errno::EINVAL);
     }
     if sig == 0 {
@@ -28136,22 +28194,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    // kill(target, sig) signal-number gate validation:
-    //   - target == 0 is "process group" targeting in Linux which we
-    //     don't support; we use target=0xDEAD_BEEF instead, a pid
-    //     that almost-certainly doesn't exist so the call bails at
-    //     the existence check (ESRCH).  What we assert is that the
-    //     signal-number gate either accepts (-> ESRCH) or rejects
-    //     (-> EINVAL) the *signal number* — never the wrong way.
-    //   - sig == 0 (existence probe): MUST NOT be EINVAL.
-    //   - sig == NSIG (64): valid; bypasses gate.
-    //   - sig == NSIG + 1 (65): EINVAL.
-    //   - sig == u64::MAX: EINVAL.
-    //   - sig == 9 (SIGKILL), 15 (SIGTERM), 17 (SIGCHLD): all valid;
-    //     the linux ABI must NOT collapse to "SIGKILL/SIGTERM only".
+    // kill(target, sig) gate-order validation (Linux ESRCH-before-EINVAL):
+    //   Linux's kill_something_info → kill_proc_info → find_vpid
+    //   resolves the target BEFORE check_kill_permission →
+    //   valid_signal.  When the target can't be resolved, the result
+    //   is -ESRCH irrespective of sig validity.
+    //
+    //   We use target = PROBE_PID = 0xDEAD_BEEF.  As pid_t (i32 per
+    //   the SYSCALL_DEFINE2(kill, pid_t, pid, ...) ABI) this is
+    //   negative (-559038737), so every probe below first hits the
+    //   ESRCH-on-pid<=0 gate inside sys_kill.  All probes therefore
+    //   expect ESRCH — what's being asserted is that sig validation
+    //   never *upstages* target resolution.  Pre-batch (357) sys_kill
+    //   ran `if sig < 0 return EINVAL` and then forwarded to
+    //   handlers::sys_signal_send, which checks is_valid_signal
+    //   before target state — exactly the reversed order Linux
+    //   forbids.
+    //
+    //   What this exercises:
+    //   - sig == 0 (existence probe): not EINVAL.  Linux returns
+    //     ESRCH because the target doesn't exist.
+    //   - sig == NSIG + 1 (65): pre-batch EINVAL via sig-gate;
+    //     post-batch ESRCH (Linux-correct).
+    //   - sig == u64::MAX: pre-batch EINVAL; post-batch ESRCH.
+    //   - sig == 0x8000_0000 (truncates to INT_MIN < 0): pre-batch
+    //     EINVAL via the explicit negative-sig gate; post-batch
+    //     ESRCH (target resolution still wins).
+    //   - sig in {9,15,17,64} (all valid): not EINVAL — post-batch
+    //     they reach the sig gate only after target ESRCH, so the
+    //     observed result is also ESRCH, but the assertion
+    //     "!= EINVAL" still holds.
+    //   - sig = 0x1_0000_0000 (truncates to 0): ESRCH (sig==0
+    //     existence probe path with the same nonexistent pid).
+    //   - sig = 0x1_0000_0009 (truncates to 9 = SIGKILL): not
+    //     EINVAL — post-batch ESRCH via the pid gate.
     {
         const PROBE_PID: u64 = 0xDEAD_BEEF;
-        // sig=0 (existence probe): not EINVAL (expect ESRCH).
+        // sig=0 (existence probe): not EINVAL.
         let a = SyscallArgs { arg0: PROBE_PID, arg1: 0,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::KILL, &a).value;
@@ -28159,22 +28238,30 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: kill sig=0 -> EINVAL");
             return Err(KernelError::InternalError);
         }
-        // sig=65 (NSIG+1): EINVAL.
+        // sig=65 (NSIG+1): expect ESRCH (target resolution wins
+        // over sig validation per Linux gate order).
         let a = SyscallArgs { arg0: PROBE_PID, arg1: 65,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::KILL, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: kill sig=65");
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill sig=65 want ESRCH, got {}", v
+            );
             return Err(KernelError::InternalError);
         }
-        // sig=u64::MAX: EINVAL.
+        // sig=u64::MAX: expect ESRCH.
         let a = SyscallArgs { arg0: PROBE_PID, arg1: u64::MAX,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::KILL, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: kill sig=u64::MAX");
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill sig=u64::MAX want ESRCH, got {}", v
+            );
             return Err(KernelError::InternalError);
         }
         // sig=9 (SIGKILL), 15 (SIGTERM), 17 (SIGCHLD), 64 (NSIG):
-        // none should be rejected by the signal-number gate.
+        // none should be rejected by the signal-number gate (the
+        // result is ESRCH from the pid gate, never EINVAL).
         for sig in [9u64, 15, 17, 64] {
             let a = SyscallArgs { arg0: PROBE_PID, arg1: sig,
                 arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
@@ -28188,15 +28275,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
         }
 
-        // Batch 288: sig truncation to int.  Linux's
+        // Batch 288/358: sig truncation to int + gate-order.  Linux's
         // `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)` truncates
-        // args.arg1 to its low 32 bits before any gate runs.
+        // args.arg1 to its low 32 bits, then runs target resolution
+        // before sig validation.
         //
-        // sig = 0x1_0000_0000 truncates to (int)0 → existence probe.
-        // Pre-batch we held sig as raw u64, so this probe missed the
-        // sig==0 gate and went to signal_send, which rejected it as
-        // EINVAL (sig > NSIG).  Post-batch: existence probe of the
-        // (nonexistent) PROBE_PID → ESRCH.
+        // sig = 0x1_0000_0000 truncates to (int)0 → existence probe
+        // against the (nonexistent) PROBE_PID → ESRCH.  Pre-batch we
+        // held sig as raw u64, so this missed the sig==0 path and
+        // went to signal_send, which rejected it as EINVAL
+        // (sig > NSIG).  Post-truncation-batch this was already
+        // ESRCH; post-gate-order-batch it remains ESRCH.
         let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x1_0000_0000,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::KILL, &a).value;
@@ -28208,9 +28297,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // sig = 0x1_0000_0009 truncates to (int)9 = SIGKILL.  Must
-        // NOT be EINVAL (the signal-number gate at NSIG=64 accepts
-        // 9 once truncation is applied).  Pre-batch this saw sig =
-        // 0x1_0000_0009 > NSIG → EINVAL.
+        // NOT be EINVAL — pre-truncation-batch sig was 0x1_0000_0009
+        // > NSIG → EINVAL; post-truncation-batch the sig gate accepts
+        // 9; post-gate-order-batch the target gate fires first with
+        // ESRCH.  Either way, never EINVAL.
         let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x1_0000_0009,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::KILL, &a).value;
@@ -28220,23 +28310,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // sig = 0x0000_0000_8000_0000 truncates to (int)INT_MIN < 0
-        // → EINVAL via the explicit lower-bound gate added in this
-        // batch.  Pre-batch the raw u64 path saw "huge unsigned >
-        // NSIG" → also EINVAL, so both paths agree on EINVAL; this
-        // test guards against a regression where someone "fixes" the
-        // negative-sig handling by widening before testing.
+        // sig = 0x0000_0000_8000_0000 truncates to (int)INT_MIN < 0.
+        // Pre-batch the explicit lower-bound `if sig < 0` gate fired
+        // with EINVAL.  Post-batch (358) target resolution runs first
+        // and PROBE_PID (negative i32) returns ESRCH before sig is
+        // ever inspected.  This probe guards the gate order itself —
+        // a regression that restored the sig-first check would
+        // surface EINVAL here.
         let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x0000_0000_8000_0000,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::KILL, &a).value;
-        if v != -i64::from(errno::EINVAL) {
+        if v != -i64::from(errno::ESRCH) {
             serial_println!(
-                "[syscall/linux]   FAIL: kill(PROBE,0x8000_0000) want EINVAL, got {}",
+                "[syscall/linux]   FAIL: kill(PROBE,0x8000_0000) want ESRCH (gate order), got {}",
                 v
             );
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   kill sig int truncation: OK");
+        serial_println!("[syscall/linux]   kill ESRCH-before-EINVAL gate order: OK");
     }
 
     // rt_sigreturn:

@@ -7820,12 +7820,32 @@ fn sys_getgroups(args: &SyscallArgs) -> SyscallResult {
 /// Kernel context: no caller_pid, treat as silent success without
 /// touching any PCB (no Linux credentials exist).
 fn sys_setgroups(args: &SyscallArgs) -> SyscallResult {
+    // Linux signature: `SYSCALL_DEFINE2(setgroups, int, gidsetsize,
+    // gid_t __user *, grouplist)`.  The body's NGROUPS_MAX gate is
+    // `if ((unsigned)gidsetsize > NGROUPS_MAX) return -EINVAL;`
+    // — gidsetsize is `int` (truncated to 32 bits by the x86_64 ABI),
+    // then reinterpreted as `unsigned` for the bound comparison so
+    // negative values surface as huge positive and fail the gate.
+    //
+    // Pre-batch we held `size` as raw u64, so high-half sentinels
+    // diverged:
+    //   * size = 0x1_0000_0000 → raw > 65536 → EINVAL.  Linux:
+    //     (int)0 = 0 → empty install → 0.
+    //   * size = 0x1_0000_0001 → raw > 65536 → EINVAL.  Linux:
+    //     (int)1 → reaches the list copy, NULL → EFAULT.
+    //   * size = u64::MAX → raw > 65536 → EINVAL.  Linux: (int)-1,
+    //     (unsigned)-1 = 0xFFFFFFFF > 65536 → EINVAL.  (Same result,
+    //     different reasoning — locking in the post-batch path.)
+    //
     // Linux's NGROUPS_MAX since 2.6.4.  We follow the same cap to
     // avoid surprising callers that pre-validated against it.
-    const NGROUPS_MAX: u64 = 65536;
-    let size = args.arg0;
+    const NGROUPS_MAX: u32 = 65536;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let size_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let size_u32 = size_i32 as u32;
     let list_ptr = args.arg1;
-    if size > NGROUPS_MAX {
+    if size_u32 > NGROUPS_MAX {
         return linux_err(errno::EINVAL);
     }
     let Some(pid) = caller_pid() else {
@@ -7840,7 +7860,7 @@ fn sys_setgroups(args: &SyscallArgs) -> SyscallResult {
     if creds_now.uid != 0 {
         return linux_err(errno::EPERM);
     }
-    if size == 0 {
+    if size_u32 == 0 {
         // Drop all supp groups.  No user pointer to validate.
         let mut new_creds = creds_now.clone();
         new_creds.groups.clear();
@@ -7852,11 +7872,10 @@ fn sys_setgroups(args: &SyscallArgs) -> SyscallResult {
     if list_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-    // Allocate space for `size` u32s.  size <= NGROUPS_MAX (65536),
-    // so worst case 256 KiB — acceptable for a rarely-called
-    // privilege-management syscall.
-    #[allow(clippy::cast_possible_truncation)]
-    let n = size as usize;
+    // Allocate space for `size_u32` u32s.  size_u32 <= NGROUPS_MAX
+    // (65536), so worst case 256 KiB — acceptable for a rarely-
+    // called privilege-management syscall.
+    let n = size_u32 as usize;
     let mut new_groups: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(n);
     // SAFETY: copy_from_user validates the user range and uses
     // STAC/CLAC for SMAP.  We point at the Vec's spare capacity and
@@ -28131,6 +28150,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   getrusage who input validation + int truncation: OK"
+        );
+    }
+
+    // Batch 306 — sys_setgroups int truncation + unsigned NGROUPS_MAX
+    // gate.  Linux's `SYSCALL_DEFINE2(setgroups, int gidsetsize, ...)`
+    // does `if ((unsigned)gidsetsize > NGROUPS_MAX) return -EINVAL`;
+    // pre-batch we compared raw u64 against NGROUPS_MAX, so high-half
+    // sentinels (which Linux truncates to small positives) were
+    // erroneously rejected as EINVAL where Linux accepts them.
+    {
+        // (a) setgroups(size=0x1_0000_0000, list=NULL).  Linux:
+        //     (int)0 = 0 → empty install → 0.  Pre-batch: raw
+        //     0x1_0000_0000 > 65536 → EINVAL.  Kernel context skips
+        //     PCB writes; returns 0 directly from the size==0 arm.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(size=high-half-zero) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) setgroups(size=0x1_0000_0001, list=NULL).  Linux:
+        //     (int)1 → passes NGROUPS_MAX → kernel-context bypass
+        //     in our code returns 0 (no PCB to write into).  Pre-
+        //     batch: raw 0x1_0000_0001 > 65536 → EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(size=high-half-one) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) setgroups(size=0x8000_0000, list=NULL).  Linux:
+        //     (int)0x80000000 = INT_MIN, (unsigned)= 0x80000000 >
+        //     65536 → EINVAL.  Regression guard for the int→u32
+        //     reinterpret: a naive `if size_i32 < 0 { ok }` would
+        //     mis-handle this, and a naive `size_u32 > NGROUPS_MAX`
+        //     comparison that forgot the sign-bit reinterpret would
+        //     also fail.  Pre-batch we returned EINVAL by accident
+        //     (raw u64 > 65536); post-batch we return EINVAL for
+        //     the right reason.
+        let a = SyscallArgs {
+            arg0: 0x8000_0000,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(size=INT_MIN) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) setgroups(size=u64::MAX, list=NULL).  Truncates to
+        //     (int)-1, (unsigned)-1 = 0xFFFFFFFF > 65536 → EINVAL.
+        //     Same result as pre-batch but locks in the post-batch
+        //     reasoning.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(size=u64::MAX) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   setgroups int truncation + unsigned NGROUPS_MAX: OK"
         );
     }
 

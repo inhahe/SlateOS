@@ -26912,3 +26912,84 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (35.29s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 24s).
+
+336. Batch 306 — sys_setgroups int truncation +
+     unsigned NGROUPS_MAX gate.
+
+     Divergence: Linux's
+     `SYSCALL_DEFINE2(setgroups, int gidsetsize, gid_t __user *grouplist)`
+     in kernel/groups.c gates with
+     `if ((unsigned)gidsetsize > NGROUPS_MAX) return -EINVAL;`.
+     gidsetsize is `int` (truncated to 32 bits by the
+     x86_64 ABI) then reinterpreted as `unsigned` for the
+     bound comparison so negative values surface as huge
+     positive and fail the gate.
+
+     Pre-batch we held `size` as raw u64 and compared
+     directly to NGROUPS_MAX(65536).  High-half
+     sentinels diverged:
+       - size=0x1_0000_0000: raw > 65536 → EINVAL.
+         Linux: (int)0=0 → empty install → 0.
+       - size=0x1_0000_0001: raw > 65536 → EINVAL.
+         Linux: (int)1 → reaches list copy, NULL → EFAULT.
+       - size=u64::MAX: raw > 65536 → EINVAL.  Linux:
+         (int)-1, (unsigned)-1=0xFFFFFFFF > 65536 →
+         EINVAL.  Same result, different reasoning.
+       - size=0x8000_0000: raw > 65536 → EINVAL.  Linux:
+         (int)INT_MIN, (unsigned)0x80000000 > 65536 →
+         EINVAL.  Same result, different reasoning.
+
+     Fix:
+       - Cast args.arg0 to i32 first (x86_64 int trunc).
+       - Reinterpret i32 as u32 via `as u32` (Linux's
+         `(unsigned)gidsetsize` semantics — bit pattern
+         preserved).
+       - Compare size_u32 > NGROUPS_MAX (now u32, not
+         u64).
+       - Use size_u32 for the subsequent `==0` empty-
+         install branch and `as usize` for the buffer
+         allocation length.
+       - Existing setgroups probes at the gid section
+         (size=65537→EINVAL, size=0→ok) still pass:
+         65537 > 65536 still EINVAL, 0 still 0.
+
+     Tests added in dispatch_linux:
+       - (a) setgroups(0x1_0000_0000, NULL) → 0 (trunc
+             to 0, kernel-context empty install).
+       - (b) setgroups(0x1_0000_0001, NULL) → 0 (trunc
+             to 1, kernel-context bypass returns 0
+             before reaching the list copy).
+       - (c) setgroups(0x8000_0000, NULL) → EINVAL
+             (INT_MIN reinterprets to 0x80000000 >
+             NGROUPS_MAX).  Regression guard for the
+             int→u32 sign-preserving reinterpret.
+       - (d) setgroups(u64::MAX, NULL) → EINVAL (trunc
+             to -1, unsigned-reinterpret to 0xFFFFFFFF).
+       Marker: "[syscall/linux]   setgroups int
+       truncation + unsigned NGROUPS_MAX: OK".
+
+     Preserved behaviour:
+       - Real userspace caller (uid==0) with size=2
+         and a valid list still installs 2 groups.
+       - Real userspace caller (uid!=0) still returns
+         EPERM.
+       - size=0 still drops all supplementary groups
+         on a real PCB caller.
+
+     Known limitations (unchanged):
+       - Linux's actual gate order is EPERM
+         (may_setgroups) BEFORE the (unsigned)>
+         NGROUPS_MAX gate.  We currently do NGROUPS_MAX
+         first, then EPERM.  For uid==0 callers and
+         kernel context the ordering is invisible; for
+         non-root callers with garbage size, we
+         return EINVAL where Linux returns EPERM.
+         Tracked here as a future gate-order
+         alignment item — defer because it requires
+         changing the "kernel-context bypass" semantics
+         to not skip EPERM, which is a larger surgery
+         than this batch's int-truncation scope.
+
+     Build: cargo build -p kernel clean (35.81s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 25s).

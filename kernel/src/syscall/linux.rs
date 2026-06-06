@@ -18894,16 +18894,42 @@ fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `setsockopt(sockfd, level, optname, optval*, optlen)`.
+///
+/// Linux gate order (net/socket.c::__sys_setsockopt, 6.x):
+///   1. `optlen < 0`                        -> -EINVAL
+///   2. sockfd_lookup_light(fd)             -> -EBADF / -ENOTSOCK
+///   3. (protocol/level dispatch — copy_from_sockptr happens INSIDE
+///      the per-level handler, which is where optval validation
+///      and `level` discrimination actually happen)
+///
+/// Pre-batch divergences fixed here:
+///   * `level < 0 -> EINVAL` was checked at syscall entry; Linux
+///     has no such gate at this layer.  Negative levels propagate
+///     to the protocol handler, which returns -ENOPROTOOPT.  With
+///     a bogus fd, Linux returns -EBADF (fd checked first) where
+///     we returned -EINVAL.
+///   * optval/optlen validation ran BEFORE fd lookup, so a probe
+///     with `(fd=-1, optlen=8, optval=NULL)` saw -EFAULT where
+///     Linux returns -EBADF.
 fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let level = args.arg1 as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let optlen = args.arg4 as i32;
-    if level < 0 || optlen < 0 {
+    // Gate 1: optlen < 0 -> EINVAL (Linux's first statement).
+    if optlen < 0 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 2: fd lookup -> EBADF.  In kernel context this is a
+    // no-op (caller_pid() == None), but in userspace context it
+    // fires before the optval check, matching Linux.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Gate 3: optval validation (modelled as a pre-handler check
+    // since we don't have a real socket layer; happens INSIDE the
+    // protocol handler in Linux, but only after fd succeeds, so
+    // ordering relative to fd is correct).
     if optlen > 0 {
         if args.arg3 == 0 {
             return linux_err(errno::EFAULT);
@@ -18912,21 +18938,35 @@ fn sys_setsockopt(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     linux_err(errno::EBADF)
 }
 
 /// `getsockopt(sockfd, level, optname, optval*, optlen*)`.
+///
+/// Linux gate order (net/socket.c::__sys_getsockopt, 6.x):
+///   1. sockfd_lookup_light(fd)             -> -EBADF / -ENOTSOCK
+///   2. (protocol/level dispatch — get_user(*optlen) and copy
+///      validation happen INSIDE the per-level handler)
+///
+/// Pre-batch divergences fixed here:
+///   * `level < 0 -> EINVAL` was checked at syscall entry; Linux
+///     has no such gate at this layer (negative levels reach
+///     the protocol handler and return -ENOPROTOOPT, which itself
+///     only fires after sockfd_lookup_light succeeds).
+///   * optlen-ptr validation ran BEFORE fd lookup, so a probe
+///     with `(fd=-1, optlen=NULL)` saw -EFAULT where Linux returns
+///     -EBADF (fd checked first).
 fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let level = args.arg1 as i32;
-    if level < 0 {
-        return linux_err(errno::EINVAL);
+    // Gate 1: fd lookup -> EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
     }
+    // Gate 2: optlen pointer validation.  In Linux this happens
+    // inside the per-level handler (get_user on *optlen), but it
+    // happens only after sockfd_lookup_light succeeds, so this
+    // position matches.
     if args.arg4 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -18939,9 +18979,6 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
     }
     // optval is optional (we'd need to read *optlen to know how much
     // to validate — skip the buffer check in kernel context).
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     linux_err(errno::EBADF)
 }
 
@@ -42402,10 +42439,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   recvmmsg timespec value gating: OK");
 
-        // setsockopt negative level -> EINVAL.
+        // setsockopt negative level -> EBADF (post batch 274).  Linux
+        // has no syscall-entry gate on `level`; a negative level
+        // propagates to the protocol handler, which is only reached
+        // after fd lookup succeeds.  In kernel context (no caller
+        // pid) fd lookup is a no-op, optval is valid, and the call
+        // falls through to the terminal EBADF.  Pre-batch-274 this
+        // returned -EINVAL via a spurious `level < 0` gate.
         let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 1, arg3: optval_ptr, arg4: 4, arg5: 0 };
-        if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: setsockopt bad level not EINVAL");
+        if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: setsockopt bad level not EBADF");
             return Err(KernelError::InternalError);
         }
         // setsockopt valid -> EBADF.
@@ -46071,6 +46114,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   mremap new_size PAGE_ALIGN overflow gating: OK"
+            );
+        }
+
+        // ---- setsockopt/getsockopt no-syscall-entry-level gate ----
+        // Linux's net/socket.c __sys_setsockopt and __sys_getsockopt
+        // do NOT validate `level` at the syscall layer.  Negative
+        // levels propagate to the protocol handler, which only
+        // runs after sockfd_lookup_light succeeds.  Pre-batch we
+        // returned -EINVAL for `level < 0` at syscall entry, which
+        // hijacked the errno from -EBADF (or -ENOPROTOOPT, with a
+        // valid fd).  Batch 274 removes the spurious gate and
+        // reorders so fd is checked before optval/optlen
+        // validation.
+        {
+            // Stack-allocated valid optval/optlen buffers for the
+            // discriminators below; black_box keeps them live.
+            let optval_buf = [0u8; 4];
+            let optval_p = (&raw const optval_buf[0]) as u64;
+            core::hint::black_box(&optval_buf);
+            let optlen_buf = [4u8, 0, 0, 0];
+            let optlen_p = (&raw const optlen_buf[0]) as u64;
+            core::hint::black_box(&optlen_buf);
+
+            // Discriminator A: setsockopt(fd=3, level=-1, optname=1,
+            //   optval=valid, optlen=4)
+            //   pre-batch: -EINVAL  (spurious level<0 gate)
+            //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
+            //                        through to terminal EBADF)
+            let a = SyscallArgs {
+                arg0: 3, arg1: u64::from(u32::MAX), arg2: 1,
+                arg3: optval_p, arg4: 4, arg5: 0,
+            };
+            if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setsockopt(level=-1) not EBADF"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: setsockopt(fd=3, level=0, optname=1,
+            //   optval=valid, optlen=-1)
+            //   Acceptance: optlen<0 -> EINVAL gate is preserved
+            //   (Linux gate 1).  Both pre and post: -EINVAL.
+            let a = SyscallArgs {
+                arg0: 3, arg1: 0, arg2: 1,
+                arg3: optval_p, arg4: u64::from(u32::MAX), arg5: 0,
+            };
+            if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setsockopt(optlen=-1) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator C: getsockopt(fd=3, level=-1, optname=1,
+            //   optval=valid, optlen=valid)
+            //   pre-batch: -EINVAL  (spurious level<0 gate)
+            //   post-batch: -EBADF  (fd kernel-ctx no-op, optlen
+            //                        ptr valid, terminal EBADF)
+            let a = SyscallArgs {
+                arg0: 3, arg1: u64::from(u32::MAX), arg2: 1,
+                arg3: optval_p, arg4: optlen_p, arg5: 0,
+            };
+            if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getsockopt(level=-1) not EBADF"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator D: getsockopt(fd=3, level=0, optname=1,
+            //   optval=valid, optlen=NULL)
+            //   Acceptance: optlen-NULL -> EFAULT gate is preserved,
+            //   just relocated to AFTER fd lookup (which is a no-op
+            //   in kernel context, so EFAULT still fires).  Both
+            //   pre and post: -EFAULT.
+            let a = SyscallArgs {
+                arg0: 3, arg1: 0, arg2: 1,
+                arg3: optval_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getsockopt(optlen=NULL) not EFAULT"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   setsockopt/getsockopt no-level gate: OK"
             );
         }
 

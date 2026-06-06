@@ -1,3 +1,5 @@
+add to roadmap-detailed to make the window frames, task bar, start menu, file explorer, search dialog, and file/folder select dialog just like in 'Aero Desktop (offline).html' as the default theme.
+
 add microsoft-like ribbons to roadmap-detailed, with a note not to copy them to the degree that they would violate microsoft patents.
 
 add that the programs should be able to register thumbnail generators for filetyes that belong to them for use in thumbnail view in the file explorer. make it so that a crash in the thumbnail generator doesn't crash the explorer.
@@ -23489,3 +23491,102 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      clamp are still not implemented.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+303.  syscall/linux: setsockopt/getsockopt drop spurious level<0
+##      gate, fd before optval/optlen (batch 274).
+##
+##      Pre-batch divergence: Linux's net/socket.c __sys_setsockopt
+##      (and __sys_getsockopt) have NO `level` validation at the
+##      syscall layer.  setsockopt's gate order is:
+##        1. optlen < 0                     -> -EINVAL
+##        2. sockfd_lookup_light(fd)        -> -EBADF / -ENOTSOCK
+##        3. per-level handler (copy_from_sockptr happens here,
+##           and an unsupported level returns -ENOPROTOOPT)
+##      getsockopt's is simply:
+##        1. sockfd_lookup_light(fd)        -> -EBADF / -ENOTSOCK
+##        2. per-level handler (get_user(*optlen) here)
+##      Pre-batch our sys_setsockopt did:
+##        if (level < 0 || optlen < 0) return EINVAL;
+##        if (optlen > 0 && optval == NULL) return EFAULT;
+##        if (optlen > 0) validate_user_read(optval, optlen)
+##        if (fd bad) return EBADF;
+##      and sys_getsockopt similarly opened with `level < 0 ->
+##      EINVAL` before any other check.  Probe-distinguishable:
+##        setsockopt(fd=-1, level=-1, optlen=4, optval=valid)
+##          pre: -EINVAL  (spurious level gate)
+##          Linux: -EBADF (fd gate)
+##        setsockopt(fd=-1, optlen=8, optval=NULL)
+##          pre: -EFAULT  (optval check before fd)
+##          Linux: -EBADF (fd gate)
+##        getsockopt(fd=-1, level=-1, optval=valid, optlen=valid)
+##          pre: -EINVAL  (spurious level gate)
+##          Linux: -EBADF (fd gate)
+##
+##      Fix in sys_setsockopt (line ~18897) and sys_getsockopt
+##      (line ~18922):
+##        * Remove the `level < 0 -> EINVAL` branches entirely;
+##          Linux propagates negative levels to the protocol
+##          handler, which returns -ENOPROTOOPT (only reachable
+##          after the fd succeeds).
+##        * Reorder setsockopt to: optlen<0 (gate 1), then
+##          validate_linux_fd (gate 2), then optval check (gate 3).
+##        * Reorder getsockopt to: validate_linux_fd (gate 1),
+##          then optlen-ptr check / read+write validation (gate 2).
+##        * Function docs now spell out the Linux gate order and
+##          note that in kernel context (caller_pid() == None)
+##          validate_linux_fd is a no-op, so probes fall through
+##          to the terminal EBADF.
+##
+##      Self-tests added in dispatch_linux (after the mremap block);
+##      setsockopt/getsockopt no-level-gate quadruple:
+##        A. setsockopt(fd=3, level=-1, optlen=4, optval=valid)
+##             pre: -EINVAL; post: -EBADF (terminal, fd no-op).
+##        B. setsockopt(fd=3, level=0, optlen=-1, optval=valid)
+##             Acceptance: optlen<0 -> -EINVAL gate preserved
+##             (Linux gate 1).  Both pre and post: -EINVAL.
+##        C. getsockopt(fd=3, level=-1, optval=valid, optlen=valid)
+##             pre: -EINVAL; post: -EBADF (terminal, fd no-op).
+##        D. getsockopt(fd=3, level=0, optval=valid, optlen=NULL)
+##             Acceptance: optlen-NULL -> -EFAULT gate preserved,
+##             just relocated to AFTER fd lookup (no-op in kernel
+##             ctx, so EFAULT still fires).  Both: -EFAULT.
+##      Stack-allocated buffers via (&raw const buf[0]) plus
+##      core::hint::black_box(&buf) to keep the pointers live for
+##      validate_user_read; in kernel context the validator is a
+##      no-op but the test still exercises the gate-position.
+##
+##      Marker:
+##        "[syscall/linux]   setsockopt/getsockopt no-level gate: OK"
+##
+##      Legacy test updated: the existing post-recvmmsg test at
+##      line ~42407 asserted `setsockopt(level=u32::MAX -> -1)
+##      -> -EINVAL` (which encoded the bug).  Now updated to
+##      assert -EBADF (terminal, kernel-ctx fd no-op), with a
+##      comment explaining the pre/post discriminant.  The
+##      sibling test that asserts `setsockopt(level=1) -> -EBADF`
+##      is unchanged.  The pre-existing getsockopt EFAULT/EBADF
+##      pair (lines ~42419/42425) also continues to pass: those
+##      probes use level=1 (positive), which was not affected by
+##      the level<0 gate, and their relative ordering still
+##      matches the new flow.
+##
+##      Existing tests preserved: mremap PAGE_ALIGN overflow
+##      (batch 273), pread64/pwrite64 fd-before-count (batch 272),
+##      capset pid EPERM (batch 270), prctl(PR_SET_NAME) NULL-arg2
+##      (batch 269), capget/capset NULL-data quadruple (batch 268),
+##      preadv/pwritev iov_len SSIZE_MAX (batch 267) — all
+##      unaffected by this addition.
+##
+##      Known limitations: we still don't implement a real
+##      per-protocol socket layer, so the post-fd handler path
+##      always answers -EBADF rather than dispatching to a real
+##      level handler that would surface -ENOPROTOOPT for
+##      unknown levels with a valid socket fd.  That's fine
+##      until the socket layer lands; the gate position is
+##      correct so the future handler can slot in without
+##      moving any of the existing gates.  Unchanged from batch
+##      273: mremap MREMAP_FIXED new_addr bounds; from batch 272:
+##      pread/pwrite EOVERFLOW gate and MAX_RW_COUNT silent
+##      clamp still not implemented.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

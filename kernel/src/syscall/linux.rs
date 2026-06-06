@@ -958,6 +958,7 @@ pub mod errno {
     pub const ELOOP: i32 = 40;
     pub const ENOMSG: i32 = 42;
     pub const EOVERFLOW: i32 = 75;
+    pub const EPROTONOSUPPORT: i32 = 93;
     pub const EOPNOTSUPP: i32 = 95;
     pub const EAFNOSUPPORT: i32 = 97;
     pub const ETIMEDOUT: i32 = 110;
@@ -18615,9 +18616,67 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
     if !(1..=5).contains(&sock_type) {
         return linux_err(errno::EINVAL);
     }
-    // protocol is opaque and family-specific; 0 = "default for type" is
-    // always legal, anything else we can't validate without a stack so
-    // we accept it.  No networking yet → ENOSYS.
+    // Gate 4: per-(family, type) protocol whitelist -> -EPROTONOSUPPORT.
+    //
+    // Linux's net/ipv4/af_inet.c::inet_create walks the inetsw list for
+    // the chosen socket type and looks for an answer entry whose
+    // .protocol matches; if no entry matches and the type isn't
+    // SOCK_RAW (which accepts any protocol), it returns
+    // -EPROTONOSUPPORT.  The same shape exists in net/ipv6/af_inet6.c
+    // for AF_INET6.  Userspace probes (e.g. `socket(AF_INET,
+    // SOCK_STREAM, 99)`) discriminate "kernel doesn't speak this
+    // (type, protocol) combo" from a generic ENOSYS by this errno.
+    // Pre-batch we accepted all non-zero protocols and fell through to
+    // ENOSYS, hiding this discriminator.
+    //
+    // Per-family valid (type, protocol) pairs (protocol == 0 always
+    // means "default for type" and is unconditionally accepted):
+    //   AF_UNIX:    any type, protocol must be 0
+    //   AF_INET / AF_INET6:
+    //     SOCK_STREAM      -> IPPROTO_TCP=6
+    //     SOCK_DGRAM       -> IPPROTO_UDP=17, IPPROTO_UDPLITE=136
+    //     SOCK_SEQPACKET   -> IPPROTO_SCTP=132 (rare; whitelist it
+    //                         here so glibc's SCTP probe works)
+    //     SOCK_RAW         -> any protocol (1..=255) — the kernel
+    //                         constructs a raw socket for the given
+    //                         protocol number, success-path
+    //     SOCK_RDM         -> none (Linux returns ESOCKTNOSUPPORT
+    //                         from inet_create's list scan; we keep
+    //                         the current ENOSYS for forward compat
+    //                         until we land the SOCK_RDM gate too)
+    //   AF_NETLINK: protocol is the netlink family (0..=32); we
+    //               accept all and let ENOSYS terminate
+    //   AF_PACKET:  protocol is an ETH_P_* htons value, accepted
+    //               unconditionally
+    //
+    // We only gate the AF_INET / AF_INET6 SOCK_STREAM / SOCK_DGRAM
+    // combinations and AF_UNIX-with-non-zero-protocol here — the
+    // remaining slots either accept any protocol on Linux or fall
+    // through to family-specific behaviour we don't model yet.  This
+    // keeps the gate strictly more accepting than Linux: anything we
+    // reject, Linux also rejects with the same errno.
+    #[allow(clippy::cast_possible_truncation)]
+    let protocol = args.arg2 as u32;
+    if protocol != 0 {
+        match (domain, sock_type) {
+            // AF_UNIX rejects any non-zero protocol with
+            // -EPROTONOSUPPORT (net/unix/af_unix.c::unix_create).
+            (1, _) => return linux_err(errno::EPROTONOSUPPORT),
+            // AF_INET / AF_INET6 SOCK_STREAM: only IPPROTO_TCP=6.
+            (2 | 10, 1) if protocol != 6 => {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
+            // AF_INET / AF_INET6 SOCK_DGRAM: IPPROTO_UDP=17 or
+            // IPPROTO_UDPLITE=136.
+            (2 | 10, 2) if protocol != 17 && protocol != 136 => {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
+            // SOCK_RAW (3) and everything else: accept and let ENOSYS
+            // terminate.
+            _ => {}
+        }
+    }
+    // No networking yet → ENOSYS.
     linux_err(errno::ENOSYS)
 }
 
@@ -46679,6 +46738,117 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   mremap MREMAP_FIXED new_addr bounds: OK"
+            );
+        }
+
+        // ---- socket per-(family, type) protocol whitelist ----
+        // Linux's inet_create / inet6_create / unix_create walk a
+        // protocol switch and return -EPROTONOSUPPORT (errno 93) for
+        // a non-zero protocol that isn't in the family's accepted
+        // set.  Pre-batch we accepted any non-zero protocol and
+        // fell through to ENOSYS.  Post-batch we gate the
+        // well-known (family, type) combinations to match Linux's
+        // protocol discriminator.
+        //
+        // Discriminators (kernel-context, no fd involved):
+        //   A. socket(AF_INET=2, SOCK_STREAM=1, protocol=99)
+        //      pre: ENOSYS ; post: EPROTONOSUPPORT
+        //   B. socket(AF_INET=2, SOCK_DGRAM=2, protocol=99)
+        //      pre: ENOSYS ; post: EPROTONOSUPPORT
+        //   C. socket(AF_INET6=10, SOCK_STREAM=1, protocol=99)
+        //      pre: ENOSYS ; post: EPROTONOSUPPORT
+        //   D. socket(AF_UNIX=1, SOCK_STREAM=1, protocol=99)
+        //      pre: ENOSYS ; post: EPROTONOSUPPORT (AF_UNIX
+        //      rejects any non-zero protocol)
+        //   E. socket(AF_INET=2, SOCK_STREAM=1, protocol=6 (TCP))
+        //      pre: ENOSYS ; post: ENOSYS (acceptance)
+        //   F. socket(AF_INET=2, SOCK_DGRAM=2, protocol=17 (UDP))
+        //      pre: ENOSYS ; post: ENOSYS (acceptance)
+        //   G. socket(AF_INET=2, SOCK_RAW=3, protocol=99)
+        //      pre: ENOSYS ; post: ENOSYS (SOCK_RAW accepts any
+        //      protocol on Linux — confirms gate is type-scoped)
+        {
+            // A: AF_INET SOCK_STREAM bad proto -> EPROTONOSUPPORT.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 99, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_INET SOCK_DGRAM bad proto -> EPROTONOSUPPORT.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 99, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_INET6 SOCK_STREAM bad proto -> EPROTONOSUPPORT.
+            let a = SyscallArgs {
+                arg0: 10, arg1: 1, arg2: 99, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET6,STREAM,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_UNIX rejects any non-zero protocol.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 99, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: AF_INET SOCK_STREAM IPPROTO_TCP -> ENOSYS (accept).
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 6, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: AF_INET SOCK_DGRAM IPPROTO_UDP -> ENOSYS (accept).
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 17, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: AF_INET SOCK_RAW any proto -> ENOSYS (accept;
+            // gate is type-scoped, RAW accepts any protocol).
+            let a = SyscallArgs {
+                arg0: 2, arg1: 3, arg2: 99, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,RAW,99) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socket EPROTONOSUPPORT gating: OK"
             );
         }
 

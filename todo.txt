@@ -1,10 +1,3 @@
-add to roadmap-detailed to make the window frames, task bar, start menu, file explorer, search dialog, and file/folder select dialog just like in 'Aero Desktop (offline).html' as the default theme.
-
-add microsoft-like ribbons to roadmap-detailed, with a note not to copy them to the degree that they would violate microsoft patents. add that i once found the specs to exactly how microsoft arranges ribbons depending on the things that are added, and to see if claude can find those specs online and use them, but only if/to the degree that it doesn't violate patents. add a note that all ribbon patents should be expiring within a year or so, so we can update it then. 
-
-if it's not already there, add to roadmap-detailed that the programs should be able to register thumbnail generators for filetyes that belong to them for use in thumbnail view in the file explorer. add to make it so that a crash in any thumbnail generator (native or third-party) doesn't crash he explorer by running things in their own processes as appropriate.
-
-
 
 The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
@@ -23925,6 +23918,99 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      __reserved_3 field validation; sys_mremap rejecting
 ##      MREMAP_FIXED when new_addr is below the userspace
 ##      mmap floor (we currently allow new_addr=0).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 308. syscall/linux: sys_socket — per-(family, type)
+##      protocol whitelist returning -EPROTONOSUPPORT
+##      (batch 279).
+##
+##      Pre-batch divergence: Linux's per-family create
+##      paths (net/ipv4/af_inet.c::inet_create,
+##      net/ipv6/af_inet6.c::inet6_create,
+##      net/unix/af_unix.c::unix_create) walk a switch over
+##      `protocol` and return -EPROTONOSUPPORT (errno 93)
+##      when the (type, protocol) pair is not in the
+##      family's accepted set.  Probes commonly use this
+##      errno to discriminate "kernel doesn't speak this
+##      (type, protocol) combination" from "kernel doesn't
+##      know this syscall at all" (ENOSYS).  We accepted any
+##      non-zero protocol and fell through to ENOSYS,
+##      hiding the discriminator.
+##
+##      Fix: add `pub const EPROTONOSUPPORT: i32 = 93;` to
+##      the errno module, then add a gate 4 to sys_socket
+##      that fires when protocol != 0:
+##        - AF_UNIX (1): any non-zero protocol ->
+##          -EPROTONOSUPPORT (Linux's unix_create only
+##          accepts protocol == 0).
+##        - AF_INET (2) / AF_INET6 (10) + SOCK_STREAM (1):
+##          protocol must be 6 (IPPROTO_TCP).
+##        - AF_INET (2) / AF_INET6 (10) + SOCK_DGRAM (2):
+##          protocol must be 17 (IPPROTO_UDP) or 136
+##          (IPPROTO_UDPLITE).
+##        - All other (family, type) slots fall through to
+##          the terminal ENOSYS (SOCK_RAW accepts any
+##          protocol on Linux; AF_NETLINK / AF_PACKET have
+##          family-specific protocol semantics we don't
+##          model yet, and over-rejecting would diverge
+##          from Linux harder than under-rejecting).
+##      The gate fires AFTER the existing family /
+##      flag-mask / type gates so the prior batch-276
+##      EAFNOSUPPORT and the type-range EINVAL still win
+##      for their respective inputs.
+##
+##      Self-tests (kernel-context probe heptuple in
+##      dispatch_linux):
+##        A. socket(AF_INET, SOCK_STREAM, 99) -> EPROTONOSUPPORT
+##           (pre-batch: ENOSYS; post-batch: EPROTONOSUPPORT).
+##        B. socket(AF_INET, SOCK_DGRAM, 99)  -> EPROTONOSUPPORT
+##           (pre-batch: ENOSYS; post-batch: EPROTONOSUPPORT).
+##        C. socket(AF_INET6, SOCK_STREAM, 99) -> EPROTONOSUPPORT
+##           (pre-batch: ENOSYS; post-batch: EPROTONOSUPPORT).
+##        D. socket(AF_UNIX, SOCK_STREAM, 99) -> EPROTONOSUPPORT
+##           (pre-batch: ENOSYS; post-batch: EPROTONOSUPPORT;
+##            AF_UNIX rejects any non-zero protocol).
+##        E. socket(AF_INET, SOCK_STREAM, 6)  -> ENOSYS
+##           (acceptance — TCP is the canonical SOCK_STREAM
+##            protocol for AF_INET).
+##        F. socket(AF_INET, SOCK_DGRAM, 17)  -> ENOSYS
+##           (acceptance — UDP is the canonical SOCK_DGRAM
+##            protocol for AF_INET).
+##        G. socket(AF_INET, SOCK_RAW, 99)    -> ENOSYS
+##           (acceptance — SOCK_RAW accepts any protocol on
+##            Linux; confirms the gate is type-scoped, not a
+##            blanket protocol-99 reject).
+##      Marker: "socket EPROTONOSUPPORT gating: OK".
+##
+##      Existing tests preserved: mremap MREMAP_FIXED
+##      new_addr bounds (278), perf_event_open __reserved_2
+##      gating (277), socket/socketpair EAFNOSUPPORT gating
+##      (276) — the new gate fires AFTER the EAFNOSUPPORT
+##      gate so unknown families still take priority;
+##      listen/shutdown drop entry gates (275),
+##      setsockopt/getsockopt no-level gate (274), mremap
+##      new_size PAGE_ALIGN overflow (273), pread64/pwrite64
+##      fd-before-count (272), capset pid EPERM (270),
+##      prctl(PR_SET_NAME) NULL-arg2 (269), capget/capset
+##      NULL-data quadruple (268), preadv/pwritev iov_len
+##      SSIZE_MAX (267) — all unaffected.  The legacy
+##      "socket valid -> ENOSYS" test at line ~42385 still
+##      passes (protocol=0).
+##
+##      Known limitations: still pending — accept/accept4
+##      and bind/connect sockaddr-before-fd reorders (not
+##      probe-distinguishable in kernel context);
+##      ESOCKTNOSUPPORT for SOCK_RDM on AF_INET (Linux
+##      returns ESOCKTNOSUPPORT here, we return ENOSYS);
+##      pread/pwrite EOVERFLOW gate at pos+count and silent
+##      MAX_RW_COUNT clamp; sys_mremap rejecting
+##      MREMAP_FIXED below the userspace mmap floor; the
+##      socketpair() per-protocol gate (this batch covers
+##      socket() only; socketpair() has the same shape but
+##      its current EOPNOTSUPP gate already fires for the
+##      common AF_INET case before the protocol check would
+##      matter, so the divergence surface is narrower).
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 

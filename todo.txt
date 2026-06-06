@@ -23784,3 +23784,70 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 21s).
 
+## 306. syscall/linux: sys_perf_event_open — in-struct
+##      __reserved_2 field gating (batch 277).
+##
+##      Pre-batch divergence: Linux's perf_copy_attr()
+##      (kernel/events/core.c) reads the userspace attr,
+##      then checks
+##          if (attr->__reserved_2)  return -EINVAL;
+##      where __reserved_2 is a u16 at offset 110 inside
+##      struct perf_event_attr (present since
+##      PERF_ATTR_SIZE_VER5, i.e. attr_size >= 112).
+##      Our sys_perf_event_open validated only the trailing
+##      bytes from PERF_ATTR_KSIZE (=136) to attr_size — it
+##      ignored in-struct reserved fields entirely. So a
+##      probe with size=136 and __reserved_2!=0 fell through
+##      the attr validation entirely and hit the ENOSYS
+##      acceptance arm, instead of -EINVAL.
+##
+##      Fix: in sys_perf_event_open, after the trailing-zero
+##      tail check and before the pid/cpu validation, copy
+##      two bytes from (attr_p + 110) when attr_size >= 112
+##      and return -EINVAL if the resulting u16 is non-zero.
+##      The copy uses validate_user_read coverage already
+##      established for [attr_p, attr_p+attr_size) above.
+##
+##      Self-tests (kernel-context probe triple, inside
+##      dispatch_linux Linux-ABI self-test block):
+##        A. attr_buf[136]; size=136; __reserved_2 byte 110=1
+##           PERF_EVENT_OPEN(attr, 0, -1, 0, 0) -> -EINVAL.
+##           (pre-batch: -ENOSYS; post-batch: -EINVAL).
+##        B. attr_buf[136]; size=136; __reserved_2 zero;
+##           PERF_EVENT_OPEN(attr, 0, -1, 0, 0) -> -ENOSYS
+##           (acceptance — confirms the gate fires only when
+##           the reserved field is non-zero).
+##        C. attr_short[64]; size=64 (< 112, so the reserved
+##           field is below attr_size and not validated);
+##           PERF_EVENT_OPEN(attr, 0, -1, 0, 0) -> -ENOSYS
+##           (acceptance — confirms the gate is conditional
+##           on attr_size >= 112 and does not regress
+##           legacy/older attr sizes).
+##      Marker: "perf_event_open __reserved_2 gating: OK".
+##
+##      Existing tests preserved: socket/socketpair
+##      EAFNOSUPPORT gating (batch 276), listen/shutdown
+##      drop entry gates (batch 275), setsockopt/getsockopt
+##      no-level gate (batch 274), mremap PAGE_ALIGN
+##      overflow (batch 273), pread64/pwrite64
+##      fd-before-count (batch 272), capset pid EPERM (270),
+##      prctl(PR_SET_NAME) NULL-arg2 (269), capget/capset
+##      NULL-data quadruple (268), preadv/pwritev iov_len
+##      SSIZE_MAX (267) — all unaffected.
+##
+##      Known limitations: still pending — accept/accept4
+##      sockaddr-before-fd reorder (Linux: flags -> fd ->
+##      sockaddr; ours: flags -> sockaddr -> fd); bind /
+##      connect sockaddr-before-fd; per-protocol
+##      protocol-number validation (socket(AF_INET,
+##      SOCK_STREAM, 99) should -EPROTONOSUPPORT, we accept
+##      it and return ENOSYS); ESOCKTNOSUPPORT for type
+##      valid but unimplemented; pread/pwrite EOVERFLOW gate
+##      and MAX_RW_COUNT silent clamp; mremap MREMAP_FIXED
+##      new_addr bounds; sys_perf_event_open in-struct
+##      __reserved_3 field validation (this batch covered
+##      __reserved_2 only — __reserved_3 is a separate u64
+##      reserved field at a later offset, still unchecked).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 26s).
+

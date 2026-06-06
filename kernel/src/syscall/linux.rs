@@ -12077,6 +12077,45 @@ fn sys_perf_event_open(args: &SyscallArgs) -> SyscallResult {
             off += take;
         }
     }
+    // In-struct reserved-field check: Linux's perf_copy_attr does
+    //   if (attr->__reserved_2) return -EINVAL;
+    // after copy_struct_from_user.  __reserved_2 is a u16 at
+    // offset 110 in struct perf_event_attr (between
+    // sample_max_stack @ 108 and aux_sample_size @ 112), present
+    // since PERF_ATTR_SIZE_VER5.  copy_struct_from_user zero-fills
+    // the kernel-side struct beyond `size`, so a probe with
+    // attr_size < 112 has __reserved_2 effectively zero and
+    // passes the check.  Older sizes (VER0..VER4 in [64, 112))
+    // don't reach __reserved_2, so we only read+validate when
+    // attr_size >= 112.
+    //
+    // Before batch 277 we didn't model this — a probe with
+    // size=136 and __reserved_2=1 fell through to the pid/cpu
+    // EINVAL or terminal ENOSYS, never surfacing the -EINVAL
+    // Linux returns for the reserved-field non-zero violation.
+    // (We don't replicate __reserved_3 because it was repurposed
+    // as `aux_action` in Linux 6.10 and is no longer reserved;
+    // __reserved_2 is the only stable in-struct reserved field
+    // a modern probe might exercise.)
+    const RESERVED_2_OFFSET: u32 = 110;
+    if attr_size >= RESERVED_2_OFFSET + 2 {
+        let mut r2 = [0u8; 2];
+        // SAFETY: validate_user_read above covers
+        // [args.arg0, args.arg0 + attr_size); offset 110 is
+        // within that range when attr_size >= 112.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(
+                args.arg0.wrapping_add(u64::from(RESERVED_2_OFFSET)),
+                r2.as_mut_ptr(),
+                2,
+            )
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        if u16::from_ne_bytes(r2) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+    }
     // pid == -1 && cpu == -1 is the "any task on any cpu" combination
     // that Linux rejects with EINVAL — without a pid there is no task
     // to attach the event to, and without a cpu there is no per-cpu
@@ -46441,6 +46480,105 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   socket/socketpair EAFNOSUPPORT gating: OK"
+            );
+        }
+
+        // ---- perf_event_open __reserved_2 in-struct check ----
+        // Linux's perf_copy_attr (kernel/events/core.c) checks
+        //   if (attr->__reserved_2) return -EINVAL;
+        // after copy_struct_from_user.  __reserved_2 is a u16 at
+        // offset 110 in struct perf_event_attr, present since
+        // PERF_ATTR_SIZE_VER5 (size>=112).  Pre-batch we only
+        // checked trailing bytes from PERF_ATTR_KSIZE (=136)
+        // onwards, leaving __reserved_2 unvalidated.  A probe
+        // with size=136 and __reserved_2!=0 would slip past
+        // our trailing-zero check and reach pid/cpu or terminal
+        // ENOSYS, where Linux returns -EINVAL.
+        {
+            // Build a perf_event_attr with size=136 and bytes
+            // [108..112] set so that __reserved_2 (u16 @ 110)
+            // is non-zero.  Layout:
+            //   type @ 0           (u32, 0)
+            //   size @ 4           (u32, 136)
+            //   ... (all zero through offset 108)
+            //   sample_max_stack @ 108 (u16, 0)
+            //   __reserved_2 @ 110     (u16, NON-ZERO)
+            //   ... rest zero
+            let mut attr_buf = [0u8; 136];
+            attr_buf[4] = 136;          // size = 136 (u32 LE)
+            attr_buf[110] = 0x01;       // __reserved_2 byte 0
+            attr_buf[111] = 0x00;       // __reserved_2 byte 1
+            let attr_p = (&raw const attr_buf[0]) as u64;
+            core::hint::black_box(&attr_buf);
+
+            // Discriminator A: perf_event_open(attr w/
+            //   __reserved_2=1, size=136, pid=0, cpu=0, gfd=-1,
+            //   flags=0)
+            //   pre-batch: -EINVAL (from pid/cpu? no, pid=0
+            //     cpu=0 passes) -> falls through to terminal
+            //     -ENOSYS.
+            //   post-batch: -EINVAL (reserved-field check).
+            let a = SyscallArgs {
+                arg0: attr_p, arg1: 0, arg2: 0,
+                #[allow(clippy::cast_sign_loss)]
+                arg3: -1_i64 as u64,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: perf_event_open(__reserved_2!=0) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: same attr but __reserved_2 = 0
+            //   (size still 136, all else zeroed)
+            //   Acceptance: clean attr falls through to terminal
+            //   -ENOSYS (we don't implement perf events).
+            let mut attr_buf2 = [0u8; 136];
+            attr_buf2[4] = 136;
+            // __reserved_2 stays zero
+            let attr_p2 = (&raw const attr_buf2[0]) as u64;
+            core::hint::black_box(&attr_buf2);
+            let a = SyscallArgs {
+                arg0: attr_p2, arg1: 0, arg2: 0,
+                #[allow(clippy::cast_sign_loss)]
+                arg3: -1_i64 as u64,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: perf_event_open(__reserved_2==0) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator C: short attr (size=64, VER0)
+            //   Acceptance: __reserved_2 is below the requested
+            //   size, so our check is bypassed (Linux zero-fills
+            //   bytes [size, sizeof(attr)) so __reserved_2 is
+            //   effectively zero).  Falls through to terminal
+            //   -ENOSYS regardless of what's at offset 110 in
+            //   the user buffer.
+            let mut attr_short = [0u8; 64];
+            attr_short[4] = 64;
+            let attr_short_p = (&raw const attr_short[0]) as u64;
+            core::hint::black_box(&attr_short);
+            let a = SyscallArgs {
+                arg0: attr_short_p, arg1: 0, arg2: 0,
+                #[allow(clippy::cast_sign_loss)]
+                arg3: -1_i64 as u64,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: perf_event_open(size=64) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   perf_event_open __reserved_2 gating: OK"
             );
         }
 

@@ -14655,15 +14655,59 @@ fn sys_epoll_create1(args: &SyscallArgs) -> SyscallResult {
 
 /// `epoll_ctl(epfd, op, fd, event*)` — op in {ADD=1, DEL=2, MOD=3}.
 fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
-    const EPOLL_CTL_ADD: i32 = 1;
     const EPOLL_CTL_DEL: i32 = 2;
-    const EPOLL_CTL_MOD: i32 = 3;
+
+    // Linux gate order (fs/eventpoll.c):
+    //
+    //   SYSCALL_DEFINE4(epoll_ctl) outer:
+    //     if (ep_op_has_event(op) /* = op != DEL */ &&
+    //         copy_from_user(&epds, event, sizeof(epds)))
+    //         return -EFAULT;
+    //     return do_epoll_ctl(epfd, op, fd, &epds, false);
+    //
+    //   do_epoll_ctl:
+    //     error = -EBADF;
+    //     f = fdget(epfd);
+    //     if (!f.file) goto error_return;          // EBADF
+    //     tf = fdget(fd);
+    //     if (!tf.file) goto error_tgt_fput;       // EBADF
+    //     error = -EPERM;
+    //     if (!file_can_poll(tf.file)) goto ...;   // EPERM
+    //     error = -EINVAL;
+    //     if (f.file == tf.file || !is_file_epoll(f.file)) goto ...;
+    //     switch (op) {
+    //       case ADD: ...
+    //       case DEL: ...
+    //       case MOD: ...
+    //       default: error = -EINVAL; break;        // unknown op (LAST)
+    //     }
+    //
+    // Pre-batch divergence fixed here:
+    //   * Our function validated `op` FIRST, returning EINVAL for any
+    //     op ∉ {ADD, DEL, MOD}.  A probe passing (op=99, event=NULL)
+    //     saw EINVAL where Linux returns EFAULT — the outer wrapper
+    //     calls copy_from_user because `op != DEL`, and a NULL event
+    //     EFAULTs there before do_epoll_ctl ever runs.
+    //   * For unknown op with a valid event ptr (e.g. op=99, event on
+    //     stack) we returned EINVAL where Linux returns EBADF — the
+    //     copy succeeds, then fdget(epfd) fires EBADF before the
+    //     switch default's EINVAL.
+    //   * `ep_op_has_event(op) = op != DEL`: even unknown ops trigger
+    //     the event read, so the EFAULT path covers ADD, MOD, and
+    //     every value other than DEL.
+    //
+    // Post-batch:
+    //   1. op != DEL  ->  read event (EFAULT on NULL/unreadable).
+    //   2. fdget(epfd) -> EBADF.  No real epfds exist in this kernel
+    //      (epoll_create returns ENOSYS), so every well-formed call
+    //      terminates here.
+    //   3-6 (target fd / file_can_poll / is_file_epoll / op switch):
+    //      unreachable in our model — all gated behind a valid epfd
+    //      which we never hand out.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let op = args.arg1 as i32;
-    if !matches!(op, EPOLL_CTL_ADD | EPOLL_CTL_DEL | EPOLL_CTL_MOD) {
-        return linux_err(errno::EINVAL);
-    }
-    // event ptr is required for ADD / MOD; DEL ignores it.
+
+    // Gate 1 (outer wrapper): copy_from_user(event) when op != DEL.
     if op != EPOLL_CTL_DEL {
         if args.arg3 == 0 {
             return linux_err(errno::EFAULT);
@@ -14673,15 +14717,11 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let target_fd = args.arg2 as i32;
-    // Validate the target fd is a real fd in our table (or we are in kernel
-    // context, in which case validation is a no-op).
-    if let Err(r) = validate_linux_fd(target_fd) {
-        return r;
-    }
-    // The epfd itself does not exist in our kernel — epoll_create returned
-    // ENOSYS so no caller can hold a real epfd.  Tell them so.
+
+    // Gate 2 (do_epoll_ctl): fdget(epfd) — always EBADF in our kernel.
+    // This terminal answer subsumes gates 3-6 because they require a
+    // valid epfd to proceed.  Unknown op + bad epfd -> EBADF, NOT
+    // EINVAL (the switch default is the last possible gate).
     linux_err(errno::EBADF)
 }
 
@@ -38200,10 +38240,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: epoll_create1 bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // epoll_ctl with invalid op -> EINVAL.
+        // epoll_ctl gate-1 discriminator: unknown op + NULL event -> EFAULT.
+        // Linux's outer SYSCALL_DEFINE4 wrapper does `copy_from_user(event)`
+        // whenever `ep_op_has_event(op)` is true, which is `op != DEL` —
+        // including unknown op values.  Pre-batch we validated op first
+        // and returned EINVAL, masking the EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::EPOLL_CTL, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: epoll_ctl bad op not EINVAL");
+        if dispatch_linux(nr::EPOLL_CTL, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: epoll_ctl unknown op + NULL event not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_ctl gate-2 discriminator: unknown op + valid event -> EBADF.
+        // Linux's do_epoll_ctl runs fdget(epfd) before the switch default's
+        // EINVAL; in our kernel epfd is never valid, so the answer is EBADF.
+        // Pre-batch we returned EINVAL.
+        let valid_event = [0u8; 12];
+        let a = SyscallArgs { arg0: 0, arg1: 99,
+            arg2: 0, arg3: valid_event.as_ptr() as u64,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CTL, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: epoll_ctl unknown op + valid event not EBADF");
             return Err(KernelError::InternalError);
         }
         // epoll_ctl with ADD and NULL event ptr -> EFAULT.
@@ -38212,6 +38268,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: epoll_ctl ADD NULL event not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // epoll_ctl with DEL and NULL event ptr -> EBADF (event read is
+        // skipped when op == DEL, so we fall through to the fdget(epfd)
+        // EBADF instead of EFAULTing on the NULL event).
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CTL, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: epoll_ctl DEL NULL event not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // epoll_ctl with ADD and valid event ptr + bad epfd -> EBADF
+        // (copy succeeds, fdget(epfd) fires).
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0,
+            arg3: valid_event.as_ptr() as u64, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::EPOLL_CTL, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: epoll_ctl ADD valid event bad epfd not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   epoll_ctl event-read > epfd > switch-EINVAL gate order: OK"
+        );
         // epoll_wait with maxevents == 0 -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::EPOLL_WAIT, &a).value != -i64::from(errno::EINVAL) {

@@ -22004,3 +22004,64 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        EFAULT".  Documented as a future-implementation note.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 25s).
+
+## 282. syscall/linux: epoll_ctl — event-read > epfd > switch-EINVAL (batch 253)
+##
+##      Pre-batch divergence (kernel/src/syscall/linux.rs):
+##      sys_epoll_ctl validated `op ∈ {ADD, DEL, MOD}` as its FIRST
+##      gate, returning EINVAL for any other op.  Linux's
+##      `fs/eventpoll.c::SYSCALL_DEFINE4(epoll_ctl)` outer wrapper
+##      does `copy_from_user(event)` whenever `ep_op_has_event(op)`
+##      is true — and `ep_op_has_event(op) = op != EPOLL_CTL_DEL`,
+##      so EVERY non-DEL op (including unknown values like op=99)
+##      triggers the event read.  do_epoll_ctl then runs
+##      `fdget(epfd)` which fires `-EBADF`; the switch default's
+##      `-EINVAL` for unknown ops is the LAST possible gate.
+##
+##      Observable consequences pre-batch:
+##        * (op=99, event=NULL)    -> EINVAL.  Linux: EFAULT (outer
+##                                   wrapper copy_from_user fires).
+##        * (op=99, event=valid)   -> EINVAL.  Linux: EBADF (fdget
+##                                   on bad epfd fires before the
+##                                   switch default).
+##      Probes (libcap-ng, glibc's epoll wrapper) use unknown op
+##      values to feature-detect; getting EINVAL where Linux gives
+##      EFAULT/EBADF teaches them the wrong story about which gate
+##      rejected their call.
+##
+##      Fix:
+##      Removed the early `op` validation entirely.  New flow:
+##        Gate 1: op != DEL  ->  read event (NULL/unreadable EFAULT).
+##        Gate 2: fdget(epfd) -> EBADF (always in our kernel since
+##                no real epfds exist — epoll_create returns ENOSYS).
+##        Gates 3-6 (target_fd / file_can_poll / is_file_epoll /
+##                   switch default): unreachable in our model;
+##                   removed the now-dead target_fd validation.
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - epoll_ctl(op=99, event=NULL) -> EFAULT
+##        Discriminator A: outer wrapper reads event for op!=DEL.
+##      - epoll_ctl(op=99, event=valid) -> EBADF
+##        Discriminator B: fdget(epfd) fires before switch default.
+##      - epoll_ctl(op=DEL=2, event=NULL) -> EBADF
+##        Confirms DEL skips the event read and falls through.
+##      - epoll_ctl(op=ADD=1, event=valid, epfd=0) -> EBADF
+##        Confirms ADD reads event then hits EBADF.
+##        Marker: "epoll_ctl event-read > epfd > switch-EINVAL
+##                 gate order: OK".
+##
+##      Existing tests preserved:
+##      - epoll_ctl(op=ADD=1, event=NULL) -> EFAULT (unchanged).
+##
+##      Changed test:
+##      - The "invalid op -> EINVAL" test was repurposed as the
+##        EFAULT discriminator (same args; different expected
+##        errno reflects the new gate order).
+##
+##      Known limitations:
+##      - No real epoll backing.  When eventpoll vfs lands, the
+##        fdget(epfd) gate becomes a real lookup and is_file_epoll
+##        / switch default become reachable.  The current
+##        "terminal EBADF" branch is the right answer until then.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

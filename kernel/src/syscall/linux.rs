@@ -18488,12 +18488,20 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let flags_u32 = args.arg1 as u32;
     let flags: u64 = u64::from(flags_u32);
-    let _cpu_id = args.arg2;
+    // cpu_id is C `int` in the Linux prototype, delivered in rdx.  The
+    // AMD64 syscall ABI does not sign- or zero-extend `int` across the
+    // syscall instruction, so Linux observes only the low 32 bits.
+    // Pre-batch we tested the raw u64 against 0 in the QUERY arm, so a
+    // caller passing 0x1_0000_0000 (high-only) was rejected with EINVAL
+    // where Linux's truncated cpu_id=0 advances to the QUERY bitmask
+    // return.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cpu_id_i32 = args.arg2 as i32;
 
     // QUERY enumerates the supported commands as a bitmask.  flags
     // and cpu_id must be 0.
     if cmd == MEMBARRIER_CMD_QUERY {
-        if flags != 0 || args.arg2 != 0 {
+        if flags != 0 || cpu_id_i32 != 0 {
             return linux_err(errno::EINVAL);
         }
         let supported = MEMBARRIER_CMD_GLOBAL
@@ -28228,6 +28236,52 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   io_setup/swapon/membarrier unsigned-int/int truncation: OK"
+        );
+
+        // membarrier cpu_id int-truncation (batch 330): Linux's third
+        // arg is C `int cpu_id`.  The QUERY arm rejects nonzero cpu_id
+        // with EINVAL; high-half garbage with low=0 must truncate and
+        // advance to the QUERY bitmask return.
+        // (a) cpu_id=0x1_0000_0000 (high-only) -> 0x3FF (QUERY succeeds).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
+        if v != 0x3FF {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier QUERY high-half cpu_id -> {} (expected 0x3FF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) cpu_id=0x1_0000_0001 (high|bad-low 1) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier QUERY high|bad-low cpu_id not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) cpu_id=0xFFFF_FFFF_0000_0000 (all-high, low=0) -> 0x3FF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0xFFFF_FFFF_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
+        if v != 0x3FF {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier QUERY all-high cpu_id -> {} (expected 0x3FF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) cpu_id=0xFFFF_FFFF_0000_0001 (all-high|low=1) -> EINVAL.
+        //     Confirms the mask still trips the gate when the low 32
+        //     bits are nonzero, regardless of high-half pattern.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0xFFFF_FFFF_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier QUERY all-high|bad-low cpu_id not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   membarrier cpu_id int-truncation (high-half ignored): OK"
         );
     }
 

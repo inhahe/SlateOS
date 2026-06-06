@@ -29104,3 +29104,95 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (36.25s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 26s).
+
+360. Batch 330 — sys_membarrier int truncation
+     (cpu_id, the third arg, must be masked to i32
+     before the QUERY != 0 reject gate).
+
+     Divergence: Linux's sys_membarrier signature is
+     `SYSCALL_DEFINE3(membarrier, int, cmd, unsigned
+     int, flags, int, cpu_id)`.  `cpu_id` is C `int`,
+     delivered in rdx.  The AMD64 syscall ABI does not
+     sign- or zero-extend `int` across the syscall
+     instruction, so Linux observes only the low 32
+     bits.
+
+     Batch 301 already truncated cmd (i32) and flags
+     (u32) but left cpu_id as raw u64.  The QUERY arm
+     (cmd == MEMBARRIER_CMD_QUERY) checks
+     `args.arg2 != 0` directly at u64 width to enforce
+     "cpu_id must be 0 for QUERY".  A caller passing
+     cpu_id=0x1_0000_0000 (high-only) hit the u64 gate
+     and was rejected with EINVAL where Linux's
+     truncated cpu_id=0 advances past the gate and
+     returns the QUERY bitmask.
+
+     Outside the QUERY arm cpu_id is unused (the
+     bind-to-CPU FLAG_CPU path forwards the value to
+     the per-CPU IPI which we don't implement), so the
+     divergence is QUERY-only.
+
+     Fix: in sys_membarrier (kernel/src/syscall/
+     linux.rs line ~18451), add an i32 cast and reroute
+     the QUERY gate through it:
+       #[allow(clippy::cast_possible_truncation,
+               clippy::cast_possible_wrap)]
+       let cpu_id_i32 = args.arg2 as i32;
+       ...
+       if cmd == MEMBARRIER_CMD_QUERY {
+           if flags != 0 || cpu_id_i32 != 0 {
+               return linux_err(errno::EINVAL);
+           }
+           ...
+       }
+
+     Tests added to dispatch_linux (after existing
+     batch-301 "io_setup/swapon/membarrier unsigned-
+     int/int truncation: OK" marker around line 28239):
+       (a) cmd=0 (QUERY), flags=0,
+           cpu_id=0x1_0000_0000
+           → 0x3FF (QUERY bitmask; truncates to 0,
+            advances past gate).  Pre-fix returned
+            EINVAL.
+       (b) cmd=0, flags=0, cpu_id=0x1_0000_0001
+           → EINVAL (truncates to 1, gate still
+            rejects nonzero low half).
+       (c) cmd=0, flags=0,
+           cpu_id=0xFFFF_FFFF_0000_0000
+           → 0x3FF (all-high pattern, low=0;
+            independent confirmation of the truncation).
+       (d) cmd=0, flags=0,
+           cpu_id=0xFFFF_FFFF_0000_0001
+           → EINVAL (all-high + low=1; mask still
+            trips the gate regardless of high half).
+     Marker: "[syscall/linux]   membarrier cpu_id
+              int-truncation (high-half ignored): OK".
+
+     Preserved: existing membarrier probes still pass:
+       - QUERY (cmd=0, flags=0, cpu_id=0) → 0x3FF.
+       - QUERY with flags=1 → EINVAL.
+       - QUERY with cpu_id=1 → EINVAL (low-half low
+         bit set rejects via the truncated value).
+       - GLOBAL (cmd=1) → 0.
+       - PRIVATE_EXPEDITED + FLAG_CPU → 0.
+       - REGISTER_GLOBAL → 0.
+       - REGISTER + FLAG_CPU → EINVAL.
+       - GLOBAL + FLAG_CPU → EINVAL (FLAG_CPU only
+         legal on PRIVATE_EXPEDITED variants).
+       - GET_REGISTRATIONS → 0.
+       - unknown flag bit → EINVAL.
+       - bogus cmd → EINVAL.
+       - huge cmd (high-half) truncated → EINVAL via
+         cmd-truncation from batch 301.
+
+     Known limitations:
+     - For non-QUERY commands cpu_id is unused: the
+       bind-to-CPU FLAG_CPU path forwards the value to
+       a per-CPU IPI which we don't implement, so even
+       a "valid" cpu_id is silently ignored.  When SMP
+       IPI lands, additional cpu_id validation
+       (range-check against nr_cpus) will be needed.
+
+     Build: cargo build -p kernel clean (35.85s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

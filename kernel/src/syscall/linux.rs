@@ -7010,13 +7010,28 @@ fn sys_getpgrp(_args: &SyscallArgs) -> SyscallResult {
 /// Errors:
 ///   - `-ESRCH` if `pid` refers to a non-existent process.
 fn sys_getpgid(args: &SyscallArgs) -> SyscallResult {
-    let pid = args.arg0;
+    // Linux signature: `SYSCALL_DEFINE1(getpgid, pid_t, pid)` — pid_t
+    // is `int`, so the x86_64 syscall ABI truncates args.arg0 to the
+    // low 32 bits before the body runs.  Pre-batch we held `pid` as
+    // raw u64; probes with high bits set (e.g. pid = 0x1_0000_0000)
+    // fell through to pcb::state(0x1_0000_0000) = None → ESRCH where
+    // Linux truncates to (int)0 → "the caller" path.  Same `int`
+    // truncation thread as batches 285/286.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    // Linux's `find_task_by_vpid` returns NULL for any pid < 0 (no
+    // valid pid_t is negative); the syscall surfaces this as ESRCH.
+    if pid < 0 {
+        return linux_err(errno::ESRCH);
+    }
     let target = if pid == 0 {
         caller_pid().unwrap_or(1)
     } else {
+        #[allow(clippy::cast_sign_loss)]
+        let pid_u = pid as u64;
         // Verify the target exists.
-        match crate::proc::pcb::state(pid) {
-            Some(_) => pid,
+        match crate::proc::pcb::state(pid_u) {
+            Some(_) => pid_u,
             None => return linux_err(errno::ESRCH),
         }
     };
@@ -7038,10 +7053,16 @@ fn sys_getpgid(args: &SyscallArgs) -> SyscallResult {
 /// every process as its own group.  Tracked alongside process-group
 /// infrastructure in todo.txt.
 fn sys_setpgid(args: &SyscallArgs) -> SyscallResult {
-    let pgid = args.arg1;
-    // Reject obviously bogus pgid (negative when cast).
-    #[allow(clippy::cast_possible_wrap)]
-    if (pgid as i64) < 0 {
+    // Linux signature: `SYSCALL_DEFINE2(setpgid, pid_t, pid, pid_t, pgid)`.
+    // pid_t is int; the kernel rejects `pgid < 0` after truncation.
+    // Pre-batch we cast args.arg1 to i64 and tested < 0, which only
+    // caught values with bit 63 set — values with bit 31 set (negative
+    // int after truncation) sneaked through.  Probe pgid =
+    // 0x0000_0000_8000_0000 → Linux sees (int)-2147483648 → EINVAL;
+    // we saw positive i64 → ok(0).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pgid = args.arg1 as i32;
+    if pgid < 0 {
         return linux_err(errno::EINVAL);
     }
     SyscallResult::ok(0)
@@ -7052,12 +7073,21 @@ fn sys_setpgid(args: &SyscallArgs) -> SyscallResult {
 /// We have no sessions; return the target PID as a stand-in (every
 /// process is in its own session of which it is the leader).
 fn sys_getsid(args: &SyscallArgs) -> SyscallResult {
-    let pid = args.arg0;
+    // Linux signature: `SYSCALL_DEFINE1(getsid, pid_t, pid)`.  Same
+    // `int` truncation as sys_getpgid; see that function's comment for
+    // the divergence Linux mirrors.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    if pid < 0 {
+        return linux_err(errno::ESRCH);
+    }
     let target = if pid == 0 {
         caller_pid().unwrap_or(1)
     } else {
-        match crate::proc::pcb::state(pid) {
-            Some(_) => pid,
+        #[allow(clippy::cast_sign_loss)]
+        let pid_u = pid as u64;
+        match crate::proc::pcb::state(pid_u) {
+            Some(_) => pid_u,
             None => return linux_err(errno::ESRCH),
         }
     };
@@ -32233,6 +32263,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: setsid() returned non-positive");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 287: getpgid/getsid/setpgid must truncate pid_t args
+        // to int before validating, matching Linux's pid_t signature.
+        //
+        // getpgid(0x1_0000_0000): (int)pid = 0 → "the caller" path
+        // → returns the caller's PID (or 1 in kernel-context fallback).
+        // Pre-batch we used the raw u64, so pcb::state(0x1_0000_0000)
+        // = None → ESRCH.
+        let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPGID, &a).value <= 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpgid(0x1_0000_0000) expected >0, got {}",
+                dispatch_linux(nr::GETPGID, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::GETSID, &a).value <= 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getsid(0x1_0000_0000) expected >0, got {}",
+                dispatch_linux(nr::GETSID, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // setpgid(0, 0x0000_0000_8000_0000): (int)pgid =
+        // -2147483648 → EINVAL.  Pre-batch we cast args.arg1 to i64
+        // and tested `< 0`, which only catches bit-63-set values; bit
+        // 31 set (= negative int) sneaked through and we returned 0.
+        let a = SyscallArgs { arg0: 0, arg1: 0x0000_0000_8000_0000,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETPGID, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid(0, 0x8000_0000) not EINVAL ({})",
+                dispatch_linux(nr::SETPGID, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   getpgid/getsid/setpgid int truncation: OK"
+        );
     }
 
     // Priority dispatch validation (batch 48):

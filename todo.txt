@@ -24754,4 +24754,114 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 22s).
 
+317. [2026-06-06] Batch 287: Linux ABI translation —
+     sys_getpgid, sys_getsid, and sys_setpgid now truncate
+     their pid_t / pgid args to int before validating,
+     mirroring Linux's
+       SYSCALL_DEFINE1(getpgid, pid_t, pid)
+       SYSCALL_DEFINE1(getsid,  pid_t, pid)
+       SYSCALL_DEFINE2(setpgid, pid_t, pid, pid_t, pgid)
+     signatures.  Continuation of the `int` truncation
+     audit started in batches 285/286.
+
+     Pre-batch divergences
+     ---------------------
+     All three handlers held their pid_t args as raw u64
+     and matched them directly.  Probes with high bits
+     set diverged from Linux's post-truncation view:
+
+       Probe A — getpgid pid_t truncation:
+         getpgid(0x1_0000_0000)
+           Linux : (int)pid = 0 → "the caller" path
+                   → returns the caller's pgid (= caller
+                     pid in our 1:1 stub)
+           Ours  : raw u64 != 0 → pcb::state(0x1_0000_0000)
+                   = None → ESRCH
+
+       Probe B — getsid pid_t truncation:
+         getsid(0x1_0000_0000)
+           Linux : (int)pid = 0 → caller's sid
+                   (= caller pid in our 1:1 stub)
+           Ours  : same wrong ESRCH as getpgid
+
+       Probe C — setpgid pgid sign-bit truncation:
+         setpgid(0, 0x0000_0000_8000_0000)
+           Linux : (int)pgid = -2_147_483_648
+                   → EINVAL (negative pgid is rejected
+                   before any group lookup)
+           Ours  : (pgid as i64) = +0x8000_0000 > 0
+                   → ok(0).  The old `(pgid as i64) < 0`
+                   guard only caught bit-63-set values
+                   because it widened first then tested
+                   the i64 sign; bit-31-set inputs slipped
+                   through.
+
+     Fixes
+     -----
+     - sys_getpgid: cast args.arg0 to i32 at entry; reject
+       `pid < 0` with ESRCH (no valid pid_t is negative;
+       Linux's find_task_by_vpid returns NULL for any
+       pid < 0).  Only on the positive-int branch do we
+       widen to u64 for the pcb::state lookup.
+     - sys_getsid: symmetric treatment of `pid` (same gate
+       semantics, same ESRCH for `pid < 0`).  No backing
+       session table either way — we still synthesize
+       sid = target pid as before.
+     - sys_setpgid: cast args.arg1 to i32 at entry and
+       test `pgid < 0` after the cast.  Replaces the old
+       `(pgid as i64) < 0` widening that missed bit-31
+       negatives.
+
+     The pid arg to setpgid is still passed through to
+     "ok(0)" — we don't model process groups, so any
+     non-negative pgid (after truncation) is accepted as
+     before.  Same call shape as the rest of the
+     process-group stubs.
+
+     New self-tests (added after the existing setsid
+     test block):
+       - getpgid(0x1_0000_0000) -> > 0
+         (pid truncates to 0 → caller path; pre-batch
+          returned -ESRCH which is < 0)
+       - getsid(0x1_0000_0000)  -> > 0
+         (same path)
+       - setpgid(0, 0x0000_0000_8000_0000) -> EINVAL
+         (pgid truncates to INT_MIN → reject; pre-batch
+          returned 0 because the i64 widening saw the
+          value as positive)
+
+     Marker:
+       "getpgid/getsid/setpgid int truncation: OK"
+
+     Preserved self-tests (still pass):
+       - All earlier setsid / getsid / getpgid / setpgid
+         tests in the dispatch_linux block continue to
+         exercise the same call shapes as before.  Inputs
+         whose high bits are zero hit the same code paths
+         post-cast (signed-positive int = original u64),
+         so the previously-asserted return values are
+         unchanged.
+
+     Known limitations
+     -----------------
+     - We still don't track process groups or sessions
+       separately from PIDs.  getsid / getpgid return
+       the target pid as both pgid and sid (the 1:1
+       "every process is its own session leader" model
+       documented in earlier batches).  Not addressed
+       here; tracked elsewhere.
+     - setpgid does not actually move processes between
+       groups; it just validates the pgid sign after
+       truncation and returns 0.  Same behaviour as
+       pre-batch for the accepted-input case.
+     - The pid arg to setpgid is not range-checked
+       against int after truncation; only pgid is.  This
+       matches Linux's handler ordering: do_setpgid
+       starts with the pgid check before any pid lookup,
+       and we have no pid lookup to perform either way.
+
+     Build: cargo build -p kernel clean.
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 22s).
+
 

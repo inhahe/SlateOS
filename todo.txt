@@ -33302,3 +33302,94 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (38.62s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+399. [BATCH 369 — 2026-06-06 — sys_shmctl IPC_INFO/SHM_INFO buf-first
+     gate routing (kernel/src/syscall/linux.rs)]
+
+     Linux divergence: pre-batch sys_shmctl treated EVERY cmd
+     uniformly as "no segment exists, return EINVAL" after the
+     `cmd<0 || shmid<0` early-EINVAL gate.  That is correct for
+     the per-segment cmds (IPC_RMID/IPC_SET/IPC_STAT/SHM_STAT/
+     SHM_STAT_ANY/SHM_LOCK/SHM_UNLOCK) and for the `default` arm
+     of Linux's switch — Linux's per-segment cmds run
+     `ipc_obtain_object_check(shmid)` first, which returns
+     -EINVAL when no segment matches.
+
+     But it is WRONG for IPC_INFO (cmd=3) and SHM_INFO (cmd=14).
+     Those two cmds are GLOBAL info queries — Linux's
+     `shmctl_ipc_info` / `shmctl_shm_info` does NO segment
+     lookup at all; it zeros a stack struct and calls
+     `copy_shminfo_to_user(buf, ...)` (or `copy_to_user(buf,
+     &shm_info, sizeof(shm_info))`) UNCONDITIONALLY.  So:
+
+       * shmctl(0, IPC_INFO, NULL) -> EFAULT (copy_to_user
+         faults on the NULL dest), not EINVAL.
+       * shmctl(0, IPC_INFO, &valid_buf) -> 0 (success,
+         shminfo64 populated; ipc_get_maxidx returns 0 when
+         no segments).  Pre-batch returned EINVAL.
+
+     Source: ipc/shm.c::ksys_shmctl -> ksys_shmctl_default ->
+     case IPC_INFO: { shmctl_ipc_info; copy_shminfo_to_user; }
+     case SHM_INFO: { shmctl_shm_info; copy_to_user; }
+     The default-EINVAL and per-segment-EINVAL paths use
+     `ipc_obtain_object_check` which fails before buf is
+     touched — those keep their pre-batch EINVAL terminal.
+
+     Fix: route IPC_INFO and SHM_INFO through a buf-first gate
+     identical to the structure Linux uses:
+
+       1. cmd<0 || shmid<0 -> EINVAL (unchanged).
+       2. if cmd == IPC_INFO || cmd == SHM_INFO:
+              buf == NULL -> EFAULT
+              validate_user_write(buf, 1) fail -> EFAULT
+              else -> ENOSYS  (no SysV IPC backing, same
+                                pattern as shmget/msgget/semget
+                                after their gate validation)
+       3. else (per-segment cmds + default unknown cmd):
+              -> EINVAL  (segment lookup fails first; default
+                          arm also EINVAL)
+
+     ENOSYS for the "valid buf" case (vs. Linux's success-0)
+     is the established translator-pattern terminal — every
+     other SysV IPC stub returns ENOSYS after its gate.  The
+     ABI shape that matters for userspace probing is the
+     EFAULT-vs-EINVAL distinction for the NULL/unmapped buf
+     case; that now matches Linux.
+
+     Probes added (5 new) to kernel/src/syscall/linux.rs
+     boot self-test block, after the existing
+     "shmctl id/cmd<0, no pre-buf validate: OK" stamp:
+
+       * shmctl(0, IPC_INFO=3, NULL) -> EFAULT (was: EINVAL
+         pre-batch).
+       * shmctl(0, SHM_INFO=14, NULL) -> EFAULT (was: EINVAL
+         pre-batch; same gate).
+       * shmctl(0, IPC_INFO=3, &stack_buf) -> ENOSYS (was:
+         EINVAL pre-batch; the most important fix — buf-with-
+         data path now matches translator pattern).
+       * shmctl(0, SHM_INFO=14, &stack_buf) -> ENOSYS (was:
+         EINVAL pre-batch).
+       * shmctl(0, IPC_STAT=2, &stack_buf) -> EINVAL (per-
+         segment cmd: segment lookup fails before buf
+         touched; pre-batch EINVAL preserved — VERIFIES that
+         the new IPC_INFO/SHM_INFO routing is not
+         over-broad).
+       * shmctl(0, SHM_STAT_ANY=15, NULL) -> EINVAL (per-
+         segment cmd: lookup fails before buf touched;
+         pre-batch EINVAL preserved).
+
+     The unmapped-non-NULL EFAULT case (e.g., buf=0xDEAD)
+     cannot be tested in kernel-context boot self-test
+     because validate_user_write is a no-op for bare kernel
+     tasks (mm/user.rs::is_kernel_context).  Only NULL is
+     reliably distinguishable from valid-stack-buffer in
+     the self-test environment; that's sufficient to
+     exercise both arms of the new gate.
+
+     Final boot-time stamp:
+         "[syscall/linux]   shmctl IPC_INFO/SHM_INFO buf-first
+          gate (EFAULT/ENOSYS), per-segment EINVAL: OK"
+
+     Build: cargo build -p kernel clean (37.62s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

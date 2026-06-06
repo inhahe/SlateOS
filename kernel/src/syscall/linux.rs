@@ -15305,17 +15305,44 @@ fn sys_shmat(_args: &SyscallArgs) -> SyscallResult {
 ///
 /// Linux's `ipc/shm.c::ksys_shmctl()` gate order:
 ///   1. `if (cmd < 0 || shmid < 0) return -EINVAL;`
-///   2. switch on cmd; the `buf` pointer is only touched inside the
-///      per-cmd handler (after `ipc_obtain_object_check(shmid)` for
-///      cmds that need a segment, or for IPC_INFO/SHM_INFO which
-///      write info to buf only after security checks pass).
+///   2. switch on cmd:
+///        * IPC_INFO (3) / SHM_INFO (14): GLOBAL info queries.  No
+///          segment lookup; immediately calls `shmctl_ipc_info` /
+///          `shmctl_shm_info` which zeros a stack buffer and then
+///          `copy_shminfo_to_user(buf, ...)` — so buf is touched
+///          UNCONDITIONALLY, with no dependence on any segment
+///          existing.  buf == NULL or unmapped -> -EFAULT.
+///          With a valid buf, Linux returns 0 (or ipc_get_maxidx,
+///          which is 0 when no segments exist) and populates buf.
+///        * IPC_STAT (2) / SHM_STAT (13) / SHM_STAT_ANY (15) /
+///          IPC_RMID (0) / IPC_SET (1) / SHM_LOCK (11) /
+///          SHM_UNLOCK (12): PER-SEGMENT cmds.  Each looks up
+///          `shmid` first; with no segments, the lookup returns
+///          -EINVAL before buf is touched.
+///        * default (unknown cmd): -EINVAL.
 ///
-/// Pre-batch we pre-validated `buf` with `validate_user_read(buf, 1)`
-/// for any non-NULL buf, so a probe passing
-/// (shmid=5, cmd=2, buf=0xDEAD) saw -EFAULT where Linux returns
-/// -EINVAL (shmid 5 doesn't exist, so the lookup inside the cmd
-/// handler fails before buf is touched).  Removed the pre-validation.
+/// Pre-batch we treated every cmd uniformly as "no segment exists,
+/// return EINVAL."  That is correct for the per-segment cmds and the
+/// default branch, but WRONG for IPC_INFO / SHM_INFO: Linux returns
+/// EFAULT (buf=NULL/unmapped) or success (buf=valid) for those, with
+/// no segment lookup ever happening.  A probe shape like
+/// `shmctl(0, IPC_INFO, NULL)` saw -EINVAL where Linux returns
+/// -EFAULT, and `shmctl(0, IPC_INFO, &valid)` saw -EINVAL where
+/// Linux returns 0 (success, shminfo64 populated).
+///
+/// Batch 369 routes IPC_INFO and SHM_INFO through buf validation,
+/// then returns ENOSYS (no SysV IPC backing — same pattern as
+/// shmget / msgget / semget).  The per-segment cmds keep their
+/// EINVAL terminal, since the segment lookup truly fails first
+/// before buf would be touched.
+///
+/// Pre-batch (Batch 200) had also added "buf is intentionally NOT
+/// validated for the per-segment cmds — Linux defers that to the
+/// per-cmd handler."  That remains true for cmd != IPC_INFO &&
+/// cmd != SHM_INFO and is preserved.
 fn sys_shmctl(args: &SyscallArgs) -> SyscallResult {
+    const IPC_INFO: i32 = 3;
+    const SHM_INFO: i32 = 14;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let shmid = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -15323,9 +15350,22 @@ fn sys_shmctl(args: &SyscallArgs) -> SyscallResult {
     if cmd < 0 || shmid < 0 {
         return linux_err(errno::EINVAL);
     }
-    // No segments exist; every shmid lookup fails with EINVAL.  Buf
-    // is intentionally NOT validated here — Linux defers that to the
-    // per-cmd handler.
+    if cmd == IPC_INFO || cmd == SHM_INFO {
+        // Global info query: Linux's `copy_shminfo_to_user(buf, ...)`
+        // (or `copy_to_user(buf, &shm_info, sizeof(shm_info))`) is
+        // unconditional.  buf == NULL or unmapped -> EFAULT.
+        if args.arg2 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+        // Valid buf, but we have no SysV IPC backing.
+        return linux_err(errno::ENOSYS);
+    }
+    // Per-segment cmd: no segments exist, every shmid lookup fails
+    // with EINVAL.  Buf is intentionally NOT validated here — Linux
+    // defers that to the per-cmd handler.
     linux_err(errno::EINVAL)
 }
 
@@ -45865,6 +45905,81 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   shmctl id/cmd<0, no pre-buf validate: OK"
+        );
+        // Batch 369: shmctl(0, IPC_INFO=3, NULL) -> EFAULT.
+        // Linux's `shmctl_ipc_info` -> `copy_shminfo_to_user(buf=NULL)`
+        // is unconditional; no segment lookup precedes it.  Was
+        // EINVAL pre-batch.
+        let a = SyscallArgs { arg0: 0, arg1: 3, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(0,IPC_INFO,NULL) not EFAULT ({})",
+                dispatch_linux(nr::SHMCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // shmctl(0, SHM_INFO=14, NULL) -> EFAULT (same gate).
+        let a = SyscallArgs { arg0: 0, arg1: 14, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(0,SHM_INFO,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // shmctl(0, IPC_INFO=3, buf=&stack_buf) -> ENOSYS.
+        // Linux would copy shminfo64 and return 0.  We have no SysV
+        // IPC backing; return ENOSYS terminal after buf validation
+        // (matches shmget/msgget/semget pattern).
+        let stack_buf: [u8; 128] = [0; 128];
+        let buf_addr = stack_buf.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 3, arg2: buf_addr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(0,IPC_INFO,valid) not ENOSYS ({})",
+                dispatch_linux(nr::SHMCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // shmctl(0, SHM_INFO=14, buf=&stack_buf) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 14, arg2: buf_addr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(0,SHM_INFO,valid) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // shmctl(0, IPC_STAT=2, buf=&stack_buf) -> EINVAL.
+        // Per-segment cmd: segment lookup fails with EINVAL before
+        // buf is touched, so even a valid buf yields EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: buf_addr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(0,IPC_STAT,valid) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // shmctl(0, SHM_STAT_ANY=15, NULL) -> EINVAL (per-segment).
+        let a = SyscallArgs { arg0: 0, arg1: 15, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SHMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: shmctl(0,SHM_STAT_ANY,NULL) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   shmctl IPC_INFO/SHM_INFO buf-first gate (EFAULT/ENOSYS), per-segment EINVAL: OK"
         );
 
         // semget with negative nsems -> EINVAL.

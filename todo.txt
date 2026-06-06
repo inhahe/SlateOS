@@ -27171,3 +27171,90 @@ OBSOLETE NOTE BELOW (pre-relaxation):
                 emitted, but the second run with extra
                 headroom completed normally; the mlockall
                 marker fires regardless.
+
+339. sys_msync int truncation — high-half register garbage
+     must be stripped before the flags mask check.
+
+     Divergence:
+       Linux signature: `int msync(void *addr, size_t length,
+       int flags)`.  SYSCALL_DEFINE3(msync, unsigned long,
+       start, size_t, len, int, flags) narrows the third
+       parameter to (int) on entry; the kernel function body
+       observes only the low 32 bits of RDX.  The high 32
+       bits are caller-uninitialised garbage (neither glibc
+       nor musl zero-extend int arguments before issuing the
+       syscall — for an int param only the low 32 bits carry
+       semantic meaning).
+
+       Pre-batch we held `flags` as `u64` and ran the mask
+       check at 64-bit width:
+           let flags = args.arg2;
+           if (flags & !MS_ALL) != 0 { return EINVAL; }
+       so a caller passing `0x1_0000_0001` (high-half
+       garbage + MS_ASYNC) saw EINVAL where Linux returns 0
+       (after the high half is truncated away the low half
+       is MS_ASYNC, mask passes, len=0 → end==addr → 0).
+
+       Same shape as the batch-308 mlockall fix.
+
+     Fix:
+       kernel/src/syscall/linux.rs sys_msync:
+         * Convert MS_ASYNC / MS_INVALIDATE / MS_SYNC /
+           MS_ALL constants from u64 to u32 to match the
+           Linux int width.
+         * Cast args.arg2 to i32 (matching Linux's int flags
+           parameter), then reinterpret as u32 for the mask
+           and mutual-exclusion checks.
+         * addr (arg0) and len (arg1) remain at u64 — those
+           are unsigned long / size_t in Linux's ABI and
+           full 64-bit width is correct.
+
+     Tests (dispatch_linux self-test, after the mlockall
+     batch-308 block):
+       - (a) msync(0, 0, 0x1_0000_0001) → 0
+             (high-half garbage + MS_ASYNC; truncates to 1,
+             mask passes, len=0 → end==addr → success).
+       - (b) msync(0, 0, 0x1_0000_0007) → EINVAL
+             (high-half garbage + MS_ALL with SYNC|ASYNC;
+             truncates to 7, mask passes, mutual-exclusion
+             fires; verifies the mutual-exclusion gate still
+             operates on the truncated value).
+       - (c) msync(0, 0, 0x1_0000_0000) → 0
+             (high-half garbage only, low half zero;
+             truncates to 0, flags==0 is accepted, len=0 →
+             success).
+       - (d) msync(0, 0, 0x1_0000_0010) → EINVAL
+             (high-half garbage + unknown low bit 0x10;
+             truncates to 0x10, mask gate rejects bogus low
+             bits; verifies the mask gate still rejects
+             unknown bits after high half is stripped).
+       Marker: "[syscall/linux]   msync int truncation
+       (high-half ignored): OK".
+
+     Preserved behaviour:
+       - Existing msync(0,0,0) → 0 probe still passes
+         (flags==0 path).
+       - Existing msync(0,0,2) → 0 probe still passes
+         (MS_INVALIDATE alone path).
+       - Existing msync(0,0,1|4) → EINVAL still passes
+         (SYNC|ASYNC mutual exclusion).
+       - Existing msync(0,0,0x10) → EINVAL still passes
+         (unknown bit path).
+       - Existing msync(0x1234, 4096, 1) → EINVAL still
+         passes (misaligned-addr path).
+       - Existing wrapping_add overflow semantics for len
+         near u64::MAX preserved (carrier width of the
+         addition path unchanged; only `flags` was narrowed).
+
+     Known limitations (deferred):
+       - We still no-op a successful msync: there is no
+         per-VMA fsync_range call because we have no
+         file-backed VMA tracking.  Real msync semantics
+         (forcing dirty pages out to backing storage) await
+         the VMA + page-cache subsystems.  Linux ABI parity
+         for the mask/alignment/overflow gates is what's
+         covered here.
+
+     Build: cargo build -p kernel clean (44.00s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 23s).

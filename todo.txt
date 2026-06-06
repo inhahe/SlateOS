@@ -21440,3 +21440,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
 
 
+
+## 275. syscall/linux: mremap — flag-mask-first + interlocks-before-alignment (batch 246)
+##
+##      Pre-batch divergences (kernel/src/syscall/linux.rs):
+##      - sys_mremap rejected misaligned old_addr (% 0x4000) as its
+##        very first gate, ahead of the flag-mask gate, the
+##        FIXED-requires-MAYMOVE interlock, and the
+##        DONTUNMAP-requires-MAYMOVE+equal-sizes interlock.
+##      - Linux's mm/mremap.c::SYSCALL_DEFINE5(mremap) layers gates
+##        in this order:
+##          1. flags & ~(MAYMOVE|FIXED|DONTUNMAP)              -> -EINVAL
+##          2. (flags & FIXED) && !(flags & MAYMOVE)            -> -EINVAL
+##          3. (flags & DONTUNMAP) && (!MAYMOVE || size_mismatch) -> -EINVAL
+##          4. offset_in_page(addr)                            -> -EINVAL
+##          5. PAGE_ALIGN(old_len/new_len)
+##        Pre-batch we ran (4) before (1), (2), and (3) — so a
+##        userspace probe sending {addr=misaligned, flags=bogus}
+##        saw EINVAL via the addr gate.  glibc's mremap shim and
+##        jemalloc's huge-pages chunk-resize-or-move helper both
+##        train their fallback path off the errno discriminator
+##        *plus* the order in which gates fire (they probe with a
+##        combined-bad-input and use the resulting errno chain to
+##        decide whether the kernel supports MREMAP_DONTUNMAP at
+##        all).  Wrong ordering looks like "kernel doesn't even
+##        validate flags" to those probes.
+##
+##      Fix:
+##      - Reordered sys_mremap gates to match Linux:
+##          (1) flag mask
+##          (2) FIXED interlock + new_addr alignment
+##          (3) DONTUNMAP interlock
+##          (4) old_addr page-alignment
+##          (5) new_size == 0  (non-Linux trailing gate; documented in
+##              the fn doc comment — Linux returns the original addr
+##              with ret=0 for new_len==0, but our resize-in-place
+##              stub has no meaningful zero-length answer)
+##      - Added a doc comment above sys_mremap that enumerates the
+##        Linux gate order and calls out the two intentional
+##        divergences (the non-Linux new_size==0 trailing gate, and
+##        the 16 KiB internal frame size used in the alignment check
+##        instead of the 4 KiB Linux ABI PAGE_SIZE).
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - (a) old_addr=0x4001 (misaligned) + flags=0x10 (bogus bit)
+##            -> EINVAL via flag-mask  (pre-batch hit addr gate).
+##      - (b) old_addr=0x4001 + flags=2 (FIXED without MAYMOVE)
+##            -> EINVAL via FIXED-needs-MAYMOVE interlock
+##            (pre-batch hit addr gate).
+##      - (c) old_addr=0x4001 + flags=5 (DONTUNMAP+MAYMOVE) with
+##            size mismatch (0x4000 -> 0x8000)
+##            -> EINVAL via DONTUNMAP-size-mismatch interlock
+##            (pre-batch hit addr gate).
+##      - (d) old_addr=0x4001 + new_size=0 + flags=0
+##            -> EINVAL via addr gate  (confirms the addr gate still
+##            fires before the non-Linux trailing new_size==0 gate).
+##        Marker: "mremap flag-mask-first gate order: OK".
+##
+##      Existing tests preserved (all 6 prior mremap tests):
+##      - misaligned-only EINVAL (still fires at addr gate with
+##        valid flags=0).
+##      - new_size=0 EINVAL (still fires; addr is aligned so addr
+##        gate is skipped and trailing gate hits).
+##      - bad-flag EINVAL (now fires at the *first* gate as in
+##        Linux — same errno).
+##      - FIXED-without-MAYMOVE EINVAL.
+##      - DONTUNMAP+size-mismatch EINVAL.
+##      - Valid call -> ENOMEM (no resize-in-place).
+##
+##      Known limitations:
+##      - Address alignment still checks against our 16 KiB internal
+##        frame size, not the 4 KiB Linux ABI PAGE_SIZE.  Switching
+##        to 4 KiB would let userspace inputs that are 4 KiB-aligned
+##        but not 16 KiB-aligned advance to the terminal ENOMEM
+##        instead of failing with EINVAL.  That widens the blast
+##        radius (it changes which userspace probes see EINVAL vs
+##        ENOMEM); deferred to a separate batch.
+##      - sys_mremap still terminates at ENOMEM — no real
+##        resize-in-place, MAYMOVE, FIXED-placement, or DONTUNMAP
+##        ABI.  glibc malloc / jemalloc fall back to mmap+memcpy+
+##        munmap, which is the intended behavior.
+##      - new_size==0 returns EINVAL rather than Linux's "return the
+##        original addr with ret=0" semantics.  Documented in the
+##        fn doc comment.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

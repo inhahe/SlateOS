@@ -19587,25 +19587,31 @@ fn sys_mincore(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `mremap(old_addr, old_size, new_size, flags, new_addr)`.
+///
+/// Gate order matches Linux's `mm/mremap.c::SYSCALL_DEFINE5(mremap)`:
+///   1. flag mask:                  `flags & ~(MAYMOVE|FIXED|DONTUNMAP) → -EINVAL`
+///   2. FIXED requires MAYMOVE:     `(flags & FIXED) && !(flags & MAYMOVE) → -EINVAL`
+///   3. DONTUNMAP requires MAYMOVE + equal sizes
+///   4. address page-alignment:     `offset_in_page(addr) → -EINVAL`
+///   5. (non-Linux) new_size == 0 → -EINVAL — Linux returns the original
+///      addr with ret=0 here, but our resize-in-place stub has no
+///      meaningful zero-length answer.  Documented under "Known
+///      limitations" in todo.txt batch 246.
+///
+/// Address alignment still uses our 16 KiB frame size rather than the
+/// 4 KiB Linux ABI PAGE_SIZE; switching to 4 KiB would change which
+/// addresses fall through to ENOMEM and is tracked separately.
 fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
     let old_addr = args.arg0;
     let old_size = args.arg1;
     let new_size = args.arg2;
     let flags = args.arg3;
     let new_addr = args.arg4;
-    // old_addr must be 16 KiB aligned.
-    if old_addr % 0x4000 != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // new_size must be > 0.
-    if new_size == 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // flags: MREMAP_MAYMOVE=1, MREMAP_FIXED=2, MREMAP_DONTUNMAP=4.
+    // (1) flag mask: MREMAP_MAYMOVE=1, MREMAP_FIXED=2, MREMAP_DONTUNMAP=4.
     if flags & !0b111 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // MREMAP_FIXED requires MREMAP_MAYMOVE and a new_addr.
+    // (2) MREMAP_FIXED requires MREMAP_MAYMOVE and an aligned new_addr.
     if flags & 2 != 0 {
         if flags & 1 == 0 {
             return linux_err(errno::EINVAL);
@@ -19614,7 +19620,7 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::EINVAL);
         }
     }
-    // MREMAP_DONTUNMAP requires MREMAP_MAYMOVE and old_size == new_size.
+    // (3) MREMAP_DONTUNMAP requires MREMAP_MAYMOVE and old_size == new_size.
     if flags & 4 != 0 {
         if flags & 1 == 0 {
             return linux_err(errno::EINVAL);
@@ -19622,6 +19628,14 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
         if old_size != new_size {
             return linux_err(errno::EINVAL);
         }
+    }
+    // (4) old_addr must be page-aligned (16 KiB here; see fn doc).
+    if old_addr % 0x4000 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // (5) new_size must be > 0 (non-Linux gate; see fn doc).
+    if new_size == 0 {
+        return linux_err(errno::EINVAL);
     }
     // We don't support resize-in-place; report ENOMEM (Linux's
     // documented "no room to grow without MAYMOVE" answer for the
@@ -42319,6 +42333,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mremap valid not ENOMEM");
             return Err(KernelError::InternalError);
         }
+        // Batch 246: gate-order discriminators — confirm Linux layering.
+        // (a) misaligned old_addr + bogus flag bit: flag-mask must fire
+        //     before alignment.  Both routes return EINVAL, but the
+        //     pre-batch code took the addr-misalignment branch with
+        //     valid flags as a control.  Reuse the bogus-flag value
+        //     (0x10) and pair it with a misaligned addr so the test
+        //     passes only when flag-mask is the *first* gate.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 0x4000, arg3: 0x10, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap bogus-flag+misaligned not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // (b) misaligned old_addr + FIXED-without-MAYMOVE: the flag
+        //     interlock must fire before alignment.  Pre-batch code
+        //     rejected this on the addr gate; post-batch hits the
+        //     FIXED-needs-MAYMOVE gate.  Errno coincides (EINVAL); the
+        //     discriminator is purely ordering.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 0x4000, arg3: 2, arg4: 0x4000, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap FIXED-no-MAYMOVE+misaligned not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // (c) misaligned old_addr + DONTUNMAP+size-mismatch: same
+        //     ordering check for the DONTUNMAP interlock.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 0x8000, arg3: 5, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap DONTUNMAP-mismatch+misaligned not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // (d) misaligned old_addr + new_size==0 + valid flags: the
+        //     addr gate must fire before the non-Linux new_size==0
+        //     gate (so a Linux-conforming addr check is reached
+        //     before the trailing non-Linux check).
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mremap misaligned+size0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   mremap flag-mask-first gate order: OK");
 
         // fallocate negative offset -> EINVAL.
         let a = SyscallArgs { arg0: 3, arg1: 0, arg2: u64::MAX, arg3: 0x1000, arg4: 0, arg5: 0 };

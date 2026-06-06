@@ -10830,10 +10830,29 @@ fn sys_fchmod(args: &SyscallArgs) -> SyscallResult {
 
 /// `fchmodat(dirfd, path, mode, flags)`.
 fn sys_fchmodat(args: &SyscallArgs) -> SyscallResult {
-    // Linux: only AT_SYMLINK_NOFOLLOW (0x100) is valid.  Some glibc
-    // versions also pass AT_EMPTY_PATH (0x1000).
-    const VALID_FLAGS: u64 = 0x100 | 0x1000;
-    if args.arg3 & !VALID_FLAGS != 0 {
+    // Linux ABI: `int fchmodat(int dirfd, const char *pathname,
+    // mode_t mode, int flags)`.  SYSCALL_DEFINE4(fchmodat, int, dfd,
+    // const char __user *, filename, umode_t, mode) — and the
+    // historical glibc-side overload also passes `int flags` in arg4.
+    // The flags parameter is C `int`, so the kernel function body sees
+    // only the low 32 bits; the high 32 bits of R10 are caller-
+    // uninitialised garbage.
+    //
+    // Pre-batch we held the mask check at 64-bit width:
+    //     const VALID_FLAGS: u64 = 0x100 | 0x1000;
+    //     if args.arg3 & !VALID_FLAGS != 0 { return EINVAL; }
+    // so a caller passing 0x1_0000_0100 (high-half garbage +
+    // AT_SYMLINK_NOFOLLOW) saw EINVAL where Linux returns EROFS (after
+    // truncation the low half is 0x100, mask passes, the call proceeds
+    // to the readonly-fs gate).  Fourth instance of the same shape
+    // after the batch-308 mlockall, batch-309 msync, and batch-310
+    // mlock2 fixes.
+    const VALID_FLAGS: u32 = 0x100 | 0x1000;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg3 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     match validate_user_str(args.arg1) {
@@ -37454,6 +37473,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fchmodat not EROFS");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 311: fchmodat int truncation — high-half register
+        // garbage must be stripped before the flags mask check.
+        //
+        // Linux signature: `int fchmodat(int dirfd, const char *path,
+        // mode_t mode, int flags)`.  flags is C int → low 32 bits
+        // only.  Pre-batch we held flags as u64 and ran the mask check
+        // at 64-bit width, so high-half garbage tripped the gate and
+        // returned EINVAL where Linux returns EROFS (after truncation
+        // the call proceeds to the readonly-fs gate).
+        //
+        // (a) fchmodat(0, 0x1000, 0, 0x1_0000_0100) → EROFS
+        //     (high-half garbage + AT_SYMLINK_NOFOLLOW; truncates to
+        //     0x100, mask passes, validate_user_str succeeds in kernel
+        //     context, EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0x1_0000_0100,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::FCHMODAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fchmodat(high|NOFOLLOW) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) fchmodat(0, 0x1000, 0, 0x1_0000_1100) → EROFS
+        //     (high-half garbage + NOFOLLOW | EMPTY_PATH; both flag
+        //     bits combined are valid; truncates to 0x1100, mask
+        //     passes, EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0x1_0000_1100,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::FCHMODAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fchmodat(high|NOFOLLOW|EMPTY_PATH) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) fchmodat(0, 0x1000, 0, 0x1_0000_0000) → EROFS
+        //     (high-half garbage only, low half zero; truncates to 0,
+        //     mask passes (flags=0 is valid), EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0x1_0000_0000,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::FCHMODAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fchmodat(high-half-zero) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) fchmodat(0, 0x1000, 0, 0x1_0000_0010) → EINVAL
+        //     (high-half garbage + unknown low bit 0x10; truncates to
+        //     0x10, mask check rejects bit outside VALID_FLAGS;
+        //     verifies the mask gate still rejects bogus low bits
+        //     after the high half is stripped).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0x1_0000_0010,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::FCHMODAT, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fchmodat(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   fchmodat int truncation (high-half ignored): OK"
+        );
+
         // chown / lchown(path,_,_) -> EROFS.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

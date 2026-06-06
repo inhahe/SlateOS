@@ -27339,3 +27339,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (45.61s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+341. sys_fchmodat int truncation — high-half register garbage
+     must be stripped before the flags mask check.
+
+     Divergence:
+       Linux signature: `int fchmodat(int dirfd, const
+       char *pathname, mode_t mode, int flags)`.  The
+       fourth parameter is C `int`, so the kernel function
+       body observes only the low 32 bits of R10; the high
+       32 bits are caller-uninitialised garbage (no zero-
+       extension for int args in the AMD64 syscall ABI).
+
+       Pre-batch we held the mask check at 64-bit width:
+           const VALID_FLAGS: u64 = 0x100 | 0x1000;
+           if args.arg3 & !VALID_FLAGS != 0 {
+               return EINVAL;
+           }
+       so a caller passing `0x1_0000_0100` (high-half
+       garbage + AT_SYMLINK_NOFOLLOW) saw EINVAL where
+       Linux returns EROFS (after truncation the low half
+       is 0x100, mask passes, the call proceeds to the
+       readonly-fs gate).  Fourth instance of the same
+       shape after the batch-308 mlockall, batch-309
+       msync, and batch-310 mlock2 fixes.
+
+       Note: sys_fchmodat2 already does the truncation
+       correctly (uses `as i32` then i32 mask) so this
+       batch only touches the original fchmodat.
+
+     Fix:
+       kernel/src/syscall/linux.rs sys_fchmodat:
+         * Cast args.arg3 to i32 (matching Linux's int
+           flags parameter), then reinterpret as u32 for
+           the mask check.
+         * Convert VALID_FLAGS from u64 to u32 since the
+           comparison is now at 32-bit width.
+
+     Tests (dispatch_linux self-test, after the existing
+     fchmodat EROFS probe):
+       - (a) fchmodat(0, 0x1000, 0, 0x1_0000_0100) → EROFS
+             (high-half garbage + AT_SYMLINK_NOFOLLOW;
+             truncates to 0x100, mask passes,
+             validate_user_str succeeds in kernel context
+             via validate_user_read bypass, EROFS terminal
+             from the read-only fs surface).
+       - (b) fchmodat(0, 0x1000, 0, 0x1_0000_1100) → EROFS
+             (high-half garbage + NOFOLLOW | EMPTY_PATH;
+             both valid bits combined; truncates to 0x1100,
+             mask passes, EROFS terminal).
+       - (c) fchmodat(0, 0x1000, 0, 0x1_0000_0000) → EROFS
+             (high-half garbage only, low half zero;
+             truncates to 0, flags=0 is valid (no required
+             bits for fchmodat), EROFS terminal).
+       - (d) fchmodat(0, 0x1000, 0, 0x1_0000_0010) → EINVAL
+             (high-half garbage + unknown low bit 0x10;
+             truncates to 0x10, mask check rejects bit
+             outside VALID_FLAGS; verifies the mask gate
+             still rejects bogus low bits after high half
+             is stripped).
+       Marker: "[syscall/linux]   fchmodat int truncation
+       (high-half ignored): OK".
+
+     Preserved behaviour:
+       - Existing fchmodat(_,path,_,0x800_0000) → EINVAL
+         probe still passes (huge bogus low bit, no high
+         bits — same EINVAL gate fires post-batch).
+       - Existing fchmodat(_,path,_,0) → EROFS probe still
+         passes (flags=0 with no high bits).
+       - sys_fchmodat2 unchanged (already correct).
+
+     Known limitations (deferred):
+       - sys_fchownat has the identical mask-check shape
+         (`args.arg4 & !(0x100|0x1000)` at u64 width).
+         Tracked for a follow-up batch — keeping batches
+         tight means landing one syscall at a time even
+         when the fix is mechanical.
+
+     Build: cargo build -p kernel clean (40.02s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

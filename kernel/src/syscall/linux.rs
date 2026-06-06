@@ -14702,29 +14702,57 @@ fn sys_select(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `pselect6(nfds, readfds*, writefds*, exceptfds*, timespec*, sigmask_arg*)`
-/// — sigmask_arg points to `struct { sigset_t *ss; size_t ss_len; }` (16B).
+/// — sigmask_arg points to `struct sigset_argpack { sigset_t *ss; size_t ss_len; }` (16B).
+///
+/// Gate order (matches Linux fs/select.c::SYSCALL_DEFINE6(pselect6) +
+/// `do_pselect` + `set_user_sigmask` + `core_sys_select`):
+///   1. sig != NULL: copy_from_user(argpack, 16) -> EFAULT.
+///      Decode `{ inner_sigmask_ptr, inner_sigsetsize }`.
+///   2. tsp != NULL: get_timespec64 + poll_select_set_timeout ->
+///      EFAULT / EINVAL.
+///   3. set_user_sigmask(inner_sigmask_ptr, inner_sigsetsize):
+///      inner_sigmask_ptr == NULL -> skip entirely (sigsetsize is
+///      IGNORED).  Else inner_sigsetsize != 8 -> EINVAL; then
+///      validate_user_read(inner_sigmask_ptr, 8) -> EFAULT.
+///   4. core_sys_select: nfds bounds + fdset write validation.
+///
+/// Pre-batch we ran nfds first, then fdset writes, then a "readable"
+/// check on the outer argpack pointer, then tsp.  Crucially we
+/// NEVER dereferenced the argpack — the inner sigmask pointer and
+/// sigsetsize were ignored entirely.  Linux applies set_user_sigmask
+/// to the inner values, so a bad inner sigsetsize was a real
+/// missed-gate divergence.
+///
+/// Discriminator:
+///   * (nfds=0, NULL tsp, argpack{inner=valid, inner_size=16}) ->
+///     Linux EINVAL (gate 3 sigsetsize != 8); pre-batch 0 (no-fds
+///     fast path with the bad sigsetsize silently accepted).
 fn sys_pselect6(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let nfds = args.arg0 as i32;
-    let len = match fd_set_byte_len(nfds) {
-        Ok(n) => n,
-        Err(r) => return r,
-    };
-    for ptr in [args.arg1, args.arg2, args.arg3] {
-        if ptr != 0 && len > 0 {
-            if let Err(e) = crate::mm::user::validate_user_write(ptr, len) {
-                return linux_err(linux_errno_for(e));
-            }
-        }
-    }
+    // Gate 1: outer SYSCALL_DEFINE6 -> get_sigset_argpack.
+    let mut inner_sigmask_ptr: u64 = 0;
+    let mut inner_sigsetsize: u64 = 0;
     if args.arg5 != 0 {
-        // { const sigset_t *ss; size_t ss_len; } = 16 bytes.  We
-        // validate it but ignore the mask (no signal delivery).
         if let Err(e) = crate::mm::user::validate_user_read(args.arg5, 16) {
             return linux_err(linux_errno_for(e));
         }
+        let mut argpack = [0u8; 16];
+        // SAFETY: validate_user_read above covers 16 bytes at args.arg5.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg5, argpack.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        inner_sigmask_ptr = u64::from_ne_bytes([
+            argpack[0], argpack[1], argpack[2], argpack[3],
+            argpack[4], argpack[5], argpack[6], argpack[7],
+        ]);
+        inner_sigsetsize = u64::from_ne_bytes([
+            argpack[8], argpack[9], argpack[10], argpack[11],
+            argpack[12], argpack[13], argpack[14], argpack[15],
+        ]);
     }
-    // Translate timespec -> int ms.  NULL = wait forever (-1).
+
+    // Gate 2: tsp != NULL -> parse timespec.  NULL = wait forever (-1).
     let timeout_ms_signed: i64 = if args.arg4 == 0 {
         -1
     } else {
@@ -14732,6 +14760,7 @@ fn sys_pselect6(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
         let mut ts = [0u8; 16];
+        // SAFETY: validate_user_read above covers 16 bytes at args.arg4.
         let r = unsafe {
             crate::mm::user::copy_from_user(args.arg4, ts.as_mut_ptr(), 16)
         };
@@ -14751,6 +14780,33 @@ fn sys_pselect6(args: &SyscallArgs) -> SyscallResult {
         let total_ms = tv_sec.saturating_mul(1000).saturating_add(extra_ms);
         core::cmp::min(total_ms, i64::from(i32::MAX))
     };
+
+    // Gate 3: set_user_sigmask on the inner argpack.  Linux's
+    // `set_user_sigmask` returns 0 immediately when the inner sigmask
+    // pointer is NULL — sigsetsize is then completely ignored.
+    if inner_sigmask_ptr != 0 {
+        if inner_sigsetsize != 8 {
+            return linux_err(errno::EINVAL);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(inner_sigmask_ptr, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    // Gate 4: core_sys_select -> nfds bounds + fdset write validation.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let nfds = args.arg0 as i32;
+    let len = match fd_set_byte_len(nfds) {
+        Ok(n) => n,
+        Err(r) => return r,
+    };
+    for ptr in [args.arg1, args.arg2, args.arg3] {
+        if ptr != 0 && len > 0 {
+            if let Err(e) = crate::mm::user::validate_user_write(ptr, len) {
+                return linux_err(linux_errno_for(e));
+            }
+        }
+    }
     select_core(nfds, args.arg1, args.arg2, args.arg3, len, timeout_ms_signed)
 }
 
@@ -38640,6 +38696,89 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+        // pselect6 discriminator A: argpack with inner sigmask pointer
+        // valid but inner sigsetsize = 16 (bad) -> EINVAL via the new
+        // gate 3.  Pre-batch ignored the inner argpack contents
+        // entirely and would fall through to select_core returning 0.
+        {
+            let dummy_sigmask: [u8; 8] = [0; 8];
+            let argpack: [u64; 2] = [
+                (&raw const dummy_sigmask[0]) as u64,
+                16,
+            ];
+            let argpack_ptr = (&raw const argpack[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: argpack_ptr,
+            };
+            core::hint::black_box(&dummy_sigmask);
+            core::hint::black_box(&argpack);
+            if dispatch_linux(nr::PSELECT6, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pselect6 argpack bad inner_sigsetsize not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // pselect6 discriminator B: argpack with inner sigmask = NULL
+        // and bad inner sigsetsize (16).  Linux's set_user_sigmask
+        // returns 0 immediately when umask is NULL, so the bad size is
+        // IGNORED — the call falls through to core_sys_select(0) and
+        // returns 0.  Pre-batch also returned 0 (it ignored the inner
+        // argpack entirely), so this test confirms the NULL-inner skip
+        // path is wired correctly post-batch rather than diverging.
+        {
+            let argpack: [u64; 2] = [0, 16];
+            let argpack_ptr = (&raw const argpack[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: argpack_ptr,
+            };
+            core::hint::black_box(&argpack);
+            if dispatch_linux(nr::PSELECT6, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pselect6 NULL inner_sigmask + bad size not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // pselect6 discriminator C: argpack with inner sigmask valid
+        // and inner_sigsetsize = 8 (correct) -> 0.  Confirms the
+        // happy-path accepts the canonical sigsetsize and falls
+        // through to core_sys_select.
+        {
+            let dummy_sigmask: [u8; 8] = [0; 8];
+            let argpack: [u64; 2] = [
+                (&raw const dummy_sigmask[0]) as u64,
+                8,
+            ];
+            let argpack_ptr = (&raw const argpack[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: argpack_ptr,
+            };
+            core::hint::black_box(&dummy_sigmask);
+            core::hint::black_box(&argpack);
+            if dispatch_linux(nr::PSELECT6, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pselect6 valid argpack sigsetsize=8 not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[syscall/linux]   pselect6 argpack > tsp > sigmask > nfds gate order: OK");
         // epoll_create(0) -> EINVAL (size must be > 0 historically).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::EPOLL_CREATE, &a).value != -i64::from(errno::EINVAL) {

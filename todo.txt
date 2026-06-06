@@ -22426,3 +22426,79 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      paths.  Tracked under the general signal-delivery work.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+## 288. syscall/linux: pselect6 — argpack > tsp > sigmask > nfds
+##      gate order (batch 259)
+##
+##      Pre-batch divergences from Linux fs/select.c
+##      `SYSCALL_DEFINE6(pselect6)` + `do_pselect` +
+##      `set_user_sigmask` + `core_sys_select`:
+##
+##        (a) We ran the nfds bounds check FIRST.  Linux's literal
+##            order is: get_sigset_argpack(sig) -> tsp parse ->
+##            set_user_sigmask(inner) -> core_sys_select(n).  The
+##            nfds gate is the LAST gate, inside core_sys_select.
+##
+##        (b) We "validated" args.arg5 (the argpack pointer) as
+##            readable but NEVER dereferenced it.  The inner sigmask
+##            pointer and inner sigsetsize from the argpack were
+##            ignored entirely — Linux applies set_user_sigmask to
+##            those inner values, with sigsetsize-must-be-8 EINVAL
+##            and sigmask-readable EFAULT gates.
+##            Discriminator: (argpack { inner=valid, inner_size=16 })
+##            -> Linux EINVAL (gate 3); pre-batch 0 (silently
+##            accepted the bad inner size and fell through to
+##            core_sys_select with nfds=0).
+##
+##        (c) Our sigsetsize check, when added, must honour Linux's
+##            "NULL inner sigmask skips sigsetsize entirely" rule
+##            (same as ppoll batch 258).
+##
+##      Fix:
+##
+##        * Reorder sys_pselect6 at kernel/src/syscall/linux.rs to
+##          four gates matching Linux literally:
+##            1. sig != NULL -> validate + copy_from_user(argpack,
+##               16) -> EFAULT.  Decode { inner_sigmask_ptr,
+##               inner_sigsetsize }.
+##            2. tsp != NULL -> validate + parse timespec ->
+##               EFAULT/EINVAL.
+##            3. inner_sigmask_ptr != NULL -> inner_sigsetsize == 8
+##               (EINVAL) -> validate_user_read(inner, 8) (EFAULT).
+##               NULL inner skips entirely.
+##            4. nfds bounds via fd_set_byte_len + fdset writes ->
+##               EINVAL.
+##          select_core called once at the end.
+##
+##      Self-tests added/updated (around the existing pselect6 block):
+##
+##        Pre-existing tests preserved (all three still pass with the
+##        new order):
+##          - pselect6(0, NULL..., &{0,0}, NULL) -> 0.
+##          - pselect6 with timespec{0, 1e9} -> EINVAL.
+##          - pselect6 with timespec{-1, 0} -> EINVAL.
+##
+##        New discriminators:
+##          A. argpack { inner=valid 8B buf, inner_size=16 } -> Linux
+##             EINVAL (gate 3 sigsetsize != 8); pre-batch 0.
+##          B. argpack { inner=NULL, inner_size=16 } -> 0  (NULL
+##             inner skips the size check entirely; same answer as
+##             pre-batch but confirms the new gate-3 skip wiring).
+##          C. argpack { inner=valid 8B buf, inner_size=8 } -> 0
+##             (canonical happy path; confirms gate 3 accepts 8).
+##
+##      Marker:
+##        "[syscall/linux]   pselect6 argpack > tsp > sigmask >
+##         nfds gate order: OK"
+##
+##      Existing tests preserved: pselect6({0,0}) -> 0, bad tv_nsec
+##      -> EINVAL, neg tv_sec -> EINVAL, downstream epoll probes.
+##
+##      Known limitations: select_core still does not actually apply
+##      the inner sigmask to signal delivery (no signal delivery
+##      exists yet).  The validate-only behavior matches Linux for
+##      the no-pending-signal case but loses the EINTR path.
+##      Tracked under the general signal-delivery work alongside
+##      ppoll (entry 287).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

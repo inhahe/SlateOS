@@ -23829,10 +23829,34 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
     const WCONTINUED: u64 = 8;
     const VALID_OPTIONS: u64 = WNOHANG | WUNTRACED | WCONTINUED;
 
-    #[allow(clippy::cast_possible_wrap)]
-    let pid_arg = args.arg0 as i64;
+    // x86_64 syscall ABI register truncation: Linux declares
+    //   pid_t wait4(pid_t pid, int *wstatus, int options,
+    //               struct rusage *rusage)
+    // so `pid_t pid` and `int options` are 32-bit C types delivered in
+    // 64-bit registers — only the low 32 bits of rdi and rdx are
+    // visible to the kernel function body.  Pre-batch we read
+    //   let pid_arg = args.arg0 as i64;
+    //   let options = args.arg2;          // raw u64
+    // which preserved the high half of each register.  Two
+    // divergences:
+    //   - `options = 0x1_0000_0001` (high bit 32 + WNOHANG): Linux
+    //     truncates to WNOHANG, falls through to the reap path
+    //     (ok(0) / ECHILD).  Pre-batch: EINVAL via the unknown-bit
+    //     gate.
+    //   - `pid = 0x1_0000_0000` (high bit 32 only): Linux truncates
+    //     to 0, which is `wait for any child in caller's process
+    //     group`.  Pre-batch we routed this to the wait-specific
+    //     path for pid 4294967296, which is a value pcb::try_reap
+    //     would walk through unconstrained — same ECHILD answer in
+    //     our model, but the wrong code path on principle.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = args.arg0 as i32;
+    let pid_arg: i64 = i64::from(pid_i32);
     let wstatus_ptr = args.arg1;
-    let options = args.arg2;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let options_i32 = args.arg2 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let options: u64 = u64::from(options_i32 as u32);
     let rusage_ptr = args.arg3;
 
     if (options & !VALID_OPTIONS) != 0 {
@@ -27264,6 +27288,89 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // boot self-test.  The validation logic itself is shared
         // infrastructure exercised by every other syscall — it WILL
         // EFAULT on bad pointers from real userspace.
+
+        // Batch 298: x86_64 syscall ABI register truncation for
+        // wait4's `pid_t pid` and `int options` args.
+
+        // (a) options = 0x1_0000_0001 (bit 32 + WNOHANG), pid = -1
+        //     (wait-any).  Linux truncates options to WNOHANG, no
+        //     children -> ECHILD via set_wait_any_task.  Pre-batch:
+        //     EINVAL because bit 32 was outside VALID_OPTIONS.
+        //     The test only requires non-EINVAL — set_wait_any_task
+        //     in kernel context surfaces ECHILD (parent_pid=0 has
+        //     no children registered).
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 0x1_0000_0001,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 options high-half not truncated"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) options = 0x1_0000_0000 (bit 32 only), pid = -1.  Linux
+        //     truncates options to 0 (no WNOHANG, would block on a
+        //     real run).  In kernel context the wait-any path enters
+        //     set_wait_any_task first which fails with ECHILD before
+        //     any blocking, so the syscall returns immediately
+        //     -ECHILD.  Pre-batch: EINVAL via the unknown-bit gate.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 0x1_0000_0000,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 options=high-half-only triggered EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) pid = 0x1_0000_0000 (bit 32 only), options = WNOHANG.
+        //     Linux truncates pid_t to 0 -> wait-any path.  Pre-batch
+        //     pid_arg as i64 was a large positive number, so we
+        //     entered the wait-specific path for that bogus pid.
+        //     Both paths return -ECHILD in kernel context (specific:
+        //     try_reap -> NoSuchProcess -> ECHILD; any:
+        //     set_wait_any_task -> ECHILD).  Externally indistinct
+        //     but the code path is now Linux-correct.  Assert
+        //     non-EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 1,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 pid high-half triggered EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if v >= 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 pid high-half succeeded ({})", v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   wait4 pid_t/int options truncation: OK"
+        );
     }
 
     // DEFAULT_RLIMITS coverage — pure const table, no userspace.

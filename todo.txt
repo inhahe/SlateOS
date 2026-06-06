@@ -26151,3 +26151,107 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (47.11s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 24s).
+
+328. Linux ABI batch 298 — sys_wait4 pid_t + int
+     options register truncation per x86_64 syscall
+     ABI.
+
+     Divergence
+     ----------
+     Linux declares:
+         pid_t wait4(pid_t pid, int *wstatus,
+                     int options, struct rusage *rusage)
+     so `pid_t pid` and `int options` are 32-bit C
+     types delivered in 64-bit registers, and only
+     the low 32 bits of rdi / rdx are visible to the
+     kernel function body.  Pre-batch our stub
+     declared:
+         let pid_arg = args.arg0 as i64;
+         let options = args.arg2;          // raw u64
+     which preserved the high half of each register.
+     Two observable divergences:
+       - options = 0x1_0000_0001 (bit 32 + WNOHANG):
+         Linux truncates to WNOHANG, no children ->
+         ECHILD via set_wait_any_task in our model;
+         pre-batch returned EINVAL via the unknown-
+         option-bit gate.
+       - options = 0x1_0000_0000 (bit 32 only):
+         Linux truncates to 0 (no WNOHANG), enters
+         the wait path -> ECHILD in our model;
+         pre-batch returned EINVAL.
+     pid truncation is internally correct under the
+     fix but externally indistinguishable from
+     pre-batch in kernel context (both wait-specific
+     and wait-any paths surface -ECHILD when the
+     parent has no children).  Documented as a
+     correctness fix not a behavioural one.
+
+     Fix
+     ---
+     kernel/src/syscall/linux.rs ~23832:
+       - Cast args.arg0 to i32 first, then re-widen
+         to i64 for the existing `pid_arg > 0`
+         test and the `target_pid as u64` conversion.
+       - Cast args.arg2 to i32, then re-widen via
+         u32 to u64 for the existing VALID_OPTIONS
+         bit-mask and WNOHANG bit check.
+     Downstream control flow (specific-pid loop, wait-
+     any loop, blocking, status encoding) is
+     unchanged — the truncated values feed the same
+     surfaces.
+
+     Existing test compatibility
+     ---------------------------
+     Pre-existing tests:
+       - arg0=u64::MAX, arg2=1|0x4000_0000: pid_i32 =
+         -1 (wait-any path same as before),
+         options_i32 = 0x4000_0001 (positive, bit 30
+         is the EINVAL trigger — still -EINVAL).
+       - arg0=u64::MAX, arg2=1 (WNOHANG): wait-any
+         path with WNOHANG, identical pre/post.
+       - arg0=0xDEAD_BEEF, arg2=1: pid_i32 = -559M
+         (sign bit set), routes to wait-any instead
+         of wait-specific.  Test only checks
+         non-EINVAL and non-success, both upheld.
+       The wait-specific-vs-any change for this probe
+       is a Linux-correct reroute (0xDEAD_BEEF as
+       pid_t is negative -> "any child in process
+       group |-pid|" -> we map to wait-any).
+
+     New self-tests
+     --------------
+     Three probes appended before a new marker
+       "[syscall/linux]   wait4 pid_t/int options truncation: OK":
+       (a) (pid=-1, options=0x1_0000_0001) -> non-
+           EINVAL (truncates to WNOHANG, ECHILD).
+       (b) (pid=-1, options=0x1_0000_0000) -> non-
+           EINVAL (truncates to 0, ECHILD).
+       (c) (pid=0x1_0000_0000, options=WNOHANG) ->
+           non-EINVAL and negative (truncates pid to
+           0 -> wait-any -> ECHILD).
+
+     Preserved
+     ---------
+     - The WAIT4 wait-any (pid <= 0) vs wait-specific
+       (pid > 0) routing.
+     - WNOHANG fast-return-0 contract for empty
+       wait-any.
+     - lost-wakeup-safe set_wait_task / try_reap
+       retry pattern in both wait paths.
+     - encode_linux_wstatus + rusage zeroing on
+       successful reap.
+
+     Known limitations / out of scope
+     --------------------------------
+     - pid_t truncation correctness can't be
+       externally observed in kernel context because
+       pcb has no children for parent_pid=0;
+       distinguishable only in real userspace with
+       actual child processes.
+     - wstatus / rusage EFAULT can't be triggered
+       from kernel-context tests due to
+       validate_user_write's documented bypass.
+
+     Build: cargo build -p kernel clean (44.43s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 23s).

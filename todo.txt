@@ -21924,3 +21924,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      transient timeout unrelated to this change; the 180s
 ##      timeout fired during sched_fairness self-test setup, then
 ##      passed at 24s on retry).
+
+## 281. syscall/linux: timerfd_settime — read > flag+spec > fd > otmr (batch 252)
+##
+##      Pre-batch divergences (kernel/src/syscall/linux.rs):
+##      sys_timerfd_settime had two gate-order divergences from
+##      Linux's `fs/timerfd.c`:
+##
+##      (a) Flag-mask EINVAL fired BEFORE the new-ptr EFAULT read.
+##          Linux's outer `SYSCALL_DEFINE4(timerfd_settime)` calls
+##          `get_itimerspec64(&new, utmr)` first (EFAULT on a bad
+##          or NULL utmr); only then does `do_timerfd_settime`
+##          check `(flags & ~TFD_SETTIME_FLAGS) ||
+##          !itimerspec64_valid(new)` as a single combined gate.
+##          A probe passing flags=bogus and rqtp=NULL saw EINVAL
+##          where Linux returns EFAULT.
+##
+##      (b) Output-ptr (otmr) validation fired BEFORE the fd
+##          lookup.  Linux's `do_timerfd_settime` calls
+##          `timerfd_fget(ufd, &f)` early (EBADF for bad fd) and
+##          performs `put_itimerspec64(&old, otmr)` at the very
+##          end, AFTER the timer is set.  A caller with valid
+##          new, valid flags, bad fd, and bad otmr saw EFAULT
+##          where Linux returns EBADF.
+##
+##      Fix:
+##      Reordered sys_timerfd_settime gates to match Linux:
+##        Gate 1: read new (NULL or unreadable -> EFAULT)
+##        Gate 2: combined `flags & ~VALID_FLAGS ||
+##                !itimerspec64_valid` -> EINVAL (single OR
+##                expression mirroring Linux's source)
+##        Gate 3: fd lookup -> EBADF
+##        Gate 4: (timer set — no-op in our kernel)
+##        Gate 5: otmr write-validate -> EFAULT (last)
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - timerfd_settime(fd=0, flags=0x8000_0000, new=NULL) -> EFAULT
+##        Discriminator (a): pre-batch returned EINVAL.  Marker
+##        confirms read fires before the flag gate.
+##      - timerfd_settime(fd=0, flags=0, new=valid, otmr=kernel_addr)
+##        -> EBADF
+##        Discriminator (b): pre-batch returned EFAULT.  Confirms
+##        fd lookup fires ahead of otmr validation.
+##      - timerfd_settime(fd=0, flags=0x8000_0000, new=valid_itspec)
+##        -> EINVAL
+##        Confirms the combined flag+spec gate still fires after
+##        the read succeeds.
+##        Marker: "timerfd_settime read > flag+spec > fd > otmr
+##                 gate order: OK".
+##
+##      Existing tests preserved:
+##      - timerfd_settime(NULL new) -> EFAULT
+##      - timerfd_settime(valid zeroed itspec, fd=0) -> EBADF
+##      - bad interval nsec (2e9) -> EINVAL
+##      - negative interval sec -> EINVAL
+##      - negative value nsec -> EINVAL
+##      - value nsec = NSEC_PER_SEC -> EINVAL
+##      - value nsec = 999_999_999 -> EBADF
+##      - prior marker "timerfd_settime itimerspec64_valid: OK"
+##        still fires before the new marker.
+##
+##      Changed test:
+##      - The "bogus flag at arg2=0x1000" test (which exercised
+##        flag-before-EFAULT pre-batch) was replaced by two tests:
+##        the EFAULT discriminator (above) and a "bad flag, valid
+##        new" -> EINVAL test that exercises the combined gate
+##        after the read.  Together they pin the new ordering.
+##
+##      Known limitations:
+##      - No real timerfd fds exist; even a valid fd that survives
+##        the lookup short-circuits to EINVAL at gate 4 ("not a
+##        timerfd").  When the timerfd vfs backing lands, gate 4
+##        will become real timer-arming work and the otmr put will
+##        materialise actual previous timer state.
+##      - The otmr validation uses validate_user_write at the END,
+##        matching Linux's order.  Once timer state is real, Linux
+##        will have already set the new timer before EFAULTing on
+##        the otmr put; the caller observes "timer changed AND
+##        EFAULT".  Documented as a future-implementation note.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s).

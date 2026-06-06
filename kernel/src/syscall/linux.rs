@@ -10698,21 +10698,46 @@ fn sys_timerfd_create(args: &SyscallArgs) -> SyscallResult {
 /// (it_interval.{tv_sec, tv_nsec} then it_value.{tv_sec, tv_nsec},
 /// each i64 little-endian on x86_64).
 ///
-/// Linux's `fs/timerfd.c::do_timerfd_settime` gates
-/// `itimerspec64_valid(new)` (both timespecs satisfying tv_sec >= 0
-/// and tv_nsec in [0, 1_000_000_000)) ahead of the fd lookup,
-/// returning EINVAL.  Pre-batch we validated the buffer was
-/// readable but never parsed it, so a probe passing a malformed
-/// itimerspec (e.g. tv_nsec = 2_000_000_000) saw EBADF (in our
-/// kernel-context tests) or the terminal EINVAL only after the
-/// fd lookup, instead of the early-gate EINVAL Linux returns.
+/// Linux's gate order spans two functions:
+///   1. `SYSCALL_DEFINE4(timerfd_settime)` calls `get_itimerspec64(&new,
+///      utmr)` which copies the user struct into a kernel buffer:
+///      NULL or unreadable utmr -> `-EFAULT`.
+///   2. `do_timerfd_settime` opens with a **single combined gate**:
+///      `if ((flags & ~TFD_SETTIME_FLAGS) || !itimerspec64_valid(new))
+///      return -EINVAL;` — unknown flag bits OR a timespec with
+///      tv_sec < 0 / tv_nsec out of [0, 1e9) BOTH map to EINVAL,
+///      ahead of the fd lookup.
+///   3. `timerfd_fget(ufd, &f)` -> `-EBADF` for an unknown fd or
+///      `-EINVAL` if the fd isn't a timerfd.
+///   4. The work is done (no-op for our kernel; we have no timerfd
+///      backing).
+///   5. `put_itimerspec64(&old, otmr)` if `otmr != NULL` — Linux
+///      EFAULTs here AFTER the timer is set, so a bad output ptr
+///      is the LAST possible failure mode.
+///
+/// Pre-batch divergences fixed here:
+///   * Flag-mask EINVAL fired BEFORE the new-ptr EFAULT read.  A
+///     probe passing flags=bogus and rqtp=NULL saw EINVAL where
+///     Linux returns EFAULT (get_itimerspec64 is the outer wrapper).
+///   * Output-ptr validation (`args.arg3`) fired BEFORE the fd
+///     lookup.  A caller with a valid timer spec, valid flags, a
+///     bad fd, and a bad otmr saw EFAULT where Linux returns EBADF
+///     (the otmr put happens at the END of do_timerfd_settime,
+///     after the timer is set).
+///   * Combined-gate semantics: pre-batch we checked flag-mask
+///     EINVAL and timespec EINVAL in SEPARATE statements.  Linux's
+///     `do_timerfd_settime` checks them as a single boolean OR,
+///     so they are observably the same gate from the caller's
+///     perspective — and a flag-mask-only failure with a
+///     malformed timespec would now match Linux's "first-fire"
+///     EINVAL regardless.
 fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
     // TFD_TIMER_ABSTIME=1, TFD_TIMER_CANCEL_ON_SET=2.
     const VALID_FLAGS: u64 = 1 | 2;
     const NSEC_PER_SEC: i64 = 1_000_000_000;
-    if args.arg1 & !VALID_FLAGS != 0 {
-        return linux_err(errno::EINVAL);
-    }
+
+    // Gate 1 (SYSCALL_DEFINE4 wrapper: get_itimerspec64): read the
+    // new itimerspec from user.  NULL or unreadable -> EFAULT.
     let new_ptr = args.arg2;
     if new_ptr == 0 {
         return linux_err(errno::EFAULT);
@@ -10720,8 +10745,6 @@ fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(new_ptr, 32) {
         return linux_err(linux_errno_for(e));
     }
-    // Parse the itimerspec and apply Linux's itimerspec64_valid
-    // check ahead of the fd lookup.
     let mut buf = [0u8; 32];
     // SAFETY: validate_user_read above confirmed 32 bytes readable.
     if let Err(e) =
@@ -10740,20 +10763,21 @@ fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
     let it_interval_nsec = read_i64(8);
     let it_value_sec = read_i64(16);
     let it_value_nsec = read_i64(24);
+
+    // Gate 2 (do_timerfd_settime opening lines): single combined
+    // EINVAL gate covering both the flag mask and itimerspec64_valid.
     let valid = |sec: i64, nsec: i64| -> bool {
         sec >= 0 && (0..NSEC_PER_SEC).contains(&nsec)
     };
-    if !valid(it_interval_sec, it_interval_nsec)
+    if args.arg1 & !VALID_FLAGS != 0
+        || !valid(it_interval_sec, it_interval_nsec)
         || !valid(it_value_sec, it_value_nsec)
     {
         return linux_err(errno::EINVAL);
     }
-    if args.arg3 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 32) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // No timerfd fds exist in our kernel, so any fd reference is bad.
+
+    // Gate 3 (timerfd_fget): unknown fd -> EBADF.  No timerfd fds
+    // exist in our kernel, so any fd reference is bad.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let pid = match caller_pid() {
@@ -10762,6 +10786,15 @@ fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
     };
     if pcb::linux_fd_lookup(pid, fd).is_none() {
         return linux_err(errno::EBADF);
+    }
+
+    // Gate 5 (put_itimerspec64 at the very end): validate otmr if
+    // provided.  Linux performs this AFTER the timer is set, so
+    // this fires last.  A NULL otmr is allowed (Linux skips the put).
+    if args.arg3 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 32) {
+            return linux_err(linux_errno_for(e));
+        }
     }
     // Even if the fd refers to a real fd, it isn't a timerfd, so:
     linux_err(errno::EINVAL)
@@ -34300,12 +34333,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: timerfd_create not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // timerfd_settime with bogus flag -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x8000_0000, arg2: 0x1000,
+        // timerfd_settime with bogus flag + readable valid new ptr
+        // -> EINVAL.  Confirms the combined flag+itimerspec gate
+        // fires once the read has succeeded.
+        let valid_itspec_for_flag = [0u8; 32];
+        let a = SyscallArgs { arg0: 0, arg1: 0x8000_0000,
+            arg2: valid_itspec_for_flag.as_ptr() as u64,
             arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
             != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: timerfd_settime(bad flag) not EINVAL");
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime(bad flag, valid new) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Gate-1 discriminator: bogus flag + NULL new -> EFAULT.
+        // Linux's outer SYSCALL_DEFINE4(timerfd_settime) calls
+        // get_itimerspec64 BEFORE do_timerfd_settime checks flags,
+        // so a bad-flag + NULL combination surfaces EFAULT first.
+        // Pre-batch this returned EINVAL (flag check fired ahead
+        // of the read), masking a probe's ability to distinguish
+        // "couldn't read the timespec" from "flag value rejected".
+        let a = SyscallArgs { arg0: 0, arg1: 0x8000_0000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime(bad flag, NULL) not EFAULT"
+            );
             return Err(KernelError::InternalError);
         }
         // timerfd_settime with NULL new -> EFAULT.
@@ -34399,8 +34454,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Gate-5 discriminator: valid new, valid flags, bad fd, bad
+        // otmr -> EBADF (not EFAULT).  Linux's
+        // do_timerfd_settime calls timerfd_fget BEFORE
+        // put_itimerspec64, so a bad fd surfaces before a bad
+        // output pointer.  Pre-batch we validated otmr ahead of
+        // the fd lookup and returned EFAULT here.
+        let valid_for_otmr_test = [0u8; 32];
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: valid_for_otmr_test.as_ptr() as u64,
+            arg3: 0xFFFF_8000_0000_0000 /* kernel addr, unwritable */,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TIMERFD_SETTIME, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime(bad fd, bad otmr) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
             "[syscall/linux]   timerfd_settime itimerspec64_valid: OK"
+        );
+        serial_println!(
+            "[syscall/linux]   timerfd_settime read > flag+spec > fd > otmr gate order: OK"
         );
         // timerfd_gettime: Linux's `do_timerfd_gettime` (fs/timerfd.c) does
         // fd lookup first, before touching the curr_value pointer. In

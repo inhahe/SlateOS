@@ -21112,7 +21112,7 @@ fn sys_listmount(args: &SyscallArgs) -> SyscallResult {
 /// the SINGLE-without-ctx case at all.
 fn sys_lsm_get_self_attr(args: &SyscallArgs) -> SyscallResult {
     const LSM_ATTR_UNDEF: u32 = 0;
-    const LSM_FLAG_SINGLE: u64 = 1;
+    const LSM_FLAG_SINGLE: u32 = 1;
 
     #[allow(clippy::cast_possible_truncation)]
     let attr = args.arg0 as u32;
@@ -21140,12 +21140,23 @@ fn sys_lsm_get_self_attr(args: &SyscallArgs) -> SyscallResult {
     }
     // flags: only LSM_FLAG_SINGLE (1) is defined.  Any other bit
     // pattern is EINVAL.
-    if args.arg3 != 0 && args.arg3 != LSM_FLAG_SINGLE {
+    //
+    // Linux signature: `SYSCALL_DEFINE4(lsm_get_self_attr, unsigned int,
+    // attr, struct lsm_ctx __user *, ctx, u32 __user *, size, u32, flags)`.
+    // `flags` is C `u32`, delivered in r10.  The AMD64 syscall ABI does
+    // not zero-extend `unsigned int` across the syscall instruction, so
+    // Linux observes only the low 32 bits.  Pre-batch we compared the
+    // raw u64 to LSM_FLAG_SINGLE: high-half garbage with low=1 made the
+    // (args.arg3 != 1) check succeed and we'd reject with EINVAL where
+    // Linux's truncated flags=SINGLE advances to the ctx==NULL gate.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    if flags != 0 && flags != LSM_FLAG_SINGLE {
         return linux_err(errno::EINVAL);
     }
     // SINGLE requested but no ctx supplied -> EINVAL.  Linux's check
     // fires after the get_user but before the copy_from_user(uctx).
-    if args.arg3 == LSM_FLAG_SINGLE && args.arg1 == 0 {
+    if flags == LSM_FLAG_SINGLE && args.arg1 == 0 {
         return linux_err(errno::EINVAL);
     }
     // No LSM module stacked → no attributes to report.  This is the
@@ -48321,6 +48332,50 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   lsm_get_self_attr UNDEF/SINGLE gating: OK"
+        );
+        // lsm_get_self_attr flags high-half garbage with low=0 -> EOPNOTSUPP
+        // (Linux truncates to u32; high half ignored, falls through to
+        // the no-LSM terminal).
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr flags=0x1_0000_0000 not EOPNOTSUPP (truncation)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr flags high-half garbage with low=SINGLE + valid
+        // ctx -> EOPNOTSUPP.  Pre-batch the raw u64 != LSM_FLAG_SINGLE check
+        // would reject with EINVAL; post-batch we mask first so SINGLE is
+        // honored and we reach the per-LSM terminal.
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr flags=0x1_0000_0001 not EOPNOTSUPP (truncation)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr flags high-half garbage with low=2 (bad) -> EINVAL.
+        // After truncation the low half is 2 which is neither 0 nor
+        // LSM_FLAG_SINGLE, so the flags gate still fires.
+        let a = SyscallArgs { arg0: 100, arg1: ctx_ptr, arg2: size_ptr, arg3: 0x1_0000_0002, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr flags=0x1_0000_0002 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lsm_get_self_attr flags high-half garbage with low=SINGLE +
+        // NULL ctx -> EINVAL.  Confirms the downstream SINGLE-without-ctx
+        // gate is reached on the truncated flag value.
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: size_ptr, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_GET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_get_self_attr flags=0x1_0000_0001 + NULL ctx not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   lsm_get_self_attr unsigned-int truncation (high-half ignored): OK"
         );
         // lsm_set_self_attr flags=1 (nonzero) -> EINVAL even with
         // otherwise valid args.  Linux checks flags first.

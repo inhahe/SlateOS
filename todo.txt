@@ -28899,3 +28899,114 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (39.56s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 15s).
+
+358. Batch 328 — sys_lsm_get_self_attr unsigned-int
+     truncation (high-half of flags must be masked
+     before the LSM_FLAG_SINGLE comparison).
+
+     Divergence: Linux's sys_lsm_get_self_attr signature
+     is `SYSCALL_DEFINE4(lsm_get_self_attr, unsigned
+     int, attr, struct lsm_ctx __user *, ctx, u32 __user
+     *, size, u32, flags)`.  `flags` is C `u32`,
+     delivered in r10.  The AMD64 syscall ABI does not
+     zero-extend `unsigned int` across the syscall
+     instruction, so Linux observes only the low 32
+     bits.
+
+     Our pre-fix implementation declared
+     `const LSM_FLAG_SINGLE: u64 = 1;` and compared
+     `args.arg3 != LSM_FLAG_SINGLE` at u64 width.  A
+     caller passing flags=0x1_0000_0001 hit the
+     comparison with the high-half garbage still in
+     place: u64 0x1_0000_0001 != 1, so we rejected
+     with EINVAL where Linux's truncated
+     flags=LSM_FLAG_SINGLE advances past the flag
+     gate into the SINGLE-without-ctx check (and
+     ultimately into the per-LSM dispatch with
+     EOPNOTSUPP terminal).
+
+     Symmetric issue on the all-zero-low path:
+     flags=0x1_0000_0000 with low=0 hit `args.arg3
+     != 0` and was also rejected with EINVAL where
+     Linux's truncated flags=0 advances unconditionally.
+
+     Fix: in sys_lsm_get_self_attr (kernel/src/syscall/
+     linux.rs line ~21113), change LSM_FLAG_SINGLE to
+     u32 and cast args.arg3 to u32 before the
+     comparisons:
+       const LSM_FLAG_SINGLE: u32 = 1;
+       #[allow(clippy::cast_possible_truncation)]
+       let flags = args.arg3 as u32;
+       if flags != 0 && flags != LSM_FLAG_SINGLE {
+           return linux_err(errno::EINVAL);
+       }
+       if flags == LSM_FLAG_SINGLE && args.arg1 == 0 {
+           return linux_err(errno::EINVAL);
+       }
+
+     Tests added to dispatch_linux (after the existing
+     "lsm_get_self_attr UNDEF/SINGLE gating: OK"
+     marker around line 48322):
+       (a) lsm_get_self_attr(attr=100, ctx=valid,
+                             size=valid,
+                             flags=0x1_0000_0000)
+           → EOPNOTSUPP (high-only; truncates to 0,
+            flag gate passes, full gate flow runs to
+            terminal EOPNOTSUPP).  Pre-fix returned
+            EINVAL.
+       (b) lsm_get_self_attr(attr=100, ctx=valid,
+                             size=valid,
+                             flags=0x1_0000_0001)
+           → EOPNOTSUPP (high|SINGLE; truncates to
+            LSM_FLAG_SINGLE, with valid ctx the
+            downstream SINGLE-without-ctx gate
+            passes, full flow runs to terminal
+            EOPNOTSUPP).  Pre-fix returned EINVAL
+            because u64 0x1_0000_0001 != 1.
+       (c) lsm_get_self_attr(attr=100, ctx=valid,
+                             size=valid,
+                             flags=0x1_0000_0002)
+           → EINVAL (high|bad-low 2; truncates to
+            2 which is neither 0 nor SINGLE; flag
+            gate still rejects; confirms mask
+            preserves correct rejection of unknown
+            bits).
+       (d) lsm_get_self_attr(attr=100, ctx=NULL,
+                             size=valid,
+                             flags=0x1_0000_0001)
+           → EINVAL (high|SINGLE with NULL ctx;
+            verifies the downstream SINGLE-without-
+            ctx gate is reached on the truncated
+            flag value).
+     Marker: "[syscall/linux]   lsm_get_self_attr
+              unsigned-int truncation (high-half
+              ignored): OK".
+
+     Preserved: existing lsm_get_self_attr probes still
+     pass:
+       - attr=0 (LSM_ATTR_UNDEF) → EINVAL.
+       - attr=50 and attr=200 (out-of-range) →
+         EOPNOTSUPP (Linux does not range-check attr;
+         falls through to the per-LSM default).
+       - NULL size → EINVAL.
+       - flags=2 → EINVAL (bad bit pattern).
+       - flags=3 (SINGLE + extra bit) → EINVAL.
+       - flags=1 with NULL ctx → EINVAL.
+       - flags=1 with valid ctx → EOPNOTSUPP.
+       - flags=0 with valid args → EOPNOTSUPP.
+
+     Known limitations:
+     - `attr` (arg0) was already cast to u32 in a
+       prior batch — the LSM_ATTR_UNDEF comparison
+       remains correct against the truncated form.
+     - `size*` (arg2) is a pointer (u64) — not
+       subject to int truncation.
+     - There is no LSM infrastructure in this kernel
+       (capabilities replace LSM in our architecture;
+       see entry 350).  EOPNOTSUPP is the permanent
+       terminal — no follow-up probes will be needed
+       when more infrastructure lands.
+
+     Build: cargo build -p kernel clean (36.52s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

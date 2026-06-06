@@ -20249,8 +20249,21 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
     if old_addr % 0x4000 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // (5) new_size must be > 0 (non-Linux gate; see fn doc).
-    if new_size == 0 {
+    // (5) PAGE_ALIGN(new_size) must be non-zero.  Linux's mm/mremap.c
+    // does `new_len = PAGE_ALIGN(new_len)` BEFORE the `if (!new_len)
+    // return -EINVAL` check, so any new_size whose alignment wraps
+    // past u64::MAX (i.e. new_size > u64::MAX - 0x3FFF) collapses to
+    // 0 and is rejected with EINVAL.  Previously we checked
+    // `new_size == 0` literally, so a probe with new_size=u64::MAX
+    // fell through to ENOMEM where Linux returns EINVAL.  Using
+    // checked_add mirrors Linux's `(x + PAGE_SIZE - 1) & ~(PAGE_SIZE
+    // - 1)` semantics — when the add overflows we treat the aligned
+    // value as 0, matching the C wraparound.
+    let new_size_aligned = match new_size.checked_add(0x3FFF) {
+        Some(v) => v & !0x3FFFu64,
+        None => 0,
+    };
+    if new_size_aligned == 0 {
         return linux_err(errno::EINVAL);
     }
     // We don't support resize-in-place; report ENOMEM (Linux's
@@ -45999,6 +46012,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   pread64/pwrite64 fd-before-count gate order: OK"
+            );
+        }
+
+        // ---- mremap new_size PAGE_ALIGN overflow gating ----
+        // Linux's mm/mremap.c PAGE_ALIGNs new_len before checking
+        // `if (!new_len) return -EINVAL`.  A new_size in
+        // (u64::MAX - 0x3FFF, u64::MAX] aligns to 0 (the C
+        // expression `(x + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)` wraps
+        // past u64::MAX), so Linux rejects with EINVAL.  Pre-batch
+        // we only compared `new_size == 0` literally, so an
+        // overflowing new_size fell through to ENOMEM.  Batch 273
+        // mirrors the PAGE_ALIGN-then-zero-check pattern using
+        // checked_add.
+        {
+            // Discriminator A: mremap(old=0, old_len=0x4000,
+            //   new_len=0, flags=0, new_addr=0)
+            //   -> EINVAL (existing behaviour, both pre/post)
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mremap(new_len=0) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: mremap(old=0, old_len=0x4000,
+            //   new_len=u64::MAX, flags=0, new_addr=0)
+            //   pre-batch -> -ENOMEM (size != 0, fell through)
+            //   post-batch -> -EINVAL (PAGE_ALIGN wraps to 0,
+            //                          matches Linux)
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0x4000, arg2: u64::MAX, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mremap(new_len=u64::MAX) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator C: mremap(old=0, old_len=0x4000,
+            //   new_len=0x4000, flags=0, new_addr=0)
+            //   Acceptance: a non-overflowing new_len still
+            //   reaches the ENOMEM terminal answer, confirming
+            //   the new gate doesn't over-reject.
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0x4000, arg2: 0x4000, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mremap(new_len=0x4000) not ENOMEM"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   mremap new_size PAGE_ALIGN overflow gating: OK"
             );
         }
 

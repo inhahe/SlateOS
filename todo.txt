@@ -23420,3 +23420,72 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      honours `pos + count` directly.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+302.  syscall/linux: mremap new_size PAGE_ALIGN overflow gate
+##      (batch 273).
+##
+##      Pre-batch divergence: Linux's mm/mremap.c does
+##        old_len = PAGE_ALIGN(old_len);
+##        new_len = PAGE_ALIGN(new_len);
+##        if (!new_len)
+##            return -EINVAL;
+##      i.e. it PAGE_ALIGNs the lengths BEFORE checking for zero.
+##      The C macro `(x + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)` wraps
+##      to 0 for any `x > u64::MAX - 0x3FFF`, so Linux rejects
+##      `new_len = u64::MAX` (and anything in
+##      (u64::MAX - 0x3FFF, u64::MAX]) with -EINVAL.  Our sys_mremap
+##      compared `new_size == 0` literally, so the overflowing
+##      range fell through to the terminal `linux_err(ENOMEM)`
+##      answer.  Probe-distinguishable:
+##        mremap(addr=0, old_len=0x4000, new_len=u64::MAX, flags=0,
+##               new_addr=0)
+##          -> pre-batch: -ENOMEM
+##          -> Linux:     -EINVAL
+##
+##      Fix in sys_mremap (line ~20220): replace the
+##        if new_size == 0 { return linux_err(errno::EINVAL); }
+##      gate with a checked_add-based PAGE_ALIGN computation:
+##        let new_size_aligned = match new_size.checked_add(0x3FFF) {
+##            Some(v) => v & !0x3FFFu64,
+##            None => 0,
+##        };
+##        if new_size_aligned == 0 {
+##            return linux_err(errno::EINVAL);
+##        }
+##      checked_add returning None mirrors the C wraparound; when
+##      it returns Some(v), the `& !0x3FFF` rounds down to the
+##      16 KiB boundary (our page size).  Same EINVAL outcome for
+##      the original `new_size == 0` case, but now also catches
+##      the overflowing tail.  Gate position is unchanged — still
+##      between old_addr alignment (gate 4) and the terminal
+##      ENOMEM, matching Linux's mremap entry sequence.
+##
+##      Self-tests added in dispatch_linux (after the pread/pwrite
+##      block); mremap PAGE_ALIGN overflow triple:
+##        A. mremap(addr=0, old=0x4000, new=0, flags=0, na=0)
+##             pre & post: -EINVAL (existing zero-check).
+##        B. mremap(addr=0, old=0x4000, new=u64::MAX, flags=0, na=0)
+##             pre: -ENOMEM (BUG); post: -EINVAL (Linux).
+##        C. mremap(addr=0, old=0x4000, new=0x4000, flags=0, na=0)
+##             Acceptance: a non-overflowing new_len reaches the
+##             terminal ENOMEM, confirming we don't over-reject.
+##
+##      Marker:
+##        "[syscall/linux]   mremap new_size PAGE_ALIGN overflow gating: OK"
+##
+##      Existing tests preserved: pread64/pwrite64 fd-before-count
+##      (batch 272), capset pid EPERM (batch 270), prctl(PR_SET_NAME)
+##      NULL-arg2 (batch 269), capget/capset NULL-data quadruple
+##      (batch 268), preadv/pwritev iov_len SSIZE_MAX (batch 267)
+##      — all unaffected by this addition (different syscall).
+##
+##      Known limitations: mremap still does not validate the
+##      MREMAP_FIXED new_addr against the user's address space
+##      bounds, and we report ENOMEM unconditionally for any
+##      non-degenerate call (no real resize-in-place support).
+##      Both are acceptable until the VMA backend lands, but
+##      should be revisited then.  Also unchanged from batch 272:
+##      pread/pwrite EOVERFLOW gate and MAX_RW_COUNT silent
+##      clamp are still not implemented.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

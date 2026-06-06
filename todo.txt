@@ -32623,3 +32623,123 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (36.45s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+393. syscall/linux batch 363 — sys_personality: remove the
+     persona-byte EINVAL gate that Linux does not have.
+
+     LINUX ABI REFERENCE.
+
+       kernel/sys.c::SYSCALL_DEFINE1(personality):
+
+           SYSCALL_DEFINE1(personality, unsigned int, personality)
+           {
+                   unsigned int old = current->personality;
+
+                   if (personality != 0xffffffff)
+                           set_personality(personality);
+
+                   return old;
+           }
+
+       And the storage helper:
+
+           static inline void __set_personality(unsigned int personality)
+           {
+                   current->personality = personality;
+           }
+
+       Two observations:
+         (1) Linux performs *no* validation on the persona value.
+             Any PER_* low byte (PER_LINUX_32BIT 0x08, PER_SVR4
+             0x01, PER_BSD 0x06, PER_SCOSVR3 0x03, PER_OSR5 0x05,
+             PER_WYSEV386 0x04, PER_HPUX 0x10, PER_SOLARIS 0x11,
+             PER_UW7 0x12, etc. — see
+             include/uapi/linux/personality.h) is accepted and
+             stored as-is.
+         (2) The only special case is 0xffffffff, which is the
+             "query only" sentinel — set_personality is skipped
+             and the current value is returned.
+
+       The personality(2) man page lists -EINVAL as an error in
+       the ERRORS section, but modern Linux never returns it —
+       this is a vestigial documentation line from older kernels
+       that pre-dated set_personality's unconditional store.
+
+     PRE-BATCH STATE.
+
+       Our sys_personality (linux.rs ~line 7231) had:
+
+           let persona = args.arg0 as u32;
+           let current = caller_pid map_or 0 personality;
+           if persona == u32::MAX { return ok(current); }
+           if (persona & 0xff) != 0 {
+               return linux_err(errno::EINVAL);   // BUG
+           }
+           if let Some(pid) = caller_pid() {
+               let _ = pcb::set_personality(pid, persona);
+           }
+           ok(current)
+
+       The `(persona & 0xff) != 0 → EINVAL` gate breaks every
+       named persona except PER_LINUX (0).  Glibc's
+       personality(2) wrapper does not expect EINVAL from any
+       persona and propagates the kernel return verbatim, so:
+
+         - `setarch i386 ./prog` (PER_LINUX_32BIT = 0x08) saw
+           -EINVAL where Linux returns the previous personality.
+         - A program calling personality(PER_BSD) to probe BSD-
+           emulation availability saw -EINVAL where Linux
+           accepts the call and returns 0.
+         - `personality(0x08 | ADDR_NO_RANDOMIZE)` (the common
+           "disable ASLR for this run" pattern in test harnesses
+           that explicitly opt out of randomization for
+           determinism) hit -EINVAL.
+
+       The pre-existing docstring explicitly framed the EINVAL as
+       intentional ("we only model PER_LINUX (0), so any other
+       persona is rejected") — a fundamental misreading of Linux's
+       contract.  The fix is to align with what the syscall
+       actually does: store any value and return the previous.
+
+     FIX.
+
+       Removed the `(persona & 0xff) != 0 → EINVAL` gate.  The
+       function now mirrors Linux's body exactly:
+         - Read current.
+         - If persona == 0xffffffff, return current.
+         - Otherwise, store persona via pcb::set_personality and
+           return the previous value.
+
+       The pre-existing kernel-context no-op store for
+       caller_pid == None is preserved — same as Linux when
+       called without a current task.  Native subsystems
+       untouched (pcb store already accepts any u32 value).
+
+     BOOT-TIME PROBES.
+
+       Flipped one stale probe (was expecting EINVAL for
+       persona=0x01) and added three new probes covering common
+       named personas:
+
+         (1) personality(PER_SVR4 = 0x01) -> 0.
+             The flip of the pre-existing EINVAL assertion.
+             Stops the per-batch regression.
+         (2) personality(PER_BSD = 0x06) -> 0.
+             Probes a high-bit persona byte to confirm the
+             rejection wasn't on a specific value.
+         (3) personality(PER_LINUX_32BIT = 0x08) -> 0.
+             The persona `setarch i386` uses — most common
+             concrete failure case pre-batch.
+         (4) personality(0x40008 = PER_LINUX_32BIT |
+             ADDR_NO_RANDOMIZE) -> 0.
+             Combines a non-zero persona byte with a flag bit
+             to prove the full 32-bit value is accepted; would
+             have failed pre-batch on the persona-byte gate
+             regardless of flag bits.
+
+     Final boot-time stamp:
+         "[syscall/linux]   personality accepts any persona (no EINVAL gate): OK"
+
+     Build: cargo build -p kernel clean (39.75s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

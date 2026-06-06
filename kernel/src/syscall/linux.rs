@@ -7215,23 +7215,42 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
 /// learn the current personality without changing it.  Any other value
 /// is "set to this personality and return the old one".
 ///
-/// Linux's `personality(2)` validates only that the low byte (the
-/// `PER_*` persona) is one it knows about — and since the only persona
-/// we model is `PER_LINUX` (0), we reject any non-zero persona with
-/// `EINVAL`.  The upper bits (`ADDR_NO_RANDOMIZE`, `READ_IMPLIES_EXEC`,
-/// `MMAP_PAGE_ZERO`, etc.) we accept and *store* verbatim: we don't
-/// actually act on any of them (we don't randomize addresses, and our
-/// mmap flags ignore READ_IMPLIES_EXEC), but storing the value lets
-/// programs round-trip persona+flags through
-/// `personality(persona)` followed by `personality(0xffffffff)`, which
-/// gdb's "show personality" relies on for its own bookkeeping.
+/// Linux's `personality(2)` does *no* validation at all
+/// (kernel/sys.c::SYSCALL_DEFINE1(personality)):
 ///
-/// Errors:
-///   - `-EINVAL` if the persona low byte is not `PER_LINUX` (0).
+/// ```c
+/// SYSCALL_DEFINE1(personality, unsigned int, personality)
+/// {
+///     unsigned int old = current->personality;
+///     if (personality != 0xffffffff)
+///         set_personality(personality);
+///     return old;
+/// }
+///
+/// static inline void __set_personality(unsigned int personality)
+/// {
+///     current->personality = personality;
+/// }
+/// ```
+///
+/// Any persona byte (PER_LINUX_32BIT = 0x08, PER_SVR4 = 0x01,
+/// PER_BSD = 0x06, PER_LINUX32 = 0x08, etc. — see
+/// include/uapi/linux/personality.h) is accepted and stored as-is.
+/// The kernel never returns `-EINVAL`.  The upper bits
+/// (`ADDR_NO_RANDOMIZE`, `READ_IMPLIES_EXEC`, `MMAP_PAGE_ZERO`, etc.)
+/// are stored verbatim alongside the persona byte.  Our translator
+/// stores values via `pcb::set_personality` but takes no behavioural
+/// action on any of them (we don't randomize addresses, and our mmap
+/// flags ignore READ_IMPLIES_EXEC) — programs still observe the
+/// round-trip through `personality(0xffffffff)`, which gdb's "show
+/// personality" relies on for its own bookkeeping.
+///
+/// Errors: none.  Returns the previous personality on success.
 fn sys_personality(args: &SyscallArgs) -> SyscallResult {
-    // Linux takes the persona as an `unsigned long` but only the low
-    // 32 bits are meaningful — the persona field is 1 byte and the
-    // flags occupy the remaining 24 bits of the lower word.
+    // Linux takes the persona as `unsigned int` (32 bits).  The
+    // x86_64 syscall ABI delivers it in a 64-bit register; truncate
+    // explicitly so high bits set by sloppy callers are dropped the
+    // same way Linux's syscall stub drops them.
     let persona = args.arg0 as u32;
 
     // Read the caller's current personality.  Kernel context (no
@@ -7242,21 +7261,28 @@ fn sys_personality(args: &SyscallArgs) -> SyscallResult {
         None => 0,
     };
 
-    // 0xffff_ffff is the canonical "query only" sentinel.  Glibc and
-    // gdb both poke this before they ever set anything to learn what
+    // 0xffff_ffff is the canonical "query only" sentinel — Linux
+    // skips set_personality entirely on this value.  Glibc and gdb
+    // both poke this before they ever set anything to learn what
     // persona they were started with.
     if persona == u32::MAX {
         return SyscallResult::ok(i64::from(current));
     }
 
-    // The persona is the low byte; flags are the upper 24 bits.  We
-    // only model PER_LINUX (0), so any other persona is rejected.
-    if (persona & 0xff) != 0 {
-        return linux_err(errno::EINVAL);
-    }
-
+    // Linux performs no further validation — accept and store any
+    // persona byte + flag combination.  Pre-batch (batch 362 and
+    // earlier) we rejected `(persona & 0xff) != 0` with EINVAL,
+    // which broke PER_LINUX_32BIT (0x08), PER_SVR4 (0x01), PER_BSD
+    // (0x06), and every other named persona.  Glibc's `personality()`
+    // wrapper does not expect EINVAL from any value and propagates
+    // the kernel return verbatim, so a process that sets
+    // PER_LINUX_32BIT pre-batch saw -EINVAL where Linux returns the
+    // previous personality.
+    //
     // Persist the new value and return the old one.  Kernel context
-    // (no PCB) is a no-op that still returns the "current" value of 0.
+    // (no PCB) is a no-op store; the return value still demonstrates
+    // the dispatcher reached the set-path rather than an EINVAL
+    // shortcut.
     if let Some(pid) = caller_pid() {
         let _ = pcb::set_personality(pid, persona);
     }
@@ -37266,17 +37292,71 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            let a_bad = SyscallArgs {
+            // Batch 363: personality(non-PER_LINUX) returns the
+            // previous personality, not EINVAL.
+            //
+            // Linux's SYSCALL_DEFINE1(personality) is just
+            //   if (personality != 0xffffffff) set_personality(personality);
+            //   return old;
+            // — no validation, no EINVAL, no persona-byte allow-list.
+            // Pre-batch we rejected `(persona & 0xff) != 0` with
+            // -EINVAL, which broke PER_SVR4 (0x01), PER_BSD (0x06),
+            // PER_LINUX_32BIT (0x08), and every other named persona.
+            //
+            // Flip the assertion: passing PER_SVR4 must return 0
+            // (the kernel-context "current personality" fall-back),
+            // not EINVAL.  Three additional probes cover the named
+            // personas glibc's `personality(2)` wrapper documents.
+            let a_svr4 = SyscallArgs {
                 arg0: 0x0000_0001, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::PERSONALITY, &a_bad).value
-                != -i64::from(errno::EINVAL) {
+            if dispatch_linux(nr::PERSONALITY, &a_svr4).value != 0 {
                 serial_println!(
-                    "[syscall/linux]   FAIL: personality(non-PER_LINUX) not EINVAL ({})",
-                    dispatch_linux(nr::PERSONALITY, &a_bad).value
+                    "[syscall/linux]   FAIL: personality(PER_SVR4=0x01) not 0 (was EINVAL) ({})",
+                    dispatch_linux(nr::PERSONALITY, &a_svr4).value
                 );
                 return Err(KernelError::InternalError);
             }
+            // PER_BSD (0x06)
+            let a_bsd = SyscallArgs {
+                arg0: 0x0000_0006, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERSONALITY, &a_bsd).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: personality(PER_BSD=0x06) not 0 ({})",
+                    dispatch_linux(nr::PERSONALITY, &a_bsd).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // PER_LINUX_32BIT (0x08) — the persona glibc uses for
+            // the `setarch i386` family of wrappers.
+            let a_l32 = SyscallArgs {
+                arg0: 0x0000_0008, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERSONALITY, &a_l32).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: personality(PER_LINUX_32BIT=0x08) not 0 ({})",
+                    dispatch_linux(nr::PERSONALITY, &a_l32).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Persona with flags: PER_LINUX_32BIT | ADDR_NO_RANDOMIZE
+            // (0x08 | 0x00040000 = 0x40008).  Linux stores the full
+            // 32-bit value; we just verify the syscall returns 0
+            // (the prev personality from kernel context).
+            let a_flagged = SyscallArgs {
+                arg0: 0x0004_0008, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PERSONALITY, &a_flagged).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: personality(PER_LINUX_32BIT|ADDR_NO_RANDOMIZE) not 0 ({})",
+                    dispatch_linux(nr::PERSONALITY, &a_flagged).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   personality accepts any persona (no EINVAL gate): OK"
+            );
 
             let test_pid = pcb::create("persona-self-test", 0);
             // Fresh PCB defaults to PER_LINUX (0).

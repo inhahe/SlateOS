@@ -36706,3 +36706,121 @@ OBSOLETE NOTE BELOW (pre-relaxation):
         fires before move_addr_to_user; accept4 flags gate
         stays first; bad fd → EBADF regardless of pointer
         validity): OK"
+
+ 435. sys_bind and sys_connect validated user pointers BEFORE
+      looking up the fd, so userspace observed EFAULT (or
+      EINVAL on short addrlen) where Linux returns EBADF for
+      an invalid fd.  Continuation of the socket-family fd-
+      gate-ordering sweep (batches 433: getsockname/getpeername;
+      434: accept/accept4).
+
+      Linux source (net/socket.c).  Both __sys_bind and
+      __sys_connect share the same shape:
+
+          int __sys_bind(int fd, struct sockaddr __user *umyaddr,
+                         int addrlen)
+          {
+              struct socket *sock;
+              struct sockaddr_storage address;
+              int err, fput_needed;
+
+              sock = sockfd_lookup_light(fd, &err,
+                                         &fput_needed);
+              if (sock) {
+                  err = move_addr_to_kernel(umyaddr, addrlen,
+                                            &address);
+                  ...
+              }
+              return err;          // -EBADF if !sock
+          }
+
+          int __sys_connect(int fd,
+                            struct sockaddr __user *uservaddr,
+                            int addrlen)
+          {
+              int ret = -EBADF;
+              struct fd f;
+
+              f = fdget(fd);
+              if (f.file) {
+                  struct sockaddr_storage address;
+                  ret = move_addr_to_kernel(uservaddr, addrlen,
+                                            &address);
+                  ...
+              }
+              return ret;
+          }
+
+      Both run fd-lookup-before-pointer-access.  An invalid
+      fd short-circuits with -EBADF regardless of whether
+      umyaddr / uservaddr / addrlen are valid.
+
+      Divergence table (fd=99 invalid; addr_len=16 is the
+      typical sockaddr_in size):
+
+         bind(fd, addr, addrlen)        Linux    pre-batch  post-batch
+         (99-bad, NULL, 16)             EBADF    EFAULT     EBADF      FIXED
+         (99-bad, valid, 0)             EBADF    EINVAL     EBADF      FIXED
+         (99-bad, valid, 1)             EBADF    EINVAL     EBADF      FIXED
+         (99-bad, BAD_PTR, 16)          EBADF    EFAULT     EBADF      FIXED
+         (99-bad, valid, 16)            EBADF    EBADF      EBADF      ok
+
+         connect(fd, addr, addrlen)     Linux    pre-batch  post-batch
+         (same matrix as bind)
+
+      Why it matters:
+        * The classic "did my listener get closed under me?"
+          probe is bind/connect on a known-bad fd: code
+          checks `errno == EBADF` to confirm.  Pre-batch the
+          same probe with a NULL placeholder addr would
+          surface EFAULT and the recovery path wouldn't fire.
+        * Connection-pool implementations (libpq, Redis
+          clients, etc.) frequently retry connect() on a
+          pooled fd that may have been silently closed by a
+          server-side reset; their canonical error
+          classification is "EBADF = repool" vs "EAGAIN /
+          ETIMEDOUT = retry-after-delay".  An EFAULT diagnosis
+          confuses retry logic into the wrong path.
+        * AF_UNIX clients constructing sockaddr_un on the
+          stack and then accidentally passing addrlen = 0
+          (a not-uncommon truncation bug from off-by-one
+          path length math) — pre-batch would see EINVAL
+          even with an already-closed socket fd; Linux
+          returns EBADF and a `if (errno == EBADF) reopen()`
+          recovery would work.
+
+      Architectural directive: translator-only fix.  Native
+      bind/connect path can validate in whatever order it
+      finds convenient; this reorder is purely so the Linux-
+      numbered entrypoint reports the errno Linux would.  No
+      changes to validate_sockaddr_in, no changes to
+      validate_linux_fd, no changes to any native code path.
+
+      Fix in kernel/src/syscall/linux.rs:
+        * sys_bind (~line 21815): moved validate_linux_fd
+          to fire BEFORE validate_sockaddr_in.  Doc-commented
+          with the __sys_bind source quote.
+        * sys_connect (~line 21959): moved validate_linux_fd
+          to fire BEFORE validate_sockaddr_in.  Doc-commented
+          with the __sys_connect source quote.
+        * Did NOT touch sys_sendto / sys_recvfrom / sys_sendmsg
+          / sys_recvmsg — each carries its own gate matrix
+          (flags, buf-len, msghdr size + per-iovec checks)
+          that needs its own Linux gate-order analysis.
+
+      Self-test additions (~line 55299):
+        * bind 4-case matrix: (NULL,16) → EFAULT, (valid,0)
+          → EINVAL, (valid,1) → EINVAL, (valid,16) → EBADF.
+        * Same 4-case matrix for connect.
+        * Same kernel-ctx caveat as batches 433/434: the
+          user-context EBADF-vs-EFAULT/EINVAL swap is not
+          directly observable here.
+
+      Build: cargo build -p kernel clean (42.85s).
+      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+      24s).
+      Stamp confirmed at build/serial-test.txt:
+        "[syscall/linux]   bind/connect fd lookup ordered
+        before pointer validation (Linux: sockfd_lookup_light
+        / fdget fires before move_addr_to_kernel; bad fd →
+        EBADF regardless of addr/addrlen): OK"

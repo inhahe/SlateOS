@@ -21813,14 +21813,42 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
 
 /// `bind(sockfd, addr*, addrlen)`.
 fn sys_bind(args: &SyscallArgs) -> SyscallResult {
+    // Batch 435 — fd lookup gates before pointer validation.
+    //
+    // Linux's __sys_bind (net/socket.c):
+    //
+    //     int __sys_bind(int fd, struct sockaddr __user *umyaddr,
+    //                    int addrlen)
+    //     {
+    //         struct socket *sock;
+    //         struct sockaddr_storage address;
+    //         int err, fput_needed;
+    //
+    //         sock = sockfd_lookup_light(fd, &err, &fput_needed);   // Gate 1
+    //         if (sock) {
+    //             err = move_addr_to_kernel(umyaddr, addrlen,        // Gate 2
+    //                                       &address);
+    //             ...
+    //         }
+    //         return err;                          // -EBADF if !sock
+    //     }
+    //
+    // sockfd_lookup_light fires FIRST: an invalid fd short-circuits
+    // with -EBADF regardless of whether umyaddr / addrlen are valid.
+    // Pre-batch our code validated the addr first, so (bad_fd, NULL,
+    // any) was -EFAULT and (bad_fd, valid, 0) was -EINVAL where Linux
+    // returns -EBADF.  Translator-only swap; native bind path is
+    // untouched.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation)]
     let addr_len = args.arg2 as u32;
-    if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
+    // Linux gate 1: sockfd_lookup_light → EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    if let Err(r) = validate_linux_fd(fd) {
+    // Linux gate 2: move_addr_to_kernel — pointer + length sanity.
+    if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
         return r;
     }
     linux_err(errno::EBADF)
@@ -21957,14 +21985,39 @@ fn sys_accept4(args: &SyscallArgs) -> SyscallResult {
 
 /// `connect(sockfd, addr*, addrlen)`.
 fn sys_connect(args: &SyscallArgs) -> SyscallResult {
+    // Batch 435 — fd lookup gates before pointer validation.
+    //
+    // Linux's __sys_connect (net/socket.c) — identical shape to
+    // __sys_bind:
+    //
+    //     int __sys_connect(int fd, struct sockaddr __user *uservaddr,
+    //                       int addrlen)
+    //     {
+    //         int ret = -EBADF;
+    //         struct fd f;
+    //
+    //         f = fdget(fd);                                       // Gate 1
+    //         if (f.file) {
+    //             struct sockaddr_storage address;
+    //             ret = move_addr_to_kernel(uservaddr, addrlen,    // Gate 2
+    //                                       &address);
+    //             ...
+    //         }
+    //         return ret;
+    //     }
+    //
+    // See sys_bind for the full Batch 435 rationale.  Same
+    // translator-only reorder.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation)]
     let addr_len = args.arg2 as u32;
-    if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
+    // Linux gate 1: fdget → -EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    if let Err(r) = validate_linux_fd(fd) {
+    // Linux gate 2: move_addr_to_kernel pointer + length sanity.
+    if let Err(r) = validate_sockaddr_in(args.arg1, addr_len) {
         return r;
     }
     linux_err(errno::EBADF)
@@ -55301,6 +55354,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   accept/accept4 fd lookup ordered before pointer validation (Linux: do_accept's fdget fires before move_addr_to_user; accept4 flags gate stays first; bad fd → EBADF regardless of pointer validity): OK"
+        );
+    }
+
+    // Batch 435: bind / connect — fd lookup gates BEFORE pointer
+    // validation, matching Linux's __sys_bind / __sys_connect in
+    // net/socket.c (sockfd_lookup_light / fdget runs before
+    // move_addr_to_kernel).
+    //
+    // Pre-batch order was POINTER → FD; userspace observed:
+    //   (bad_fd, NULL, 16)        pre EFAULT  post EBADF (Linux)
+    //   (bad_fd, valid, 0)        pre EINVAL  post EBADF (Linux)
+    //   (bad_fd, valid, 1)        pre EINVAL  post EBADF (Linux)
+    //   (bad_fd, BAD_PTR, 16)     pre EFAULT  post EBADF (Linux)
+    //
+    // Same kernel-ctx caveat as batches 433/434: validate_linux_fd
+    // is a no-op when caller_pid() is None, so the post-gate flow
+    // remains observable.  The probes verify the reorder did not
+    // regress (NULL → EFAULT, addrlen < 2 → EINVAL, valid → EBADF).
+    {
+        let sockaddr_buf = [0u8; 32];
+        let sockaddr_ptr = sockaddr_buf.as_ptr() as u64;
+
+        // bind(fd=3, NULL, 16): fd OK → NULL → EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bind(NULL, 16) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::BIND, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // bind(fd=3, valid, 0): fd OK → addrlen < 2 → EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bind(valid, 0) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::BIND, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // bind(fd=3, valid, 1): addrlen = 1 still under sa_family → EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bind(valid, 1) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::BIND, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // bind(fd=3, valid, 16): fd OK → pointer OK → EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bind(valid, 16) post-reorder not EBADF ({})",
+                dispatch_linux(nr::BIND, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Same matrix for connect.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: connect(NULL, 16) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::CONNECT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: connect(valid, 0) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::CONNECT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: connect(valid, 1) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::CONNECT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: connect(valid, 16) post-reorder not EBADF ({})",
+                dispatch_linux(nr::CONNECT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   bind/connect fd lookup ordered before pointer validation (Linux: sockfd_lookup_light / fdget fires before move_addr_to_kernel; bad fd → EBADF regardless of addr/addrlen): OK"
         );
     }
 

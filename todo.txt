@@ -26836,3 +26836,79 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        Build: cargo build -p kernel clean (39.83s).
        Boot test: bash scripts/boot-test.sh --no-build
                   --timeout=240 PASSED (BOOT_OK at 25s).
+
+335. Batch 305 — sys_getrusage missing `who` input
+     validation + int truncation gate.
+
+     Divergence: Linux's
+     `SYSCALL_DEFINE2(getrusage, int, who, struct rusage __user *, ru)`
+     in kernel/sys.c gates `who not in {RUSAGE_SELF=0,
+     RUSAGE_CHILDREN=-1, RUSAGE_THREAD=1}` → EINVAL
+     *before* touching the user pointer.  Pre-batch we
+     skipped that gate entirely: any `who` value
+     (including unspecified codes like 42, or high-half
+     sentinels like 0x1_0000_0000) fell straight through
+     to the NULL/copy_to_user path, returning EFAULT or
+     success where Linux returns EINVAL.  Feature-
+     detection probes (`is getrusage(THREAD) supported?`)
+     saw contradictory results vs. Linux.  Same x86_64
+     ABI int-truncation thread as batches 285/286/303/
+     304 — `who` is delivered in a 64-bit register and
+     must be cast to i32 before the gate runs.
+
+     Fix:
+       - In sys_getrusage: cast args.arg0 to i32 first,
+         then reject any value not in
+         {RUSAGE_SELF=0, RUSAGE_CHILDREN=-1,
+          RUSAGE_THREAD=1} with EINVAL, before the
+         existing NULL pointer check.  Constants defined
+         locally; matches Linux's `kernel/sys.c` order.
+
+     Tests added in dispatch_linux:
+       - (a) getrusage(who=2, ru=NULL) → EINVAL (gate
+             fires before NULL check).
+       - (b) getrusage(who=0x1_0000_0000, ru=NULL) →
+             EFAULT (truncates to (int)0=SELF, passes
+             gate, NULL → EFAULT).
+       - (c) getrusage(who=u64::MAX, ru=NULL) → EFAULT
+             (truncates to (int)-1=CHILDREN, passes
+             gate, NULL → EFAULT).  Regression guard:
+             ensures CHILDREN stays in the allowed set.
+       - (d) getrusage(who=42, ru=NULL) → EINVAL
+             (garbage who).
+       Marker: "[syscall/linux]   getrusage who input
+       validation + int truncation: OK".
+
+     Existing getrusage probe at the
+     getrusage/sysinfo/times dispatch block (who=0,
+     ru=NULL → EFAULT) still passes: who=0=RUSAGE_SELF
+     clears the new gate, then NULL → EFAULT as before.
+
+     Preserved behaviour:
+       - Valid who (SELF/CHILDREN/THREAD) with NULL
+         pointer still returns EFAULT.
+       - Valid who with a valid pointer still returns
+         a 144-byte zero rusage and ok(0).
+       - Pointer validation order unchanged after the
+         who gate (NULL → EFAULT, then
+         validate_user_write, then copy_to_user).
+
+     Known limitations (deferred):
+       - We still return all-zero rusage for SELF/
+         CHILDREN/THREAD — accurate utime/stime/maxrss
+         accounting requires a per-PCB resource counter
+         which doesn't exist yet.  Tracked alongside
+         the scheduler accounting work.
+       - RUSAGE_THREAD currently returns the same zero
+         rusage as RUSAGE_SELF; once per-thread
+         accounting exists, THREAD should report only
+         the current thread's usage.
+       - sys_setrlimit/getrlimit (unsigned int
+         resource) audited last batch — they delegate
+         to sys_prlimit64 which already casts resource
+         to u32 (verified, batch 305).  Closing that
+         deferred item.
+
+     Build: cargo build -p kernel clean (35.29s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 24s).

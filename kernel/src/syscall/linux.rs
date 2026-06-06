@@ -6915,6 +6915,29 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 ///
 /// Returns 0 on success, `-EFAULT` if `usage` is a bad pointer.
 fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/sys.c::SYSCALL_DEFINE2(getrusage)):
+    //   1. who not in {SELF=0, CHILDREN=-1, THREAD=1}    -> -EINVAL
+    //   2. copy_to_user(ru, &r, sizeof r)                -> -EFAULT
+    // The x86_64 syscall ABI delivers `int who` in a 64-bit
+    // register and truncates to the low 32 bits before the body
+    // runs.  Pre-batch we skipped the `who` validation entirely:
+    // any value — including unspecified codes like 42, or high-
+    // half sentinels like 0x1_0000_0000 — fell through to the
+    // EFAULT/zero-buffer path, returning success or EFAULT where
+    // Linux returns EINVAL.  Probes detecting feature presence
+    // (`is getrusage(THREAD) supported?` style polling) saw
+    // contradictory results vs. Linux.
+    const RUSAGE_SELF: i32 = 0;
+    const RUSAGE_CHILDREN: i32 = -1;
+    const RUSAGE_THREAD: i32 = 1;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let who_i32 = args.arg0 as i32;
+    if who_i32 != RUSAGE_SELF
+        && who_i32 != RUSAGE_CHILDREN
+        && who_i32 != RUSAGE_THREAD
+    {
+        return linux_err(errno::EINVAL);
+    }
     let usage_ptr = args.arg1;
     if usage_ptr == 0 {
         return linux_err(errno::EFAULT);
@@ -28024,6 +28047,90 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   getitimer/setitimer int which truncation: OK"
+        );
+    }
+
+    // Batch 305 — sys_getrusage missing `who` input validation.
+    // Linux gates `who not in {SELF=0, CHILDREN=-1, THREAD=1}` -> EINVAL
+    // *before* touching the rusage pointer; pre-batch we skipped that
+    // and went straight to the EFAULT/copy_to_user path.  Also covers
+    // the int-truncation thread: high-half sentinels for `who` must be
+    // cast to i32 first so RUSAGE_SELF/CHILDREN/THREAD comparisons see
+    // the truncated value, not the raw 64-bit register.
+    {
+        // (a) getrusage(who=2, ru=NULL).  Linux: who=2 is not in the
+        //     allowed set -> EINVAL (before the NULL check).  Pre-
+        //     batch we returned EFAULT (NULL gate fired first).
+        let a = SyscallArgs {
+            arg0: 2,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage(who=2) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) getrusage(who=0x1_0000_0000, ru=NULL).  Pre-batch: raw
+        //     0x1_0000_0000 != 0/1/-1 -> would have been EINVAL once
+        //     we added the gate, BUT we have no gate -> EFAULT.
+        //     Post-batch: who truncates to (int)0 = RUSAGE_SELF,
+        //     passes the gate, then NULL pointer -> EFAULT.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage(who=high-half-zero) -> {} (expected -EFAULT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) getrusage(who=u64::MAX, ru=NULL).  Truncates to
+        //     (int)-1 = RUSAGE_CHILDREN -> passes who gate, NULL
+        //     pointer -> EFAULT.  Pre-batch: huge u64 != 0 -> EFAULT
+        //     coincidentally (NULL path), but we want to lock in the
+        //     post-batch reasoning so a future regression that drops
+        //     CHILDREN from the allowed set is caught.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage(who=u64::MAX trunc -1) -> {} (expected -EFAULT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) getrusage(who=42, ru=NULL).  Garbage who: EINVAL.
+        let a = SyscallArgs {
+            arg0: 42,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage(who=42) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   getrusage who input validation + int truncation: OK"
         );
     }
 

@@ -34805,3 +34805,54 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (49.99s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 23s).
+
+414. Batch 384 — landlock_create_ruleset VERSION/ERRATA queries returning bogus 0.
+
+     Divergence:
+
+       call                             pre-batch        Linux (!initialized)
+       -------------------------------- ---------------- -------------------------
+       (NULL, 0, VERSION=0x1)           0  "ABI v0"      -EOPNOTSUPP
+       (NULL, 0, ERRATA=0x2)            0  "no errata"   -EOPNOTSUPP
+       (attr, size=8, flags=0) valid    -ENOSYS          -EOPNOTSUPP
+       (attr, size=16, zero-pad)        -ENOSYS          -EOPNOTSUPP
+
+     Why it matters: Linux's `security/landlock/syscalls.c::SYSCALL_DEFINE3`
+     opens with `if (!landlock_initialized) return -EOPNOTSUPP;` so EVERY
+     code path through the syscall returns EOPNOTSUPP on a kernel where
+     Landlock LSM hooks are registered but the backend isn't initialized.
+     Linux NEVER returns `0` from the VERSION/ERRATA queries — those
+     paths exclusively yield a positive `LANDLOCK_ABI_VERSION` (>=1, the
+     ABI version number) or `-EOPNOTSUPP`.  Returning `0` claimed a
+     fictional "ABI version 0" that has no documented semantics:
+
+       abi = syscall(SYS_landlock_create_ruleset, NULL, 0,
+                     LANDLOCK_CREATE_RULESET_VERSION);
+       if (abi < 0)        /* no Landlock */
+       else if (abi >= 1)  /* Landlock at version abi */
+       /* abi == 0 — undefined; some libs treat as "version 0 ruleset",
+          others as "no Landlock", inconsistent. */
+
+     Real-world probe paths in Chromium's sandbox, BubbleWrap, systemd,
+     and libcap-ng take the `>= 1` branch on `0`, then fail trying to
+     construct a "version-0 ruleset" that doesn't exist.  ENOSYS for the
+     real-ruleset path was its own mild divergence — falsely signalling
+     "syscall-table miss" where the syscall is in fact registered;
+     EOPNOTSUPP correctly signals "syscall present, no backend".
+
+     Fix: migrate all three terminal answers in
+     sys_landlock_create_ruleset to `linux_err(errno::EOPNOTSUPP)`,
+     mirroring Linux's `!landlock_initialized` gate.  Pre-EOPNOTSUPP
+     flag-validity gates (the ERRATA-vs-VERSION mutex, the
+     size/attr/query-form constraints, forward-compat E2BIG) remain
+     intact so callers who probe flag-level discriminators still see
+     the Linux-shaped EINVAL/E2BIG/EFAULT discriminators before the
+     terminal EOPNOTSUPP.  Doc comment cites the literal Linux gate
+     order from security/landlock/syscalls.c.
+
+     Probes updated (4) and one new aggregate stamp added:
+       "[syscall/linux]   landlock_create_ruleset VERSION/ERRATA query
+        -> EOPNOTSUPP (was bogus 0): OK"
+
+     Build: cargo build -p kernel clean (46.26s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).

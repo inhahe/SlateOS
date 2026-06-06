@@ -19144,16 +19144,59 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
 /// `flags` as a small dispatch token, not a bitmask:
 ///   * `flags == 0` enters the real-ruleset construction path.
 ///   * `flags == LANDLOCK_CREATE_RULESET_VERSION (0x1)` with
-///     `attr == NULL && size == 0` returns the Landlock ABI version.
+///     `attr == NULL && size == 0` returns the Landlock ABI version
+///     (a *positive* integer: `LANDLOCK_ABI_VERSION` = 1 in Linux 5.13,
+///     growing to 6 in Linux 6.10+).
 ///   * `flags == LANDLOCK_CREATE_RULESET_ERRATA (0x2)` (Linux 6.10+)
 ///     with `attr == NULL && size == 0` returns the errata bitmap.
 ///   * Any other `flags` value — including combinations like
 ///     `VERSION | ERRATA` — returns `EINVAL`.
 ///
-/// We honestly report ABI version 0 ("Landlock is not available") and
-/// an empty errata bitmap (no errata to surface for a Landlock that
-/// doesn't exist), so callers skip rule construction without hitting
-/// ENOSYS surprises on subsequent calls.
+/// Batch 384: pre-batch we returned `0` from the VERSION and ERRATA
+/// query paths, claiming "ABI version 0" / "no errata to surface".
+/// But Linux NEVER returns `0` from these queries — the function-body
+/// answers are exclusively: positive `LANDLOCK_ABI_VERSION`,
+/// errata bitmap, or `-EOPNOTSUPP` (when `landlock_initialized` is
+/// false) / `-EINVAL` (bad flag combinations).  Returning `0` claims
+/// a fictional ABI version that has no documented semantics:
+///
+///   abi = syscall(SYS_landlock_create_ruleset, NULL, 0,
+///                 LANDLOCK_CREATE_RULESET_VERSION);
+///   if (abi < 0)     /* no Landlock */
+///   else if (abi >= 1) /* Landlock at version abi */
+///   /* abi == 0 — undefined; some libs treat as success+v0, others
+///      as "no Landlock", inconsistent. */
+///
+/// Real-world probe paths (Chromium sandbox, BubbleWrap, systemd's
+/// landlock support, libcap-ng) take the `>= 1` branch on `0`, then
+/// fail trying to use a "version-0 ruleset" that doesn't exist.
+///
+/// Linux's `security/landlock/syscalls.c` literal gate order:
+///
+///   SYSCALL_DEFINE3(landlock_create_ruleset, ...) {
+///       if (!landlock_initialized)
+///           return -EOPNOTSUPP;
+///       if (flags) {
+///           if (attr || size || flags != LANDLOCK_CREATE_RULESET_VERSION)
+///               return -EINVAL;
+///           return LANDLOCK_ABI_VERSION;
+///       }
+///       ...
+///   }
+///
+/// We model `landlock_initialized = false` — there is no Landlock LSM
+/// in this kernel.  The Linux-faithful answer on the
+/// `!landlock_initialized` branch is `-EOPNOTSUPP` for every code
+/// path through this syscall, including the version and errata
+/// queries and the real ruleset construction.  Migrate the three
+/// terminal `0` / `ENOSYS` answers to `EOPNOTSUPP`, leaving the
+/// pre-`!landlock_initialized` flag-validity gates intact so callers
+/// who poke at flag-level discriminators (Linux 6.10+'s ERRATA-vs-
+/// VERSION mutex, the size/attr query-form constraints) still see
+/// the Linux-shaped `EINVAL`s before the terminal answer.  This makes
+/// the function body internally consistent — every "valid call shape,
+/// no Landlock to back it" path now answers EOPNOTSUPP, the same
+/// errno Linux returns when its `landlock_initialized` gate fires.
 fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
     const LANDLOCK_CREATE_RULESET_VERSION: u32 = 0x1;
     const LANDLOCK_CREATE_RULESET_ERRATA: u32 = 0x2;
@@ -19164,15 +19207,21 @@ fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
             && args.arg0 == 0
             && args.arg1 == 0
         {
-            // ABI version 0 — Landlock not available.
-            return SyscallResult::ok(0);
+            // Linux: returns positive LANDLOCK_ABI_VERSION when
+            // initialized.  We model !initialized -> EOPNOTSUPP, the
+            // canonical "this kernel has Landlock LSM hooks registered
+            // but no working backend" signal.  Pre-batch we returned
+            // `0`, which Linux never does from this query path.
+            return linux_err(errno::EOPNOTSUPP);
         }
         if flags == LANDLOCK_CREATE_RULESET_ERRATA
             && args.arg0 == 0
             && args.arg1 == 0
         {
-            // No errata to surface — empty bitmap.
-            return SyscallResult::ok(0);
+            // Same rationale as VERSION query — Linux's
+            // `!landlock_initialized` arm returns EOPNOTSUPP before
+            // any flag-dispatch can yield the errata bitmap.
+            return linux_err(errno::EOPNOTSUPP);
         }
         return linux_err(errno::EINVAL);
     }
@@ -19239,7 +19288,11 @@ fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
             off += take;
         }
     }
-    linux_err(errno::ENOSYS)
+    // Batch 384: was ENOSYS.  Linux's `!landlock_initialized` arm
+    // returns EOPNOTSUPP for every code path in this syscall, so the
+    // real-ruleset construction path also terminates here — matching
+    // the VERSION/ERRATA query EOPNOTSUPP above.
+    linux_err(errno::EOPNOTSUPP)
 }
 
 /// `landlock_add_rule(ruleset_fd, rule_type, rule_attr*, flags)`.
@@ -49743,19 +49796,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   sched_{{set,get}}attr pid_t/uint truncation: OK"
         );
 
-        // landlock_create_ruleset version-query -> 0 (no landlock).
+        // Batch 384: landlock_create_ruleset VERSION-query.  Pre-batch
+        // we returned `0`, claiming a fictional "ABI version 0" that
+        // Linux never produces.  Linux's `!landlock_initialized` arm
+        // returns -EOPNOTSUPP for every code path in this syscall;
+        // mirror that so probes detect "no Landlock" via the same errno
+        // sandbox libraries (Chromium, BubbleWrap, systemd, libcap-ng)
+        // see on a Linux kernel built without the Landlock LSM
+        // initialized.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: landlock version-query not 0");
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+            != -i64::from(errno::EOPNOTSUPP)
+        {
+            serial_println!("[syscall/linux]   FAIL: landlock version-query not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // landlock_create_ruleset errata-query (flags=ERRATA=0x2) -> 0
-        // (no errata bitmap to surface for a non-existent Landlock).
+        // Batch 384: landlock_create_ruleset ERRATA-query — same
+        // EOPNOTSUPP rationale as VERSION query.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: landlock errata-query not 0");
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+            != -i64::from(errno::EOPNOTSUPP)
+        {
+            serial_println!("[syscall/linux]   FAIL: landlock errata-query not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   landlock_create_ruleset VERSION/ERRATA query -> EOPNOTSUPP (was bogus 0): OK"
+        );
         // landlock_create_ruleset VERSION|ERRATA (0x3) -> EINVAL
         // (Linux requires flags to be exactly one dispatch value, not
         // a bit-OR combination).
@@ -49790,15 +49857,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock NULL attr not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // landlock_create_ruleset valid -> ENOSYS.
-        // Provide a small readable 8-byte buffer as the attr pointer
-        // (batch 107 removed the previous shared `size_ptr` definition
-        // when the sched_setattr test was rewritten).
+        // Batch 384: landlock_create_ruleset real-ruleset path also
+        // moves to EOPNOTSUPP (was ENOSYS).  Linux's
+        // `!landlock_initialized` arm terminates here as well; ENOSYS
+        // would falsely signal "syscall-table miss" where the syscall
+        // is in fact registered.  Keep the readable 8-byte attr buffer
+        // so the pre-EOPNOTSUPP attr/size/forward-compat gates still
+        // get exercised by the discriminators below.
         let landlock_attr = [0u8; 8];
         let size_ptr = landlock_attr.as_ptr() as u64;
         let a = SyscallArgs { arg0: size_ptr, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: landlock valid not ENOSYS");
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+            != -i64::from(errno::EOPNOTSUPP)
+        {
+            serial_println!("[syscall/linux]   FAIL: landlock valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
         // Batch 224 discriminator: (attr=valid, size=4) — usize <
@@ -49843,17 +49915,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // first non-zero byte returns -E2BIG so probes can detect
         // what the kernel knows.
         //
-        // Case A: size=16 with zero tail -> ENOSYS (passes zero-check;
-        // landlock not implemented so terminal stub returns ENOSYS).
+        // Case A: size=16 with zero tail -> EOPNOTSUPP (passes
+        // zero-check; landlock not initialized so terminal answer is
+        // EOPNOTSUPP after batch 384, not ENOSYS).
         let landlock_pad_zero = [0u8; 16];
         let a = SyscallArgs {
             arg0: landlock_pad_zero.as_ptr() as u64,
             arg1: 16,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0,
         };
-        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::ENOSYS) {
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
+            != -i64::from(errno::EOPNOTSUPP)
+        {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock (attr, size=16, zero-pad) not ENOSYS"
+                "[syscall/linux]   FAIL: landlock (attr, size=16, zero-pad) not EOPNOTSUPP"
             );
             return Err(KernelError::InternalError);
         }

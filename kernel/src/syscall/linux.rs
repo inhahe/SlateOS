@@ -20402,6 +20402,31 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
     if new_size_aligned == 0 {
         return linux_err(errno::EINVAL);
     }
+    // (6) MREMAP_FIXED: new_addr + new_size must not overflow and
+    // must remain inside the user address space.  Linux's
+    // mm/mremap.c::mremap_to() does, after aligning the lengths:
+    //   if (new_len > TASK_SIZE || new_addr > TASK_SIZE - new_len)
+    //       goto out;                  // -> -EINVAL
+    // The second clause is written as a subtraction precisely to
+    // catch wraparound: `new_addr > TASK_SIZE - new_len` is true
+    // both for genuinely-too-high new_addr AND for new_addr +
+    // new_len overflowing past 2^64 (since TASK_SIZE - new_len
+    // would itself be a huge number in that case, but `new_addr`
+    // can still exceed it).  We mirror this with a single
+    // checked_add into USER_SPACE_END (= 0x0000_8000_0000_0000,
+    // our equivalent of x86_64 Linux's TASK_SIZE).  Pre-batch we
+    // accepted MREMAP_FIXED with new_addr near u64::MAX and fell
+    // through to ENOMEM; post-batch we return EINVAL, matching
+    // Linux's documented errno for this gate.
+    if flags & 2 != 0 {
+        let fits = match new_addr.checked_add(new_size_aligned) {
+            Some(end) => end <= crate::mm::page_table::USER_SPACE_END,
+            None => false,
+        };
+        if !fits {
+            return linux_err(errno::EINVAL);
+        }
+    }
     // We don't support resize-in-place; report ENOMEM (Linux's
     // documented "no room to grow without MAYMOVE" answer for the
     // shrinks/expand-only case).  glibc malloc handles ENOMEM from
@@ -46579,6 +46604,81 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   perf_event_open __reserved_2 gating: OK"
+            );
+        }
+
+        // ---- mremap MREMAP_FIXED new_addr+new_size overflow / TASK_SIZE ----
+        // Linux's mm/mremap.c::mremap_to() does, after PAGE_ALIGN'ing
+        // the lengths:
+        //   if (new_len > TASK_SIZE || new_addr > TASK_SIZE - new_len)
+        //       goto out;        // -> -EINVAL
+        // Pre-batch we accepted MREMAP_FIXED|MAYMOVE with a new_addr
+        // near u64::MAX and fell through to ENOMEM.  Post-batch the
+        // overflow / out-of-user-space case returns EINVAL.
+        //
+        // Discriminator triple (all kernel-context, no real fd needed
+        // because mremap doesn't take an fd):
+        //   A. flags=MAYMOVE|FIXED(3), old_addr=0 (aligned),
+        //      old_size=0x4000, new_size=0x4000,
+        //      new_addr=0xFFFFFFFFFFFFC000 (page-aligned, but
+        //      new_addr+new_size overflows past u64::MAX)
+        //        -> pre-batch: ENOMEM ; post-batch: EINVAL
+        //   B. same args but new_addr=0x10_0000_0000_0000 (page-aligned,
+        //      above USER_SPACE_END=0x8000_0000_0000)
+        //        -> pre-batch: ENOMEM ; post-batch: EINVAL
+        //   C. same args but new_addr=0 (inside user space)
+        //        -> pre-batch: ENOMEM ; post-batch: ENOMEM (acceptance —
+        //           confirms the gate only fires for out-of-bounds
+        //           new_addr and doesn't regress the legacy path)
+        {
+            // Discriminator A: new_addr+new_size overflow.
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0x4000,
+                arg2: 0x4000,
+                arg3: 3,
+                arg4: 0xFFFF_FFFF_FFFF_C000,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mremap(FIXED, new_addr+sz overflow) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Discriminator B: new_addr above USER_SPACE_END.
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0x4000,
+                arg2: 0x4000,
+                arg3: 3,
+                arg4: 0x10_0000_0000_0000,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mremap(FIXED, new_addr above USER_SPACE_END) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Discriminator C: new_addr inside user space — acceptance,
+            // still falls through to ENOMEM.
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0x4000,
+                arg2: 0x4000,
+                arg3: 3,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mremap(FIXED, new_addr=0) not ENOMEM"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   mremap MREMAP_FIXED new_addr bounds: OK"
             );
         }
 

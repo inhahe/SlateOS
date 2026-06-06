@@ -23851,3 +23851,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 26s).
 
+## 307. syscall/linux: sys_mremap — MREMAP_FIXED new_addr
+##      out-of-user-space / overflow gating (batch 278).
+##
+##      Pre-batch divergence: Linux's mm/mremap.c::mremap_to()
+##      does, after PAGE_ALIGN'ing the lengths:
+##          if (new_len > TASK_SIZE ||
+##              new_addr > TASK_SIZE - new_len)
+##              goto out;   /* -> -EINVAL */
+##      The second clause is written as a subtraction precisely
+##      to catch both:
+##        - new_addr legitimately above the user/kernel split, AND
+##        - new_addr + new_len overflowing past 2^64 (wraparound
+##          case: TASK_SIZE - new_len is a huge unsigned, but
+##          new_addr can still exceed it).
+##      Pre-batch our sys_mremap accepted MREMAP_FIXED|MAYMOVE
+##      with new_addr near u64::MAX and fell through to ENOMEM,
+##      diverging from Linux's documented EINVAL on this gate.
+##
+##      Fix: in sys_mremap, after the existing flag/MAYMOVE/align
+##      checks and the new_size PAGE_ALIGN overflow check from
+##      batch 273, and only when MREMAP_FIXED (flag bit 2) is
+##      set, do:
+##          let fits = match new_addr.checked_add(new_size_aligned) {
+##              Some(end) => end <= USER_SPACE_END,
+##              None      => false,
+##          };
+##          if !fits { return -EINVAL; }
+##      USER_SPACE_END (0x0000_8000_0000_0000) is our x86_64
+##      equivalent of Linux's TASK_SIZE on the same arch.  The
+##      checked_add collapses the two-part Linux check into a
+##      single overflow-safe expression: None on wraparound,
+##      Some(end) > USER_SPACE_END on out-of-bounds.
+##
+##      Self-tests (kernel-context probe triple in dispatch_linux):
+##        A. flags=MAYMOVE|FIXED(3), old_addr=0, old_size=0x4000,
+##           new_size=0x4000, new_addr=0xFFFF_FFFF_FFFF_C000
+##           (page-aligned, but new_addr+new_size overflows past
+##           u64::MAX) -> EINVAL.
+##           (pre-batch: ENOMEM; post-batch: EINVAL).
+##        B. same args but new_addr=0x10_0000_0000_0000
+##           (page-aligned, above USER_SPACE_END) -> EINVAL.
+##           (pre-batch: ENOMEM; post-batch: EINVAL).
+##        C. same args but new_addr=0 (inside user space) ->
+##           ENOMEM (acceptance — confirms the gate only fires
+##           for out-of-bounds new_addr and doesn't regress the
+##           pre-existing fall-through-to-ENOMEM path).
+##      Marker: "mremap MREMAP_FIXED new_addr bounds: OK".
+##
+##      Existing tests preserved: perf_event_open __reserved_2
+##      gating (batch 277), socket/socketpair EAFNOSUPPORT
+##      gating (276), listen/shutdown drop entry gates (275),
+##      setsockopt/getsockopt no-level gate (274), mremap
+##      new_size PAGE_ALIGN overflow (273), pread64/pwrite64
+##      fd-before-count (272), capset pid EPERM (270),
+##      prctl(PR_SET_NAME) NULL-arg2 (269), capget/capset
+##      NULL-data quadruple (268), preadv/pwritev iov_len
+##      SSIZE_MAX (267) — all unaffected.  In particular the
+##      existing mremap test rejecting new_size==u64::MAX with
+##      EINVAL (batch 273) continues to fire BEFORE the new
+##      MREMAP_FIXED bounds check.
+##
+##      Known limitations: still pending — accept/accept4 and
+##      bind/connect sockaddr-before-fd reorders (not
+##      probe-distinguishable in kernel context because
+##      validate_linux_fd is a no-op there; will need real
+##      user-context tests); per-protocol protocol-number
+##      validation (socket(AF_INET, SOCK_STREAM, 99) should
+##      -EPROTONOSUPPORT, we accept and return ENOSYS);
+##      ESOCKTNOSUPPORT for type valid but unimplemented;
+##      pread/pwrite EOVERFLOW gate at pos+count and silent
+##      MAX_RW_COUNT clamp; sys_perf_event_open in-struct
+##      __reserved_3 field validation; sys_mremap rejecting
+##      MREMAP_FIXED when new_addr is below the userspace
+##      mmap floor (we currently allow new_addr=0).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+

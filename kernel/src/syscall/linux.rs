@@ -25164,11 +25164,28 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
 /// lookup (which then EINVALs for missing VMAs), so pre-batch's
 /// EINVAL-on-misalignment yields the same errno as Linux's
 /// likely terminal in practice.  No probe-observable divergence.
+///
+/// Batch 390: add the two arithmetic-overflow gates Linux runs
+/// after the prot reject and PAGE_MASK rounds:
+///
+///   * `if (start + size <= start) return ret;` — wraps to
+///     EINVAL.  After PAGE_MASK, `size == 0` makes this
+///     trivially true so `size=0` is a silent EINVAL (not
+///     ENOSYS).  Pre-batch we let `size=0` flow through to
+///     ENOSYS, masking the real "bad size" signal.
+///
+///   * `if (pgoff + (size >> PAGE_SHIFT) < pgoff) return ret;`
+///     — pgoff arithmetic wrap-around (huge pgoff + non-trivial
+///     size).  Pre-batch we ignored pgoff entirely.
+///
+/// The PAGE_SHIFT is 14 (16 KiB pages) per CLAUDE.md.  Linux
+/// uses 12 (4 KiB), but the LOGIC — overflow check on the file
+/// page index sum — is what's faithful.
 fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
     let addr = args.arg0;
-    let _size = args.arg1;
+    let size = args.arg1;
     let prot = args.arg2;
-    let _pgoff = args.arg3;
+    let pgoff = args.arg3;
     let _flags = args.arg4;
     // 16 KiB alignment — see CLAUDE.md architectural rules.
     if addr % 0x4000 != 0 {
@@ -25177,6 +25194,25 @@ fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
     // Linux: `if (prot) return -EINVAL;` — any non-zero prot
     // is rejected (the original VMA's protection is preserved).
     if prot != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Linux: `start = start & PAGE_MASK; size = size & PAGE_MASK;`
+    // then `if (start + size <= start) return -EINVAL;`.  We've
+    // already rejected misaligned start so masking start is a
+    // no-op; mask size to mirror Linux's behaviour for size that's
+    // not a multiple of the page size (low bits silently dropped).
+    let size_masked = size & !0x3fffu64; // 16 KiB PAGE_MASK
+    // After mask, `start + size_masked <= start` catches:
+    //   - size_masked == 0 (including the size=0 case)
+    //   - arithmetic wrap-around when start + size overflows
+    let end = addr.wrapping_add(size_masked);
+    if end <= addr {
+        return linux_err(errno::EINVAL);
+    }
+    // Linux: `if (pgoff + (size >> PAGE_SHIFT) < pgoff) return -EINVAL;`
+    // — pgoff arithmetic overflow on the file page index.
+    let pages = size_masked >> 14; // 16 KiB PAGE_SHIFT
+    if pgoff.wrapping_add(pages) < pgoff {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -55806,6 +55842,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   remap_file_pages prot!=0 EINVAL (all non-zero prots): OK"
+        );
+
+        // Batch 390: Linux's mm/mmap.c::SYSCALL_DEFINE5(remap_file_pages)
+        // gates after prot:
+        //
+        //   start = start & PAGE_MASK; size = size & PAGE_MASK;
+        //   if (start + size <= start) return -EINVAL;
+        //   if (pgoff + (size >> PAGE_SHIFT) < pgoff) return -EINVAL;
+        //
+        // Pre-batch we ignored both checks: size=0 (and size<PAGE_SIZE)
+        // flowed through to ENOSYS where Linux returns EINVAL, and
+        // pgoff overflow was never validated at all.
+        //
+        // remap_file_pages size=0 -> EINVAL (start+size <= start at start=0).
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages size=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // remap_file_pages size=0x3fff (sub-page, mask -> 0) -> EINVAL.
+        //   Linux's `size & PAGE_MASK` drops low bits; if everything
+        //   was sub-page, size_masked == 0 -> same EINVAL as size=0.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x3fff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages sub-page size not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // remap_file_pages start+size overflow -> EINVAL.
+        //   addr = 0xffff_ffff_ffff_c000 (aligned, max u64 rounded down),
+        //   size = 0x4000 -> end wraps to 0 <= addr -> EINVAL.
+        let a = SyscallArgs {
+            arg0: 0xffff_ffff_ffff_c000,
+            arg1: 0x4000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages addr+size overflow not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // remap_file_pages pgoff overflow -> EINVAL.
+        //   pgoff = u64::MAX, size = 0x4000 (pages = 1) ->
+        //   pgoff + 1 wraps to 0 < pgoff -> EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x4000,
+            arg1: 0x4000,
+            arg2: 0,
+            arg3: u64::MAX,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::REMAP_FILE_PAGES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: remap_file_pages pgoff overflow not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   remap_file_pages size/pgoff overflow EINVAL gates (start+size, pgoff+pages): OK"
         );
 
         // ioprio_set bad which -> EINVAL.

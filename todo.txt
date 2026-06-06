@@ -35119,3 +35119,98 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (39.40s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
+
+420. Batch 390 — sys_remap_file_pages missing start+size / pgoff
+     overflow EINVAL gates (linux fidelity).
+
+     File         : kernel/src/syscall/linux.rs
+     Linux source : mm/mmap.c::SYSCALL_DEFINE5(remap_file_pages)
+       SYSCALL_DEFINE5(remap_file_pages, unsigned long, start,
+                       unsigned long, size, unsigned long, prot,
+                       unsigned long, pgoff, unsigned long, flags)
+       {
+           ...
+           if (prot)
+               return ret;                                       (gate 1)
+           start = start & PAGE_MASK;
+           size  = size  & PAGE_MASK;
+           if (start + size <= start)
+               return ret;                                       (gate 2)
+           if (pgoff + (size >> PAGE_SHIFT) < pgoff)
+               return ret;                                       (gate 3)
+           ...
+       }
+       where ret = -EINVAL.
+
+     Pre-batch    : checked only addr alignment + prot != 0.  Both
+                    of Linux's arithmetic-overflow gates (gates 2
+                    and 3) were missing, so:
+
+                      addr=0, size=0, prot=0, pgoff=0
+                        Linux: start+size=0 <= start=0 → EINVAL
+                        Us   : ENOSYS
+
+                      addr=0, size=0x3fff, prot=0, pgoff=0
+                        Linux: size_masked=0 → 0 <= 0 → EINVAL
+                        Us   : ENOSYS
+
+                      addr=0xffff_ffff_ffff_c000, size=0x4000, prot=0
+                        Linux: end wraps to 0 <= addr → EINVAL
+                        Us   : ENOSYS
+
+                      addr=0x4000, size=0x4000, prot=0, pgoff=u64::MAX
+                        Linux: pgoff+1 wraps to 0 < u64::MAX → EINVAL
+                        Us   : ENOSYS
+
+     Post-batch   : after the prot check, mask size with
+                    `size & !0x3fff` (16 KiB PAGE_MASK), then test
+                    `end = addr.wrapping_add(size_masked); end <= addr`
+                    (catches size=0, sub-page size, and start+size
+                    overflow in one shot), then test
+                    `pgoff.wrapping_add(size_masked >> 14) < pgoff`
+                    (pgoff arithmetic overflow on the file page
+                    index).  Returns EINVAL on either trip.
+
+     Why it matters: glibc dropped its remap_file_pages wrapper in
+     2.x and the kernel deprecated the syscall in 3.16, so the
+     remaining consumers are (a) probing utilities checking which
+     syscalls a kernel supports and (b) emulated /
+     compatibility-shim layers (e.g. Wine, Proton, certain DBMS
+     ports) replaying old captured traces.  Both classes
+     distinguish "this kernel doesn't implement remap_file_pages
+     at all" (ENOSYS — fall back to mmap reshuffling) from "the
+     specific call is malformed" (EINVAL — caller bug).  Pre-batch
+     we returned ENOSYS for valid-prot-but-malformed-size or -pgoff
+     calls, telling the prober "no support — fall back" when Linux
+     says "your call is broken — fix it".  Wine in particular
+     sometimes builds remap_file_pages calls as part of memory-
+     mapped-file emulation; pre-batch our ENOSYS would mask Wine's
+     own arithmetic bugs (size=0 from a div-by-zero upstream) by
+     succeeding the fallback path, where Linux would have reported
+     EINVAL and Wine would have surfaced an internal error.
+
+     Note: PAGE_SHIFT is 14 (16 KiB pages) per CLAUDE.md, vs
+     Linux's 12.  The LOGIC — overflow check on the file page
+     index sum — is what's faithful; the page-size constant is
+     architecturally ours.
+
+     Architectural: this is pure ABI translation — the underlying
+     "we don't implement non-linear mappings" semantic is
+     unchanged (terminal ENOSYS still returned for well-formed
+     calls).  We are merely rejecting malformed inputs at the
+     boundary instead of letting them through to the ENOSYS exit.
+
+     Probes added: (1) `addr=0x4000, size=0, prot=0, pgoff=0`
+     → EINVAL (size=0 trips start+size <= start at start=0).
+     (2) `addr=0x4000, size=0x3fff, prot=0, pgoff=0` → EINVAL
+     (sub-page size masks to 0; same gate).  (3) `addr=
+     0xffff_ffff_ffff_c000, size=0x4000, prot=0, pgoff=0` →
+     EINVAL (start+size wraps to 0 <= start).  (4) `addr=0x4000,
+     size=0x4000, prot=0, pgoff=u64::MAX` → EINVAL (pgoff+1
+     wraps).  Existing prot-rejection + misalign + valid-prot=0
+     ENOSYS probes unchanged.  New aggregate stamp:
+       "[syscall/linux]   remap_file_pages size/pgoff overflow
+        EINVAL gates (start+size, pgoff+pages): OK"
+
+     Build: cargo build -p kernel clean (41.86s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).

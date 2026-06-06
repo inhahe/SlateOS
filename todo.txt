@@ -27258,3 +27258,84 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (44.00s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 23s).
+
+340. sys_mlock2 int truncation — high-half register garbage
+     must be stripped before the flags mask check.
+
+     Divergence:
+       Linux signature: `int mlock2(const void *addr, size_t
+       len, int flags)`.  SYSCALL_DEFINE3(mlock2,
+       unsigned long, start, size_t, len, int, flags)
+       narrows the third parameter to (int) on entry; the
+       mask check `flags & ~MLOCK_ONFAULT` runs at 32-bit
+       width.  The high 32 bits of RDX are caller-
+       uninitialised garbage (the C calling convention for
+       int args does not zero-extend before issuing the
+       syscall).
+
+       Pre-batch we held `flags` as `u64` and ran the mask
+       check at 64-bit width:
+           let flags = args.arg2;
+           if flags & !1 != 0 { return EINVAL; }
+       so a caller passing `0x1_0000_0001` (high-half
+       garbage + MLOCK_ONFAULT) saw EINVAL where Linux
+       returns 0 (truncates to 1, mask passes).  Third
+       instance of the same shape after the batch-308
+       mlockall and batch-309 msync fixes.
+
+     Fix:
+       kernel/src/syscall/linux.rs sys_mlock2:
+         * Cast args.arg2 to i32 (matching Linux's int
+           flags parameter), then reinterpret as u32 for
+           the mask check.
+         * addr (arg0) and len (arg1) remain at u64 —
+           those are unsigned long / size_t in Linux's
+           ABI and full 64-bit width is correct.
+
+     Tests (dispatch_linux self-test, after the existing
+     mlock2 valid probe):
+       - (a) mlock2(0x4000, 0x4000, 0x1_0000_0001) → 0
+             (high-half garbage + MLOCK_ONFAULT;
+             truncates to 1, mask passes, validate_user_read
+             bypassed in kernel context, success).
+       - (b) mlock2(0x4000, 0, 0x1_0000_0001) → 0
+             (high-half garbage + MLOCK_ONFAULT, len=0;
+             truncates to 1, mask passes, len=0 short-
+             circuit fires before validate_user_read).
+       - (c) mlock2(0x4000, 0, 0x1_0000_0000) → 0
+             (high-half garbage only, low half zero;
+             truncates to 0, flags=0 is valid for mlock2
+             which has no required bits, len=0 → 0).
+       - (d) mlock2(0x4000, 0, 0x1_0000_0002) → EINVAL
+             (high-half garbage + unknown low bit 0x2;
+             truncates to 0x2, mask gate rejects bit
+             outside MLOCK_ONFAULT; verifies the mask gate
+             still rejects bogus low bits after the high
+             half is stripped).
+       Marker: "[syscall/linux]   mlock2 int truncation
+       (high-half ignored): OK".
+
+     Preserved behaviour:
+       - Existing mlock2(0x4000, 0x4000, 2) → EINVAL probe
+         still passes (bad low flag with no high bits).
+       - Existing mlock2(0x4000, 0, 0) → 0 probe still
+         passes (len=0 short-circuit).
+       - Existing mlock2(0x4000, 0x4000, 1) → 0 probe
+         still passes (valid MLOCK_ONFAULT + non-zero len).
+
+     Known limitations (deferred):
+       - We accept successful mlock2 without actually
+         pinning pages (no swap subsystem yet — all memory
+         is implicitly locked).  Same caveat as mlockall:
+         real lock-counting and OOM-killer interaction
+         await the broader VM work.
+       - The kernel-context validate_user_read bypass
+         means probe (a) doesn't actually exercise the
+         user-pointer validation surface; the bypass is
+         well-established (it lets self-tests address
+         "fake" addresses like 0x4000) so this is a
+         testing convenience, not an ABI compromise.
+
+     Build: cargo build -p kernel clean (45.61s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

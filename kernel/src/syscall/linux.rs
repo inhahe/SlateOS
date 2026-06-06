@@ -21333,9 +21333,24 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
 
 /// `mlock2(addr, len, flags)`.
 fn sys_mlock2(args: &SyscallArgs) -> SyscallResult {
+    // Linux ABI: `int mlock2(const void *addr, size_t len, int flags)`.
+    // SYSCALL_DEFINE3(mlock2, unsigned long, start, size_t, len, int,
+    // flags) narrows the third parameter to (int) on entry, so the
+    // mask check `flags & ~MLOCK_ONFAULT` runs at 32-bit width.  The
+    // high 32 bits of the third register are caller-uninitialised
+    // garbage (the C calling convention for int args does not zero-
+    // extend before issuing the syscall).
+    //
+    // Pre-batch we held flags as u64 and ran the mask check at 64-bit
+    // width, so a caller passing 0x1_0000_0001 (high-half garbage +
+    // MLOCK_ONFAULT) saw EINVAL where Linux returns 0.  Same shape as
+    // the batch-308 mlockall and batch-309 msync fixes.
     let addr = args.arg0;
     let len = args.arg1;
-    let flags = args.arg2;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg2 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
     // flags: MLOCK_ONFAULT (1) only.
     if flags & !1 != 0 {
         return linux_err(errno::EINVAL);
@@ -47405,6 +47420,97 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mlock2 valid not 0");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 310: mlock2 int truncation — high-half register garbage
+        // must be stripped before the flags mask check.
+        //
+        // Linux signature: `int mlock2(const void *addr, size_t len,
+        // int flags)`.  SYSCALL_DEFINE3(mlock2, ..., int, flags)
+        // narrows flags to (int) on entry; the mask check
+        // `flags & ~MLOCK_ONFAULT` runs at 32-bit width.  Pre-batch we
+        // held flags as u64 and ran the mask at 64-bit width, so high-
+        // half garbage tripped the gate and returned EINVAL where
+        // Linux returns success.
+        //
+        // (a) mlock2(0x4000, 0x4000, 0x1_0000_0001) → 0
+        //     (high-half garbage + MLOCK_ONFAULT; truncates to 1,
+        //     flags mask passes, validate_user_read bypassed in kernel
+        //     context, success).
+        let a = SyscallArgs {
+            arg0: 0x4000,
+            arg1: 0x4000,
+            arg2: 0x1_0000_0001,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MLOCK2, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlock2(high|MLOCK_ONFAULT) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) mlock2(0x4000, 0, 0x1_0000_0001) → 0
+        //     (high-half garbage + MLOCK_ONFAULT, len=0; truncates to
+        //     1, mask passes, len=0 short-circuit → success).
+        let a = SyscallArgs {
+            arg0: 0x4000,
+            arg1: 0,
+            arg2: 0x1_0000_0001,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MLOCK2, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlock2(high|MLOCK_ONFAULT,len=0) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) mlock2(0x4000, 0, 0x1_0000_0000) → 0
+        //     (high-half garbage only, low half zero, len=0; truncates
+        //     to 0, mask passes (0 & !1 = 0), len=0 → success).  This
+        //     locks in flags=0 acceptance for mlock2 after truncation.
+        let a = SyscallArgs {
+            arg0: 0x4000,
+            arg1: 0,
+            arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MLOCK2, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlock2(high-half-zero,len=0) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) mlock2(0x4000, 0, 0x1_0000_0002) → EINVAL
+        //     (high-half garbage + unknown low bit 0x2; truncates to
+        //     0x2, mask check rejects bit outside MLOCK_ONFAULT;
+        //     verifies the mask gate still rejects bogus low bits
+        //     after the high half is stripped).
+        let a = SyscallArgs {
+            arg0: 0x4000,
+            arg1: 0,
+            arg2: 0x1_0000_0002,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MLOCK2, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlock2(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   mlock2 int truncation (high-half ignored): OK"
+        );
 
         // acct NULL -> EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

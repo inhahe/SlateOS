@@ -24014,3 +24014,85 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 309. syscall/linux: sys_socket — ESOCKTNOSUPPORT for
+##      SOCK_RDM on AF_INET / AF_INET6 / AF_UNIX
+##      (batch 280).
+##
+##      Pre-batch divergence: Linux's per-family create
+##      paths (inet_create, inet6_create, unix_create) all
+##      initialise `err = -ESOCKTNOSUPPORT;` before walking
+##      the protocol-list-for-this-type.  For socket types
+##      a family doesn't implement (e.g. SOCK_RDM=4 on
+##      AF_INET / AF_INET6 / AF_UNIX) the list walk has no
+##      entries, err is never overwritten, and the syscall
+##      returns -ESOCKTNOSUPPORT (errno 94).  We accepted
+##      these (family, type) combinations and fell through
+##      to ENOSYS, hiding the "family knows protocols but
+##      not this type within it" discriminator.
+##
+##      Fix: add `pub const ESOCKTNOSUPPORT: i32 = 94;` to
+##      the errno module, then add a gate 4 in sys_socket
+##      (between the existing type-range EINVAL and the
+##      batch-279 EPROTONOSUPPORT gate, matching Linux's
+##      err-init-before-list-walk ordering):
+##          if sock_type == 4 {
+##              match domain {
+##                  1 | 2 | 10 => return -ESOCKTNOSUPPORT,
+##                  _ => {}
+##              }
+##          }
+##      The gate is conservative: AF_NETLINK (16) and
+##      AF_PACKET (17) also reject SOCK_RDM on Linux but
+##      their type/protocol semantics are family-specific
+##      and we'd rather under-reject than over-reject
+##      without modelling each family.  This keeps the gate
+##      strictly more accepting than Linux for the unmodelled
+##      slots.
+##
+##      Self-tests (kernel-context probe sextuple in
+##      dispatch_linux):
+##        A. socket(AF_INET=2, SOCK_RDM=4, 0)
+##           pre: ENOSYS ; post: ESOCKTNOSUPPORT
+##        B. socket(AF_INET6=10, SOCK_RDM=4, 0)
+##           pre: ENOSYS ; post: ESOCKTNOSUPPORT
+##        C. socket(AF_UNIX=1, SOCK_RDM=4, 0)
+##           pre: ENOSYS ; post: ESOCKTNOSUPPORT
+##        D. socket(AF_INET, SOCK_RDM=4, protocol=99)
+##           Confirms ESOCKTNOSUPPORT precedes the proto
+##           whitelist gate (Linux's err-init ordering):
+##           pre: ENOSYS ; post: ESOCKTNOSUPPORT.
+##        E. socket(AF_NETLINK=16, SOCK_RDM=4, 0)
+##           Acceptance — AF_NETLINK not in allowlist;
+##           ENOSYS.
+##        F. socket(AF_INET, SOCK_STREAM=1, 0)
+##           Acceptance regression check — STREAM is
+##           supported; ENOSYS.
+##      Marker: "socket ESOCKTNOSUPPORT gating: OK".
+##
+##      Existing tests preserved: socket EPROTONOSUPPORT
+##      gating (279), mremap MREMAP_FIXED new_addr bounds
+##      (278), perf_event_open __reserved_2 gating (277),
+##      socket/socketpair EAFNOSUPPORT gating (276),
+##      listen/shutdown drop entry gates (275),
+##      setsockopt/getsockopt no-level gate (274), mremap
+##      new_size PAGE_ALIGN overflow (273), pread64/pwrite64
+##      fd-before-count (272), capset pid EPERM (270),
+##      prctl(PR_SET_NAME) NULL-arg2 (269), capget/capset
+##      NULL-data quadruple (268), preadv/pwritev iov_len
+##      SSIZE_MAX (267) — all unaffected.  Batch 279's
+##      A/B/C/D EPROTONOSUPPORT probes use SOCK_STREAM/DGRAM,
+##      which are not in the SOCK_RDM gate's match arm, so
+##      the new gate is invisible to them.
+##
+##      Known limitations: still pending — accept/accept4
+##      and bind/connect sockaddr-before-fd reorders (not
+##      probe-distinguishable in kernel context);
+##      AF_NETLINK / AF_PACKET ESOCKTNOSUPPORT gates;
+##      pread/pwrite EOVERFLOW gate at pos+count and silent
+##      MAX_RW_COUNT clamp; sys_mremap rejecting
+##      MREMAP_FIXED below the userspace mmap floor;
+##      socketpair() per-(family,type,protocol) gating
+##      mirror of socket()'s batches 279+280.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+

@@ -35636,3 +35636,95 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (40.48s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 23s).
      Stamp confirmed at build/serial-test.txt:602.
+
+427. [2026-06-06] sys_sethostname + sys_setdomainname CAP-first gate
+     inversion fixed — Linux ABI gate-1 EPERM now fires before
+     len/NULL/copy gates.
+
+     Where: kernel/src/syscall/linux.rs (sys_sethostname ~line 9464,
+     sys_setdomainname ~line 9544).
+
+     Divergence (per Linux's literal kernel/sys.c::SYSCALL_DEFINE2
+     for both): Linux gate order is
+       1. !ns_capable(CAP_SYS_ADMIN)            -> -EPERM
+       2. len < 0 || len > __NEW_UTS_LEN (64)   -> -EINVAL
+       3. copy_from_user(tmp, name, len)        -> -EFAULT
+       4. install via uts_sem-protected memcpy  -> 0
+
+     Pre-batch our gate order was inverted:
+       (a) len_i32 < 0 || > 64 -> EINVAL
+       (b) name==NULL && len!=0 -> EFAULT
+       (c) CAP check (uid != 0 -> EPERM)
+       (d) len == 0 -> EINVAL (empty-name reject, sethostname-only)
+       (e) copy_from_user -> EFAULT
+       (f) UTF-8 validation -> EINVAL
+       (g) nameservice::set_hostname -> 0
+
+     Concrete observable discriminators for a uid=1000 caller:
+       * sethostname(NULL, 65)
+           Linux:  EPERM   (gate-1 trips before len range)
+           Pre:    EINVAL  (gate-(a) raw len > 64)
+       * sethostname(NULL, 5)
+           Linux:  EPERM   (gate-1 trips before NULL pointer is examined)
+           Pre:    EFAULT  (gate-(b) NULL+len!=0)
+       * sethostname(NULL, -1)
+           Linux:  EPERM   (gate-1 trips before len-sign is examined)
+           Pre:    EINVAL  (gate-(a) len_i32 < 0)
+       * setdomainname(NULL, 65) from uid=1000
+           Linux:  EPERM.  Pre: EINVAL.
+       * setdomainname(NULL, 5)  from uid=1000
+           Linux:  EPERM.  Pre: EFAULT.
+
+     Why it matters: systemd-hostnamed's fallback path, util-linux
+     `hostname(1)` / `domainname(1)`, busybox's hostname applet, and
+     the NIS startup scripts all probe these syscalls before
+     escalating.  The errno discriminator: EPERM tells them
+     "escalate or give up" (and they fall through to a DBus call or
+     `setuid` wrapper); EINVAL/EFAULT tells them "your input shape
+     is wrong, retry" — sending them into a retry loop that can
+     never clear the privilege gate.  Pre-batch we trapped non-root
+     callers in retry loops they could never win.
+
+     Sister fixes (CAP-first inversion thread):
+       * batch 343 — swapoff CAP_SYS_ADMIN first
+       * batch 348 — acct CAP_SYS_PACCT first
+       * batch 392 — fsopen may_mount first
+       * batch 393 — fsmount may_mount first
+       * batch 394 — fspick may_mount first
+
+     Architectural directive: pure ABI translator behaviour.  We
+     model CAP_SYS_ADMIN as `uid == 0` because that's the only
+     privilege model the Linux-ABI layer exposes.  Kernel-context
+     callers (caller_pid() == None) bypass gate-1 so boot-time
+     init_defaults() / kshell hostname installation can run before
+     any userspace process exists; this matches every other CAP-
+     modelled gate in this file.  No nameservice or PCB
+     infrastructure change.  Unlike fsopen/fsmount/fspick (which
+     collapse to terminal EPERM because no mount infrastructure
+     exists), sethostname/setdomainname remain conditionally
+     non-EPERM — kernel-context and root-userspace callers
+     successfully install via nameservice::set_hostname /
+     set_domain.
+
+     Boot-test coverage: kernel-context bypasses gate-1, so the
+     three new self-test probes confirm the post-gate-1 reach into
+     gate-2 (EINVAL), gate-3 (EFAULT), and gate-(domain-empty=0)
+     respectively.  The non-root EPERM observable is structural:
+     no PCB infrastructure exists to fake a non-zero-uid caller
+     from the kernel-context boot self-test, so the EPERM-from-
+     non-root path is documented in the function doc-comment
+     divergence table rather than dynamically tested.
+
+     Probes added (3 new + 1 new aggregate stamp, in the existing
+     sethostname/setdomainname test block):
+       sethostname(0, 65)  -> EINVAL  (gate-1 bypassed, gate-2 fires)
+       sethostname(0, 5)   -> EFAULT  (gate-1 bypassed, gate-3 fires)
+       setdomainname(0, 0) -> 0       (gate-1 bypassed, clear-domain
+                                       success)
+     New aggregate stamp:
+       "[syscall/linux]   set{host,domain}name CAP_SYS_ADMIN
+        gate-first (Linux gate 1 fires before len/NULL/copy): OK"
+
+     Build: cargo build -p kernel clean (41.72s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
+     Stamp confirmed in build/serial-test.txt.

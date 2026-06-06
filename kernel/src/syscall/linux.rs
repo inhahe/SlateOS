@@ -9454,13 +9454,18 @@ fn sys_syncfs(args: &SyscallArgs) -> SyscallResult {
 /// bypasses the gate (boot init sets the hostname before any user
 /// process exists).
 ///
-/// Errors:
-///   - `-EFAULT` on bad pointer
-///   - `-EINVAL` for `len > 64` (Linux's `_UTSNAME_NODENAME_LENGTH`).
-///   - `-EINVAL` for non-UTF-8 input (deviation from Linux which
-///     accepts arbitrary bytes; documented in todo.txt — the
-///     nameservice stores a Rust String).
-///   - `-EPERM` if the caller is non-root.
+/// Gate order (matching Linux's kernel/sys.c::SYSCALL_DEFINE2(sethostname),
+/// batch 397):
+///   1. `CAP_SYS_ADMIN` (modelled as `uid == 0`) → `-EPERM` —
+///      kernel-context bypasses.
+///   2. `len < 0 || len > 64` → `-EINVAL`.
+///   3. `name == NULL && len != 0` → `-EFAULT`.
+///   4. `len == 0` → `-EINVAL` (nameservice rejects empty names).
+///   5. `copy_from_user` → `-EFAULT`.
+///   6. Non-UTF-8 input → `-EINVAL` (deviation from Linux which
+///      accepts arbitrary bytes; documented in todo.txt — the
+///      nameservice stores a Rust String).
+///   7. Install via `nameservice::set_hostname` → `0`.
 fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
     // Ensure the nameservice storage layer is initialised; idempotent.
     // Without this, a sethostname call from userspace before any
@@ -9468,6 +9473,73 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
     // set_hostname and we'd return -ENOSYS, which is not Linux's
     // contract for this call.
     crate::fs::nameservice::init_defaults();
+
+    // Linux gate order (kernel/sys.c::SYSCALL_DEFINE2(sethostname)):
+    //
+    //   SYSCALL_DEFINE2(sethostname, char __user *, name, int, len)
+    //   {
+    //       int errno;
+    //       char tmp[__NEW_UTS_LEN];
+    //
+    //       if (!ns_capable(current_user_ns(), CAP_SYS_ADMIN))
+    //           return -EPERM;                  // (1) CAP_SYS_ADMIN
+    //       if (len < 0 || len > __NEW_UTS_LEN)
+    //           return -EINVAL;                 // (2) len range
+    //       ...
+    //       if (!copy_from_user(tmp, name, len)) {   // (3) EFAULT
+    //           ...
+    //       }
+    //       ...
+    //   }
+    //
+    // Batch 397: pre-batch we ran (a) len_i32 < 0 || > 64 → EINVAL, (b)
+    // NULL+len!=0 → EFAULT, (c) CAP check (uid != 0 → EPERM), (d) empty
+    // → EINVAL, (e) copy_from_user → EFAULT.  Gates (a) and (b) ran
+    // ahead of Linux's gate-1 CAP_SYS_ADMIN check, so an unprivileged
+    // userspace caller (uid != 0) saw EINVAL/EFAULT for malformed
+    // inputs where Linux returns EPERM:
+    //
+    //   * sethostname(NULL, 65) from uid=1000
+    //       Linux:  EPERM   (gate-1 trips before len range is examined)
+    //       Pre:    EINVAL  (raw len > 64 → gate-(a))
+    //   * sethostname(NULL, 5) from uid=1000
+    //       Linux:  EPERM   (gate-1 trips before NULL pointer is examined)
+    //       Pre:    EFAULT  (NULL+len!=0 → gate-(b))
+    //   * sethostname(NULL, -1) from uid=1000
+    //       Linux:  EPERM   (gate-1 trips before len-sign is examined)
+    //       Pre:    EINVAL  (len_i32 < 0 → gate-(a))
+    //
+    // The errno selection matters to privilege-aware tooling.  systemd-
+    // hostnamed's fallback path, util-linux `hostname(1)`, and busybox's
+    // `hostname` probe the syscall to decide whether to escalate via a
+    // DBus call (hostnamed) or abort outright; EPERM tells them
+    // "escalate or give up", EINVAL/EFAULT tells them "your input shape
+    // is wrong, retry" — sending them into a retry loop that can never
+    // clear the privilege gate.
+    //
+    // Sister fixes (CAP-first inversion thread):
+    //   * batch 343 — swapoff CAP_SYS_ADMIN first
+    //   * batch 348 — acct CAP_SYS_PACCT first
+    //   * batch 392 — fsopen may_mount first
+    //   * batch 393 — fsmount may_mount first
+    //   * batch 394 — fspick may_mount first
+    //
+    // Architectural directive: Linux ABI translator only — we model
+    // CAP_SYS_ADMIN as uid==0 because that's the only privilege model
+    // this kernel exposes to the Linux-ABI layer.  Kernel-context
+    // callers (caller_pid() == None) bypass the gate so boot
+    // initialisation can install a default hostname before any
+    // userspace process exists; matches every other CAP-modelled gate
+    // in this file.
+
+    // Gate 1 (Linux's literal first check): CAP_SYS_ADMIN → EPERM.
+    // Kernel context bypasses.
+    if let Some(pid) = caller_pid() {
+        match pcb::get_credentials(pid) {
+            Some(creds) if creds.uid != 0 => return linux_err(errno::EPERM),
+            _ => {} // root or PCB-tear-down race — proceed
+        }
+    }
 
     let name_ptr = args.arg0;
     // Linux ABI: `SYSCALL_DEFINE2(sethostname, char __user *, name,
@@ -9495,15 +9567,6 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
     let len = len_i32 as usize;
     if name_ptr == 0 && len != 0 {
         return linux_err(errno::EFAULT);
-    }
-
-    // Permission check.  Linux: CAP_SYS_ADMIN.  We model with uid==0.
-    // Kernel context (caller_pid() == None) is bootstrap — bypass.
-    if let Some(pid) = caller_pid() {
-        match pcb::get_credentials(pid) {
-            Some(creds) if creds.uid != 0 => return linux_err(errno::EPERM),
-            _ => {} // root or PCB-tear-down race — proceed
-        }
     }
 
     if len == 0 {
@@ -9546,6 +9609,33 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
     // here before any kshell command has woken it up.
     crate::fs::nameservice::init_defaults();
 
+    // Batch 397: same CAP-first gate inversion as sys_sethostname.
+    // Linux's kernel/sys.c::SYSCALL_DEFINE2(setdomainname) opens with
+    //
+    //   if (!ns_capable(current_user_ns(), CAP_SYS_ADMIN))
+    //       return -EPERM;                  // (1) CAP_SYS_ADMIN
+    //   if (len < 0 || len > __NEW_UTS_LEN)
+    //       return -EINVAL;                 // (2) len range
+    //
+    // ahead of every other check, including the copy_from_user that
+    // would surface EFAULT.  Pre-batch we ran len → EINVAL and
+    // NULL → EFAULT before consulting the credentials.  Same errno-
+    // selection consequence as sethostname: util-linux `domainname(1)`
+    // and the NIS startup scripts both probe with NULL/garbage args
+    // and expect EPERM to discriminate "drop, you're not root" from
+    // EINVAL/EFAULT "your input shape is wrong, retry."  See
+    // sys_sethostname for the full rationale and sister-fix list.
+
+    // Gate 1 (Linux's literal first check): CAP_SYS_ADMIN → EPERM.
+    // Kernel context (caller_pid() == None) bypasses so boot-time
+    // init_defaults() can run.
+    if let Some(pid) = caller_pid() {
+        match pcb::get_credentials(pid) {
+            Some(creds) if creds.uid != 0 => return linux_err(errno::EPERM),
+            _ => {}
+        }
+    }
+
     let name_ptr = args.arg0;
     // Linux ABI: `SYSCALL_DEFINE2(setdomainname, char __user *, name,
     // int, len)` — same int-truncation thread as sys_sethostname; see
@@ -9559,14 +9649,6 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
     let len = len_i32 as usize;
     if name_ptr == 0 && len != 0 {
         return linux_err(errno::EFAULT);
-    }
-
-    // CAP_SYS_ADMIN gate (uid==0); kernel context bypasses.
-    if let Some(pid) = caller_pid() {
-        match pcb::get_credentials(pid) {
-            Some(creds) if creds.uid != 0 => return linux_err(errno::EPERM),
-            _ => {}
-        }
     }
 
     // setdomainname(NULL, 0) is "clear the domain" — Linux accepts.
@@ -40081,6 +40163,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   set{{host,domain}}name len int-truncation (high-half ignored): OK"
+        );
+
+        // Batch 397: CAP-first gate reorder.  Linux's
+        // kernel/sys.c::SYSCALL_DEFINE2(sethostname) opens with
+        // `if (!ns_capable(...)) return -EPERM;` ahead of every
+        // other check, including the `len < 0 || len > 64` EINVAL
+        // gate and the copy_from_user EFAULT gate.  Pre-batch we
+        // ran len and NULL gates ahead of the CAP check, so an
+        // unprivileged userspace caller saw EINVAL/EFAULT for
+        // malformed inputs where Linux returns EPERM.  Sister of
+        // batches 343/348/392/393/394.
+        //
+        // Kernel context (caller_pid() == None) bypasses gate-1, so
+        // these probes re-confirm the post-gate-1 path still
+        // reaches the deeper EINVAL/EFAULT/EINVAL/0 answers when
+        // gate-1 is bypassed.  The non-root EPERM observable is
+        // structural (no PCB infrastructure to fake a non-zero-uid
+        // caller from the boot self-test); see the function-level
+        // doc comment for the per-input divergence table.
+        let a = SyscallArgs { arg0: 0, arg1: 65, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname kernel-bypass len=65 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: 5, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname kernel-bypass NULL+len=5 not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETDOMAINNAME, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setdomainname kernel-bypass NULL+len=0 not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   set{{host,domain}}name CAP_SYS_ADMIN gate-first (Linux gate 1 fires before len/NULL/copy): OK"
         );
     }
 

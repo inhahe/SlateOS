@@ -18754,6 +18754,44 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     if !(1..=5).contains(&sock_type) {
         return linux_err(errno::EINVAL);
     }
+    // Gate 3a: sock_create walks inet_create / unix_create which
+    // initialise err=-ESOCKTNOSUPPORT before the type-list walk.
+    // For SOCK_RDM (type 4) on AF_UNIX/AF_INET/AF_INET6 the list
+    // is empty so the syscall returns ESOCKTNOSUPPORT BEFORE the
+    // ops->socketpair == NULL EOPNOTSUPP gate below.  Pre-batch
+    // we jumped straight to "domain != AF_UNIX -> EOPNOTSUPP",
+    // collapsing this discriminator into EOPNOTSUPP.  Mirrors
+    // sys_socket batch 280.
+    if sock_type == 4 {
+        match domain {
+            1 | 2 | 10 => return linux_err(errno::ESOCKTNOSUPPORT),
+            _ => {}
+        }
+    }
+    // Gate 3b: per-(family, type) protocol whitelist ->
+    // -EPROTONOSUPPORT, applied INSIDE sock_create's family-create
+    // (inet_create / unix_create) before ops->socketpair is even
+    // consulted.  Pre-batch our domain!=AF_UNIX EOPNOTSUPP shortcut
+    // also masked EPROTONOSUPPORT here.  AF_UNIX with non-zero
+    // protocol returns EPROTONOSUPPORT (unix_create), and
+    // AF_INET/AF_INET6 STREAM/DGRAM with a mismatched protocol
+    // also surfaces EPROTONOSUPPORT from inet_create's list walk
+    // before the ops table is touched.  Mirrors sys_socket batch
+    // 279.
+    #[allow(clippy::cast_possible_truncation)]
+    let protocol = args.arg2 as u32;
+    if protocol != 0 {
+        match (domain, sock_type) {
+            (1, _) => return linux_err(errno::EPROTONOSUPPORT),
+            (2 | 10, 1) if protocol != 6 => {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
+            (2 | 10, 2) if protocol != 17 && protocol != 136 => {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
+            _ => {}
+        }
+    }
     // Gate 3: only AF_UNIX implements ops->socketpair.  AF_INET,
     // AF_INET6, AF_NETLINK, AF_PACKET return -EOPNOTSUPP because
     // their ops table has socketpair == NULL.
@@ -46990,6 +47028,103 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socket ESOCKTNOSUPPORT gating: OK"
+            );
+        }
+
+        // ---- socketpair per-(family,type,protocol) gating ----
+        // Linux's __sys_socketpair calls sock_create twice; the
+        // first call walks inet_create / unix_create which apply
+        // both the ESOCKTNOSUPPORT err-init gate and the
+        // EPROTONOSUPPORT protocol-list gate BEFORE the
+        // ops->socketpair == NULL EOPNOTSUPP gate is reached.
+        // Pre-batch our sys_socketpair jumped straight to
+        // EOPNOTSUPP for any non-AF_UNIX domain, collapsing both
+        // discriminators.  Batch 281 surfaces them; mirrors
+        // sys_socket batches 279 (EPROTONOSUPPORT) + 280
+        // (ESOCKTNOSUPPORT).
+        //
+        // Discriminator quintet (kernel-context):
+        //   A. socketpair(AF_INET, SOCK_RDM=4, 0, sv)
+        //      pre: EOPNOTSUPP ; post: ESOCKTNOSUPPORT
+        //   B. socketpair(AF_INET, SOCK_STREAM=1, 99, sv)
+        //      pre: EOPNOTSUPP ; post: EPROTONOSUPPORT
+        //   C. socketpair(AF_UNIX, SOCK_STREAM=1, 99, sv)
+        //      pre: ENOSYS ; post: EPROTONOSUPPORT (AF_UNIX
+        //      rejects any non-zero protocol)
+        //   D. socketpair(AF_INET, SOCK_STREAM=1, 0, sv)
+        //      Regression: was EOPNOTSUPP, still EOPNOTSUPP
+        //      (ops->socketpair gate fires after the now-empty
+        //      proto/type gates).
+        //   E. socketpair(AF_UNIX, SOCK_RDM=4, 0, sv)
+        //      pre: ENOSYS ; post: ESOCKTNOSUPPORT
+        {
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+
+            // A: AF_INET / SOCK_RDM / 0
+            let a = SyscallArgs {
+                arg0: 2, arg1: 4, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,RDM) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_INET / SOCK_STREAM / 99
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 99, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_UNIX / SOCK_STREAM / 99
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 99, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_INET / SOCK_STREAM / 0 (regression
+            // check — EOPNOTSUPP path still wins).
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,0) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: AF_UNIX / SOCK_RDM / 0
+            let a = SyscallArgs {
+                arg0: 1, arg1: 4, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socketpair ESOCKT/EPROTO gating: OK"
             );
         }
 

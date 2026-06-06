@@ -24096,3 +24096,96 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
+## 310. syscall/linux: sys_socketpair — mirror sys_socket
+##      batches 279+280: per-(family,type,protocol) gating
+##      returning -EPROTONOSUPPORT / -ESOCKTNOSUPPORT
+##      before the ops->socketpair == NULL EOPNOTSUPP
+##      gate (batch 281).
+##
+##      Pre-batch divergence: Linux's __sys_socketpair
+##      calls sock_create(family, type, protocol, ...);
+##      the per-family create function (inet_create,
+##      inet6_create, unix_create) initialises
+##      err = -ESOCKTNOSUPPORT and then walks inetsw[type]
+##      / runs the family's protocol switch.  Both
+##      ESOCKTNOSUPPORT (for SOCK_RDM on AF_INET/AF_INET6
+##      /AF_UNIX) and EPROTONOSUPPORT (for non-zero protocol
+##      not in the family's accepted set) fire BEFORE
+##      sock_create returns successfully — only on the
+##      success path does the kernel check
+##      sock1->ops->socketpair == NULL and return
+##      EOPNOTSUPP.  Pre-batch our sys_socketpair jumped
+##      straight to "domain != AF_UNIX -> EOPNOTSUPP",
+##      collapsing both Linux-level discriminators
+##      (ESOCKTNOSUPPORT and EPROTONOSUPPORT) into the same
+##      EOPNOTSUPP.
+##
+##      Fix: in sys_socketpair, between the type-range
+##      EINVAL gate and the existing "domain != 1 ->
+##      EOPNOTSUPP" gate, insert two new gates that mirror
+##      sys_socket batches 279 (proto whitelist) and 280
+##      (SOCK_RDM family allowlist), in Linux's err-init
+##      order (ESOCKTNOSUPPORT before EPROTONOSUPPORT):
+##        Gate 3a: SOCK_RDM (type 4) on AF_UNIX(1) /
+##                 AF_INET(2) / AF_INET6(10) -> ESOCKTNOSUPPORT.
+##        Gate 3b: protocol != 0 mismatched against
+##                 (family, type) pair -> EPROTONOSUPPORT.
+##                 AF_UNIX rejects any non-zero protocol;
+##                 AF_INET/AF_INET6 + SOCK_STREAM must be
+##                 6 (TCP); + SOCK_DGRAM must be 17 (UDP)
+##                 or 136 (UDPLITE); other slots
+##                 (SOCK_RAW, SOCK_SEQPACKET, AF_NETLINK,
+##                 AF_PACKET) fall through unchanged.
+##      Existing Gate 3 EOPNOTSUPP for domain != AF_UNIX
+##      still fires when the proto/type gates pass, so the
+##      common AF_INET / SOCK_STREAM / 0 socketpair() call
+##      still returns EOPNOTSUPP exactly as before.
+##
+##      Self-tests (kernel-context probe quintet in
+##      dispatch_linux):
+##        A. socketpair(AF_INET, SOCK_RDM, 0, sv)
+##           pre: EOPNOTSUPP ; post: ESOCKTNOSUPPORT
+##        B. socketpair(AF_INET, SOCK_STREAM, 99, sv)
+##           pre: EOPNOTSUPP ; post: EPROTONOSUPPORT
+##        C. socketpair(AF_UNIX, SOCK_STREAM, 99, sv)
+##           pre: ENOSYS (AF_UNIX path fell through to
+##           the terminal ENOSYS) ; post: EPROTONOSUPPORT
+##        D. socketpair(AF_INET, SOCK_STREAM, 0, sv)
+##           Regression check — EOPNOTSUPP still wins for
+##           the common ipv4-stream case.
+##        E. socketpair(AF_UNIX, SOCK_RDM, 0, sv)
+##           pre: ENOSYS ; post: ESOCKTNOSUPPORT
+##      Marker: "socketpair ESOCKT/EPROTO gating: OK".
+##
+##      Existing tests preserved: socket ESOCKTNOSUPPORT
+##      gating (280), socket EPROTONOSUPPORT gating (279),
+##      mremap MREMAP_FIXED new_addr bounds (278),
+##      perf_event_open __reserved_2 gating (277),
+##      socket/socketpair EAFNOSUPPORT gating (276) —
+##      socketpair(99, 1, 0, sv) still returns EAFNOSUPPORT
+##      because the family gate fires before the new
+##      ESOCKT/EPROTO gates; socketpair(2, 1, 0, sv) still
+##      returns EOPNOTSUPP (this is the regression check
+##      above); socketpair(1, 1, 0, sv) still returns
+##      ENOSYS for AF_UNIX-with-zero-protocol; legacy
+##      socketpair NULL sv / EFAULT tests unchanged.
+##      listen/shutdown drop entry gates (275),
+##      setsockopt/getsockopt no-level gate (274), mremap
+##      new_size PAGE_ALIGN overflow (273), pread64/pwrite64
+##      fd-before-count (272), capset pid EPERM (270),
+##      prctl(PR_SET_NAME) NULL-arg2 (269), capget/capset
+##      NULL-data quadruple (268), preadv/pwritev iov_len
+##      SSIZE_MAX (267) — all unaffected.
+##
+##      Known limitations: still pending — accept/accept4
+##      and bind/connect sockaddr-before-fd reorders (not
+##      probe-distinguishable in kernel context);
+##      AF_NETLINK / AF_PACKET ESOCKTNOSUPPORT gates (we
+##      under-reject these to stay conservative without
+##      modelling each family's type matrix); pread/pwrite
+##      EOVERFLOW gate at pos+count and silent
+##      MAX_RW_COUNT clamp; sys_mremap rejecting
+##      MREMAP_FIXED below the userspace mmap floor.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 22s).
+

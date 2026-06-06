@@ -7914,35 +7914,70 @@ fn sys_sched_getscheduler(args: &SyscallArgs) -> SyscallResult {
 /// Kernel-context callers (no `caller_pid()`) bypass the RTPRIO gate
 /// for the same reason every other rlimit gate in this file does:
 /// rlimits are a userspace policy, not a kernel boundary.
+///
+/// Gate order (matches Linux `kernel/sched/syscalls.c`):
+///   1. `SYSCALL_DEFINE3(sched_setscheduler)` outer: `policy < 0`
+///      -> EINVAL.  Linux declares `int policy`, so a u64 whose low
+///      32 bits encode a negative `int` fires here, even when the
+///      raw u64 value is huge.
+///   2. `do_sched_setscheduler` entry: `!param || pid < 0` -> EINVAL.
+///      NULL param is EINVAL on Linux, NOT EFAULT — `copy_from_user`
+///      runs only after this gate.
+///   3. `copy_from_user(&lparam, param, sizeof(struct sched_param))`
+///      -> EFAULT.
+///   4. `find_process_by_pid(pid)` -> ESRCH if no such task.
+///   5. `__sched_setscheduler`: policy in valid set -> EINVAL.
+///   6. priority range check for the policy -> EINVAL.
+///   7. RTPRIO rlimit gate -> EPERM.
 fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
     let pid = args.arg0;
     let policy = args.arg1;
     let param_ptr = args.arg2;
 
-    // Validate policy first — cheaper than the pointer fetch.
-    // 4 is the deprecated SCHED_ISO slot; Linux rejects it.
-    match policy {
-        0 | 1 | 2 | 3 | 5 | 6 | 7 => {}
-        _ => return linux_err(errno::EINVAL),
-    }
-    if pid != 0 {
-        if pcb::state(pid).is_none() {
-            return linux_err(errno::ESRCH);
-        }
+    // Gate 1 (outer SYSCALL_DEFINE3): policy < 0 -> EINVAL.
+    // Linux's signature is `int policy`; treat the low 32 bits as
+    // signed so e.g. arg1 == u64::MAX (== -1 as i32) fires here.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let policy_i32 = policy as i32;
+    if policy_i32 < 0 {
+        return linux_err(errno::EINVAL);
     }
 
-    // Fetch sched_priority from user memory.
+    // Gate 2 (do_sched_setscheduler entry): !param || pid < 0 -> EINVAL.
+    // NULL param is EINVAL here, not EFAULT — the copy_from_user that
+    // could produce EFAULT only runs after this gate passes.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = pid as i32;
+    if param_ptr == 0 || pid_i32 < 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Gate 3: copy_from_user(&lparam, param, sizeof(struct sched_param))
+    // -> EFAULT.  read_user_sched_priority still null-checks defensively
+    // even though gate 2 already rejected NULL.
     let sched_prio = match read_user_sched_priority(param_ptr) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
     };
 
-    // Policy/priority compatibility check.
+    // Gate 4: find_process_by_pid(pid) -> ESRCH.
+    if pid != 0 && pcb::state(pid).is_none() {
+        return linux_err(errno::ESRCH);
+    }
+
+    // Gate 5 (__sched_setscheduler policy switch): unknown policy
+    // -> EINVAL.  4 is the deprecated SCHED_ISO slot; Linux rejects it.
+    match policy {
+        0 | 1 | 2 | 3 | 5 | 6 | 7 => {}
+        _ => return linux_err(errno::EINVAL),
+    }
+
+    // Gate 6: policy/priority compatibility check -> EINVAL.
     if let Err(e) = sched_priority_check_for_policy(policy, sched_prio) {
         return linux_err(e);
     }
 
-    // RTPRIO gate for real-time policies.
+    // Gate 7: RTPRIO gate for real-time policies -> EPERM.
     if policy == 1 || policy == 2 {
         if let Err(e) = rlimit_rtprio_check_for_caller(sched_prio) {
             return linux_err(e);
@@ -31969,47 +32004,104 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // sched_setscheduler(0, 8, NULL) -> EINVAL (policy out of range).
-        // Policy validation happens before the param pointer fetch, so
-        // this still returns EINVAL even with a NULL param.
-        let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // Batch 254: sched_setscheduler now matches Linux's gate
+        // order — outer policy<0 > param NULL/pid<0 > copy_from_user
+        // > find_pid > policy switch > priority > RTPRIO.  Stack-
+        // allocated sched_param so the param-NULL gate doesn't pre-empt
+        // the policy-validation gate we actually want to exercise.
+        let sched_param_zero = [0u8; 4];
+        let sched_param_zero_ptr = sched_param_zero.as_ptr() as u64;
+
+        // sched_setscheduler(0, 8, valid_param) -> EINVAL via gate 5
+        // (policy not in {0,1,2,3,5,6,7}).  Pre-batch the policy gate
+        // fired ahead of the param fetch; we now reach it via a valid
+        // param so the test still proves policy=8 is rejected.
+        let a = SyscallArgs { arg0: 0, arg1: 8, arg2: sched_param_zero_ptr,
+            arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: sched_setscheduler(8) not EINVAL"
+                "[syscall/linux]   FAIL: sched_setscheduler(8, valid) not EINVAL"
             );
             return Err(KernelError::InternalError);
         }
-        // sched_setscheduler(0, 4, NULL) -> EINVAL.  Policy 4 is the
-        // deprecated SCHED_ISO slot that Linux still rejects; we used
-        // to silently accept it (0..=7) but batch 49 tightened the
-        // whitelist to {0,1,2,3,5,6,7}.
-        let a = SyscallArgs { arg0: 0, arg1: 4, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // sched_setscheduler(0, 4, valid_param) -> EINVAL.  Policy 4 is
+        // the deprecated SCHED_ISO slot that Linux still rejects.  Same
+        // reasoning as above — supply a valid param so gate 5 fires.
+        let a = SyscallArgs { arg0: 0, arg1: 4, arg2: sched_param_zero_ptr,
+            arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: sched_setscheduler(4) not EINVAL (was: silent success)"
+                "[syscall/linux]   FAIL: sched_setscheduler(4, valid) not EINVAL"
             );
             return Err(KernelError::InternalError);
         }
-        // sched_setscheduler(0, 0, NULL) -> EFAULT.  Param pointer is
-        // required even for SCHED_OTHER because the kernel needs to
-        // read sched_priority and validate it is 0.  Previously
-        // returned 0 because the stub ignored the pointer entirely.
+        // sched_setscheduler(0, 0, NULL) -> EINVAL.  Linux's
+        // do_sched_setscheduler entry rejects NULL param with EINVAL
+        // ahead of copy_from_user, so this is EINVAL, not EFAULT.
+        // Pre-batch we ran copy_from_user before any NULL check on
+        // param and answered EFAULT instead.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
-            != -i64::from(errno::EFAULT) {
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: sched_setscheduler(OTHER, NULL) expected EFAULT, got {}",
+                "[syscall/linux]   FAIL: sched_setscheduler(OTHER, NULL) expected EINVAL, got {}",
                 dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
             );
             return Err(KernelError::InternalError);
         }
+        // Discriminator A (gate 1 vs gate 2): policy=u64::MAX (== -1
+        // as i32) with a valid param -> EINVAL via outer policy<0.
+        // Proves the outer gate fires ahead of param/pid validation.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX,
+            arg2: sched_param_zero_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(policy=-1) not EINVAL (gate 1)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Discriminator B (gate 2 vs gate 5): policy=99 (positive, so
+        // gate 1 passes) with NULL param -> EINVAL via gate 2.
+        // Pre-batch the policy switch fired first and also produced
+        // EINVAL — the discriminator is that NULL param with a *valid*
+        // policy must still return EINVAL (i.e. it is NOT EFAULT).
+        let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(99, NULL) not EINVAL (gate 2)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Discriminator C (gate 4 vs gate 5): unknown pid (12345) with
+        // policy=99 and a valid param -> ESRCH.  Pre-batch we validated
+        // the policy first and returned EINVAL; Linux looks up the pid
+        // before __sched_setscheduler's policy switch runs, so ESRCH
+        // wins.
+        let a = SyscallArgs { arg0: 12345, arg1: 99,
+            arg2: sched_param_zero_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(pid=12345, 99, valid) expected ESRCH, got {}",
+                dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setscheduler policy<0 > param+pid > read > find > policy gate order: OK"
+        );
         // sched_setparam(0, NULL) -> EFAULT (same reason: needs to
         // read sched_priority from the param pointer).
+        // Re-bind args explicitly — the previous `a` was the batch-254
+        // discriminator with arg0=12345 and a non-zero arg1.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SCHED_SETPARAM, &a).value
             != -i64::from(errno::EFAULT) {
             serial_println!(

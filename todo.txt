@@ -22065,3 +22065,98 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        "terminal EBADF" branch is the right answer until then.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 283. syscall/linux: sched_setscheduler — outer policy<0 > param+pid
+##      > copy_from_user > find_pid > policy switch > priority > RTPRIO
+##      (batch 254)
+##
+##      Pre-batch divergences from Linux's
+##      `kernel/sched/syscalls.c::SYSCALL_DEFINE3(sched_setscheduler)`
+##      + `do_sched_setscheduler` + `__sched_setscheduler`:
+##
+##        (a) Our gate 1 validated `policy` against {0,1,2,3,5,6,7}
+##            before any param/pid check.  Linux's outer gate is
+##            `if (policy < 0) return -EINVAL;` ONLY; the policy-set
+##            switch lives inside __sched_setscheduler, several gates
+##            deeper.  Net effect: we returned EINVAL too eagerly on
+##            high-but-positive policy numbers.
+##
+##        (b) Our NULL-param check fired inside read_user_sched_priority
+##            and produced EFAULT.  Linux's do_sched_setscheduler entry
+##            is `if (!param || pid < 0) return -EINVAL;` — so NULL
+##            param is EINVAL on Linux, NOT EFAULT.
+##
+##        (c) The pid lookup (ESRCH) ran AFTER our policy-set EINVAL.
+##            Linux runs find_process_by_pid in do_sched_setscheduler,
+##            BEFORE __sched_setscheduler's policy switch.
+##            Discriminator: (policy=99, pid=non_existent, param=valid)
+##            -> Linux ESRCH, pre-batch EINVAL.
+##
+##        (d) The outer "policy < 0" check was absent.  arg1=u64::MAX
+##            (-1 as i32) fell through into the {0..=7} whitelist and
+##            also returned EINVAL — but for the wrong reason, and a
+##            future addition of more policy slots would have leaked
+##            negative-policy callers past the outer gate.
+##
+##      Fix:
+##
+##        * Reorder sys_sched_setscheduler at kernel/src/syscall/linux.rs
+##          to seven gates matching Linux literally:
+##            1. (policy as i32) < 0           -> EINVAL  (outer)
+##            2. param_ptr == 0 || pid<0       -> EINVAL  (do_*)
+##            3. copy_from_user(param)         -> EFAULT
+##            4. find_process_by_pid(pid)      -> ESRCH
+##            5. policy in {0,1,2,3,5,6,7}     -> EINVAL  (__sched_*)
+##            6. sched_priority_check_for_policy -> EINVAL
+##            7. rlimit_rtprio_check_for_caller -> EPERM
+##
+##        * Pid is also reinterpreted as i32 for the gate-2 sign check.
+##          The existing u64 pid is preserved for the post-gate pcb::
+##          lookups (gate 2 rejects any value whose low 32 bits are
+##          negative, so the post-gate path only sees non-negative low
+##          halves).
+##
+##      Self-tests added (after the existing sched_setscheduler block,
+##      around line 31972 in the dispatch_linux self-test region):
+##
+##        Pre-existing tests updated:
+##          - sched_setscheduler(0, 8, NULL) -> EINVAL  (was: policy
+##            out-of-range gate).  Now exercises gate 5 by supplying a
+##            stack-allocated zero sched_param — without the buffer the
+##            gate-2 EINVAL would pre-empt the policy-set EINVAL.
+##          - sched_setscheduler(0, 4, NULL) -> EINVAL  (deprecated
+##            SCHED_ISO).  Same rewrite — valid param exercises gate 5.
+##          - sched_setscheduler(0, 0, NULL) -> was EFAULT, now EINVAL.
+##            Linux's gate 2 returns EINVAL for NULL param ahead of any
+##            copy_from_user.
+##
+##        New discriminators:
+##          A. sched_setscheduler(0, u64::MAX, valid_param) -> EINVAL
+##             (gate 1, outer policy<0 ahead of param/pid validation).
+##          B. sched_setscheduler(0, 99, NULL) -> EINVAL (gate 2 with
+##             positive-but-unknown policy — proves NULL param doesn't
+##             leak to EFAULT).
+##          C. sched_setscheduler(12345, 99, valid_param) -> ESRCH
+##             (gate 4 fires before gate 5; pre-batch returned EINVAL).
+##
+##      Marker:
+##        "[syscall/linux]   sched_setscheduler policy<0 > param+pid >
+##         read > find > policy gate order: OK"
+##
+##      Existing tests preserved: sched_get_priority_max test, the
+##      pure-helper decision tables for sched_priority_check_for_policy
+##      and rlimit_rtprio_check_with, the kernel-context RTPRIO bypass
+##      assert, sched_getparam/sched_rr_get_interval NULL=>EFAULT
+##      probes, and the sched_setparam(0, 0, NULL) -> EFAULT probe.
+##      The sched_setparam test was using the `a` binding left over
+##      from the previous sched_setscheduler test; rebound it to
+##      explicit zero so its semantics no longer depend on stitching
+##      with the new batch-254 discriminators.
+##
+##      Known limitations: sched_setparam currently returns EFAULT for
+##      NULL param.  Linux actually routes sched_setparam through the
+##      same do_sched_setscheduler entry and would return EINVAL for
+##      NULL param — but sys_sched_setparam is a separate function and
+##      is out of scope for this batch.  Track for a follow-up.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

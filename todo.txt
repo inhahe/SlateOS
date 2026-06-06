@@ -27950,3 +27950,97 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.50s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 26s).
+
+348. sys_memfd_secret unsigned-int truncation — high-half
+     register garbage leaked into the O_CLOEXEC mask check
+     (batch 318).
+
+     Divergence: Linux signature is
+       `int memfd_secret(unsigned int flags)`.
+     The sole parameter is C unsigned int → only the low
+     32 bits are defined; the AMD64 syscall ABI does NOT
+     zero-extend int args before issuing the syscall, so
+     the high 32 bits of %rdi are caller-uninitialised
+     garbage.  SYSCALL_DEFINE1(memfd_secret, unsigned int,
+     flags) narrows to (unsigned int) on entry; the mask
+     check `flags & ~FD_CLOEXEC` in mm/secretmem.c runs at
+     32-bit width.
+
+     Pre-batch we held flags as u64 and ran the mask check
+     against the full 64-bit register, so a caller with
+     non-zero high bits saw spurious EINVAL where Linux
+     returns ENOSYS in our kernel (we don't implement
+     secretmem at all — terminal ENOSYS after the mask
+     gate is the truthful answer).
+
+     Eleventh instance of the int/unsigned-int truncation
+     pattern after batches 308-317.  Also reconfirmed
+     that sys_statx (already truncated since batch 225)
+     and sys_unshare (kernel signature is unsigned long,
+     not int, so no truncation needed) are NOT candidates
+     for this audit pass.
+
+     Pivot from initial batch-318 candidate sys_unshare:
+     verified that Linux's SYSCALL_DEFINE1(unshare,
+     unsigned long, unshare_flags) uses unsigned long for
+     the flags parameter (not int as the userspace
+     glibc/man page declaration suggests), so the high
+     32 bits are NOT caller-uninitialised — they're
+     meaningfully zero by the userspace caller widening
+     int→long via the C calling convention.  No
+     truncation divergence in unshare.
+
+     Fix: cast args.arg0 (u64) to u32 directly (matches
+     batch 314's renameat2 pattern for unsigned int —
+     no i32 intermediate needed for unsigned types).
+
+     Tests: four boot-time probes added in dispatch_linux
+     after the existing MEMFD_SECRET ENOSYS probe, each
+     covering one shape:
+       (a) memfd_secret(0x1_0008_0000) → ENOSYS
+           (high|O_CLOEXEC; truncates to 0o2_000_000 =
+            0x8_0000, mask passes, ENOSYS terminal).
+       (b) memfd_secret(0x1_0000_0000) → ENOSYS
+           (high-half only, low half zero; truncates to 0,
+            mask passes, ENOSYS).
+       (c) memfd_secret(0x1_0000_0001) → EINVAL
+           (high|bad-low 0x1; truncates to 0x1, mask
+            rejects bit outside O_CLOEXEC; verifies mask
+            gate still rejects invalid bits after the
+            high half is stripped).
+       (d) memfd_secret(0x0008_0000) → ENOSYS
+           (plain O_CLOEXEC with no high half; control
+            case to ensure the valid flag still flows
+            past the mask post-batch).
+     Marker: "[syscall/linux]   memfd_secret unsigned-int
+              truncation (high-half ignored): OK".
+
+     Build attempt 1 failed: first cut of probe (a) used
+     0x1_0020_0000 with the comment claiming O_CLOEXEC =
+     0x20_0000.  Recomputed: 0o2_000_000 octal = 2 *
+     8^6 = 524288 = 0x80000.  Rewrote (a) to
+     0x1_0008_0000 and (d) to 0x0008_0000.
+
+     Preserved: existing memfd_secret(0) → ENOSYS probe
+     still passes: 0 truncates to 0, mask passes, ENOSYS.
+
+     Known limitations:
+     - We never plan to implement secretmem (Linux's
+       secretmem_file_operations require a writable backing
+       memory region that the kernel removes from the
+       direct map and the page cache; this is fundamentally
+       at odds with our shared-page IPC model).  ENOSYS
+       is the permanent terminal — no follow-up probes
+       needed when more infrastructure lands.
+     - The probe set covers flag truncation but does not
+       exercise the `prctl(PR_SET_DUMPABLE, 0)` privilege
+       gate that Linux runs after the mask check (Linux's
+       memfd_secret refuses if the caller has set
+       PR_SET_DUMPABLE=0 because secretmem pages must
+       survive a fork-with-dump).  Our ENOSYS terminal
+       fires before that gate, which is correct because
+       the feature is unsupported.
+
+     Build: cargo build -p kernel clean (37.68s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 25s).

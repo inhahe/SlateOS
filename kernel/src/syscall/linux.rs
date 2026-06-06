@@ -12981,9 +12981,22 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `memfd_secret(flags)`.
+///
+/// Linux ABI: `int memfd_secret(unsigned int flags)`.
+/// SYSCALL_DEFINE1(memfd_secret, unsigned int, flags) narrows the sole
+/// parameter to (unsigned int) on entry; the mask check
+/// `flags & ~FD_CLOEXEC` in mm/secretmem.c runs at 32-bit width.
+/// Pre-batch we held flags as u64 and ran the mask check at 64-bit
+/// width, so the AMD64 syscall ABI's high-half garbage (the kernel
+/// does not zero-extend int args before issuing the syscall) leaked
+/// into the mask and returned spurious EINVAL where Linux returns
+/// ENOSYS (we don't implement secretmem).  Eleventh instance of the
+/// int/unsigned-int truncation pattern after batches 308-317.
 fn sys_memfd_secret(args: &SyscallArgs) -> SyscallResult {
-    const VALID_FLAGS: u64 = 0o2_000_000; // O_CLOEXEC
-    if args.arg0 & !VALID_FLAGS != 0 {
+    const VALID_FLAGS: u32 = 0o2_000_000; // O_CLOEXEC
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg0 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -40280,6 +40293,85 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: memfd_secret not ENOSYS");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 318: memfd_secret unsigned-int truncation — high-half
+        // register garbage must be stripped before the flags mask check.
+        //
+        // Linux signature: `int memfd_secret(unsigned int flags)`.
+        // flags is C unsigned int → low 32 bits only.  Pre-batch we
+        // held flags as u64 and ran the mask check at 64-bit width, so
+        // high-half garbage returned spurious EINVAL where Linux
+        // returns ENOSYS (we don't implement secretmem).
+        //
+        // (a) memfd_secret(0x1_0008_0000) → ENOSYS
+        //     (high|O_CLOEXEC; truncates to 0o2_000_000 = 0x8_0000,
+        //     mask passes, ENOSYS terminal).
+        let a = SyscallArgs {
+            arg0: 0x1_0008_0000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_secret(high|O_CLOEXEC) -> {} (expected -ENOSYS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) memfd_secret(0x1_0000_0000) → ENOSYS
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes, ENOSYS terminal).
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_secret(high-half-zero) -> {} (expected -ENOSYS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) memfd_secret(0x1_0000_0001) → EINVAL
+        //     (high|bad-low 0x1; truncates to 0x1, mask rejects bit
+        //     outside O_CLOEXEC; verifies mask gate still rejects
+        //     invalid bits after the high half is stripped).
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_secret(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) memfd_secret(0x0008_0000) → ENOSYS
+        //     (plain O_CLOEXEC with no high half; truncates to itself,
+        //     mask passes, ENOSYS terminal — control case to ensure
+        //     the valid flag still flows past the mask post-batch).
+        let a = SyscallArgs {
+            arg0: 0x0008_0000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_secret(O_CLOEXEC) -> {} (expected -ENOSYS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   memfd_secret unsigned-int truncation (high-half ignored): OK"
+        );
 
         // pidfd_open(pid <= 0) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

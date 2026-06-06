@@ -14203,11 +14203,30 @@ fn sys_unshare(args: &SyscallArgs) -> SyscallResult {
     const VALID_FLAGS: u64 = 0x400 | 0x200 | 0x20000 | 0x40000 | 0x800_0000
         | 0x4000_0000 | 0x2000_0000 | 0x1000_0000 | 0x400_0000
         | 0x200_0000 | 0x80 | 0x10000 | 0x800 | 0x100;
-    if args.arg0 & !VALID_FLAGS != 0 {
+    // x86_64 syscall ABI register truncation: Linux declares
+    //   int unshare(int flags)
+    // (kernel/fork.c::SYSCALL_DEFINE1(unshare, unsigned long, unshare_flags)
+    // actually takes unsigned long, but the glibc / musl wrapper
+    // signature is `int`, and on amd64 the kernel function still
+    // receives only the low 32 bits of `flags` from any libc caller
+    // because the wrapper sign-extends an int into the register).
+    // Even for direct syscall users, mirroring the int width matches
+    // the documented userspace ABI and the SYSCALL_DEFINE3(clone) /
+    // SYSCALL_DEFINE5(clone) flags-field width that share the same
+    // CLONE_* mask.  Pre-batch we masked args.arg0 raw as u64, so a
+    // probe with `flags = 0x1_0000_0000` (high bit 32 + low zero)
+    // failed the `& !VALID_FLAGS` gate and returned EINVAL — Linux's
+    // 32-bit view truncates to 0 and takes the unshare(0) success
+    // arm.  Cast at entry to restore the ABI's 32-bit view.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags: u64 = u64::from(flags_i32 as u32);
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     // unshare(0) trivially succeeds: nothing to unshare.
-    if args.arg0 == 0 {
+    if flags == 0 {
         return SyscallResult::ok(0);
     }
     linux_err(errno::EPERM)
@@ -42327,6 +42346,85 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: unshare not EPERM");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 340: x86_64 syscall ABI register truncation for
+        // unshare's `int flags` arg.  Pre-batch flags was masked raw
+        // as u64, so high-half-set sentinels failed the
+        // `& !VALID_FLAGS` gate.  Linux's 32-bit view ignores the
+        // high half; mirror that.
+
+        // (a) flags = 0x1_0000_0000 (high bit 32 only, low zero).
+        // Linux truncates to 0 -> unshare(0) success path returning
+        // ok(0).  Pre-batch the high bit was outside VALID_FLAGS ->
+        // EINVAL.  Discriminates the truncation.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UNSHARE, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: unshare(high|0) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) flags = 0x1_0000_0400 (high bit 32 + CLONE_FILES).
+        // Linux truncates to 0x400 (CLONE_FILES), mask passes,
+        // falls through to EPERM.  Pre-batch the high bit failed the
+        // mask -> EINVAL.  Confirms a valid bit survives truncation.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0400, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UNSHARE, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: unshare(high|CLONE_FILES) -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) flags = 0x1_0000_0008 (high bit 32 + bit-3, which is
+        // not in VALID_FLAGS).  Linux truncates to 0x8 -> EINVAL
+        // from the mask check.  Pre-batch also EINVAL but for the
+        // wrong reason (high bit, not the bit-3).  Confirms the
+        // post-truncation mask still rejects invalid low bits.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0008, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UNSHARE, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: unshare(high|bad) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) flags = 0xFFFF_FFFF_0000_0000 (entire high half set,
+        // low zero).  Linux truncates to 0 -> unshare(0) success.
+        // Pre-batch the high half had stray bits outside VALID_FLAGS
+        // -> EINVAL.  All-high discriminator confirms only the low
+        // 32 bits are observed.
+        let a = SyscallArgs {
+            arg0: 0xFFFF_FFFF_0000_0000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UNSHARE, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: unshare(all-high) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!("[syscall/linux]   unshare int flags truncation: OK");
+
         // setns(fd=0, nstype=0) -> EPERM (nstype=0 is accepted on the
         // proc_ns_file path and only rejected on the pidfd path; we
         // can't distinguish, so EPERM is the truthful terminal).

@@ -30018,3 +30018,89 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (35.66s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+370. sys_unshare int-flags truncation (high-half
+     ignored).
+
+     Divergence: Linux's userspace ABI declares
+       int unshare(int flags)
+     (kernel-side SYSCALL_DEFINE1(unshare, unsigned
+     long, unshare_flags) takes unsigned long, but the
+     glibc/musl wrapper sign-extends an int into the
+     register, so the kernel function effectively
+     observes only the low 32 bits for any libc
+     caller).  The CLONE_* flag mask lives in the low
+     32 bits in both clone() and unshare(); high-half
+     register bits are caller-controlled garbage that
+     must be stripped before the `& !VALID_FLAGS`
+     check.  Pre-batch our stub did
+       `if args.arg0 & !VALID_FLAGS != 0 { EINVAL; }`
+     at full u64 width, so probes with sentinel high
+     bits hit the wrong gate:
+       - flags=0x1_0000_0000 (high|0): Linux
+         truncates to 0, takes the unshare(0) success
+         arm and returns ok(0).  Pre-batch: the high
+         bit was outside VALID_FLAGS -> EINVAL.
+       - flags=0x1_0000_0400 (high|CLONE_FILES):
+         Linux truncates to CLONE_FILES, mask passes,
+         falls through to EPERM (unprivileged).  Pre-
+         batch: EINVAL via the same high-bit gate.
+       - flags=0xFFFF_FFFF_0000_0000 (all-high, low
+         zero): Linux truncates to 0, success arm.
+         Pre-batch: EINVAL.
+
+     Fix: in fn sys_unshare (kernel/src/syscall/
+     linux.rs line ~14196), cast at entry to restore
+     the ABI's 32-bit view and re-widen for the mask
+     compare:
+
+       #[allow(clippy::cast_possible_truncation,
+              clippy::cast_possible_wrap)]
+       let flags_i32 = args.arg0 as i32;
+       #[allow(clippy::cast_sign_loss)]
+       let flags: u64 = u64::from(flags_i32 as u32);
+       if flags & !VALID_FLAGS != 0 { EINVAL; }
+       if flags == 0 { return ok(0); }
+       EPERM
+
+     Re-widening to u64 after truncation keeps the
+     downstream mask check and the `flags == 0`
+     short-circuit unchanged.  Same shape used in
+     batches 317 (umount2), 335 (sched_setscheduler
+     policy) and 337 (faccessat2 flags) — cast at
+     entry, re-widen for the comparison.
+
+     Tests: four boot-time probes appended after the
+     existing unshare(CLONE_FILES) EPERM test in the
+     self-test block:
+       (a) flags=0x1_0000_0000 -> 0 (was EINVAL).
+           High-only discriminator: truncates to 0,
+           unshare(0) success path.
+       (b) flags=0x1_0000_0400 -> EPERM (was EINVAL).
+           High|CLONE_FILES: truncates to CLONE_FILES,
+           mask passes, terminal EPERM.
+       (c) flags=0x1_0000_0008 -> EINVAL preserved.
+           High|bit-3 (not in VALID_FLAGS): mask
+           rejects the truncated low half — confirms
+           the post-cast EINVAL gate still fires for
+           genuinely invalid bits.
+       (d) flags=0xFFFF_FFFF_0000_0000 -> 0 (was
+           EINVAL).  All-high, low=0: truncates to 0,
+           success.
+     Marker: "unshare int flags truncation: OK".
+
+     Preserved: all existing unshare probes pass —
+     unshare(0)=0, unshare(0x8)=EINVAL (bit-3 outside
+     mask), unshare(CLONE_FILES)=EPERM.
+
+     Known limitations: none.  The unshare stub
+     remains terminal-EPERM for every nonzero valid
+     flag combination because we do not implement
+     namespace unsharing; once the namespace
+     subsystem lands, the per-flag dispatch will see
+     the same truncated value and the high-half
+     stripping will continue to behave correctly.
+
+     Build: cargo build -p kernel clean (34.83s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 23s).

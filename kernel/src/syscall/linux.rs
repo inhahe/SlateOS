@@ -15478,8 +15478,65 @@ fn sys_semtimedop(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EINVAL)
 }
 
-/// `msgget(key, msgflg)`.
-fn sys_msgget(_args: &SyscallArgs) -> SyscallResult {
+/// `msgget(key, msgflg)` — create / get SysV message queue.
+fn sys_msgget(args: &SyscallArgs) -> SyscallResult {
+    // Linux signature:
+    //   SYSCALL_DEFINE2(msgget, key_t, key, int, msgflg)
+    // - key_t is C `int` (32 bits) — x86_64 syscall ABI truncates.
+    // - msgflg is C `int` (32 bits) — truncates.
+    //
+    // Gate order (ipc/msg.c::SYSCALL_DEFINE2(msgget) ->
+    // ipc/util.c::ipcget):
+    //
+    //   if (key == IPC_PRIVATE) {
+    //       ipcget_new -> ops->getnew -> newque (no size param ->
+    //                                            no size gate)
+    //   } else {
+    //       ipcget_public -> ipc_findkey(key)
+    //           if (!found) {
+    //               if (!(msgflg & IPC_CREAT)) return -ENOENT;
+    //               ops->getnew -> newque
+    //           } else { return existing id; }
+    //   }
+    //
+    // Pre-batch we returned a flat ENOSYS regardless of key/msgflg.
+    // The high-yield divergence is the ENOENT shape:
+    //
+    //   * msgget(key=5, msgflg=0)
+    //     Linux: -ENOENT (key not found, !IPC_CREAT).  Pre-batch:
+    //     ENOSYS.  Same observability problem as shmget pre-batch-364:
+    //     callers probing for a known well-known SysV msq key couldn't
+    //     distinguish "SysV msg not supported" from "queue not yet
+    //     created".  Linux's ENOENT is the standard signal to attempt
+    //     creation; ENOSYS instead made portable code give up entirely.
+    //
+    //   * key_t truncation: high bits in args.arg0 (above 32) leaked
+    //     into the IPC_PRIVATE check pre-batch.  E.g. key=0x1_0000_0000
+    //     truncates to 0 (IPC_PRIVATE) under Linux's syscall ABI but
+    //     matched as non-zero pre-batch.
+    //
+    // The terminal answer remains ENOSYS for any "actually try to
+    // create" path — this kernel has no SysV message-queue backing.
+    // newque has no size gate (msgget takes only key+msgflg), so unlike
+    // sys_shmget there's no intermediate EINVAL shape to honour.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let key = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let msgflg = args.arg1 as i32;
+    const IPC_PRIVATE: i32 = 0;
+    const IPC_CREAT: i32 = 0o1000;
+
+    if key == IPC_PRIVATE {
+        // ipcget_new path: always runs newque.
+        return linux_err(errno::ENOSYS);
+    }
+
+    // key != IPC_PRIVATE: ipcget_public path.  ipc_findkey misses
+    // because no queues exist.
+    if msgflg & IPC_CREAT == 0 {
+        return linux_err(errno::ENOENT);
+    }
+    // IPC_CREAT and not found -> newque -> no size gate -> ENOSYS.
     linux_err(errno::ENOSYS)
 }
 
@@ -45833,6 +45890,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: msgget not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // Batch 365: msgget routes through Linux's ipcget machinery
+        // (ipc/util.c::ipcget).  Pre-batch we returned ENOSYS for every
+        // shape; Linux distinguishes "queue not found" (ENOENT) from
+        // "kernel doesn't support SysV msg" (ENOSYS).  Probes:
+        //
+        //   * msgget(key=5, msgflg=0) -> ENOENT
+        //       ipcget_public -> ipc_findkey miss + !IPC_CREAT.
+        //       Pre-batch this returned ENOSYS, blocking portable
+        //       feature-detection code from telling "queue missing"
+        //       from "SysV msg unsupported".
+        //
+        //   * msgget(key=5, msgflg=IPC_CREAT) -> ENOSYS
+        //       ipcget_public miss + IPC_CREAT -> newque (no size
+        //       gate; msgget takes only key+msgflg).  Terminal ENOSYS.
+        //
+        //   * msgget(key=0x1_0000_0000, msgflg=0) -> ENOSYS
+        //       key_t (C `int`) truncation: high bit set in arg0
+        //       truncates to 0 == IPC_PRIVATE under Linux's syscall
+        //       ABI, which always routes to newque/ENOSYS (no ENOENT
+        //       gate).  Pre-batch the wide compare leaked through.
+        const MSGGET_IPC_CREAT: u64 = 0o1000;
+        let a = SyscallArgs { arg0: 5, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGGET, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgget(5,0) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 5, arg1: MSGGET_IPC_CREAT,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGGET, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgget(5,IPC_CREAT) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSGGET, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msgget(0x1_0000_0000,0) key_t \
+                 truncation -> ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   msgget ipcget gate routing \
+             (IPC_PRIVATE / ENOENT / key_t-trunc): OK"
+        );
         // Batch 199 reorders msgsnd to match Linux's
         // SYSCALL_DEFINE4(msgsnd), where get_user(mtype, &msgp->mtype)
         // runs FIRST and EFAULTs on unreadable msgp ahead of any

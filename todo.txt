@@ -32902,3 +32902,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.43s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+395. syscall/linux batch 365 — sys_msgget: implement ipcget gate
+     routing (IPC_PRIVATE / ENOENT / key_t truncation).
+
+     Pre-batch sys_msgget was a flat ENOSYS stub:
+
+         fn sys_msgget(_args: &SyscallArgs) -> SyscallResult {
+             linux_err(errno::ENOSYS)
+         }
+
+     Linux's SYSCALL_DEFINE2(msgget, key_t, key, int, msgflg) routes
+     through the same ipc/util.c::ipcget machinery as shmget (batch
+     364):
+
+         if (key == IPC_PRIVATE) {
+             ipcget_new -> ops->getnew -> newque
+         } else {
+             ipcget_public -> ipc_findkey(key)
+                 if (!found) {
+                     if (!(msgflg & IPC_CREAT)) return -ENOENT;
+                     ops->getnew -> newque
+                 } else { return existing id; }
+         }
+
+     Unlike shmget, msgget takes only (key, msgflg) — no size — so
+     newque has no SHMMIN-equivalent size gate.  The only observable
+     divergence is the ENOENT path: msgget(key=5, msgflg=0) should
+     return ENOENT, not ENOSYS.  This matters for portable feature
+     detection: ENOENT tells callers "queue not yet created, try
+     IPC_CREAT", while ENOSYS tells them "SysV msg unsupported,
+     fall back to POSIX mq or pipes".  Conflating the two made
+     well-known-key probes (e.g. attaching to a daemon's queue)
+     impossible to distinguish from kernel feature absence.
+
+     Secondary fix: key_t (C `int`) truncation.  args.arg0 is u64;
+     a high bit set (e.g. 0x1_0000_0000) truncates to 0 under
+     Linux's x86_64 syscall ABI, routing to IPC_PRIVATE/newque.
+     Pre-batch the wide compare against `0i64` would mismatch and
+     incorrectly fall into the public path.  Same `as i32` cast
+     pattern as batch 364 / 362.
+
+     Fix shape (mirroring sys_shmget post-batch-364, minus the size
+     gate since msgget has no size parameter):
+
+         let key = args.arg0 as i32;
+         let msgflg = args.arg1 as i32;
+         const IPC_PRIVATE: i32 = 0;
+         const IPC_CREAT: i32 = 0o1000;
+         if key == IPC_PRIVATE {
+             return linux_err(errno::ENOSYS);
+         }
+         if msgflg & IPC_CREAT == 0 {
+             return linux_err(errno::ENOENT);
+         }
+         linux_err(errno::ENOSYS)
+
+     Terminal answer remains ENOSYS for every "actually create"
+     path — this kernel has no SysV message-queue backing.
+
+     Existing probe (key=0, msgflg=0) is IPC_PRIVATE and still
+     returns ENOSYS, so it remains valid.  Added three new probes:
+
+       * msgget(key=5, msgflg=0) -> ENOENT
+           ipcget_public miss + !IPC_CREAT.  Pre-batch: ENOSYS.
+
+       * msgget(key=5, msgflg=IPC_CREAT) -> ENOSYS
+           ipcget_public miss + IPC_CREAT -> newque (terminal).
+
+       * msgget(key=0x1_0000_0000, msgflg=0) -> ENOSYS
+           key_t truncation: high-bit arg0 wraps to 0 ==
+           IPC_PRIVATE under Linux's syscall ABI, routes to
+           newque/ENOSYS (no ENOENT gate).
+
+     Final boot-time stamp:
+         "[syscall/linux]   msgget ipcget gate routing
+          (IPC_PRIVATE / ENOENT / key_t-trunc): OK"
+
+     Build: cargo build -p kernel clean (37.01s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

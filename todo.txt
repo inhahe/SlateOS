@@ -26255,3 +26255,130 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (44.43s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 23s).
+
+  329. Batch 299 — sys_clock_gettime + sys_clock_nanosleep
+       x86_64 register-truncation tightening.
+
+       Divergence
+       ----------
+       Two adjacent posix-clock entry points read
+       declared 32-bit C-types as raw u64:
+
+       (a) sys_clock_gettime (kernel/src/syscall/linux.rs
+           ~24539): `let clockid = args.arg0;` was raw.
+           The match below compares clockid against
+           u64-typed constants (`const CLOCK_REALTIME:
+           u64 = 0;` etc.).  A sentinel like
+           clockid=0x1_0000_0000 has low 32 == 0 ==
+           CLOCK_REALTIME but doesn't equal the u64
+           constant 0, so it fell through to
+           `_ => return linux_err(errno::EINVAL)`.
+           Linux's SYSCALL_DEFINE2(clock_gettime) casts
+           clockid_t (int) before any branching, so the
+           same sentinel resolves to REALTIME and fills
+           the timespec.
+
+       (b) sys_clock_nanosleep (kernel/src/syscall/linux.rs
+           ~24611): `let flags = args.arg1;` was raw and
+           the gate `if flags & !TIMER_ABSTIME != 0`
+           rejected high-bit-set values that Linux would
+           truncate.  flags=0x1_0000_0001 returned EINVAL
+           where Linux truncates to TIMER_ABSTIME=1 and
+           takes the ABS branch.
+
+           A separate inner divergence existed at the
+           `let now_ns: u64 = match clockid { 0 =>
+           timekeeping::clock_realtime(), _ =>
+           hrtimer::now_ns() };` pick, which read raw u64
+           clockid even though the upfront range check
+           used clockid_i32.  After this batch the
+           identifier `clockid` itself is the
+           re-widened-from-i32-via-u32 value, so the
+           inner match is automatically correct.
+
+       Fix
+       ---
+       In sys_clock_gettime, replace the raw read with:
+         let clockid_i32 = args.arg0 as i32;
+         let clockid: u64 = u64::from(clockid_i32 as u32);
+       The match arms still compare against u64 constants
+       and now see the zero-extended low-32 value.
+
+       In sys_clock_nanosleep, consolidate the two casts
+       at the top of the function:
+         let clockid_i32 = args.arg0 as i32;
+         let clockid: u64 = u64::from(clockid_i32 as u32);
+         let flags_i32 = args.arg1 as i32;
+         let flags: u64 = u64::from(flags_i32 as u32);
+       and remove the redundant `let clockid_i32 =
+       clockid as i32;` further down.  All downstream
+       reads of `clockid` (range check via clockid_i32,
+       EOPNOTSUPP match, inner now_ns match) and `flags`
+       (the !TIMER_ABSTIME gate and the TIMER_ABSTIME
+       branch pick) now see the truncated value.
+
+       All three casts get
+       #[allow(clippy::cast_possible_truncation,
+              clippy::cast_possible_wrap,
+              clippy::cast_sign_loss)]
+       split across the two `as` steps to mirror the
+       batches-295..298 pattern.
+
+       New self-tests
+       --------------
+       Three probes appended before a new marker
+         "[syscall/linux]   clock_gettime/clock_nanosleep
+          clockid_t/int flags truncation: OK"
+       inserted after the wait4 marker:
+
+       (a) clock_gettime(clockid=0x1_0000_0000, NULL)
+           -> -EFAULT.  Pre-batch: -EINVAL via the raw
+           u64-match fallthrough.
+       (b) clock_gettime(clockid=0x1_0000_0008, &ts_buf)
+           -> 0.  Pre-batch: -EINVAL.  Truncates to
+           CLOCK_REALTIME_ALARM=8, which the
+           per-batch-prior fix already accepts as
+           realtime.
+       (c) clock_nanosleep(clockid=CLOCK_MONOTONIC,
+           flags=0x1_0000_0001, &zero_ts, NULL) -> 0.
+           Pre-batch: -EINVAL via the flag gate.
+           Truncates to TIMER_ABSTIME=1; target_ns=0
+           is "already past", yield_now, success.
+
+       Preserved
+       ---------
+       - clock_gettime u64 const arms (CLOCK_REALTIME=0
+         .. CLOCK_TAI=11) unchanged; only the type the
+         match scrutinee carries was tightened.
+       - clock_nanosleep gate order
+         (clockid -> EINVAL/EOPNOTSUPP, read_timespec
+         -> EFAULT, timespec_valid -> EINVAL,
+         flags & !TIMER_ABSTIME -> EINVAL) preserved.
+       - The clockid_i32 range check `(0..=11).contains
+         && != 10` and the EOPNOTSUPP `matches!(3|4|5|6)`
+         filter are unchanged.
+       - clock_gettime ALARM/TAI accept path
+         (REALTIME_ALARM=8, BOOTTIME_ALARM=9, TAI=11
+         all -> realtime/monotonic) preserved.
+
+       Known limitations / out of scope
+       --------------------------------
+       - clock_nanosleep inner now_ns match divergence
+         (raw u64 clockid -> hrtimer when high bits set)
+         is fixed implicitly by the rename of `clockid`
+         to the truncated u64, but the symptom is hard
+         to test externally because the timespec is
+         already zero and the ABS branch saturates to 0
+         regardless of clock source.  Probe (c) demands
+         success and would have failed with the old
+         flag gate; the inner divergence on its own is
+         silent in kernel context.
+       - sys_perf_event_open audit (pid_t + int cpu +
+         int group_fd) was scoped but not landed in
+         this batch — its body extends past line 12380
+         and was not fully traversed; deferred to a
+         later batch.
+
+       Build: cargo build -p kernel clean (45.19s).
+       Boot test: bash scripts/boot-test.sh --no-build
+                  --timeout=240 PASSED (BOOT_OK at 27s).

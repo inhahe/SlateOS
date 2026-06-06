@@ -24536,7 +24536,17 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
     const CLOCK_BOOTTIME_ALARM: u64 = 9;
     const CLOCK_TAI: u64 = 11;
 
-    let clockid = args.arg0;
+    // x86_64 syscall ABI: clockid_t is `int` (32-bit) but delivered in
+    // a 64-bit register.  The kernel function body must only see the
+    // low 32 bits — Linux's wrapper does `(clockid_t)args[0]` before any
+    // match.  Without the truncation, a sentinel like 0x1_0000_0000
+    // (low 32 == 0 == CLOCK_REALTIME, high 32 == 1) fails every match
+    // arm and falls into the `_ => EINVAL` default, where Linux would
+    // truncate and return REALTIME.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let clockid: u64 = u64::from(clockid_i32 as u32);
     let tp_ptr = args.arg1;
 
     let ns: u64 = match clockid {
@@ -24607,8 +24617,23 @@ fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
 fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     const TIMER_ABSTIME: u64 = 1;
     const NSEC_PER_SEC: i64 = 1_000_000_000;
-    let clockid = args.arg0;
-    let flags = args.arg1;
+    // x86_64 syscall ABI truncation: clockid_t is `int` (32-bit),
+    // flags is `int` (32-bit).  Both arrive in 64-bit registers and
+    // must be cast to their declared widths before any range/match
+    // logic.  Pre-batch we read both as raw u64, so a sentinel like
+    // clockid=0x1_0000_0000 passed the `clockid_i32` range check
+    // (truncated to 0) but the inner `match clockid` on u64 fell to
+    // hrtimer instead of timekeeping, and flags=0x1_0000_0001 failed
+    // the `flags & !TIMER_ABSTIME` gate with EINVAL where Linux would
+    // truncate and take the ABS path.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clockid_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let clockid: u64 = u64::from(clockid_i32 as u32);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg1 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags: u64 = u64::from(flags_i32 as u32);
     let req_ptr = args.arg2;
 
     // Linux's `SYSCALL_DEFINE4(clock_nanosleep)`
@@ -24622,8 +24647,6 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     // to sleep with whatever timespec was passed, treating unknown
     // clockids as "use hrtimer".  Feature-detection probes (e.g. glibc's
     // clock_nanosleep wrapper) saw success where Linux rejects.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let clockid_i32 = clockid as i32;
     // Valid posix clockids: REALTIME(0), MONOTONIC(1),
     // PROCESS_CPUTIME_ID(2), THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
     // REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
@@ -27370,6 +27393,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   wait4 pid_t/int options truncation: OK"
+        );
+    }
+
+    // Batch 299 — clock_gettime / clock_nanosleep clockid_t (int) and
+    // clock_nanosleep flags (int) x86_64 register-truncation audit.
+    //
+    // Pre-batch reads:
+    //   sys_clock_gettime: `let clockid = args.arg0;` (raw u64). The
+    //     match arms compare clockid against `const ...: u64 = N`
+    //     constants, so any high-bit-set sentinel falls through to
+    //     `_ => EINVAL` even when the low 32 bits name a valid clock.
+    //   sys_clock_nanosleep: `let flags = args.arg1;` (raw u64).  The
+    //     `flags & !TIMER_ABSTIME != 0` gate rejects any high-bit-set
+    //     value where Linux would truncate to a valid 0/1 flag.
+    //
+    // Linux's wrappers cast clockid_t/int to 32-bit before any logic.
+    {
+        // (a) clock_gettime(clockid=0x1_0000_0000, NULL).  Truncates
+        //     to CLOCK_REALTIME=0, reaches write_timespec(NULL), which
+        //     returns EFAULT.  Pre-batch: raw u64 0x1_0000_0000 fails
+        //     every match arm -> _ => EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::CLOCK_GETTIME, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_gettime high-half clockid -> {} (expected -EFAULT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) clock_gettime(clockid=0x1_0000_0008, &ts).  Truncates to
+        //     CLOCK_REALTIME_ALARM=8 (mirrors realtime in Linux), fills
+        //     the timespec and returns 0.  Pre-batch: raw u64 doesn't
+        //     equal the u64-typed CLOCK_REALTIME_ALARM(8) constant ->
+        //     EINVAL.
+        let mut ts_buf = [0u8; 16];
+        let ts_ptr = ts_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0008,
+            arg1: ts_ptr,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::CLOCK_GETTIME, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_gettime high-half REALTIME_ALARM -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) clock_nanosleep(clockid=CLOCK_MONOTONIC, flags=0x1_0000_0001,
+        //     &zero_ts, NULL).  Truncates flags to TIMER_ABSTIME=1 and
+        //     takes the ABS branch: target_ns=0 is "already past", so
+        //     saturating_sub yields 0 and we yield_now and return 0.
+        //     Pre-batch: raw flags 0x1_0000_0001 hits the
+        //     `flags & !TIMER_ABSTIME != 0` gate -> EINVAL.
+        let zero_ts = [0u8; 16];
+        let zero_ts_ptr = zero_ts.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: 0x1_0000_0001,
+            arg2: zero_ts_ptr,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep high-half flags -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   clock_gettime/clock_nanosleep clockid_t/int flags truncation: OK"
         );
     }
 

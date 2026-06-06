@@ -28613,3 +28613,104 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (38.90s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 25s).
+
+355. Batch 325 — sys_landlock_add_rule rule_type int
+     truncation (high-half of rule_type must be masked
+     before the enum-match gate).  This closes the
+     deferred limitation from entry 354.
+
+     Divergence: Linux's sys_landlock_add_rule signature
+     declares `const enum landlock_rule_type, rule_type`
+     for arg1.  The C enum is int-sized, delivered in
+     rsi.  The AMD64 syscall ABI does not zero-extend
+     C int across the syscall instruction, so Linux
+     observes only the low 32 bits — the high half is
+     caller-controlled garbage that must be ignored.
+
+     Our pre-fix implementation did `if !matches!(args.
+     arg1, 1 | 2) { return EINVAL; }` at u64 width, so
+     a probe like rule_type=0x1_0000_0001 failed the
+     match and returned EINVAL where Linux's truncated
+     rule_type=1 matches PATH_BENEATH and advances to
+     the attr gate.  The downstream per-arm dispatcher
+     `match args.arg1 { 1 => ..., 2 => ... }` had the
+     same divergence.
+
+     Fix: in sys_landlock_add_rule (kernel/src/syscall/
+     linux.rs line ~17869), cast args.arg1 to i32 once
+     and use it for both the validation match! and the
+     per-arm dispatcher:
+       #[allow(clippy::cast_possible_truncation,
+                clippy::cast_possible_wrap)]
+       let rule_type = args.arg1 as i32;
+       if !matches!(rule_type, 1 | 2) {
+           return linux_err(errno::EINVAL);
+       }
+       ...
+       match rule_type { 1 => ..., 2 => ..., _ => ... }
+
+     Tests added to dispatch_linux (after the unsigned-
+     int truncation marker from batch 324):
+       (a) landlock_add_rule(ruleset_fd=0,
+                              rule_type=0x1_0000_0001,
+                              attr=NULL, flags=0)
+           → EFAULT (high|PATH_BENEATH; truncates to 1,
+            type matches, downstream attr=NULL gate
+            returns EFAULT).  Pre-fix returned EINVAL
+            because the u64 match failed.
+       (b) landlock_add_rule(ruleset_fd=0,
+                              rule_type=0x1_0000_0002,
+                              attr=NULL, flags=0)
+           → EFAULT (high|NET_PORT; truncates to 2,
+            type matches, attr=NULL EFAULT).  Pre-fix
+            returned EINVAL.
+       (c) landlock_add_rule(ruleset_fd=0,
+                              rule_type=0x1_0000_0000,
+                              attr=NULL, flags=0)
+           → EINVAL (high|0 = invalid; truncates to 0,
+            not in {1,2}, rule_type gate fires EINVAL).
+            Verifies the gate still rejects unknown
+            rule_type after the high-bit strip.
+       (d) landlock_add_rule(ruleset_fd=0,
+                              rule_type=0x1_0000_0001,
+                              attr=lpb_attr (valid,
+                              allowed_access=EXECUTE=
+                              0x1), flags=0)
+           → EBADF (high|PATH_BENEATH with valid attr;
+            truncates to 1, full pre-validate flow
+            runs to the terminal EBADF since no real
+            ruleset_fd exists).  Pre-fix returned
+            EINVAL.
+     Marker: "[syscall/linux]   landlock_add_rule
+              rule_type int truncation (high-half
+              ignored): OK".
+
+     Preserved: existing landlock_add_rule probes
+     still pass:
+       - bad rule_type=99, flags=0 → EINVAL: works
+         because 99 fits in 32 bits and is not in
+         {1,2}.
+       - valid PATH_BENEATH (allowed_access=1) → EBADF:
+         works because 1 in i32 == 1 in u64.
+       - PATH_BENEATH allowed_access=0 → ENOMSG:
+         unaffected.
+       - PATH_BENEATH allowed_access=0x10000 (outside
+         FS mask) → EINVAL: unaffected.
+       - valid NET_PORT (allowed_access=1, port=8080)
+         → EBADF: unaffected.
+       - NET_PORT allowed_access=0x4 (outside NET mask)
+         → EINVAL: unaffected.
+       - NET_PORT port=65536 → EINVAL: unaffected.
+       - flags truncation probes (entry 354) all pass.
+
+     Known limitations:
+     - Landlock continues to be fundamentally
+       incompatible with our capability-based security
+       model (see entry 350).  EBADF is the permanent
+       terminal after pre-validation — no follow-up
+       probes will be needed when more infrastructure
+       lands.
+
+     Build: cargo build -p kernel clean (44.83s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

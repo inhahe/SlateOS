@@ -10704,7 +10704,32 @@ fn sys_signalfd(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `signalfd4(fd, mask, sizemask, flags)`.
+///
+/// Gate order (matches Linux fs/signalfd.c):
+///   1. (outer SYSCALL_DEFINE4) `sizemask != sizeof(sigset_t)` -> EINVAL.
+///   2. (outer) `copy_from_user(&mask, user_mask, 8)` -> EFAULT.
+///   3. (do_signalfd4) `flags & ~(SFD_CLOEXEC | SFD_NONBLOCK)` -> EINVAL.
+///   4. fd != -1: validate then surface EINVAL (no signalfd kind here).
+///
+/// Pre-batch the flag-mask check fired ahead of the sizemask + mask
+/// gates, so a probe of (sizemask=8, mask=NULL, flags=bogus) saw
+/// EINVAL where Linux returns EFAULT.
 fn sys_signalfd4(args: &SyscallArgs) -> SyscallResult {
+    let mask_ptr = args.arg1;
+    let sizemask = args.arg2 as usize;
+    // Gate 1: sizemask must be sizeof(sigset_t) = 8.
+    if sizemask != 8 {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 2: copy_from_user(mask) -> EFAULT.
+    if mask_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Gate 3 (do_signalfd4): flags must be a subset of
+    // SFD_CLOEXEC|SFD_NONBLOCK.
     // SFD_NONBLOCK = O_NONBLOCK = 0o4000 (2048).
     // SFD_CLOEXEC  = O_CLOEXEC  = 0o2_000_000 (524288).
     const SFD_NONBLOCK: u64 = 0o4000;
@@ -10712,17 +10737,6 @@ fn sys_signalfd4(args: &SyscallArgs) -> SyscallResult {
     const VALID_FLAGS: u64 = SFD_NONBLOCK | SFD_CLOEXEC;
     if args.arg3 & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
-    }
-    let mask_ptr = args.arg1;
-    let sizemask = args.arg2 as usize;
-    if sizemask != 8 {
-        return linux_err(errno::EINVAL);
-    }
-    if mask_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
-        return linux_err(linux_errno_for(e));
     }
     // Same fd semantics as signalfd(2) — see comment there.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -34524,6 +34538,62 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   signalfd/signalfd4 fd discrimination: OK");
+
+        // Batch 256: signalfd4 gate order (outer sizemask -> outer
+        // copy_from_user -> do_signalfd4 flag-mask -> fd disp).
+        //
+        // Discriminator A (gate 2 vs gate 3): sizemask=8 (passes),
+        // mask=NULL, flags=bogus -> EFAULT.  Pre-batch the flag-mask
+        // check fired ahead of the mask read and returned EINVAL.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 8, arg3: 0x8000_0000, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD4, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: signalfd4(sizemask=8, NULL, bad flag) expected EFAULT, got {}",
+                dispatch_linux(nr::SIGNALFD4, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Discriminator B (gate 1 wins over gate 2 EFAULT): sizemask=7,
+        // mask=NULL -> EINVAL (sizemask gate fires before any pointer
+        // touch).  Confirms the wrong sizemask answer hasn't slipped
+        // into EFAULT territory.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 7, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD4, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: signalfd4(sizemask=7, NULL) expected EINVAL, got {}",
+                dispatch_linux(nr::SIGNALFD4, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Discriminator C (gate 1 wins over gate 3): sizemask=7,
+        // mask=valid, flags=bogus -> EINVAL (sizemask gate ahead of the
+        // flag-mask gate; both produce EINVAL but the former wins).
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: sigmask.as_ptr() as u64,
+            arg2: 7, arg3: 0x8000_0000, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGNALFD4, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: signalfd4(sizemask=7, valid, bad flag) expected EINVAL, got {}",
+                dispatch_linux(nr::SIGNALFD4, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   signalfd4 sizemask > mask EFAULT > flag-mask gate order: OK"
+        );
 
         // timerfd_create with bogus clockid -> EINVAL.
         let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,

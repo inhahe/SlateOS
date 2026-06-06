@@ -22229,3 +22229,57 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      batch).
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 25s).
+
+## 285. syscall/linux: signalfd4 — outer sizemask > outer
+##      copy_from_user > do_signalfd4 flag-mask (batch 256)
+##
+##      Pre-batch divergence from Linux fs/signalfd.c:
+##
+##        Our `if args.arg3 & !VALID_FLAGS != 0` flag-mask gate fired
+##        FIRST.  Linux's signalfd4 splits the work:
+##          (outer SYSCALL_DEFINE4)
+##            if sizemask != sizeof(sigset_t)             -> EINVAL
+##            if copy_from_user(&mask, user_mask, 8)      -> EFAULT
+##          (do_signalfd4)
+##            if flags & ~(SFD_CLOEXEC | SFD_NONBLOCK)    -> EINVAL
+##
+##        Discriminator: (sizemask=8, mask=NULL, flags=0x8000_0000).
+##          Linux:    sizemask OK -> copy_from_user fails -> EFAULT.
+##          Pre-batch: flag-mask EINVAL fires first -> EINVAL.
+##
+##      Fix:
+##        * Reorder sys_signalfd4 to four gates: sizemask -> mask
+##          read -> flag-mask -> fd disposition.
+##        * sys_signalfd (legacy) already had the right order
+##          (sizemask -> mask -> fd) — no flag-mask check applies
+##          since it forwards with flags=0.
+##
+##      Self-tests added (after the existing signalfd4 fd-discrim
+##      block around line 34526):
+##        A. signalfd4(fd=-1, NULL, sizemask=8, flags=0x8000_0000)
+##           -> EFAULT (gate 2 ahead of gate 3).  Pre-batch EINVAL.
+##        B. signalfd4(fd=-1, NULL, sizemask=7, flags=0) -> EINVAL
+##           (gate 1 ahead of gate 2 EFAULT; sizemask wrong wins
+##           over NULL pointer).
+##        C. signalfd4(fd=-1, valid_mask, sizemask=7, flags=bogus)
+##           -> EINVAL (gate 1 wins over gate 3; both EINVAL but
+##           with the right reason).
+##
+##      Marker:
+##        "[syscall/linux]   signalfd4 sizemask > mask EFAULT >
+##         flag-mask gate order: OK"
+##
+##      Existing tests preserved: the pre-existing signalfd4(bad
+##      flag) test feeds sizemask=8 + valid mask + bogus flag,
+##      which still hits gate 3 EINVAL (gates 1+2 pass).
+##      signalfd4(-1, valid, sizemask=8, flags=valid) still
+##      reaches the terminal ENOSYS.  signalfd4(fd=0) still EINVAL
+##      (gates 1+2+3 pass, then fd!=-1 validate -> EINVAL).
+##
+##      Known limitations: no real signalfd kind exists in this
+##      kernel, so any fd!=-1 falls through to the terminal EINVAL.
+##      That mirrors Linux's do_signalfd4 "fd present but wrong
+##      kind" answer; it does not mirror the case where a real
+##      signalfd would receive a mask update.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

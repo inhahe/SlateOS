@@ -22463,26 +22463,66 @@ fn sys_vserver(_args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `futimesat(dirfd, path, times[2])` — legacy directory-fd-relative
-/// utime, superseded by `utimensat(2)` (which we handle).
+/// utime, superseded by `utimensat(2)`.
 ///
-/// Validate path string and (when non-NULL) the 32-byte `times[2]`
-/// buffer; return ENOSYS so glibc falls back to utimensat.
+/// Linux's `fs/utimes.c::SYSCALL_DEFINE3(futimesat)` forwards to
+/// `do_futimesat(dfd, filename, utimes)` — the same helper that
+/// `utimes(2)` uses.  Gate order:
+///   1. If `utimes != NULL`: copy_from_user 32 bytes (2x
+///      `struct __kernel_old_timeval`) -> -EFAULT.
+///   2. `times[0].tv_usec >= USEC_PER_SEC` OR
+///      `times[1].tv_usec >= USEC_PER_SEC` -> -EINVAL (the
+///      explicit pre-do_utimes usec check).
+///   3. `do_utimes()` resolves the path -> -EFAULT on NULL
+///      filename / -ENOENT etc.
+///   4. `vfs_utimes()` -> `mnt_want_write()` -> -EROFS.
+///
+/// Pre-batch we validated `path` first and only the 32-byte
+/// readability of `times`, so a probe of `(filename=NULL,
+/// times={tv_usec=1e6, ...})` saw EFAULT instead of Linux's
+/// EINVAL.  Terminal is preserved as ENOSYS (intentional: glibc
+/// uses ENOSYS to fall back to utimensat — a separate concern
+/// from the gate-order fix).
 fn sys_futimesat(args: &SyscallArgs) -> SyscallResult {
+    const USEC_PER_SEC: i64 = 1_000_000;
     let _dirfd = args.arg0 as i32;
     let path = args.arg1;
     let times = args.arg2;
+    // Gate 1: copy timeval array.
+    if times != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(times, 32) {
+            return linux_err(linux_errno_for(e));
+        }
+        let mut buf = [0u8; 32];
+        // SAFETY: validate_user_read above confirmed 32 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(times, buf.as_mut_ptr(), 32)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let read_i64 = |o: usize| -> i64 {
+            match <[u8; 8]>::try_from(&buf[o..o + 8]) {
+                Ok(b) => i64::from_ne_bytes(b),
+                Err(_) => 0,
+            }
+        };
+        // tv_usec lives at offset 8 of each 16-byte timeval.
+        let usec0 = read_i64(8);
+        let usec1 = read_i64(24);
+        // Gate 2: tv_usec range gate.
+        if usec0 >= USEC_PER_SEC || usec1 >= USEC_PER_SEC {
+            return linux_err(errno::EINVAL);
+        }
+    }
+    // Gate 3: do_utimes path resolution.
     if path == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = validate_user_str(path) {
         return linux_err(linux_errno_for(e));
     }
-    if times != 0 {
-        // times is `struct timeval[2]` — 2 * 16 = 32 bytes.
-        if let Err(e) = crate::mm::user::validate_user_read(times, 32) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+    // Terminal: ENOSYS so glibc falls back to utimensat (intentional
+    // diverge from Linux's EROFS — see doc comment).
     linux_err(errno::ENOSYS)
 }
 
@@ -45485,6 +45525,66 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: futimesat NULL times not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // futimesat discriminator A: tv_usec[0] = USEC_PER_SEC (1e6)
+        // with filename=NULL -> Linux EINVAL via do_futimesat's
+        // explicit pre-do_utimes usec check; pre-batch returned
+        // EFAULT because filename was inspected first.
+        {
+            let bad_times: [i64; 4] = [0, 1_000_000, 0, 0];
+            let bad_ptr = (&raw const bad_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: bad_ptr, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&bad_times);
+            if dispatch_linux(nr::FUTIMESAT, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: futimesat bad tv_usec[0] not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // futimesat discriminator B: tv_usec[1] = i64::MAX with
+        // filename=NULL -> EINVAL via the same gate on entry 1.
+        {
+            let bad_times: [i64; 4] = [0, 0, 0, i64::MAX];
+            let bad_ptr = (&raw const bad_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: bad_ptr, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&bad_times);
+            if dispatch_linux(nr::FUTIMESAT, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: futimesat bad tv_usec[1] not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // futimesat discriminator C: well-formed timeval array with
+        // filename=NULL -> EFAULT (acceptance: usec gate passes,
+        // filename-NULL surfaces).
+        {
+            let good_times: [i64; 4] = [0, 999_999, 0, 0];
+            let good_ptr = (&raw const good_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: good_ptr, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&good_times);
+            if dispatch_linux(nr::FUTIMESAT, &a).value
+                != -i64::from(errno::EFAULT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: futimesat valid tv_usec + NULL fn not EFAULT"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   futimesat tv_usec value gating: OK"
+        );
     }
 
     serial_println!("[syscall/linux] Translation self-test PASSED");

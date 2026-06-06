@@ -22909,3 +22909,67 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      tracked as a follow-up.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 26s).
+
+## 295. syscall/linux: futimesat — tv_usec value gating (batch 266)
+##
+##      Pre-batch divergence:
+##        Linux's `fs/utimes.c::SYSCALL_DEFINE3(futimesat)` is a
+##        thin wrapper around `do_futimesat(dfd, filename, utimes)`
+##        — the same helper that utimes(2) uses.  Gate order:
+##          1. utimes != NULL: copy_from_user 32 bytes -> EFAULT.
+##          2. tv_usec[0]|tv_usec[1] >= USEC_PER_SEC -> EINVAL.
+##          3. do_utimes -> path resolution -> EFAULT on NULL
+##             filename.
+##          4. vfs_utimes -> mnt_want_write -> EROFS.
+##        Pre-batch: path-NULL first, then validate_user_str, then
+##        validate_user_read(times, 32) — never copied or
+##        inspected tv_usec values.  Observable divergence:
+##        `(filename=NULL, times={tv_usec[0]=1e6, ...})` saw
+##        EFAULT instead of Linux's EINVAL — same pattern fixed
+##        in utimes (batch 265).
+##
+##      Fix:
+##        Restructured to mirror do_futimesat:
+##          1. If times != 0: validate_user_read(32) +
+##             copy_from_user the timeval array.
+##          2. Gate tv_usec[0]|tv_usec[1] >= 1_000_000 -> EINVAL.
+##          3. path == 0 -> EFAULT.
+##          4. validate_user_str(path) -> EFAULT on bad string.
+##          5. Terminal ENOSYS (intentional divergence from
+##             Linux's EROFS — glibc uses ENOSYS to fall back to
+##             utimensat; documented in the doc comment as a
+##             separate concern from the gate-order fix).
+##
+##      Self-tests added/updated:
+##
+##        Pre-existing tests preserved:
+##          - futimesat NULL path -> EFAULT.
+##          - futimesat (path=valid, times=zero-buf) -> ENOSYS.
+##          - futimesat (path=valid, times=NULL) -> ENOSYS.
+##
+##        New discriminators (inserted right after the existing
+##        futimesat triple):
+##          A. (filename=NULL, times={(0,1e6),(0,0)}) -> EINVAL
+##              via the new tv_usec gate; pre-batch EFAULT.
+##          B. (filename=NULL, times={(0,0),(0,i64::MAX)}) ->
+##              EINVAL via the same gate on entry 1.
+##          C. (filename=NULL, times={(0,999_999),(0,0)}) ->
+##              EFAULT (acceptance: valid tv_usec falls through
+##              to filename check).
+##
+##      Marker:
+##        "[syscall/linux]   futimesat tv_usec value gating: OK"
+##
+##      Existing tests preserved: utimes / utime / utimensat
+##      gates, downstream *at-family probes, legacy-syscall ENOSYS
+##      sweep right above this block.
+##
+##      Known limitations: same as utimes (batch 265) — negative
+##      tv_usec values pass our signed `>=`-comparison; Linux
+##      catches them at vfs_utimes->nsec_valid after the *1000
+##      conversion makes tv_nsec negative.  Terminal ENOSYS is
+##      also a deliberate non-Linux behaviour (Linux returns
+##      EROFS for read-only mounts) to drive glibc's
+##      utimensat-fallback path.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

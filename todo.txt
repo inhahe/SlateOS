@@ -30280,3 +30280,184 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (35.49s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+372. Batch 342 - Linux ABI sys_init_module /
+     sys_finit_module / sys_delete_module gate-order
+     inversion fix: EPERM must be the terminal-and-
+     only answer.
+
+     Divergence (kernel/module/main.c, modern
+     mainline):
+
+       SYSCALL_DEFINE3(init_module, void __user *, umod,
+                       unsigned long, len,
+                       const char __user *, uargs)
+       {
+           int err;
+           err = may_init_module();
+           if (err) return err;     // (1) EPERM
+           err = copy_module_from_user(umod, len, &info);
+           if (err) return err;     // (2) EFAULT / ENOEXEC
+           ...
+       }
+       static int may_init_module(void) {
+           if (!capable(CAP_SYS_MODULE) || modules_disabled)
+               return -EPERM;
+           return 0;
+       }
+
+     Same gate-1-first pattern for finit_module and
+     delete_module.
+
+     Pre-batch errno table (kernel-context probe;
+     userspace probes inherit the same pattern):
+
+       Probe                              Linux  Pre-batch  Post-batch
+       ---------------------------------  -----  ---------  ----------
+       init_module(NULL, 1, NULL)         EPERM  EFAULT     EPERM
+       init_module(0x1000, 0, NULL)       EPERM  ENOEXEC    EPERM
+       init_module(0x1000, 63, NULL)      EPERM  ENOEXEC    EPERM
+       init_module(0x1000, 64, NULL)      EPERM  EPERM      EPERM
+       finit_module(0, 0, 0x80000000)     EPERM  EINVAL     EPERM
+       finit_module(0, 0, 0)              EPERM  EPERM      EPERM
+       delete_module(NULL, 0)             EPERM  EFAULT     EPERM
+       delete_module(name, 0x80000000)    EPERM  EINVAL     EPERM
+
+     Pre-batch we ran:
+       sys_init_module: NULL umod -> EFAULT;
+                        len < sizeof(Elf64_Ehdr) -> ENOEXEC;
+                        bad umod range -> EFAULT;
+                        bad uargs -> EFAULT;
+                        then EPERM.
+       sys_finit_module: flag mask check -> EINVAL;
+                         validate_linux_fd -> EBADF (userspace);
+                         bad uargs -> EFAULT;
+                         then EPERM.
+       sys_delete_module: spurious flag mask check
+                          (Linux does NOT impose one
+                          here - only inspects O_NONBLOCK
+                          for blocking vs non-blocking
+                          mode) -> EINVAL;
+                          NULL name -> EFAULT;
+                          bad name range -> EFAULT;
+                          then EPERM.
+
+     Linux validates CAP_SYS_MODULE BEFORE touching
+     any user pointer or any flag bit.  The errno
+     selection matters because module loaders
+     (modprobe, dkms, systemd-modules-load) branch
+     on it.  EPERM signals "the caller is
+     unprivileged, abort and tell the user to use
+     sudo".  EFAULT / ENOEXEC / EINVAL all signal
+     "this specific file/argument is bad, try the
+     next candidate" - triggering fallback loops
+     that mangle paths, swap module names, or rebuild
+     the kernel info cache.  None of those retries
+     can ever succeed; they just burn CPU and
+     occasionally produce confusing error chains in
+     userspace logs.
+
+     Fix: each of the three syscalls is reduced to
+     `linux_err(errno::EPERM)`.  Architectural
+     directive: we are a microkernel.  There is no
+     loadable-module subsystem and there never will
+     be (the design-review explicitly forbids
+     hosting a Linux LKM loader inside the kernel
+     address space).  No caller can therefore ever
+     hold CAP_SYS_MODULE; Linux's gate-1 always
+     trips.  Returning EPERM unconditionally is both
+     the simplest correct mirror of Linux's userspace
+     experience AND a structurally honest report of
+     our native capability state.
+
+     Code changes:
+       kernel/src/syscall/linux.rs
+         sys_init_module: body replaced with EPERM-
+           only; arg validation removed (unreachable
+           after Linux's gate-1).
+         sys_finit_module: body replaced with EPERM-
+           only; flag mask check, fd validation, and
+           uargs pointer check removed.
+         sys_delete_module: body replaced with EPERM-
+           only; spurious flag mask check (not
+           present in Linux), NULL name check, and
+           name pointer validation removed.
+
+     Self-tests (kernel/src/syscall/linux.rs):
+       Updated existing probes that previously
+       expected EFAULT / ENOEXEC / EINVAL to now
+       expect EPERM.  Marker:
+       "init/finit/delete_module gate-order EPERM-
+        first: OK"
+
+       Probe coverage:
+         (a) init_module(NULL, 1, NULL): EFAULT ->
+             EPERM.
+         (b) init_module(0x1000, 0, NULL): ENOEXEC
+             -> EPERM.
+         (c) init_module(0x1000, 63, NULL): ENOEXEC
+             -> EPERM.
+         (d) init_module(0x1000, 64, NULL): EPERM
+             stays EPERM (boundary).
+         (e) finit_module(0, 0, 0x8000_0000):
+             EINVAL -> EPERM (unknown flag bit
+             stops mattering).
+         (f) finit_module(0, 0, 0): EPERM stays
+             EPERM (baseline).
+         (g) delete_module(NULL, 0): EFAULT ->
+             EPERM.
+         (h) delete_module(name=stack, 0x8000_0000):
+             EINVAL -> EPERM (spurious flag-mask
+             gate removed).
+
+     Prior batch 302 high-half flag-truncation tests
+     for finit_module / delete_module still pass:
+     the post-truncation flag value of 0 now bypasses
+     the (now-removed) flag-mask gate entirely and
+     reaches the same terminal EPERM via the direct
+     path.
+
+     Known limitations / judgment calls:
+
+     * Module image inspection is gone.  Linux,
+       under CAP_SYS_MODULE, would proceed to copy
+       the module image from user memory and run
+       ELF validation - returning ENOEXEC for short
+       headers, EINVAL for bad section tables, etc.
+       Since we never enter that path, those errnos
+       are unreachable from userspace.  Architectural
+       directive: this is intentional - we don't
+       parse Linux module images at all, so any
+       Linux-specific errno from inside the loader
+       would be a fabrication.
+
+     * delete_module flag mask gone.  Linux only
+       inspects O_NONBLOCK for blocking semantics
+       and accepts every other flag bit silently
+       (there are no flag-mask EINVAL errors in
+       delete_module).  Our pre-batch EINVAL on
+       unknown flag bits was an outright divergence
+       on top of the gate-order inversion; removing
+       it actually tightens the Linux mirror.
+
+     * No CAP_SYS_MODULE / modules_disabled tracking
+       or any uid-based pre-EPERM modelling.  Linux
+       userspace running as root with CAP_SYS_MODULE
+       would clear gate-1 and proceed to the loader
+       (which would then likely fail with ENOSYS-
+       equivalent had Linux not implemented modules
+       at all).  In our environment no caller ever
+       holds CAP_SYS_MODULE so the unconditional
+       EPERM is observationally identical for every
+       Linux process we'd ever run.
+
+     * Modprobe / dkms behaviour: with EPERM as the
+       terminal answer, fallback loops in these tools
+       will abort cleanly.  A future "modprobe -n"
+       (dry-run) would still complete because dry
+       runs do not invoke init_module; only the live
+       load path is affected.
+
+     Build: cargo build -p kernel clean (39.32s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

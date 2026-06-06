@@ -14108,87 +14108,131 @@ fn sys_quotactl_fd(args: &SyscallArgs) -> SyscallResult {
 /// sees EPERM, so this divergence affects only CAP-holding probes
 /// (which on real Linux would proceed into ENOEXEC / EFAULT
 /// territory we don't yet emulate properly).
-fn sys_init_module(args: &SyscallArgs) -> SyscallResult {
-    const ELF64_EHDR_SIZE: usize = 64;
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    let len = args.arg1 as usize;
-    // Linux: copy_module_from_user rejects len < sizeof(*hdr) with
-    // ENOEXEC ("not a valid ELF").
-    if len < ELF64_EHDR_SIZE {
-        return linux_err(errno::ENOEXEC);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
-        return linux_err(linux_errno_for(e));
-    }
-    if args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+fn sys_init_module(_args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/module/main.c::SYSCALL_DEFINE3(init_module)):
+    //
+    //   SYSCALL_DEFINE3(init_module, void __user *, umod,
+    //                   unsigned long, len, const char __user *, uargs)
+    //   {
+    //       int err;
+    //       struct load_info info = { };
+    //
+    //       err = may_init_module();
+    //       if (err) return err;     // (1) CAP_SYS_MODULE -> EPERM
+    //
+    //       err = copy_module_from_user(umod, len, &info);
+    //       if (err) return err;     // (2) EFAULT / ENOEXEC validation
+    //       ...
+    //   }
+    //
+    //   static int may_init_module(void) {
+    //       if (!capable(CAP_SYS_MODULE) || modules_disabled)
+    //           return -EPERM;
+    //       return 0;
+    //   }
+    //
+    // So Linux validates CAP_SYS_MODULE BEFORE touching the module
+    // image at all.  Pre-batch we did the inverse: NULL umod -> EFAULT;
+    // len < sizeof(Elf64_Ehdr) -> ENOEXEC; bad umod range -> EFAULT;
+    // bad uargs -> EFAULT; only after all that did we return the
+    // terminal EPERM.
+    //
+    // Three concrete divergences:
+    //   * init_module(NULL, 1, _)   — Linux: EPERM.  Pre-batch: EFAULT.
+    //   * init_module(0x1000, 0, _) — Linux: EPERM.  Pre-batch: ENOEXEC.
+    //   * init_module(0x1000, 63, _)— Linux: EPERM.  Pre-batch: ENOEXEC.
+    //
+    // The errno selection matters to module loaders.  modprobe / dkms /
+    // systemd-modules-load use EPERM to decide "the caller is
+    // unprivileged, no point trying alternate paths" — they abort the
+    // load.  ENOEXEC and EFAULT both signal "this specific file is
+    // bad" and trigger fallback to a different module file or path,
+    // burning CPU on retries that can never succeed.  Returning the
+    // Linux-shaped EPERM lets loaders fail fast.
+    //
+    // Architectural directive: we are a microkernel.  There is no
+    // loadable-module subsystem and there never will be — the
+    // architectural-review directive explicitly forbids hosting a
+    // Linux LKM loader inside the kernel address space.  No caller
+    // can therefore ever hold CAP_SYS_MODULE; Linux's gate-1 always
+    // trips.  Return EPERM unconditionally.
     linux_err(errno::EPERM)
 }
 
 /// `finit_module(fd, param_values, flags)`.
-fn sys_finit_module(args: &SyscallArgs) -> SyscallResult {
-    // MODULE_INIT_IGNORE_MODVERSIONS = 1, IGNORE_VERMAGIC = 2,
-    // COMPRESSED_FILE = 4.
-    const VALID_FLAGS: u64 = 1 | 2 | 4;
-    // Linux signature:
-    //   `SYSCALL_DEFINE3(finit_module, int, fd, const char __user *,
-    //                    uargs, int, flags)`.
-    // `flags` is declared `int` (32-bit), so the x86_64 syscall ABI
-    // truncates args.arg2 to its low 32 bits before the body runs.
-    // Pre-batch (302) we masked args.arg2 raw, so a probe with
-    // flags=0x1_0000_0000 (truncates to 0) hit the EINVAL flag-mask
-    // gate where Linux truncates to 0 and reaches the terminal EPERM
-    // (no CAP_SYS_MODULE).
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let flags_i32 = args.arg2 as i32;
-    #[allow(clippy::cast_sign_loss)]
-    let flags: u64 = u64::from(flags_i32 as u32);
-    if flags & !VALID_FLAGS != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
-    if args.arg1 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+fn sys_finit_module(_args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/module/main.c::SYSCALL_DEFINE3(finit_module)):
+    //
+    //   SYSCALL_DEFINE3(finit_module, int, fd, const char __user *,
+    //                   uargs, int, flags)
+    //   {
+    //       int err;
+    //       struct fd f;
+    //
+    //       err = may_init_module();
+    //       if (err) return err;     // (1) CAP_SYS_MODULE -> EPERM
+    //
+    //       if (flags & ~(MODULE_INIT_IGNORE_MODVERSIONS
+    //                   | MODULE_INIT_IGNORE_VERMAGIC
+    //                   | MODULE_INIT_COMPRESSED_FILE))
+    //           return -EINVAL;      // (2) flag mask
+    //       ...
+    //   }
+    //
+    // Pre-batch we ran the flag-mask check FIRST (EINVAL on unknown
+    // flag bits), then validated the fd (EBADF on bad fd in userspace
+    // context), then the uargs pointer (EFAULT on bad range), and only
+    // then returned EPERM.  So:
+    //
+    //   * finit_module(_, _, 0x8000_0000) — Linux: EPERM.  Pre-batch:
+    //     EINVAL (unknown flag).
+    //   * finit_module(99, _, 0) from userspace — Linux: EPERM.
+    //     Pre-batch: EBADF.
+    //   * finit_module(_, 0xDEAD, 0) from userspace — Linux: EPERM.
+    //     Pre-batch: EFAULT.
+    //
+    // Architectural directive: see sys_init_module — no LKM loader
+    // exists or will exist, no caller holds CAP_SYS_MODULE, Linux's
+    // gate-1 always trips.  The batch 302 high-half flag-truncation
+    // probes (finit_module flag=0x1_0000_0000) still reach the same
+    // terminal EPERM, just via the new direct path.
     linux_err(errno::EPERM)
 }
 
 /// `delete_module(name, flags)`.
-fn sys_delete_module(args: &SyscallArgs) -> SyscallResult {
-    // O_NONBLOCK=0o4000, O_TRUNC=0o1000 (the only valid flags).
-    const VALID_FLAGS: u64 = 0o4000 | 0o1000;
-    // Linux signature:
-    //   `SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
-    //                    unsigned int, flags)`.
-    // `flags` is declared `unsigned int` (32-bit), so the x86_64 syscall
-    // ABI truncates args.arg1 to its low 32 bits before the body runs.
-    // Pre-batch (302) we masked args.arg1 raw, so a probe with
-    // flags=0x1_0000_0000 (truncates to 0) hit the EINVAL flag-mask
-    // gate where Linux truncates to 0 and reaches the terminal EPERM
-    // (no CAP_SYS_MODULE).
-    #[allow(clippy::cast_possible_truncation)]
-    let flags_u32 = args.arg1 as u32;
-    let flags: u64 = u64::from(flags_u32);
-    if flags & !VALID_FLAGS != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
+fn sys_delete_module(_args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/module/main.c::SYSCALL_DEFINE2(delete_module)):
+    //
+    //   SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
+    //                   unsigned int, flags)
+    //   {
+    //       struct module *mod;
+    //       char name[MODULE_NAME_LEN];
+    //       int ret, forced = 0;
+    //
+    //       if (!capable(CAP_SYS_MODULE) || modules_disabled)
+    //           return -EPERM;        // (1) CAP_SYS_MODULE
+    //
+    //       if (strncpy_from_user(name, name_user, MODULE_NAME_LEN-1) < 0)
+    //           return -EFAULT;       // (2) name copy
+    //       ...
+    //   }
+    //
+    // Note: Linux delete_module does NOT validate the `flags` arg with
+    // a mask check — it only inspects `flags & O_NONBLOCK` later to
+    // decide between blocking and non-blocking unload.  Pre-batch we
+    // imposed a stricter EINVAL flag-mask gate (flags & ~(O_NONBLOCK |
+    // O_TRUNC)) — an outright divergence on top of the gate-order
+    // inversion.  Drop it.
+    //
+    // Pre-batch divergences:
+    //   * delete_module(_, 0x8000_0000) — Linux: EPERM.  Pre-batch:
+    //     EINVAL (spurious flag-mask gate).
+    //   * delete_module(NULL, 0) — Linux: EPERM.  Pre-batch: EFAULT.
+    //
+    // Architectural directive: see sys_init_module.  The batch 302
+    // high-half flag-truncation probe (delete_module flag=0x1_0000_0000)
+    // still reaches the same terminal EPERM via the direct path.
     linux_err(errno::EPERM)
 }
 
@@ -42346,75 +42390,103 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   quotactl_fd type/cmds gating: OK"
         );
 
-        // init_module(NULL,_,_) -> EFAULT.
+        // Batch 342: init_module/finit_module/delete_module gate-order
+        // inversion fix.  Linux's three module syscalls all run
+        // may_init_module() / capable(CAP_SYS_MODULE) ahead of any
+        // pointer or flag validation.  Pre-batch we validated inputs
+        // first, so probes that should hit EPERM saw EFAULT, ENOEXEC,
+        // or EINVAL.  Mirror Linux: EPERM is now the terminal-and-
+        // only answer (we have no LKM loader and never will, so no
+        // caller can ever hold CAP_SYS_MODULE).
+
+        // (a) init_module(NULL, 1, NULL) — pre-batch EFAULT (NULL umod
+        //     check fired first); Linux EPERM (may_init_module trips
+        //     before any pointer touch).
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INIT_MODULE, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: init_module(NULL) not EFAULT");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: init_module(NULL,1,_) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // init_module(img, 0, _) -> ENOEXEC.  Linux's
-        // copy_module_from_user gates `len < sizeof(Elf64_Ehdr)`
-        // before any other validation, returning ENOEXEC ("not a
-        // valid ELF").  Pre-batch we returned EINVAL.
+        // (b) init_module(0x1000, 0, NULL) — pre-batch ENOEXEC
+        //     (len < sizeof(Elf64_Ehdr)); Linux EPERM.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INIT_MODULE, &a).value
-            != -i64::from(errno::ENOEXEC) {
-            serial_println!("[syscall/linux]   FAIL: init_module(len=0) not ENOEXEC");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: init_module(_,0,_) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // init_module(img, 63, _) -> ENOEXEC (one byte short of
-        // an ELF64 header).
+        // (c) init_module(0x1000, 63, NULL) — pre-batch ENOEXEC
+        //     (one byte short of an ELF64 header); Linux EPERM.
         let a = SyscallArgs { arg0: 0x1000, arg1: 63, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INIT_MODULE, &a).value
-            != -i64::from(errno::ENOEXEC) {
+            != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: init_module(len=63) not ENOEXEC"
+                "[syscall/linux]   FAIL: init_module(_,63,_) not EPERM"
             );
             return Err(KernelError::InternalError);
         }
-        // init_module(img, 64, NULL) -> EPERM (at the boundary;
-        // gate clears, validate_user_read bypassed in kernel
-        // context, terminal CAP).
+        // (d) init_module(0x1000, 64, NULL) — boundary stays EPERM
+        //     pre-batch (clears the len gate; user_read kernel-context
+        //     bypassed; terminal CAP).  Post-batch: same EPERM via
+        //     the direct path.
         let a = SyscallArgs { arg0: 0x1000, arg1: 64, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INIT_MODULE, &a).value
             != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: init_module(len=64) not EPERM"
+                "[syscall/linux]   FAIL: init_module(_,64,_) not EPERM"
             );
             return Err(KernelError::InternalError);
         }
-        serial_println!(
-            "[syscall/linux]   init_module ELF len gating: OK"
-        );
-        // finit_module bogus flag -> EINVAL.
+        // (e) finit_module(0, 0, 0x8000_0000) — pre-batch EINVAL
+        //     (unknown flag bit); Linux EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x8000_0000, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FINIT_MODULE, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: finit_module(bad flag) not EINVAL");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: finit_module(_,_,0x80000000) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // finit_module(_, NULL, 0) in kernel context -> EPERM.
+        // (f) finit_module(0, NULL, 0) in kernel context — was EPERM
+        //     pre-batch via the validate_linux_fd kernel-context
+        //     bypass; stays EPERM post-batch via the direct path.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FINIT_MODULE, &a).value
             != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: finit_module not EPERM");
+            serial_println!("[syscall/linux]   FAIL: finit_module(0,0,0) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // delete_module(NULL,_) -> EFAULT.
+        // (g) delete_module(NULL, 0) — pre-batch EFAULT (NULL name
+        //     check fired before EPERM); Linux EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::DELETE_MODULE, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: delete_module(NULL) not EFAULT");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: delete_module(NULL,0) not EPERM");
             return Err(KernelError::InternalError);
         }
+        // (h) delete_module(name=valid, flags=0x8000_0000) — pre-batch
+        //     EINVAL (spurious flag-mask gate Linux does not impose);
+        //     Linux EPERM.  Use a stack name pointer that survives
+        //     validate_user_read's kernel-context bypass.
+        let name_buf = [b'n'; 4];
+        let a = SyscallArgs { arg0: name_buf.as_ptr() as u64,
+            arg1: 0x8000_0000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::DELETE_MODULE, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: delete_module(_,0x80000000) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   init/finit/delete_module gate-order EPERM-first: OK"
+        );
 
         // unshare(0) -> 0.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

@@ -4128,36 +4128,61 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     let len = args.arg1;
     let prot = args.arg2;
 
-    // POSIX: a zero-length range succeeds without doing anything.
-    if len == 0 {
-        return SyscallResult::ok(0);
-    }
-    // Reject unknown prot bits.
-    if (prot & !PROT_VALID_MASK) != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // Addr must be frame-aligned (Linux requires alignment to system
-    // page size; ours is 16 KiB).
+    // Gate order matches Linux's mm/mprotect.c::do_mprotect_pkey:
+    //   1. start & ~PAGE_MASK                  → -EINVAL
+    //   2. !len                                → 0
+    //   3. len = PAGE_ALIGN(len)               (may wrap)
+    //   4. end = start + len; end <= start     → -ENOMEM
+    //   5. !arch_validate_prot(prot, start)    → -EINVAL
+    //   6. find_vma_intersection range miss    → -ENOMEM
+    //
+    // Pre-batch divergences fixed here:
+    //  - `len == 0 -> 0` ran *before* alignment, so a probe with a
+    //    misaligned addr and len=0 saw 0 where Linux returns EINVAL.
+    //  - len-PAGE_ALIGN overflow and addr+len overflow both returned
+    //    EINVAL; Linux returns ENOMEM via the end<=start check.
+    //  - Out-of-user-space returned EFAULT; Linux returns ENOMEM via
+    //    "no VMA covers this range" (find_vma_intersection NULL).
+    //
+    // Address alignment still uses our 16 KiB internal frame size
+    // rather than the 4 KiB Linux ABI PAGE_SIZE; the page tables
+    // genuinely operate at 16 KiB granularity so accepting a
+    // 4-KiB-aligned-but-not-16K input would either fail the VMA walk
+    // or apply the change to too wide a range.
+
+    // (1) addr must be frame-aligned.
     let frame_size = FRAME_SIZE as u64;
     if (addr & (frame_size - 1)) != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Round len up to whole frames.
+    // (2) POSIX: zero-length range succeeds without doing anything.
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    // (3) Round len up to whole frames.  Linux silently wraps via
+    // PAGE_ALIGN and catches it in (4); we explicitly catch the wrap
+    // and report the same ENOMEM the (4) gate would have reported.
     let len_aligned = match len
         .checked_add(frame_size - 1)
         .map(|v| v & !(frame_size - 1))
     {
         Some(v) => v,
-        None => return linux_err(errno::EINVAL),
+        None => return linux_err(errno::ENOMEM),
     };
+    // (4) end = addr + len_aligned; overflow → ENOMEM.
     let end = match addr.checked_add(len_aligned) {
         Some(e) => e,
-        None => return linux_err(errno::EINVAL),
+        None => return linux_err(errno::ENOMEM),
     };
-    // Range must lie entirely in user space (don't let userspace
-    // mprotect kernel mappings).
+    // (5) Reject unknown prot bits (arch_validate_prot equivalent).
+    if (prot & !PROT_VALID_MASK) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // (6) Range must lie entirely in user space — Linux's
+    // find_vma_intersection returns NULL for kernel addresses and
+    // surfaces ENOMEM.
     if addr >= USER_SPACE_END || end > USER_SPACE_END {
-        return linux_err(errno::EFAULT);
+        return linux_err(errno::ENOMEM);
     }
 
     // Resolve the caller's PML4.
@@ -25377,11 +25402,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    // mprotect argument validation:
-    //   - zero length succeeds (no-op);
+    // mprotect argument validation — Linux gate order
+    // (mm/mprotect.c::do_mprotect_pkey):
+    //   - aligned addr + zero length succeeds (no-op);
     //   - unknown prot bit -> EINVAL;
-    //   - misaligned addr   -> EINVAL;
-    //   - kernel-space addr -> EFAULT.
+    //   - misaligned addr  -> EINVAL (even with len=0);
+    //   - addr+len overflow -> ENOMEM;
+    //   - kernel-space addr -> ENOMEM (no VMA covers).
     // We can't exercise the success path from boot context (no owning
     // Linux process), but we *can* prove the validation layer rejects
     // bad input before reaching the page-table walk.
@@ -25404,14 +25431,44 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mprotect misalign");
             return Err(KernelError::InternalError);
         }
+        // Batch 248: kernel-addr now returns ENOMEM (matches Linux's
+        // find_vma_intersection NULL path), not EFAULT.
         let args3 = SyscallArgs {
             arg0: 0xFFFF_8000_0000_0000,
             arg1: 0x4000, arg2: 1, arg3: 0, arg4: 0, arg5: 0
         };
-        if dispatch_linux(nr::MPROTECT, &args3).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: mprotect kernel-addr");
+        if dispatch_linux(nr::MPROTECT, &args3).value != -i64::from(errno::ENOMEM) {
+            serial_println!("[syscall/linux]   FAIL: mprotect kernel-addr not ENOMEM");
             return Err(KernelError::InternalError);
         }
+        // Batch 248: misaligned addr with len=0 -> EINVAL (alignment
+        // fires before the len==0 short-circuit).  Pre-batch this
+        // returned 0 because len==0 was the first gate.
+        let args4 = SyscallArgs { arg0: 0x4001, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MPROTECT, &args4).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mprotect misalign+len0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 248: PAGE_ALIGN(len) overflow -> ENOMEM (not EINVAL).
+        // len = u64::MAX falls past checked_add(FRAME_SIZE-1).
+        let args5 = SyscallArgs { arg0: 0x4000, arg1: u64::MAX, arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MPROTECT, &args5).value != -i64::from(errno::ENOMEM) {
+            serial_println!("[syscall/linux]   FAIL: mprotect len-overflow not ENOMEM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 248: addr + len_aligned overflow -> ENOMEM (not EINVAL).
+        // addr = 0xFFFF_FFFF_FFFF_C000, len = 0x8000 → end wraps.
+        // (This addr is also > USER_SPACE_END, but the overflow check
+        // fires earlier in the gate sequence.)
+        let args6 = SyscallArgs { arg0: 0xFFFF_FFFF_FFFF_C000, arg1: 0x8000,
+            arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MPROTECT, &args6).value != -i64::from(errno::ENOMEM) {
+            serial_println!("[syscall/linux]   FAIL: mprotect end-overflow not ENOMEM");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   mprotect do_mprotect_pkey gate order: OK");
     }
 
     // mprotect_flush_range routing: tiny range (<= MPROTECT_FULL_FLUSH_

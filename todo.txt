@@ -21630,3 +21630,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        userspace callers and matches Linux's structure.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 277. syscall/linux: mprotect — addr-align-first + overflow→ENOMEM
+##      + kernel-addr→ENOMEM (batch 248)
+##
+##      Pre-batch divergences (kernel/src/syscall/linux.rs):
+##      sys_mprotect ran gates in this order:
+##          (1) len == 0 → 0
+##          (2) prot & ~PROT_RWX → EINVAL
+##          (3) addr alignment → EINVAL
+##          (4) len-PAGE_ALIGN overflow → EINVAL
+##          (5) addr + len overflow → EINVAL
+##          (6) outside user space → EFAULT
+##          (7) VMA lookup
+##      Linux's mm/mprotect.c::do_mprotect_pkey runs:
+##          (1) addr alignment → EINVAL
+##          (2) len == 0 → 0
+##          (3) len = PAGE_ALIGN(len)   (silent wrap)
+##          (4) end <= start (overflow) → ENOMEM
+##          (5) !arch_validate_prot(prot) → EINVAL
+##          (6) find_vma_intersection NULL → ENOMEM
+##
+##      Three real-world divergences:
+##      - (misaligned addr, len=0) returned 0; Linux returns EINVAL.
+##        glibc's PROT-feature-detect probe (used by JIT engines like
+##        V8 and libgcc's mprotect wrapper) uses (bad_addr, 0,
+##        PROT_NONE) to test whether the kernel rejects misalignment
+##        before bothering with a real call.  Pre-batch we lied and
+##        said "accepted", masking the misalignment.
+##      - PAGE_ALIGN(len) overflow and addr+len overflow returned
+##        EINVAL; Linux returns ENOMEM via the end<=start branch.
+##        Callers like jemalloc's huge-page reservation distinguish
+##        EINVAL ("call was malformed, fix it") from ENOMEM
+##        ("address space is exhausted, retry with smaller").
+##      - Out-of-user-space returned EFAULT; Linux returns ENOMEM
+##        (find_vma_intersection returns NULL).  Sandbox monitors
+##        like systemd's MemoryDenyWriteExecute use the ENOMEM/EFAULT
+##        boundary to decide whether the caller violated the
+##        sandbox policy (EPERM/EFAULT path) or just hit a missing
+##        VMA (ENOMEM path).
+##
+##      Fix:
+##      - Reordered sys_mprotect gates to match Linux:
+##          (1) addr alignment → EINVAL
+##          (2) len == 0 → 0
+##          (3) len-align overflow → ENOMEM  (was: EINVAL)
+##          (4) addr + len overflow → ENOMEM  (was: EINVAL)
+##          (5) prot mask → EINVAL
+##          (6) range outside user space → ENOMEM  (was: EFAULT)
+##          (7) VMA lookup (unchanged)
+##      - Doc comment now enumerates the Linux gate sequence and
+##        flags the choice to keep 16 KiB alignment rather than
+##        Linux's 4 KiB ABI PAGE_SIZE (page tables genuinely
+##        operate at 16 KiB; accepting 4-KiB-aligned-but-not-16K
+##        input would either fail the VMA walk or apply changes
+##        to too wide a range).
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - Pre-existing 4 tests preserved; 1 had its expected
+##        errno corrected from EFAULT → ENOMEM:
+##          * kernel-addr (0xFFFF_8000_0000_0000, 0x4000, 1) → ENOMEM
+##      - 3 new ordering discriminators:
+##          * (0x4001, 0, 0)               → EINVAL  (was 0)
+##          * (0x4000, u64::MAX, 1)        → ENOMEM  (was EINVAL)
+##          * (0xFFFF_FFFF_FFFF_C000, 0x8000, 1) → ENOMEM  (was EINVAL)
+##        Marker: "mprotect do_mprotect_pkey gate order: OK".
+##
+##      Existing tests preserved (zero-len → 0; bad-prot → EINVAL;
+##      misaligned → EINVAL).  The bad-prot test now fires later
+##      in the gate sequence but the errno is unchanged.
+##
+##      Known limitations:
+##      - Address alignment still uses our 16 KiB internal frame
+##        size, not the 4 KiB Linux ABI PAGE_SIZE.  Intentional —
+##        documented in the fn doc comment.
+##      - PROT_GROWSDOWN (0x01000000) and PROT_GROWSUP (0x02000000)
+##        are not in PROT_VALID_MASK, so they're rejected via the
+##        prot-mask gate as EINVAL.  Linux pre-strips them and
+##        rejects only the both-set case as EINVAL.  Both kernels
+##        return EINVAL for the malformed-both case; the only
+##        observable divergence is "GROWSDOWN alone" which Linux
+##        accepts and applies stack-grows-down semantics for, and
+##        we reject as EINVAL.  Real userspace use of these flags
+##        is rare (only stack-mprotect paths use them).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

@@ -10686,18 +10686,62 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `utimes(path, times[2])` — two `struct timeval` = 32 bytes.
+///
+/// Linux dispatches via `do_futimesat(AT_FDCWD, filename, utimes)`
+/// in `fs/utimes.c`:
+///   1. If `utimes != NULL`: `copy_from_user(&times, utimes, 32)`
+///      -> -EFAULT on bad pointer.
+///   2. If `times[i].tv_usec >= USEC_PER_SEC` for either entry
+///      -> -EINVAL (Linux: "this test is needed to catch only
+///      `times[0].tv_usec == UINT_MAX`" — i.e. the explicit usec
+///      validation before do_utimes is entered).
+///   3. `do_utimes()` resolves the path -> -EFAULT on bad
+///      `filename` pointer / -ENOENT etc.
+///   4. `vfs_utimes()` -> `mnt_want_write()` -> -EROFS.
+///
+/// Pre-batch we validated `filename` first and the timeval array
+/// only for readability, so a probe of `(filename=NULL,
+/// times={tv_usec=1e6, ...})` saw EFAULT instead of Linux's
+/// EINVAL.
 fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
+    const USEC_PER_SEC: i64 = 1_000_000;
+    // Gate 1: do_futimesat copies the timeval array first.
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 32) {
+            return linux_err(linux_errno_for(e));
+        }
+        let mut buf = [0u8; 32];
+        // SAFETY: validate_user_read above confirmed 32 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg1, buf.as_mut_ptr(), 32)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let read_i64 = |o: usize| -> i64 {
+            match <[u8; 8]>::try_from(&buf[o..o + 8]) {
+                Ok(b) => i64::from_ne_bytes(b),
+                Err(_) => 0,
+            }
+        };
+        // struct __kernel_old_timeval { tv_sec @0, tv_usec @8 }, 16B
+        // per entry, 32B total.  Gate 2: tv_usec >= USEC_PER_SEC on
+        // either entry returns -EINVAL (Linux's explicit pre-
+        // do_utimes check).
+        let usec0 = read_i64(8);
+        let usec1 = read_i64(24);
+        if usec0 >= USEC_PER_SEC || usec1 >= USEC_PER_SEC {
+            return linux_err(errno::EINVAL);
+        }
+    }
+    // Gate 3: do_utimes path resolution.  NULL filename surfaces
+    // EFAULT in user_path_at_empty.
     if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
         return linux_err(linux_errno_for(e));
     }
-    if args.arg1 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 32) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+    // Gate 4: mnt_want_write -> EROFS (terminal).
     linux_err(errno::EROFS)
 }
 
@@ -34772,6 +34816,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: utimes not EROFS");
             return Err(KernelError::InternalError);
         }
+        // utimes discriminator A: tv_usec[0] = USEC_PER_SEC (1e6)
+        // with filename=NULL -> Linux EINVAL via the explicit
+        // pre-do_utimes usec check; pre-batch returned EFAULT
+        // because filename-NULL was inspected first.
+        {
+            let bad_times: [i64; 4] = [0, 1_000_000, 0, 0];
+            let bad_ptr = (&raw const bad_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: bad_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&bad_times);
+            if dispatch_linux(nr::UTIMES, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: utimes bad tv_usec[0] not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // utimes discriminator B: tv_usec[1] = i64::MAX with
+        // filename=NULL -> EINVAL via the same gate (confirms
+        // entry 1 is also inspected).
+        {
+            let bad_times: [i64; 4] = [0, 0, 0, i64::MAX];
+            let bad_ptr = (&raw const bad_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: bad_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&bad_times);
+            if dispatch_linux(nr::UTIMES, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: utimes bad tv_usec[1] not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // utimes discriminator C: well-formed timeval array with
+        // filename=NULL -> EFAULT (acceptance: confirms the usec
+        // gate doesn't reject valid values and the EFAULT path
+        // still surfaces after the usec check passes).
+        {
+            let good_times: [i64; 4] = [0, 999_999, 0, 0];
+            let good_ptr = (&raw const good_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: good_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&good_times);
+            if dispatch_linux(nr::UTIMES, &a).value
+                != -i64::from(errno::EFAULT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: utimes valid tv_usec + NULL fn not EFAULT"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   utimes tv_usec value gating: OK"
+        );
         // utime(NULL, _) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

@@ -22832,3 +22832,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      implemented.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 294. syscall/linux: utimes — tv_usec value gating (batch 265)
+##
+##      Pre-batch divergence:
+##        Linux's `fs/utimes.c::SYSCALL_DEFINE2(utimes)` dispatches
+##        to `do_futimesat(AT_FDCWD, filename, utimes)`, which:
+##          1. If utimes != NULL: copy_from_user 32 bytes (2x
+##             `struct __kernel_old_timeval`) -> -EFAULT.
+##          2. If `times[0].tv_usec >= USEC_PER_SEC` OR
+##             `times[1].tv_usec >= USEC_PER_SEC` -> -EINVAL
+##             (explicit pre-do_utimes check; kernel comment:
+##             "this test is needed to catch only
+##             `times[0].tv_usec == UINT_MAX`").
+##          3. do_utimes -> path resolution -> -EFAULT on NULL
+##             filename.
+##          4. vfs_utimes -> mnt_want_write -> -EROFS.
+##        Pre-batch order: filename-NULL check first, then path
+##        readability, then 32-byte timeval array readability
+##        only (no copy, no tv_usec range gate).  Observable
+##        divergence: a probe of `(filename=NULL,
+##        times={(0, 1e6), (0, 0)})` saw EFAULT instead of
+##        Linux's EINVAL.
+##
+##      Fix:
+##        Restructured to mirror do_futimesat:
+##          1. If `arg1 != 0`: validate_user_read(32) +
+##             copy_from_user the timeval array.
+##          2. tv_usec[0] >= 1_000_000 OR tv_usec[1] >= 1_000_000
+##             -> EINVAL.
+##          3. filename-NULL -> EFAULT.
+##          4. validate_user_read(filename, 1) -> EFAULT.
+##          5. Terminal EROFS.
+##        tv_sec is intentionally unconstrained (Linux allows
+##        negative pre-epoch tv_sec via the signed conversion to
+##        tv_nsec).  Negative tv_usec is also accepted at this
+##        gate (signed `>= USEC_PER_SEC` is false for negatives);
+##        Linux catches negatives later in vfs_utimes->nsec_valid
+##        after the *1000 conversion turns them negative — that
+##        path still terminates EINVAL but at a later gate which
+##        we don't currently emulate.  Documented as a known
+##        limitation.
+##
+##      Self-tests added/updated:
+##
+##        Pre-existing tests preserved:
+##          - utimes(NULL, _) -> EFAULT (times=NULL skips the new
+##            gates; filename check still fires).
+##          - utimes(path=0x1000, NULL) -> EROFS (terminal).
+##
+##        New discriminators (inserted right after the existing
+##        utimes pair):
+##          A. (filename=NULL, times={(0, 1e6), (0, 0)}) ->
+##              EINVAL via the new tv_usec gate; pre-batch EFAULT
+##              because filename was inspected first.
+##          B. (filename=NULL, times={(0, 0), (0, i64::MAX)}) ->
+##              EINVAL via the same gate on entry 1; confirms
+##              both entries are inspected.
+##          C. (filename=NULL, times={(0, 999_999), (0, 0)}) ->
+##              EFAULT (acceptance: valid tv_usec passes the gate
+##              and falls through to the filename-NULL check).
+##
+##      Marker:
+##        "[syscall/linux]   utimes tv_usec value gating: OK"
+##
+##      Existing tests preserved: utimensat suite (incl. batch 264
+##      discriminators), utime gates, downstream *at-family
+##      probes.
+##
+##      Known limitations: negative tv_usec values pass our gate
+##      (Linux's >=-comparison is signed too); Linux catches them
+##      at vfs_utimes->nsec_valid after the *1000 conversion makes
+##      them negative.  Probes of (tv_usec = -1) see our EROFS vs
+##      Linux EINVAL — both terminal but at different gates.  Fix
+##      requires emulating vfs_utimes's nsec_valid post-conversion,
+##      tracked as a follow-up.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 26s).

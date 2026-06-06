@@ -22590,6 +22590,30 @@ fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, usize_field as usize) {
         return linux_err(linux_errno_for(e));
     }
+    // 2e. kreq.spare != 0 -> EINVAL.  Batch 381: Linux's
+    // copy_mnt_id_req checks the `spare` reserved field after the
+    // size-copy.  The struct layout is { u32 size, u32 spare, u64
+    // mnt_id, u64 param, ... }, so spare lives at offset 4 inside
+    // the user request.  Reading it here is safe because gate 2d
+    // already validated `usize_field >= MNT_ID_REQ_SIZE_VER0 = 24`
+    // bytes are readable.  Pre-batch we never touched spare, so a
+    // probe passing { size:24, spare:1, mnt_id:0, ... } walked
+    // straight through to do_statmount and saw -ENOENT where
+    // Linux returns -EINVAL.
+    let mut spare_buf = [0u8; 4];
+    // SAFETY: validate_user_read at gate 2d confirmed at least
+    // usize_field >= 24 bytes are readable starting at args.arg0;
+    // offset 4 + 4 = 8 is well within that range.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(
+            args.arg0 + 4, spare_buf.as_mut_ptr(), 4,
+        )
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    if u32::from_le_bytes(spare_buf) != 0 {
+        return linux_err(errno::EINVAL);
+    }
     // Buffer / bufsize handling (after req is fully validated).
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
@@ -22662,6 +22686,23 @@ fn sys_listmount(args: &SyscallArgs) -> SyscallResult {
     // 2d. copy_struct_from_user the whole declared usize.
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, usize_field as usize) {
         return linux_err(linux_errno_for(e));
+    }
+    // 2e. kreq.spare != 0 -> EINVAL.  Batch 381: same Linux gate
+    // as sys_statmount (both syscalls share copy_mnt_id_req).
+    // See sys_statmount for full rationale.
+    let mut spare_buf = [0u8; 4];
+    // SAFETY: validate_user_read at gate 2d confirmed at least
+    // usize_field >= 24 bytes are readable starting at args.arg0;
+    // offset 4 + 4 = 8 is well within that range.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(
+            args.arg0 + 4, spare_buf.as_mut_ptr(), 4,
+        )
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    if u32::from_le_bytes(spare_buf) != 0 {
+        return linux_err(errno::EINVAL);
     }
     // Buffer / bufsize handling (after req is fully validated).
     if args.arg2 > 0 {
@@ -53684,6 +53725,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   listmount unsigned-int truncation (high-half ignored): OK"
+        );
+
+        // Batch 381: copy_mnt_id_req spare-field gate.  Linux's
+        // copy_mnt_id_req checks `kreq.spare != 0 -> EINVAL` after
+        // the size copy.  Pre-batch we never read spare, so a probe
+        // passing a request with spare=1 walked through to
+        // do_statmount/do_listmount and saw -ENOENT where Linux
+        // returns -EINVAL.
+        let spare_req = MntIdReq { size: 24, spare: 1, mnt_id: 0, param: 0 };
+        let spare_req_ptr = (&raw const spare_req) as u64;
+        // statmount with spare=1 -> EINVAL (was ENOENT pre-batch).
+        let a = SyscallArgs {
+            arg0: spare_req_ptr, arg1: mnt_outbuf_ptr,
+            arg2: 128, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: statmount spare!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // listmount with spare=1 -> EINVAL (was ENOENT pre-batch).
+        let a = SyscallArgs {
+            arg0: spare_req_ptr, arg1: mnt_outbuf_ptr,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: listmount spare!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // listmount with spare=1 and LISTMOUNT_REVERSE flag also
+        // gets EINVAL via the spare gate (after the flag-mask gate
+        // passes).
+        let a = SyscallArgs {
+            arg0: spare_req_ptr, arg1: mnt_outbuf_ptr,
+            arg2: 8, arg3: 1, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: listmount spare!=0+REVERSE not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        core::hint::black_box(&spare_req);
+        serial_println!(
+            "[syscall/linux]   statmount/listmount spare!=0 EINVAL gate: OK"
         );
 
         // lsm_get_self_attr attr=0 (LSM_ATTR_UNDEF) -> EINVAL.

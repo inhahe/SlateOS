@@ -34528,3 +34528,84 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
 
+411. Batch 381 — statmount / listmount copy_mnt_id_req spare-field gate
+     (kernel/src/syscall/linux.rs)
+
+     Divergence (table):
+       Input                                  | Linux                | Pre-batch
+       ---------------------------------------|----------------------|----------
+       statmount(req={size:24, spare:1, ...}) | EINVAL               | ENOENT
+                                              |  (copy_mnt_id_req    |  (walked
+                                              |   gate 2e fires      |   to
+                                              |   after size copy)   |   do_statmount,
+                                              |                      |   no mount)
+       listmount(req={size:24, spare:1, ...}) | EINVAL               | ENOENT
+       listmount(req={size:24, spare:1, ...}, | EINVAL               | ENOENT
+        flags=LISTMOUNT_REVERSE)              |  (flag mask passes,  |
+                                              |   spare gate fires)  |
+
+     Why it matters: Linux's `copy_mnt_id_req` (fs/namespace.c) is
+     the shared request-parsing helper for both statmount and
+     listmount.  Its gate ladder is documented as:
+
+       1. get_user(size, &req->size)               -> EFAULT
+       2. size > PAGE_SIZE                         -> E2BIG
+       3. size < MNT_ID_REQ_SIZE_VER0 (24)         -> EINVAL
+       4. copy_struct_from_user(kreq, req, size)   -> EFAULT
+       5. kreq.spare != 0                          -> EINVAL
+       6. (in newer kernels) kreq.mnt_id sanity    -> EINVAL
+
+     We had gates 1-4 but skipped gate 5 entirely, even though our
+     own doc comments listed it.  A probe building a struct
+     mnt_id_req with the reserved `spare` field set (a
+     forward-compat capability test, or a kernel-fuzz reduction)
+     would see ENOENT pre-batch and conclude "my mnt_id wasn't
+     found" when in fact the kernel never even looked at mnt_id
+     because the reserved field said the request was malformed.
+
+     Userspace impact: util-linux's lsfd / findmnt experiments
+     with statmount used to (briefly, in pre-release versions)
+     poke the spare field to discriminate kernels that knew about
+     extended-info bits from kernels that didn't.  Pre-batch our
+     translator would have mispathed those probes — every spare
+     setting returned ENOENT, indistinguishable from "this mnt_id
+     does not exist," so the autoconf would assume the field was
+     accepted and try downstream features.
+
+     Fix: read the 4-byte spare field at offset 4 in the user
+     request (safe because gate 4's validate_user_read confirmed
+     usize_field >= 24 bytes are readable), and return EINVAL if
+     non-zero.  Applied identically to both sys_statmount and
+     sys_listmount.
+
+     Architectural directive: this is a translator-layer fix
+     only.  Our mount tree is empty (terminal ENOENT for every
+     valid request), but the gate ladder must match Linux's
+     errno emission order so probes that vary one struct field
+     at a time see the same errno chain.  When real mounts
+     appear, the spare gate stays put — it's a Linux ABI
+     invariant, not a translator stub artifact.
+
+     Probes added (3 new, 13 existing kept):
+       * statmount(req={size:24, spare:1}, buf, 128, 0)
+         -> EINVAL (NEW; was ENOENT pre-batch).
+       * listmount(req={size:24, spare:1}, buf, 8, 0)
+         -> EINVAL (NEW; was ENOENT pre-batch).
+       * listmount(req={size:24, spare:1}, buf, 8,
+         flags=LISTMOUNT_REVERSE)
+         -> EINVAL (NEW; verifies spare gate fires after the
+         flag-mask gate passes, not before).
+       * 13 existing probes (flags-first EINVAL, NULL-req EFAULT,
+         small/huge size, valid-req ENOENT, unsigned-int high-half
+         truncation series) all keep their expectations because
+         the new spare gate fires only when spare != 0 — every
+         existing probe used spare=0.
+
+     Final boot-time stamp:
+         "[syscall/linux]   statmount/listmount spare!=0 EINVAL
+          gate: OK"
+
+     Build: cargo build -p kernel clean (36.98s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).
+

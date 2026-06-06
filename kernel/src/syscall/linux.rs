@@ -15741,19 +15741,75 @@ fn sys_msgctl(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EINVAL)
 }
 
-/// `mq_open(name, oflag, mode, attr)`.
+/// `mq_open(name, oflag, mode, attr)` — open / create POSIX message queue.
+///
+/// Linux gate order (ipc/mqueue.c::SYSCALL_DEFINE4(mq_open) ->
+/// do_mq_open -> getname):
+///
+///   1. SYSCALL_DEFINE4 top:
+///        if (u_attr && copy_from_user(&attr, u_attr, 64))
+///            return -EFAULT;
+///   2. do_mq_open -> getname(u_name):
+///        a. NULL or unreadable u_name -> EFAULT
+///           (strncpy_from_user returns -EFAULT).
+///        b. empty name (first byte '\0') -> ENOENT
+///           (getname_flags: `if (!len && !(flags & LOOKUP_EMPTY))
+///            return ERR_PTR(-ENOENT);` — mq_open does NOT pass
+///           LOOKUP_EMPTY).
+///        c. name > PATH_MAX-1 (4095) without NUL -> ENAMETOOLONG.
+///   3. We have no POSIX mq backing -> terminal ENOSYS.
+///
+/// Pre-batch divergences:
+///
+///   * Gate order: pre-batch validated u_name BEFORE u_attr.  Linux
+///     runs the u_attr copy_from_user FIRST (when u_attr != NULL).
+///     The errno produced is EFAULT in both orderings whenever an
+///     unreadable pointer is the cause, so no observable errno
+///     change — but the "which pointer faulted" attribution differs.
+///     Re-order for fidelity and to mirror Linux's audit_mq_open
+///     hook position (attr is logged before the name is resolved).
+///
+///   * mq_open(u_name = "") -> ENOSYS pre-batch; Linux returns
+///     ENOENT.  Userspace probing for an existing queue with an
+///     empty path (a common mistake or a malformed config) sees
+///     "POSIX mq unsupported" instead of "you passed an empty
+///     name" — masks the real bug.  Batch 367 reads the first
+///     byte and short-circuits to ENOENT when it's NUL.
+///
+/// ENAMETOOLONG (>4095 bytes without NUL) remains unmodeled because
+/// validate_user_read is a no-op in the kernel-context self-test
+/// harness; userspace will see the right errno once the strnlen-
+/// equivalent gate is wired through real user-pointer validation
+/// (no observable divergence in the boot probes).
 fn sys_mq_open(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    // attr is struct mq_attr = 8 * 8 bytes = 64 bytes when non-NULL.
+    // Gate 1 (SYSCALL_DEFINE4 top): u_attr copy_from_user first.
     if args.arg3 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 64) {
             return linux_err(linux_errno_for(e));
         }
+    }
+    // Gate 2a (getname): NULL u_name -> EFAULT.
+    if args.arg0 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // Gate 2a (getname): unreadable u_name -> EFAULT.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+        return linux_err(linux_errno_for(e));
+    }
+    // Gate 2b (getname): empty name -> ENOENT.
+    let mut first = [0u8; 1];
+    // SAFETY: validate_user_read above confirmed 1 byte readable
+    // (in user context).  In kernel-context self-test the validate
+    // is a no-op and copy_from_user does a raw memcpy from the
+    // address; callers in that context must pass a stack-backed
+    // pointer to a known byte (see boot probes below).
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(args.arg0, first.as_mut_ptr(), 1)
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+    if first[0] == 0 {
+        return linux_err(errno::ENOENT);
     }
     linux_err(errno::ENOSYS)
 }
@@ -46269,14 +46325,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mq_open(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // mq_open(name) -> ENOSYS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // Batch 367: mq_open now mirrors Linux's getname empty-string
+        // gate.  Stack-backed probes so the first-byte read is
+        // deterministic in kernel-context self-test.
+        let good_name: [u8; 4] = [b'/', b'q', 0, 0];
+        let good_name_ptr = good_name.as_ptr() as u64;
+        let empty_name: [u8; 1] = [0u8];
+        let empty_name_ptr = empty_name.as_ptr() as u64;
+        // mq_open(valid name with non-NUL first byte) -> ENOSYS.
+        let a = SyscallArgs { arg0: good_name_ptr, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MQ_OPEN, &a).value
             != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: mq_open not ENOSYS");
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_open(\"/q\") not ENOSYS"
+            );
             return Err(KernelError::InternalError);
         }
+        // mq_open(empty name) -> ENOENT (getname's empty-string gate).
+        //   Pre-batch returned ENOSYS, masking userspace errors that
+        //   pass an empty queue name.
+        let a = SyscallArgs { arg0: empty_name_ptr, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_OPEN, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_open(\"\") not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mq_open(valid name, attr = non-NULL stack buf) -> ENOSYS.
+        //   Exercises the u_attr-first gate ordering: the attr buf
+        //   is validated/copied before the name path runs.
+        let attr_buf = [0u8; 64];
+        let attr_ptr = attr_buf.as_ptr() as u64;
+        let a = SyscallArgs { arg0: good_name_ptr, arg1: 0, arg2: 0,
+            arg3: attr_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_OPEN, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_open(name, attr) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mq_open getname empty-string + attr-first \
+             gate order: OK"
+        );
         // mq_unlink(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

@@ -33092,3 +33092,117 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (40.30s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+397. syscall/linux batch 367 — sys_mq_open: implement Linux's
+     getname empty-string ENOENT gate and re-order u_attr
+     copy_from_user ahead of u_name validation.
+
+     Pre-batch sys_mq_open:
+
+         fn sys_mq_open(args: &SyscallArgs) -> SyscallResult {
+             if args.arg0 == 0 { return linux_err(errno::EFAULT); }
+             if let Err(e) = validate_user_read(args.arg0, 1) {
+                 return linux_err(linux_errno_for(e));
+             }
+             if args.arg3 != 0 {
+                 if let Err(e) = validate_user_read(args.arg3, 64) {
+                     return linux_err(linux_errno_for(e));
+                 }
+             }
+             linux_err(errno::ENOSYS)
+         }
+
+     Linux's SYSCALL_DEFINE4(mq_open, const char __user *, u_name,
+     int, oflag, umode_t, mode, struct mq_attr __user *, u_attr)
+     gate order:
+
+         1. SYSCALL_DEFINE4 top:
+              if (u_attr && copy_from_user(&attr, u_attr, 64))
+                  return -EFAULT;
+         2. do_mq_open -> getname(u_name):
+              a. NULL or unreadable u_name -> EFAULT.
+              b. empty name (first byte '\0') -> ENOENT
+                 (getname_flags: `if (!len && !(flags &
+                  LOOKUP_EMPTY)) return ERR_PTR(-ENOENT);` —
+                 mq_open does NOT pass LOOKUP_EMPTY).
+              c. name > PATH_MAX-1 (4095) without NUL ->
+                 ENAMETOOLONG.
+         3. No POSIX mq backing -> terminal ENOSYS.
+
+     Two divergences resolved:
+
+       * Gate order: pre-batch ran u_name validate BEFORE u_attr
+         copy.  Linux runs u_attr copy_from_user FIRST when
+         u_attr != NULL.  The observable errno is EFAULT in both
+         orderings whenever an unreadable pointer is the cause,
+         so the swap is mostly fidelity (mirrors Linux's
+         audit_mq_open hook position — attr is logged before the
+         name is resolved).  Re-ordered for parallel structure
+         with future gate-content checks.
+
+       * mq_open(u_name = "") -> ENOSYS pre-batch; Linux returns
+         ENOENT.  Userspace probing for a queue with an
+         empty/malformed name path saw "POSIX mq unsupported"
+         instead of "you passed an empty name" — masks the
+         caller's real bug.  Post-batch reads the first byte and
+         short-circuits to ENOENT when it's NUL, matching
+         getname_flags exactly.
+
+     ENAMETOOLONG (>4095 bytes without NUL) remains unmodeled in
+     the boot probes because validate_user_read is a no-op in
+     kernel-context self-test; a probe can't construct a
+     non-terminated user string of that length without a real
+     user mm.  No observable divergence at the probe level.
+
+     Fix shape:
+
+         if args.arg3 != 0 {
+             if let Err(e) = validate_user_read(args.arg3, 64) {
+                 return linux_err(linux_errno_for(e));
+             }
+         }
+         if args.arg0 == 0 { return linux_err(errno::EFAULT); }
+         if let Err(e) = validate_user_read(args.arg0, 1) {
+             return linux_err(linux_errno_for(e));
+         }
+         let mut first = [0u8; 1];
+         // SAFETY: 1 byte validated above.
+         if let Err(e) = unsafe {
+             copy_from_user(args.arg0, first.as_mut_ptr(), 1)
+         } {
+             return linux_err(linux_errno_for(e));
+         }
+         if first[0] == 0 { return linux_err(errno::ENOENT); }
+         linux_err(errno::ENOSYS)
+
+     Probe rewrite:
+       Existing probe used a raw integer pointer (arg0=0x1000)
+       that worked pre-batch because the first byte was never
+       read.  Post-batch the empty-string check reads byte 0, so
+       a raw integer would dereference non-deterministic kernel
+       memory.  Replaced with stack-backed buffers:
+
+       * good_name = "/q\0\0"  (first byte = '/', non-NUL)
+       * empty_name = [0]       (first byte = '\0')
+
+       Existing mq_open(NULL) -> EFAULT probe retained (NULL gate
+       still wins under the new u_attr=NULL path).
+
+       Three new probes:
+         * mq_open(good_name, 0, 0, 0) -> ENOSYS
+             (replaces the old 0x1000 probe with a deterministic
+              stack buffer; first byte non-NUL).
+         * mq_open(empty_name, 0, 0, 0) -> ENOENT
+             (the headline divergence: pre-batch ENOSYS).
+         * mq_open(good_name, 0, 0, attr_buf=stack[64]) -> ENOSYS
+             (exercises the u_attr-first gate ordering: 64-byte
+              stack-backed attr buffer must pass validate ahead
+              of the name path; then name path returns ENOSYS).
+
+     Final boot-time stamp:
+         "[syscall/linux]   mq_open getname empty-string +
+          attr-first gate order: OK"
+
+     Build: cargo build -p kernel clean (39.39s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

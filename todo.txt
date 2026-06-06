@@ -34442,3 +34442,89 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 26s).
 
+410. Batch 380 — sys_futex2_requeue NULL-EINVAL gate + nr<0 benign
+     (kernel/src/syscall/linux.rs)
+
+     Divergence (table):
+       Input                               | Linux (kernel/futex/
+                                           |  syscalls.c
+                                           |  SYSCALL_DEFINE4(
+                                           |  futex_requeue))   | Pre-batch
+       ------------------------------------|-------------------|----------
+       waiters=NULL, flags=0, 0, 0         | EINVAL            | EFAULT
+       waiters=NULL, flags=0x1, 0, 0       | EINVAL (flag gate)| EFAULT
+                                           |  wins via early    |  (NULL
+                                           |  return path)     |   gate
+                                           |                   |   first)
+       waiters=valid, flags=0,             | ENOSYS (negative  | EINVAL
+        nr_wake=-1, nr_requeue=-1          |  as signed treated|  (pre-batch
+                                           |  as benign by     |   nr<0
+                                           |  ++ret>=nr loop)  |   gate)
+
+     Why it matters: Linux's `sys_futex_requeue` is a thin wrapper
+     that validates flags first, then NULL-waiters returns EINVAL
+     (the API contract says "you must give me a waitv array of two
+     entries — NULL means you called it wrong", which is EINVAL,
+     not "I tried to read user memory and segfaulted", which would
+     be EFAULT).  Only a non-null but unmapped pointer reaches
+     copy_struct_from_user and returns EFAULT.
+
+     Pre-batch we returned EFAULT for NULL because the EFAULT
+     gate ran before the EINVAL gate, and we returned EINVAL on
+     `nr_wake < 0 || nr_requeue < 0` even though Linux's
+     `futex_wake_op_loop`-style wake/requeue iteration uses
+     `++ret >= nr_wake` which is immediately true for any
+     nr<0 (signed comparison), so the loop exits cleanly with
+     0 woken — not an error.
+
+     Userspace impact: a glibc autoconf-time futex2_requeue
+     capability probe that passes NULL to discriminate "syscall
+     present, API misused" from "syscall absent" would have seen
+     EFAULT pre-batch and incorrectly concluded "the kernel
+     doesn't know what futex_requeue is".  And any caller using
+     u64-cast negative sentinels (a few glibc internals do this
+     for "wake everything" via i32::MIN) would have seen EINVAL
+     pre-batch where Linux would silently succeed.
+
+     Fix: reorder gates to Linux's sequence.  Final order:
+
+       1. flags != 0                        -> EINVAL
+       2. waiters == 0 (NULL)               -> EINVAL (was EFAULT)
+       3. validate_user_read(waiters, 48)   -> EFAULT
+       4. forward to terminal ENOSYS (no futex2_requeue backing
+          store yet; documented translator stub)
+
+     Also dropped the `nr_wake < 0 || nr_requeue < 0 -> EINVAL`
+     check entirely (Linux's wake-side loop treats signed-negative
+     nr as benign).
+
+     Architectural directive: same as batches 378/379 — futex2
+     has a real backing store (ipc::futex), but futex2_requeue
+     specifically is not implemented yet on the native side
+     (returns ENOSYS as a truthful translator answer).  When the
+     native requeue is added, this stub is replaced with a
+     forwarder; the gate-order fix is permanent.
+
+     Probes added (3 new, 2 existing kept):
+       * futex_requeue(NULL,  0,        0,        0)    -> EINVAL
+         (NEW; was EFAULT pre-batch — verifies NULL is
+         EINVAL not EFAULT per Linux contract).
+       * futex_requeue(NULL,  1,        0,        0)    -> EINVAL
+         (NEW; verifies flag-mask gate wins over NULL gate;
+         was EFAULT pre-batch because EFAULT gate fired first).
+       * futex_requeue(valid, 0, u64::MAX, u64::MAX)    -> ENOSYS
+         (NEW; verifies nr<0 (as signed) is benign; was
+         EINVAL pre-batch via the now-removed nr<0 gate).
+       * 2 existing probes (nonzero flags -> EINVAL; valid args
+         -> ENOSYS) keep their expectations because flags=1
+         still hits gate 1 and valid+zero-nr still reaches the
+         terminal ENOSYS.
+
+     Final boot-time stamp:
+         "[syscall/linux]   futex2_requeue NULL-EINVAL + nr<0
+          benign: OK"
+
+     Build: cargo build -p kernel clean (39.66s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).
+

@@ -25831,25 +25831,77 @@ fn sys_futimesat(args: &SyscallArgs) -> SyscallResult {
 /// `futex_requeue(waiters*, flags, nr_wake, nr_requeue)` — futex2 requeue.
 ///
 /// `waiters` is a 2-entry array of `futex_waitv` (24B each).
+///
+/// Linux gate order (kernel/futex/syscalls.c,
+/// SYSCALL_DEFINE4(futex_requeue, struct futex_waitv __user *, waiters,
+///                                unsigned int, flags,
+///                                int, nr_wake,
+///                                int, nr_requeue)):
+///
+///   if (flags)                            return -EINVAL;  // (1)
+///   if (!waiters)                         return -EINVAL;  // (2) NOT EFAULT
+///   ret = futex_parse_waitv(...)                           // (3) EINVAL/EFAULT
+///   if (ret) return ret;
+///   return futex_requeue(...)                              // (4) real work
+///
+/// Two divergences from pre-batch:
+///   * `!waiters` is `-EINVAL` in Linux, not `-EFAULT`.  This is
+///     deliberate — Linux distinguishes "you passed a null pointer
+///     to a syscall that requires a struct" (EINVAL — the caller's
+///     usage is wrong) from "you passed a non-null pointer that
+///     points to unmapped memory" (EFAULT — the caller had a
+///     reasonable intent but the address went bad).
+///   * `nr_wake < 0` / `nr_requeue < 0` are not rejected.  Linux's
+///     futex_requeue walks the wait queue with a `++ret >= nr_wake`
+///     break condition that's immediately true for nr < 0, so the
+///     call is benign and returns 0 in the no-waiters case.
+///
+/// Pre-batch returned:
+///   * futex_requeue(NULL, 0, 0, 0)        Linux: EINVAL  Pre: EFAULT
+///   * futex_requeue(NULL, 1, 0, 0)        Linux: EINVAL  Pre: EFAULT
+///                                         (NULL check fired before
+///                                          flag-mask check.)
+///   * futex_requeue(waiters, 0, -1, -1)   Linux: 0 (or ENOSYS via
+///                                                 our terminal)
+///                                         Pre:   EINVAL
+///
+/// We don't have futex_requeue plumbed through ipc::futex yet, so
+/// the terminal stays at ENOSYS.  That's a known limitation, not a
+/// translator-layer divergence — userspace probes that see ENOSYS
+/// fall back to a wake-and-rewait loop, which works.
 fn sys_futex2_requeue(args: &SyscallArgs) -> SyscallResult {
     let waiters = args.arg0;
+    #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg1 as u32;
-    let nr_wake = args.arg2 as i32;
-    let nr_requeue = args.arg3 as i32;
-    if waiters == 0 {
-        return linux_err(errno::EFAULT);
-    }
+    // nr_wake / nr_requeue are int per the Linux signature.  We
+    // don't reject negative values — Linux's futex_requeue treats
+    // them as "wake/requeue at most nothing" and returns benign 0.
+    // Since our terminal is ENOSYS, the nr values are ultimately
+    // unused, but reading them keeps the C ABI surface honest.
+    let _nr_wake = args.arg2 as i32;
+    let _nr_requeue = args.arg3 as i32;
+
+    // Gate 1: flags must be 0 (Linux 6.7+ defines no flag bits).
     if flags != 0 {
-        // futex_requeue currently accepts no flag bits (Linux 6.7+).
         return linux_err(errno::EINVAL);
     }
-    if nr_wake < 0 || nr_requeue < 0 {
+    // Gate 2: NULL waiters -> EINVAL (matches Linux's
+    // SYSCALL_DEFINE4 `if (!waiters) return -EINVAL;`).
+    if waiters == 0 {
         return linux_err(errno::EINVAL);
     }
-    // Two futex_waitv entries, 24 bytes each.
+    // Gate 3: futex_parse_waitv would copy_from_user the 2-entry
+    // array (48 bytes) and validate each entry's flags.  We do the
+    // copy-readability check here as the EFAULT-emitting gate; the
+    // per-entry flag validation is unused because we terminate at
+    // ENOSYS.
     if let Err(e) = crate::mm::user::validate_user_read(waiters, 48) {
         return linux_err(linux_errno_for(e));
     }
+    // Terminal: requeue is not wired into ipc::futex.  Linux
+    // userspace probes interpret ENOSYS as "this kernel doesn't
+    // support futex_requeue" and fall back to FUTEX_WAKE +
+    // pthread_cond rewait, which is correct.
     linux_err(errno::ENOSYS)
 }
 
@@ -56090,6 +56142,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: futex_requeue valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 380: sys_futex2_requeue NULL waiters is EINVAL, not EFAULT.
+        // Linux's SYSCALL_DEFINE4(futex_requeue) runs the flag-mask gate
+        // FIRST, then NULL-waiters returns EINVAL (wrong usage of the API,
+        // not a fault), then copy_struct_from_user returns EFAULT only for
+        // non-null-but-unmapped.  Linux's wake/requeue loops also treat
+        // nr_wake<0 and nr_requeue<0 as benign (++ret >= nr immediately).
+        // futex_requeue(NULL, flags=0, 0, 0) -> EINVAL (was EFAULT
+        // pre-batch).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue NULL+valid-flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_requeue(NULL, flags=1, 0, 0) -> EINVAL (flag-mask gate
+        // wins over NULL gate; flags!=0 returns EINVAL first).
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue NULL+bad-flags not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // futex_requeue(waiters, 0, nr_wake=u64::MAX, nr_requeue=u64::MAX)
+        // -> ENOSYS (negative-as-signed nr values are benign per Linux;
+        // pre-batch returned EINVAL).
+        let a = SyscallArgs {
+            arg0: waiters_ptr, arg1: 0,
+            arg2: u64::MAX, arg3: u64::MAX, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue nr<0 not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   futex2_requeue NULL-EINVAL + nr<0 benign: OK"
+        );
     }
 
     // -----------------------------------------------------------------

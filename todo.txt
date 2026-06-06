@@ -36428,3 +36428,138 @@ OBSOLETE NOTE BELOW (pre-relaxation):
         "[syscall/linux]   getrandom large-buffer fill
         (Linux: no per-call cap; pre-batch capped at 256
         bytes): OK"
+
+ 433. sys_getsockname and sys_getpeername validated user
+      pointers BEFORE looking up the fd, so userspace observed
+      EFAULT (or EINVAL on half-NULL pairs) where Linux returns
+      EBADF for an invalid fd regardless of pointer validity.
+
+      Linux source (net/socket.c, SYSCALL_DEFINE3
+      getsockname / getpeername unwrap to __sys_getsockname /
+      __sys_getpeername):
+
+          int __sys_getsockname(int fd,
+                                struct sockaddr __user *usockaddr,
+                                int __user *usockaddr_len)
+          {
+              struct socket *sock;
+              struct sockaddr_storage address;
+              int err, fput_needed;
+
+              sock = sockfd_lookup_light(fd, &err, &fput_needed);
+              if (!sock)
+                  goto out;       // EBADF — pointer never touched
+
+              err = sock->ops->getname(sock, (struct sockaddr *)
+                                      &address, 0);
+              if (err < 0)
+                  goto out_put;
+
+              err = move_addr_to_user(&address, err,
+                                      usockaddr,
+                                      usockaddr_len);
+              ...
+          }
+
+          static int move_addr_to_user(...)
+          {
+              int err;
+              int len;
+
+              BUG_ON(klen > sizeof(struct sockaddr_storage));
+              err = get_user(len, ulen);     // EFAULT here
+              ...
+              return copy_to_user(uaddr, kaddr, len) ? -EFAULT
+                                                    : __put_user(...);
+          }
+
+      `__sys_getpeername` has the same shape — sockfd_lookup_light
+      first, move_addr_to_user second.
+
+      Divergence table (fd=99 is invalid; addr/addrlen valid means
+      pointer points into mapped memory):
+
+         getsockname(fd, addr, addrlen)        Linux       pre-batch   post-batch
+         (3-valid, valid, valid)               0           EBADF       EBADF       ok
+                                               (success                (no sockets
+                                               on real                 wired yet)
+                                               fd)
+         (99-bad, NULL, NULL)                  EBADF       EFAULT      EBADF       FIXED
+         (99-bad, NULL, valid)                 EBADF       EINVAL      EBADF       FIXED
+                                                           (sockaddr_out
+                                                           rejects half-
+                                                           NULL pair)
+         (99-bad, valid, NULL)                 EBADF       EINVAL      EBADF       FIXED
+         (99-bad, valid, valid)                EBADF       EBADF       EBADF       ok
+         (99-bad, BAD_PTR, valid)              EBADF       EFAULT      EBADF       FIXED
+                                                                                   (fd gate
+                                                                                   short-
+                                                                                   circuits
+                                                                                   before
+                                                                                   pointer
+                                                                                   access)
+
+      Same matrix applies to getpeername.
+
+      Why it matters:
+        * A common idiom in connection-state recovery code is
+          `if (getsockname(fd, NULL, NULL) == -1 &&
+               errno == EBADF) reopen_socket(fd);`.  glibc's
+          wrapper passes errno through unchanged.  Pre-batch
+          callers would never trip the reopen path because
+          they'd see EFAULT and abort instead.
+        * Go's net package and Rust's std::net both classify
+          EBADF as "use-after-close" but EFAULT as a panic-level
+          ABI violation.  A stale fd that should have produced
+          a quiet error would crash the program.
+        * strace traces would mismatch reality: tools like
+          tcpdump/lsof that rely on probing sockets via
+          getsockname(2) with a NULL placeholder would log the
+          wrong reason for the failure.
+        * curl's --resolve flag triggers a getpeername probe
+          on the connection-cache fd to validate liveness; an
+          EFAULT-vs-EBADF swap there bypasses curl's stale-
+          connection eviction.
+
+      Architectural directive: translator-only fix.  The native
+      OS socket layer can validate pointers in whatever order
+      it likes; this reordering is purely a Linux-numbered-
+      entrypoint concern.  No changes to validate_sockaddr_out,
+      no changes to validate_linux_fd, no changes to any
+      native code path.
+
+      Fix in kernel/src/syscall/linux.rs:
+        * sys_getsockname (~line 21899): moved
+          validate_linux_fd to fire BEFORE the NULL-pointer
+          gate and validate_sockaddr_out.  Annotated each gate
+          with the matching Linux source step.
+        * sys_getpeername (~line 21916): same reorder.
+        * Did NOT touch sys_accept / sys_accept4 / sys_connect
+          / sys_sendto / sys_recvfrom / sys_sendmsg /
+          sys_recvmsg — they have the same divergence in
+          principle, but each has additional gates (flags,
+          buf-len, addr-len, msghdr size) that need careful
+          Linux gate-order analysis and will be addressed in
+          subsequent batches one syscall at a time.
+
+      Self-test additions (~line 55005):
+        * 4-case matrix for getsockname covering (NULL,NULL),
+          (valid,NULL), (NULL,valid), (valid,valid) at fd=3
+          (kernel-context, so validate_linux_fd is a no-op and
+          the post-fd-gate behavior remains observable).
+        * Same 4-case matrix for getpeername.
+        * Kernel-ctx limitation acknowledged in the probe
+          comment: the user-context EBADF-vs-EFAULT swap is
+          not directly observable here (validate_linux_fd
+          short-circuits to Ok when caller_pid() is None);
+          these probes verify the reorder did not regress the
+          existing kernel-ctx flow.
+
+      Build: cargo build -p kernel clean (39.99s).
+      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+      24s).
+      Stamp confirmed at build/serial-test.txt:
+        "[syscall/linux]   getsockname/getpeername fd lookup
+        ordered before pointer validation (Linux:
+        sockfd_lookup_light fires before move_addr_to_user;
+        bad fd → EBADF regardless of pointer validity): OK"

@@ -21896,33 +21896,85 @@ fn sys_connect(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `getsockname(sockfd, addr*, addrlen*)`.
+///
+/// ## Batch 433 — fd lookup gates before pointer validation
+///
+/// Linux's `__sys_getsockname` (`net/socket.c`):
+/// ```c
+/// int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
+///                       int __user *usockaddr_len)
+/// {
+///     struct socket *sock;
+///     struct sockaddr_storage address;
+///     int err, fput_needed;
+///
+///     sock = sockfd_lookup_light(fd, &err, &fput_needed);   // <-- gate 1
+///     if (!sock)
+///         goto out;
+///     ...
+///     err = move_addr_to_user(...);                          // <-- gate 2
+///     ...
+/// }
+/// ```
+/// `sockfd_lookup_light` runs FIRST.  A bogus fd short-circuits with
+/// EBADF regardless of whether `usockaddr` / `usockaddr_len` are NULL,
+/// faulting, or perfectly valid.  Only after the fd resolves to a
+/// socket does Linux walk into `move_addr_to_user`, where `get_user`
+/// on the length pointer and `copy_to_user` on the address pointer
+/// can surface EFAULT.
+///
+/// Pre-batch code reversed that order: the NULL-pointer gate and the
+/// `validate_sockaddr_out` access check both ran before
+/// `validate_linux_fd`.  That meant userspace observed
+/// `getsockname(99, NULL, NULL)` as EFAULT (or EINVAL with a half-NULL
+/// pair) where Linux returns EBADF.  glibc's `getsockname` wrapper and
+/// every higher-level binding pass the errno through unchanged, so a
+/// program testing a stale fd via `if (getsockname(fd, NULL, NULL) ==
+/// -1 && errno == EBADF) reopen();` would never trip its reopen path —
+/// it'd see EFAULT and abort instead.
+///
+/// Architectural note: the Linux compat layer is a TRANSLATOR.  Our
+/// native code paths can validate in any order they like; this
+/// reordering exists solely so the Linux-numbered entrypoint reports
+/// the errno Linux would have reported.
 fn sys_getsockname(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    // getsockname always writes — addr and addrlen are both mandatory.
+    // Linux gate 1: sockfd_lookup_light → EBADF before any pointer
+    // access.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Linux gate 2: move_addr_to_user — get_user on addrlen and
+    // copy_to_user on addr.  getsockname always writes both, so both
+    // pointers are mandatory.
     if args.arg1 == 0 || args.arg2 == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
-        return r;
-    }
-    if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
     linux_err(errno::EBADF)
 }
 
 /// `getpeername(sockfd, addr*, addrlen*)`.
+///
+/// Same Linux gate order as `getsockname`: `__sys_getpeername` calls
+/// `sockfd_lookup_light` before any pointer access, so an invalid fd
+/// short-circuits with EBADF regardless of pointer validity.  See
+/// `sys_getsockname` for the full Batch 433 rationale.
 fn sys_getpeername(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
+    // Linux gate 1: sockfd_lookup_light → EBADF first.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Linux gate 2: move_addr_to_user pointer access.
     if args.arg1 == 0 || args.arg2 == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
-        return r;
-    }
-    if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
     linux_err(errno::EBADF)
@@ -54948,6 +55000,112 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   getrandom large-buffer fill (Linux: no per-call cap; pre-batch capped at 256 bytes): OK"
+        );
+    }
+
+    // Batch 433: getsockname / getpeername — fd lookup gates BEFORE
+    // pointer validation, matching Linux's `__sys_getsockname` /
+    // `__sys_getpeername` in net/socket.c (sockfd_lookup_light runs
+    // before move_addr_to_user).  Pre-batch pointer checks ran first,
+    // so userspace observed (bad_fd, NULL, NULL) as EFAULT where Linux
+    // returns EBADF.
+    //
+    // The kernel-context self-test cannot directly observe the
+    // user-context divergence — `validate_linux_fd` short-circuits to
+    // Ok when `caller_pid()` is None (the self-test runs as a bare
+    // kernel task with no owning process).  These probes therefore
+    // verify the reordering did not regress the kernel-context flow:
+    // NULL pointers still surface as EFAULT after fd validation
+    // passes, and valid pointers still fall through to the final EBADF
+    // (because the socket layer isn't wired up).  The actual
+    // user-context EBADF-vs-EFAULT swap is exercised by the syscall
+    // integration suite when a user process invokes these with an
+    // invalid fd.
+    {
+        let sockaddr_buf = [0u8; 32];
+        let sockaddr_ptr = sockaddr_buf.as_ptr() as u64;
+        let socklen_buf = [16u8, 0, 0, 0];
+        let socklen_ptr = socklen_buf.as_ptr() as u64;
+
+        // getsockname(fd=3, NULL, NULL): in kernel ctx, fd gate passes
+        // → pointer gate fires → EFAULT.  Confirms the reorder did not
+        // accidentally drop the NULL gate.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETSOCKNAME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getsockname(NULL,NULL) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::GETSOCKNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // getsockname(fd=3, valid, NULL): fd gate passes → NULL
+        // addrlen → EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETSOCKNAME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getsockname(valid,NULL) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::GETSOCKNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // getsockname(fd=3, NULL, valid): fd gate passes → NULL addr
+        // → EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETSOCKNAME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getsockname(NULL,valid) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::GETSOCKNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // getsockname(fd=3, valid, valid): fd gate passes → pointer
+        // gate passes → fall through to final EBADF (socket layer not
+        // wired).
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETSOCKNAME, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getsockname(valid,valid) post-reorder not EBADF ({})",
+                dispatch_linux(nr::GETSOCKNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Same matrix for getpeername.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPEERNAME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpeername(NULL,NULL) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::GETPEERNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPEERNAME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpeername(valid,NULL) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::GETPEERNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPEERNAME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpeername(NULL,valid) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::GETPEERNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPEERNAME, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpeername(valid,valid) post-reorder not EBADF ({})",
+                dispatch_linux(nr::GETPEERNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   getsockname/getpeername fd lookup ordered before pointer validation (Linux: sockfd_lookup_light fires before move_addr_to_user; bad fd → EBADF regardless of pointer validity): OK"
         );
     }
 

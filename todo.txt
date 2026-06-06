@@ -29629,3 +29629,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.71s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 26s).
+
+366. Batch 336 — sys_sethostname + sys_setdomainname
+     `len` int truncation (high-half ignored).
+
+     Divergence: Linux's prototypes are
+       SYSCALL_DEFINE2(sethostname,   char __user *, name, int, len)
+       SYSCALL_DEFINE2(setdomainname, char __user *, name, int, len)
+     where `len` is `int`, delivered in rsi.  The
+     AMD64 syscall ABI does not zero- or sign-extend
+     `int` args before issuing syscall, so only the
+     low 32 bits of `len` are defined.  Linux's body
+     opens with `if (len < 0 || len > __NEW_UTS_LEN)
+     return -EINVAL;` run at 32-bit width.
+
+     Pre-batch both stubs held `len` as a raw u64
+     (`let len = args.arg1 as usize`) and gated at
+     full 64-bit width with `if len > 64 { EINVAL }`.
+     High-bit sentinels whose low 32 encoded a valid
+     in-range length (e.g. arg1 = 0x1_0000_0001,
+     low = 1) tripped the raw `> 64` reject and
+     surfaced EINVAL where Linux truncates to 1 and
+     proceeds to copy_from_user (returning EFAULT
+     for NULL name with non-zero len, success for
+     a valid name).
+
+     Fix: cast `args.arg1` to i32 with the standard
+     `#[allow(clippy::cast_possible_truncation,
+              clippy::cast_possible_wrap)]`, run
+     `if len_i32 < 0 || len_i32 > 64 { EINVAL }`
+     (mirroring Linux's combined gate), then widen
+     `len_i32 as usize` for the body's NULL check
+     and copy_from_user length.  Adds the negative-
+     len reject path Linux has but our raw-usize
+     code masked behind `len > 64`.
+
+     Tests: five boot-time probes added inside the
+     existing sethostname / setdomainname validation
+     block.  All use name = NULL so the success path
+     after the len gate is gate 2 (`name_ptr==0 &&
+     len!=0`) -> EFAULT, which discriminates cleanly
+     from the pre-batch raw-len EINVAL.
+       (a) sethostname(NULL, 0x1_0000_0001) -> EFAULT
+           (was EINVAL).  Primary discriminator.
+       (a') setdomainname(NULL, 0x1_0000_0001) ->
+           EFAULT (was EINVAL).
+       (b) sethostname(NULL, 0x1_0000_0040) -> EFAULT
+           (was EINVAL).  Boundary at low = 64
+           (maximum valid len).
+       (c) sethostname(NULL, 0x1_0000_0041) -> EINVAL
+           preserved (low = 65 > 64).
+       (d) sethostname(NULL, 0xFFFF_FFFF_FFFF_FFFF)
+           -> EINVAL preserved, now via the new
+           `len_i32 < 0` arm (was raw `> 64`).
+       (d') setdomainname(NULL, 0xFFFF_FFFF_FFFF_FFFF)
+           -> EINVAL preserved (same path).
+     Marker: "[syscall/linux]   set{host,domain}name
+              len int-truncation (high-half
+              ignored): OK".
+
+     Preserved: existing sethostname/setdomainname
+     probes still pass:
+       - sethostname(NULL, 65) -> EINVAL.
+       - sethostname(NULL, 5)  -> EFAULT.
+       - sethostname(NULL, 0)  -> EINVAL (empty name
+         rejected, batch 57).
+       - setdomainname(NULL, 0) -> 0 (clear-domain).
+       - hostname/domain round-trip via nameservice
+         (set+get with restore).
+
+     Known limitations:
+     - `name_ptr` (arg0) is a user pointer (u64);
+       no truncation issue.
+     - The "empty hostname rejected with EINVAL"
+       deviation from Linux (which accepts len=0)
+       predates this batch and is preserved; the
+       nameservice refuses empty strings.
+
+     Build: cargo build -p kernel clean (36.86s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

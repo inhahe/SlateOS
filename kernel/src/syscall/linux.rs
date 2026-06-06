@@ -8926,10 +8926,29 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
     crate::fs::nameservice::init_defaults();
 
     let name_ptr = args.arg0;
-    let len = args.arg1 as usize;
-    if len > 64 {
+    // Linux ABI: `SYSCALL_DEFINE2(sethostname, char __user *, name,
+    // int, len)`.  `len` is declared `int`, delivered in rsi; the
+    // x86_64 syscall ABI leaves the high 32 bits undefined.  Linux's
+    // body opens with `if (len < 0 || len > __NEW_UTS_LEN) return
+    // -EINVAL;`, run at 32-bit width.
+    //
+    // Pre-batch (336) we held `len` as raw u64 (`args.arg1 as usize`),
+    // so high-bit sentinels diverged from Linux:
+    //   - len = 0x1_0000_0001 (truncates to 1): Linux runs the copy
+    //     and returns 0 / EFAULT-on-NULL / etc.; we hit len > 64 →
+    //     EINVAL.
+    //   - len = 0xFFFF_FFFF_FFFF_FFFF (truncates to -1): Linux returns
+    //     EINVAL via the `len < 0` arm.  Pre-batch also returned EINVAL
+    //     via raw `len > 64` — preserved.
+    // Mirror Linux: cast to i32, reject negative, then widen back to
+    // usize for the body.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let len_i32 = args.arg1 as i32;
+    if len_i32 < 0 || len_i32 > 64 {
         return linux_err(errno::EINVAL);
     }
+    #[allow(clippy::cast_sign_loss)]
+    let len = len_i32 as usize;
     if name_ptr == 0 && len != 0 {
         return linux_err(errno::EFAULT);
     }
@@ -8984,10 +9003,16 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
     crate::fs::nameservice::init_defaults();
 
     let name_ptr = args.arg0;
-    let len = args.arg1 as usize;
-    if len > 64 {
+    // Linux ABI: `SYSCALL_DEFINE2(setdomainname, char __user *, name,
+    // int, len)` — same int-truncation thread as sys_sethostname; see
+    // that body's comment for the divergence Linux mirrors.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let len_i32 = args.arg1 as i32;
+    if len_i32 < 0 || len_i32 > 64 {
         return linux_err(errno::EINVAL);
     }
+    #[allow(clippy::cast_sign_loss)]
+    let len = len_i32 as usize;
     if name_ptr == 0 && len != 0 {
         return linux_err(errno::EFAULT);
     }
@@ -36289,6 +36314,88 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 .expect("restore hostname");
             let _ = crate::fs::nameservice::set_domain(&orig_domain);
         }
+
+        // Batch 336: sethostname / setdomainname `len` is declared
+        // `int` in Linux, delivered in rsi, so the x86_64 ABI leaves
+        // the high 32 bits undefined.  Pre-batch we held `len` as a
+        // raw u64 (`args.arg1 as usize`) and ran `if len > 64`
+        // against the full width — high-bit sentinels whose low 32
+        // encoded a valid in-range len fell through to EINVAL where
+        // Linux truncates first and either copies or returns EFAULT.
+        //
+        // Probes use NULL name_ptr so the success path is a clean
+        // EFAULT (post-len-gate, pre-copy), discriminating from the
+        // pre-batch EINVAL outcome.
+        //
+        // (a) len = 0x1_0000_0001 (low = 1), name = NULL -> EFAULT
+        //     via gate 2 (name_ptr==0 && len!=0).  Pre-batch: raw
+        //     len > 64 -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0001,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(NULL, 0x1_0000_0001) expected EFAULT, got {}",
+                dispatch_linux(nr::SETHOSTNAME, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETDOMAINNAME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setdomainname(NULL, 0x1_0000_0001) expected EFAULT, got {}",
+                dispatch_linux(nr::SETDOMAINNAME, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) len = 0x1_0000_0040 (low = 64, the max valid len),
+        //     name = NULL -> EFAULT.  Pre-batch: EINVAL via raw
+        //     len > 64.  Boundary discriminator.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0040,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(NULL, low=64) expected EFAULT, got {}",
+                dispatch_linux(nr::SETHOSTNAME, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) len = 0x1_0000_0041 (low = 65, just past max),
+        //     name = NULL -> EINVAL.  Preserved: pre-batch EINVAL
+        //     via raw len > 64; post-batch EINVAL via len_i32 > 64.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0041,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(NULL, low=65) expected EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) len = 0xFFFF_FFFF_FFFF_FFFF (low = -1 as i32),
+        //     name = NULL -> EINVAL via the new len < 0 arm.
+        //     Preserved: pre-batch EINVAL via raw len > 64; post-batch
+        //     EINVAL via len_i32 < 0 (closer to Linux's reasoning).
+        let a = SyscallArgs { arg0: 0, arg1: 0xFFFF_FFFF_FFFF_FFFF,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETHOSTNAME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(NULL, u64::MAX) expected EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETDOMAINNAME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setdomainname(NULL, u64::MAX) expected EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   set{{host,domain}}name len int-truncation (high-half ignored): OK"
+        );
     }
 
     // mlock / munlock / mlockall / munlockall.

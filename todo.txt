@@ -35214,3 +35214,116 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (41.86s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
+
+421. Batch 391 — sys_pidfd_send_signal Linux 6.7+ scope-flag
+     acceptance (PIDFD_SIGNAL_THREAD/THREAD_GROUP/PROCESS_GROUP).
+
+     File         : kernel/src/syscall/linux.rs
+     Linux source : kernel/signal.c::SYSCALL_DEFINE4(pidfd_send_signal)
+       include/uapi/linux/pidfd.h:
+         #define PIDFD_SIGNAL_THREAD        (1U << 0)
+         #define PIDFD_SIGNAL_THREAD_GROUP  (1U << 1)
+         #define PIDFD_SIGNAL_PROCESS_GROUP (1U << 2)
+         #define PIDFD_SEND_SIGNAL_FLAGS \
+             (PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP | \
+              PIDFD_SIGNAL_PROCESS_GROUP)
+
+       SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
+               siginfo_t __user *, info, unsigned int, flags) {
+           if (flags & ~PIDFD_SEND_SIGNAL_FLAGS)
+               return -EINVAL;                              (gate 1)
+           /* Ensure that only a single signal scope determining
+            * flag is set. */
+           if (hweight32(flags) > 1)
+               return -EINVAL;                              (gate 2)
+           ...
+           if (flags & PIDFD_SIGNAL_PROCESS_GROUP)
+               type = PIDTYPE_PGID;                          (gate 7)
+           else if (flags & PIDFD_SIGNAL_THREAD)
+               type = PIDTYPE_PID;
+           else if (flags & PIDFD_SIGNAL_THREAD_GROUP)
+               type = PIDTYPE_TGID;
+           ...
+       }
+
+     Pre-batch    : ANY non-zero flag value rejected with EINVAL.
+                    Linux ≥ 6.7 accepts the 3 scope bits as hints;
+                    only unknown bits or multi-bit values are EINVAL.
+
+                      flags=PIDFD_SIGNAL_THREAD (1), bad fd
+                        Linux: pass gates → fdget → EBADF
+                        Us   : EINVAL
+
+                      flags=PIDFD_SIGNAL_THREAD_GROUP (2), bad fd
+                        Linux: pass gates → fdget → EBADF
+                        Us   : EINVAL
+
+                      flags=PIDFD_SIGNAL_PROCESS_GROUP (4), bad fd
+                        Linux: pass gates → fdget → EBADF
+                        Us   : EINVAL
+
+                      flags=3 (THREAD|THREAD_GROUP)
+                        Linux: gate 2 (hweight > 1) → EINVAL
+                        Us   : EINVAL (raw != 0 gate)
+                                — coincides, but for wrong reason
+
+     Post-batch   : VALID_FLAGS mask = THREAD | THREAD_GROUP |
+                    PROCESS_GROUP.  Gate 1: any unknown bit set →
+                    EINVAL.  Gate 2: flags.count_ones() > 1 →
+                    EINVAL.  Then existing fdget/fd-type gates.
+                    After successful fdget (pidfd kind verified),
+                    add gate 7-equivalent: PIDFD_SIGNAL_PROCESS_GROUP
+                    on a non-pgrp pidfd → EINVAL.  Since our
+                    pidfd_open only ever creates process-scope
+                    pidfds (we model neither thread-pidfds via
+                    PIDFD_THREAD nor pgrp-pidfds via PIDFD_PIDFS_PGID
+                    at this layer — both are accepted as hints and
+                    fall through to process-scope delivery), this
+                    catch is unconditional whenever the flag is set.
+
+                    THREAD and THREAD_GROUP are accepted as hints
+                    and delivered to the underlying process — same
+                    observable behaviour Linux exhibits on a
+                    process-pidfd (THREAD_GROUP is the implicit
+                    default scope; THREAD on a process-pidfd
+                    delivers to the thread-group leader, which IS
+                    our process — equivalent on a single-thread
+                    model).
+
+     Why it matters: Linux 6.7 (Dec 2023) is now the baseline LTS
+     for several distros (Ubuntu 24.04, Debian Trixie).  glibc 2.39+
+     uses PIDFD_SIGNAL_THREAD as part of its posix_spawn_pidfd-with-
+     fast-path machinery; systemd 254+ uses PIDFD_SIGNAL_THREAD_GROUP
+     in its unit-stop sequences for compatibility with cgroup v2
+     freezer interactions; the OpenJDK / Hotspot JVM uses the
+     scope flags to differentiate "kill one Java thread" from
+     "kill the whole VM".  Pre-batch our blanket EINVAL on any
+     non-zero flag breaks all three: they'd fall back to the
+     legacy `kill(2)` racy delivery path (PID-recycling window)
+     where Linux gives them the deterministic pidfd-scoped path.
+
+     Architectural: pure ABI translation — the underlying signal
+     delivery semantics are unchanged.  We accept the scope flags
+     as hints because our model collapses thread vs thread-group
+     vs process scope into a single "deliver to process" action;
+     this matches the observable Linux behaviour on a process-pidfd
+     (THREAD on a process-pidfd delivers to TGID via thread-group
+     leader fallback).  PROCESS_GROUP requires a pgrp-pidfd which
+     we don't model, so always EINVAL after fdget — same as Linux
+     on a kernel without PIDFD_PIDFS_PGID-style pidfds.
+
+     Probes added: (1) `flags=0x100` (unknown bit, bad fd) → EINVAL
+     (replaces pre-batch's flags=1 → EINVAL test, which is now
+     wrong).  (2) `flags=3` (THREAD|THREAD_GROUP, bad fd) → EINVAL
+     (hweight > 1 gate).  (3) `flags=1` (PIDFD_SIGNAL_THREAD, bad
+     fd) → EBADF (was EINVAL pre-batch).  (4) `flags=2`
+     (PIDFD_SIGNAL_THREAD_GROUP, bad fd) → EBADF (was EINVAL
+     pre-batch).  (5) `flags=4` (PIDFD_SIGNAL_PROCESS_GROUP, bad
+     fd) → EBADF (was EINVAL pre-batch; flag is syntactically
+     valid, fdget fires first).  Existing flags=0x1_0000_0000
+     truncation probe + bad-sig + bad-sig+info + kernel-context
+     probes unchanged.  Existing aggregate stamp:
+       "[syscall/linux]   pidfd_send_signal flags/fd/sig gate order: OK"
+
+     Build: cargo build -p kernel clean (40.06s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).

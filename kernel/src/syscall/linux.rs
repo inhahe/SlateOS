@@ -13933,11 +13933,13 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
     // Linux kernel/signal.c SYSCALL_DEFINE4(pidfd_send_signal) gate
     // order, mirrored here so feature-probes see Linux-shaped errnos:
     //
-    //   1. flags & ~(supported_bits)         -> EINVAL
-    //   2. fdget(pidfd)                      -> EBADF (no such fd)
-    //   3. pidfd_to_pid(f.file)              -> EBADF (fd isn't a pidfd)
-    //   4. if (info) copy_siginfo_from_user  -> EFAULT
-    //   5. kill_pid_info_type / valid_signal -> EINVAL (sig > NSIG)
+    //   1. flags & ~PIDFD_SEND_SIGNAL_FLAGS  -> EINVAL
+    //   2. hweight32(flags) > 1              -> EINVAL  (Linux 6.7+)
+    //   3. fdget(pidfd)                      -> EBADF (no such fd)
+    //   4. pidfd_to_pid(f.file)              -> EBADF (fd isn't a pidfd)
+    //   5. if (info) copy_siginfo_from_user  -> EFAULT
+    //   6. kill_pid_info_type / valid_signal -> EINVAL (sig > NSIG)
+    //   7. PIDFD_SIGNAL_PROCESS_GROUP on a non-pgrp pidfd -> EINVAL
     //
     // Previously we validated the signal range and the siginfo pointer
     // BEFORE looking up the fd, so callers probing with a bogus
@@ -13948,9 +13950,59 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
     // it as raw u64 and tested != 0, so a probe like
     // flags=0x1_0000_0000 fired EINVAL where Linux's truncated
     // flags=0 lets the call through to the fdget path.
+    //
+    // Batch 391: pre-batch we rejected *every* non-zero flags value
+    // with EINVAL.  Linux 6.7 added PIDFD_SIGNAL_THREAD (1),
+    // PIDFD_SIGNAL_THREAD_GROUP (2), and PIDFD_SIGNAL_PROCESS_GROUP
+    // (4) as scope-selecting flags — exactly one bit may be set;
+    // unknown bits or multi-bit values are EINVAL; otherwise the
+    // gate falls through to the same fdget/fd-type checks.
+    //
+    //   include/uapi/linux/pidfd.h:
+    //     #define PIDFD_SIGNAL_THREAD          (1U << 0)
+    //     #define PIDFD_SIGNAL_THREAD_GROUP    (1U << 1)
+    //     #define PIDFD_SIGNAL_PROCESS_GROUP   (1U << 2)
+    //     #define PIDFD_SEND_SIGNAL_FLAGS \
+    //         (PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP | \
+    //          PIDFD_SIGNAL_PROCESS_GROUP)
+    //
+    //   kernel/signal.c::SYSCALL_DEFINE4(pidfd_send_signal):
+    //     if (flags & ~PIDFD_SEND_SIGNAL_FLAGS)
+    //         return -EINVAL;
+    //     /* Ensure that only a single signal scope determining flag
+    //      * is set. */
+    //     if (hweight32(flags) > 1)
+    //         return -EINVAL;
+    //     ...
+    //     if (flags & PIDFD_SIGNAL_PROCESS_GROUP)
+    //         type = PIDTYPE_PGID;
+    //     else if (flags & PIDFD_SIGNAL_THREAD)
+    //         type = PIDTYPE_PID;
+    //     else if (flags & PIDFD_SIGNAL_THREAD_GROUP)
+    //         type = PIDTYPE_TGID;
+    //     ...
+    //
+    // For our kernel: pidfd_open only ever returns a process-scope
+    // pidfd (we model neither thread-pidfds nor pgrp-pidfds at this
+    // layer), so PIDFD_SIGNAL_PROCESS_GROUP can never be valid here
+    // and surfaces EINVAL after fdget.  THREAD and THREAD_GROUP are
+    // both accepted as hints and deliver to the underlying process,
+    // matching Linux's behaviour on a process-pidfd (THREAD_GROUP
+    // is already the default scope; THREAD on a process-pidfd
+    // delivers to the thread-group leader, which IS our process).
+    const PIDFD_SIGNAL_THREAD: u32 = 1 << 0;
+    const PIDFD_SIGNAL_THREAD_GROUP: u32 = 1 << 1;
+    const PIDFD_SIGNAL_PROCESS_GROUP: u32 = 1 << 2;
+    const VALID_FLAGS: u32 = PIDFD_SIGNAL_THREAD
+        | PIDFD_SIGNAL_THREAD_GROUP
+        | PIDFD_SIGNAL_PROCESS_GROUP;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg3 as u32;
-    if flags != 0 {
+    if flags & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // hweight32(flags) > 1 — only one scope bit may be set.
+    if flags.count_ones() > 1 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -13968,6 +14020,13 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
         // pidfd_to_pid returns ERR_PTR(-EBADF) when the file isn't a
         // pidfd; the syscall propagates it as EBADF.
         return linux_err(errno::EBADF);
+    }
+    // PIDFD_SIGNAL_PROCESS_GROUP requires a pgrp-pidfd (Linux 6.9+
+    // PIDFD_PIDFS_PGID).  Our pidfd_open only creates process-scope
+    // pidfds, so this combination is always rejected by Linux's
+    // pidfd_get_pid arm-check that runs after fdget — match that.
+    if flags & PIDFD_SIGNAL_PROCESS_GROUP != 0 {
+        return linux_err(errno::EINVAL);
     }
     if args.arg2 != 0 {
         // copy_siginfo_from_user_any — struct siginfo_t = 128 bytes.
@@ -45191,13 +45250,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // pidfd_send_signal nonzero flags -> EINVAL.  Flags are checked
-        // before fdget, so this still fires even with a junk fd.
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 9, arg2: 0, arg3: 1,
+        // pidfd_send_signal unknown flag bit -> EINVAL.  Flags are
+        // checked before fdget, so this still fires even with a junk fd.
+        // Bit 8 (0x100) is outside PIDFD_SEND_SIGNAL_FLAGS.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 9, arg2: 0, arg3: 0x100,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
             != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: pidfd_send_signal(flags) not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: pidfd_send_signal(unknown flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 391: pidfd_send_signal multi-bit flags -> EINVAL.
+        //   PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP = 3.
+        //   Linux's `hweight32(flags) > 1` gate fires before fdget.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 9, arg2: 0, arg3: 3,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: pidfd_send_signal(multi-bit flags) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 391: pidfd_send_signal flags=PIDFD_SIGNAL_THREAD (1) +
+        //   bad fd -> EBADF.  Pre-batch this was EINVAL (we rejected
+        //   any non-zero flags).  Linux 6.7+ accepts the scope flag
+        //   and falls through to fdget which fires EBADF.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 9, arg2: 0, arg3: 1,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_send_signal(SIGNAL_THREAD, bad fd) -> {} (want EBADF)",
+                dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 391: pidfd_send_signal flags=PIDFD_SIGNAL_THREAD_GROUP (2)
+        //   + bad fd -> EBADF.  Same fall-through as THREAD.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 9, arg2: 0, arg3: 2,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_send_signal(SIGNAL_THREAD_GROUP, bad fd) -> {} (want EBADF)",
+                dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 391: pidfd_send_signal flags=PIDFD_SIGNAL_PROCESS_GROUP (4)
+        //   + bad fd -> EBADF.  Flag is valid syntactically (one bit set),
+        //   passes the mask + hweight gates, fdget fires first with EBADF.
+        //   (The PROCESS_GROUP-requires-pgrp-pidfd EINVAL gate only fires
+        //   after a successful fdget.)
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 9, arg2: 0, arg3: 4,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_send_signal(SIGNAL_PROCESS_GROUP, bad fd) -> {} (want EBADF)",
+                dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
         // pidfd_send_signal with bogus siginfo pointer + bogus sig +

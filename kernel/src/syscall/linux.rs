@@ -18845,7 +18845,18 @@ fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
 ///     cache pages; we mirror that for the console pseudo-handle and
 ///     for pipes.
 fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
-    if args.arg3 != 0 {
+    // Linux signature: `SYSCALL_DEFINE4(cachestat, unsigned int, fd,
+    // struct cachestat_range __user *, cstat_range, struct cachestat
+    // __user *, cstat, unsigned int, flags)`.  `flags` is C unsigned int,
+    // delivered in r10.  The AMD64 syscall ABI does NOT zero-extend
+    // unsigned int across the syscall instruction, so Linux observes only
+    // the low 32 bits — the high half is caller-controlled garbage that
+    // must be ignored.  Pre-batch we tested the raw u64 against 0, so a
+    // probe like flags=0x1_0000_0000 saw EINVAL where Linux's truncated
+    // flags=0 lets the call advance to the pointer gates.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     if args.arg1 == 0 || args.arg2 == 0 {
@@ -45883,6 +45894,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // cachestat flags is C `unsigned int`; the high 32 bits of arg3
+        // must be masked before the `flags != 0` rejection gate.  Pre-
+        // batch the gate compared at u64 width so any high-half garbage
+        // returned EINVAL where Linux's truncated flags=0 falls through.
+        //
+        // Re-prime the cstat_buf sentinel since the success probe above
+        // overwrote the first 40 bytes with zeros.
+        for byte in &mut cstat_buf {
+            *byte = 0xCC;
+        }
+        // (a) flags=0x1_0000_0000 (high-only), range=NULL, cstat=NULL:
+        //     truncates to 0, gate passes, downstream EFAULT on NULL
+        //     range pointer (cstat_range is checked first).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat(high-only,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) flags=0x1_0000_0001 (high|bad-low 1): truncates to 1, gate
+        //     still rejects.  Verifies the mask gate continues to reject
+        //     any nonzero low half after the high-bit strip.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat(high|bad-low 1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) flags=0x1_0000_0002 (high|bad-low 2): truncates to 2, gate
+        //     still rejects.  Independent low bit confirms the mask
+        //     covers more than the LSB.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0002, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat(high|bad-low 2) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) flags=0x1_0000_0000 with valid cstat_range and cstat:
+        //     truncates to 0, all gates pass, success path returns 0 and
+        //     zero-fills the cstat buffer.  Verifies flag truncation
+        //     does not mask downstream behaviour.
+        let cstat_ptr = cstat_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: buf_ptr, arg2: cstat_ptr, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat(high-only,valid) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if cstat_buf[..40].iter().any(|&b| b != 0) {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat(high-only,valid) did not zero-fill",
+            );
+            return Err(KernelError::InternalError);
+        }
+        if cstat_buf[40..].iter().any(|&b| b != 0xCC) {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat(high-only,valid) over-wrote",
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   cachestat unsigned-int truncation (high-half ignored): OK"
+        );
 
         // mseal non-zero flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };

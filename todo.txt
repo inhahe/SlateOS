@@ -28413,3 +28413,99 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (43.86s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 25s).
+
+353. Batch 323 — sys_cachestat int truncation (high-half
+     of flags must be masked before the != 0 reject gate).
+
+     Divergence: Linux's sys_cachestat signature is
+     `SYSCALL_DEFINE4(cachestat, unsigned int, fd,
+     struct cachestat_range __user *, cstat_range,
+     struct cachestat __user *, cstat, unsigned int,
+     flags)`.  The `flags` parameter is C `unsigned int`,
+     delivered in r10.  The AMD64 ABI does not zero-
+     extend `unsigned int` across the syscall
+     instruction, so Linux observes only the low 32 bits
+     — the high half is caller-controlled garbage that
+     must be ignored.
+
+     Our pre-fix implementation did `if args.arg3 != 0 {
+     return EINVAL; }` at u64 width, so any high-half
+     garbage (e.g. 0x1_0000_0000) was rejected with
+     EINVAL even though Linux's truncated flags=0
+     advances to the pointer gates.  Userspace probes
+     stress-testing the syscall by sweeping the high half
+     of r10 saw the wrong errno discriminator.
+
+     Fix: in sys_cachestat (kernel/src/syscall/linux.rs
+     line ~18847), cast args.arg3 to u32 before the
+     != 0 gate:
+       #[allow(clippy::cast_possible_truncation)]
+       let flags = args.arg3 as u32;
+       if flags != 0 {
+           return linux_err(errno::EINVAL);
+       }
+     fd is also `unsigned int` per Linux's prototype but
+     the existing `as i32` cast at line ~18867 already
+     truncates to 32 bits; no separate fix needed.
+
+     Tests added to dispatch_linux (after existing
+     cachestat valid/zero-fill probes around line 45886):
+       (a) cachestat(fd=0, range=NULL, cstat=NULL,
+                     flags=0x1_0000_0000)
+           → EFAULT (high-only; truncates to 0, gate
+            passes, downstream EFAULT on the NULL
+            cstat_range pointer).  Pre-fix returned
+            EINVAL because the high bit set the raw u64
+            non-zero.
+       (b) cachestat(fd=0, range=NULL, cstat=NULL,
+                     flags=0x1_0000_0001)
+           → EINVAL (high|bad-low 1; truncates to 1,
+            gate still rejects nonzero low half;
+            verifies the mask still rejects after the
+            high-bit strip).
+       (c) cachestat(fd=0, range=NULL, cstat=NULL,
+                     flags=0x1_0000_0002)
+           → EINVAL (high|bad-low 2; independent low
+            bit confirms the mask covers more than the
+            LSB).
+       (d) cachestat(fd=0, range=valid (cstat_range_buf
+                     16 bytes), cstat=valid (40-byte
+                     destination), flags=0x1_0000_0000)
+           → 0 (high-only with valid pointers; full
+            success path runs, zero-fills the 40-byte
+            cstat buffer, leaves the 8-byte trailing
+            sentinel intact).  Verifies flag truncation
+            does not mask downstream behaviour.
+     Marker: "[syscall/linux]   cachestat unsigned-int
+              truncation (high-half ignored): OK".
+
+     Preserved: existing cachestat probes still pass:
+       - flags=1 → EINVAL: works because 1 fits in 32
+         bits and the != 0 gate still rejects.
+       - range=NULL, cstat=valid, flags=0 → EFAULT:
+         range gate fires first regardless of flag
+         path.
+       - valid range+cstat, flags=0 → 0 with 40-byte
+         zero-fill: unchanged success path.
+
+     Known limitations:
+     - There is no page cache in this kernel — every
+       counter returned is honestly zero.  When a real
+       page-cache subsystem lands, the success path
+       will surface per-range cache residency / dirty /
+       writeback / evicted counters, but the flag-mask
+       gate continues to guard the entry.
+     - fd (arg0) is C `unsigned int` per Linux's
+       prototype, but we cast to i32 (line ~18867) for
+       compatibility with validate_linux_fd's signed-fd
+       contract.  All u32 values up to 2_147_483_647 fit
+       both representations identically; values above
+       that wrap to negative i32 and are rejected as
+       invalid fds, matching Linux's `fd < 0` rejection
+       (Linux rejects any fd whose underlying file
+       lookup fails, which any high-bit fd does via the
+       fdtable bounds).  No truncation needed for fd.
+
+     Build: cargo build -p kernel clean (57.98s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 26s).

@@ -12288,6 +12288,52 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
+    // Linux short-circuit: if the local iov_iter has zero total bytes
+    // (cnt==0 OR every entry has len==0), import_iovec sets up an
+    // empty iter and process_vm_rw goes `if (!iov_iter_count(&iter))
+    // goto free_iov_l;` -> returns 0 BEFORE validating the remote
+    // iov or resolving pid.  Without this, a probe passing pid=-1
+    // with liovcnt=0 saw ESRCH where Linux returns 0 (empty call
+    // succeeds even with an invalid pid because the kernel never
+    // touches the target task).  Batch 234 closes the known
+    // limitation noted in entry 262.
+    let local_total: u64 = if liovcnt == 0 {
+        0
+    } else {
+        // Sum iov lens.  Each iov is 16 bytes: [u64 base, u64 len].
+        // Read 16 entries (256 bytes) at a time to amortize STAC/CLAC.
+        let mut scratch = [0u8; 256];
+        let mut sum: u64 = 0;
+        let mut idx: usize = 0;
+        while idx < liovcnt {
+            let take = core::cmp::min(16, liovcnt - idx);
+            let bytes = take * 16;
+            let src = args.arg1.wrapping_add((idx as u64) * 16);
+            // SAFETY: validate_user_read above covered the full
+            // [args.arg1, args.arg1 + liovcnt*16) range; this sub-
+            // range is contained within it.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_from_user(src, scratch.as_mut_ptr(), bytes)
+            } {
+                return linux_err(linux_errno_for(e));
+            }
+            for j in 0..take {
+                let len_off = j * 16 + 8;
+                let len_bytes: [u8; 8] = match <[u8; 8]>::try_from(
+                    &scratch[len_off..len_off + 8],
+                ) {
+                    Ok(b) => b,
+                    Err(_) => return linux_err(errno::EINVAL),
+                };
+                sum = sum.saturating_add(u64::from_le_bytes(len_bytes));
+            }
+            idx += take;
+        }
+        sum
+    };
+    if local_total == 0 {
+        return SyscallResult::ok(0);
+    }
     if riovcnt > 1024 {
         return linux_err(errno::EINVAL);
     }
@@ -34922,12 +34968,28 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // process_vm_readv with pid <= 0 -> ESRCH.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // process_vm_readv with pid <= 0 and a non-empty local iov
+        // -> ESRCH.  Batch 234 added the local iter_count==0
+        // short-circuit, so the pid check only fires when there's
+        // actual work to do; an all-zero call now succeeds with 0
+        // (matches Linux's process_vm_rw goto free_iov_l).  Use a
+        // valid local iov with non-zero len so the pid resolution
+        // path is actually reached.
+        let pvr_pid0_local_buf = [0u8; 4];
+        let mut pvr_pid0_iov = [0u8; 16];
+        pvr_pid0_iov[0..8].copy_from_slice(
+            &(pvr_pid0_local_buf.as_ptr() as u64).to_le_bytes(),
+        );
+        pvr_pid0_iov[8..16].copy_from_slice(&4u64.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: pvr_pid0_iov.as_ptr() as u64,
+            arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::PROCESS_VM_READV, &a).value
             != -i64::from(errno::ESRCH) {
-            serial_println!("[syscall/linux]   FAIL: process_vm_readv(0) not ESRCH");
+            serial_println!("[syscall/linux]   FAIL: process_vm_readv(0, valid iov) not ESRCH");
             return Err(KernelError::InternalError);
         }
         // process_vm_readv with nonzero flags -> EINVAL.
@@ -34973,21 +35035,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Case C: pid=-1, liovcnt=0, riovcnt=2000 -> EINVAL.  Linux
-        // validates local-then-remote; local is empty (no-op), then
-        // remote sees riovcnt > UIO_MAXIOV and returns EINVAL.
-        // Pre-batch our combined `liovcnt > 1024 || riovcnt > 1024`
-        // would also return EINVAL, but with liovcnt=2 and
-        // riovcnt=2000 the new split now gives the right local-first
-        // discriminator (see case D).
+        // Case C: pid=-1, liovcnt=0, riovcnt=2000 -> 0.  Batch 234
+        // closed the local-iter-count-zero short-circuit: Linux's
+        // process_vm_rw calls import_iovec(LOCAL, liovcnt=0) which
+        // returns an empty iter; iov_iter_count==0 -> goto free_iov_l
+        // -> return 0, BEFORE remote validation or the pid check
+        // fire.  Pre-batch we returned ESRCH (pid<=0 first); batch
+        // 233 changed this to EINVAL (split count gate); batch 234
+        // now correctly returns 0 to match Linux.
         let a = SyscallArgs {
             arg0: u64::MAX,
             arg1: 0, arg2: 0, arg3: 0x1000, arg4: 2000, arg5: 0,
         };
-        if dispatch_linux(nr::PROCESS_VM_READV, &a).value
-            != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: process_vm_readv(pid=-1, riovcnt=2000) not EINVAL"
+                "[syscall/linux]   FAIL: process_vm_readv(pid=-1, liovcnt=0, riovcnt=2000) not 0"
             );
             return Err(KernelError::InternalError);
         }
@@ -35009,6 +35071,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   process_vm_readv local-iov-EINVAL/EFAULT > remote-iov-EINVAL/EFAULT > pid-ESRCH gate order: OK"
+        );
+        // Batch 234: local iter_count == 0 short-circuit.  Linux's
+        // process_vm_rw returns 0 (success — no bytes moved) when the
+        // local iov_iter has zero total bytes, BEFORE remote
+        // validation or pid resolution.  Two ways to be empty:
+        //   - liovcnt == 0 (no entries at all)
+        //   - liovcnt > 0 but every iov[i].iov_len == 0
+        //
+        // Case E: pid=-1, liovcnt=0, riovcnt=0 -> 0 (was ESRCH).
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_vm_readv(pid=-1, all-empty) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case F: pid=-1, liovcnt=2 with both lens=0 -> 0.  iov_iter
+        // total is 0 even though liovcnt > 0; Linux's short-circuit
+        // fires.  Pre-batch we returned EFAULT (lvec=NULL with
+        // liovcnt>0) since we didn't sum lens.  This needs a
+        // readable iov array with len fields zeroed.
+        let empty_iovs = [0u8; 32]; // 2 iovs of {base=0, len=0}
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: empty_iovs.as_ptr() as u64,
+            arg2: 2,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_VM_READV, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_vm_readv(pid=-1, zero-len iovs) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   process_vm_readv local-iter-empty short-circuit: OK"
         );
         // Batch 112: process_vm_readv / writev upgraded to perform
         // the same-address-space transfer.  In kernel-context the

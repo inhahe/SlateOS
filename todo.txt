@@ -20487,5 +20487,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
+## 263. [DONE 2026-06-05] Linux ABI: sys_process_vm_readv/writev local
+##      iter_count==0 short-circuit — close the known limitation from
+##      entry 262.
+##
+##      Linux source: mm/process_vm_access.c::process_vm_rw, after
+##      import_iovec(LOCAL) succeeds:
+##        if (!iov_iter_count(&iter))
+##            goto free_iov_l;   // returns 0
+##      This fires when liovcnt==0 OR every iov[i].iov_len==0.  It
+##      returns 0 BEFORE remote validation or mm_access(pid), so even
+##      pid=-1 with no work-to-do succeeds.
+##
+##      Also discovered: batch 233's Case C test expectation was wrong.
+##      I asserted (pid=-1, liovcnt=0, riovcnt=2000) -> EINVAL on the
+##      theory that "Linux validates local-then-remote, then remote
+##      sees riovcnt > UIO_MAXIOV."  But Linux's local short-circuit
+##      fires BEFORE remote validation, so the correct answer is 0.
+##      Updated Case C to expect 0.
+##
+##      Pre-batch divergences (closed here):
+##      - (pid=anything, liovcnt=0) -> ESRCH for pid<=0, 0 for pid>0.
+##        Linux always returns 0 (local iter empty).
+##      - (pid=valid, liovcnt=2 with both lens=0) -> reached the AS
+##        same-process check.  Linux short-circuits to 0.
+##
+##      Fix: after the local iov readability check, sum the iov lens
+##      (16 entries / 256 bytes per copy_from_user batch).  If the
+##      total is 0, return SyscallResult::ok(0) immediately, before
+##      the remote validation and pid-ESRCH check.  saturating_add
+##      guards against u64 overflow.
+##
+##      Test updates:
+##      - Old pid=0 empty-args ESRCH test rewritten to use a non-empty
+##        local iov (1 entry, len=4), so the pid<=0 ESRCH path is
+##        actually exercised.
+##      - Batch 233 Case C corrected from EINVAL to 0.
+##      - New Case E: (pid=-1, all-empty)              -> 0 (was ESRCH).
+##      - New Case F: (pid=-1, lvec=[zero-len iovs])   -> 0 (was
+##                                                       EFAULT — we
+##                                                       used to take
+##                                                       the
+##                                                       lvec=NULL
+##                                                       branch when
+##                                                       liovcnt>0 if
+##                                                       arg1 was 0;
+##                                                       here arg1 is
+##                                                       a valid
+##                                                       pointer so
+##                                                       previously
+##                                                       we'd run the
+##                                                       same-AS copy
+##                                                       and produce
+##                                                       a non-zero
+##                                                       result or
+##                                                       fail with
+##                                                       EFAULT on
+##                                                       the deref).
+##      Marker: "process_vm_readv local-iter-empty short-circuit: OK".
+##
+##      Known limitations: the same-AS copy loop downstream handles the
+##      case where local has content but remote is empty by returning
+##      0 from the "Nothing to do if either side has zero entries"
+##      block.  That still doesn't fully match Linux's
+##      process_vm_rw_core semantics for cross-side mismatches, but
+##      the rough behavior (returns 0 for empty-remote calls when
+##      local is non-empty) is preserved.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

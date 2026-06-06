@@ -28234,3 +28234,91 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (51.01s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+351. Batch 321 — sys_map_shadow_stack int truncation
+     (high-half of flags must be masked before bit
+     validation).
+
+     Divergence: Linux's sys_map_shadow_stack signature
+     is `SYSCALL_DEFINE3(map_shadow_stack, unsigned long,
+     addr, unsigned long, size, unsigned int, flags)`.
+     The `flags` parameter is C `unsigned int`, but on
+     x86_64 the syscall ABI delivers it in r10 (a 64-bit
+     register) and the AMD64 ABI does NOT zero-extend
+     `unsigned int` arguments before the syscall
+     instruction.  So Linux observes only the low 32 bits
+     of r10; the high 32 bits are caller-controlled
+     garbage that must be ignored.
+
+     Our pre-fix implementation read args.arg2 as raw u64
+     and did `if flags & !1 != 0 { return EINVAL; }`.
+     That meant any high-half garbage (e.g.
+     0x1_0000_0001) was rejected with EINVAL where Linux
+     would accept (truncated low half is 1 =
+     SHADOW_STACK_SET_TOKEN, valid) and return ENOSYS on
+     our stub.
+
+     Fix: in sys_map_shadow_stack (kernel/src/syscall/
+     linux.rs line ~18952), insert:
+       #[allow(clippy::cast_possible_truncation)]
+       let flags = args.arg2 as u32;
+     before the mask check.  Mask compares against u32
+     truncated value so high-half garbage is dropped
+     before the SHADOW_STACK_SET_TOKEN=1 bit gate.  addr
+     (arg0) and size (arg1) are C `unsigned long` and
+     stay at u64 — no truncation needed for them.
+
+     Tests added to dispatch_linux (after existing valid/
+     undef-flag probes around line 45925):
+       (a) map_shadow_stack(0, 4096, 0x1_0000_0001)
+           → ENOSYS (high|SHADOW_STACK_SET_TOKEN;
+            truncates to 1, mask passes, falls through
+            to ENOSYS stub).
+       (b) map_shadow_stack(0, 4096, 0x1_0000_0000)
+           → ENOSYS (high-half only, low half zero;
+            truncates to 0, mask passes, ENOSYS).
+       (c) map_shadow_stack(0, 4096, 0x1_0000_0002)
+           → EINVAL (high|bad-low 0x2; truncates to 0x2,
+            mask rejects bit outside the SET_TOKEN bit;
+            verifies mask gate still rejects invalid
+            bits after the high half is stripped).
+       (d) map_shadow_stack(0, 13, 0x1_0000_0001)
+           → EINVAL (bad size 13; not multiple of 8;
+            verifies the size gate fires before the
+            truncated flag gate so size validation is
+            not masked by truncation).
+     Marker: "[syscall/linux]   map_shadow_stack
+              unsigned-int truncation (high-half
+              ignored): OK".
+
+     Preserved: existing map_shadow_stack probes still
+     pass:
+       - valid (size=4096, flags=0) → ENOSYS: works
+         because 0 is 0 in either width.
+       - valid (size=4096, flags=SET_TOKEN=1) → ENOSYS:
+         works because 1 fits in 32 bits, u32 cast is
+         identity.
+       - undef flag 0x2 → EINVAL: works because 0x2 fits
+         in 32 bits and the mask still rejects.
+       - size=0 → EINVAL: gate fires before flag check.
+       - size=7 (not multiple of 8) → EINVAL: gate fires
+         before flag check.
+
+     Known limitations:
+     - x86 CET shadow stacks require user-mode hardware
+       support and a real address-space mapper to back
+       the SSP-page allocation.  We have neither — the
+       syscall remains an ENOSYS stub.  When CET lands,
+       the flag-mask gate continues to guard the entry,
+       but the ENOSYS return is replaced by the actual
+       allocation path.  Probes (a) and (b) will need to
+       be updated to expect the new terminal errno (or a
+       success fd) at that time.
+     - addr (arg0) is currently ignored entirely (no
+       address-hint plumbing).  When CET allocation lands
+       this becomes a placement hint matched against the
+       process address space.
+
+     Build: cargo build -p kernel clean (42.97s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 27s).

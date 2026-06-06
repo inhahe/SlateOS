@@ -18950,14 +18950,31 @@ fn sys_mseal(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `map_shadow_stack(addr, size, flags)`.
+///
+/// Linux ABI: `int map_shadow_stack(unsigned long addr,
+///                                  unsigned long size,
+///                                  unsigned int flags)`.
+/// SYSCALL_DEFINE3(map_shadow_stack, ..., unsigned int, flags) narrows
+/// the third parameter to (unsigned int) on entry; the mask check
+/// `flags & ~SHADOW_STACK_SET_TOKEN` in arch/x86/kernel/shstk.c runs
+/// at 32-bit width.  Pre-batch we held flags as u64 and ran the mask
+/// check at 64-bit width, so the AMD64 syscall ABI's high-half
+/// garbage (the kernel does not zero-extend int args before issuing
+/// the syscall) leaked into the mask and returned spurious EINVAL
+/// where Linux returns ENOSYS (we don't implement CET shadow stacks).
+/// Fourteenth instance of the int/unsigned-int truncation pattern
+/// after batches 308-320.
 fn sys_map_shadow_stack(args: &SyscallArgs) -> SyscallResult {
     // size must be a multiple of 8 (CET pushes u64 SSP entries) and
-    // at least 8 bytes.
+    // at least 8 bytes.  addr (arg0) and size (arg1) are unsigned long
+    // → stay at u64; no truncation needed for those.
     if args.arg1 == 0 || args.arg1 % 8 != 0 {
         return linux_err(errno::EINVAL);
     }
     // flags: SHADOW_STACK_SET_TOKEN (1) is the only defined bit.
-    if args.arg2 & !1 != 0 {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    if flags & !1 != 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -45923,6 +45940,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: map_shadow_stack valid not ENOSYS");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 321: map_shadow_stack unsigned-int truncation — high-
+        // half register garbage must be stripped before the
+        // SHADOW_STACK_SET_TOKEN mask check.
+        //
+        // Linux signature: `int map_shadow_stack(unsigned long addr,
+        // unsigned long size, unsigned int flags)`.  flags is C
+        // unsigned int → low 32 bits only.  Pre-batch we held flags
+        // as u64 and ran the mask check at 64-bit width, so high-half
+        // garbage returned spurious EINVAL where Linux returns ENOSYS
+        // (we don't implement CET shadow stacks).
+        //
+        // All four probes use a valid size=4096 so the size gate
+        // (multiple of 8) is trivially satisfied and discrimination is
+        // driven purely by the flag mask.
+        //
+        // (a) map_shadow_stack(0, 4096, 0x1_0000_0001) → ENOSYS
+        //     (high|SHADOW_STACK_SET_TOKEN; truncates to 1, mask
+        //     passes, ENOSYS terminal).
+        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 0x1_0000_0001,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: map_shadow_stack(high|SET_TOKEN) -> {} (expected -ENOSYS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) map_shadow_stack(0, 4096, 0x1_0000_0000) → ENOSYS
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes, ENOSYS).
+        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: map_shadow_stack(high-half-zero) -> {} (expected -ENOSYS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) map_shadow_stack(0, 4096, 0x1_0000_0002) → EINVAL
+        //     (high|bad-low 0x2; truncates to 0x2, mask rejects bit
+        //     outside SHADOW_STACK_SET_TOKEN=0x1; verifies mask gate
+        //     still rejects invalid bits after the high half is
+        //     stripped).
+        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 0x1_0000_0002,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: map_shadow_stack(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) map_shadow_stack(0, 13, 0x1_0000_0001) → EINVAL
+        //     (size=13 not multiple of 8; verifies the size gate
+        //     fires BEFORE the truncated flag gate — gate order
+        //     preserved).
+        let a = SyscallArgs { arg0: 0, arg1: 13, arg2: 0x1_0000_0001,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: map_shadow_stack(high|valid,bad-size) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   map_shadow_stack unsigned-int truncation (high-half ignored): OK"
+        );
     }
 
     // -----------------------------------------------------------------

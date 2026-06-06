@@ -23198,3 +23198,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      tracked here for a future cleanup pass.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+299.  syscall/linux: capset pid != current -> EPERM (batch 270).
+##
+##      Pre-batch divergence: Linux's sys_capset (kernel/capability.c)
+##      runs this gate sequence after cap_validate_magic succeeds:
+##        if (get_user(pid, &header->pid))
+##            return -EFAULT;
+##        /* may only affect current now */
+##        if (pid != 0 && pid != task_pid_vnr(current))
+##            return -EPERM;
+##        if (copy_from_user(&kdata, data, ...))
+##            return -EFAULT;
+##      The EPERM gate fires BEFORE the data-NULL / data-EFAULT
+##      gate.  Pre-batch we ignored the pid field in the header
+##      entirely, so:
+##        capset(V3 header w/ pid=other, NULL data)
+##          -> -EFAULT (data NULL fired)
+##          where Linux returns -EPERM (pid gate fires first).
+##        capset(V3 header w/ pid=other, valid data)
+##          -> 0 (silent OK after batch 268's data-NULL gate)
+##          where Linux returns -EPERM.
+##      Flagged as a known limitation in batch 268's todo.
+##
+##      Fix in sys_capset (line ~7853, V1|V2|V3 arm):
+##        After cap_validate_magic equivalent succeeds, before the
+##        existing data NULL/validate gate, extract pid_in_hdr from
+##        hdr_buf[4..8] and compare to a `current_pid_u32` that's
+##        derived from caller_pid() (or 0 in kernel context).  When
+##        pid_in_hdr != 0 && pid_in_hdr != current_pid_u32, return
+##        -EPERM.  Cite Linux's gate sequence in the comment.
+##
+##      Judgement call on kernel context: caller_pid() == None is
+##      treated as pid 0 — the kernel acts as "current task"
+##      (pid 0), so any non-zero pid in the header triggers EPERM
+##      and any zero pid bypasses the gate.  This is consistent
+##      with the gate's intent ("you can only affect yourself")
+##      and lets the boot-test discriminate the EPERM case
+##      cleanly.  Documented in the inline comment.
+##
+##      Self-tests added in dispatch_linux (capset EPERM triple):
+##        A. capset(V3 hdr w/ pid=12345, NULL data)  -> -EPERM
+##           Pre-batch: -EFAULT (data NULL fired); post-batch:
+##           -EPERM (pid gate now fires first).  Direct
+##           discriminator for gate ordering.
+##        B. capset(V3 hdr w/ pid=12345, valid data) -> -EPERM
+##           Pre-batch: 0; post-batch: -EPERM.  Direct
+##           discriminator for the new gate.
+##        C. capset(V3 hdr w/ pid=0,     NULL data)  -> -EFAULT
+##           Acceptance: pid==0 bypasses the EPERM gate, so the
+##           call still surfaces -EFAULT from the data-NULL gate.
+##           Pre-batch behaviour preserved, confirming the new
+##           gate is restricted to non-self pids.
+##
+##      Marker:
+##        "[syscall/linux]   capset pid != current EPERM gating: OK"
+##
+##      Existing tests preserved: the batch-268 capget/capset
+##      quadruple uses pid=0 in its V3 header (hdr_c[4..8] == 0),
+##      so all four of its discriminators continue to behave as
+##      documented.  prctl(PR_SET_NAME) NULL-arg2 gating
+##      (batch 269) directly above; capget/capset NULL-data
+##      quadruple (batch 268) above that; preadv/pwritev iov_len
+##      gating (batch 267) above that; futimesat tv_usec triple
+##      (batch 266) below.
+##
+##      Known limitations: we still do not validate that the
+##      cap_user_data values represent a valid subset of the
+##      bounding/permitted/inheritable sets (Linux's
+##      cap_capset() does the subset check via security hook).
+##      Cosmetic until we maintain per-task cap state.  Also:
+##      task_pid_vnr() in Linux is PID-namespace-relative; we do
+##      not implement PID namespaces yet, so our comparison is
+##      against the global PID.  When PID namespaces land, this
+##      gate must be revisited to use the caller's namespace.
+##      Tracked here for a future cleanup pass.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

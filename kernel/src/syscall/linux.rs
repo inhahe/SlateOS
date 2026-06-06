@@ -7852,17 +7852,45 @@ fn sys_capset(args: &SyscallArgs) -> SyscallResult {
     let version = u32::from_ne_bytes([hdr_buf[0], hdr_buf[1], hdr_buf[2], hdr_buf[3]]);
     match version {
         V1 | V2 | V3 => {
-            // Linux's sys_capset (kernel/capability.c) calls
-            // `copy_from_user(&kdata, data, copybytes)` after
-            // cap_validate_magic succeeds, with `copybytes = tocopy
-            // * sizeof(struct __user_cap_data_struct)` (12 bytes per
-            // element).  A NULL or unreadable data pointer surfaces
-            // EFAULT — there is no NULL-data probe form for capset
-            // (unlike capget, where the NULL-datap probe returns 0).
-            // Pre-batch we accepted any valid-version capset call
-            // as silent OK without ever inspecting `data`, so a
-            // probe `capset(V3, NULL)` returned 0 where Linux
-            // returns EFAULT.
+            // Linux's sys_capset (kernel/capability.c) gate order
+            // after cap_validate_magic succeeds is:
+            //
+            //   if (get_user(pid, &header->pid))
+            //       return -EFAULT;
+            //   /* may only affect current now */
+            //   if (pid != 0 && pid != task_pid_vnr(current))
+            //       return -EPERM;
+            //   if (copy_from_user(&kdata, data, ...))
+            //       return -EFAULT;
+            //
+            // We already copied the 8-byte header up-front, so `pid`
+            // lives in hdr_buf[4..8].  The EPERM gate fires *before*
+            // the data-NULL / data-EFAULT gate.  Pre-batch we ignored
+            // the pid field entirely, so `capset(V3, pid=other,
+            // valid_data)` returned 0 where Linux returns EPERM.
+            //
+            // Kernel context (caller_pid() == None) is treated as
+            // pid 0 — the kernel is "no PID, no privilege to set
+            // anyone else's caps", consistent with the EPERM gate's
+            // intent (the only legal pid from kernel context is 0,
+            // meaning "current task", which is the kernel itself).
+            let pid_in_hdr = u32::from_ne_bytes([
+                hdr_buf[4], hdr_buf[5], hdr_buf[6], hdr_buf[7],
+            ]);
+            let current_pid_u32: u32 = match caller_pid() {
+                Some(p) => u32::try_from(p).unwrap_or(0),
+                None => 0,
+            };
+            if pid_in_hdr != 0 && pid_in_hdr != current_pid_u32 {
+                return linux_err(errno::EPERM);
+            }
+
+            // After the EPERM gate, Linux calls
+            //   copy_from_user(&kdata, data, copybytes)
+            // with copybytes = tocopy * sizeof(__user_cap_data_struct)
+            // = 12 (V1) or 24 (V2/V3) bytes.  NULL or unreadable
+            // surfaces EFAULT (no NULL-data probe form for capset,
+            // unlike capget).
             let elems: usize = if version == V1 { 1 } else { 2 };
             let total = elems * 12;
             if args.arg1 == 0 {
@@ -45794,6 +45822,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   prctl(PR_SET_NAME) NULL-arg2 gating: OK"
+            );
+        }
+
+        // ---- capset pid != current -> EPERM ----
+        // Linux's sys_capset (kernel/capability.c) gate order after
+        // cap_validate_magic succeeds is:
+        //   if (get_user(pid, &header->pid)) return -EFAULT;
+        //   if (pid != 0 && pid != task_pid_vnr(current))
+        //       return -EPERM;
+        //   if (copy_from_user(&kdata, data, ...)) return -EFAULT;
+        // The EPERM gate fires *before* the data-NULL / data-EFAULT
+        // gate.  Pre-batch we ignored the pid field entirely, so a
+        // probe `capset(V3 header with pid=other, NULL data)`
+        // returned EFAULT (data NULL) where Linux returns EPERM,
+        // and `capset(V3 header with pid=other, valid_data)`
+        // returned 0 where Linux returns EPERM.
+        //
+        // Kernel context (caller_pid() == None) is treated as pid 0
+        // for the EPERM comparison: the kernel can only act as
+        // "current task" (pid 0), so any non-zero pid triggers
+        // EPERM, mirroring what an unprivileged userspace caller
+        // would see.
+        {
+            const V3: u32 = 0x2008_0522;
+
+            // Discriminator A: capset(V3 hdr w/ pid=12345, NULL data)
+            //   pre-batch -> -EFAULT (data NULL fired first)
+            //   post-batch -> -EPERM (new gate fires before data NULL)
+            let mut hdr_a: [u8; 8] = [0; 8];
+            hdr_a[0] = V3.to_ne_bytes()[0];
+            hdr_a[1] = V3.to_ne_bytes()[1];
+            hdr_a[2] = V3.to_ne_bytes()[2];
+            hdr_a[3] = V3.to_ne_bytes()[3];
+            // pid = 12345 little-endian at bytes 4..8
+            let pid_le = 12345u32.to_ne_bytes();
+            hdr_a[4] = pid_le[0]; hdr_a[5] = pid_le[1];
+            hdr_a[6] = pid_le[2]; hdr_a[7] = pid_le[3];
+            let hdr_a_ptr = (&raw const hdr_a[0]) as u64;
+            core::hint::black_box(&hdr_a);
+            let a = SyscallArgs {
+                arg0: hdr_a_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EPERM) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capset(V3, pid=other, NULL) not EPERM"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: capset(V3 hdr w/ pid=12345, valid data buf)
+            //   pre-batch -> 0 (silent OK)
+            //   post-batch -> -EPERM (gate fires before data validation)
+            let data_buf = [0u8; 24];
+            let data_ptr = (&raw const data_buf[0]) as u64;
+            core::hint::black_box(&data_buf);
+            let a = SyscallArgs {
+                arg0: hdr_a_ptr, arg1: data_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EPERM) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capset(V3, pid=other, valid data) not EPERM"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator C: capset(V3 hdr w/ pid=0, NULL data) -> EFAULT
+            //   acceptance: pid==0 ("current task") bypasses the EPERM
+            //   gate, so the call falls through to the data-NULL gate
+            //   and surfaces -EFAULT.  Pre-batch behaviour, preserved.
+            let mut hdr_c: [u8; 8] = [0; 8];
+            hdr_c[0] = V3.to_ne_bytes()[0];
+            hdr_c[1] = V3.to_ne_bytes()[1];
+            hdr_c[2] = V3.to_ne_bytes()[2];
+            hdr_c[3] = V3.to_ne_bytes()[3];
+            // pid bytes 4..8 stay 0 -> pid_in_hdr == 0
+            let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
+            core::hint::black_box(&hdr_c);
+            let a = SyscallArgs {
+                arg0: hdr_c_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capset(V3, pid=0, NULL) not EFAULT"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   capset pid != current EPERM gating: OK"
             );
         }
 

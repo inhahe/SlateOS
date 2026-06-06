@@ -4354,7 +4354,6 @@ fn mprotect_flush_range(start: u64, end: u64) {
 ///   entirely in user space.  Length 0 succeeds without further
 ///   checking (POSIX).
 fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::USER_SPACE_END;
 
     // Linux gate order (mm/madvise.c::do_madvise):
@@ -4379,6 +4378,19 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
     //     capable() check fires ahead of the user-space VMA lookup).
     //   * Misaligned addr with len=0 returned 0; Linux returns
     //     EINVAL because alignment is gate 2, ahead of len==0.
+    //   * Alignment was checked against the kernel's internal 16 KiB
+    //     FRAME_SIZE rather than Linux's `PAGE_SIZE` (4 KiB on x86_64,
+    //     visible to userspace via `sysconf(_SC_PAGESIZE)`).  glibc
+    //     allocators and CRIU probes pass 4 KiB-aligned addresses
+    //     because that is the documented ABI; rejecting those with
+    //     EINVAL teaches them that madvise is broken.  This matches
+    //     the existing 4 KiB ABI gate used by `sys_mprotect`,
+    //     `sys_msync`, and `sys_mremap`.
+
+    // Linux ABI page size on x86_64 (sysconf(_SC_PAGESIZE)); the
+    // internal frame size of this kernel is larger but is not
+    // observable through this syscall.
+    const ABI_PAGE_SIZE: u64 = 4096;
 
     let addr = args.arg0;
     let len = args.arg1;
@@ -4402,17 +4414,16 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
 
-    // Gate 2: addr must be page-aligned.  Linux requires this even for
-    // len=0; we now match that semantics.  Our page is 16 KiB.
-    let frame_size = FRAME_SIZE as u64;
-    if (addr & (frame_size - 1)) != 0 {
+    // Gate 2: addr must be page-aligned per the Linux ABI (4 KiB on
+    // x86_64).  Linux requires this even for len=0; we now match.
+    if (addr & (ABI_PAGE_SIZE - 1)) != 0 {
         return linux_err(errno::EINVAL);
     }
 
-    // Gate 3: round len up to whole frames; reject overflow.
+    // Gate 3: round len up to whole ABI pages; reject overflow.
     let len_aligned = match len
-        .checked_add(frame_size - 1)
-        .map(|v| v & !(frame_size - 1))
+        .checked_add(ABI_PAGE_SIZE - 1)
+        .map(|v| v & !(ABI_PAGE_SIZE - 1))
     {
         Some(v) => v,
         None => return linux_err(errno::EINVAL),
@@ -25691,8 +25702,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: madvise kernel-addr");
             return Err(KernelError::InternalError);
         }
+        // Gate 2 ABI-page discriminator: addr=0x5000 is 4 KiB-aligned
+        // (matches Linux's PAGE_SIZE) but NOT 16 KiB-aligned (the
+        // kernel's internal FRAME_SIZE).  Pre-batch this returned
+        // EINVAL because we checked against the larger frame size;
+        // Linux accepts because PAGE_ALIGNED holds.  A glibc allocator
+        // or CRIU probe routinely passes 4 KiB-aligned addresses.
+        let a = SyscallArgs { arg0: 0x5000, arg1: 0x1000,
+            arg2: 0 /* MADV_NORMAL */, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: madvise(4 KiB-aligned, not 16 KiB-aligned) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Same shape with len=0 still passes alignment (gate 2) and
+        // then succeeds at gate 5 (end==start).
+        let a = SyscallArgs { arg0: 0x5000, arg1: 0,
+            arg2: 4 /* MADV_DONTNEED */, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: madvise(4 KiB-aligned, len=0) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Discriminator for sub-4-KiB misalignment: addr=0x4002 fails
+        // even the ABI alignment gate -> EINVAL.  Confirms we still
+        // reject genuine sub-page misalignment.
+        let a = SyscallArgs { arg0: 0x4002, arg1: 0x1000,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: madvise(sub-4-KiB misalign) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall/linux]   madvise behavior-EINVAL > align > overflow > len=0 > HWPOISON-EPERM > ENOMEM gate order: OK"
+            "[syscall/linux]   madvise ABI-page alignment (4 KiB) gate order: OK"
         );
     }
 

@@ -21841,3 +21841,86 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        surface area.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 25s).
+
+## 280. syscall/linux: madvise — ABI 4 KiB alignment instead of 16 KiB frame (batch 251)
+##
+##      Pre-batch divergence (kernel/src/syscall/linux.rs):
+##      sys_madvise's gate 2 ("addr must be page-aligned") and gate 3
+##      ("round len up to whole pages") used `FRAME_SIZE` (16 KiB,
+##      the kernel's internal frame size) instead of Linux's
+##      `PAGE_SIZE` (4 KiB on x86_64, the value visible to userspace
+##      via `sysconf(_SC_PAGESIZE)`).  Linux's
+##      `mm/madvise.c::do_madvise` calls `PAGE_ALIGNED(start)` which
+##      compiles to a 4 KiB check on x86_64.
+##
+##      Why this matters: glibc allocators (jemalloc, tcmalloc, glibc
+##      malloc) and CRIU's checkpoint/restore probes routinely pass
+##      4 KiB-aligned addresses because that is the documented ABI.
+##      Pre-batch our kernel rejected a 4 KiB-aligned-but-not-16-KiB-
+##      aligned address (e.g. 0x5000, 0xD000, 0x11000) with EINVAL
+##      where Linux accepts and returns 0.  An allocator that
+##      depends on `madvise(MADV_DONTNEED)` to release pages back to
+##      the kernel would see every other call (worst case, more)
+##      fail, attribute it to a kernel bug, and either spam log
+##      output or fall back to a slower release path.
+##
+##      Sibling syscalls already use the 4 KiB ABI page size:
+##      sys_msync, sys_mprotect, sys_mremap, sys_pkey_mprotect, and
+##      sys_mlock2 (see line ~15508 and ~17612).  This batch brings
+##      sys_madvise in line with its peers.
+##
+##      Fix:
+##      - Removed `use crate::mm::frame::FRAME_SIZE;` from
+##        sys_madvise.
+##      - Added `const ABI_PAGE_SIZE: u64 = 4096;` and replaced
+##        `frame_size` with `ABI_PAGE_SIZE` in gates 2 (alignment)
+##        and 3 (PAGE_ALIGN rounding).  Gate 4 (overflow) and gate 7
+##        (USER_SPACE_END bounds) are unaffected: they operate on
+##        the post-rounding `end` value.
+##      - Extended the doc comment to call out the alignment-source
+##        divergence and link to the sibling syscalls that already
+##        use ABI_PAGE_SIZE.
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - madvise(addr=0x5000, len=0x1000, advice=MADV_NORMAL) -> 0
+##        Discriminator: 0x5000 = 5*4 KiB is 4 KiB-aligned but NOT
+##        16 KiB-aligned.  Pre-batch returned EINVAL; post-batch
+##        returns 0.
+##      - madvise(addr=0x5000, len=0, advice=MADV_DONTNEED) -> 0
+##        Confirms the alignment gate passes at the new threshold
+##        and then gate 5 (len==0 no-op) fires.
+##      - madvise(addr=0x4002, len=0x1000, advice=MADV_NORMAL)
+##        -> EINVAL
+##        Confirms sub-4-KiB misalignment is STILL rejected.
+##        0x4002 is 16 KiB-aligned plus 2 bytes -> fails both old
+##        and new gate; the test guards against an over-correction
+##        that accepts all alignments.
+##        Marker: "madvise ABI-page alignment (4 KiB) gate order: OK".
+##
+##      Existing tests preserved:
+##      - All 16-KiB-aligned addresses (0x4000) used by prior tests
+##        are also 4 KiB-aligned, so behavior_valid, len==0,
+##        HWPOISON-EPERM, and ENOMEM tests all still pass unchanged.
+##      - Prior marker "madvise behavior-EINVAL > align > overflow >
+##        len=0 > HWPOISON-EPERM > ENOMEM gate order: OK" still
+##        fires before the new marker.
+##
+##      Known limitations:
+##      - We still treat every documented MADV_* advisory hint as a
+##        no-op return 0.  Hints like MADV_DONTNEED could free
+##        anonymous pages eagerly once we have VMA tracking with
+##        anonymous/file-backed discrimination; until then the
+##        documented "kernel ignored the hint" semantics are
+##        semantically valid for every caller.
+##      - The kernel's actual page table operates on 16 KiB frames.
+##        When real madvise work lands (DONTNEED freeing, COLD/PAGEOUT
+##        eviction), the implementation will need to handle requests
+##        that don't align to a 16 KiB frame boundary, either by
+##        rounding inward (skipping the partial frame on either end)
+##        or by only acting at frame granularity.  Either is a
+##        Linux-compatible interpretation of "advisory hint".
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s after one
+##      transient timeout unrelated to this change; the 180s
+##      timeout fired during sched_fairness self-test setup, then
+##      passed at 24s on retry).

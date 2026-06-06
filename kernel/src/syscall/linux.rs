@@ -12397,10 +12397,19 @@ fn sys_io_uring_enter(args: &SyscallArgs) -> SyscallResult {
     // Linux 6.10: IORING_ENTER_GETEVENTS=0x01, SQ_WAKEUP=0x02,
     // SQ_WAIT=0x04, EXT_ARG=0x08, REGISTERED_RING=0x10,
     // ABS_TIMER=0x20, EXT_ARG_REG=0x40.  Higher bits are unused.
-    const IORING_ENTER_GETEVENTS: u64 = 0x01;
-    const IORING_ENTER_EXT_ARG: u64 = 0x08;
-    const VALID_FLAGS: u64 = 0x7F;
-    let flags = args.arg3;
+    const IORING_ENTER_GETEVENTS: u32 = 0x01;
+    const IORING_ENTER_EXT_ARG: u32 = 0x08;
+    const VALID_FLAGS: u32 = 0x7F;
+    // Linux signature: SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd,
+    // u32, to_submit, u32, min_complete, u32, flags, ...).  The AMD64
+    // syscall ABI does not zero-extend `u32` args before issuing
+    // syscall, so only the low 32 bits of `flags` are defined; the high
+    // half is caller-supplied garbage.  Mask to u32 before any flag-bit
+    // comparison so high-half garbage doesn't spuriously trip the
+    // `flags & !VALID_FLAGS` reject and surface EINVAL where Linux
+    // would accept the call.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -39963,6 +39972,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // pointer cannot be tested here — only the explicit NULL
         // EFAULT check fires inside the kernel.)
         serial_println!("[syscall/linux]   io_uring_enter/register validation: OK");
+
+        // io_uring_enter flags is C `u32` in the Linux prototype, delivered
+        // in r10.  The AMD64 syscall ABI does not zero-extend `u32` args,
+        // so high-half garbage must be masked off before any flag-bit
+        // comparison.  Pre-batch a raw `let flags = args.arg3;` caused
+        // any high bit to trip the `flags & !VALID_FLAGS != 0` reject and
+        // surface EINVAL where Linux would accept the call and fall
+        // through to the fd lookup (EBADF in this kernel).
+        //
+        // (a) flags=0x1_0000_0000 (high-only) -> low u32 is 0, no flag
+        //     bit set, sig=NULL skips pointer block, fd=0 -> EBADF.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0x1_0000_0000,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0x1_0000_0000) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) flags=0x1_0000_0080 (high|invalid bit 7) -> u32 reject
+        //     preserved at low-half; EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0x1_0000_0080,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0x1_0000_0080) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) flags=0x1_0000_0001 (high|GETEVENTS) -> low u32 = GETEVENTS,
+        //     no invalid bits, sig=NULL skips block, fd=0 -> EBADF.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0x1_0000_0001,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0x1_0000_0001) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) flags=0xFFFF_FFFF_0000_0000 (all-high, low=0) -> EBADF.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0xFFFF_FFFF_0000_0000,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0xFFFF_FFFF_0000_0000) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   io_uring_enter flags u32-truncation (high-half ignored): OK"
+        );
     }
 
     // BPF / perf_event_open / keyring / userfaultfd / memfd / pidfd /

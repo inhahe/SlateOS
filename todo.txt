@@ -29281,3 +29281,94 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.13s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+362. Batch 332 — sys_io_uring_enter unsigned-int
+     truncation (high-half ignored).
+
+     Divergence: Linux's prototype is
+       SYSCALL_DEFINE6(io_uring_enter,
+                       unsigned int, fd,
+                       u32, to_submit,
+                       u32, min_complete,
+                       u32, flags,
+                       const sigset_t __user *, sig,
+                       size_t, sigsz)
+     where `flags` is `u32`, delivered in r10.  The
+     AMD64 syscall ABI does not zero-extend `u32` args
+     before issuing syscall, so only the low 32 bits
+     of `flags` are defined; the high half is caller-
+     supplied garbage that the kernel must mask off
+     before any flag-bit comparison.
+
+     Pre-batch sys_io_uring_enter read flags as a raw
+     `u64` (`let flags = args.arg3;`) and gated against
+     `VALID_FLAGS: u64 = 0x7F` with
+     `if flags & !VALID_FLAGS != 0 { ... EINVAL }`.  Any
+     bit set above bit 31 — i.e. any caller-supplied
+     high-half garbage — tripped the reject and
+     surfaced EINVAL where Linux would mask the high
+     half, accept the call, and fall through to the
+     fd lookup (EBADF in this kernel, since no
+     io_uring fd can exist).
+
+     Fix: cast `args.arg3` to `u32` at entry with
+     `#[allow(clippy::cast_possible_truncation)]` and
+     change `IORING_ENTER_GETEVENTS`,
+     `IORING_ENTER_EXT_ARG`, and `VALID_FLAGS` from
+     `u64` to `u32` so the downstream EXT_ARG /
+     GETEVENTS bit checks operate on the same masked
+     value.
+
+     Tests: four boot-time probes added after the
+     existing "io_uring_enter/register validation: OK"
+     marker, all with fd=0, to_submit=0, min_complete=0,
+     sig=NULL, sigsz=0 so the discriminator is solely
+     the post-mask flag value:
+       (a) flags=0x1_0000_0000 (high-only, low=0)
+           -> EBADF (no invalid bit set after mask).
+       (b) flags=0x1_0000_0080 (high|bit-7 reserved)
+           -> EINVAL preserved (low half still bad).
+       (c) flags=0x1_0000_0001 (high|GETEVENTS)
+           -> EBADF (low half is the valid GETEVENTS
+           bit, sig=NULL skips pointer block, fd=0
+           falls through).
+       (d) flags=0xFFFF_FFFF_0000_0000 (all-high,
+           low=0) -> EBADF.
+     Marker: "[syscall/linux]   io_uring_enter flags
+              u32-truncation (high-half ignored): OK".
+
+     Preserved: existing io_uring_enter validation
+     probes still pass:
+       - fd=0, flags=0, sig=NULL -> EBADF.
+       - flags=0x80 (unknown bit) -> EINVAL.
+       - sig=non-NULL, EXT_ARG clear, sigsz!=8
+         -> EINVAL.
+       - EXT_ARG without GETEVENTS -> EINVAL.
+       - sig=NULL, EXT_ARG|GETEVENTS -> EBADF.
+
+     Known limitations:
+     - `fd` (arg0) is C `unsigned int` (Linux uses
+       `unsigned int` for io_uring fds at this syscall
+       boundary); already cast to i32 at the
+       validate_linux_fd step.
+     - `to_submit` and `min_complete` (arg1, arg2) are
+       both C `u32` but are not consulted by the
+       current handler (no io_uring fds exist), so no
+       gate observes them — no truncation visible
+       today.  When io_uring lands, they will need
+       their own u32 mask before any range comparison.
+     - `sigsz` (arg5) is C `size_t` (u64) — no
+       truncation issue.
+     - sys_io_uring_setup also takes `entries: u32`
+       and gates against `IORING_MAX_ENTRIES: u64 =
+       32768`; this is a separate truncation candidate
+       deferred to a future batch (the existing
+       max-entries probe uses a 65536 sentinel that
+       fits in u32 so the bug isn't visible there
+       yet — high-bit-set entries would currently
+       surface EINVAL via the `>` comparison instead
+       of being masked).  Logged here for follow-up.
+
+     Build: cargo build -p kernel clean (40.84s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

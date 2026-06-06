@@ -18707,29 +18707,63 @@ fn sys_get_robust_list(args: &SyscallArgs) -> SyscallResult {
 
 /// `set_mempolicy_home_node(start, len, home_node, flags)`.
 fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
-    // home_node is an unsigned long; must be < MAX_NUMNODES (we have
-    // 1 node so anything > 0 is invalid).
-    if args.arg2 > 0 {
+    // Linux mm/mempolicy.c::SYSCALL_DEFINE4(set_mempolicy_home_node)
+    // gate order — port literally so feature-probing libraries
+    // (libnuma, glibc numa_set_localalloc) see the documented errno
+    // discriminator for each malformed input:
+    //
+    //   1. start & ~PAGE_MASK             -> EINVAL
+    //   2. flags != 0                     -> EINVAL
+    //   3. PAGE_ALIGN(len) overflow       -> EINVAL  (len_aligned wraps)
+    //   4. (start + len_aligned) overflow -> EINVAL  (end < start)
+    //   5. end == start (len rounds to 0) -> return 0   <-- success!
+    //   6. home_node out of range         -> EINVAL
+    //
+    // Pre-batch-240 we returned EINVAL for len==0 (which Linux turns
+    // into a successful no-op via the PAGE_ALIGN(0)==0 path) and we
+    // ran the home_node check ahead of every other gate.  Both are
+    // observable to userspace and would mis-train glibc's probe.
+    //
+    // 4 KiB ABI page alignment for start: Linux uses PAGE_SIZE (4096
+    // on x86_64).  Our internal FRAME_SIZE is 16 KiB but the user-
+    // visible Linux ABI is 4 KiB on x86_64 — same fix as sys_msync
+    // (batch 196).
+    const ABI_PAGE_SIZE: u64 = 4096;
+    // (1) start alignment.
+    if args.arg0 & (ABI_PAGE_SIZE - 1) != 0 {
         return linux_err(errno::EINVAL);
     }
-    // flags must be 0 (no flags defined).
+    // (2) flags must be 0 (no flags defined).
     if args.arg3 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // len must be > 0 (otherwise nothing to apply policy to).
-    if args.arg1 == 0 {
-        return linux_err(errno::EINVAL);
+    // (3) PAGE_ALIGN(len) — round up to the next 4 KiB boundary, with
+    //     overflow check.  Linux's PAGE_ALIGN macro silently wraps on
+    //     overflow; we detect and reject it (Linux's downstream "end <
+    //     start" check catches the wrap, so the userspace-visible
+    //     errno is the same).
+    let len_aligned = match args.arg1.checked_add(ABI_PAGE_SIZE - 1) {
+        Some(v) => v & !(ABI_PAGE_SIZE - 1),
+        None => return linux_err(errno::EINVAL),
+    };
+    // (4) end = start + len_aligned, with overflow check (Linux:
+    //     "if (end < start) return -EINVAL").
+    let end = match args.arg0.checked_add(len_aligned) {
+        Some(v) => v,
+        None => return linux_err(errno::EINVAL),
+    };
+    // (5) end == start: the requested range is empty (either len was
+    //     0, or len was strictly less than the page size and rounded
+    //     to 0 after... wait, PAGE_ALIGN(1) == 4096, so the only way
+    //     to land here is len == 0).  Linux short-circuits to success
+    //     without examining home_node — there's nothing to apply a
+    //     policy to.
+    if end == args.arg0 {
+        return SyscallResult::ok(0);
     }
-    // 4 KiB ABI page alignment for start: Linux's mm/mempolicy.c uses
-    // PAGE_SIZE (4096 on x86_64) for the start alignment check.  Our
-    // internal FRAME_SIZE is 16 KiB, but the user-visible Linux ABI is
-    // 4 KiB on x86_64 — and feature-probing libraries (libnuma, glibc
-    // numa_set_localalloc) hand in 4 KiB-aligned addresses they got
-    // from /proc/self/maps or sysconf(_SC_PAGESIZE).  Requiring 16 KiB
-    // alignment forces those probes to see EINVAL on every reasonable
-    // call.  Same issue/fix as sys_msync (batch 196).
-    const ABI_PAGE_SIZE: u64 = 4096;
-    if args.arg0 & (ABI_PAGE_SIZE - 1) != 0 {
+    // (6) home_node is an unsigned long; must be < MAX_NUMNODES (we
+    //     have 1 node so anything > 0 is invalid).
+    if args.arg2 > 0 {
         return linux_err(errno::EINVAL);
     }
     // With a single NUMA node (node 0), pinning the home node of
@@ -40878,12 +40912,82 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node flags!=0 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // set_mempolicy_home_node len=0 -> EINVAL.
+        // Batch 240: set_mempolicy_home_node len=0 -> 0 (success).
+        // Linux's PAGE_ALIGN(0)==0, so end == start, and the function
+        // short-circuits to success WITHOUT examining the home_node.
+        // Pre-batch-240 we returned EINVAL here — userspace probes
+        // (libnuma) special-case len==0 as a feature probe and expect
+        // 0 from a kernel that supports the syscall at all.
         let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node len=0 not EINVAL");
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy_home_node len=0 not 0 ({})",
+                dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value
+            );
             return Err(KernelError::InternalError);
         }
+        // Batch 240: len=0 + bad home_node -> still 0.  Proves the
+        // end==start short-circuit fires BEFORE the home_node check,
+        // matching Linux's literal gate order.  Pre-batch-240 this
+        // returned EINVAL via the home_node-first check.
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy_home_node len=0+bad_node not 0 ({})",
+                dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 240: PAGE_ALIGN(len) overflow -> EINVAL.  len near
+        // u64::MAX causes the round-up to overflow; Linux's wrap-on-
+        // overflow would be caught by the downstream end<start check,
+        // and we reject at the round-up site for the same errno.
+        let a = SyscallArgs {
+            arg0: 0x4000,
+            arg1: u64::MAX - 100,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy_home_node PAGE_ALIGN overflow not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 240: (start + len_aligned) overflow -> EINVAL.  start
+        // near the top of the address space + a positive aligned len
+        // wraps past u64::MAX.  Linux: "if (end < start) return
+        // -EINVAL".
+        let a = SyscallArgs {
+            arg0: 0xFFFF_FFFF_FFFF_F000,
+            arg1: 0x4000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy_home_node end-overflow not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 240: misaligned start + flags!=0 + bad home_node — all
+        // three gates would EINVAL.  We can't directly observe which
+        // fires, but this exercises the new ordering and confirms the
+        // result remains EINVAL.
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 99, arg3: 7, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy_home_node triple-bad not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   set_mempolicy_home_node start-align > flags > PAGE_ALIGN > end-overflow > end==start->0 > home_node gate order: OK"
+        );
         // set_mempolicy_home_node misaligned -> EINVAL.
         let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != -i64::from(errno::EINVAL) {

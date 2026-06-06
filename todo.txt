@@ -20906,4 +20906,133 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
 
+## 269. (batch 240) syscall/linux: set_mempolicy_home_node — Linux-aligned
+##      gate order, len==0 returns 0.
+##
+##      Pre-batch-240 divergences from Linux mm/mempolicy.c::
+##      SYSCALL_DEFINE4(set_mempolicy_home_node):
+##
+##      a) Gate order was inverted: home_node check ran first, then
+##         flags, then len>0, then start-alignment.  Linux's literal
+##         source order is:
+##           1. start & ~PAGE_MASK             -> EINVAL
+##           2. flags != 0                     -> EINVAL
+##           3. PAGE_ALIGN(len) overflow       -> EINVAL
+##           4. (start + len_aligned) overflow -> EINVAL
+##           5. end == start                   -> return 0
+##           6. home_node out of range         -> EINVAL
+##         A userspace probe that hands in bad start AND bad home_node
+##         AND bad flags currently surfaces the wrong errno
+##         discriminator (EINVAL via the home_node check, not via the
+##         alignment check that Linux would hit first).  Since all
+##         three return EINVAL the user-visible value is the same, but
+##         strace/perfetto trace replays and ABI conformance suites
+##         that key on "which gate fired" diverge.
+##
+##      b) len==0 returned EINVAL instead of 0.  Linux's PAGE_ALIGN(0)
+##         is 0, so end == start, and the function short-circuits to
+##         success WITHOUT examining home_node.  libnuma's
+##         numa_set_localalloc() feature probe passes len=0 to see
+##         whether the kernel supports the syscall at all — pre-batch
+##         we made that probe fail with EINVAL and the library logged
+##         "kernel lacks home-node API" on a single-NUMA-node box.
+##
+##      c) PAGE_ALIGN(len) and (start + len) overflow were never
+##         checked.  A pathological len near u64::MAX would silently
+##         pass through Rust's wrapping arithmetic and yield arbitrary
+##         results.  Linux explicitly wraps len_aligned via PAGE_ALIGN
+##         macro and checks "if (end < start) return -EINVAL".
+##
+##      Fix:
+##      - Reordered gates in sys_set_mempolicy_home_node to match
+##        Linux literally (1..6 above).
+##      - Implemented PAGE_ALIGN(len) via checked_add(4095) followed by
+##        mask, returning EINVAL on overflow (Linux's wrap would be
+##        caught downstream by end<start, same errno).
+##      - Implemented (start + len_aligned) via checked_add, returning
+##        EINVAL on overflow.
+##      - end == start now short-circuits to return 0 (success) before
+##        the home_node check, matching Linux.
+##      - Doc comment updated with the literal Linux gate order and
+##        rationale for each step.
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - (start=0x4000, len=0, node=0, flags=0)   -> 0       (the
+##                                                              flipped
+##                                                              test;
+##                                                              was
+##                                                              EINVAL
+##                                                              pre-
+##                                                              batch).
+##      - (start=0x4000, len=0, node=99, flags=0)  -> 0       (proves
+##                                                              the
+##                                                              end==
+##                                                              start
+##                                                              short-
+##                                                              circuit
+##                                                              fires
+##                                                              BEFORE
+##                                                              the
+##                                                              home_node
+##                                                              check —
+##                                                              same
+##                                                              input
+##                                                              returned
+##                                                              EINVAL
+##                                                              pre-
+##                                                              batch).
+##      - (start=0x4000, len=u64::MAX-100)         -> EINVAL  (PAGE_ALIGN
+##                                                              overflow
+##                                                              gate; this
+##                                                              input
+##                                                              would
+##                                                              have
+##                                                              silently
+##                                                              wrapped
+##                                                              pre-
+##                                                              batch).
+##      - (start=0xFFFF_FFFF_FFFF_F000, len=0x4000)-> EINVAL  (start +
+##                                                              len_aligned
+##                                                              overflow
+##                                                              gate).
+##      - (start=0x4001, len=0x4000, node=99,
+##         flags=7)                                -> EINVAL  (triple-bad
+##                                                              input —
+##                                                              confirms
+##                                                              reorder
+##                                                              didn't
+##                                                              admit
+##                                                              any
+##                                                              clearly-
+##                                                              bad
+##                                                              input).
+##        Marker: "set_mempolicy_home_node start-align > flags >
+##        PAGE_ALIGN > end-overflow > end==start->0 > home_node gate
+##        order: OK".
+##
+##      Existing tests preserved:
+##      - node!=0 (len>0) -> EINVAL.
+##      - flags!=0        -> EINVAL.
+##      - misaligned start (0x4001) -> EINVAL.
+##      - valid (0x4000, 0x4000)    -> 0.
+##      - idempotent repeat         -> 0.
+##      - second valid range        -> 0.
+##      - batch-201 4 KiB-aligned-but-not-16-KiB-aligned start -> 0.
+##      - batch-201 1-byte off from 4 KiB grid -> EINVAL.
+##
+##      Known limitations:
+##      - We have a single NUMA node, so home_node==0 is the only
+##        valid value.  Multi-node systems would need real per-node
+##        MAX_NUMNODES tracking; today we surface EINVAL for any
+##        home_node > 0 which is correct for single-node but not
+##        forward-compatible with multi-socket hardware.
+##      - The actual home-node policy is not applied to the range —
+##        with one NUMA node it's a no-op, but if we ever add more
+##        nodes the success short-circuit will be lying.  At that
+##        point this stub needs to be replaced with a real
+##        policy_node_set() against the process's mempolicy tree.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+
 

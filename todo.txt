@@ -35851,3 +35851,202 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (49.18s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).
      Stamp confirmed at build/serial-test.txt:461.
+
+429. Linux ABI fidelity — sys_setrlimit and sys_getrlimit wrappers
+     must run their `copy_from_user` / `copy_to_user` gates
+     UNCONDITIONALLY around `do_prlimit`.  Delegating naively to
+     `sys_prlimit64` inherits prlimit64's skip-when-NULL semantics,
+     which is correct for prlimit64 itself but wrong for the legacy
+     wrappers.
+
+     Linux source (`kernel/sys.c`):
+
+       SYSCALL_DEFINE2(setrlimit, unsigned int, resource,
+                       struct rlimit __user *, rlim)
+       {
+           struct rlimit new_rlim;
+           if (copy_from_user(&new_rlim, rlim, sizeof(*rlim)))
+               return -EFAULT;
+           return do_prlimit(current, resource, &new_rlim, NULL);
+       }
+
+       SYSCALL_DEFINE2(getrlimit, unsigned int, resource,
+                       struct rlimit __user *, rlim)
+       {
+           struct rlimit value;
+           int ret;
+           ret = do_prlimit(current, resource, NULL, &value);
+           if (!ret)
+               ret = copy_to_user(rlim, &value, sizeof(*rlim))
+                         ? -EFAULT : 0;
+           return ret;
+       }
+
+       static int do_prlimit(struct task_struct *tsk, unsigned int resource,
+                             struct rlimit *new_rlim, struct rlimit *old_rlim)
+       {
+           ...
+           if (resource >= RLIM_NLIMITS)
+               return -EINVAL;
+           ...
+       }
+
+     Gate orders:
+       * setrlimit: copy_from_user (EFAULT) → do_prlimit (EINVAL).
+       * getrlimit: do_prlimit (EINVAL) → copy_to_user (EFAULT).
+       * prlimit64 (kernel/sys.c::SYSCALL_DEFINE4): `if (new_rlim)
+         copy_from_user(...)` → find_task_by_vpid → do_prlimit →
+         `if (old_rlim) copy_to_user(...)`.  The NULL-skips are
+         specific to prlimit64.
+
+     Concrete divergence table (pre-batch behaviour vs Linux):
+
+       setrlimit(BOGUS_RES, NULL):
+           Linux:  EFAULT  (copy_from_user(NULL) is gate 1)
+           Pre:    EINVAL  (delegated to prlimit64, which skipped
+                            the read since new_ptr==NULL, then
+                            failed resource gate)
+       setrlimit(BOGUS_RES, BAD_PTR):
+           Linux:  EFAULT  (copy_from_user fault)
+           Pre:    EINVAL  (prlimit64 validates pointer AFTER
+                            resource — so bad resource short-
+                            circuits before pointer check)
+       setrlimit(VALID_RES, NULL):
+           Linux:  EFAULT  (copy_from_user(NULL))
+           Pre:    0       (prlimit64 skipped read, snapshotted
+                            old=DEFAULT in kernel-context, no
+                            install, returned 0)  ← silent
+                            data-loss for daemons dropping their
+                            own RLIMIT_CORE
+       getrlimit(VALID_RES, NULL):
+           Linux:  EFAULT  (copy_to_user(NULL))
+           Pre:    0       (prlimit64 skipped write, returned 0)
+                           ← caller reads uninitialised memory
+                            thinking it held the rlimit
+       getrlimit(BOGUS_RES, NULL):
+           Linux:  EINVAL  (do_prlimit resource gate)
+           Pre:    EINVAL  ✓  (matches — both sides resource-first)
+
+     Why it matters: glibc 2.x switched to prlimit64 long ago, but
+     the raw-syscall surface is reached by:
+       * musl on i386 chroots prior to 1.2 (uses legacy setrlimit
+         when prlimit64 isn't available on the kernel ABI surface).
+       * klibc, dietlibc, uClibc legacy code paths.
+       * gdb's target_resource probe (asks for RLIMIT_STACK before
+         attaching to a remote target).
+       * Privileged daemons (sshd, systemd-logind, nginx master)
+         that drop RLIMIT_CORE early — silent "success" with no
+         install applied means core dumps are still produced on
+         crash, leaking secrets, when the daemon believed it had
+         disabled them.
+       * setuid wrappers that lower RLIMIT_NOFILE before exec —
+         silent no-op leaves the child with the higher fd ceiling.
+     The third concrete divergence above (setrlimit(VALID, NULL) →
+     0) is the bug-class that hides as "the hardening daemon
+     thinks it ran, the kernel agrees nothing happened" — exactly
+     the type of silent-success failure mode CLAUDE.md flags as
+     "invisible bugs."
+
+     Architectural directive: pure ABI translator fidelity.  The
+     fix is wrapper-level only — `sys_prlimit64`'s own gate order
+     is unchanged because prlimit64's NULL semantics ARE Linux's
+     prlimit64 semantics (it really does skip copy_from/to_user
+     when the corresponding rlim is NULL).  The bug is solely in
+     the legacy wrappers, not in prlimit64.
+
+     Fix (kernel/src/syscall/linux.rs):
+
+       sys_setrlimit:
+         + EFAULT-on-NULL check for `rlim_ptr` (args.arg1)
+         + validate_user_read on the 16-byte rlim struct
+           BEFORE delegating to sys_prlimit64
+         (resource check still runs second, inside prlimit64,
+          to match Linux's setrlimit copy-first/resource-second
+          order)
+
+       sys_getrlimit:
+         + Resource < NUM_RLIMITS check BEFORE pointer validation
+           (matches Linux's do_prlimit-first ordering for
+           getrlimit; bogus resource is more specific than bad
+           pointer when both fail).  Resource is also narrowed
+           to u32 first (Linux declares `unsigned int resource`).
+         + EFAULT-on-NULL check for `rlim_ptr` (args.arg1)
+         + validate_user_write on the 16-byte rlim struct
+           BEFORE delegating to sys_prlimit64
+
+     Probes added (batch-429 block in the Linux self-test, placed
+     immediately after the batch-428 stamp ~line 34303):
+
+       (a) setrlimit(BOGUS_RES=99, NULL)    → EFAULT
+       (b) setrlimit(VALID_RES=STACK, NULL) → EFAULT
+       (c) setrlimit(VALID_RES=NOFILE, valid kernel ptr with
+                     [cur=200, max=400]) → 0  (happy path
+                     sanity: the new EFAULT gate doesn't break
+                     the success path)
+       (d) getrlimit(VALID_RES=STACK, NULL) → EFAULT
+       (e) getrlimit(BOGUS_RES=99, NULL)    → EINVAL  (resource
+                     check fires first)
+       (f) getrlimit(BOGUS_RES=u64::MAX, NULL) → EINVAL  (also
+                     exercises the int truncation: u64::MAX→u32::
+                     MAX→ still ≥ NUM_RLIMITS)
+       (g) getrlimit(VALID_RES=STACK, valid kernel ptr) → 0 and
+                     the read-back ([cur, max]) equals
+                     DEFAULT_RLIMITS[STACK]
+
+     Note on BAD_PTR (non-NULL but unmapped) probes: not included.
+     The boot self-test runs in kernel context, where
+     validate_user_read / validate_user_write short-circuit to
+     Ok(()) (see `mm/user.rs::is_kernel_context()`).  A non-NULL
+     bad pointer therefore advances past my pre-validation into
+     the real `copy_from_user` / `copy_to_user`, which page-faults
+     the kernel synchronously (the existing prlimit64 probes
+     intentionally avoid bad-ptr cases for the same reason — they
+     only test NULL).  Userspace coverage for non-NULL EFAULT is
+     provided by validate_user_*'s general unmapped-page handling,
+     which is exercised by the syscall integration tests when run
+     with a real PCB.
+
+     Stale pre-existing assertion block removed: the legacy
+     `getrlimit / setrlimit — wrappers around prlimit64` block
+     (was ~line 40839) encoded the pre-batch divergence:
+       "getrlimit(99, NULL) → EINVAL"  ✓ still correct
+       "setrlimit(99, NULL) → EINVAL"  ✗ now EFAULT
+       "getrlimit(STACK, NULL) → 0"    ✗ now EFAULT
+       "setrlimit(STACK, NULL) → 0"    ✗ now EFAULT
+     Replaced by a doc-only stub pointing to the batch-429 block.
+
+     New aggregate stamp (immediately after the batch-428 stamp,
+     ~line 34303):
+       "[syscall/linux]   setrlimit/getrlimit unconditional
+        copy_to/from_user EFAULT gate (Linux: legacy wrappers
+        always touch rlim, NULL → EFAULT regardless of resource
+        validity): OK"
+
+     Sibling syscalls audited and confirmed correct (Linux-style
+     ordering, no fix needed):
+
+       * sys_prlimit64 itself — body genuinely runs
+         `if (new_rlim) copy_from_user` and
+         `if (!ret && old_rlim) copy_to_user` (matches
+         Linux); pre-batch behaviour at this entry was already
+         correct.
+       * sys_getresuid / sys_getresgid — write_uid32_triple
+         skips NULL fields per POSIX, matches Linux.
+       * sys_getrusage — gate order: who-validation (EINVAL) →
+         pointer-validation (EFAULT); matches Linux's
+         kernel/sys.c::SYSCALL_DEFINE2(getrusage).
+       * sys_sysinfo — info==NULL → EFAULT before any other
+         work; matches Linux.
+       * sys_times — tms==NULL allowed (POSIX permits a null
+         tms when caller only wants the return value); matches
+         Linux.
+
+     Build: cargo build -p kernel clean (38.28s, then 36.46s
+     after probe revision, then 36.68s after stale-block removal).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 23s
+     on the second attempt; first attempt hit the known
+     intermittent RCU self-test hang documented in known-issues.md
+     entry 1 — retry passed cleanly).
+     Stamps confirmed at build/serial-test.txt:
+       line 461 — batch-428 PR_SET_DUMPABLE + PR_SET_KEEPCAPS
+       line 462 — batch-429 setrlimit/getrlimit EFAULT gate

@@ -10171,12 +10171,80 @@ fn sys_close_range(args: &SyscallArgs) -> SyscallResult {
 
 /// `getrlimit(resource, rlim)` — write the current limit for `resource`
 /// into `rlim`.
+///
+/// ## Gate-order divergence from naive prlimit64 delegation (batch 429)
+///
+/// Linux's `kernel/sys.c::SYSCALL_DEFINE2(getrlimit, ...)` reads:
+///
+/// ```text
+///   SYSCALL_DEFINE2(getrlimit, unsigned int, resource,
+///                   struct rlimit __user *, rlim)
+///   {
+///       struct rlimit value;
+///       int ret;
+///
+///       ret = do_prlimit(current, resource, NULL, &value);
+///       if (!ret)
+///           ret = copy_to_user(rlim, &value, sizeof(*rlim))
+///                     ? -EFAULT : 0;
+///       return ret;
+///   }
+/// ```
+///
+/// — and `do_prlimit` opens with `if (resource >= RLIM_NLIMITS) return
+/// -EINVAL;`.  Linux's gate order is **(1) resource → EINVAL, (2)
+/// copy_to_user → EFAULT**, both unconditional once each fires.  A
+/// `NULL` user pointer makes `copy_to_user` return the full byte
+/// count, which the wrapper turns into `-EFAULT`.
+///
+/// Pre-batch we delegated to `sys_prlimit64(pid=0, resource,
+/// new_rlim=NULL, old_rlim=rlim)`.  prlimit64's body (correctly for
+/// itself) reads `if (!ret && old_rlim) { copy_to_user(...) }` — so a
+/// `NULL` `old_rlim` is treated as "no readback requested" and the
+/// syscall returns 0.  That's **prlimit64's** semantics; legacy
+/// `getrlimit` always writes back because its wrapper does so
+/// unconditionally.  The observable divergence:
+///
+///   getrlimit(VALID_RES, NULL) → Linux: -EFAULT, pre-batch: 0
+///
+/// Returning 0 with no `rlim` write is a silent data loss: the caller
+/// assumes `rlim` was populated and reads uninitialised stack/heap.
+/// EFAULT correctly signals "you handed me a bad pointer."  Glibc
+/// switched to prlimit64 long ago, but raw-syscall callers, musl on
+/// 32-bit chroots, klibc, and gdb's target-resource probes still
+/// reach the legacy entry directly.
+///
+/// Pre-validating the rlim pointer here, after the resource check,
+/// restores Linux's gate order without disturbing prlimit64's own
+/// (legitimately different) handling of NULL `old_rlim`.
 fn sys_getrlimit(args: &SyscallArgs) -> SyscallResult {
+    // Gate 1 (do_prlimit's opening check): resource < RLIM_NLIMITS.
+    // Linux declares this arg as `unsigned int`, so the x86_64 syscall
+    // ABI narrows rdi to its low 32 bits before the body runs.  Mirror
+    // that narrowing here so a probe with `resource = 0x1_0000_0000`
+    // truncates to RLIMIT_CPU and reaches the EFAULT gate — same
+    // pattern as the prlimit64 int-truncation thread from batch 293.
+    #[allow(clippy::cast_possible_truncation)]
+    let resource = args.arg0 as u32;
+    if resource >= pcb::NUM_RLIMITS {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 2 (the unconditional copy_to_user in the syscall wrapper):
+    // a NULL or unwritable `rlim` returns EFAULT.  Pre-batch we
+    // inherited prlimit64's skip-when-NULL semantics and returned 0
+    // instead.
+    let rlim_ptr = args.arg1;
+    if rlim_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(rlim_ptr, 16) {
+        return linux_err(linux_errno_for(e));
+    }
     let prlimit_args = SyscallArgs {
         arg0: 0,            // pid: caller
-        arg1: args.arg0,    // resource
+        arg1: args.arg0,    // resource (re-narrowed inside prlimit64)
         arg2: 0,            // new_limit: NULL
-        arg3: args.arg1,    // old_limit: out
+        arg3: args.arg1,    // old_limit: out (pre-validated above)
         arg4: 0,
         arg5: 0,
     };
@@ -10184,11 +10252,69 @@ fn sys_getrlimit(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `setrlimit(resource, rlim)` — install a new limit for `resource`.
+///
+/// ## Gate-order divergence from naive prlimit64 delegation (batch 429)
+///
+/// Linux's `kernel/sys.c::SYSCALL_DEFINE2(setrlimit, ...)` reads:
+///
+/// ```text
+///   SYSCALL_DEFINE2(setrlimit, unsigned int, resource,
+///                   struct rlimit __user *, rlim)
+///   {
+///       struct rlimit new_rlim;
+///
+///       if (copy_from_user(&new_rlim, rlim, sizeof(*rlim)))
+///           return -EFAULT;
+///       return do_prlimit(current, resource, &new_rlim, NULL);
+///   }
+/// ```
+///
+/// — `copy_from_user` is the **first** gate, unconditional, and runs
+/// **before** `do_prlimit`'s `resource >= RLIM_NLIMITS` EINVAL check.
+/// A `NULL` or unreadable `rlim` returns EFAULT regardless of how
+/// invalid `resource` is.
+///
+/// Pre-batch we delegated to `sys_prlimit64(pid=0, resource,
+/// new_rlim=rlim, old_rlim=NULL)`.  prlimit64's body (correctly for
+/// itself) runs `if (new_rlim) { copy_from_user(...) }` — so a `NULL`
+/// `new_rlim` is treated as "no install requested" and the resource
+/// check fires next.  But that's **prlimit64's** semantics; legacy
+/// `setrlimit` always reads `rlim` because its wrapper does so
+/// unconditionally.
+///
+/// Three observable divergences pre-batch:
+///
+///   setrlimit(BOGUS_RES, NULL)     → Linux: -EFAULT, pre-batch: -EINVAL
+///   setrlimit(BOGUS_RES, BAD_PTR)  → Linux: -EFAULT, pre-batch: -EINVAL
+///   setrlimit(VALID_RES, NULL)     → Linux: -EFAULT, pre-batch: 0
+///
+/// The third is the most damaging: a privileged daemon dropping its
+/// own RLIMIT_CORE to disable core dumps would see "success" with no
+/// install actually performed.  EFAULT correctly signals "you handed
+/// me a bad pointer" and forces the caller to retry with a real
+/// `struct rlimit`.
+///
+/// Pre-validating the rlim pointer here (EFAULT on NULL/bad), then
+/// delegating to `sys_prlimit64`, restores Linux's gate order without
+/// disturbing prlimit64's own (legitimately different) handling of
+/// NULL `new_rlim`.
 fn sys_setrlimit(args: &SyscallArgs) -> SyscallResult {
+    // Gate 1 (the unconditional copy_from_user in the syscall wrapper):
+    // a NULL or unreadable `rlim` returns EFAULT before do_prlimit's
+    // resource check runs.  Pre-batch we inherited prlimit64's
+    // skip-when-NULL semantics and returned EINVAL (bad resource) or
+    // 0 (good resource) instead.
+    let rlim_ptr = args.arg1;
+    if rlim_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(rlim_ptr, 16) {
+        return linux_err(linux_errno_for(e));
+    }
     let prlimit_args = SyscallArgs {
         arg0: 0,            // pid: caller
         arg1: args.arg0,    // resource
-        arg2: args.arg1,    // new_limit: in
+        arg2: args.arg1,    // new_limit: in (pre-validated above)
         arg3: 0,            // old_limit: NULL
         arg4: 0,
         arg5: 0,
@@ -34175,6 +34301,140 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2 full-width compare (Linux: arg2 declared unsigned long, EINVAL when high bits set): OK"
         );
 
+        // Batch 429 — setrlimit / getrlimit wrapper gate order.
+        //
+        // Linux's legacy SYSCALL_DEFINE2(setrlimit) and
+        // SYSCALL_DEFINE2(getrlimit) wrappers in kernel/sys.c call
+        // copy_from_user / copy_to_user UNCONDITIONALLY around
+        // do_prlimit.  prlimit64's body skips the copy when the
+        // corresponding rlim ptr is NULL — semantically correct for
+        // prlimit64 itself, but wrong for the legacy wrappers.
+        //
+        // Pre-batch we delegated both legacy entries straight to
+        // sys_prlimit64 and inherited its skip-when-NULL semantics.
+        // Three observable divergences for setrlimit:
+        //   setrlimit(BOGUS_RES, NULL)     → Linux: EFAULT, ours: EINVAL
+        //   setrlimit(BOGUS_RES, BAD_PTR)  → Linux: EFAULT, ours: EINVAL
+        //   setrlimit(VALID_RES, NULL)     → Linux: EFAULT, ours: 0
+        // And one for getrlimit:
+        //   getrlimit(VALID_RES, NULL)     → Linux: EFAULT, ours: 0
+        // (getrlimit's BOGUS_RES path matches Linux already because
+        // do_prlimit's resource gate fires before the copy_to_user.)
+        //
+        // The probes below only exercise NULL discriminators because
+        // kernel-context validate_user_read/write bypasses (the
+        // self-test runs as a bare kernel task with no owning
+        // process), so a non-NULL bad pointer would advance to the
+        // real copy_from/to_user and synchronously page-fault the
+        // kernel.  The userspace path through validate_user_*
+        // catches the BAD_PTR case the same way it catches NULL —
+        // covered by user-context smoke tests in the syscall
+        // integration suite.
+        {
+            // setrlimit divergence probes.
+            // (a) BOGUS_RES + NULL → EFAULT (was EINVAL pre-batch).
+            let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setrlimit(bogus, NULL) not EFAULT ({})",
+                    dispatch_linux(nr::SETRLIMIT, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (b) VALID_RES + NULL → EFAULT (was 0 pre-batch — silent
+            //     data-loss for daemons dropping RLIMIT_CORE).
+            let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setrlimit(STACK, NULL) not EFAULT ({})",
+                    dispatch_linux(nr::SETRLIMIT, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (c) VALID_RES + VALID_PTR with cur<=max → must still
+            //     succeed (sanity: the new EFAULT gate doesn't break
+            //     the happy path).
+            let good_limit: [u64; 2] = [200, 400];
+            let a = SyscallArgs {
+                arg0: 7,                            // RLIMIT_NOFILE
+                arg1: good_limit.as_ptr() as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SETRLIMIT, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setrlimit(NOFILE, valid) happy path not 0 ({})",
+                    dispatch_linux(nr::SETRLIMIT, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // getrlimit divergence probes.
+            // (d) VALID_RES + NULL → EFAULT (was 0 pre-batch — silent
+            //     data-loss; caller reads uninit memory thinking it
+            //     held the rlimit).
+            let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrlimit(STACK, NULL) not EFAULT ({})",
+                    dispatch_linux(nr::GETRLIMIT, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (e) BOGUS_RES + NULL → EINVAL (matches Linux's
+            //     do_prlimit-first ordering; resource is more
+            //     specific than pointer when both fail).
+            let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrlimit(bogus, NULL) not EINVAL ({})",
+                    dispatch_linux(nr::GETRLIMIT, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (f) BOGUS_RES = u64::MAX truncates to u32::MAX → still
+            //     >= NUM_RLIMITS → EINVAL.  Also exercises the int
+            //     truncation thread.
+            let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrlimit(u64::MAX, NULL) not EINVAL ({})",
+                    dispatch_linux(nr::GETRLIMIT, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (g) VALID_RES + VALID_PTR → success and the read-back
+            //     matches DEFAULT_RLIMITS[STACK] in kernel context.
+            let mut readback = [0u64; 2];
+            let a = SyscallArgs {
+                arg0: 3,                            // RLIMIT_STACK
+                arg1: readback.as_mut_ptr() as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::GETRLIMIT, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrlimit(STACK, valid) happy path not 0 ({})",
+                    dispatch_linux(nr::GETRLIMIT, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            let (def_cur, def_max) = pcb::DEFAULT_RLIMITS[3];
+            if readback[0] != def_cur || readback[1] != def_max {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getrlimit(STACK) read = ({}, {}) (expected default ({}, {}))",
+                    readback[0], readback[1], def_cur, def_max
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   setrlimit/getrlimit unconditional copy_to/from_user EFAULT gate (Linux: legacy wrappers always touch rlim, NULL → EFAULT regardless of resource validity): OK"
+        );
+
         // Batch 68: PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS sticky
         // round-trip with strict argument validation matching Linux.
         //
@@ -40577,43 +40837,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     }
 
     // getrlimit / setrlimit — wrappers around prlimit64.
-    //   - unknown resource -> EINVAL via the prlimit64 path.
-    //   - NULL rlim with valid resource -> 0 (matches prlimit64 NULL/NULL).
-    {
-        // getrlimit(99, NULL) -> EINVAL (resource > 15).
-        let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETRLIMIT, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: getrlimit(bad) not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // setrlimit(99, NULL) -> EINVAL.
-        if dispatch_linux(nr::SETRLIMIT, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: setrlimit(bad) not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // getrlimit(RLIMIT_STACK=3, NULL) -> 0 (NULL pointer accepted).
-        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETRLIMIT, &a).value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: getrlimit(STACK,NULL) not 0"
-            );
-            return Err(KernelError::InternalError);
-        }
-        if dispatch_linux(nr::SETRLIMIT, &a).value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: setrlimit(STACK,NULL) not 0"
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    //
+    // Batch 429: the pre-existing assertions here ("NULL rlim with
+    // valid resource returns 0", "setrlimit(bogus, NULL) returns
+    // EINVAL") encoded the pre-batch divergence from Linux.  The new
+    // behaviour is asserted comprehensively in the batch-429 block
+    // co-located with the PRCTL / prlimit64 self-tests above (the
+    // EFAULT-on-NULL gate; the do_prlimit-then-EFAULT order for
+    // getrlimit; the unconditional EFAULT-first order for setrlimit).
+    // No probes here.
 
     // getcpu — both pointers NULL is allowed and returns 0.
     {

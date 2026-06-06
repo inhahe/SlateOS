@@ -5827,15 +5827,53 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         // else is EINVAL.  We persist the value per-PCB so a
         // subsequent PR_GET_DUMPABLE round-trips correctly; kernel
         // context (no PCB) silently succeeds without storing.
+        //
+        // Linux signature (kernel/sys.c::__do_sys_prctl):
+        //   SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2,
+        //                          unsigned long, arg3, unsigned long, arg4,
+        //                          unsigned long, arg5)
+        //   case PR_SET_DUMPABLE:
+        //       if (arg2 != SUID_DUMP_DISABLE && arg2 != SUID_DUMP_USER) {
+        //           error = -EINVAL;
+        //           break;
+        //       }
+        //       set_dumpable(me->mm, arg2);
+        //
+        // `arg2` is declared `unsigned long` (64-bit on x86_64), so
+        // the syscall ABI delivers the full 64-bit register width to
+        // the comparison.  Pre-batch (428) we truncated through
+        // `args.arg1 as u32` BEFORE the bound test, which accepted
+        // arg2 = 0x1_0000_0000 (low32 = 0, hits the `<= 1` arm and
+        // stores SUID_DUMP_DISABLE) and arg2 = 0x1_0000_0001 (low32 = 1,
+        // stores SUID_DUMP_USER) where Linux returns -EINVAL because
+        // `0x100000001 != 0 && 0x100000001 != 1` evaluates true.
+        //
+        // Concrete divergences fixed:
+        //   * prctl(PR_SET_DUMPABLE, 0x1_0000_0000)
+        //       Linux: EINVAL.  Pre-batch: 0 (silently stored 0).
+        //   * prctl(PR_SET_DUMPABLE, 0x1_0000_0001)
+        //       Linux: EINVAL.  Pre-batch: 0 (silently stored 1).
+        //   * prctl(PR_SET_DUMPABLE, 0xDEAD_BEEF_DEAD_BEEF)
+        //       Linux: EINVAL.  Pre-batch: EINVAL (low32 > 1, lucky match).
+        //
+        // Why this matters: libcap-ng's `capng_change_id` and systemd's
+        // setuid hardening hooks pass `unsigned long` flag values
+        // assembled from `(prio << 32) | flag` masks; a low-bit-1 in the
+        // high half should be observable as EINVAL so the caller knows
+        // the kernel saw the full word.  Pre-batch we silently dropped
+        // the high half and accepted ambiguous input — the kind of
+        // bug-class that hides cred-token races for hours of debugging.
+        // Match Linux: compare the full 64-bit `args.arg1` to {0, 1}
+        // before truncating to u32 for the storage helper.
         4 => {
-            let new_dumpable = args.arg1 as u32;
-            // 2 would mean SUID_DUMP_ROOT; user-callable set of 2
-            // is EINVAL on Linux (see prctl(2): "the value 2 cannot
-            // be set via prctl(); only the kernel sets this value
-            // automatically after execve(2) of a set-user-ID … file").
-            if new_dumpable > 1 {
+            // Linux: arg2 (full 64-bit) must equal SUID_DUMP_DISABLE (0)
+            // or SUID_DUMP_USER (1); anything else is EINVAL.  Compare
+            // the full u64 BEFORE narrowing for storage.
+            if args.arg1 > 1 {
                 return linux_err(errno::EINVAL);
             }
+            #[allow(clippy::cast_possible_truncation)]
+            let new_dumpable = args.arg1 as u32;
             if let Some(pid) = caller_pid() {
                 let _ = pcb::set_dumpable(pid, new_dumpable);
             }
@@ -5857,11 +5895,36 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         // do not model POSIX capabilities yet so the flag has no
         // effect on actual privilege transitions.  Kernel context
         // (no PCB) silently succeeds without storing.
+        //
+        // Linux gate (security/commoncap.c::cap_task_prctl,
+        // PR_SET_KEEPCAPS arm):
+        //   case PR_SET_KEEPCAPS:
+        //       if (arg2 > 1)             /* Note, we rely on arg2 being
+        //                                    unsigned here */
+        //           return -EINVAL;
+        //
+        // `arg2` is `unsigned long` (64-bit) and the test is the full-
+        // width `arg2 > 1`.  Pre-batch (428) we narrowed
+        // `args.arg1 as u32` BEFORE the bound test, which silently
+        // accepted any arg2 whose low 32 bits were 0 or 1 regardless of
+        // the high half — same shape as the PR_SET_DUMPABLE bug above
+        // and rooted in the same misread of the Linux declared type.
+        //
+        // Concrete divergences fixed (mirror PR_SET_DUMPABLE table):
+        //   * prctl(PR_SET_KEEPCAPS, 0x1_0000_0000)
+        //       Linux: EINVAL.  Pre-batch: 0 (silently stored 0).
+        //   * prctl(PR_SET_KEEPCAPS, 0x1_0000_0001)
+        //       Linux: EINVAL.  Pre-batch: 0 (silently stored 1).
+        //
+        // Match Linux: compare the full 64-bit `args.arg1` to the
+        // u64 bound `> 1` BEFORE narrowing to u32 for the storage helper.
         8 => {
-            let new_keepcaps = args.arg1 as u32;
-            if new_keepcaps > 1 {
+            // Linux: arg2 > 1 (full 64-bit comparison) is EINVAL.
+            if args.arg1 > 1 {
                 return linux_err(errno::EINVAL);
             }
+            #[allow(clippy::cast_possible_truncation)]
+            let new_keepcaps = args.arg1 as u32;
             if let Some(pid) = caller_pid() {
                 let _ = pcb::set_keepcaps(pid, new_keepcaps);
             }
@@ -33951,8 +34014,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //      cleanly across the full 0..=2 range (the helper has no
         //      validation; the syscall surface gates the user range).
         {
-            // Out-of-range -> EINVAL.
-            for bad in [2u64, 3, 1_000, u64::MAX] {
+            // Out-of-range -> EINVAL.  The 0x1_0000_0000 and
+            // 0x1_0000_0001 values are the batch-428 truncation
+            // discriminators: low 32 bits land in {0, 1}, so a
+            // pre-batch `args.arg1 as u32` narrow would have accepted
+            // them.  Linux compares the full 64-bit arg2 to {0, 1} and
+            // returns EINVAL — match that.
+            for bad in [
+                2u64, 3, 1_000, u64::MAX,
+                0x1_0000_0000_u64, 0x1_0000_0001_u64,
+            ] {
                 let a = SyscallArgs { arg0: 4, arg1: bad, arg2: 0,
                     arg3: 0, arg4: 0, arg5: 0 };
                 if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
@@ -34027,8 +34098,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //   4. pcb::{get,set}_keepcaps round-trips through
         //      0 -> 1 -> destroy -> None.
         {
-            // Out-of-range -> EINVAL.
-            for bad in [2u64, 3, 100, u64::MAX] {
+            // Out-of-range -> EINVAL.  Same batch-428 truncation
+            // discriminators as PR_SET_DUMPABLE: 0x1_0000_0000 and
+            // 0x1_0000_0001 catch the `args.arg1 as u32` narrow that
+            // pre-batch silently accepted.
+            for bad in [
+                2u64, 3, 100, u64::MAX,
+                0x1_0000_0000_u64, 0x1_0000_0001_u64,
+            ] {
                 let a = SyscallArgs { arg0: 8, arg1: bad, arg2: 0,
                     arg3: 0, arg4: 0, arg5: 0 };
                 if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
@@ -34085,6 +34162,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::get_keepcaps(test_pid), None);
             assert_eq!(pcb::set_keepcaps(test_pid, 1), None);
         }
+
+        // Batch 428 — PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2 narrowing
+        // bug.  Linux's `arg2` is declared `unsigned long` and tested
+        // at full 64-bit width.  Pre-batch we did `args.arg1 as u32`
+        // BEFORE the bound check, so high-half-set arg2 values whose
+        // low 32 bits land in {0, 1} were silently accepted.  The
+        // probes above now include 0x1_0000_0000 and 0x1_0000_0001 in
+        // the EINVAL discriminator list for both options — they fire
+        // only after the fix narrows post-bound-check.
+        serial_println!(
+            "[syscall/linux]   PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2 full-width compare (Linux: arg2 declared unsigned long, EINVAL when high bits set): OK"
+        );
 
         // Batch 68: PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS sticky
         // round-trip with strict argument validation matching Linux.

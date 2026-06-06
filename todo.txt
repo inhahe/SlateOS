@@ -35728,3 +35728,126 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.72s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
      Stamp confirmed in build/serial-test.txt.
+
+428. [2026-06-06] sys_prctl PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2
+     narrowing bug fixed — Linux ABI compares the full 64-bit
+     `unsigned long arg2` to the {0, 1} bound, but pre-batch we
+     truncated `args.arg1 as u32` BEFORE the bound check, silently
+     accepting high-half-set values whose low 32 bits land in {0, 1}.
+
+     Where: kernel/src/syscall/linux.rs
+       * sys_prctl PR_SET_DUMPABLE arm (case 4) ~line 5830
+       * sys_prctl PR_SET_KEEPCAPS arm (case 8) ~line 5895
+
+     Divergence: Linux declares `prctl`'s arg2 as `unsigned long`
+     (64-bit on x86_64) and the relevant arms test it at full width:
+
+       kernel/sys.c::__do_sys_prctl PR_SET_DUMPABLE:
+         if (arg2 != SUID_DUMP_DISABLE && arg2 != SUID_DUMP_USER) {
+             error = -EINVAL;
+             break;
+         }
+
+       security/commoncap.c::cap_task_prctl PR_SET_KEEPCAPS:
+         case PR_SET_KEEPCAPS:
+             if (arg2 > 1) /* Note, we rely on arg2 being unsigned */
+                 return -EINVAL;
+
+     Pre-batch the kernel function body was:
+       let new_dumpable = args.arg1 as u32;   // <- narrowed first
+       if new_dumpable > 1 { return EINVAL; }
+
+     (and identically for KEEPCAPS).  This silently dropped the
+     high 32 bits before comparing, so `arg2 = 0x1_0000_0000`
+     (low32 == 0) and `arg2 = 0x1_0000_0001` (low32 == 1) passed
+     the bound and were stored.
+
+     Concrete observable discriminators:
+       * prctl(PR_SET_DUMPABLE, 0x1_0000_0000)
+           Linux:  EINVAL (full 64-bit != 0 && != 1)
+           Pre:    0      (silently stored SUID_DUMP_DISABLE)
+       * prctl(PR_SET_DUMPABLE, 0x1_0000_0001)
+           Linux:  EINVAL
+           Pre:    0      (silently stored SUID_DUMP_USER)
+       * prctl(PR_SET_KEEPCAPS, 0x1_0000_0000)
+           Linux:  EINVAL
+           Pre:    0      (silently stored KEEPCAPS_CLEAR)
+       * prctl(PR_SET_KEEPCAPS, 0x1_0000_0001)
+           Linux:  EINVAL
+           Pre:    0      (silently stored KEEPCAPS_KEEP)
+
+     Why it matters: libcap-ng's `capng_change_id` and systemd's
+     setuid hardening hooks pass `unsigned long` flag values
+     assembled from `(prio << 32) | flag` style masks.  A
+     high-bit-set arg2 should be observable as EINVAL so the
+     caller knows the kernel saw the full word — pre-batch the
+     kernel silently dropped the high half and accepted ambiguous
+     input.  This is the bug-class that hides cred-token races
+     for hours of debugging: a daemon constructs a 64-bit "shape"
+     value, the kernel returns 0, but the dumpable/keepcaps state
+     installed bears no relation to the high half the daemon
+     thought it sent.  Matches Linux: full-width compare before
+     narrowing.
+
+     Sibling arms inspected and confirmed correct (full-u64
+     bound BEFORE truncation, or value never narrows before
+     comparison):
+       * case 1   (PR_SET_PDEATHSIG) — `sig = args.arg1` u64,
+                                       `if sig > 64 -> EINVAL`
+       * case 23  (PR_CAPBSET_READ)  — `args.arg1 > LAST_CAP` u64
+                                       gate BEFORE `as u32`
+       * case 24  (PR_CAPBSET_DROP)  — same shape as 23
+       * case 26  (PR_SET_TSC)       — `args.arg1 != 1 && != 2` u64
+                                       gate BEFORE `as u32`
+       * case 28  (PR_SET_SECUREBITS)— explicit
+                                       `args.arg1 > u32::MAX` guard
+                                       BEFORE truncation
+       * case 36  (PR_SET_CHILD_SUBREAPER) — never narrows
+       * case 38  (PR_SET_NO_NEW_PRIVS)    — direct u64 ==/!= checks
+       * case 41  (PR_SET_THP_DISABLE)     — never narrows
+       * case 57  (PR_SET_IO_FLUSHER) — `arg1 != 0 && != 1` u64
+                                       BEFORE `as u32`
+       * case 65  (PR_SET_MDWE)       — explicit
+                                       `raw_bits > u32::MAX` guard
+                                       BEFORE truncation
+       * case 67  (PR_SET_MEMORY_MERGE) — same pattern as 57
+     Only cases 4 and 8 had the narrow-then-compare inversion.
+
+     Architectural directive: pure ABI translator fidelity.  The
+     storage value `set_dumpable(pid, u32)` and
+     `set_keepcaps(pid, u32)` continue to take u32 because the
+     dumpable/keepcaps state vocabulary is {0, 1, 2} on the
+     dumpable side and {0, 1} on the keepcaps side — narrowing
+     is now safe *after* the bound check has confirmed the value
+     fits.  No PCB schema or helper signature change.
+
+     Probes added (extended the existing PR_SET_DUMPABLE and
+     PR_SET_KEEPCAPS EINVAL probe arrays):
+
+       PR_SET_DUMPABLE EINVAL discriminators (case-4 test block,
+       ~line 33955) — added 0x1_0000_0000 and 0x1_0000_0001 to the
+       existing [2, 3, 1_000, u64::MAX] array.  Pre-fix these two
+       new values would have returned 0 (silently stored a value);
+       post-fix they correctly return EINVAL.
+
+       PR_SET_KEEPCAPS EINVAL discriminators (case-8 test block,
+       ~line 34105) — added 0x1_0000_0000 and 0x1_0000_0001 to the
+       existing [2, 3, 100, u64::MAX] array.  Same fix-discriminator
+       property as above.
+
+     New aggregate stamp (between the keepcaps block close and
+     batch-68 PR_SET_NO_NEW_PRIVS block, ~line 34172):
+       "[syscall/linux]   PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2
+        full-width compare (Linux: arg2 declared unsigned long,
+        EINVAL when high bits set): OK"
+
+     Boot-test coverage: kernel-context probes run with caller_pid()
+     == None, so the per-PCB storage skip path is taken regardless
+     of arg2 value — but the EINVAL gate at the top of each arm
+     fires unconditionally and is the exact ABI surface this batch
+     repairs.  The post-fix run shows all 6 EINVAL values rejected
+     for each option (2/3/1000/u64::MAX/0x1_0000_0000/0x1_0000_0001).
+
+     Build: cargo build -p kernel clean (49.18s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).
+     Stamp confirmed at build/serial-test.txt:461.

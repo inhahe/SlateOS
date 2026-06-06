@@ -17901,19 +17901,38 @@ fn sys_open_by_handle_at(args: &SyscallArgs) -> SyscallResult {
 
 /// `fsopen(fsname*, flags)` — create a filesystem context.  Flags are
 /// FSOPEN_CLOEXEC (1) only.
-fn sys_fsopen(args: &SyscallArgs) -> SyscallResult {
-    const FSOPEN_CLOEXEC: u32 = 0x1;
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg1 as u32;
-    if flags & !FSOPEN_CLOEXEC != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = validate_user_str(args.arg0) {
-        return linux_err(linux_errno_for(e));
-    }
+///
+/// Linux gate order (fs/fsopen.c::SYSCALL_DEFINE2(fsopen)):
+///
+///   SYSCALL_DEFINE2(fsopen, const char __user *, _fs_name,
+///                   unsigned int, flags)
+///   {
+///       ...
+///       if (!may_mount())
+///           return -EPERM;                         // (1) CAP_SYS_ADMIN
+///       if (flags & ~FSOPEN_CLOEXEC)
+///           return -EINVAL;                        // (2) flag mask
+///       fs_name = strndup_user(_fs_name, PAGE_SIZE);
+///       if (IS_ERR(fs_name)) return PTR_ERR(...);  // (3) EFAULT/etc
+///       ...
+///   }
+///
+/// Batch 392: pre-batch we ran (a) flag mask → EINVAL, (b) NULL ptr →
+/// EFAULT, (c) validate_user_str → EFAULT, (d) terminal EPERM.  That
+/// inverted Linux's gate-1 CAP_SYS_ADMIN check, so an unprivileged
+/// caller (every Linux-ABI caller here, since we never grant
+/// CAP_SYS_ADMIN) probing with `(fsname=NULL, flags=0xff)` saw EINVAL
+/// where Linux returns EPERM.  Sister fix to the swapoff (batch 343)
+/// and acct (batch 348) CAP-first reorderings.
+///
+/// Architectural: pure ABI translation — no mount infrastructure
+/// exists either way.  The reorder makes the errno faithful to Linux's
+/// unprivileged-caller observable, which is what every Linux-ABI
+/// caller in this kernel is.
+fn sys_fsopen(_args: &SyscallArgs) -> SyscallResult {
+    // Gate 1 (Linux's literal first check): may_mount() → EPERM.
+    // We never grant CAP_SYS_ADMIN to Linux-ABI callers, so the
+    // gate-1 EPERM is terminal — no pointer or flag touch.
     linux_err(errno::EPERM)
 }
 
@@ -49490,24 +49509,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   open_by_handle_at handle_type<0 EINVAL + terminal EOPNOTSUPP (was EPERM): OK");
 
-        // fsopen with bad flags -> EINVAL.
+        // Batch 392: Linux fs/fsopen.c::SYSCALL_DEFINE2(fsopen) runs
+        //   may_mount() → EPERM as its literal first gate, BEFORE the
+        //   flag mask or fsname pointer touch.  Pre-batch we ran flag
+        //   mask + NULL check FIRST, so unprivileged callers (every
+        //   caller in this kernel) saw EINVAL/EFAULT where Linux
+        //   returns EPERM.  Sister of batch-343 swapoff fix.
+        //
+        // fsopen with bad flags -> EPERM (CAP gate fires first).
         let a = SyscallArgs { arg0: path_ptr, arg1: 0xff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fsopen bad flags not EINVAL");
+        if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsopen bad flags not EPERM (CAP gate)");
             return Err(KernelError::InternalError);
         }
-        // fsopen NULL fsname -> EFAULT.
+        // fsopen NULL fsname -> EPERM (CAP gate fires before strndup_user).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: fsopen NULL not EFAULT");
+        if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsopen NULL not EPERM (CAP gate)");
             return Err(KernelError::InternalError);
         }
-        // fsopen valid -> EPERM.
+        // fsopen bad ptr -> EPERM (CAP gate fires before validate_user_str).
+        let a = SyscallArgs { arg0: 0xDEAD_BEEF, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsopen bad ptr not EPERM (CAP gate)");
+            return Err(KernelError::InternalError);
+        }
+        // fsopen valid -> EPERM (terminal — no mount infrastructure either way).
         let a = SyscallArgs { arg0: path_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FSOPEN, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: fsopen valid not EPERM");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   fsopen may_mount EPERM-first gate (Linux gate 1 fires before flag/ptr): OK");
 
         // fsconfig bad cmd -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

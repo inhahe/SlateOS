@@ -35327,3 +35327,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (40.06s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).
+
+422. Batch 392 — sys_fsopen may_mount EPERM-first gate ordering
+     (CAP_SYS_ADMIN check precedes flag mask + fsname pointer touch).
+
+     File         : kernel/src/syscall/linux.rs
+     Linux source : fs/fsopen.c::SYSCALL_DEFINE2(fsopen)
+       SYSCALL_DEFINE2(fsopen, const char __user *, _fs_name,
+                       unsigned int, flags) {
+           struct file_system_type *fs_type;
+           struct fs_context *fc;
+           const char *fs_name;
+           int ret;
+
+           if (!may_mount())
+               return -EPERM;                          (gate 1)
+           if (flags & ~FSOPEN_CLOEXEC)
+               return -EINVAL;                         (gate 2)
+           fs_name = strndup_user(_fs_name, PAGE_SIZE);
+           if (IS_ERR(fs_name))
+               return PTR_ERR(fs_name);                (gate 3, EFAULT)
+           ...
+       }
+
+     Pre-batch    : (a) flag mask → EINVAL, (b) NULL ptr → EFAULT,
+                    (c) validate_user_str → EFAULT, (d) terminal EPERM.
+                    Wrong order — gate-1 EPERM should fire first.
+
+                      fsopen(NULL, 0xff)
+                        Linux unpriv: EPERM (may_mount fails)
+                        Us pre-batch: EINVAL (flag mask)
+
+                      fsopen(NULL, 0)
+                        Linux unpriv: EPERM (may_mount fails)
+                        Us pre-batch: EFAULT (NULL ptr)
+
+                      fsopen(0xDEAD_BEEF, 0)
+                        Linux unpriv: EPERM (may_mount fails)
+                        Us pre-batch: EFAULT (validate_user_str)
+
+                      fsopen("ext4", 0)
+                        Linux unpriv: EPERM (may_mount fails)
+                        Us pre-batch: EPERM (terminal)         ✓ coincide
+
+     Post-batch   : terminal EPERM with no other gates.  We never
+                    grant CAP_SYS_ADMIN to any Linux-ABI caller, so
+                    gate-1 EPERM is the unconditional unprivileged-
+                    Linux answer.  No mount infrastructure to dispatch
+                    to either way.
+
+     Why it matters: systemd-mount (the new-mount-API consumer), util-
+     linux's mount(8), and libmount-based tools probe filesystem
+     support by attempting fsopen("$fsname", 0) and reading the errno
+     to discriminate "kernel supports the new mount API, just not as
+     me" (EPERM — drop privileges decision) from "kernel doesn't
+     support it" (ENOSYS — fall back to old mount(2)).  Pre-batch our
+     EFAULT on NULL or EINVAL on bad flags broke the discriminator:
+     the tool would interpret EFAULT as "you passed a bad pointer,
+     fix your code" (internal bug, terminal) instead of the EPERM
+     answer that suggests "this is a permission issue, try sudo".
+     systemd-mount in particular caches this errno across the boot
+     sequence; pre-batch each `systemd-mount --options=...` invocation
+     could fail with the wrong shape and the user would see a "bad
+     option" diagnostic rather than "needs root."
+
+     This is the sister fix to batches 343 (swapoff CAP-first) and
+     348 (acct CAP-first).  swapon is the deliberate exception —
+     Linux's swapon checks flag mask BEFORE CAP per a documented
+     ABI quirk (see todo 173), which we mirror.
+
+     Architectural: pure ABI translation.  No mount infrastructure
+     exists either way; the terminal answer is unchanged.  We only
+     reorder the gates so the errno discriminator matches Linux's
+     unprivileged-caller observable.
+
+     Probes updated (4) + new aggregate stamp:
+       - fsopen(NULL, 0xff)          : EINVAL → EPERM
+       - fsopen(NULL, 0)             : EFAULT → EPERM
+       - fsopen(0xDEAD_BEEF, 0)      : EFAULT → EPERM  (new)
+       - fsopen("path", 0)           : EPERM → EPERM   ✓ unchanged
+     New aggregate stamp:
+       "[syscall/linux]   fsopen may_mount EPERM-first gate (Linux
+        gate 1 fires before flag/ptr): OK"
+
+     Build: cargo build -p kernel clean (39.99s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).

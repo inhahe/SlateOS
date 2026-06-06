@@ -37246,3 +37246,147 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        sockfd_lookup_light fires before the per-msg
        copy_msghdr_from_user loop; recvmmsg's timeout gate
        stays first): OK"
+
+439. [2026-06-06] syscall/linux: sys_settimeofday tv_sec gate
+     removed and tv_usec gate switched to strict `>` to match
+     Linux 6.x (translator-only)
+
+     Pivot from the socket fd-vs-pointer sweep (batches 433–438)
+     to the time-of-day surface.  sys_settimeofday's value gate
+     was modelled on the old `timeval_valid()` helper that
+     Linux retired with the timespec64 conversion; the current
+     6.x SYSCALL_DEFINE2(settimeofday) gate is observably
+     different at two boundaries that real callers
+     (ntp/chrony/hwclock CAP_SYS_TIME probes, time-sync test
+     suites) hit.
+
+     Linux source (kernel/time/time.c, kernel 6.x):
+
+         SYSCALL_DEFINE2(settimeofday,
+                         struct __kernel_old_timeval __user *, tv,
+                         struct timezone __user *, tz)
+         {
+             struct timespec64 new_ts;
+             struct timezone new_tz;
+
+             if (tv) {
+                 if (get_user(new_ts.tv_sec, &tv->tv_sec) ||
+                     get_user(new_ts.tv_nsec, &tv->tv_usec))
+                     return -EFAULT;
+
+                 if (new_ts.tv_nsec > USEC_PER_SEC ||
+                     new_ts.tv_nsec < 0)
+                     return -EINVAL;
+
+                 new_ts.tv_nsec *= NSEC_PER_USEC;
+             }
+             if (tz) {
+                 if (copy_from_user(&new_tz, tz, sizeof(*tz)))
+                     return -EFAULT;
+             }
+
+             return do_sys_settimeofday64(tv ? &new_ts : NULL,
+                                          tz ? &new_tz : NULL);
+         }
+
+     do_sys_settimeofday64 → security_settime64 → gate on
+     CAP_SYS_TIME → EPERM for unprivileged callers.
+
+     Two divergences from pre-batch:
+
+       (A) tv_sec sign — Linux 6.x does NOT range-check tv_sec.
+           Even a negative pre-epoch value is forwarded to
+           do_sys_settimeofday64 (where the CAP_SYS_TIME gate
+           returns EPERM for unprivileged callers).  Pre-batch
+           we modelled the retired `timeval_valid()` helper
+           which rejected tv_sec < 0 with EINVAL.
+
+       (B) tv_usec upper bound — Linux 6.x uses strict
+           `tv_nsec > USEC_PER_SEC || tv_nsec < 0`, so exactly
+           `USEC_PER_SEC` (1_000_000) is ACCEPTED — Linux
+           multiplies by NSEC_PER_USEC and lets
+           timespec64_normalize roll the extra second into
+           tv_sec.  Pre-batch we used `!(0..1_000_000).contains`
+           which is equivalent to `tv_usec >= 1_000_000 ||
+           tv_usec < 0`, rejecting the exact boundary value as
+           EINVAL where Linux returns EPERM.
+
+     Divergence table (assuming CAP_SYS_TIME absent, our
+     uniform state):
+
+        settimeofday(tv, tz)              Linux  pre    post
+        ({sec= 0, usec=     0}, NULL)     EPERM  EPERM  EPERM  ok
+        ({sec=-1, usec=     0}, NULL)     EPERM  EINVAL EPERM  FIXED
+        ({sec= 0, usec=    -1}, NULL)     EINVAL EINVAL EINVAL ok
+        ({sec= 0, usec=999_999}, NULL)    EPERM  EPERM  EPERM  ok
+        ({sec= 0, usec=1_000_000}, NULL)  EPERM  EINVAL EPERM  FIXED
+        ({sec= 0, usec=1_000_001}, NULL)  EINVAL EINVAL EINVAL ok (new probe)
+
+     Why it matters:
+       * NTP daemons (chrony, ntpd, systemd-timesyncd) issue
+         settimeofday with a sentinel `{tv_sec=-1, tv_usec=0}`
+         probe at startup to distinguish "kernel rejected the
+         time" (EINVAL — fatal, abort sync) from "I lack the
+         capability" (EPERM — fall back to adjtimex skew loop).
+         Pre-batch this probe saw EINVAL where Linux returns
+         EPERM, pushing daemons into the abort path on systems
+         that do have the privilege but happened to send a
+         negative sentinel.
+       * Hardware-clock readers (hwclock, fake-hwclock,
+         openrc-init's bootmisc) format a struct from a
+         BIOS-CMOS read where the tv_usec field can occasionally
+         materialise as exactly 1_000_000 due to rounding from
+         a sub-second carry computation.  Linux normalises that
+         to {sec+=1, usec=0}; pre-batch we reject it as EINVAL,
+         which hwclock interprets as "BIOS time is corrupt" and
+         emits a warning to syslog every boot.
+       * Time-skew test suites (LTP's settimeofday02, glibc's
+         tst-settimeofday) explicitly probe the USEC_PER_SEC
+         boundary as part of their accept-set; pre-batch
+         failures show up as test regressions.
+       * Container-init shims that wrap settimeofday to log
+         capability denials key on EPERM specifically; an
+         EINVAL leak from a value-shape mismatch is silently
+         dropped into "I sent garbage" diagnostics and never
+         surfaces the CAP_SYS_TIME hint.
+
+     Architectural directive: translator-only fix.  No
+     changes to do_sys_settimeofday64 backend semantics (we
+     don't have one — the EPERM terminal is unconditional), no
+     timekeeping.rs touched, no native code touched.  The
+     Linux compat layer's value gate is reshaped to mirror
+     Linux 6.x; native OS time-setting (if ever wired) is
+     unaffected.
+
+     Fix in kernel/src/syscall/linux.rs:
+       * sys_settimeofday (~line 23947): removed `tv_sec < 0`
+         gate; switched tv_usec gate from
+         `!(0..1_000_000).contains(&tv_usec)` to
+         `tv_usec > 1_000_000 || tv_usec < 0`.  Doc-commented
+         with full Linux 6.x source quote and explicit
+         reasoning for each retired check.  Kept the tv_sec
+         read (as `_tv_sec`) so the 16-byte layout stays
+         verifiable and a future CAP-aware path has the
+         parsed value at hand.
+
+     Self-test updates (~line 56880):
+       * tv_sec = -1, tv_usec = 0  → expect EPERM (was
+         EINVAL pre-batch).  Comment now references the
+         Linux 6.x retirement of `timeval_valid()`.
+       * tv_usec = -1              → expect EINVAL (unchanged).
+       * tv_usec = 1_000_000       → expect EPERM (was
+         EINVAL pre-batch).  Boundary case for the strict-`>`
+         comparison.
+       * tv_usec = 1_000_001       → expect EINVAL (NEW
+         probe — verifies the strict-`>` cutoff still fires
+         one ULP above USEC_PER_SEC).
+       * tv_usec = 999_999         → expect EPERM (unchanged
+         well-inside-range case).
+       * tz-only and NULL/NULL probes unchanged.
+
+     Build: cargo build -p kernel clean (39.91s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+     23s).
+     Stamp confirmed at build/serial-test.txt:
+       "[syscall/linux]   settimeofday Linux 6.x value gate
+       (tv_sec unchecked, tv_usec strict-`>` USEC_PER_SEC): OK"

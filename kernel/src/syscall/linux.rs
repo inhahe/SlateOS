@@ -23951,12 +23951,36 @@ fn sys_settimeofday(args: &SyscallArgs) -> SyscallResult {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 16) {
             return linux_err(linux_errno_for(e));
         }
-        // Linux's SYSCALL_DEFINE2(settimeofday) calls timeval_valid() on
-        // the copied-in tv ahead of do_sys_settimeofday64:
-        //   tv_sec >= 0 && tv_usec >= 0 && tv_usec < USEC_PER_SEC
-        // (USEC_PER_SEC = 1_000_000).  Reject malformed tv with EINVAL
-        // ahead of the EPERM so probes can distinguish
-        // "I sent a garbage struct" from "I don't have CAP_SYS_TIME."
+        // Linux 6.x `kernel/time/time.c::SYSCALL_DEFINE2(settimeofday)`:
+        //
+        //     if (tv) {
+        //         if (get_user(new_ts.tv_sec, &tv->tv_sec) ||
+        //             get_user(new_ts.tv_nsec, &tv->tv_usec))
+        //             return -EFAULT;
+        //
+        //         if (new_ts.tv_nsec > USEC_PER_SEC || new_ts.tv_nsec < 0)
+        //             return -EINVAL;
+        //         ...
+        //     }
+        //
+        // Two things to mirror precisely:
+        //   1. tv_sec is NOT range-checked in 6.x — even a negative
+        //      pre-epoch sec is forwarded to do_sys_settimeofday64,
+        //      which only gates on CAP_SYS_TIME (returning EPERM).
+        //      The old `timeval_valid()` helper that checked
+        //      `tv_sec >= 0` was retired with the timespec64
+        //      conversion; mirroring it here would mis-report
+        //      EINVAL where a real kernel returns EPERM, breaking
+        //      ntp / chrony / hwclock CAP_SYS_TIME probes that
+        //      use a sentinel tv_sec=-1 to distinguish "kernel
+        //      rejected the time" from "I lack the capability."
+        //   2. The tv_usec bound is `> USEC_PER_SEC` (strict), so
+        //      USEC_PER_SEC itself (1_000_000) is ACCEPTED.  Linux
+        //      then multiplies tv_usec by NSEC_PER_USEC and lets
+        //      timespec64_normalize roll the extra second into
+        //      tv_sec.  Our pre-batch `< USEC_PER_SEC` (strict
+        //      upper) rejected exactly 1_000_000 as EINVAL where
+        //      Linux returns EPERM.
         let mut buf = [0u8; 16];
         // SAFETY: validate_user_read above confirmed 16 bytes readable.
         if let Err(e) = unsafe {
@@ -23964,7 +23988,11 @@ fn sys_settimeofday(args: &SyscallArgs) -> SyscallResult {
         } {
             return linux_err(linux_errno_for(e));
         }
-        let tv_sec = i64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
+        // tv_sec is read but intentionally not validated (Linux 6.x
+        // forwards any value to do_sys_settimeofday64).  Keep the
+        // read so the layout-derived comments stay verifiable, and
+        // so a future CAP-aware path can use the parsed value.
+        let _tv_sec = i64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
             Ok(b) => b,
             Err(_) => return linux_err(errno::EINVAL),
         });
@@ -23972,7 +24000,10 @@ fn sys_settimeofday(args: &SyscallArgs) -> SyscallResult {
             Ok(b) => b,
             Err(_) => return linux_err(errno::EINVAL),
         });
-        if tv_sec < 0 || !(0..1_000_000).contains(&tv_usec) {
+        // Linux 6.x: `tv_nsec > USEC_PER_SEC || tv_nsec < 0`.
+        // The strict `>` means USEC_PER_SEC itself is OK; the
+        // strict `< 0` means 0 is OK.
+        if tv_usec > 1_000_000 || tv_usec < 0 {
             return linux_err(errno::EINVAL);
         }
     }
@@ -56877,8 +56908,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: settimeofday both not EPERM");
             return Err(KernelError::InternalError);
         }
-        // settimeofday timeval_valid gate: tv_sec < 0 -> EINVAL ahead
-        // of EPERM.  Build a dedicated 16-byte tv with sec=-1, usec=0.
+        // settimeofday Linux 6.x gate (batch 439): tv_sec is NOT
+        // range-checked (any sec, including negative, passes the
+        // value gate and reaches the CAP_SYS_TIME check, i.e.
+        // EPERM here).  tv_usec gate is `> USEC_PER_SEC || < 0`,
+        // so USEC_PER_SEC itself (1_000_000) is accepted and only
+        // values strictly greater fail with EINVAL.
+        //
+        // tv_sec = -1, tv_usec = 0 -> EPERM (no tv_sec gate).
         let tv_neg_sec: [u8; 16] = {
             let mut b = [0u8; 16];
             b[0..8].copy_from_slice(&(-1i64).to_ne_bytes());
@@ -56888,13 +56925,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs {
             arg0: tv_neg_sec_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
         };
-        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: settimeofday tv_sec<0 not EINVAL"
+                "[syscall/linux]   FAIL: settimeofday tv_sec<0 not EPERM (batch 439 Linux 6.x)"
             );
             return Err(KernelError::InternalError);
         }
-        // tv_usec < 0 -> EINVAL.
+        // tv_usec < 0 -> EINVAL (gate unchanged from pre-batch).
         let tv_neg_usec: [u8; 16] = {
             let mut b = [0u8; 16];
             b[8..16].copy_from_slice(&(-1i64).to_ne_bytes());
@@ -56910,10 +56947,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // tv_usec == USEC_PER_SEC (1_000_000) -> EINVAL.
-        let tv_usec_overflow: [u8; 16] = {
+        // tv_usec == USEC_PER_SEC (1_000_000) -> EPERM (batch 439:
+        // Linux 6.x strict `>` accepts equal-to-USEC_PER_SEC and
+        // lets timespec64_normalize roll the carry into tv_sec).
+        let tv_usec_boundary: [u8; 16] = {
             let mut b = [0u8; 16];
             b[8..16].copy_from_slice(&1_000_000i64.to_ne_bytes());
+            b
+        };
+        let tv_usec_boundary_ptr = tv_usec_boundary.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: tv_usec_boundary_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: settimeofday tv_usec=1e6 not EPERM (batch 439 Linux 6.x boundary)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // tv_usec == USEC_PER_SEC + 1 (1_000_001) -> EINVAL (just
+        // beyond the strict `>` cutoff).
+        let tv_usec_overflow: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[8..16].copy_from_slice(&1_000_001i64.to_ne_bytes());
             b
         };
         let tv_usec_overflow_ptr = tv_usec_overflow.as_ptr() as u64;
@@ -56922,11 +56978,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: settimeofday tv_usec=1e6 not EINVAL"
+                "[syscall/linux]   FAIL: settimeofday tv_usec=1_000_001 not EINVAL"
             );
             return Err(KernelError::InternalError);
         }
-        // tv_usec == 999_999 -> EPERM (boundary just inside valid).
+        // tv_usec == 999_999 -> EPERM (well inside valid range).
         let tv_usec_max: [u8; 16] = {
             let mut b = [0u8; 16];
             b[8..16].copy_from_slice(&999_999i64.to_ne_bytes());
@@ -56952,7 +57008,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   settimeofday timeval_valid: OK"
+            "[syscall/linux]   settimeofday Linux 6.x value gate (tv_sec unchecked, tv_usec strict-`>` USEC_PER_SEC): OK"
         );
 
         // mincore misaligned -> EINVAL.

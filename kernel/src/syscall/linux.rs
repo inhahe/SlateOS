@@ -14760,7 +14760,7 @@ fn validate_user_timespec64(ptr: u64) -> Result<(), SyscallResult> {
 /// returns -EINVAL.  Batch 198 adds the `timespec64_valid` gate
 /// ahead of the fd lookup.
 fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
-    const MQ_PRIO_MAX: u64 = 32768;
+    const MQ_PRIO_MAX: u32 = 32768;
     // 1. Validate abs_timeout shape ahead of any fd touch (Linux's
     //    prepare_timeout runs first in the syscall entry).
     if args.arg4 != 0 {
@@ -14769,7 +14769,20 @@ fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
         }
     }
     // 2. Priority gate.
-    if args.arg3 >= MQ_PRIO_MAX {
+    //
+    // Linux signature: SYSCALL_DEFINE5(mq_timedsend, mqd_t, mqdes,
+    //   const char __user *, u_msg_ptr, size_t, msg_len,
+    //   unsigned int, msg_prio,
+    //   const struct __kernel_timespec __user *, u_abs_timeout).
+    // msg_prio is C `unsigned int`, delivered in r10.  The AMD64 syscall
+    // ABI does not zero-extend `unsigned int` across the syscall
+    // instruction, so Linux observes only the low 32 bits.  Pre-batch we
+    // tested args.arg3 at u64 width: a caller passing 0x1_0000_0000
+    // (high-only) was rejected with EINVAL where Linux's truncated
+    // msg_prio=0 < MQ_PRIO_MAX advances to the msg-pointer NULL check.
+    #[allow(clippy::cast_possible_truncation)]
+    let msg_prio = args.arg3 as u32;
+    if msg_prio >= MQ_PRIO_MAX {
         return linux_err(errno::EINVAL);
     }
     if args.arg1 == 0 {
@@ -42595,6 +42608,58 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   mq_timedsend prio validation: OK");
+
+        // Batch 331: msg_prio is C `unsigned int`; high-half garbage
+        // must be masked before the >= MQ_PRIO_MAX gate.  Pre-batch the
+        // raw-u64 comparison rejected high-only values with EINVAL where
+        // Linux's truncated msg_prio advances to the msg-pointer check.
+        // (a) prio=0x1_0000_0000, msg=NULL -> EFAULT (truncates to 0,
+        //     prio gate passes, NULL msg check fires).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1,
+            arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedsend(prio=0x1_0000_0000, NULL) not EFAULT (truncation)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) prio=0x1_0000_0001, msg=NULL -> EFAULT (truncates to 1
+        //     which is < MQ_PRIO_MAX; gate passes, NULL msg check fires).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1,
+            arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedsend(prio=0x1_0000_0001, NULL) not EFAULT (truncation)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) prio=0x1_0000_8000 (high|MQ_PRIO_MAX), msg=NULL -> EINVAL
+        //     (truncates to 32768; gate still rejects values >= MAX).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1,
+            arg3: 0x1_0000_8000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedsend(prio=0x1_0000_8000, NULL) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) prio=0xFFFF_FFFF_0000_0000 (all-high, low=0), msg=NULL
+        //     -> EFAULT.  Independent confirmation of the truncation.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1,
+            arg3: 0xFFFF_FFFF_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedsend(prio=0xFFFF_FFFF_0000_0000, NULL) not EFAULT (truncation)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mq_timedsend msg_prio unsigned-int truncation (high-half ignored): OK"
+        );
 
         // Batch 198: abs_timeout validation runs ahead of the fd
         // lookup.  Linux's prepare_timeout calls timespec64_valid

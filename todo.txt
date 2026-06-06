@@ -29196,3 +29196,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (35.85s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+361. Batch 331 — sys_mq_timedsend unsigned-int
+     truncation (msg_prio, the fourth arg, must be
+     masked to u32 before the MQ_PRIO_MAX gate).
+
+     Divergence: Linux's sys_mq_timedsend signature is
+     `SYSCALL_DEFINE5(mq_timedsend, mqd_t, mqdes,
+     const char __user *, u_msg_ptr, size_t, msg_len,
+     unsigned int, msg_prio, const struct
+     __kernel_timespec __user *, u_abs_timeout)`.
+     `msg_prio` is C `unsigned int`, delivered in r10.
+     The AMD64 syscall ABI does not zero-extend
+     `unsigned int` across the syscall instruction.
+
+     Our pre-fix implementation did `if args.arg3 >=
+     MQ_PRIO_MAX { return EINVAL; }` at u64 width
+     (MQ_PRIO_MAX = 32768).  A caller passing
+     msg_prio=0x1_0000_0000 (high-only) hit the u64
+     gate (0x1_0000_0000 >= 32768) and was rejected
+     with EINVAL where Linux's truncated msg_prio=0
+     advances to the msg-pointer NULL check.
+
+     Fix: in sys_mq_timedsend (kernel/src/syscall/
+     linux.rs line ~14762), narrow MQ_PRIO_MAX to u32
+     and cast args.arg3 to u32 before the comparison:
+       const MQ_PRIO_MAX: u32 = 32768;
+       #[allow(clippy::cast_possible_truncation)]
+       let msg_prio = args.arg3 as u32;
+       if msg_prio >= MQ_PRIO_MAX {
+           return linux_err(errno::EINVAL);
+       }
+
+     Tests added to dispatch_linux (after existing
+     "mq_timedsend prio validation: OK" marker around
+     line 42597):
+       (a) prio=0x1_0000_0000, msg=NULL, ts=0
+           → EFAULT (truncates to 0, prio gate
+            passes, NULL msg check fires).  Pre-fix
+            returned EINVAL.
+       (b) prio=0x1_0000_0001, msg=NULL, ts=0
+           → EFAULT (truncates to 1 < MQ_PRIO_MAX,
+            advances to NULL msg).  Pre-fix returned
+            EINVAL.
+       (c) prio=0x1_0000_8000 (high|MQ_PRIO_MAX),
+           msg=NULL, ts=0
+           → EINVAL (truncates to 32768; gate still
+            rejects values >= MAX).  Both pre and
+            post-batch return EINVAL — confirms the
+            mask doesn't accidentally let MAX-equal
+            values through.
+       (d) prio=0xFFFF_FFFF_0000_0000 (all-high,
+           low=0), msg=NULL, ts=0
+           → EFAULT.  Independent confirmation of the
+            truncation with an alternate high-half
+            pattern.  Pre-fix returned EINVAL.
+     Marker: "[syscall/linux]   mq_timedsend msg_prio
+              unsigned-int truncation (high-half
+              ignored): OK".
+
+     Preserved: existing mq_timedsend probes still
+     pass:
+       - mq_timedsend(NULL) → EFAULT.
+       - mq_timedsend(prio=MQ_PRIO_MAX) → EINVAL.
+       - mq_timedsend(prio=70000) → EINVAL (well
+         above MAX; fits in u32 so the mask is
+         transparent).
+       - mq_timedsend(prio=32767, NULL) → EFAULT
+         (highest valid value; advances to NULL msg).
+       - mq_timedsend(bad tv_nsec) → EINVAL.
+       - mq_timedsend(neg tv_sec) → EINVAL.
+       - mq_timedsend(good ts, bad prio) → EINVAL.
+
+     Known limitations:
+     - mqd (arg0) is C `mqd_t` (int) — already cast
+       to i32 at the fd-validation step.
+     - msg_len (arg2) is C `size_t` (u64) — no
+       truncation issue.
+     - There is no real mq implementation; terminal
+       EBADF stands in for the fd lookup.  When mq
+       lands, the full receive/send/notify paths will
+       need their own truncation audits.
+
+     Build: cargo build -p kernel clean (37.13s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

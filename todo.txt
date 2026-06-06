@@ -27419,3 +27419,93 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (40.02s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+342. sys_fchownat int truncation — high-half register garbage
+     must be stripped before the flags mask check.
+
+     Divergence:
+       Linux signature: `int fchownat(int dirfd, const
+       char *pathname, uid_t owner, gid_t group, int
+       flags)`.  SYSCALL_DEFINE5 narrows the fifth
+       parameter to (int) on entry; the mask check
+       `flags & ~(AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH)` runs
+       at 32-bit width.
+
+       Pre-batch we held the mask check at 64-bit width
+       (identical shape to batch-311 fchmodat):
+           const VALID_FLAGS: u64 = 0x100 | 0x1000;
+           if args.arg4 & !VALID_FLAGS != 0 {
+               return EINVAL;
+           }
+           if args.arg4 & 0x1000 != 0 { ... EMPTY_PATH ... }
+       so a caller passing `0x1_0000_0100` (high-half
+       garbage + AT_SYMLINK_NOFOLLOW) saw EINVAL where
+       Linux returns EROFS.  Fifth instance of the same
+       shape after batches 308 (mlockall), 309 (msync),
+       310 (mlock2), and 311 (fchmodat).
+
+       Note: the AT_EMPTY_PATH branch test also used
+       `args.arg4 & 0x1000` at u64 width; replacing with
+       the truncated u32 `flags` ensures the EMPTY_PATH
+       branch fires for callers whose high-half garbage
+       coincidentally clears bit 0x1000 — pre-batch this
+       branch could spuriously NOT fire when high bits
+       were present (less common; the EINVAL gate fired
+       first for any non-empty high half).
+
+     Fix:
+       kernel/src/syscall/linux.rs sys_fchownat:
+         * Cast args.arg4 to i32 (matching Linux's int
+           flags parameter), then reinterpret as u32 for
+           the mask and EMPTY_PATH-branch checks.
+         * Convert VALID_FLAGS from u64 to u32.
+         * Replace `args.arg4 & 0x1000` with `flags &
+           0x1000` so the EMPTY_PATH branch dispatch is
+           consistent with the mask gate's truncated view.
+
+     Tests (dispatch_linux self-test, after the existing
+     fchownat EROFS probe):
+       - (a) fchownat(0, 0x1000, 0, 0, 0x1_0000_0100) →
+             EROFS (high|NOFOLLOW; truncates to 0x100, mask
+             passes, no EMPTY_PATH branch fires, EROFS
+             terminal via validate_user_str + read-only
+             surface).
+       - (b) fchownat(0, 0x1000, 0, 0, 0x1_0000_1100) →
+             EROFS (high|NOFOLLOW|EMPTY_PATH; truncates to
+             0x1100, mask passes, EMPTY_PATH branch fires,
+             dirfd=0 in kernel context → caller_pid()=None
+             → EROFS via the AT_EMPTY_PATH branch's
+             kernel-context fallback).
+       - (c) fchownat(0, 0x1000, 0, 0, 0x1_0000_0000) →
+             EROFS (high-half only, low half zero;
+             truncates to 0, flags=0, no branches, EROFS
+             via validate_user_str path).
+       - (d) fchownat(0, 0x1000, 0, 0, 0x1_0000_0010) →
+             EINVAL (high|bad-low 0x10; truncates to 0x10,
+             mask rejects bit outside VALID_FLAGS).
+       Marker: "[syscall/linux]   fchownat int truncation
+       (high-half ignored): OK".
+
+     Preserved behaviour:
+       - Existing fchownat(_,path,_,_,0x800_0000) → EINVAL
+         probe still passes (huge bogus low bit, no high
+         bits — same EINVAL gate post-batch).
+       - Existing fchownat(_,path,_,_,0) → EROFS probe
+         still passes.
+
+     Known limitations (deferred):
+       - sys_chown / sys_lchown have no flags parameter,
+         so they have no equivalent truncation surface.
+         The fchown/lchown surface in linux.rs already
+         casts fd to i32.
+       - Remaining unaudited `*at` syscalls with int flags
+         that follow this pattern: sys_linkat (existing
+         AT_SYMLINK_FOLLOW), sys_renameat2 (existing
+         RENAME_* bits), sys_unlinkat (existing AT_REMOVEDIR),
+         sys_utimensat (existing AT_SYMLINK_NOFOLLOW),
+         sys_statx (existing AT_NO_AUTOMOUNT etc.).  Each
+         is a candidate for future int-truncation batches.
+
+     Build: cargo build -p kernel clean (39.62s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 26s).

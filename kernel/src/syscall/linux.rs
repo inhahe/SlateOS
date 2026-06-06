@@ -10897,15 +10897,34 @@ fn sys_lchown(args: &SyscallArgs) -> SyscallResult {
 
 /// `fchownat(dirfd, path, uid, gid, flags)`.
 fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
-    // Linux: AT_SYMLINK_NOFOLLOW (0x100) | AT_EMPTY_PATH (0x1000).
-    const VALID_FLAGS: u64 = 0x100 | 0x1000;
-    if args.arg4 & !VALID_FLAGS != 0 {
+    // Linux ABI: `int fchownat(int dirfd, const char *pathname,
+    // uid_t owner, gid_t group, int flags)`.  SYSCALL_DEFINE5(fchownat,
+    // int, dfd, const char __user *, filename, uid_t, user, gid_t,
+    // group, int, flag) — the last parameter is C `int`, so the kernel
+    // function body observes only the low 32 bits of R8; the high 32
+    // bits are caller-uninitialised garbage (no zero-extension for int
+    // args in the AMD64 syscall ABI).
+    //
+    // Pre-batch we held the mask check at 64-bit width:
+    //     const VALID_FLAGS: u64 = 0x100 | 0x1000;
+    //     if args.arg4 & !VALID_FLAGS != 0 { return EINVAL; }
+    //     if args.arg4 & 0x1000 != 0 { ... AT_EMPTY_PATH branch ... }
+    // so a caller passing 0x1_0000_0100 (high-half garbage +
+    // AT_SYMLINK_NOFOLLOW) saw EINVAL where Linux returns EROFS.  Fifth
+    // instance of the same shape after batches 308 (mlockall), 309
+    // (msync), 310 (mlock2), and 311 (fchmodat).
+    const VALID_FLAGS: u32 = 0x100 | 0x1000;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg4 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     // AT_EMPTY_PATH may pass an empty path with a valid dirfd; in that
     // case the operation targets dirfd directly.  Even then we have no
     // writable FS, so EROFS once dirfd is validated.
-    if args.arg4 & 0x1000 != 0 {
+    if flags & 0x1000 != 0 {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let dirfd = args.arg0 as i32;
         // AT_FDCWD == -100; accept it without validation.
@@ -37613,6 +37632,107 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fchownat not EROFS");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 312: fchownat int truncation — high-half register
+        // garbage must be stripped before the flags mask check.
+        //
+        // Linux signature: `int fchownat(int dirfd, const char *path,
+        // uid_t owner, gid_t group, int flags)`.  flags is C int → low
+        // 32 bits only.  Pre-batch we held flags as u64 and ran the
+        // mask check at 64-bit width, so high-half garbage tripped the
+        // gate and returned EINVAL where Linux returns EROFS.
+        //
+        // Mirrors the batch-311 fchmodat fix exactly; sharing the same
+        // VALID_FLAGS = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH (0x100 |
+        // 0x1000) surface.
+        //
+        // (a) fchownat(0, 0x1000, 0, 0, 0x1_0000_0100) → EROFS
+        //     (high|NOFOLLOW; truncates to 0x100, mask passes, no
+        //     EMPTY_PATH branch, validate_user_str succeeds in kernel
+        //     context, EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0x1_0000_0100,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::FCHOWNAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fchownat(high|NOFOLLOW) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) fchownat(0, 0x1000, 0, 0, 0x1_0000_1100) → EROFS
+        //     (high|NOFOLLOW|EMPTY_PATH; truncates to 0x1100, mask
+        //     passes, AT_EMPTY_PATH branch fires; dirfd=0 in kernel
+        //     context → caller_pid()=None → EROFS).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0x1_0000_1100,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::FCHOWNAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fchownat(high|NOFOLLOW|EMPTY_PATH) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) fchownat(0, 0x1000, 0, 0, 0x1_0000_0000) → EROFS
+        //     (high-half garbage only, low half zero; truncates to 0,
+        //     mask passes, no EMPTY_PATH branch, EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0x1_0000_0000,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::FCHOWNAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fchownat(high-half-zero) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) fchownat(0, 0x1000, 0, 0, 0x1_0000_0010) → EINVAL
+        //     (high|bad-low 0x10; truncates to 0x10, mask check
+        //     rejects bit outside VALID_FLAGS; verifies mask gate
+        //     still rejects bogus low bits after high half is
+        //     stripped).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0x1_0000_0010,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::FCHOWNAT, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fchownat(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   fchownat int truncation (high-half ignored): OK"
+        );
 
         // truncate(NULL,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

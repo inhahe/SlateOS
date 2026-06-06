@@ -14192,10 +14192,25 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `umount2(target, flags)`.
+///
+/// Linux ABI: `int umount2(const char *target, int flags)`.
+/// SYSCALL_DEFINE2(umount, ..., int, flags) narrows the second
+/// parameter to (int) on entry; the mask check
+/// `flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW)`
+/// in fs/namespace.c runs at 32-bit width.  Pre-batch we held flags
+/// as u64 and ran the mask check at 64-bit width, so the AMD64
+/// syscall ABI's high-half garbage leaked into the mask and returned
+/// spurious EINVAL where Linux accepts the call and proceeds to the
+/// CAP_SYS_ADMIN check (EPERM in our kernel context).  Tenth instance
+/// of the int-flags truncation pattern after batches 308-316.
 fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
     // MNT_FORCE=1, MNT_DETACH=2, MNT_EXPIRE=4, UMOUNT_NOFOLLOW=8.
-    const VALID_FLAGS: u64 = 1 | 2 | 4 | 8;
-    if args.arg1 & !VALID_FLAGS != 0 {
+    const VALID_FLAGS: u32 = 1 | 2 | 4 | 8;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg1 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     if args.arg0 == 0 {
@@ -41528,6 +41543,86 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: umount2 not EPERM");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 317: umount2 int truncation — high-half register
+        // garbage must be stripped before the flags mask check.
+        //
+        // Linux signature: `int umount2(const char *target, int flags)`.
+        // flags is C int → low 32 bits only.  Pre-batch we held flags
+        // as u64 and ran the mask check at 64-bit width, so high-half
+        // garbage returned spurious EINVAL where Linux returns EPERM
+        // (no CAP_SYS_ADMIN in kernel context after path validation).
+        //
+        // (a) umount2(0x1000, 0x1_0000_0001) → EPERM
+        //     (high|MNT_FORCE; truncates to 1, mask passes, path
+        //     validated, EPERM terminal).
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1_0000_0001, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UMOUNT2, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: umount2(high|MNT_FORCE) -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) umount2(0x1000, 0x1_0000_000F) → EPERM
+        //     (high|all-valid 0xF; truncates to 0xF, mask passes,
+        //     EPERM).
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1_0000_000F, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UMOUNT2, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: umount2(high|all-valid) -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) umount2(0x1000, 0x1_0000_0000) → EPERM
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes, EPERM).
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1_0000_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UMOUNT2, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: umount2(high-half-zero) -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) umount2(0x1000, 0x1_0000_0010) → EINVAL
+        //     (high|bad-low 0x10; truncates to 0x10, mask rejects bit
+        //     outside MNT_FORCE|MNT_DETACH|MNT_EXPIRE|UMOUNT_NOFOLLOW;
+        //     verifies mask gate still rejects invalid bits after the
+        //     high half is stripped).
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1_0000_0010, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UMOUNT2, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: umount2(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   umount2 int truncation (high-half ignored): OK"
+        );
+
         // pivot_root(NULL, NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

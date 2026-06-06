@@ -27861,3 +27861,92 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (45.06s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+347. sys_umount2 int truncation — high-half register garbage
+     leaked into the MNT_FORCE|MNT_DETACH|MNT_EXPIRE|
+     UMOUNT_NOFOLLOW mask check (batch 317).
+
+     Divergence: Linux signature is
+       `int umount2(const char *target, int flags)`.
+     The second parameter is C int → only the low 32 bits
+     are defined; the AMD64 syscall ABI does NOT zero-
+     extend int args before issuing the syscall, so the
+     high 32 bits of %rsi are caller-uninitialised garbage.
+     SYSCALL_DEFINE2(umount, ..., int, flags) narrows to
+     (int) on entry; the mask check
+     `flags & ~(MNT_FORCE|MNT_DETACH|MNT_EXPIRE|
+                UMOUNT_NOFOLLOW)` in fs/namespace.c::
+     SYSCALL_DEFINE2(umount) runs at 32-bit width before
+     the CAP_SYS_ADMIN check.
+
+     Pre-batch we held flags as u64 and ran the mask check
+     against the full 64-bit register, so a caller with
+     non-zero high bits saw spurious EINVAL where Linux
+     accepts the flag value and proceeds to the EPERM
+     terminal (no CAP_SYS_ADMIN in kernel context after
+     path validation).
+
+     Tenth instance of the int-flags truncation pattern
+     after batches 308 (mlockall), 309 (msync), 310
+     (mlock2), 311 (fchmodat), 312 (fchownat), 313
+     (unlinkat), 314 (renameat2), 315 (linkat), and 316
+     (utimensat).
+
+     Fix: cast args.arg1 (u64) to i32, then re-widen to
+     u32 for the mask check.  Matches the i32→u32 pattern
+     used in batches 308, 311, 312, 313, 315, 316.
+
+     Tests: four boot-time probes added in dispatch_linux
+     after the existing UMOUNT2 EPERM probe, each
+     covering one shape:
+       (a) umount2(0x1000, 0x1_0000_0001) → EPERM
+           (high|MNT_FORCE; truncates to 1, mask passes,
+            path validated, EPERM terminal in kernel
+            context).
+       (b) umount2(0x1000, 0x1_0000_000F) → EPERM
+           (high|all-valid 0xF; truncates to 0xF, mask
+            passes, EPERM).
+       (c) umount2(0x1000, 0x1_0000_0000) → EPERM
+           (high-half only, low half zero; truncates to 0,
+            mask passes, EPERM).
+       (d) umount2(0x1000, 0x1_0000_0010) → EINVAL
+           (high|bad-low 0x10; truncates to 0x10, mask
+            rejects bit outside the valid set; verifies
+            mask gate still rejects invalid bits after
+            the high half is stripped).
+     Marker: "[syscall/linux]   umount2 int truncation
+              (high-half ignored): OK".
+
+     Preserved: existing umount2 probes still pass:
+       - umount2(0x1000, 0x8000_0000) → EINVAL: works
+         because 0x8000_0000 has bit 31 set, which after
+         i32 cast becomes negative-i32, and (negative as
+         u32) keeps bit 31 set → mask rejects (0x8000_0000
+         & !(MNT_FORCE|...|UMOUNT_NOFOLLOW) != 0).  The
+         truncation doesn't change this outcome.
+       - umount2(0x1000, 0) → EPERM: works because 0 is 0
+         in either width.
+
+     Known limitations:
+     - Real Linux umount2 runs many gates between mask
+       check and the FS hit: lookup_mnt(target), per-mount
+       MNT_LOCKED check, mnt namespace check, MNT_EXPIRE
+       requires zero refcount, MNT_FORCE only for FUSE
+       filesystems by current uid, MNT_DETACH lazy-unmount
+       semantics.  Our EPERM short-circuit is correct for
+       the no-namespace/no-capability case but does not
+       exercise those gates.  When CAP_SYS_ADMIN
+       enforcement and a writable VFS land, the umount2
+       self-tests will need to grow probes for each
+       terminal errno.
+     - Selected umount2 over splice/tee/vmsplice (which
+       share the SPLICE_F_* mask 1|2|4|8) because all
+       three of those return EINVAL at the terminal AND at
+       the mask gate, so the truncation fix is correct
+       but cannot be observed via a boot probe.  Will
+       revisit those when fd-installation infrastructure
+       lets us reach the success path.
+
+     Build: cargo build -p kernel clean (37.50s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 26s).

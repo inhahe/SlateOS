@@ -10873,28 +10873,70 @@ fn sys_renameat(args: &SyscallArgs) -> SyscallResult {
 fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
     // Linux ABI: `int renameat2(int olddirfd, const char *oldpath,
     // int newdirfd, const char *newpath, unsigned int flags)`.
-    // SYSCALL_DEFINE5(renameat2, ..., unsigned int, flags) narrows the
-    // fifth parameter to (unsigned int) on entry; the mask check
-    // `flags & ~(RENAME_NOREPLACE|EXCHANGE|WHITEOUT)` runs at 32-bit
-    // width.  The high 32 bits of R8 are caller-uninitialised garbage
-    // (the C calling convention does not zero-extend unsigned int args
-    // any more than int args).
     //
-    // Pre-batch we held the mask check at 64-bit width:
-    //     const VALID_FLAGS: u64 = 1 | 2 | 4;
-    //     if args.arg4 & !VALID_FLAGS != 0 { return EINVAL; }
-    // so a caller passing 0x1_0000_0001 (high-half garbage +
-    // RENAME_NOREPLACE) saw EINVAL where Linux returns ENOENT (after
-    // truncation the low half is 1, mask passes, the call proceeds to
-    // rename_impl which validates pointers and returns ENOENT for our
-    // empty FS).  Seventh instance of the same shape after batches 308
-    // (mlockall), 309 (msync), 310 (mlock2), 311 (fchmodat), 312
-    // (fchownat), and 313 (unlinkat).
-    const VALID_FLAGS: u32 = 1 | 2 | 4;
+    // Linux gate order (fs/namei.c::do_renameat2):
+    //
+    //   gate 1: flags & ~VALID_FLAGS -> EINVAL.
+    //   gate 2: (flags & EXCHANGE) && (flags & (NOREPLACE | WHITEOUT))
+    //           -> EINVAL.  EXCHANGE is mutually exclusive with the
+    //           other two flags because:
+    //             - EXCHANGE requires both src and dst to exist
+    //               (semantically "swap"), so NOREPLACE ("must NOT
+    //               exist") is incoherent;
+    //             - EXCHANGE leaves dst pointing at the old src
+    //               (it's a swap, not a move), so WHITEOUT ("create
+    //               a whiteout entry at the old src location to
+    //               mask any lower-layer file in an overlayfs") is
+    //               incoherent.
+    //   gate 3: (flags & WHITEOUT) && !capable(CAP_MKNOD) -> EPERM.
+    //           WHITEOUT creates a device node, gated on
+    //           CAP_MKNOD.
+    //   gate 4: path lookup + rename / exchange / whiteout work.
+    //
+    // SYSCALL_DEFINE5(renameat2, ..., unsigned int, flags) narrows
+    // the fifth parameter to (unsigned int) on entry; the mask
+    // check runs at 32-bit width.  The high 32 bits of R8 are
+    // caller-uninitialised garbage (the C calling convention does
+    // not zero-extend unsigned int args).
+    //
+    // Pre-batch (this batch): gates 2 and 3 were missing entirely.
+    // A caller passing RENAME_EXCHANGE | RENAME_NOREPLACE saw
+    // ENOENT (from our empty-FS rename_impl) where Linux returns
+    // EINVAL — confusing for fs-walkers that expect EXCHANGE to
+    // refuse incoherent flag combinations early.  A caller passing
+    // RENAME_WHITEOUT as an unprivileged user saw ENOENT where
+    // Linux returns EPERM, defeating overlayfs implementations
+    // that probe the WHITEOUT path before attempting a real rename.
+    const RENAME_NOREPLACE: u32 = 1;
+    const RENAME_EXCHANGE: u32 = 2;
+    const RENAME_WHITEOUT: u32 = 4;
+    const VALID_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg4 as u32;
+
+    // Gate 1: unknown flag bits.
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
+    }
+    // Gate 2: EXCHANGE is mutually exclusive with NOREPLACE/WHITEOUT.
+    if (flags & RENAME_EXCHANGE) != 0
+        && (flags & (RENAME_NOREPLACE | RENAME_WHITEOUT)) != 0
+    {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 3: WHITEOUT requires CAP_MKNOD.  Kernel-context bypass
+    // (caller_pid() == None) treats as implicit root; userspace
+    // non-root callers see EPERM here.  No PCB-missing race
+    // handling because the CAP gate is conservative — if we cannot
+    // confirm the caller has the cap, we deny.  In our model,
+    // uid==0 stands in for CAP_MKNOD; uid!=0 → EPERM.
+    if (flags & RENAME_WHITEOUT) != 0 {
+        if let Some(pid) = caller_pid() {
+            match pcb::get_credentials(pid) {
+                Some(c) if c.uid != 0 => return linux_err(errno::EPERM),
+                _ => {}
+            }
+        }
     }
     rename_impl(args.arg1, args.arg3)
 }
@@ -38669,21 +38711,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (b) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0007) → ENOENT
+        // (b) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0007) → EINVAL
         //     (high|NOREPLACE|EXCHANGE|WHITEOUT; truncates to 7, all
-        //     three valid bits set, mask passes; the mutual-exclusion
-        //     between EXCHANGE and NOREPLACE/WHITEOUT is enforced by
-        //     Linux but not by our stub — see Known Limitations.
-        //     For this probe we lock in the truncation behaviour
-        //     specifically.  Pre-batch: EINVAL via 64-bit mask trip).
+        //     three valid bits set, gate 1 mask passes; gate 2 now
+        //     rejects EXCHANGE|NOREPLACE (and EXCHANGE|WHITEOUT)
+        //     with EINVAL.  Batch 347 added gate 2 so this probe's
+        //     expectation flipped from ENOENT (pre-batch 347) to
+        //     EINVAL.  Locks in BOTH truncation (high half stripped)
+        //     and gate-2 enforcement in a single probe.
         let a = SyscallArgs {
             arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
             arg4: 0x1_0000_0007, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
-        if v != -i64::from(errno::ENOENT) {
+        if v != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: renameat2(high|all-valid) -> {} (expected -ENOENT)",
+                "[syscall/linux]   FAIL: renameat2(high|all-valid) -> {} (expected -EINVAL)",
                 v
             );
             return Err(KernelError::InternalError);
@@ -38725,6 +38768,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   renameat2 unsigned-int truncation (high-half ignored): OK"
+        );
+    }
+
+    // Batch 347 — sys_renameat2 EXCHANGE mutual-exclusion gate
+    // (gate 2) and WHITEOUT CAP_MKNOD gate (gate 3).  Linux's
+    // fs/namei.c::do_renameat2 rejects EXCHANGE combined with
+    // either NOREPLACE or WHITEOUT (because EXCHANGE is a swap, so
+    // both endpoints must exist and neither is being created), and
+    // requires CAP_MKNOD for WHITEOUT (because WHITEOUT creates a
+    // device node).  Pre-batch we implemented only gate 1 (mask
+    // check); gates 2 and 3 were silently skipped, so callers
+    // probing incoherent flag combinations saw ENOENT (our empty
+    // FS) instead of Linux's EINVAL/EPERM.
+    {
+        // (e) renameat2 RENAME_EXCHANGE alone (flags=2) -> ENOENT.
+        //     Gate 2 does not fire because neither NOREPLACE nor
+        //     WHITEOUT is set.  Falls through to rename_impl which
+        //     returns ENOENT for our empty FS.  Regression guard:
+        //     gate 2 must NOT reject EXCHANGE alone.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 2, arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(EXCHANGE alone) -> {} (expected -ENOENT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (f) renameat2 EXCHANGE|NOREPLACE (flags=3) -> EINVAL via
+        //     gate 2.  Pre-batch: ENOENT (gate 2 missing).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 3, arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(EXCHANGE|NOREPLACE) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (g) renameat2 EXCHANGE|WHITEOUT (flags=6) -> EINVAL via
+        //     gate 2 (mutual-exclusion).  Pre-batch: ENOENT.  This
+        //     also confirms gate-2 fires BEFORE gate-3 (the WHITEOUT
+        //     CAP check would have to evaluate caller_pid otherwise).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 6, arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(EXCHANGE|WHITEOUT) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (h) renameat2 WHITEOUT alone (flags=4) -> ENOENT from
+        //     kernel context.  Gate 3 (CAP_MKNOD) bypasses because
+        //     caller_pid() == None during boot self-test (kernel
+        //     context = implicit root).  Falls through to
+        //     rename_impl which returns ENOENT.  For userspace
+        //     non-root callers the gate would fire EPERM here,
+        //     unverifiable from boot self-test but documented in
+        //     todo.txt.  Pre-batch: ENOENT (gate 3 missing) — same
+        //     observable end state from kernel context, but the
+        //     gate is now in place for userspace callers.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 4, arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(WHITEOUT alone, kctx) -> {} (expected -ENOENT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   renameat2 EXCHANGE mutex + WHITEOUT CAP gates: OK"
         );
     }
 

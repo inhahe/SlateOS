@@ -31007,3 +31007,143 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (44.08s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+377. syscall/linux batch 347 — sys_renameat2
+     EXCHANGE mutual-exclusion gate (gate 2) and
+     WHITEOUT CAP_MKNOD gate (gate 3) added.
+
+     Linux gate-order facts
+     (fs/namei.c::do_renameat2):
+
+       gate 1: flags & ~(NOREPLACE|EXCHANGE|
+               WHITEOUT) -> EINVAL.
+       gate 2: (flags & EXCHANGE) &&
+               (flags & (NOREPLACE|WHITEOUT))
+               -> EINVAL.
+       gate 3: (flags & WHITEOUT) &&
+               !capable(CAP_MKNOD) -> EPERM.
+       gate 4: path lookup + rename /
+               exchange / whiteout work.
+
+     Why gates 2 and 3 exist:
+
+       gate 2 — EXCHANGE is mutually exclusive
+       with NOREPLACE and WHITEOUT because:
+
+         - EXCHANGE requires both endpoints to
+           exist (semantically "swap"), so
+           NOREPLACE ("must NOT exist") is
+           incoherent;
+         - EXCHANGE leaves dst pointing at the
+           old src (swap, not move), so
+           WHITEOUT ("create whiteout entry
+           at old src to mask any lower-layer
+           file in an overlayfs") is
+           incoherent.
+
+       gate 3 — WHITEOUT creates a character
+       device node (special major/minor 0/0
+       sentinel for overlayfs) at the old src
+       location.  Device-node creation is
+       gated on CAP_MKNOD.
+
+     Pre-batch behaviour:
+
+       Gate 2 missing -> EXCHANGE|NOREPLACE
+       returned ENOENT (from our empty-FS
+       rename_impl) where Linux returns EINVAL.
+       Tricks overlayfs / podman / containerd
+       implementations probing for EXCHANGE
+       coherence into believing the kernel
+       silently accepts incoherent combos.
+
+       Gate 3 missing -> WHITEOUT alone from
+       an unprivileged caller returned ENOENT
+       where Linux returns EPERM.  Defeats
+       overlayfs probes that check whether
+       they have CAP_MKNOD by trying a
+       throwaway WHITEOUT rename and inspecting
+       the errno (EPERM = abort, ENOENT =
+       proceed with whiteout-based overlay
+       semantics).  Pre-batch ENOENT tricked
+       the probe into proceeding with
+       overlay semantics it could not actually
+       deliver.
+
+     Fix:
+
+       Inserted gates 2 and 3 in sys_renameat2
+       between the mask check and rename_impl:
+
+         const RENAME_NOREPLACE: u32 = 1;
+         const RENAME_EXCHANGE:  u32 = 2;
+         const RENAME_WHITEOUT:  u32 = 4;
+         // gate 1: mask check (existed)
+         // gate 2:
+         if (flags & RENAME_EXCHANGE) != 0
+             && (flags & (RENAME_NOREPLACE
+                          | RENAME_WHITEOUT))
+                 != 0 {
+             return EINVAL;
+         }
+         // gate 3:
+         if (flags & RENAME_WHITEOUT) != 0 {
+             if let Some(pid) = caller_pid() {
+                 if uid != 0 { return EPERM; }
+             }
+         }
+
+       Kernel-context (caller_pid()=None) bypass
+       on gate 3 preserves boot self-test
+       dispatch.  Userspace non-root gets EPERM.
+
+     Self-test (4 new probes, e..h, joining the
+     batch-314 a..d truncation guards; also
+     updated probe (b) to reflect gate-2's new
+     EXCHANGE|NOREPLACE|WHITEOUT rejection):
+
+         (b) flags=0x1_0000_0007 was ENOENT
+             now EINVAL (high|all-valid;
+             truncates to 7, gate 2 fires).
+         (e) flags=2 (EXCHANGE alone)   ENOENT
+         (f) flags=3 (EXCHANGE|
+             NOREPLACE)                 EINVAL
+         (g) flags=6 (EXCHANGE|
+             WHITEOUT)                  EINVAL
+         (h) flags=4 (WHITEOUT alone,
+             kernel ctx)                ENOENT
+             (gate 3 bypasses;
+              userspace non-root would
+              see EPERM here, not
+              probeable from kctx)
+
+     Marker: renameat2 EXCHANGE mutex
+             + WHITEOUT CAP gates: OK
+
+     Known limitations / judgment calls:
+
+     * No real overlayfs / WHITEOUT device-node
+       creation.  Gate 3 returns ENOENT for
+       kernel-context callers (no CAP check,
+       but rename_impl then refuses the empty
+       FS); userspace root callers would also
+       get ENOENT.  The structurally correct
+       answer once we add WHITEOUT semantics
+       will be: EPERM for non-CAP_MKNOD,
+       EXDEV for cross-fs, success for same-fs
+       overlayfs WHITEOUT.
+
+     * uid==0 stands in for CAP_MKNOD.  We do
+       not model fine-grained capabilities,
+       so any uid==0 caller is treated as
+       CAP_MKNOD-holding.
+
+     * Cannot probe gate-3 EPERM from boot
+       self-test (caller_pid() = None bypasses).
+       Reading the body confirms gate 3 is
+       in place; userspace runtime will
+       exercise it.
+
+     Build: cargo build -p kernel clean (36.70s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

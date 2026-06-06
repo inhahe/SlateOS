@@ -18726,8 +18726,23 @@ fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
     const RSEQ_STRUCT_ALIGN: u64 = 32;
 
     let rseq_ptr = args.arg0;
-    let len = args.arg1;
-    let flags = args.arg2;
+    // Linux signature: `SYSCALL_DEFINE4(rseq, struct rseq __user *, rseq,
+    //   u32, rseq_len, int, flags, u32, sig)`.  `rseq_len` is C `u32` in
+    // rsi and `flags` is C `int` in rdx; the AMD64 syscall ABI delivers
+    // both in 64-bit registers and does NOT zero/sign-extend them, so
+    // only the low 32 bits are defined.  Pre-batch we held `len` and
+    // `flags` as raw u64, so a probe like rseq_len=0x1_0000_0020
+    // (high|32) fired the `len != 32` EINVAL gate where Linux's
+    // truncated len=32 advances to the register path, and flags
+    // =0x1_0000_0000 fired the `flags != 0` EINVAL gate where Linux's
+    // truncated flags=0 advances likewise.  Truncate both to their
+    // declared C-type width before any compare.
+    #[allow(clippy::cast_possible_truncation)]
+    let len_u32 = args.arg1 as u32;
+    let len: u64 = u64::from(len_u32);
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_u32 = args.arg2 as u32;
+    let flags: u64 = u64::from(flags_u32);
     #[allow(clippy::cast_possible_truncation)]
     let sig = args.arg3 as u32;
 
@@ -46596,6 +46611,71 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: rseq cleanup unregister not 0");
             return Err(KernelError::InternalError);
         }
+
+        // rseq rseq_len/flags ABI truncation.  Linux declares
+        //   SYSCALL_DEFINE4(rseq, struct rseq __user *, rseq,
+        //                   u32, rseq_len, int, flags, u32, sig)
+        // so rseq_len and flags are 32-bit C types delivered in
+        // 64-bit registers without zero-extension.  Pre-batch we
+        // held both at raw u64 — a probe with rseq_len=0x1_0000_0020
+        // or flags=0x1_0000_0000 fired the `len != 32` / `flags != 0`
+        // EINVAL gates where Linux's truncated values advance to the
+        // ptr=NULL EFAULT.  Probes use rseq_ptr=NULL so they exercise
+        // the EINVAL→EFAULT discriminator without touching the
+        // already-cleaned task registration slot.
+        //
+        // (o) rseq_len=0x1_0000_0020 (high|32), flags=0, ptr=NULL ->
+        //     truncated len=32 passes gate, ptr=NULL -> EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1_0000_0020, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq(rseq_len=0x1_0000_0020) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (p) rseq_len=0x1_0000_0010 (high|16), flags=0, ptr=NULL ->
+        //     truncated len=16 still fails the `len != 32` gate ->
+        //     EINVAL preserved (low-half discriminator).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1_0000_0010, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq(rseq_len=0x1_0000_0010) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (q) rseq_len=32, flags=0x1_0000_0000 (high-only), ptr=NULL ->
+        //     truncated flags=0 register-path, ptr=NULL -> EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 32, arg2: 0x1_0000_0000, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq(flags=0x1_0000_0000) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (r) rseq_len=32, flags=0xFFFF_FFFF_0000_0000 (all-high, low=0),
+        //     ptr=NULL -> truncated flags=0, ptr=NULL -> EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 32, arg2: 0xFFFF_FFFF_0000_0000, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::RSEQ, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: rseq(flags=0xFFFF_FFFF_0000_0000) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   rseq rseq_len/flags u32-truncation (high-half ignored): OK"
+        );
 
         // sync_file_range bad flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0xff, arg4: 0, arg5: 0 };

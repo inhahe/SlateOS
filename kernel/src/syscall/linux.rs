@@ -12525,11 +12525,20 @@ fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
     if opcode > 31 {
         return linux_err(errno::EINVAL);
     }
+    // Linux declares `unsigned int nr_args`; the x86_64 syscall ABI
+    // delivers it in r10 without zero-extension, so only the low 32
+    // bits are defined.  Pre-batch we held `args.arg3` as raw u64,
+    // so a probe like nr_args=0x1_0000_0000 (high-only, low=0)
+    // entered the pointer-check branch where Linux's truncated
+    // nr_args=0 skips it and falls through to the fd-validation
+    // EBADF.  Truncate to u32 before any comparison to match.
+    #[allow(clippy::cast_possible_truncation)]
+    let nr_args = args.arg3 as u32;
     // arg pointer must be readable when nr_args > 0.  We can't gate by
     // opcode (the per-opcode struct sizes vary), so use a minimum of 1
     // byte to surface EFAULT on bogus pointers; opcode-specific size
     // checks are deferred to the (future) real implementation.
-    if args.arg3 > 0 && args.arg2 != 0 {
+    if nr_args > 0 && args.arg2 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
             return linux_err(linux_errno_for(e));
         }
@@ -12537,7 +12546,7 @@ fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
     // nr_args==0 with arg!=NULL: Linux ignores arg in that case, no
     // pointer check needed.  nr_args>0 with arg==NULL: Linux returns
     // EFAULT for most opcodes — match that.
-    if args.arg3 > 0 && args.arg2 == 0 {
+    if nr_args > 0 && args.arg2 == 0 {
         return linux_err(errno::EFAULT);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -40401,6 +40410,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   io_uring_enter flags u32-truncation (high-half ignored): OK"
+        );
+
+        // io_uring_register nr_args is C `unsigned int` in the Linux
+        // prototype, delivered in r10.  The AMD64 syscall ABI does not
+        // zero-extend, so a raw `args.arg3 > 0` test sees high-half
+        // garbage where Linux's truncated nr_args is 0.  Pre-batch this
+        // routed (nr_args=0x1_0000_0000, arg=NULL) into the
+        // "nr_args>0 && arg==NULL" EFAULT branch where Linux's
+        // truncated nr_args=0 skips the pointer block and falls
+        // through to the fd-validation EBADF.
+        //
+        // (k) nr_args=0x1_0000_0000 (high-only, low=0), arg=NULL ->
+        //     after truncation nr_args=0, skip pointer block, fd=0
+        //     -> EBADF.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0x1_0000_0000,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(nr_args=0x1_0000_0000) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (l) nr_args=0x1_0000_0001 (high|1), arg=NULL -> low u32=1,
+        //     pointer block fires with NULL arg -> EFAULT preserved.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0x1_0000_0001,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(nr_args=0x1_0000_0001) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (m) nr_args=0xFFFF_FFFF_0000_0000 (all-high, low=0), arg=NULL
+        //     -> truncates to 0, skip pointer block, fd=0 -> EBADF.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0xFFFF_FFFF_0000_0000,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(nr_args=0xFFFF_FFFF_0000_0000) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (n) nr_args=0 baseline preservation: arg=NULL, fd=0 -> EBADF.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(nr_args=0) baseline not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   io_uring_register nr_args u32-truncation (high-half ignored): OK"
         );
     }
 

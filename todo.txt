@@ -29797,3 +29797,86 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.11s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+368. sys_io_uring_register nr_args u32-truncation
+     (high-half ignored).
+
+     Divergence: Linux declares
+       int io_uring_register(unsigned int fd,
+                             unsigned int opcode,
+                             void *arg,
+                             unsigned int nr_args)
+     so `nr_args` is a C `unsigned int` delivered in
+     r10 by the x86_64 syscall ABI.  The AMD64 ABI
+     does NOT zero-extend `unsigned int` register
+     arguments — only the low 32 bits of r10 are
+     defined.  Pre-batch our stub held nr_args at
+     raw u64 (`if args.arg3 > 0 && args.arg2 != 0`
+     ... `if args.arg3 > 0 && args.arg2 == 0`), so a
+     probe like nr_args=0x1_0000_0000 with arg=NULL
+     entered the "nr_args>0 && arg==NULL" EFAULT
+     branch.  Linux's truncated nr_args=0 instead
+     skips the pointer block entirely and falls
+     through to the fd-validation gate, returning
+     EBADF for the fd=0 we're testing against (no
+     io_uring ring can exist in this kernel).
+
+     Fix: in fn sys_io_uring_register
+     (kernel/src/syscall/linux.rs ~line 12528),
+     truncate args.arg3 to u32 before any compare:
+
+       #[allow(clippy::cast_possible_truncation)]
+       let nr_args = args.arg3 as u32;
+       if nr_args > 0 && args.arg2 != 0 { ... }
+       if nr_args > 0 && args.arg2 == 0 {
+           return linux_err(errno::EFAULT);
+       }
+
+     This is the same shape applied to io_uring_enter
+     flags in batch 285 and to faccessat2 flags in
+     batch 337 — mask to declared C-type width before
+     any control-flow comparison.
+
+     Tests: four boot-time probes in dispatch_linux's
+     io_uring block (labels k/l/m/n), all with fd=0:
+       (k) nr_args=0x1_0000_0000, arg=NULL ->
+           EBADF (was EFAULT) — primary discriminator.
+       (l) nr_args=0x1_0000_0001, arg=NULL ->
+           EFAULT preserved (low-half nr_args=1 still
+           fires the EFAULT-on-NULL gate).
+       (m) nr_args=0xFFFF_FFFF_0000_0000, arg=NULL ->
+           EBADF (was EFAULT) — all-high-half
+           discriminator.
+       (n) nr_args=0, arg=NULL -> EBADF baseline
+           preservation (skips pointer block, fd=0
+           hits the EBADF gate).
+     Marker: "io_uring_register nr_args u32-truncation
+              (high-half ignored): OK".
+
+     Preserved: existing io_uring_register probes
+     (g/h/i/j) still pass — they exercise fd validation,
+     the 31-opcode cap, the USE_REGISTERED_RING bit, and
+     the nr_args=4/arg=NULL EFAULT gate respectively.
+
+     Known limitations:
+     - `opcode` (arg1) is already cast to u32 via
+       `raw_op = args.arg1 as u32` at the head of the
+       function, so its truncation was already handled.
+     - `fd` (arg0) is cast via the standard
+       `args.arg0 as i32` pattern further down.
+     - We cannot exercise the "non-NULL bogus arg
+       pointer with truncated-zero nr_args" case from
+       a kernel-context probe: validate_user_read in
+       the kernel always returns Ok, so even if the
+       comparison were wrong the EFAULT wouldn't
+       fire in self-test.  Only userspace callers
+       exercise that combination.
+     - The opcode-specific struct-size checks (LINUX's
+       per-op `struct io_uring_*` validation) are
+       deferred until the io_uring dispatch path is
+       implemented; until then we use a 1-byte minimum
+       read just to surface EFAULT on bogus pointers.
+
+     Build: cargo build -p kernel clean (36.37s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 23s).

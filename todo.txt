@@ -20751,4 +20751,80 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
 
+## 267. [DONE 2026-06-05] Linux ABI: move_mount — MOVE_MOUNT_BENEATH +
+##      MOVE_MOUNT_SET_GROUP mutual-exclusion -EINVAL (batch 238).
+##
+##      Linux reference: fs/namespace.c, SYSCALL_DEFINE5(move_mount).
+##      Gate order is:
+##
+##          1. may_mount() (CAP_SYS_ADMIN in mnt_ns)         -> -EPERM
+##          2. flags & ~MOVE_MOUNT__MASK                     -> -EINVAL
+##          3. (flags & (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP))
+##             == (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP) -> -EINVAL
+##          4. user_path_at(from_dfd, from_pathname, lflags) -> -EFAULT
+##                                                              / -ENOENT
+##                                                              / ...
+##
+##      Pre-batch divergence: gate 3 (the BENEATH+SET_GROUP mutual
+##      exclusion) was missing.  Passing both bits together is
+##      semantically nonsense — moving a mount *beneath* a target
+##      while simultaneously requesting that the *propagation group*
+##      of the source be installed on the target has no defined
+##      behaviour — and Linux refuses it ahead of any path validation.
+##      A probe passing (flags = BENEATH | SET_GROUP |
+##      F_EMPTY_PATH | T_EMPTY_PATH, paths = NULL, NULL) saw our
+##      terminal -EPERM where Linux returns -EINVAL.
+##
+##      Fix: add the mutual-exclusion check after the flag-mask check
+##      and before any path validation:
+##
+##          if (flags & (BENEATH | SET_GROUP)) == (BENEATH | SET_GROUP)
+##              return -EINVAL;
+##
+##      We do NOT layer in may_mount()-first CAP_SYS_ADMIN ordering:
+##      our kernel-context tests have no credentials view, and the
+##      privileged caller path already terminates at -EPERM.  The
+##      may_mount ordering only matters for unprivileged callers
+##      with a real mnt_ns, which the boot env cannot model.
+##
+##      Self-tests added (after the existing valid->EPERM probe):
+##      - (flags = BENEATH | SET_GROUP | F_EMPTY_PATH | T_EMPTY_PATH,
+##         paths = NULL, NULL)                              -> EINVAL
+##                                                            (was
+##                                                             EPERM).
+##      - (flags = BENEATH | F_EMPTY_PATH | T_EMPTY_PATH,
+##         paths = NULL, NULL)                              -> EPERM
+##                                                            (BENEATH
+##                                                             alone is
+##                                                             legal, so
+##                                                             the gate
+##                                                             must not
+##                                                             fire).
+##      - (flags = SET_GROUP | F_EMPTY_PATH | T_EMPTY_PATH,
+##         paths = NULL, NULL)                              -> EPERM
+##                                                            (SET_GROUP
+##                                                             alone is
+##                                                             legal).
+##        Marker: "move_mount BENEATH|SET_GROUP mutual exclusion
+##        EINVAL: OK".
+##
+##      Existing tests preserved: bad-flags->EINVAL, NULL from-path
+##      without F_EMPTY_PATH->EFAULT, valid->EPERM.
+##
+##      Known limitations:
+##      - may_mount() CAP_SYS_ADMIN-first ordering not modeled (see
+##        above).  An unprivileged caller would see -EPERM ahead of
+##        the flag-mask check on Linux; we surface -EINVAL first
+##        because there is no caller credentials view in the
+##        dispatch-time test context.
+##      - user_path_at path-walking semantics are stubbed: any
+##        non-NULL path with a readable string passes our
+##        validate_user_str check and reaches the terminal -EPERM.
+##        Real path resolution (-EFAULT for bad addr, -ENOENT for
+##        missing dentry, -ELOOP for symlink cycles, etc.) is not
+##        implemented.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+
 

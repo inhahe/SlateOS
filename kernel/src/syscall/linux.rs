@@ -15105,9 +15105,40 @@ fn sys_move_mount(args: &SyscallArgs) -> SyscallResult {
         | MOVE_MOUNT_T_EMPTY_PATH
         | MOVE_MOUNT_SET_GROUP
         | MOVE_MOUNT_BENEATH;
+    // Linux gate order (fs/namespace.c::SYSCALL_DEFINE5(move_mount)):
+    //
+    //   1. may_mount() (CAP_SYS_ADMIN-in-mnt-ns)       -> -EPERM
+    //   2. flags & ~MOVE_MOUNT__MASK                   -> -EINVAL
+    //   3. (flags & (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP))
+    //         == (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP)
+    //                                                  -> -EINVAL
+    //   4. user_path_at(from_dfd, from_pathname, lflags, &from_path)
+    //                                                  -> -EFAULT/-ENOENT/...
+    //
+    // Pre-batch we honoured the flag-mask check (step 2) but lacked
+    // the BENEATH+SET_GROUP mutual-exclusion gate (step 3).  Linux
+    // documents this combination as nonsensical — moving a mount
+    // *beneath* a target while simultaneously requesting that the
+    // *propagation group* of the source be set on the target has
+    // no defined semantics — and rejects it with -EINVAL before any
+    // path validation runs.  A probe passing
+    // (flags = BENEATH | SET_GROUP | F_EMPTY_PATH | T_EMPTY_PATH,
+    //  paths = NULL, NULL) saw our terminal -EPERM where Linux
+    // returns -EINVAL.
+    //
+    // We do not implement step 1 (may_mount() CAP_SYS_ADMIN check
+    // first): the privileged path returns -EPERM as our terminal,
+    // and our kernel-context tests run without a credentials view.
+    // The CAP_SYS_ADMIN ordering manifests only for an unprivileged
+    // caller with a real mnt_ns, which our test env cannot model.
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg4 as u32;
     if flags & !MOVE_MOUNT_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if (flags & (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP))
+        == (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP)
+    {
         return linux_err(errno::EINVAL);
     }
     if args.arg1 != 0 {
@@ -37924,6 +37955,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: move_mount valid not EPERM");
             return Err(KernelError::InternalError);
         }
+        // Batch 238: Linux gates MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP
+        // as -EINVAL ahead of any path validation.  The two flags
+        // together are semantically meaningless (move-beneath +
+        // set-propagation-group has no defined behaviour) and Linux
+        // refuses the call before user_path_at runs.
+        //
+        // Probe: (flags = BENEATH | SET_GROUP | F_EMPTY_PATH |
+        //                 T_EMPTY_PATH, paths = NULL, NULL).
+        // Pre-batch we passed the flag-mask check, the EMPTY_PATH
+        // bits suppressed both -EFAULT path gates, and the terminal
+        // returned -EPERM.  Post-batch the mutual-exclusion gate
+        // fires and we return -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: u64::from(0x200_u32 | 0x100 | 0x4 | 0x40),
+            arg5: 0,
+        };
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_mount BENEATH|SET_GROUP not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Sibling probe: BENEATH alone (without SET_GROUP) is a legal
+        // flag combination — the mutual-exclusion gate must NOT fire,
+        // and with EMPTY_PATH set on both sides the path gates also
+        // skip, so we reach the terminal -EPERM.  Confirms the gate
+        // is keyed on BOTH bits and not just BENEATH.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: u64::from(0x200_u32 | 0x4 | 0x40),
+            arg5: 0,
+        };
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_mount BENEATH (alone) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Sibling probe: SET_GROUP alone (without BENEATH) is also
+        // legal; same EPERM terminal as plain valid call.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: u64::from(0x100_u32 | 0x4 | 0x40),
+            arg5: 0,
+        };
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_mount SET_GROUP (alone) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   move_mount BENEATH|SET_GROUP mutual exclusion EINVAL: OK"
+        );
     }
 
     // -----------------------------------------------------------------

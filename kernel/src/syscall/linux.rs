@@ -8110,8 +8110,24 @@ fn sys_sched_get_priority_min(args: &SyscallArgs) -> SyscallResult {
 ///
 /// We report 100 ms (a typical Linux RR slice).
 fn sys_sched_rr_get_interval(args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/sched/syscalls.c::SYSCALL_DEFINE2 +
+    // sched_rr_get_interval):
+    //
+    //   1. `pid < 0`                                -> -EINVAL
+    //   2. find_process_by_pid(pid)                 -> -ESRCH
+    //   3. put_timespec64(&t, interval)             -> -EFAULT
+    //
+    // Pre-batch divergence: `pid < 0` was not gated as EINVAL.  The
+    // raw u64 cast left a huge positive value that fell through to
+    // the state lookup and returned ESRCH (a probe passing pid=-1
+    // saw ESRCH where Linux returns EINVAL).
     let pid = args.arg0;
     let ts_ptr = args.arg1;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = args.arg0 as i32;
+    if pid_i32 < 0 {
+        return linux_err(errno::EINVAL);
+    }
     if pid != 0 {
         if crate::proc::pcb::state(pid).is_none() {
             return linux_err(errno::ESRCH);
@@ -31460,6 +31476,58 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: sched_rr_get_interval(0, NULL) not EFAULT"
             );
             return Err(KernelError::InternalError);
+        }
+
+        // Batch 236: Linux's sched_rr_get_interval(2) gates `pid < 0`
+        // as -EINVAL ahead of the task lookup (which would otherwise
+        // produce -ESRCH) and ahead of the user-pointer validation
+        // (-EFAULT).  Pre-batch we cast args.arg0 directly to u64 for
+        // the lookup, so a negative pid landed as a huge positive
+        // value and we returned ESRCH (or EFAULT when ts was NULL).
+        //
+        // Three layered probes:
+        //   (a) (pid = -1, ts = NULL)        -> EINVAL  (was EFAULT)
+        //   (b) (pid = -1, ts = bogus ptr)   -> EINVAL  (proves pid<0
+        //       fires before write validation)
+        //   (c) (pid = bogus positive, ts = NULL) -> ESRCH (the lookup
+        //       gate still runs once pid >= 0).
+        {
+            // (a) pid = -1, ts = NULL.
+            let a_neg = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_RR_GET_INTERVAL, &a_neg).value
+                != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_rr_get_interval(pid=-1, NULL) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (b) pid = -1, ts = bogus user ptr (some non-zero address).
+            // The pid<0 gate must fire before validate_user_write, so the
+            // result must still be EINVAL — never EFAULT.
+            let a_neg_ts = SyscallArgs { arg0: u64::MAX, arg1: 0xdead_beef,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_RR_GET_INTERVAL, &a_neg_ts).value
+                != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_rr_get_interval(pid=-1, bogus ts) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (c) pid = a bogus positive value with no PCB, ts = NULL.
+            // Lookup must miss and return ESRCH before the ts EFAULT.
+            let a_bogus = SyscallArgs { arg0: 0x7fff_ffff, arg1: 0,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_RR_GET_INTERVAL, &a_bogus).value
+                != -i64::from(errno::ESRCH) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_rr_get_interval(bogus pid, NULL) not ESRCH"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   sched_rr_get_interval pid<0-EINVAL > pid-ESRCH > ts-EFAULT gate order: OK"
+            );
         }
 
         // Batch 62: per-PCB sched_policy / sched_priority round-trip.

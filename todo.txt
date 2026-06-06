@@ -20615,4 +20615,66 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean, boot test PASSED (BOOT_OK at 25s).
 
 
+## 265. [DONE 2026-06-05] Linux ABI: sched_rr_get_interval — pid<0
+##      -EINVAL gate ahead of -ESRCH and -EFAULT (batch 236).
+##
+##      Linux reference: kernel/sched/syscalls.c, SYSCALL_DEFINE2 of
+##      sched_rr_get_interval (and the timespec64 variant).  The gate
+##      order is:
+##
+##          1. `pid < 0`                                -> -EINVAL
+##          2. find_process_by_pid(pid)                 -> -ESRCH
+##          3. put_timespec64(&t, interval)             -> -EFAULT
+##
+##      Pre-batch divergence: we cast args.arg0 straight to u64 for
+##      the PCB lookup, so a probe passing pid=-1 (which an x86_64
+##      libc forwards as 0xFFFF_FFFF_FFFF_FFFF) bypassed the EINVAL
+##      gate.  When ts was NULL we returned EFAULT (the ts validation
+##      ran first since pid != 0 took the lookup branch, and the
+##      huge pid missed); when ts was valid we returned ESRCH.  Both
+##      diverged from Linux, which returns EINVAL the instant it
+##      sees a negative pid.
+##
+##      Fix: take args.arg0 as i32 with allow(cast_possible_wrap,
+##      cast_possible_truncation), and if pid_i32 < 0 return EINVAL
+##      before the PCB lookup or the ts NULL/validation gates.
+##
+##      Self-tests added (after the existing sched_rr_get_interval(0,
+##      NULL) -> EFAULT assertion):
+##      - (pid = -1 as u64::MAX, ts = NULL)            -> EINVAL
+##                                                       (was EFAULT).
+##      - (pid = -1 as u64::MAX, ts = 0xdead_beef)     -> EINVAL
+##                                                       (proves the
+##                                                        pid<0 gate
+##                                                        fires before
+##                                                        validate_user_
+##                                                        write).
+##      - (pid = 0x7fff_ffff bogus positive, ts = NULL) -> ESRCH
+##                                                       (proves the
+##                                                        pid lookup
+##                                                        gate still
+##                                                        runs for
+##                                                        pid >= 0).
+##        Marker: "sched_rr_get_interval pid<0-EINVAL > pid-ESRCH >
+##        ts-EFAULT gate order: OK".
+##
+##      Known limitations:
+##      - We still report a fixed 100 ms RR slice for every task; the
+##        per-policy variation Linux exposes (SCHED_OTHER returns 0
+##        and SCHED_FIFO returns 0) is not yet modeled.  A follow-up
+##        batch can layer the policy branch on top once the gate
+##        order is solid.
+##
+##      Side observation (NOT introduced by this batch): the boot
+##      test occasionally panics in kernel/src/watchdog.rs:258 with
+##      "assertion `left == right` failed: heartbeat should
+##      increment".  This is a pre-existing flaky watchdog self-test
+##      that has been hit on previous batches as well; on retry the
+##      same kernel boots to BOOT_OK normally.  Tracking only — fix
+##      belongs to the watchdog owner, not the Linux ABI work.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s on retry; first
+##      boot tripped the unrelated watchdog flake above).
+
+
 

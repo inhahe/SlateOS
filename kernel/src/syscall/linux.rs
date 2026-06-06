@@ -15123,6 +15123,52 @@ fn sys_pivot_root(_args: &SyscallArgs) -> SyscallResult {
 /// Union = `0x7_FFFF` (`SWAP_FLAGS_VALID`).
 fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
     const SWAP_FLAGS_VALID: u64 = 0x7_FFFF;
+    // Linux gate order (mm/swapfile.c::SYSCALL_DEFINE2(swapon)):
+    //
+    //   SYSCALL_DEFINE2(swapon, const char __user *, specialfile,
+    //                   int, swap_flags)
+    //   {
+    //       ...
+    //       if (swap_flags & ~SWAP_FLAGS_VALID)
+    //           return -EINVAL;                  // (1) flag mask
+    //
+    //       if (!capable(CAP_SYS_ADMIN))
+    //           return -EPERM;                   // (2) CAP gate
+    //
+    //       if (!swap_avail_heads)
+    //           return -ENOMEM;
+    //
+    //       name = getname(specialfile);         // (3) EFAULT later
+    //       ...
+    //   }
+    //
+    // Note: the flag mask check INTENTIONALLY precedes CAP — unlike
+    // swapoff (which CAP-checks first) — so unprivileged callers can
+    // discover that a particular flag bit is unknown.  This is a
+    // documented kernel-side ABI quirk: see `mm/swapfile.c` and
+    // todo 173.
+    //
+    // After the flag mask, however, Linux's NEXT gate is CAP_SYS_ADMIN,
+    // NOT getname.  Pre-batch we ran:
+    //   * flag mask                        -> EINVAL
+    //   * args.arg0 == 0                   -> EFAULT (pre-CAP, wrong)
+    //   * validate_user_read(args.arg0, 1) -> EFAULT (pre-CAP, wrong)
+    //   * then EPERM.
+    //
+    // Concrete divergence:
+    //   * swapon(NULL, 0)                  Linux: EPERM.  Pre: EFAULT.
+    //   * swapon(0xDEAD, 0)                Linux: EPERM.  Pre: EFAULT.
+    //   * swapon(NULL, 0x100_0000)         Linux: EINVAL  Pre: EINVAL.
+    //                                                     (mask wins,
+    //                                                      ok already.)
+    //
+    // The errno selection matters to swap-management daemons that probe
+    // CAP_SYS_ADMIN by calling swapon with NULL or a known-bad pointer
+    // expecting EPERM to abort fast.  EFAULT signals "your pointer is
+    // bad, maybe retry with a different one" — a retry loop that can
+    // never succeed without CAP_SYS_ADMIN.  Sister of the batch-343
+    // swapoff fix.
+    //
     // Linux signature: `SYSCALL_DEFINE2(swapon, const char __user *,
     // specialfile, int, swap_flags)`.  `swap_flags` is declared `int`
     // (32-bit), so the x86_64 syscall ABI truncates args.arg1 to its
@@ -15138,12 +15184,9 @@ fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
     if swap_flags & !SWAP_FLAGS_VALID != 0 {
         return linux_err(errno::EINVAL);
     }
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Architectural directive: we have no swap subsystem and no caller
+    // holds CAP_SYS_ADMIN.  Linux's gate-2 always trips, BEFORE getname
+    // ever runs.  Return EPERM without touching the specialfile ptr.
     linux_err(errno::EPERM)
 }
 
@@ -45914,6 +45957,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: swapon(prefer+prio) not EPERM");
             return Err(KernelError::InternalError);
         }
+        // Batch 375: swapon(NULL, 0) - pre-batch EFAULT (NULL ptr check
+        // ran before CAP); Linux EPERM (CAP_SYS_ADMIN check is gate-2
+        // in mm/swapfile.c::SYSCALL_DEFINE2(swapon), right after the
+        // flag mask).  Sister of the batch-343 swapoff fix.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SWAPON, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: swapon(NULL) not EPERM ({})",
+                dispatch_linux(nr::SWAPON, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // swapon(NULL, bad flag bit) -> EINVAL (flag mask wins over
+        // CAP even with NULL ptr — verifies the gate order).
+        let a = SyscallArgs { arg0: 0, arg1: 0x8000_0000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SWAPON, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: swapon(NULL,bad flag) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // swapon(0xDEAD, 0) - bogus non-NULL ptr also collapses to
+        // EPERM now that the pre-CAP getname is gone.  Pre-batch
+        // would have hit validate_user_read and returned EFAULT.
+        let a = SyscallArgs { arg0: 0xDEAD, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SWAPON, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: swapon(0xDEAD) not EPERM ({})",
+                dispatch_linux(nr::SWAPON, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   swapon gate-order EPERM-after-mask (no pre-CAP getname): OK"
+        );
         // swapoff(path) -> EPERM.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

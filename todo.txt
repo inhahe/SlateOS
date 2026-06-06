@@ -33845,3 +33845,86 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (38.47s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+405. [BATCH 375 — 2026-06-06 — sys_swapon gate-order EPERM-
+     after-mask (kernel/src/syscall/linux.rs)]
+
+     Linux divergence: pre-batch sys_swapon validated the
+     specialfile pointer (NULL check + validate_user_read) BEFORE
+     reaching the EPERM terminal.  Linux's gate order in
+     mm/swapfile.c::SYSCALL_DEFINE2(swapon) is:
+
+       (1) flag mask: `if (swap_flags & ~SWAP_FLAGS_VALID)
+                       return -EINVAL;`
+       (2) CAP gate:  `if (!capable(CAP_SYS_ADMIN))
+                       return -EPERM;`
+       (3) ENOMEM:    `if (!swap_avail_heads) return -ENOMEM;`
+       (4) getname:   `name = getname(specialfile);`
+
+     The flag mask is intentionally pre-CAP (so unprivileged
+     callers can probe unknown flag bits — see batch-301 / todo
+     173), but the getname() call comes AFTER CAP.  Pre-batch we
+     ran NULL/range checks pre-CAP, which is the same wrong-shape
+     pattern fixed for swapoff in batch 343.
+
+     Concrete divergences:
+       * swapon(NULL,   0)            Linux: EPERM  Pre: EFAULT
+       * swapon(0xDEAD, 0)            Linux: EPERM  Pre: EFAULT
+                                      (validate_user_read range
+                                       rejection — would-be
+                                       EFAULT in real userspace;
+                                       in self-test the validator
+                                       is a no-op so this fell
+                                       through to EPERM, but the
+                                       gate order was still wrong.)
+       * swapon(NULL,   0x100_0000)   Linux: EINVAL Pre: EINVAL
+                                      (mask gate fires first;
+                                       matches Linux.)
+       * swapon(valid,  0)            Linux: EPERM  Pre: EPERM
+                                      (same terminal; both ok.)
+
+     Why this matters: swap-management daemons (systemd-swap,
+     dphys-swapfile, custom mkswap scripts) probe CAP_SYS_ADMIN
+     by calling swapon with NULL or a known-bad pointer expecting
+     EPERM to "fail fast and abort."  EFAULT signals "your
+     pointer is bad, maybe retry with a different one" — a retry
+     loop that can never succeed without CAP_SYS_ADMIN.  Same
+     errno-selection reasoning as the batch-343 swapoff fix.
+
+     Fix: drop the args.arg0 == 0 and validate_user_read checks
+     entirely.  After the flag mask passes, the next answer is
+     EPERM regardless of specialfile ptr shape:
+
+       const SWAP_FLAGS_VALID: u64 = 0x7_FFFF;
+       let swap_flags = (args.arg1 as i32) as u32 as u64;
+       if swap_flags & !SWAP_FLAGS_VALID != 0 {
+           return linux_err(errno::EINVAL);
+       }
+       linux_err(errno::EPERM)
+
+     Architectural directive: we have no swap subsystem and no
+     caller holds CAP_SYS_ADMIN.  Linux's gate-2 always trips,
+     BEFORE getname ever runs.  EPERM unconditionally after the
+     flag mask.
+
+     Probes added (3 new, 3 existing kept):
+       * swapon(NULL, 0)               -> EPERM (was EFAULT pre-
+         batch — the main fix).
+       * swapon(NULL, 0x8000_0000)     -> EINVAL (VERIFIES mask
+         gate still wins over the new EPERM terminal).
+       * swapon(0xDEAD, 0)             -> EPERM (verifies bogus
+         non-NULL ptr also collapses to EPERM; would have hit
+         validate_user_read pre-batch in real userspace).
+
+     Existing kept:
+       * swapon(0x1000, 0)             -> EPERM.
+       * swapon(0x1000, 0x8000_0000)   -> EINVAL.
+       * swapon(0x1000, 0x8000|5)      -> EPERM.
+
+     Final boot-time stamp:
+         "[syscall/linux]   swapon gate-order EPERM-after-mask
+          (no pre-CAP getname): OK"
+
+     Build: cargo build -p kernel clean (37.75s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 23s).

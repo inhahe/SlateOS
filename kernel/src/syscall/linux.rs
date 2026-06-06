@@ -19808,39 +19808,68 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `rt_sigtimedwait(set*, info*, timeout*, sigsetsize)`.
+///
+/// Linux gate order (kernel/signal.c
+/// `SYSCALL_DEFINE4(rt_sigtimedwait, ...)`):
+///   1. `sigsetsize != sizeof(sigset_t)`         -> EINVAL
+///   2. `copy_from_user(uthese, sigset_t)`       -> EFAULT
+///   3. if `uts != NULL`: `get_timespec64(uts)`  -> EFAULT
+///      (copy_from_user 16 bytes; no value check here)
+///   4. `do_sigtimedwait`:
+///        a. `timespec64_valid(&ts)`             -> EINVAL
+///        b. schedule_timeout / dequeue_signal
+///        c. signal arrived: `copy_siginfo_to_user(uinfo)` -> EFAULT
+///        d. timeout fired                        -> EAGAIN
+///
+/// Critical: `uinfo` is NEVER validated upfront. Linux only touches
+/// the user info buffer inside `do_sigtimedwait` *after* a signal has
+/// been dequeued (step 4c). For the timeout-only path (step 4d),
+/// `uinfo` is left strictly untouched — a NULL or bogus `uinfo`
+/// produces EAGAIN, not EFAULT.
+///
+/// Pre-batch (356) divergence fixed: we eagerly validated `uinfo`
+/// after `uthese` and before `uts`, so:
+///   * A caller passing `uinfo=NULL` always observed EFAULT, even
+///     when the well-formed timeout would have produced EAGAIN
+///     under Linux.
+///   * Our gate order placed `uinfo` before `uts`, so a probe
+///     combining bad `uinfo` + bad `uts` saw the wrong errno
+///     discriminator (EFAULT-from-uinfo instead of EFAULT-from-uts
+///     or EINVAL-from-bad-value).
+///
+/// Since our implementation always returns EAGAIN (we never inject a
+/// signal into this path), we mirror Linux step 4d exactly: `uinfo`
+/// is never read or written, so it doesn't matter what the caller
+/// passed.
 fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
+    // Gate 1: sigsetsize must equal sizeof(sigset_t)=8.
     if args.arg3 != 8 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 2: copy_from_user(uthese, 8) equivalent.  Linux's
+    // copy_from_user returns -EFAULT for NULL or unmapped buffers.
+    // validate_user_read maps the same.
     if args.arg0 == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 8) {
         return linux_err(linux_errno_for(e));
     }
-    if args.arg1 != 0 {
-        // struct siginfo is 128 bytes on Linux.
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 128) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+    // Gate 3+4a: if a timeout was supplied, validate readability
+    // (EFAULT) and timespec64_valid value range (EINVAL).
+    // validate_user_timespec64 returns the precomposed EFAULT or
+    // EINVAL SyscallResult — same discriminator Linux produces.
     if args.arg2 != 0 {
-        // Linux's `do_sigtimedwait` runs `timespec64_valid` on the
-        // copied-in timespec: tv_sec >= 0 AND
-        // tv_nsec in [0, NSEC_PER_SEC).  Pre-batch we only validated
-        // readability, so a malformed value (e.g. {tv_sec=-1, 0} or
-        // {0, 1_000_000_000}) sailed through and returned the same
-        // EAGAIN as a well-formed finite timeout — silently wrong
-        // vs Linux's EINVAL.  Use the shared helper for parity with
-        // futex2_wait, mq_timedsend, recvmmsg, etc.
         if let Err(r) = validate_user_timespec64(args.arg2) {
             return r;
         }
     }
-    // Documented: returns EAGAIN when the timeout expires without a
-    // matching signal arriving.  We never deliver signals into this
-    // path, so EAGAIN is truthful for any finite timeout, and we treat
-    // a NULL (= infinite) timeout the same way to avoid hanging.
+    // Gate 4d: timeout fired.  Linux returns EAGAIN with `uinfo`
+    // untouched.  We do the same.  We treat NULL (= infinite)
+    // timeout identically because we have no path that injects a
+    // matching signal into this stub yet — hanging the caller would
+    // be worse than the Linux-fidelity divergence on the infinite
+    // timeout.  This shortcut is documented in todo.txt.
     linux_err(errno::EAGAIN)
 }
 
@@ -49434,6 +49463,49 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   rt_sigtimedwait timespec value gating: OK"
         );
+
+        // Batch 357: rt_sigtimedwait `uinfo` is never validated upfront.
+        // Linux's gate order is sigsetsize -> uthese -> uts -> EAGAIN,
+        // with `uinfo` touched only inside do_sigtimedwait *after* a
+        // signal is dequeued (the EAGAIN/timeout path leaves it
+        // untouched).  Pre-batch we ran a validate_user_write(uinfo, 128)
+        // gate after the uthese copy, which mattered for real userspace
+        // callers passing a bogus uinfo (Linux: EAGAIN, ours: EFAULT)
+        // and reordered the errno discriminator when uts was also bad.
+        //
+        // In boot self-test the kernel-context bypass made the eager
+        // validate_user_write trivially succeed, so the divergence was
+        // invisible here; this probe is a regression guard that pins
+        // the new contract.  We deliberately pass a non-NULL but
+        // structurally invalid `uinfo = 0xCAFEBABE` (a "looks-like-
+        // garbage" sentinel that, if ever re-introduced into a real
+        // validate_user_write call once the bypass is lifted, will
+        // immediately surface as EFAULT).
+        //
+        //   valid uthese, garbage uinfo, valid 0-timeout -> EAGAIN
+        {
+            let good_ts: [i64; 2] = [0, 0];
+            let good_ts_ptr = (&raw const good_ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: buf_ptr,
+                arg1: 0xCAFE_BABE,
+                arg2: good_ts_ptr,
+                arg3: 8, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&good_ts);
+            if dispatch_linux(nr::RT_SIGTIMEDWAIT, &a).value
+                != -i64::from(errno::EAGAIN)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rt_sigtimedwait garbage uinfo not EAGAIN ({})",
+                    dispatch_linux(nr::RT_SIGTIMEDWAIT, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   rt_sigtimedwait garbage uinfo + valid uts -> EAGAIN: OK"
+            );
+        }
 
         // rt_sigqueueinfo bad sig + valid info -> EINVAL (sig range
         // check fires after the info-copy succeeds).

@@ -32122,3 +32122,77 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (44.35s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 27s).
+
+387. syscall/linux batch 357 — sys_rt_sigtimedwait: drop eager
+     uinfo validation; mirror Linux's gate order.
+
+     Pre-batch `fn sys_rt_sigtimedwait` had a translator-level
+     gate-order divergence:
+
+       Bug: when `uinfo != NULL`, we eagerly called
+       `validate_user_write(args.arg1, 128)` after the `uthese`
+       copy_from_user gate and BEFORE the `uts` gate.  Linux's
+       `SYSCALL_DEFINE4(rt_sigtimedwait, ...)`
+       (kernel/signal.c) does no such thing — it validates only
+       sigsetsize, uthese (copy_from_user), and uts (get_timespec64),
+       then calls `do_sigtimedwait`.  `uinfo` is touched only
+       *inside* `do_sigtimedwait`, and *only* on the path where
+       a signal has been successfully dequeued
+       (`copy_siginfo_to_user(uinfo, &info)`).  The timeout path
+       (which is the path our stub always takes — we never inject
+       a signal into rt_sigtimedwait yet) leaves `uinfo` strictly
+       untouched and returns -EAGAIN.
+
+     Real-userspace impact pre-batch:
+       * Caller passes valid uthese + valid uts + bogus uinfo
+         (e.g. NULL is allowed by Linux when no signal is being
+         waited for, but pre-batch we still ran validate on
+         arg1=0; the explicit `if args.arg1 != 0` guard hid that
+         specific case, but a non-NULL-but-unmapped uinfo turned
+         a Linux EAGAIN into our EFAULT).
+       * Combined bad uts + bad uinfo got the wrong errno
+         discriminator (EFAULT-from-uinfo instead of EFAULT-from-
+         uts copy_from_user or EINVAL-from-bad-timespec64-value).
+
+     Boot-self-test impact: invisible — `validate_user_write`
+     returns Ok unconditionally in kernel context (the
+     documented bypass for tasks with no owning process).  The
+     fix is therefore "correct under real userspace, no behavior
+     change in self-test."  But we add a regression-guard probe
+     so the contract is pinned for the day the bypass goes
+     away.
+
+     Post-batch gate sequence (matching Linux):
+       1. sigsetsize != 8                         -> EINVAL
+       2. uthese NULL guard +
+          validate_user_read(uthese, 8)           -> EFAULT
+       3. uts != NULL: validate_user_timespec64   -> EFAULT
+          or EINVAL (per timespec64_valid)
+       4. (timeout fires)                          -> EAGAIN
+       5. uinfo: never touched.
+
+     Self-test probe added (boot output prefix
+     `[syscall/linux]   rt_sigtimedwait ...`):
+
+       garbage uinfo + valid uts -> EAGAIN:
+         dispatch_linux with arg0=valid mask, arg1=0xCAFE_BABE
+         (deliberately-garbage uinfo sentinel), arg2=valid
+         {tv_sec=0, tv_nsec=0}, arg3=8 -> EAGAIN.  Pin-down
+         that the new wrapper never dereferences uinfo on the
+         timeout path.  The 0xCAFE_BABE sentinel will surface
+         as EFAULT immediately if anyone reintroduces an eager
+         validate_user_write(uinfo) gate once the kernel-
+         context bypass is lifted.
+
+     Architectural directive: TRANSLATOR-only fix.  No change
+     to the native signal subsystem or to do_sigtimedwait
+     (which we don't have).  The infinite-timeout shortcut
+     (NULL uts -> still EAGAIN instead of "block forever") is
+     still in effect and is documented in todo entry around
+     batch 300 — it's a deliberate concession to keep the boot
+     self-test from hanging until we have a real
+     dequeue_signal path wired in.
+
+     Build: cargo build -p kernel clean (42.03s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

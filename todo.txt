@@ -25687,3 +25687,145 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (43.51s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 24s).
+
+324. Linux ABI batch 294 — sys_pidfd_open /
+     sys_pidfd_send_signal / sys_pidfd_getfd: `unsigned
+     int flags` register truncation across the whole
+     pidfd family.
+
+     Pre-batch divergences
+     ---------------------
+     Linux declares
+       int sys_pidfd_open(pid_t pid, unsigned int flags);
+       int sys_pidfd_send_signal(int pidfd, int sig,
+                                 siginfo_t __user *info,
+                                 unsigned int flags);
+       int sys_pidfd_getfd(int pidfd, int targetfd,
+                           unsigned int flags);
+     The x86_64 syscall ABI truncates each `flags` arg
+     to 32 bits before the body runs.  Pre-batch the
+     pid / fd / sig args were already truncated by
+     earlier batches, but each stub still tested
+     `args.argN != 0` (or `args.argN & !VALID_FLAGS`)
+     against the raw u64.  Probes saw:
+
+       pidfd_open (pid=missing, flags=0x1_0000_0000):
+         Linux : flags trunc to 0 → ESRCH from lookup
+         Ours  : raw & !VALID_FLAGS != 0 → EINVAL
+
+       pidfd_open with high garbage + PIDFD_NONBLOCK
+       (flags=0x1_0000_0800):
+         Linux : flags trunc to 0x800 = PIDFD_NONBLOCK
+                 → valid → ESRCH from lookup
+         Ours  : raw 0x1_0000_0800 & !0x880 ≠ 0
+                 → EINVAL
+
+       pidfd_send_signal (fd=0, sig=9, info=NULL,
+                          flags=0x1_0000_0000):
+         Linux : flags trunc to 0 → fdget(0) on
+                 kernel ctx → EBADF
+         Ours  : raw != 0 → EINVAL
+
+       pidfd_getfd (pidfd=3, targetfd=0,
+                    flags=0x1_0000_0000):
+         Linux : flags trunc to 0 → fdget(3) on
+                 kernel ctx → EBADF
+         Ours  : raw != 0 → EINVAL
+
+     Fixes
+     -----
+     - sys_pidfd_open:
+         * `VALID_FLAGS` constants redeclared as u32
+           (PIDFD_NONBLOCK = 0o4000, PIDFD_THREAD =
+           0o200).
+         * `flags = args.arg1 as u32` at entry; the
+           `flags & !VALID_FLAGS != 0` gate now runs
+           against the truncated value.
+         * `nonblock` derivation now reads
+           `flags & PIDFD_NONBLOCK` instead of the raw
+           `args.arg1 & 0o4000`.
+     - sys_pidfd_send_signal:
+         * `flags = args.arg3 as u32` at entry; the
+           `flags != 0` reservation gate now runs
+           against the truncated value.
+     - sys_pidfd_getfd:
+         * `flags = args.arg2 as u32` at entry; the
+           `flags != 0` reservation gate now runs
+           against the truncated value.
+
+     Existing self-tests
+     -------------------
+     None required restructuring:
+       - pidfd_open(0, 0) → EINVAL          (pid_i32 ≤ 0)
+       - pidfd_open(1, 1) → EINVAL          (1 still bad after u32)
+       - pidfd_open(0x7FFF_FFFE, 0o200)     → ESRCH
+       - pidfd_open(0x7FFF_FFFE, 0o4200)    → ESRCH
+       - pidfd_open(0x7FFF_FFFE, 0)         → ESRCH
+       - pidfd_send_signal(0, 999, 0, 0)    → EBADF
+                                              (fdget first; 999 sig
+                                               OK after truncation)
+       - pidfd_send_signal(u64::MAX, 9, 0, 1)
+                                            → EINVAL
+                                              (flags=1 truncated to 1,
+                                               still != 0)
+       - pidfd_send_signal(0, 999, 0x1, 0)  → EBADF
+       - pidfd_send_signal(3, 9, 0, 0)      → EBADF
+       - pidfd_getfd(0, 0, 1, 0)            → EINVAL
+       - pidfd_getfd(0, u64::MAX, 0, 0)     → EBADF
+                                              (target_fd<0)
+       - pidfd_getfd(3, 0, 0, 0)            → EBADF
+
+     New self-tests demonstrating the truncation
+     -------------------------------------------
+       - pidfd_open(0x7FFF_FFFE, 0x1_0000_0000)
+         → ESRCH  (flags truncates to 0)
+       - pidfd_open(0x7FFF_FFFE, 0x1_0000_0800)
+         → ESRCH  (flags truncates to PIDFD_NONBLOCK)
+       - pidfd_send_signal(0, 9, 0, 0x1_0000_0000)
+         → EBADF  (flags truncates to 0)
+       - pidfd_getfd(3, 0, 0x1_0000_0000, 0)
+         → EBADF  (flags truncates to 0)
+
+     Marker:
+       "pidfd_{open,send_signal,getfd} uint flags
+        truncation: OK"
+
+     Preserved self-tests
+     --------------------
+     All prior pidfd_* boot probes (the four listed
+     above per syscall) plus the `register_ipc_handle
+     pidfd_getfd wiring` end-to-end install test.
+
+     Known limitations
+     -----------------
+     - Linux's pidfd_open declares the pid arg as
+       `pid_t` and rejects pid <= 0 with EINVAL — we
+       match.  Linux additionally walks the namespace
+       hierarchy (pidfd_get_pid honours the calling
+       process's pid namespace); we don't model
+       namespaces beyond global pids.  Independent of
+       truncation.
+     - Linux's pidfd_send_signal info struct
+       (siginfo_t = 128 bytes) carries SI_USER vs
+       SI_KERNEL provenance that we discard — we hand
+       off to sys_kill which synthesises its own
+       si_code.  Documented under entry 271's known
+       limitations.
+     - pidfd_send_signal also accepts a `PIDFD_SIGNAL_*`
+       flags bit set on Linux 6.9+ (PIDFD_SIGNAL_THREAD
+       and friends); we still treat any non-zero
+       truncated flags as EINVAL.  Independent of
+       this batch's u64→u32 fix.
+
+     During this batch's first build I shipped Probe B
+     with arg1=0x1_0000_4000 by accident (confusing
+     hex 0x4000 with octal 0o4000).  The boot test
+     caught it (probe returned -22 EINVAL where ESRCH
+     was expected) and the fix swapped in 0x1_0000_0800.
+     Documented because a future audit may re-derive
+     these constants and the octal/hex confusion is a
+     well-trodden trap.
+
+     Build: cargo build -p kernel clean (53.55s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 24s).

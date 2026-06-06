@@ -12697,10 +12697,17 @@ fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
     // this layer — both end up referring to a process via raw_handle —
     // so accept the flag and treat it as a hint until a real
     // thread-aware pidfd lands.
-    const PIDFD_NONBLOCK: u64 = 0o4000;
-    const PIDFD_THREAD: u64 = 0o200;
-    const VALID_FLAGS: u64 = PIDFD_NONBLOCK | PIDFD_THREAD;
-    if args.arg1 & !VALID_FLAGS != 0 {
+    const PIDFD_NONBLOCK: u32 = 0o4000;
+    const PIDFD_THREAD: u32 = 0o200;
+    const VALID_FLAGS: u32 = PIDFD_NONBLOCK | PIDFD_THREAD;
+    // Linux declares `unsigned int flags`; the x86_64 ABI truncates
+    // args.arg1 to 32 bits before the body runs.  Pre-batch we held
+    // it as raw u64, so a probe like flags=0x1_0000_0000 saw EINVAL
+    // where Linux's truncated flags=0 lets the call through to the
+    // pid lookup.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg1 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -12719,7 +12726,7 @@ fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return linux_err(errno::EBADF),
     };
-    let nonblock = (args.arg1 & 0o4000) != 0;
+    let nonblock = (flags & PIDFD_NONBLOCK) != 0;
     let mut status = oflags::O_RDWR;
     if nonblock {
         status |= oflags::O_NONBLOCK;
@@ -12763,7 +12770,14 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
     // BEFORE looking up the fd, so callers probing with a bogus
     // (fd=anything, sig=999) saw EINVAL where Linux returns EBADF
     // (fdget fires first).  Reorder to match.
-    if args.arg3 != 0 {
+    // Linux declares `unsigned int flags`; the x86_64 ABI truncates
+    // args.arg3 to 32 bits before the body runs.  Pre-batch we held
+    // it as raw u64 and tested != 0, so a probe like
+    // flags=0x1_0000_0000 fired EINVAL where Linux's truncated
+    // flags=0 lets the call through to the fdget path.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -12839,8 +12853,13 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
 ///   * `EMFILE` — caller's fd table is full
 ///                (propagated from `linux_fd_install`).
 fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
-    // flags reserved.
-    if args.arg2 != 0 {
+    // flags reserved.  Linux declares `unsigned int flags`; the
+    // x86_64 ABI truncates args.arg2 to 32 bits before the body runs.
+    // Pre-batch the raw-u64 != 0 check rejected flags=0x1_0000_0000
+    // where Linux's truncated flags=0 lets the call through.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -38112,6 +38131,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Batch 294 int-truncation probes.  All three pidfd_* syscalls
+        // declare `unsigned int flags`; the x86_64 ABI truncates
+        // args.arg{1,3,2} to u32 before the body runs.  Pre-batch the
+        // raw-u64 reservation gate fired EINVAL where Linux's truncated
+        // flags=0 lets the call through to the existence / fdget check.
+
+        // Probe A — pidfd_open flags=0x1_0000_0000 truncates to 0,
+        // pid=0x7FFF_FFFE (missing).  Linux: ESRCH from lookup.
+        // Pre-batch: raw flags & !VALID_FLAGS != 0 → EINVAL (wrong).
+        let a = SyscallArgs {
+            arg0: 0x7FFF_FFFE,
+            arg1: 0x1_0000_0000,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIDFD_OPEN, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_open flags truncates to 0 not ESRCH ({})",
+                dispatch_linux(nr::PIDFD_OPEN, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe B — pidfd_open with garbage high bits AND a valid
+        // PIDFD_NONBLOCK low bit truncates to 0o4000 (= 0x800).
+        // Same ESRCH expected — proves the high bits don't pollute
+        // the VALID_FLAGS mask check.
+        let a = SyscallArgs {
+            arg0: 0x7FFF_FFFE,
+            arg1: 0x1_0000_0800,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIDFD_OPEN, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_open flags trunc to NONBLOCK not ESRCH ({})",
+                dispatch_linux(nr::PIDFD_OPEN, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe C — pidfd_send_signal flags=0x1_0000_0000 truncates
+        // to 0.  Linux: passes flags gate, fdget on fd=0 in kernel
+        // context → EBADF.  Pre-batch: raw != 0 → EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 9, arg2: 0,
+            arg3: 0x1_0000_0000,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_send_signal flags truncates to 0 not EBADF ({})",
+                dispatch_linux(nr::PIDFD_SEND_SIGNAL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe D — pidfd_getfd flags=0x1_0000_0000 truncates to 0.
+        // Linux: passes flags gate, fdget on pidfd=3 in kernel ctx →
+        // EBADF.  Pre-batch: raw != 0 → EINVAL.
+        let a = SyscallArgs {
+            arg0: 3, arg1: 0,
+            arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIDFD_GETFD, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pidfd_getfd flags truncates to 0 not EBADF ({})",
+                dispatch_linux(nr::PIDFD_GETFD, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   pidfd_{{open,send_signal,getfd}} uint flags truncation: OK"
+        );
 
         // process_vm_readv with pid <= 0 and a non-empty local iov
         // -> ESRCH.  Batch 234 added the local iter_count==0

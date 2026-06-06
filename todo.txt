@@ -24988,4 +24988,118 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 22s).
 
+319. [2026-06-06] Batch 289: Linux ABI translation —
+     sys_tkill and sys_tgkill now truncate their pid_t
+     args (tid / tgid) to i32 and reject `tid <= 0` /
+     `tgid <= 0` with EINVAL before any owner_process
+     lookup, mirroring Linux's
+       SYSCALL_DEFINE2(tkill,  pid_t, pid, int, sig)
+       SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)
+     bodies, which both open with
+       `if (pid <= 0) return -EINVAL`
+     (tgkill additionally `|| tgid <= 0`).  Continuation
+     of the `int` truncation audit started in batches
+     285/286/287/288.  Sig handling is delegated to
+     sys_kill, which already truncates sig (batch 288).
 
+     Pre-batch divergences
+     ---------------------
+     Linux's tkill/tgkill ABI truncates each register to
+     int before the body runs.  Pre-batch we held tid /
+     tgid as raw u64, so two distinct probes diverged:
+
+       Probe A — tid truncates to 0 (Linux EINVAL gate):
+         tkill(0x1_0000_0000, 1)
+           Linux : (int)tid = 0 → EINVAL
+           Ours  : raw tid != 0 →
+                   owner_process(0x1_0000_0000) = None
+                   → ESRCH
+         tgkill(1, 0x1_0000_0000, 1) same path → EINVAL.
+         tgkill(0x1_0000_0000, 1, 1) tgid path → EINVAL.
+
+       Probe B — tid truncates to -1 (same gate):
+         tkill(u64::MAX, 1)
+           Linux : (int)tid = -1 → EINVAL
+           Ours  : owner_process miss → ESRCH
+
+     Same `tid <= 0` gate for tgkill applied to both
+     tgid and tid columns.
+
+     Fixes
+     -----
+     - sys_tkill: cast args.arg0 to i32 at entry; reject
+       `tid <= 0` with EINVAL; widen the surviving
+       positive int back to u64 for the owner_process
+       lookup.  Pass args.arg1 (raw u64 sig) unchanged
+       to sys_kill — sys_kill already truncates sig
+       (batch 288) so the inner gate sees the post-ABI
+       value either way.
+     - sys_tgkill: cast args.arg0 and args.arg1 to i32
+       at entry; reject `tgid <= 0 || tid <= 0` with
+       EINVAL; widen both surviving positive ints back
+       to u64 for the owner_process / tgid-mismatch
+       checks.  Pass args.arg2 unchanged to sys_kill
+       for the same reason.
+
+     Existing self-tests restructured
+     --------------------------------
+     The previous tkill/tgkill self-tests used `u64::MAX`
+     to mean "definitely nonexistent tid" and asserted
+     ESRCH from the owner_process lookup miss.  After
+     truncation, u64::MAX → -1 → the new `tid <= 0`
+     gate fires first and returns EINVAL.  We replaced
+     the probe value with `0x7FFF_FFFE` (positive
+     INT_MAX-1, definitely no registered thread) so the
+     same ESRCH path is still exercised — the test
+     intent (ensure non-existence yields ESRCH, not the
+     wrong errno) is preserved without depending on the
+     old wrong gate ordering.
+
+     Restructured tests (still pass post-batch):
+       - tkill(0x7FFF_FFFE, 1)  -> ESRCH
+       - tkill(0x7FFF_FFFE, 0)  -> ESRCH (sig=0 probe
+         on nonexistent tid, after the tid lookup miss)
+       - tgkill(1, 0x7FFF_FFFE, 1) -> ESRCH
+
+     New self-tests demonstrating the truncation gate:
+       - tkill(0x1_0000_0000, 1)  -> EINVAL
+         (tid truncates to 0)
+       - tkill(u64::MAX, 1)       -> EINVAL
+         (tid truncates to -1; this is the old probe
+         flipped to its new correct expected value)
+       - tgkill(0x1_0000_0000, 1, 1) -> EINVAL
+         (tgid truncates to 0)
+       - tgkill(1, 0x1_0000_0000, 1) -> EINVAL
+         (tid truncates to 0)
+       - tgkill(u64::MAX, u64::MAX, 1) -> EINVAL
+         (both truncate to -1)
+
+     Marker:
+       "tkill/tgkill pid_t int truncation: OK"
+
+     Known limitations
+     -----------------
+     - sig is still passed forward as raw u64 from
+       tkill/tgkill to sys_kill.  sys_kill truncates it
+       there (batch 288), so post-ABI behaviour is
+       correct; the only observable artefact is that
+       sys_kill sees the raw register value for its
+       initial `sig < 0 / sig == 0 / signal-send`
+       decision.  No behavioural divergence.
+     - sys_kill still does not truncate pid (the
+       0xDEAD_BEEF probes in the kill self-tests would
+       need restructuring along the same lines as this
+       batch did for tkill/tgkill).  Tracked under
+       entry 318's "Known limitations" and unchanged
+       here.
+     - tgkill's tgid-mismatch check (`if pid != tgid`)
+       now operates on the post-truncation positive int
+       widened back to u64.  This is observationally
+       identical to the pre-batch raw u64 comparison
+       for inputs whose tgid was already a small
+       positive int (the only inputs that can reach
+       this point post-batch).
+
+     Build: cargo build -p kernel clean.
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 22s).

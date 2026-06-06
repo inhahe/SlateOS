@@ -4910,15 +4910,35 @@ fn sys_rt_sigpending(args: &SyscallArgs) -> SyscallResult {
 ///   - `-ESRCH` if `tid` is not a registered thread.
 ///   - All other errors delegate to [`sys_kill`].
 fn sys_tkill(args: &SyscallArgs) -> SyscallResult {
-    let tid = args.arg0;
-    let sig = args.arg1;
-    let pid = match crate::proc::thread::owner_process(tid) {
+    // Linux signature: `SYSCALL_DEFINE2(tkill, pid_t, pid, int, sig)`.
+    // Both pid_t and int are 32-bit, so the x86_64 ABI truncates the
+    // 64-bit registers to their low 32 bits before the body runs.
+    // Pre-batch (289) we held both as raw u64, missing two gates:
+    //   - tid = 0x1_0000_0000 (truncates to 0): Linux rejects EINVAL
+    //     before any lookup; we treated it as raw u64 != 0 and went
+    //     to owner_process(0x1_0000_0000) → None → ESRCH.
+    //   - tid = u64::MAX (truncates to -1): Linux rejects EINVAL on
+    //     the same `pid <= 0` gate; we returned ESRCH from the
+    //     lookup.
+    // Linux's tkill body opens with `if (pid <= 0) return -EINVAL;`
+    // — sig truncation is then deferred to the shared
+    // do_send_specific path.  We delegate the sig half to sys_kill
+    // (which now truncates sig itself, batch 288), forwarding the
+    // truncated tid as the looked-up owning pid.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let tid = args.arg0 as i32;
+    if tid <= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let tid_u = tid as u64;
+    let pid = match crate::proc::thread::owner_process(tid_u) {
         Some(p) => p,
         None => return linux_err(errno::ESRCH),
     };
     let kill_args = SyscallArgs {
         arg0: pid,
-        arg1: sig,
+        arg1: args.arg1,
         arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
     sys_kill(&kill_args)
@@ -4937,19 +4957,45 @@ fn sys_tkill(args: &SyscallArgs) -> SyscallResult {
 ///   - Otherwise, behaves exactly like [`sys_tkill`] (and thus like
 ///     `kill(tgid, sig)` for now).
 fn sys_tgkill(args: &SyscallArgs) -> SyscallResult {
-    let tgid = args.arg0;
-    let tid = args.arg1;
-    let sig = args.arg2;
-    let pid = match crate::proc::thread::owner_process(tid) {
+    // Linux signature:
+    //   `SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)`
+    // All three are 32-bit, so the x86_64 ABI truncates each register
+    // to its low 32 bits before the body runs.  Linux's tgkill body
+    // opens with `if (tgid <= 0 || pid <= 0) return -EINVAL;` — the
+    // same gate as tkill but with the tgid added.  Pre-batch (289)
+    // we held all three as raw u64.
+    //
+    // Probes pre-batch:
+    //   - tgkill(0x1_0000_0001, valid_tid, sig): Linux truncates
+    //     tgid to 1 and proceeds; we matched pid != raw u64 tgid →
+    //     ESRCH (mismatched tgid) even when the tids' owning pid
+    //     would have been 1.
+    //   - tgkill(valid_tgid, 0x1_0000_0000, sig): Linux truncates
+    //     tid to 0 → EINVAL; we did owner_process(0x1_0000_0000) →
+    //     None → ESRCH.
+    //   - tgkill(u64::MAX, u64::MAX, sig): Linux truncates both to
+    //     -1 → EINVAL; we hit ESRCH on the owner_process lookup.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let tgid = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let tid = args.arg1 as i32;
+    if tgid <= 0 || tid <= 0 {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let tid_u = tid as u64;
+    #[allow(clippy::cast_sign_loss)]
+    let tgid_u = tgid as u64;
+    let pid = match crate::proc::thread::owner_process(tid_u) {
         Some(p) => p,
         None => return linux_err(errno::ESRCH),
     };
-    if pid != tgid {
+    if pid != tgid_u {
         return linux_err(errno::ESRCH);
     }
     let kill_args = SyscallArgs {
         arg0: pid,
-        arg1: sig,
+        arg1: args.arg2,
         arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
     sys_kill(&kill_args)
@@ -27775,15 +27821,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     }
 
     // tkill / tgkill dispatch validation:
-    //   - Non-existent tid -> ESRCH (no owning process).
+    //   - Non-existent tid (post-truncation valid positive int) ->
+    //     ESRCH (no owning process).
     //   - tgkill with mismatched tgid -> ESRCH even if tid exists.
     //   - In boot context, current_task_id() may or may not be a
     //     registered thread; we test only the unambiguous "tid that
     //     definitely doesn't exist" path to avoid coupling to scheduler
     //     state.
+    //
+    // Batch 289 update: probes formerly used `u64::MAX` to mean
+    // "definitely nonexistent".  Post-batch the tkill/tgkill bodies
+    // truncate to int and reject tid<=0/tgid<=0 with EINVAL before any
+    // lookup (per Linux), so u64::MAX (truncates to -1) now produces
+    // EINVAL.  We switch to `0x7FFF_FFFE` (positive INT_MAX-1,
+    // definitely no registered thread) to keep exercising the
+    // owner_process-lookup-misses-ESRCH path.
     {
-        // tkill on a definitely-nonexistent tid (u64::MAX) -> ESRCH.
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 1, arg2: 0, arg3: 0,
+        const PROBE_TID: u64 = 0x7FFF_FFFE;
+        // tkill on a positive but nonexistent tid -> ESRCH.
+        let a = SyscallArgs { arg0: PROBE_TID, arg1: 1, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TKILL, &a).value != -i64::from(errno::ESRCH) {
             serial_println!(
@@ -27793,7 +27849,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // tkill with sig=0 on nonexistent tid still ESRCH (probe).
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: PROBE_TID, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TKILL, &a).value != -i64::from(errno::ESRCH) {
             serial_println!(
@@ -27802,8 +27858,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // tgkill on nonexistent tid -> ESRCH.
-        let a = SyscallArgs { arg0: 1, arg1: u64::MAX, arg2: 1, arg3: 0,
+        // tgkill on positive-but-nonexistent tid -> ESRCH (owner_process
+        // miss, before the tgid mismatch check).
+        let a = SyscallArgs { arg0: 1, arg1: PROBE_TID, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TGKILL, &a).value != -i64::from(errno::ESRCH) {
             serial_println!(
@@ -27812,6 +27869,61 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Batch 289: pid_t truncation to int.  Linux's tkill/tgkill
+        // both open with `if (pid <= 0) return -EINVAL` (and tgkill
+        // adds `|| tgid <= 0`).  Post-truncation probes:
+        //
+        //   tkill(0x1_0000_0000, 1): (int)tid = 0 → EINVAL.
+        //     Pre-batch we saw raw u64 != 0 → owner_process miss → ESRCH.
+        let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 1, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TKILL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: tkill(0x1_0000_0000,1) want EINVAL, got {}",
+                dispatch_linux(nr::TKILL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   tkill(u64::MAX, 1): (int)tid = -1 → EINVAL.
+        //     Pre-batch we saw owner_process(u64::MAX) miss → ESRCH.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 1, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TKILL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: tkill(u64::MAX,1) want EINVAL, got {}",
+                dispatch_linux(nr::TKILL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   tgkill(0x1_0000_0000, 1, 1): (int)tgid = 0 → EINVAL.
+        let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 1, arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TGKILL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: tgkill tgid=0x1_0000_0000 want EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   tgkill(1, 0x1_0000_0000, 1): (int)tid = 0 → EINVAL.
+        let a = SyscallArgs { arg0: 1, arg1: 0x1_0000_0000, arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TGKILL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: tgkill tid=0x1_0000_0000 want EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   tgkill(u64::MAX, u64::MAX, 1): both → -1 → EINVAL.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: u64::MAX, arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TGKILL, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: tgkill(u64::MAX,u64::MAX,1) want EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   tkill/tgkill pid_t int truncation: OK");
     }
 
     // umask dispatch validation (batch 51 — per-process umask storage).

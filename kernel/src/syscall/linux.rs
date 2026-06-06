@@ -11195,8 +11195,22 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
 /// shortcut, so probes saw EINVAL/EROFS where Linux returns 0 or
 /// EINVAL respectively.
 fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
-    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-    const VALID_FLAGS: u64 = AT_SYMLINK_NOFOLLOW;
+    // Linux ABI: `int utimensat(int dirfd, const char *pathname,
+    // const struct timespec times[2], int flags)`.
+    // SYSCALL_DEFINE4(utimensat, ..., int, flags) narrows the fourth
+    // parameter to (int) on entry; do_utimes runs the mask check
+    // `flags & ~AT_SYMLINK_NOFOLLOW` at 32-bit width.  Pre-batch we
+    // held flags as u64 and ran the mask check at 64-bit width, so the
+    // AMD64 syscall ABI's high-half garbage (the kernel does not
+    // zero-extend int args before issuing the syscall) leaked into the
+    // mask and returned spurious EINVAL where Linux either reaches the
+    // EROFS terminal (with valid times) or returns 0 via the
+    // (OMIT, OMIT) short-circuit (whose gate runs at gate 2, before
+    // the flag check, so high-half garbage in arg3 with valid OMIT
+    // times must still return 0).  Ninth instance of the *at int-flags
+    // truncation pattern after batches 308-315.
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW;
     // UAPI <linux/stat.h>: ((1<<30)-1) and ((1<<30)-2).
     const UTIME_NOW: i64 = 0x3fff_ffff;
     const UTIME_OMIT: i64 = 0x3fff_fffe;
@@ -11233,8 +11247,12 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
     } else {
         None
     };
-    // Gate 3: do_utimes flag check.
-    if args.arg3 & !VALID_FLAGS != 0 {
+    // Gate 3: do_utimes flag check (32-bit width after int narrowing).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg3 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     // path may legitimately be NULL: operate on dirfd directly.
@@ -38244,6 +38262,95 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   utimensat OMIT-shortcut + nsec_valid: OK"
         );
+
+        // Batch 316: utimensat int truncation — high-half register
+        // garbage must be stripped before the gate-3 flag mask check.
+        //
+        // Linux signature: `int utimensat(int dirfd, const char *path,
+        // const struct timespec times[2], int flags)`.  flags is C int
+        // → low 32 bits only.  Pre-batch we held flags as u64 and ran
+        // the mask check at 64-bit width, so high-half garbage returned
+        // spurious EINVAL where Linux either reaches EROFS (with valid
+        // times) or returns 0 via the gate-2 OMIT-shortcut.
+        //
+        // (a) utimensat(0, NULL, NULL, 0x1_0000_0100) → EROFS
+        //     (high|AT_SYMLINK_NOFOLLOW; truncates to 0x100, mask
+        //     passes, NULL path is legal, EROFS terminal at gate 5).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0100,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UTIMENSAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: utimensat(high|AT_SYMLINK_NOFOLLOW) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) utimensat(0, NULL, &(OMIT,OMIT), 0x1_0000_0100) → 0
+        //     (high|AT_SYMLINK_NOFOLLOW with OMIT-OMIT times;
+        //     gate 2 short-circuits before the flag check, so flags
+        //     truncation doesn't matter for this shape — but we lock
+        //     in that high-half garbage with OMIT-OMIT still returns 0
+        //     even when the (truncated) flag would also pass the mask).
+        {
+            const UTIME_OMIT: i64 = 0x3fff_fffe;
+            let omit_times: [i64; 4] = [0, UTIME_OMIT, 0, UTIME_OMIT];
+            let omit_ptr = (&raw const omit_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: omit_ptr,
+                arg3: 0x1_0000_0100, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&omit_times);
+            let v = dispatch_linux(nr::UTIMENSAT, &a).value;
+            if v != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: utimensat(high|valid,OMIT-OMIT) -> {} (expected 0)",
+                    v
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (c) utimensat(0, NULL, NULL, 0x1_0000_0000) → EROFS
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes, EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0000,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UTIMENSAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: utimensat(high-half-zero) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) utimensat(0, NULL, NULL, 0x1_0000_0010) → EINVAL
+        //     (high|bad-low 0x10; truncates to 0x10, mask rejects bit
+        //     outside AT_SYMLINK_NOFOLLOW; verifies mask gate still
+        //     rejects invalid bits after the high half is stripped).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0010,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UTIMENSAT, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: utimensat(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   utimensat int truncation (high-half ignored): OK"
+        );
+
         // utimes(NULL, _) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

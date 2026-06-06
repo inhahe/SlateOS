@@ -27763,3 +27763,101 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (47.67s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 25s).
+
+346. sys_utimensat int truncation — high-half register
+     garbage leaked into the AT_SYMLINK_NOFOLLOW mask
+     check at gate 3 (batch 316).
+
+     Divergence: Linux signature is
+       `int utimensat(int dirfd, const char *pathname,
+                      const struct timespec times[2],
+                      int flags)`.
+     The fourth parameter is C int → only the low 32 bits
+     are defined; the AMD64 syscall ABI does NOT zero-
+     extend int args before issuing the syscall, so the
+     high 32 bits of %r10 are caller-uninitialised garbage.
+     SYSCALL_DEFINE4(utimensat, ..., int, flags) narrows
+     to (int) on entry; the mask check
+     `flags & ~AT_SYMLINK_NOFOLLOW` in fs/utimes.c::
+     do_utimes runs at 32-bit width.
+
+     Pre-batch we held flags as u64 and ran the mask check
+     against the full 64-bit register, so a caller with
+     non-zero high bits saw spurious EINVAL where Linux
+     either reaches the EROFS terminal (with valid times
+     and a known-good path) or returns 0 via the gate-2
+     (OMIT, OMIT) short-circuit (whose gate runs BEFORE
+     the flag check, so high-half garbage in arg3 with
+     valid OMIT-OMIT times must still return 0 even when
+     the truncated flag would also pass the mask).
+
+     Ninth instance of the *at int-flags truncation
+     pattern after batches 308 (mlockall), 309 (msync),
+     310 (mlock2), 311 (fchmodat), 312 (fchownat), 313
+     (unlinkat), 314 (renameat2), and 315 (linkat).
+
+     Fix: cast args.arg3 (u64) to i32, then re-widen to
+     u32 for the mask check at gate 3.  Matches the
+     i32→u32 pattern used in batches 308, 311, 312, 313,
+     315 (all flags=int).  Also changed VALID_FLAGS const
+     from u64 to u32 (no behavioural difference; the mask
+     is the same value 0x100 either way).
+
+     Tests: four boot-time probes added in dispatch_linux
+     after the existing utimensat OMIT-shortcut/nsec_valid
+     discriminator probes, each covering one shape:
+       (a) utimensat(0, NULL, NULL, 0x1_0000_0100) → EROFS
+           (high|AT_SYMLINK_NOFOLLOW; truncates to 0x100,
+            mask passes, NULL path is legal, EROFS at
+            gate 5).
+       (b) utimensat(0, NULL, &(OMIT,OMIT), 0x1_0000_0100)
+           → 0 (high|AT_SYMLINK_NOFOLLOW with OMIT-OMIT
+            times; gate 2 short-circuits before the flag
+            check.  This locks in that the OMIT-shortcut
+            still fires even when the flag has high-half
+            garbage — important because the gate ordering
+            puts gate 2 BEFORE the flag mask, so the
+            truncation only matters for shapes where
+            gate 2 doesn't fire).
+       (c) utimensat(0, NULL, NULL, 0x1_0000_0000) → EROFS
+           (high-half only, low half zero; truncates to 0,
+            mask passes, EROFS terminal).
+       (d) utimensat(0, NULL, NULL, 0x1_0000_0010) → EINVAL
+           (high|bad-low 0x10; truncates to 0x10, mask
+            rejects bit outside AT_SYMLINK_NOFOLLOW;
+            verifies mask gate still rejects invalid bits
+            after the high half is stripped).
+     Marker: "[syscall/linux]   utimensat int truncation
+              (high-half ignored): OK".
+
+     Preserved: existing utimensat probes all still pass:
+       - bogus flag (0x800_0000) → EINVAL: works because
+         0x800_0000 fits in 32 bits, so the i32 cast is
+         identity and the mask still rejects it.
+       - (_,NULL,NULL,0) → EROFS: works because 0 is 0
+         in either width.
+       - OMIT-shortcut discriminator A (bogus flag +
+         bogus path + OMIT-OMIT) → 0: works because
+         gate 2 fires before the flag check.
+       - nsec_valid discriminator B (NSEC_PER_SEC) →
+         EINVAL: works because gate 4 fires after the
+         (now-truncated) gate-3 flag check passes.
+
+     Known limitations:
+     - utimensat's full Linux behaviour requires a
+       writable FS to mutate atime/mtime.  Our EROFS
+       terminal is correct for the empty-FS case but
+       does not exercise mnt_want_write/vfs_utimes
+       permission checks (need_capability(CAP_FOWNER)
+       for changing times on files not owned by caller;
+       EACCES when the inode's flags include S_IMMUTABLE
+       or S_APPEND).  Follow-up needed when writable FS
+       lands.
+     - args.arg3 used in the flag check; args.arg2
+       (times[2] pointer) and args.arg1 (path pointer)
+       are correctly u64 (pointers, not int).  No
+       truncation concerns there.
+
+     Build: cargo build -p kernel clean (45.06s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

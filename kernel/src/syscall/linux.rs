@@ -18823,7 +18823,18 @@ fn sys_sync_file_range(args: &SyscallArgs) -> SyscallResult {
 /// passing a junk-advice value with a closed-but-shaped-like-an-fd
 /// pidfd saw EINVAL where Linux returns EBADF.
 fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
-    if args.arg4 != 0 {
+    // Linux signature: SYSCALL_DEFINE5(process_madvise, int, pidfd,
+    //   const struct iovec __user *, vec, size_t, vlen,
+    //   int, behavior, unsigned int, flags).
+    // `flags` is C `unsigned int`, delivered in r8.  The AMD64 syscall
+    // ABI does not zero-extend `unsigned int` args before issuing
+    // syscall, so only the low 32 bits of `flags` are defined; the high
+    // half is caller-supplied garbage.  Mask to u32 before the `!= 0`
+    // reject so high-half garbage doesn't spuriously trip EINVAL where
+    // Linux's truncated `flags == 0` would advance to the next gate.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg4 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     let iovcnt = args.arg2;
@@ -46303,6 +46314,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   process_madvise advice-last gate order: OK"
+        );
+
+        // process_madvise flags is C `unsigned int` in the Linux
+        // prototype, delivered in r8.  The AMD64 syscall ABI does not
+        // zero-extend `unsigned int` args before issuing syscall, so
+        // high-half garbage must be masked off before the `flags != 0`
+        // reject.  Pre-batch a raw `args.arg4 != 0` check surfaced
+        // EINVAL for any high-bit-set flags where Linux would mask the
+        // high half, accept `flags == 0`, and advance to the pidfd
+        // lookup (EBADF in this kernel — no real pidfds exist).
+        //
+        // (a) flags=0x1_0000_0000 (high-only, low=0) -> low u32 is 0,
+        //     gate passes, fd=0 lookup -> EBADF.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0x1_0000_0000,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_MADVISE, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_madvise(flags=0x1_0000_0000) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) flags=0x1_0000_0001 (high|valid-bit) -> low u32 is 1,
+        //     gate fires -> EINVAL preserved.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0x1_0000_0001,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_MADVISE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_madvise(flags=0x1_0000_0001) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) flags=0x1_0000_8000 (high|low!=0) -> EINVAL preserved.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0x1_0000_8000,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_MADVISE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_madvise(flags=0x1_0000_8000) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) flags=0xFFFF_FFFF_0000_0000 (all-high, low=0) -> EBADF.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0xFFFF_FFFF_0000_0000,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::PROCESS_MADVISE, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: process_madvise(flags=0xFFFF_FFFF_0000_0000) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   process_madvise flags unsigned-int truncation (high-half ignored): OK"
         );
 
         // cachestat non-zero flags -> EINVAL.

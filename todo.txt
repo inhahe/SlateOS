@@ -29457,3 +29457,87 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (35.53s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 25s).
+
+364. Batch 334 — sys_process_madvise unsigned-int
+     truncation (high-half ignored).
+
+     Divergence: Linux's prototype is
+       SYSCALL_DEFINE5(process_madvise,
+                       int, pidfd,
+                       const struct iovec __user *, vec,
+                       size_t, vlen,
+                       int, behavior,
+                       unsigned int, flags)
+     where `flags` is `unsigned int`, delivered in r8.
+     The AMD64 syscall ABI does not zero-extend
+     `unsigned int` args before issuing syscall, so
+     only the low 32 bits of `flags` are defined; the
+     high half is caller-supplied garbage that the
+     kernel must mask off before any comparison.
+
+     Pre-batch sys_process_madvise gated `flags` at
+     u64 width as the very first statement:
+       if args.arg4 != 0 {
+           return linux_err(errno::EINVAL);
+       }
+     Any high-bit garbage in arg4 (e.g.
+     0x1_0000_0000 — low half zero) tripped the
+     `flags != 0` reject and surfaced EINVAL where
+     Linux would mask the high half, accept the
+     truncated `flags == 0`, and advance to the pidfd
+     lookup (EBADF in this kernel — no real pidfds
+     exist).
+
+     Fix: cast `args.arg4` to `u32` at entry with
+     `#[allow(clippy::cast_possible_truncation)]` and
+     run the `flags != 0` reject against the masked
+     value.
+
+     Tests: four boot-time probes added after the
+     existing "process_madvise advice-last gate order:
+     OK" marker, all with pidfd=0, iov=NULL,
+     iovcnt=0, behavior=0 so the discriminator is
+     solely the post-mask flags value:
+       (a) flags=0x1_0000_0000 (high-only, low=0)
+           -> EBADF (was EINVAL pre-batch).  Primary
+           discriminator: low u32 is zero so the
+           flag gate passes, then iovcnt=0 skips the
+           iov block, fd lookup terminates with EBADF.
+       (b) flags=0x1_0000_0001 (high|valid-bit)
+           -> EINVAL preserved (low half is 1, gate
+           still fires).
+       (c) flags=0x1_0000_8000 (high|low!=0)
+           -> EINVAL preserved.
+       (d) flags=0xFFFF_FFFF_0000_0000 (all-high,
+           low=0) -> EBADF (was EINVAL pre-batch).
+     Marker: "[syscall/linux]   process_madvise flags
+              unsigned-int truncation (high-half
+              ignored): OK".
+
+     Preserved: existing process_madvise probes still
+     pass:
+       - (all-zero) -> EBADF.
+       - (flags=1) -> EINVAL.
+       - (closed pidfd, advice=200) -> EBADF (advice
+         gate fires LAST, after fd lookup).
+       - (flags=1, advice=200) -> EINVAL (flags wins
+         over advice).
+
+     Known limitations:
+     - `pidfd` (arg0) is C `int` — already cast to
+       i32 at the validate_linux_fd step.
+     - `vlen` (arg2) is C `size_t` (u64) — no
+       truncation issue.
+     - `behavior` (arg3) is C `int` and is compared
+       at u64 width (`if args.arg3 > 100`) in the
+       terminal gate at line ~18864.  In kernel
+       context the fd lookup terminates with EBADF
+       before reaching the behavior gate, so the
+       truncation bug is not observable via boot
+       self-tests today; logged here as a follow-up
+       for when real pidfds exist or unit-test
+       infrastructure lands.
+
+     Build: cargo build -p kernel clean (35.70s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 23s).

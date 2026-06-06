@@ -6,6 +6,48 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## ARCHITECTURAL CONSTRAINT (user, 2026-06-06): Linux compat layer
+## must NOT reshape the native OS.
+##
+## The Linux ABI compatibility surface (kernel/src/syscall/linux.rs)
+## is a TRANSLATOR.  It accepts Linux syscall numbers + Linux ABI
+## semantics and dispatches to native primitives.  It does NOT get
+## to reshape the native side to look like Linux.  Specifically:
+##
+##   - No Unix signals as a native process-control primitive.
+##     Native uses IPC messages for shutdown / control.  Linux signal
+##     delivery is *emulated* inside the compat layer on top of the
+##     native primitives — it must not leak Linux signal semantics
+##     into native code.
+##   - No 4 KiB page assumptions in the native MM.  Native is 16 KiB.
+##     Linux callers that depend on 4 KiB page size get a translation
+##     at the ABI boundary (e.g. sysconf(_SC_PAGE_SIZE) returns 4096
+##     for compatibility), not a 4 KiB allocator alongside the 16 KiB
+##     one.
+##   - No ambient-authority fds bleeding into the native handle table.
+##     Linux fd integers are looked up in a per-process Linux fd table
+##     that maps to native unforgeable handles.  Capabilities stay
+##     capabilities.
+##   - No fork/exec address-space-sharing assumptions reshaping the
+##     native process model.  Linux clone() is implemented on top of
+##     the native process / thread primitives; no CoW page-sharing
+##     across processes was added to satisfy Linux semantics.
+##   - No Linux-style /proc, /sys, /dev mounts in the native VFS.
+##     The compat layer synthesises Linux-shaped pseudo-fs reads from
+##     native subsystem queries; the native VFS doesn't grow special
+##     procfs nodes.
+##
+## If a Linux binary needs something the native side genuinely
+## cannot provide without architectural compromise, the right answer
+## is ENOSYS (or the closest Linux errno) with a doc comment
+## explaining why — NOT a hack into native code to satisfy a Linux
+## quirk.  When in doubt, the native architecture wins.
+##
+## The truncation-audit work (batches 281+) is purely inside
+## linux.rs: masking high-half register garbage at the ABI boundary
+## to match what Linux's kernel sees.  It does not touch native
+## code.  Future batches must hold to the same discipline.
+
 The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
 ## FLAKY TEST (noticed+FIXED 2026-06-04): ktrace::self_test "Read back"

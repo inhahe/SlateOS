@@ -69,6 +69,45 @@ Every performance-critical subsystem has a measured baseline and a concrete targ
 - **YAML for all configuration files**, processed with a library that preserves user comments and formatting (e.g., ruamel.yaml or Rust equivalent).
 - **No binary logs** — text-based (JSON-lines) structured logging.
 
+### Linux Compatibility Boundary (non-negotiable)
+
+User-directed constraint (2026-06-06): the Linux ABI surface
+(`kernel/src/syscall/linux.rs`) is a **translator**. It accepts Linux
+syscall numbers and Linux ABI semantics and dispatches to native
+primitives. It does **not** reshape the native OS to look like Linux.
+Specifically:
+
+- **No Unix signals as a native process-control primitive.** Native uses
+  IPC messages for shutdown / control. Linux signal delivery is
+  *emulated* inside the compat layer on top of native primitives —
+  Linux signal semantics must not leak into native code.
+- **No 4 KiB page assumptions in the native MM.** Native is 16 KiB.
+  Linux callers that depend on 4 KiB page size get a translation at the
+  ABI boundary (e.g. `sysconf(_SC_PAGE_SIZE)` returns 4096 for
+  compatibility); we do not add a 4 KiB allocator alongside the 16 KiB
+  one.
+- **No ambient-authority fds bleeding into the native handle table.**
+  Linux fd integers are looked up in a per-process Linux fd table that
+  maps to native unforgeable handles. Capabilities stay capabilities.
+- **No fork/exec address-space-sharing assumptions reshaping the native
+  process model.** Linux `clone()` is implemented on top of the native
+  process / thread primitives; no CoW page-sharing across processes was
+  added to satisfy Linux semantics.
+- **No Linux-style `/proc`, `/sys`, `/dev` mounts in the native VFS.**
+  The compat layer synthesises Linux-shaped pseudo-fs reads from native
+  subsystem queries; the native VFS doesn't grow special procfs nodes.
+
+If a Linux binary needs something the native side genuinely cannot
+provide without architectural compromise, the right answer is `ENOSYS`
+(or the closest Linux errno) with a doc comment explaining why — **not**
+a hack into native code to satisfy a Linux quirk. When in doubt, the
+native architecture wins.
+
+The truncation-audit work (batches 281+ in `todo.txt`) is purely inside
+`linux.rs`: masking high-half register garbage at the ABI boundary to
+match what Linux's kernel sees. It does not touch native code. Future
+batches must hold to the same discipline.
+
 ### API Design Principles
 
 - **Handle-based filesystem:** all file/dir operations take a capability handle, not a path string. Open returns a handle; subsequent ops are relative to it. Handles ARE capabilities — no TOCTOU races. Convenience wrappers for open+operate+close in one call. Validated by corrode.dev "Bugs Rust Won't Catch" (2026-04): 44 CVEs in Rust coreutils (uutils), largest cluster = TOCTOU path-resolution races. Our handle-based API eliminates the entire class. Additional API rules from that analysis:
@@ -352,6 +391,17 @@ _One graphical session at a time. Fast user switching (suspend one session, star
 - [ ] `ui.hide_taskbar` — remove own entry from taskbar
 - [ ] `ui.context_menu` — add items to system context menus
 
+#### Capability Types — Shell / File Type Integration
+
+_Predefined capability *names* with grants scoped per extension list — same model as `fs.read` (scoped per path) or `net.connect` (scoped per domain). The user grants e.g. `shell.fileassoc.register` to a program with the extension list `[".docx", ".odt"]`; the program cannot register for any other extension without re-prompting the user. We do **not** mint one capability per extension — extension strings are open-ended and capability names are predefined, so the scope mechanism (already used by `fs.*` and `net.*`) is the right tool._
+
+- [ ] `shell.fileassoc.register` — register the program as a candidate default handler for a file extension (i.e., push onto the per-extension launch stack described in §2.3 → File Type Associations). Scoped per extension list at grant time. Does not grant default-status by itself — the user still chooses which stack entry is active in settings, and the launch stack falls back automatically on uninstall.
+- [ ] `shell.thumbnail.register` — register a thumbnail-generator entry for a file extension (push onto the per-extension thumbnail-generator stack described in §2.3). Scoped per extension list at grant time. Independent of `shell.fileassoc.register` — a program can ship a thumbnailer for `.foo` without being a launch handler for `.foo`, and vice versa. (This is the same capability referenced as `thumbnail.register` in §2.3 — name reconciled here.)
+- [ ] `shell.protocol.register` — register the program as a handler for a URL scheme (e.g., `mailto:`, `magnet:`, custom app schemes). Scoped per scheme list at grant time. Same stack-and-fallback model as file extensions.
+- [ ] `shell.open_with_menu` — appear in the "Open With" submenu of file explorer's context menu for a given extension list, without being on the default-handler stack. Lower-risk grant than `shell.fileassoc.register` because it only makes the program *discoverable* — it never becomes the default by accident. Scoped per extension list at grant time.
+
+_Scoping mechanics: the grant carries a list of extension strings (or `*` if the user explicitly chose "any extension" — rare, intended for power-user tools like a generic hex-thumbnail viewer). Extensions are normalized at grant time (lowercased, leading `.` stripped/added consistently) so `.JPG` and `.jpg` cannot be spoofed as different. Re-prompts on attempted out-of-scope registration: the program calls `register_for(".bar")` while only granted `[".foo"]` → the request fails silently in the kernel but surfaces as a user-facing "<program> wants to also register for `.bar`" prompt the next time the user opens its settings, so the program isn't forced into an immediate modal interruption._
+
 #### Capability Types — Automation / Accessibility
 - [ ] `access.automate` — emulate mouse/keyboard input to other programs
 - [ ] `access.read_screen` — read screen content of other windows
@@ -581,8 +631,19 @@ _Dedup: (1) Package manager hardlinks in content-addressed store. (2) Filesystem
 #### File Type Associations
 - [ ] Extension → default app mapping
 - [ ] Per-app icons per extension (e.g., audio vs video files can have different icons even if same app)
+- [ ] **Per-extension "brief description" is set by the owning application.** Manifest field on `shell.fileassoc.register` — alongside the extension list and icon, each manifest entry carries a short human-readable label (e.g. "MP3 audio", "Markdown document") that becomes the file's "Brief description" column value in file explorer (§4.1) and anywhere else the OS surfaces a file-type label. The description follows the active top-of-stack handler: if the user re-prioritizes the launch stack or the top handler is uninstalled, the description shifts to whatever the new top handler provided in *its* manifest. Same stack-and-fallback semantics as the launch target. The user can override the description per extension in settings; the override persists across handler changes (it's stored on the user side, not on the handler side). When no registered handler supplies a description and no user override exists, the description falls back to the owning-application name, then to the uppercase extension (e.g. "FOO file").
 - [ ] User can change association: pick from registered apps, any installed app, or any executable + arguments
-- [ ] Fallback to previous app when handler is uninstalled
+- [ ] **Fallback chain (stack) on handler uninstall.** Per-extension default-app associations are stored as a *history stack*, not a single value. Installing a new handler pushes onto the stack (gated by `shell.fileassoc.register`, scoped per extension list — see §1.5 → Capability Types — Shell / File Type Integration); uninstalling pops to whatever was active before. Multiple uninstalls in a row continue to fall back further down the chain until either an installed handler is found or the stack is empty (in which case the extension reverts to "no default — ask user."). Same stack model for the "user manually changed association" path: the manual choice is just another push, and uninstalling it pops to the previous entry. User can view and edit the full chain in settings if they want — e.g., reorder it, or remove a specific historical entry without uninstalling the program.
+- [ ] **Thumbnail-generator registration (independent of file-type ownership, capability-gated).** Any program can register a thumbnail generator for any extension(s), given the appropriate capability — they do *not* need to be the default handler for that extension, or even own the file type at all. This lets a standalone thumbnail generator for `.docx` files coexist with whatever document viewer the user prefers; a third-party generator for a proprietary format ship without bundling a full viewer; a power user install niche generators for filetypes the OS doesn't otherwise have viewers for. Generators are declared at install time (manifest entry: extension list, generator executable path, supported output sizes, max-memory hint, timeout hint). The OS maintains a central extension → active-generator map used by file explorer and any other thumbnail-consuming app.
+  - [ ] **Capability:** registering a thumbnail generator requires `shell.thumbnail.register` (defined in §1.5 → Capability Types — Shell / File Type Integration). Without it, the manifest entry is silently ignored. The capability *name* is predefined; the grant is *scoped per extension list*, so the user picks at install time which extensions the program may thumbnail. A program that lists `.foo` and `.bar` in its manifest can ask for both in one grant, but cannot later add `.baz` without re-prompting the user. Becoming the default handler for a file extension (launch, not thumbnail) is a separate capability — `shell.fileassoc.register` — so a program can ship a thumbnailer for a format it doesn't own.
+  - [ ] **Stacking + auto-fallback on uninstall.** Each extension has a *stack* of registered generators, ordered by registration time (newest on top). The top-of-stack installed generator is the active one. When the active generator is uninstalled, the next one down becomes active automatically — no broken thumbnails, no user intervention. If the user manually picks a non-top generator as preferred (settings UI), that promotion is also stored on the stack so uninstalling the preferred one falls back to the previous preferred, then the previous-previous, etc. Empty stack → built-in placeholder thumbnail.
+  - [ ] **User control.** Settings UI lets the user see, for each extension, the full list of registered generators and which is active. User can: pick a different one as active, disable specific generators without uninstalling them, or reorder the stack. This matches the same UX pattern as the default-app association (above) so users only learn one mental model.
+  - [ ] Each thumbnail generator runs in its own sandboxed process — never in-process with the file explorer or any other consumer. A crash in a generator (native or third-party) must not crash the calling app; the OS surfaces a generic placeholder thumbnail for files whose generator crashed or timed out.
+  - [ ] Generator processes have minimal capabilities: read-only access to the specific file being thumbnailed, write access only to a return pipe. No network, no other filesystem, no IPC outside the request/response pair. (The sandbox is what makes the "any program can register" rule safe — a third-party generator can't exfiltrate file contents or harm the system even if malicious, because the sandbox doesn't let it.)
+  - [ ] Per-generator timeout (default ~2 s, manifest-tunable) and per-generator memory cap (default ~256 MiB, manifest-tunable) enforced by the kernel; exceeding either kills the worker and marks the file as "no thumbnail."
+  - [ ] Crash/timeout backoff: if a generator crashes N times in a row on different files, it's marked degraded and skipped for the rest of the session (placeholder used instead). When a generator is degraded, the OS automatically tries the next generator down the stack for affected files — same fallback path as an uninstall. User can re-enable from settings.
+  - [ ] Generator workers are pooled per-extension and reused across files within a session to amortize startup cost. Pool size cap per generator (default 4) prevents a directory of thousands of files from spawning thousands of workers.
+  - [ ] Built-in generators (images, video, PDF) use the same registration mechanism, the same stack, and the same sandbox — no privileged in-process path, and a user-installed third-party generator can override a built-in one by sitting on top of its stack entry. This forces the framework to be robust against its own first-party generators and lets users genuinely replace the defaults.
 
 _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso` (dynamic shared object), `.slib` (static library)._
 
@@ -714,6 +775,10 @@ _nircmd: full feature set (see `nircmd.html`). CLI wrapper over system functions
 - [ ] Non-bug failures: meaningful message with tips on why it might happen
 - [ ] Include unwind info in release builds (< 2% perf impact)
 - [ ] Separate debug symbol files for on-demand symbolization
+- [ ] **"Who's holding it?" — mandatory attribution on contention failures.** When an operation fails because some other process holds a resource (file lock, exclusive open, port binding, capability slot, shared-memory region, device handle), the error must volunteer the identity of the holder, not just say "resource busy." Required fields in the error: **installed application name** (the human-meaningful name from the package manager, e.g. "Firefox", not just `firefox-bin`), the **full executable path**, the **PID**, and — when applicable — the **window title** or **service name** so a user can recognize "oh, that's the browser tab I forgot about." Apply this rule to every OS API that can return a contention error: file open with conflicting share mode, `rename`/`unlink` blocked by an open handle, `bind` blocked by a held port, IPC channel held exclusively, recursive lock held by a different thread, etc. The kernel tracks ownership of every contentious resource already — the policy is "never let that information die at the API boundary."
+  - [ ] When the holder is itself the OS, name the *originating* program through the service-attribution chain (see §4.3 Process Explorer), not the service process. "Locked by Photos.app (via filesystem service)" — not "locked by `fs-svcd`."
+  - [ ] When attribution isn't available (e.g., the holder crashed leaving a stale lock), say so explicitly: "Resource held by orphan lock from PID 4123 (process no longer running). Run [recover-stale-locks] to clear." Never leave the user staring at "resource busy" with no recourse.
+  - [ ] Bubble this attribution all the way up through the GUI: file explorer's "couldn't delete" dialog shows the holder identity inline, with a button to switch to that program or kill it. Same for the editor's "couldn't save" dialog, package manager's "couldn't upgrade — file in use" dialog, etc.
 
 ---
 
@@ -815,6 +880,17 @@ _Kexec-style OS reboot without rebooting the PC, available as a power menu optio
 #### Themes and Appearance
 
 _A theme is a declarative YAML file plus optional bundled assets. Themes are pure data — never executable code. A theme defines visual treatment; it never changes layout, behavior, or hotkeys._
+
+##### Default Theme — Aero
+- [ ] Ship an Aero-inspired theme as the out-of-the-box default. Reference: `Aero Desktop (offline).html` in the project root — match the look of:
+  - [ ] **Window frames** — glassy/blurry title bar, rounded top corners, soft drop shadow, gradient highlight on focused window, dimmed/desaturated frame for unfocused windows, Aero-style close/minimize/maximize buttons in the top-right
+  - [ ] **Taskbar** — translucent/blurry panel, grouped running-app icons with hover thumbnails, Aero Peek-style preview on hover, distinct visual treatment for pinned vs. running apps
+  - [ ] **Start menu** — two-column layout (pinned/recent on the left, system folders/power on the right), translucent background matching taskbar, search field at the bottom, jump-lists from pinned apps
+  - [ ] **File explorer** — Aero-styled chrome (translucent title bar, Aero address bar, pane splits with the same glass treatment), default view styling that matches the rest of the shell
+  - [ ] **Search dialog** — Aero-styled modal: glassy chrome, accent-color focus ring, result rows with the same row styling as file explorer
+  - [ ] **File/folder select (open/save) dialog** — same chrome and styling as file explorer (it IS the file explorer component per §4.1), Aero-styled OK/Cancel buttons in the footer
+- [ ] The default theme is a normal YAML theme file — it uses the same axis system as third-party themes, so users can swap it out wholesale or override any single axis (e.g., keep Aero window decorations but switch icons to a flat-modern pack). No hard-coded "Aero mode" path in the compositor.
+- [ ] Aero blur and transparency are theme axes (window-decorations, taskbar-panel-styling), so users who want a flat/opaque look can disable them without losing the rest of the default visual identity.
 
 ##### Theme Format
 - [ ] YAML theme file following the OS config convention (comment-preserving parser)
@@ -989,6 +1065,26 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 - [ ] Bracket matching
 - [ ] Configurable tab width, tabs vs spaces
 
+#### Ribbon Widget
+_A tabbed command surface (Office-style) for command-dense applications: file explorer, text editor, image editor, etc. The ribbon is a widget, not a mandatory chrome — apps that don't want one use traditional menus and toolbars instead._
+
+- [ ] Tabbed top bar: each tab is a category of commands (e.g., Home, View, Tools)
+- [ ] Each tab divided into named groups; groups contain buttons, split-buttons, dropdowns, galleries, toggles
+- [ ] Three button sizes within a group (large with icon-above-label, medium with icon+label side-by-side, small icon-only)
+- [ ] Contextual tabs that appear only when relevant content is selected (e.g., a "Picture Tools" tab when an image is selected — appears with a distinct color band)
+- [ ] Keyboard access via key tips (overlay letters/numbers on every command, navigable like Office Alt-sequences)
+- [ ] Minimize/expand ribbon (double-click a tab or hotkey toggles full-height vs. tabs-only)
+- [ ] Adaptive group collapsing when window is too narrow: groups collapse to a single dropdown button showing their label and icon, expanding to the full group on click — the collapse order is per-group priority defined by the app
+- [ ] Quick Access Toolbar (small always-visible row above or below the ribbon for user-pinned commands)
+- [ ] Customization UI: user can reorder tabs, add/remove commands from groups, hide tabs they don't use
+- [ ] Theme-aware rendering: ribbon chrome uses the same window-decoration tokens as the title bar so it blends with the active theme (Aero glass by default)
+
+_Patent caution: Microsoft holds patents covering specific aspects of ribbon layout — particularly the "Office Fluent UI" licensing program covers the precise tab/group/contextual-tab arrangement, the gallery-on-hover preview behavior, and the specific collapse heuristics. **Implement the general tabbed-command pattern, which is not patentable, but stop short of the specific arrangements, animations, and behaviors covered by Microsoft's claims.** Concretely: don't replicate Office's exact contextual-tab color rules, don't copy the specific gallery live-preview UX verbatim, and don't reproduce Office's exact key-tip overlay sequence.  This is intentional under-implementation — better to ship a deliberately-different ribbon than risk an infringement claim._
+
+_Author's note: I once found a Microsoft document specifying exactly how the Office ribbon rearranges groups when commands are added/removed, including the precise priority encoding and collapse-order rules. **TODO for Claude:** search online for this spec (likely titled something like "Office Fluent UI Design Guidelines" or "Office UI Command Design Specification") and use it to implement the adaptive-collapse algorithm — but only to the degree that doing so doesn't reproduce patented behavior. If the spec turns out to describe patented mechanisms verbatim, treat it as inspiration only and implement a deliberately-distinct algorithm._
+
+_Patent timeline: most of Microsoft's ribbon-specific patents (filed around 2005–2007) are expiring within the next year or so. **TODO:** revisit this entry after the relevant patents have expired and lift the deliberate under-implementation — at that point we can implement the full Office-faithful behavior without legal risk._
+
 #### Advanced Features
 - [ ] Clipboard: multi-format (text, HTML, image, structured data)
 - [ ] Clipboard history with view and select
@@ -1034,14 +1130,106 @@ _Multi-format clipboard: source puts full rich + plain text, OS auto-generates s
 ### 4.1 File Explorer
 
 - [ ] Path bar with autocomplete (absolute or relative paths)
-- [ ] Thumbnails for images, video, PDFs
+- [ ] Thumbnails for images, video, PDFs (built-in generators, registered through the same OS-wide mechanism as third-party generators — see §2.3 File Type Associations → Thumbnail-generator registration). Explorer is a thumbnail *consumer*, never an executor: every generator runs in its own sandboxed worker, so a buggy or malicious generator can never crash the explorer or compromise its caps.
 - [ ] Detail column view:
-  - [ ] Columns are union of relevant columns per file type in folder
-  - [ ] User can choose default columns per file type
-  - [ ] Audio columns: stereo/mono/joint, VBR, kHz, bitrate, length, ID3v1/v2 tags
-  - [ ] Image columns: width, height, EXIF metadata
-  - [ ] General columns: size, dates (created/modified/accessed), permissions
-  - [ ] Apps can register custom detail columns and file decoders
+  - [ ] **No content-based column auto-selection.** The OS never inspects a directory's contents to decide which columns to show. A folder containing only audio files does *not* automatically gain bitrate/length/sample-rate columns; a folder of photos does *not* automatically gain width/height/camera columns. The visible column set is determined exclusively by (a) the user's explicit per-view preference, (b) the user's saved default for "all folders" or for the specific folder, or (c) the OS's initial out-of-the-box default — never by sniffing what's inside the directory. Rationale: content-sniffing makes the column set jitter as the user navigates (same view changing shape when the user enters or leaves a folder of mixed content), creates surprise when a single off-type file in an otherwise-uniform directory suppresses or restores a column, makes "why did my columns change?" answers require explaining the heuristic, and forces the OS to scan every file's type on every directory listing just to decide chrome. The user is in charge of which columns are shown; the OS just shows them.
+  - [ ] User can show/hide any column from a column-picker dropdown on the header row (Windows-style). Changes apply to the current view, with a "save as default for all folders" / "save as default for this folder" option in the same menu.
+  - [ ] User can save per-folder column preferences (the chosen set, order, and widths persist with the folder so revisiting it restores the view).
+  - [ ] User can save a global default column set (used for any folder without a saved per-folder preference).
+  - [ ] Out-of-the-box default column set is fixed and minimal — name, size, datetime modified — independent of what's in any directory. The user expands from there.
+  - [ ] Apps can register custom detail columns and file decoders (capability-gated; same model as thumbnail-generator registration in §2.3 — extension-scoped, sandboxed worker reads the file, returns the column value, never runs in-process with explorer)
+  - [ ] **Directories have a size column too** — recursive total of contents (matching the visual reference in `Aero Desktop (offline).html`). Most file managers leave this blank because computing it on every directory listing is expensive; we cache instead (see directory-size cache below).
+  - [ ] **Enablable columns — full initial list.** All values shown blank when not applicable to the row's file type. Sort works on every column. Each column maps to a typed value (integer/float/duration/datetime/string/enum) so sorting is correct and not lexicographic on numeric content.
+    - **Filesystem / general (apply to any file or directory):**
+      - [ ] Name
+      - [ ] Extension
+      - [ ] Size (bytes — formatted with binary unit suffix in the cell, raw bytes for sorting)
+      - [ ] Brief description (short human-readable file-type label, e.g. "JPEG image", "Markdown document", "MP3 audio". Sourced from the file-type registry — every registered extension carries a description string. **Set by the owning application** at registration time (manifest field alongside the extension list — see §2.3 File Type Associations and `shell.fileassoc.register` in §1.5): when a program pushes itself onto the launch stack for `.foo`, it also supplies the brief description it wants shown for `.foo`. The active description follows the active owning application — if the user re-prioritizes the launch stack or the top-of-stack handler is uninstalled, the description shifts to whatever the new top-of-stack handler provided. The user can override any registered description in settings and the override persists across handler changes. If no description is registered (and no override exists), falls back to the owning-application name (see next column); if no application owns the extension either, falls back to the extension itself in uppercase, e.g. "FOO file".)
+      - [ ] Owning application (the application currently at the top of the launch stack for this file's extension — see §2.3 File Type Associations. Blank when no application owns the extension. This is the column that changes when the user installs / uninstalls / re-prioritizes a handler; "Brief description" is mostly stable across handler changes.)
+      - [ ] Datetime created
+      - [ ] Datetime last modified
+      - [ ] Datetime last read (atime, subject to the OS's relatime-style update policy — see §2.x atime semantics; if atime updates are disabled for a mount the column shows the last reliably-known value with a small marker indicating it may be stale)
+      - [ ] Owner (user)
+      - [ ] Permissions / capability summary
+      - [ ] Path (full absolute path — useful in search results)
+    - **Directory-only:**
+      - [ ] Files (recursive count of all files in subtree — served from the directory-size cache, same staleness semantics as the size column)
+      - [ ] Subdirectories (recursive count of all subdirectories in subtree — same cache, same staleness semantics)
+      - [ ] Immediate children count (non-recursive — cheap, always fresh)
+    - **Image columns:**
+      - [ ] Width (pixels)
+      - [ ] Height (pixels)
+      - [ ] Megapixels (derived — useful sort key)
+      - [ ] Aspect ratio
+      - [ ] Color depth (bits per pixel)
+      - [ ] Camera make / model
+      - [ ] Date taken (EXIF DateTimeOriginal — separate from filesystem create/modify)
+      - [ ] Exposure time, aperture (f-stop), ISO, focal length
+      - [ ] Lens model
+      - [ ] Flash fired (yes/no)
+      - [ ] GPS coordinates (location)
+      - [ ] Orientation (EXIF — 1..8)
+    - **Audio columns:**
+      - [ ] Title
+      - [ ] Artist
+      - [ ] Album
+      - [ ] Album artist
+      - [ ] Track number / disc number
+      - [ ] Genre
+      - [ ] Year (release year)
+      - [ ] Length (duration)
+      - [ ] Bitrate (kbps)
+      - [ ] Variable bitrate (yes/no)
+      - [ ] Sample rate (Hz)
+      - [ ] Number of channels
+      - [ ] Channel layout (mono / stereo / joint stereo / 5.1 / etc.)
+      - [ ] Sample bit depth
+      - [ ] Audio codec
+      - [ ] Composer
+      - [ ] Comment
+      - [ ] ReplayGain (track / album)
+    - **Video columns:**
+      - [ ] Width (pixels)
+      - [ ] Height (pixels)
+      - [ ] Resolution label (e.g. "1080p", "4K UHD")
+      - [ ] Frames per second
+      - [ ] Length (duration)
+      - [ ] Bitrate (kbps)
+      - [ ] Variable bitrate (yes/no)
+      - [ ] Video codec
+      - [ ] Audio codec (of the embedded audio track)
+      - [ ] Number of audio tracks
+      - [ ] Number of subtitle tracks
+    - **Document columns:**
+      - [ ] Title
+      - [ ] Author
+      - [ ] Description
+      - [ ] Page count
+      - [ ] Word count
+      - [ ] Application that created the document
+    - **Location / geotagging (when present in any media type):**
+      - [ ] Location (GPS coordinates, latitude/longitude; renders as a clickable link that opens the map app)
+      - [ ] Place name (reverse-geocoded — capability-gated and offline-only; never sends file location to a network service without an explicit per-mount opt-in)
+  - [ ] **Future-expansion notes (TODO before shipping detail-column view):**
+    - _Look into adding many more columns that Windows Explorer supports out of the box (Windows ships several hundred property keys — `System.Photo.*`, `System.Music.*`, `System.Document.*`, etc.). Pick the long tail that's actually useful and skip the noise._
+    - _Look into the full EXIF tag set (`Make`, `Model`, `LensInfo`, `WhiteBalance`, `MeteringMode`, `SubjectDistance`, IFD0/Exif/GPS/Interop IFDs)._
+    - _Look into the full ID3v2 frame set (`TCOM` composer, `TPUB` publisher, `TBPM` BPM, `TCMP` compilation, `USLT` lyrics, `APIC` embedded cover-art presence flag) plus Vorbis comments, MP4 atoms, FLAC tags, and other format-native metadata._
+    - _Look into the column set Foobar2000 exposes for audio files — it's the most comprehensive in the wild and a good reference for what columns power users actually want (track gain, album gain, dynamic range / DR, encoding tool, encoder settings, codec profile, CUE sheet presence, embedded cover art presence, etc.)._
+    - _All additional columns should land through the same registration mechanism third-party apps use, so first-party and third-party live on equal footing — no privileged in-process path._
+- [ ] **Directory-size cache (OS-wide service).** A persistent on-disk cache of recursively-computed directory sizes, keyed by inode (or path on filesystems without stable inodes). Any tool can query it — file explorer, `du` equivalent, settings/storage panel, backup tool — so the work isn't duplicated.
+  - [ ] **Lookup contract:** caller asks for a directory's recursive size. Cache returns either (a) a cached value with a "fresh" marker, (b) a cached value with a "stale, recomputing" marker plus a subscription handle that fires when the recompute finishes, or (c) "unknown, computing" with the same subscription handle. Callers (file explorer) show the cached value immediately and update the row in place when the subscription fires — no blocking on cold cache.
+  - [ ] **Invalidation is event-driven, not polled.** The cache subscribes to the filesystem's change-notification stream (the same mechanism that powers live file-explorer refresh). Any create/delete/resize/rename anywhere under a cached directory invalidates that directory's entry *and* every ancestor entry up to the root. No periodic scans; no time-based expiry.
+  - [ ] **Background recompute.** Invalidated entries are recomputed in the background by a low-priority worker, throttled so it doesn't compete with foreground I/O. Recompute uses the same change-notification stream to short-circuit: if a subdirectory hasn't been invalidated since the last successful recompute, reuse its cached size instead of walking it again. This makes a "small change in a huge tree" cost proportional to the changed subtree, not the whole tree.
+  - [ ] **Persistence.** Cache lives on disk so it survives reboots. Stored under the per-user state directory. On mount, the cache is presumed valid only if the filesystem's change-notification stream has been continuously observed since the last clean unmount — otherwise entries on that mount are marked stale and recomputed lazily on first access.
+  - [ ] **Permission model.** Cache entries are stored per-user, since a recursive size depends on what the querying user can read. Cross-user queries either recompute under the querying user's identity or return "unknown" — never leak sizes a user couldn't have computed themselves.
+  - [ ] **Bounded memory: constant cap, install-time default based on total RAM.** In-memory hot set; cold entries spill to disk. The OS doesn't track every directory ever seen — only those that have been queried.
+    - [ ] **Install-time default:** at install, the OS picks a fixed byte cap based on total RAM at that moment (default ~0.1%, e.g. ~16 MiB on a 16 GiB machine, ~64 MiB on a 64 GiB machine). After install the cap is just a number — no auto-scaling.
+    - [ ] **Settings UI exposes one control:** a byte count. Users who want more or less change it directly. Total RAM rarely changes after install, so making the cap "follow" RAM doesn't earn its complexity; the rare user who adds RAM and notices the cache feels tight can raise the number once and be done.
+    - [ ] **Recommended-value tip beside the control.** Next to the byte-count field, display the OS's recommended amount computed *in the moment* against current total RAM (same ~0.1% rule used at install). If the user has added RAM since install, the tip will read higher than the currently-set value — a low-friction nudge that they could raise the cap if they want, without the OS silently doing it for them. A one-click "use recommended" button next to the tip applies it. If current setting already matches the recommendation, the tip just shows "(recommended)" next to the value with no nag.
+    - [ ] **Live application:** raising the cap lets more entries stay hot immediately; lowering it triggers an eviction pass.
+    - [ ] **Pressure-aware shrinking (not pressure-aware sizing).** The cap is the ceiling, not the floor. The cache registers a shrinker callback with the kernel's memory-pressure subsystem; under pressure the kernel asks it to evict cold entries (LRU), and the cache complies all the way down to zero if pressure persists. When pressure subsides, the cache refills toward the cap as queries come in. The user-visible effect: on an idle machine the cache happily sits at its cap; under pressure it gets out of the way automatically; recovery is automatic too. Same pattern the kernel uses for the dentry cache, inode cache, and slab caches — well-trodden machinery, not a new invention.
+    - [ ] **Anti-pattern (do not do this):** sizing the *cap* by free memory rather than the *fill* by memory pressure. Free memory is a moving target that points the wrong direction at the worst moments (huge at boot when caching does nothing, near-zero right before swap when caching matters most), is ambiguous in definition (`MemFree` vs. `MemAvailable`), and would put the dir-size cache in direct competition with the page cache over the same accounting. Pressure-driven shrinking gives you the *intent* of "use memory when slack exists, give it up when it doesn't" without any of those problems.
+  - [ ] **Capability:** the cache service exposes a query handle as an OS capability so apps don't get ambient access. File explorer holds it by default; other apps must be granted.
 - [ ] View options: list, thumbnails (any size), column view, order by any column
 - [ ] Optional preview panel: shows currently selected image/video, movable and resizable (uses dockable panel widget)
 - [ ] Search feature with checkboxes for what to search:
@@ -1082,6 +1270,12 @@ _Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3
 - [ ] Show: capabilities, running user, priority levels, app name, what launched it, is it a service, what's blocking it, what's waiting on its locks, running/paused status, full path
 - [ ] Switch to any window or terminal a process owns
 - [ ] System resource graphs (CPU, RAM, disk, network over time)
+- [ ] **Service-mediated resource attribution.** When a program's resource use flows through an OS service process — e.g., the program writes to a TCP socket and the network stack runs in a separate daemon, or the program opens a file and the disk I/O is performed by a filesystem service, or the program asks the audio service to mix samples — Process Explorer must attribute the resource consumption back to the *originating* program, not to the service. So a user sees "Firefox is using 4 MB/s of network" and "Slack is using 12% disk I/O" even though the kernel-visible network/disk traffic actually flows through the network/storage daemons.
+  - [ ] **Mechanism.** Every service-mediated request carries the originator's identity through the IPC chain as a kernel-stamped tag (not a self-declared field — services can't lie). The service processes' accounting layer attributes bytes/cycles/I/O back to that tag. Process Explorer queries the kernel for a flattened "if I look through every service, who's actually using this resource" view alongside the raw "which process holds the syscall" view.
+  - [ ] **Per-resource breakdown.** Each row in Process Explorer can expand to show "via which service" for that program's CPU / memory / disk / network — so a user troubleshooting "why is the disk thrashing" can see both "Backup.app is generating 200 MB/s of writes via the filesystem service" *and* "the filesystem service has 200 MB/s of writes pending, originated by Backup.app." Both views are consistent and reconcile to the same totals.
+  - [ ] **Sort and filter by attributed resource.** "Sort by attributed network" puts the actual bandwidth consumers at the top, not the network service. Same for disk, memory, CPU.
+  - [ ] **Discover-the-culprit UX.** Top bar of Process Explorer shows the top-3 attributed consumers per resource (CPU / RAM / disk / net) at a glance. One click drills into that program. The user shouldn't have to know that "the network service is at 60% CPU because of Firefox" — they should see "Firefox is at 60% CPU (via network service)" without expanding anything.
+  - [ ] This attribution is also what powers the §2.8 file-lock error messages: the kernel-stamped originator tag is what lets a "Locked by Photos.app (via filesystem service)" message exist at all.
 
 - [ ] Code signing display: process explorer shows "repo-verified," "signed by [entity]," or "unsigned"
   - [ ] Repo packages verified by repo signature + content-addressed hash

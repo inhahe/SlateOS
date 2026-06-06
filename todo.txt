@@ -33561,3 +33561,73 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (38.90s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+402. [BATCH 372 — 2026-06-06 — sys_ustat super_get_super-first
+     EINVAL terminal (kernel/src/syscall/linux.rs)]
+
+     Linux divergence: pre-batch sys_ustat validated ubuf first
+     and returned EFAULT for NULL/bad ubuf, then ENOSYS for
+     valid ubuf.  Both are wrong-shape: Linux's ustat actually
+     IS supported, and its gate order is super-block lookup
+     FIRST — `user_get_super(new_decode_dev(dev), false)` —
+     which returns NULL for any dev that doesn't match a
+     mounted filesystem's `s_dev`.  That NULL produces -EINVAL
+     BEFORE copy_to_user ever touches ubuf.
+
+     Source: fs/statfs.c::SYSCALL_DEFINE2(ustat):
+       s = user_get_super(new_decode_dev(dev), false);
+       if (!s) return -EINVAL;                  // (1)
+       err = statfs_by_dentry(s->s_root, &sbuf);
+       drop_super(s);
+       if (err) return err;                     // (2)
+       memset(&tmp, 0, sizeof(tmp));
+       ...
+       if (copy_to_user(ubuf, &tmp, sizeof(struct ustat)))
+           return -EFAULT;                       // (3)
+
+     Concrete divergences for any dev / ubuf shape:
+       * ustat(99, NULL)      Linux: EINVAL  Pre-batch: EFAULT
+       * ustat(99, 0xDEAD)    Linux: EINVAL  Pre-batch: EFAULT
+                                              (or EINVAL with
+                                               wrong cause)
+       * ustat(99, &valid)    Linux: EINVAL  Pre-batch: ENOSYS
+
+     ENOSYS for the valid-ubuf case was particularly misleading
+     to userspace probes: ustat IS supported on Linux, just
+     returns EINVAL when no fs matches `dev`.  glibc removed
+     the wrapper in 2.28 but klibc / musl-pre-1.2 / BSD compat
+     code still raw-syscall it directly; getting ENOSYS makes
+     them switch to a different code path (statfs fallback)
+     when the right answer was already known to be "no such
+     filesystem."
+
+     Our kernel has no mounted filesystem exposing an `s_dev`
+     value that would match userspace's `dev` argument — even
+     `dev=0` does not match a real super_block in our setup
+     (Linux's `user_get_super(0)` also fails for the same
+     reason on a fresh kernel).  So the correct terminal
+     across every (dev, ubuf) shape is EINVAL before any ubuf
+     touch.
+
+     Fix: drop the ubuf pre-validation entirely and return
+     EINVAL unconditionally.
+
+     Probes replaced (2 old removed, 4 new added):
+       * ustat(dev=0, NULL) -> EINVAL (was EFAULT pre-batch).
+       * ustat(dev=0, &stack_buf) -> EINVAL (was ENOSYS pre-
+         batch — the most important fix).
+       * ustat(dev=99, ubuf=0xDEAD) -> EINVAL (VERIFIES the
+         gate-1 EINVAL terminal is unconditional; pre-batch
+         would have returned EFAULT here too via
+         validate_user_write rejection).
+       * ustat(dev=u64::MAX, NULL) -> EINVAL (verifies the
+         dev=u32 truncation doesn't change the result —
+         still no matching fs).
+
+     Final boot-time stamp:
+         "[syscall/linux]   ustat super_get_super-first EINVAL
+          (gate-1 terminal): OK"
+
+     Build: cargo build -p kernel clean (37.78s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

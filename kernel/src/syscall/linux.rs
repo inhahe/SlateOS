@@ -23017,19 +23017,72 @@ fn sys_acct(_args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `ustat(dev, ubuf*)`.
-fn sys_ustat(args: &SyscallArgs) -> SyscallResult {
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    // struct ustat is 32 bytes (f_tfree + f_tinode + 6B fsname + 6B fpack).
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 32) {
-        return linux_err(linux_errno_for(e));
-    }
-    // ustat is deprecated since Linux 2.6 in favour of statfs/fstatfs;
-    // glibc removed the wrapper in 2.28.  Return ENOSYS — every
-    // surviving caller already handles "ustat absent" by switching to
-    // statfs (which we DO implement).
-    linux_err(errno::ENOSYS)
+///
+/// Linux's `fs/statfs.c::SYSCALL_DEFINE2(ustat)` gate order:
+///
+/// ```text
+///   SYSCALL_DEFINE2(ustat, unsigned, dev, struct ustat __user *, ubuf)
+///   {
+///       struct super_block *s;
+///       struct ustat tmp;
+///       struct kstatfs sbuf;
+///       int err;
+///
+///       s = user_get_super(new_decode_dev(dev), false);
+///       if (!s)
+///           return -EINVAL;            // (1) no fs with that s_dev
+///
+///       err = statfs_by_dentry(s->s_root, &sbuf);
+///       drop_super(s);
+///       if (err)
+///           return err;                 // (2) statfs failure
+///
+///       memset(&tmp, 0, sizeof(tmp));
+///       tmp.f_tfree = sbuf.f_bfree;
+///       ...
+///       if (copy_to_user(ubuf, &tmp, sizeof(struct ustat)))
+///           return -EFAULT;             // (3) bad ubuf
+///       return 0;
+///   }
+/// ```
+///
+/// Critically, the super-block lookup runs BEFORE ubuf is touched.
+/// On a kernel where no mounted filesystem matches the requested
+/// `dev`, Linux returns -EINVAL regardless of how invalid ubuf is
+/// — the copy_to_user gate is unreachable.
+///
+/// Pre-batch we returned EFAULT for NULL/bad ubuf and ENOSYS for
+/// a valid ubuf.  Three concrete divergences for any caller-
+/// supplied dev value:
+///
+///   * ustat(dev=99, NULL)       — Linux: EINVAL.  Pre-batch: EFAULT.
+///   * ustat(dev=99, 0xDEAD)     — Linux: EINVAL.  Pre-batch: EFAULT
+///                                  (or EINVAL via validate, but the
+///                                  wrong cause).
+///   * ustat(dev=99, &valid_buf) — Linux: EINVAL.  Pre-batch: ENOSYS.
+///
+/// ENOSYS was particularly misleading: ustat IS supported on Linux
+/// (it just returns EINVAL when no super block matches), so probes
+/// detecting "ustat present" via the errno shape were getting the
+/// wrong answer.  glibc removed the wrapper in 2.28, but raw
+/// syscall callers (klibc, musl pre-1.2, BSD compat code) still
+/// hit this directly.
+///
+/// Our kernel has no mounted filesystem exposing an `s_dev` value
+/// that would match `dev` from userspace.  Even `dev=0` does not
+/// match a real super_block in our setup — Linux's
+/// `user_get_super(0)` fails for the same reason.  So the correct
+/// terminal across every (dev, ubuf) shape is EINVAL, before any
+/// ubuf touch.
+///
+/// Batch 372 drops the ubuf pre-validation entirely.
+fn sys_ustat(_args: &SyscallArgs) -> SyscallResult {
+    // No mounted filesystem matches the requested s_dev, so Linux's
+    // `user_get_super(...)` would return NULL and the syscall
+    // terminates with -EINVAL before copy_to_user runs.  ubuf is
+    // intentionally NOT validated here — it is unreachable on
+    // Linux's gate-1 failure path.
+    linux_err(errno::EINVAL)
 }
 
 /// Backend for `pread64`/`preadv*`: reads from a File handle at an
@@ -53837,18 +53890,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   acct CAP_SYS_PACCT first: OK"
         );
 
-        // ustat NULL buf -> EFAULT.
+        // Batch 372: ustat is now Linux-faithful — user_get_super
+        // returns NULL for any dev we have no filesystem for, so the
+        // syscall terminates with EINVAL before any ubuf touch.
+        // Pre-batch returned EFAULT for NULL ubuf and ENOSYS for a
+        // valid ubuf — both wrong shapes (ENOSYS misleads probes
+        // because Linux DOES support ustat).
+        //
+        // ustat(dev=0, NULL) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: ustat NULL not EFAULT");
+        if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: ustat(dev=0,NULL) not EINVAL ({})",
+                dispatch_linux(nr::USTAT, &a).value
+            );
             return Err(KernelError::InternalError);
         }
-        // ustat valid -> ENOSYS.
+        // ustat(dev=0, &valid) -> EINVAL (super lookup fails before
+        // copy_to_user touches the buf).
         let a = SyscallArgs { arg0: 0, arg1: ustat_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: ustat valid not ENOSYS");
+        if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ustat(dev=0,valid) not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // ustat(dev=99, 0xDEAD) -> EINVAL (any dev value, any ubuf —
+        // VERIFIES the gate-1 EINVAL terminal is unconditional).
+        let a = SyscallArgs { arg0: 99, arg1: 0xDEAD, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ustat(dev=99,bad) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // ustat(dev=u32::MAX as u64, NULL) -> EINVAL (high-bit dev
+        // truncated to u32, still no matching fs).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USTAT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: ustat(dev=MAX,NULL) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   ustat super_get_super-first EINVAL (gate-1 terminal): OK"
+        );
     }
 
     // -----------------------------------------------------------------

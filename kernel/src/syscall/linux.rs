@@ -22334,31 +22334,69 @@ fn sys_recvmsg(args: &SyscallArgs) -> SyscallResult {
 
 /// `sendmmsg(sockfd, msgvec*, vlen, flags)`.
 fn sys_sendmmsg(args: &SyscallArgs) -> SyscallResult {
+    // Batch 438 — fd lookup gates before mmsg pointer validation.
+    //
+    // Linux's __sys_sendmmsg (net/socket.c):
+    //
+    //     int __sys_sendmmsg(int fd, struct mmsghdr __user *mmsg,
+    //                        unsigned int vlen,
+    //                        unsigned int flags,
+    //                        bool forbid_cmsg_compat)
+    //     {
+    //         ...
+    //         if (vlen > UIO_MAXIOV)
+    //             vlen = UIO_MAXIOV;            // silent clamp
+    //
+    //         sock = sockfd_lookup_light(fd, &err,        // Gate 1: fd
+    //                                    &fput_needed);
+    //         if (!sock)
+    //             return err;
+    //         ...
+    //         while (datagrams < vlen) {
+    //             err = ___sys_sendmsg(sock,
+    //                 (struct user_msghdr __user *)entry,
+    //                 &msg_sys, flags, &used_address,
+    //                 MSG_EOR);                  // Gate 2: per-msg
+    //             ...                            //  (copy_msghdr_from_user
+    //                                            //   inside)
+    //         }
+    //         ...
+    //     }
+    //
+    // FD lookup runs FIRST.  No upfront mmsg pointer validation in
+    // Linux — the per-msg loop is where copy_from_user fires, and
+    // only after fd resolves.  Pre-batch we ran MMSG_PTR → FD; a
+    // probe with (bad_fd, NULL, vlen=2) returned EFAULT where Linux
+    // returns EBADF.
+    //
+    // Translator-only swap.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation)]
     let vlen = args.arg2 as u32;
+    // Linux gate 1: sockfd_lookup_light → EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // vlen==0: Linux's loop body never runs, so the per-msg
+    // pointer access never fires.  Return the terminal EBADF
+    // (matches the "no socket" surface we present here).
     if vlen == 0 {
-        // Linux returns 0 (number of messages sent) for vlen==0, but we
-        // still want to surface "no socket" — go straight to EBADF.
-        if let Err(r) = validate_linux_fd(fd) {
-            return r;
-        }
         return linux_err(errno::EBADF);
     }
+    // Linux gate 2: per-msg copy_msghdr_from_user.  We model this
+    // as an upfront access check on the full mmsghdr vector
+    // (mmsghdr = msghdr (56) + msg_len (4) + 4 pad = 64 bytes per
+    // entry).
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
-    // mmsghdr = msghdr (56) + msg_len (4) + 4 pad = 64 bytes per entry.
     let total = (vlen as usize).saturating_mul(64);
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
         return linux_err(linux_errno_for(e));
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, total) {
         return linux_err(linux_errno_for(e));
-    }
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
     }
     linux_err(errno::EBADF)
 }
@@ -22372,12 +22410,21 @@ fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
     //      tv_nsec not in [0, NSEC_PER_SEC)) -> EINVAL.  Linux
     //      validates the values inside __sys_recvmmsg BEFORE
     //      socket lookup or any per-msg work.
-    //   2. vlen / mmsg ptr / fd -> EFAULT/EBADF.
+    //   2. sockfd_lookup_light(fd) -> EBADF.
+    //   3. per-msg loop body: copy_msghdr_from_user on each
+    //      mmsg entry -> EFAULT.  Only runs when vlen > 0.
     //
     // Pre-batch (entry 261) we only validated the timeout pointer
     // was readable — we never copied or parsed the values.  A
     // probe with a malformed timespec passed silently and fell
     // through to the terminal EBADF, where Linux returns EINVAL.
+    //
+    // Batch 438 — fd lookup ordered BEFORE per-msg mmsg pointer
+    // validation, matching __sys_recvmmsg's
+    // sockfd_lookup_light → per-msg-loop order.  Pre-batch we ran
+    // MMSG_PTR before FD lookup; a probe with (bad_fd, NULL,
+    // vlen=2, NULL_timeout) returned EFAULT where Linux returns
+    // EBADF.
     //
     // Discriminators:
     //   * (vlen=0, timeout={-1,0}) -> Linux EINVAL; pre-batch EBADF.
@@ -22413,13 +22460,18 @@ fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Gate 2: vlen / mmsg ptr / fd.
+    // Gate 2: sockfd_lookup_light → EBADF.  Batch 438 reorder —
+    // Linux runs the fd lookup before the per-msg loop, so a bad
+    // fd surfaces as EBADF regardless of mmsg pointer validity.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // vlen==0: Linux's loop body never runs → terminal EBADF.
     if vlen == 0 {
-        if let Err(r) = validate_linux_fd(fd) {
-            return r;
-        }
         return linux_err(errno::EBADF);
     }
+    // Gate 3: per-msg copy_msghdr_from_user (modelled as an
+    // upfront access check on the full mmsghdr vector).
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -22429,9 +22481,6 @@ fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, total) {
         return linux_err(linux_errno_for(e));
-    }
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
     }
     linux_err(errno::EBADF)
 }
@@ -55778,6 +55827,109 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   sendmsg/recvmsg fd lookup ordered before msghdr validation (Linux: sockfd_lookup_light fires before copy_msghdr_from_user; bad fd → EBADF regardless of msghdr pointer validity): OK"
+        );
+    }
+
+    // Batch 438: sendmmsg / recvmmsg — fd lookup gates BEFORE
+    // mmsg pointer validation, matching Linux's __sys_sendmmsg /
+    // __sys_recvmmsg in net/socket.c (sockfd_lookup_light fires
+    // before the per-msg loop that calls copy_msghdr_from_user).
+    //
+    // recvmmsg keeps its existing timeout-first gate (Linux:
+    // get_timespec64 + timespec64 value validation in the
+    // SYSCALL_DEFINE5 wrapper, before __sys_recvmmsg).  Only the
+    // FD ↔ MMSG_PTR ordering changes.
+    //
+    // Pre-batch userspace observed:
+    //   sendmmsg(99, NULL, vlen=2)   pre EFAULT  Linux EBADF
+    //   recvmmsg(99, NULL, vlen=2, NULL_timeout) pre EFAULT Linux EBADF
+    //
+    // Kernel-ctx caveat unchanged.
+    {
+        let mmsg_buf = [0u8; 128];
+        let mmsg_ptr = mmsg_buf.as_ptr() as u64;
+
+        // sendmmsg(fd=3, NULL, vlen=2): fd OK (kernel ctx) →
+        // vlen>0 → NULL ptr → EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMMSG, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendmmsg(NULL, vlen=2) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::SENDMMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sendmmsg(fd=3, NULL, vlen=0): fd OK → vlen==0 short-
+        // circuit → terminal EBADF.  No pointer access.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendmmsg(NULL, vlen=0) post-reorder not EBADF ({})",
+                dispatch_linux(nr::SENDMMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sendmmsg(fd=3, valid, vlen=2): fd OK → vlen>0 → ptr OK
+        // → terminal EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: mmsg_ptr, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendmmsg(valid, vlen=2) post-reorder not EBADF ({})",
+                dispatch_linux(nr::SENDMMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // recvmmsg(fd=3, NULL, vlen=2, NULL_timeout): no timeout
+        // gate → fd OK → vlen>0 → NULL ptr → EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvmmsg(NULL, vlen=2, NULL_timeout) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::RECVMMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvmmsg(fd=3, valid, vlen=2, NULL_timeout): fd OK →
+        // vlen>0 → ptr OK → terminal EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: mmsg_ptr, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvmmsg(valid, vlen=2, NULL_timeout) post-reorder not EBADF ({})",
+                dispatch_linux(nr::RECVMMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvmmsg(fd=3, NULL, vlen=0, NULL_timeout): vlen==0 →
+        // EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvmmsg(NULL, vlen=0, NULL_timeout) post-reorder not EBADF ({})",
+                dispatch_linux(nr::RECVMMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvmmsg(fd=3, NULL, vlen=2, BAD_TIMEOUT): timeout gate
+        // (tv_nsec out of range) still fires FIRST → EINVAL.
+        // Confirms batch 438 reorder did not weaken the existing
+        // timeout-first gate from entry 261.
+        {
+            let bad_ts: [i64; 2] = [0, 1_000_000_000];
+            let bad_ts_ptr = (&raw const bad_ts[0]) as u64;
+            let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 2, arg3: 0, arg4: bad_ts_ptr, arg5: 0 };
+            core::hint::black_box(&bad_ts);
+            if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: recvmmsg(NULL, vlen=2, bad_timeout) timeout gate not first ({})",
+                    dispatch_linux(nr::RECVMMSG, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        serial_println!(
+            "[syscall/linux]   sendmmsg/recvmmsg fd lookup ordered before per-msg pointer validation (Linux: sockfd_lookup_light fires before the per-msg copy_msghdr_from_user loop; recvmmsg's timeout gate stays first): OK"
         );
     }
 

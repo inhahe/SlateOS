@@ -37085,3 +37085,164 @@ OBSOLETE NOTE BELOW (pre-relaxation):
         before msghdr validation (Linux: sockfd_lookup_light
         fires before copy_msghdr_from_user; bad fd → EBADF
         regardless of msghdr pointer validity): OK"
+
+438. [2026-06-06] syscall/linux: sendmmsg/recvmmsg fd lookup
+     ordered before per-msg pointer validation (Linux fidelity,
+     translator-only)
+
+     Continuation of batches 433–437 socket-family fd-vs-pointer
+     gate audit.  Batch 437 fixed sendmsg/recvmsg but explicitly
+     deferred the mmsg shapes because they layer a vlen-based
+     size computation and (for recvmmsg) a timeout-first gate
+     on top of the fd gate.  This batch handles them.
+
+     Linux source (net/socket.c, __sys_sendmmsg /
+     __sys_recvmmsg, kernel 6.x):
+
+         int __sys_sendmmsg(int fd, struct mmsghdr __user *mmsg,
+                            unsigned int vlen, unsigned int flags,
+                            bool forbid_cmsg_compat)
+         {
+             int datagrams;
+             struct socket *sock;
+             int err, fput_needed;
+
+             if (forbid_cmsg_compat && (flags & MSG_CMSG_COMPAT))
+                 return -EINVAL;
+
+             sock = sockfd_lookup_light(fd, &err, &fput_needed);
+             if (!sock)
+                 return err;
+
+             err = do_sendmmsg(sock, mmsg, vlen, flags);
+
+             fput_light(sock->file, fput_needed);
+             return err;
+         }
+
+         int __sys_recvmmsg(int fd, struct mmsghdr __user *mmsg,
+                            unsigned int vlen, unsigned int flags,
+                            struct __kernel_timespec __user *timeout,
+                            struct old_timespec32 __user *timeout32)
+         {
+             struct __kernel_timespec timeout_sys;
+             ...
+             /* TIMEOUT FIRST: validate user-supplied timeout
+                regardless of fd / mmsg validity */
+             if (timeout) {
+                 if (get_timespec64(&timeout_sys, timeout))
+                     return -EFAULT;
+                 ...
+                 if (!timespec64_valid(&timeout_sys))
+                     return -EINVAL;
+             }
+             ...
+             datagrams = do_recvmmsg(fd, mmsg, vlen, flags,
+                                     timeout ? &timeout_sys : NULL);
+             ...
+         }
+
+         static int do_recvmmsg(int fd, ...)
+         {
+             struct socket *sock;
+             ...
+             sock = sockfd_lookup_light(fd, &err, &fput_needed);
+             if (!sock)
+                 return err;
+             ...
+             /* per-msg loop: copy_msghdr_from_user on each entry */
+         }
+
+     Gate order in Linux:
+       (1) recvmmsg only: timeout get_user + timespec64_valid
+           → EFAULT / EINVAL.  sendmmsg has no timeout.
+       (2) sockfd_lookup_light(fd) → bad fd short-circuits with
+           -EBADF regardless of mmsg pointer / vlen.
+       (3) per-mmsg-entry copy_msghdr_from_user, which can
+           surface -EFAULT on individual entries.
+
+     Note: vlen==0 in Linux is "no datagrams to deliver" and
+     returns 0 quickly inside do_sendmmsg / do_recvmmsg, but
+     this happens AFTER sockfd_lookup_light.  Our translator
+     short-circuits vlen==0 with -EBADF (the fd was bogus so
+     even the "do nothing" path must still report the bad fd)
+     — this matches what sockfd_lookup_light would report
+     before do_sendmmsg/do_recvmmsg got the chance to see
+     vlen==0.
+
+     Divergence table (fd=99 invalid):
+
+        sendmmsg(fd, mmsg, vlen, flags)   Linux  pre    post
+        (99, NULL,    2, 0)               EBADF  EFAULT EBADF  FIXED
+        (99, BAD_PTR, 2, 0)               EBADF  EFAULT EBADF  FIXED
+        (99, NULL,    0, 0)               EBADF  ?      EBADF  FIXED
+        (99, valid,   2, 0)               EBADF  EBADF  EBADF  ok
+
+        recvmmsg(fd, mmsg, vlen, flags, timeout)
+        (99, *,       *, 0, BAD_TIMEOUT)  EFAULT EFAULT EFAULT ok (gate 1)
+        (99, *,       *, 0, {0,1e9})      EINVAL EINVAL EINVAL ok (gate 1)
+        (99, NULL,    2, 0, NULL)         EBADF  EFAULT EBADF  FIXED
+        (99, NULL,    0, 0, NULL)         EBADF  ?      EBADF  FIXED
+        (99, valid,   2, 0, NULL)         EBADF  EBADF  EBADF  ok
+
+     Why it matters:
+       * HAProxy, Envoy, nginx connection-multiplex paths use
+         sendmmsg/recvmmsg in tight loops where a sibling worker
+         may close the fd between epoll wakeup and the mmsg
+         call.  EBADF means "drop this fd from the pool";
+         EFAULT means "I built bad mmsghdr memory" — completely
+         different recovery.
+       * QUIC userspace stacks (msquic, quiche, picoquic, lsquic)
+         use sendmmsg with UDP_SEGMENT / GRO to batch outgoing
+         datagrams under GSO.  These paths probe socket
+         capabilities and classify EFAULT as a fatal build-bug
+         while EBADF is a transient connection-teardown signal.
+       * io_uring fallback paths and userspace network proxies
+         (Tailscale, WireGuard userspace ports, MASQUE relays)
+         that wrap recvmmsg behind a poll/select wakeup may
+         pass NULL mmsg in early-init paths intentionally to
+         probe fd validity — they expect EBADF, not EFAULT.
+
+     Architectural directive: translator-only fix.  No changes
+     to validate_user_read / validate_user_write, no changes
+     to validate_linux_fd, no changes to validate_timespec
+     semantics, no native code touched.  Linux compat layer
+     reshapes its own gate order; native OS architecture is
+     not affected.
+
+     Fix in kernel/src/syscall/linux.rs:
+       * sys_sendmmsg (~line 22336): reordered to FD → vlen==0
+         short-circuit → NULL gate → validate_user_read(64*vlen)
+         + validate_user_write(64*vlen) → EBADF.  Doc-commented
+         with __sys_sendmmsg source quote.
+       * sys_recvmmsg (~line 22367): timeout gate (gate 1)
+         stays first as before (batch 261); FD gate moved to
+         fire BEFORE vlen==0 short-circuit and BEFORE mmsg
+         pointer/size validation.  Doc enumerates all three
+         gates explicitly.
+
+     Self-test additions (~line 55505):
+       * sendmmsg 3-case:
+           (fd=3, NULL, vlen=2)        → EFAULT (kernel-ctx)
+           (fd=3, NULL, vlen=0)        → EBADF  (kernel-ctx)
+           (fd=3, valid, vlen=2)       → EBADF  (kernel-ctx)
+       * recvmmsg 4-case:
+           (fd=3, NULL, vlen=2, NULL_t)→ EFAULT
+           (fd=3, valid, vlen=2,NULL_t)→ EBADF
+           (fd=3, NULL, vlen=0, NULL_t)→ EBADF
+           (fd=3, NULL, vlen=2,bad_t)  → EINVAL  (timeout-first
+                                                  preserved)
+       * Kernel-context caveat (validate_linux_fd → Ok when
+         caller_pid()==None) means EBADF vs EFAULT swap isn't
+         directly observable from kernel ctx; probes verify
+         post-fd-gate flow.
+
+     Build: cargo build -p kernel clean (44.81s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+     24s).
+     Stamp confirmed at build/serial-test.txt:
+       "[syscall/linux]   sendmmsg/recvmmsg fd lookup ordered
+       before per-msg pointer validation (Linux:
+       sockfd_lookup_light fires before the per-msg
+       copy_msghdr_from_user loop; recvmmsg's timeout gate
+       stays first): OK"

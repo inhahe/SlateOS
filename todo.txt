@@ -28139,3 +28139,98 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (43.80s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+350. sys_landlock_restrict_self unsigned-int truncation —
+     high-half register garbage leaked into the
+     LANDLOCK_RESTRICT_SELF_FLAGS mask check (batch 320).
+
+     Divergence: Linux signature is
+       `int landlock_restrict_self(int ruleset_fd,
+                                   __u32 flags)`.
+     The second parameter is C __u32 → only the low 32
+     bits are defined; the AMD64 syscall ABI does NOT
+     zero-extend int args before issuing the syscall, so
+     the high 32 bits of %rsi are caller-uninitialised
+     garbage.  SYSCALL_DEFINE2(landlock_restrict_self,
+     ..., __u32, flags) narrows to (__u32) on entry; the
+     mask check `flags & ~LANDLOCK_RESTRICT_SELF_FLAGS`
+     in security/landlock/syscalls.c runs at 32-bit width.
+
+     Pre-batch we held flags as u64 and ran the mask
+     check against the full 64-bit register, so a caller
+     with non-zero high bits saw spurious EINVAL where
+     Linux returns EBADF (no landlock ruleset fd exists
+     in our kernel — we have no landlock infrastructure
+     at all, so EBADF is the permanent terminal).
+
+     Thirteenth instance of the int/unsigned-int
+     truncation pattern after batches 308 (mlockall),
+     309 (msync), 310 (mlock2), 311 (fchmodat), 312
+     (fchownat), 313 (unlinkat), 314 (renameat2), 315
+     (linkat), 316 (utimensat), 317 (umount2), 318
+     (memfd_secret), and 319 (timerfd_settime).
+
+     Pivot from initial batch-320 candidate sys_swapon:
+     verified that sys_swapon was already truncated in
+     batch 301 (see lines 14293-14296: `swap_flags_i32 =
+     args.arg1 as i32; swap_flags: u64 = u64::from(
+     swap_flags_i32 as u32)`).  No further work needed
+     there.
+
+     Fix: cast args.arg1 (u64) to u32 directly (matches
+     batches 314 and 318 patterns for unsigned int — no
+     i32 intermediate needed for unsigned types).
+
+     Tests: four boot-time probes added in dispatch_linux
+     after the existing landlock_restrict_self log flags
+     marker, each covering one shape:
+       (a) landlock_restrict_self(0, 0x1_0000_0001)
+           → EBADF (high|LOG_SAME_EXEC_OFF; truncates
+            to 1, mask passes, fd check passes in kernel
+            context, EBADF terminal).
+       (b) landlock_restrict_self(0, 0x1_0000_0007)
+           → EBADF (high|all-valid 0x7 = SAME_EXEC_OFF|
+            NEW_EXEC_ON|SUBDOMAINS_OFF; truncates to 7,
+            mask passes, EBADF).
+       (c) landlock_restrict_self(0, 0x1_0000_0000)
+           → EBADF (high-half only, low half zero;
+            truncates to 0, mask passes, EBADF).
+       (d) landlock_restrict_self(0, 0x1_0000_0008)
+           → EINVAL (high|bad-low 0x8; truncates to 0x8,
+            mask rejects bit outside the valid set;
+            verifies mask gate still rejects invalid
+            bits after the high half is stripped).
+     Marker: "[syscall/linux]   landlock_restrict_self
+              unsigned-int truncation (high-half
+              ignored): OK".
+
+     Preserved: existing landlock_restrict_self probes
+     still pass:
+       - undef flag 0x8 → EINVAL: works because 0x8 fits
+         in 32 bits, the u32 cast is identity, mask still
+         rejects.
+       - valid (flags=0) → EBADF: works because 0 is 0
+         in either width.
+       - LOG_SAME_EXEC_OFF=0x1, LOG_NEW_EXEC_ON=0x2,
+         LOG_SUBDOMAINS_OFF=0x4, all three (0x7) → EBADF:
+         all low-32-bit values, behave identically post-
+         truncation.
+       - high bit (0x101) → EINVAL: works because 0x101
+         truncates to itself (already in low 32 bits),
+         and 0x100 is outside the valid set.
+
+     Known limitations:
+     - Landlock is fundamentally incompatible with our
+       capability-based security model (we have no
+       per-thread/per-process LSM hook infrastructure and
+       no plan to add one — capabilities replace landlock
+       in our architecture).  EBADF is the permanent
+       terminal after the mask gate — no follow-up probes
+       needed when more infrastructure lands.
+     - args.arg0 (ruleset_fd) is already i32-truncated at
+       the cast in line 17950 — no separate fix needed
+       for the fd parameter.
+
+     Build: cargo build -p kernel clean (51.01s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

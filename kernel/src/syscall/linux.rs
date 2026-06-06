@@ -17932,9 +17932,23 @@ fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
 /// terminal `EBADF` (no real ruleset fd ever exists) for any well-
 /// formed call.
 fn sys_landlock_restrict_self(args: &SyscallArgs) -> SyscallResult {
-    const LANDLOCK_RESTRICT_SELF_FLAGS: u64 =
+    // Linux ABI: `int landlock_restrict_self(int ruleset_fd,
+    // __u32 flags)`.  SYSCALL_DEFINE2(landlock_restrict_self, ...,
+    // __u32, flags) narrows the second parameter to (__u32) on entry;
+    // the mask check `flags & ~LANDLOCK_RESTRICT_SELF_FLAGS` in
+    // security/landlock/syscalls.c runs at 32-bit width.  Pre-batch we
+    // held flags as u64 and ran the mask check at 64-bit width, so the
+    // AMD64 syscall ABI's high-half garbage (the kernel does not zero-
+    // extend int args before issuing the syscall) leaked into the mask
+    // and returned spurious EINVAL where Linux returns EBADF (no
+    // landlock ruleset fd ever exists in our kernel).  Thirteenth
+    // instance of the int/unsigned-int truncation pattern after batches
+    // 308-319.
+    const LANDLOCK_RESTRICT_SELF_FLAGS: u32 =
         (1 << 0) | (1 << 1) | (1 << 2);
-    if args.arg1 & !LANDLOCK_RESTRICT_SELF_FLAGS != 0 {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg1 as u32;
+    if flags & !LANDLOCK_RESTRICT_SELF_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -44781,6 +44795,77 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   landlock_restrict_self log flags: OK");
+
+        // Batch 320: landlock_restrict_self unsigned-int truncation —
+        // high-half register garbage must be stripped before the
+        // LANDLOCK_RESTRICT_SELF_FLAGS mask check.
+        //
+        // Linux signature: `int landlock_restrict_self(int ruleset_fd,
+        // __u32 flags)`.  flags is C __u32 → low 32 bits only.  Pre-
+        // batch we held flags as u64 and ran the mask check at 64-bit
+        // width, so high-half garbage returned spurious EINVAL where
+        // Linux returns EBADF (no landlock ruleset fd in our kernel).
+        //
+        // (a) landlock_restrict_self(0, 0x1_0000_0001) → EBADF
+        //     (high|LOG_SAME_EXEC_OFF; truncates to 1, mask passes,
+        //     fd check passes in kernel context, EBADF terminal).
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0001, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock_restrict_self(high|LOG_SAME_EXEC_OFF) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) landlock_restrict_self(0, 0x1_0000_0007) → EBADF
+        //     (high|all-valid 0x7; truncates to 7, mask passes, EBADF).
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0007, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock_restrict_self(high|all-valid) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) landlock_restrict_self(0, 0x1_0000_0000) → EBADF
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes, EBADF).
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock_restrict_self(high-half-zero) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) landlock_restrict_self(0, 0x1_0000_0008) → EINVAL
+        //     (high|bad-low 0x8; truncates to 0x8, mask rejects bit
+        //     outside LANDLOCK_RESTRICT_SELF_FLAGS=0x7; verifies mask
+        //     gate still rejects invalid bits after the high half is
+        //     stripped).
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0008, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock_restrict_self(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   landlock_restrict_self unsigned-int truncation (high-half ignored): OK"
+        );
 
         // kcmp bad type, valid pids -> EINVAL.  Type validation lives
         // in Linux's switch-default arm, so it fires only after the

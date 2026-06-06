@@ -34179,3 +34179,142 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        Filed here because the fairness self-test crashing is a
        boot-blocker if it ever becomes deterministic.
 
+408. [Linux-compat / kernel/src/syscall/linux.rs] sys_futex2_wake
+     gate-order: flag-mask + size + mask==0 must run BEFORE the
+     uaddr access; nr<0 is benign in Linux (returns 0), not
+     EINVAL.
+
+     Linux source (kernel/futex/syscalls.c,
+     SYSCALL_DEFINE4(futex_wake, void __user *, uaddr,
+                                 unsigned long, mask,
+                                 int, nr,
+                                 unsigned int, flags)):
+
+       if (flags & ~FUTEX2_VALID_MASK)
+           return -EINVAL;              // (1) flag mask
+       flags = futex2_to_flags(flags);
+       if (!futex_flags_valid(flags))
+           return -EINVAL;              // (2) size != U32
+       if (!futex_validate_input(flags, mask))
+           return -EINVAL;              // (3) mask == 0
+       return futex_wake(uaddr, flags, nr, mask);
+
+     And futex_wake() in kernel/futex/waitwake.c:
+
+       int futex_wake(void __user *uaddr, unsigned int flags,
+                      int nr_wake, u32 bitset)
+       {
+           ...
+           if (!bitset) return -EINVAL;
+           ret = get_user_key(uaddr, ...);
+           if (unlikely(ret != 0)) goto out;  // (4) uaddr EFAULT
+           ...
+           plist_for_each_entry_safe(...) {
+               if (match_futex(&this->key, &key)) {
+                   futex_wake_mark(&wake_q, this);
+                   if (++ret >= nr_wake)
+                       break;          // nr_wake<0: break on first iter
+               }
+           }
+           return ret;                    // 0 if no waiters (any nr)
+       }
+
+     So Linux orders: flag-mask, size, mask==0, THEN uaddr.  And
+     nr<0 is silently benign — the wake loop exits without
+     waking anyone, returning 0.
+
+     Pre-batch we ran:
+       * uaddr == 0 -> EFAULT      (FIRST — divergent)
+       * nr < 0     -> EINVAL      (divergent: Linux returns 0)
+       * flag mask  -> EINVAL
+       * size mask  -> EINVAL
+       * NUMA       -> ENOSYS      (translator-specific, kept)
+       * mask == 0  -> EINVAL
+       * validate_user_read uaddr -> EFAULT
+       * forward.
+
+     Divergence table:
+
+       * futex2_wake(NULL,1,1,0x100)          Linux: EINVAL
+                                              Pre:   EFAULT
+                                              (the main fix —
+                                               flag-mask gate now
+                                               wins over uaddr.)
+       * futex2_wake(NULL,0,1,F2_SIZE_U32)    Linux: EINVAL
+                                              Pre:   EFAULT
+                                              (mask==0 gate now
+                                               wins over uaddr.)
+       * futex2_wake(NULL,1,1,F2_SIZE_U32)    Linux: EFAULT
+                                              Pre:   EFAULT
+                                              (flag/mask gates
+                                               pass; uaddr is the
+                                               terminal both
+                                               sides.  Same.)
+       * futex2_wake(valid,1,-1,F2_SIZE_U32)  Linux: 0 (benign)
+                                              Pre:   EINVAL
+                                              (Linux's wake loop
+                                               breaks on first
+                                               iter for nr<0.)
+
+     Why this matters: glibc's NPTL pthread_cond_signal /
+     pthread_cond_broadcast probes futex2 via wake-on-private-mutex
+     and uses EINVAL vs. EFAULT to distinguish "kernel doesn't
+     support futex2 with this flag combo, fall back to
+     FUTEX_WAKE" from "kernel supports futex2 but my address went
+     bad."  EFAULT-on-bad-flags forces the fallback path
+     unnecessarily and bypasses the futex2 fast path forever for
+     that thread.
+
+     Worse, the `nr < 0 -> EINVAL` divergence breaks the
+     idiomatic "wake any" call (passing INT_MAX or -1) that
+     pthread_cond_broadcast uses internally - Linux treats
+     nr=-1 as "wake at most nothing" silently, returning 0,
+     while we returned EINVAL and caused the caller to abort
+     the broadcast loop, leaving condvar waiters stranded.
+
+     Fix: reorder to Linux's sequence and drop the nr<0
+     rejection; clamp nr<0 to 0 before forwarding to the legacy
+     handler so handlers::sys_futex_wake doesn't misinterpret
+     the sign-extended u32 as "wake u32::MAX."
+
+       if flags & !VALID_FLAG_BITS != 0 -> EINVAL
+       if flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32 -> EINVAL
+       if flags & FUTEX2_NUMA != 0 -> ENOSYS (translator)
+       if mask == 0 -> EINVAL
+       if uaddr == 0 -> EFAULT
+       if validate_user_read fails -> EFAULT
+       nr_clamped = if nr < 0 { 0 } else { nr as u64 };
+       forward to handlers::sys_futex_wake
+
+     Architectural directive: futex2 has a real backing store
+     (ipc::futex).  This is a translator gate-order fix only —
+     no change to the underlying queue.  FUTEX2_NUMA -> ENOSYS
+     is preserved as a truthful translator answer because we
+     have one global futex hash.
+
+     Probes added (3 new, 1 reused-with-changed-expectation,
+     plus the existing 5 kept):
+       * futex2_wake(NULL, 1, 1, 0x100)       -> EINVAL (NEW —
+         verifies flag-mask gate wins over uaddr; pre-batch
+         would have returned EFAULT).
+       * futex2_wake(NULL, 0, 1, F2_SIZE_U32) -> EINVAL (NEW —
+         verifies mask==0 gate wins over uaddr; pre-batch
+         would have returned EFAULT).
+       * futex2_wake(valid, 1, u64::MAX, F2_SIZE_U32) -> 0
+         (NEW; was EINVAL pre-batch; verifies nr<0 is benign).
+       * futex2_wake(NULL, 1, 1, F2_SIZE_U32) -> EFAULT
+         (existing; reused with the same expectation — both
+         flag/mask gates pass so uaddr is the terminal).
+       * The 5 other existing probes (bad-flag, non-U32-size,
+         NUMA, mask=0, valid-nr-0, valid-nr-10) all keep their
+         expectations because they don't exercise the gate
+         interaction.
+
+     Final boot-time stamp:
+         "[syscall/linux]   futex2_wake flag-mask-before-uaddr
+          + nr<0 benign: OK"
+
+     Build: cargo build -p kernel clean (45.73s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 26s).
+

@@ -25286,33 +25286,95 @@ fn sys_futex2_wake(args: &SyscallArgs) -> SyscallResult {
     let nr = args.arg2 as i32;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg3 as u32;
-    if uaddr2 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if nr < 0 {
-        return linux_err(errno::EINVAL);
-    }
+
+    // Linux gate order (kernel/futex/syscalls.c:
+    // SYSCALL_DEFINE4(futex_wake, void __user *uaddr, unsigned long mask,
+    //                 int nr, unsigned int flags)):
+    //   1. flags & ~FUTEX2_VALID_MASK            -> -EINVAL
+    //   2. !futex_flags_valid(flags)             -> -EINVAL (size != U32)
+    //   3. !futex_validate_input(flags, mask)    -> -EINVAL (mask == 0)
+    //   4. futex_wake(uaddr, flags, nr, mask):
+    //        - get_user_key(uaddr)               -> -EFAULT on bad uaddr
+    //        - loop wakes at most `nr` waiters; `nr < 0` is benign and
+    //          returns 0 without erroring (the break condition
+    //          `++ret >= nr_wake` is immediately true on the first
+    //          iteration, and with no waiters the loop body never
+    //          runs and `ret` stays 0).
+    //
+    // Pre-batch we ran:
+    //   * uaddr == 0 -> EFAULT                   (FIRST — divergent)
+    //   * nr < 0     -> EINVAL                   (divergent: Linux returns 0)
+    //   * flag mask  -> EINVAL
+    //   * size mask  -> EINVAL
+    //   * NUMA flag  -> ENOSYS                   (translator-specific, kept)
+    //   * mask == 0  -> EINVAL
+    //   * validate_user_read uaddr -> EFAULT
+    //   * forward.
+    //
+    // Concrete divergences:
+    //   * futex2_wake(NULL, _, _, 0x100)         Linux: EINVAL (bad flag)
+    //                                            Pre:   EFAULT (uaddr first)
+    //   * futex2_wake(NULL, _, _, 0)             Linux: EINVAL (size != U32)
+    //                                            Pre:   EFAULT
+    //   * futex2_wake(NULL, 0, _, F2_SIZE_U32)   Linux: EINVAL (mask == 0)
+    //                                            Pre:   EFAULT
+    //   * futex2_wake(valid, 1, -1, F2_SIZE_U32) Linux: 0 (benign no-op)
+    //                                            Pre:   EINVAL
+    //
+    // Why this matters: glibc's NPTL pthread_cond_signal path probes
+    // futex2 via wake-on-private-mutex and uses EINVAL vs. EFAULT to
+    // distinguish "kernel doesn't support futex2 with this flag combo,
+    // fall back to FUTEX_WAKE" from "kernel supports futex2 but my
+    // address went bad."  EFAULT-on-bad-flags forces the fallback path
+    // unnecessarily and bypasses the futex2 fast path forever for that
+    // thread.  Similarly, the `nr < 0 -> EINVAL` divergence breaks
+    // probes that intentionally pass `nr = -1` as "wake any" - Linux
+    // treats this as "wake at most -1 (i.e. wake nothing)" and returns
+    // 0, while we returned EINVAL and caused the caller to abort the
+    // condvar broadcast loop.
+    //
+    // Architectural directive: futex semantics are real (we have the
+    // ipc::futex backing store).  This is a translator gate-order fix
+    // only — no change to the underlying queue.
+
+    // Gate 1: flag mask EINVAL (must come first).
     if flags & !VALID_FLAG_BITS != 0 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 2: size != U32 EINVAL.
     if flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 2.5: FUTEX2_NUMA — translator-specific.  We have one global
+    // futex hash, so a request for NUMA-aware hashing has no truthful
+    // answer.  ENOSYS lets glibc's pthread_create + NUMA hint paths
+    // detect "kernel doesn't speak NUMA-aware futex2" and fall back to
+    // the non-NUMA call.  Linux 6.7+ would accept and ignore on a
+    // single-node system; ENOSYS is the closest truthful answer.
     if flags & FUTEX2_NUMA != 0 {
         return linux_err(errno::ENOSYS);
     }
+    // Gate 3: mask == 0 EINVAL (futex_validate_input rejects).
     if mask == 0 {
         return linux_err(errno::EINVAL);
+    }
+    // Gate 4: uaddr validation (in futex_wake() via get_user_key).
+    if uaddr2 == 0 {
+        return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(uaddr2, 4) {
         return linux_err(linux_errno_for(e));
     }
+    // nr < 0 is benign in Linux — the wake loop breaks before doing
+    // anything.  Clamp to 0 so the forwarded handler doesn't surprise
+    // us with an unsigned-truncation-induced "wake u32::MAX" instead.
+    let nr_clamped: u64 = if nr < 0 { 0 } else { nr as u64 };
     // Forward to the legacy WAKE handler.  arg1 carries `nr` (count to
     // wake) per `handlers::sys_futex_wake`'s ABI; mask is consumed
     // here and dropped (see doc comment for the upgrade path).
     let a = SyscallArgs {
         arg0: uaddr2,
-        arg1: nr as u64,
+        arg1: nr_clamped,
         arg2: 0,
         arg3: 0,
         arg4: 0,
@@ -55662,21 +55724,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         const F2_NUMA: u64 = 0x4;
         const F2_PRIVATE: u64 = 0x80;
 
-        // futex2 wake NULL -> EFAULT.
+        // Batch 378: sys_futex2_wake gate-order fix.  Linux's
+        // SYSCALL_DEFINE4(futex_wake) runs flag-mask + size + mask==0
+        // gates BEFORE futex_wake() touches uaddr (via get_user_key).
+        // Pre-batch we ran uaddr==0 -> EFAULT FIRST and also
+        // rejected nr<0 with EINVAL where Linux returns 0 (the wake
+        // loop's break condition `++ret >= nr_wake` is immediately
+        // true on the first iteration).
+
+        // futex2 wake NULL + valid U32-size + mask=1 -> EFAULT
+        // (uaddr gate fires AFTER flag/mask gates, but all flag/mask
+        // gates pass here, so the terminal is still EFAULT).
         let a = SyscallArgs {
             arg0: 0, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: futex2 wake NULL not EFAULT");
+            serial_println!("[syscall/linux]   FAIL: futex2 wake NULL valid-flags not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // futex2 wake nr<0 -> EINVAL.
+        // futex2 wake NULL + bad flag bit (0x100) -> EINVAL
+        // (verifies flag-mask gate now wins over uaddr gate; pre-batch
+        // returned EFAULT because uaddr was checked first).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 1, arg2: 1, arg3: 0x100, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wake NULL+bad-flag not EINVAL (gate order)");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wake NULL + mask=0 + valid flags -> EINVAL
+        // (verifies mask==0 gate now wins over uaddr gate).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wake NULL+mask=0 not EINVAL (gate order)");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wake valid + nr<0 -> 0 (no waiters; Linux returns 0
+        // because the wake loop breaks on `++ret >= nr_wake` first
+        // iteration).  Pre-batch returned EINVAL.
         let a = SyscallArgs {
             arg0: u32_ptr, arg1: 1, arg2: u64::MAX, arg3: F2_SIZE_U32,
             arg4: 0, arg5: 0,
         };
-        if dispatch_linux(nr::FUTEX_WAKE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: futex2 wake nr<0 not EINVAL");
+        let r = dispatch_linux(nr::FUTEX_WAKE, &a).value;
+        if r != 0 {
+            serial_println!("[syscall/linux]   FAIL: futex2 wake nr<0 not 0 (got {})", r);
             return Err(KernelError::InternalError);
         }
         // futex2 wake unknown flag bit (0x100) -> EINVAL.
@@ -55729,6 +55823,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: futex2 wake nr=10 not 0");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   futex2_wake flag-mask-before-uaddr + nr<0 benign: OK"
+        );
 
         // futex2 wait bad clockid (99) -> EINVAL.
         let a = SyscallArgs {

@@ -27668,3 +27668,98 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (59.23s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+345. sys_linkat int truncation — high-half register garbage
+     leaked into the AT_SYMLINK_FOLLOW|AT_EMPTY_PATH mask
+     check (batch 315).
+
+     Divergence: Linux signature is
+       `int linkat(int olddirfd, const char *oldpath,
+                   int newdirfd, const char *newpath,
+                   int flags)`.
+     The fifth parameter is C int → only the low 32 bits
+     are defined; the AMD64 syscall ABI does NOT zero-extend
+     int args before issuing the syscall, so the high 32
+     bits of %r8 are caller-uninitialised garbage.
+     SYSCALL_DEFINE5(linkat, int, olddfd, ..., int, flags)
+     narrows to (int) on entry; the mask check
+     `flags & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH)` in
+     fs/namei.c::do_linkat runs at 32-bit width.
+
+     Pre-batch we held flags as u64 and ran the mask check
+     against the full 64-bit register, so a caller with
+     non-zero high bits saw spurious EINVAL where Linux
+     accepts the call and proceeds to EROFS (no writable
+     FS in kernel context after validate_user_read
+     succeeds for non-NULL paths).
+
+     Eighth instance of the *at int-flags truncation
+     pattern after batches 308 (mlockall), 309 (msync),
+     310 (mlock2), 311 (fchmodat), 312 (fchownat), 313
+     (unlinkat), and 314 (renameat2).
+
+     Fix: cast args.arg4 (u64) to i32, then re-widen to
+     u32 for the mask check.  Matches the i32→u32 pattern
+     used in batches 308, 311, 312, 313 (all flags=int).
+     renameat2 used direct u32 cast because its flags is
+     unsigned int; linkat is signed int so it goes through
+     i32 first to mirror exactly what (int) narrowing does
+     in SYSCALL_DEFINE5.
+
+     Tests: four boot-time probes added in dispatch_linux
+     after the existing LINKAT EINVAL/EROFS probes, each
+     covering one shape:
+       (a) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0400)
+           → EROFS (high|AT_SYMLINK_FOLLOW; truncates to
+            0x400, mask passes, paths validated, EROFS
+            terminal in kernel context).
+       (b) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_1400)
+           → EROFS (high|AT_SYMLINK_FOLLOW|AT_EMPTY_PATH;
+            truncates to 0x1400, mask passes, EROFS).
+       (c) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0000)
+           → EROFS (high-half only, low half zero;
+            truncates to 0, mask passes, EROFS).
+       (d) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0010)
+           → EINVAL (high|bad-low 0x10; truncates to 0x10,
+            mask rejects bit outside the valid set;
+            verifies mask gate still rejects invalid bits
+            after the high half is stripped).
+     Marker: "[syscall/linux]   linkat int truncation
+              (high-half ignored): OK".
+
+     Preserved: existing linkat(bad flag) EINVAL and
+     linkat(valid AT_SYMLINK_FOLLOW) EROFS probes still
+     fire — the 64-bit mask check `& !VALID_FLAGS != 0`
+     and the 32-bit mask check `& !VALID_FLAGS != 0`
+     return identical results when args.arg4 fits in
+     32 bits, which is the case in those probes
+     (0x800_0000 and 0x400 respectively).
+
+     Known limitations:
+     - sys_linkat in our kernel returns EROFS uncondi-
+       tionally after pointer validation because we have
+       no writable FS.  Real Linux runs ten more gates
+       between mask check and EROFS (do_filp_open on
+       oldpath, follow_or_not_to_follow logic on
+       AT_SYMLINK_FOLLOW vs symlink target, ESTALE
+       handling, vfs_link permission checks, target
+       directory validation, EXDEV cross-device check,
+       ELOOP for symlink chains, ENAMETOOLONG, EACCES on
+       restricted dirs, and ENOSPC).  Our EROFS short-
+       circuit is correct for the empty-FS case but does
+       not exercise those gates.  When we land a writable
+       FS the linkat self-tests will need to grow probes
+       for each terminal errno.
+     - AT_EMPTY_PATH (0x1000) requires olddirfd to be an
+       open fd referring to the source file (Linux's
+       hardlinks-to-fd feature, CAP_DAC_READ_SEARCH or
+       O_PATH).  In kernel context we can't install a
+       real fd so the (b) probe with AT_EMPTY_PATH only
+       exercises the mask gate, not the
+       resolve-from-fd path.  When fd installation lands
+       a follow-up test should cover the AT_EMPTY_PATH
+       semantics end-to-end.
+
+     Build: cargo build -p kernel clean (47.67s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 25s).

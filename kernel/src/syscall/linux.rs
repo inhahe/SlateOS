@@ -11130,10 +11130,27 @@ fn sys_link(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `linkat(olddirfd, oldpath, newdirfd, newpath, flags)`.
+///
+/// Linux ABI: `int linkat(int olddirfd, const char *oldpath,
+/// int newdirfd, const char *newpath, int flags)`.
+/// SYSCALL_DEFINE5(linkat, int, olddfd, ..., int, flags) narrows the
+/// fifth parameter to (int) on entry; the mask check
+/// `flags & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH)` runs at 32-bit width
+/// in fs/namei.c::do_linkat.  Pre-batch we held flags as u64 and ran
+/// the mask check against the full 64-bit register, so the AMD64
+/// syscall ABI's high-half garbage (the kernel does not zero-extend
+/// int args before issuing the syscall) leaked into the mask and
+/// returned spurious EINVAL where Linux accepts the call and proceeds
+/// to EROFS (no writable FS).  Eighth instance of the *at int-flags
+/// truncation pattern after batches 308-314.
 fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
-    // Linux: AT_SYMLINK_FOLLOW (0x400) | AT_EMPTY_PATH (0x1000).
-    const VALID_FLAGS: u64 = 0x400 | 0x1000;
-    if args.arg4 & !VALID_FLAGS != 0 {
+    // AT_SYMLINK_FOLLOW (0x400) | AT_EMPTY_PATH (0x1000).
+    const VALID_FLAGS: u32 = 0x400 | 0x1000;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg4 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     if args.arg1 == 0 || args.arg3 == 0 {
@@ -38046,6 +38063,87 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: linkat not EROFS");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 315: linkat int truncation — high-half register
+        // garbage must be stripped before the flags mask check.
+        //
+        // Linux signature: `int linkat(int olddirfd, const char *oldpath,
+        // int newdirfd, const char *newpath, int flags)`.  flags is C
+        // int → low 32 bits only.  Pre-batch we held flags as u64 and
+        // ran the mask check at 64-bit width, so high-half garbage
+        // returned spurious EINVAL where Linux returns EROFS (no
+        // writable FS in kernel context after validate_user_read
+        // succeeds for non-NULL paths).
+        //
+        // (a) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0400) → EROFS
+        //     (high|AT_SYMLINK_FOLLOW; truncates to 0x400, mask
+        //     passes, paths validated, EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x1_0000_0400, arg5: 0,
+        };
+        let v = dispatch_linux(nr::LINKAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linkat(high|AT_SYMLINK_FOLLOW) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_1400) → EROFS
+        //     (high|AT_SYMLINK_FOLLOW|AT_EMPTY_PATH; truncates to
+        //     0x1400, mask passes, EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x1_0000_1400, arg5: 0,
+        };
+        let v = dispatch_linux(nr::LINKAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linkat(high|all-valid) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0000) → EROFS
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes, EROFS terminal).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x1_0000_0000, arg5: 0,
+        };
+        let v = dispatch_linux(nr::LINKAT, &a).value;
+        if v != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linkat(high-half-zero) -> {} (expected -EROFS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0010) → EINVAL
+        //     (high|bad-low 0x10; truncates to 0x10, mask rejects bit
+        //     outside AT_SYMLINK_FOLLOW|AT_EMPTY_PATH; verifies mask
+        //     gate still rejects invalid bits after the high half is
+        //     stripped — locks in the truncation behaviour).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x1_0000_0010, arg5: 0,
+        };
+        let v = dispatch_linux(nr::LINKAT, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linkat(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   linkat int truncation (high-half ignored): OK"
+        );
 
         // utimensat bogus flag -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,

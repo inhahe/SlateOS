@@ -35057,3 +35057,65 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (40.44s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
+
+419. Batch 389 — sync_file_range: add `offset + nbytes` overflow gate
+     (endbyte < 0 / endbyte < offset → EINVAL).  Pre-batch we checked
+     individual sign bits on `offset` and `nbytes` but missed the
+     signed-sum overflow that Linux explicitly tests.
+
+     Divergence table:
+       Linux source : fs/sync.c::ksys_sync_file_range (called from
+                      SYSCALL_DEFINE4(sync_file_range, ...)).
+       Linux gates  : 1. flags & ~VALID_FLAGS              → EINVAL
+                      2. endbyte = offset + nbytes
+                      3. (s64)offset  < 0                  → EINVAL
+                      4. (s64)endbyte < 0   (signed wrap)  → EINVAL
+                      5. endbyte < offset   (unsigned wrap)→ EINVAL
+                      6. fdget(fd)                         → EBADF
+                      7. !(f_mode & FMODE_FSYNC)           → ESPIPE
+       Pre-batch    : flags → off<0 → nbytes<0 → fd validate → ok(0).
+                      A call with `offset = i64::MAX, nbytes = 1`
+                      passed gates 1–3 (both signs positive), fell
+                      through to fd validation; with caller_pid()
+                      == None the kernel-context shortcut returned
+                      ok(0).  Linux computes `endbyte = i64::MAX + 1`
+                      → wraps to i64::MIN → trips gate 4 → EINVAL.
+       Post-batch   : insert checked_add overflow check + the
+                      `endbyte < off` wrap check immediately after the
+                      individual sign checks, before fd validation.
+
+     Why it matters: real consumers (PostgreSQL's pg_flush_data,
+     MySQL InnoDB doublewrite, Ceph BlueStore aio_flush) call
+     sync_file_range to durably flush specific extents and rely on
+     EINVAL to surface upper-layer bugs that compute a bogus
+     `(offset, nbytes)` pair (e.g. passing `nbytes = SIZE_MAX` as
+     "flush to end of file" — a common mistake when porting from
+     fdatasync which has no offset/length params).  Pre-batch our
+     stub silently returned ok(0) for these malformed calls; Linux
+     reports EINVAL.  Database engines distinguish "wrote nothing
+     because the FS doesn't need a flush" (ok=0) from "you handed
+     me a malformed range" (EINVAL) — the former lets them advance
+     the WAL pointer, the latter forces a diagnostic + retry.  A
+     silent ok(0) here would advance the WAL pointer on a flush
+     that never happened.
+
+     Linux's gate order between (offset<0) and (endbyte<0) is:
+     offset is tested first, then the sum.  We mirror that exactly:
+     individual signs first, then checked_add for the overflow.
+     Architectural: this is pure ABI translation — the underlying
+     "all FS write through; flush is no-op" semantic is unchanged.
+     We are merely rejecting malformed inputs at the boundary
+     instead of letting them through.
+
+     Probes added: (1) `offset = i64::MAX, nbytes = 1, flags = 0`
+     → EINVAL (endbyte overflow; pre-batch this fell to fd validate
+     and returned EBADF or ok(0)).  (2) `offset = i64::MAX, nbytes
+     = 0, flags = 0` → ok(0) (boundary case: endbyte == offset, no
+     overflow, must succeed — guards against the gate false-
+     positiving).  Existing bad-flags + neg-offset + (0,0,0,0) ok
+     probes unchanged.  New aggregate stamp:
+       "[syscall/linux]   sync_file_range endbyte overflow EINVAL
+        gate (offset+nbytes wrap): OK"
+
+     Build: cargo build -p kernel clean (39.40s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).

@@ -20326,6 +20326,43 @@ fn sys_rseq(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `sync_file_range(fd, offset, nbytes, flags)`.
+///
+/// Linux signature: `SYSCALL_DEFINE4(sync_file_range, int, fd, loff_t,
+/// offset, loff_t, nbytes, unsigned int, flags)`.  The gate order in
+/// `fs/sync.c::ksys_sync_file_range` is:
+///
+/// ```c
+/// ret = -EINVAL;
+/// if (flags & ~VALID_FLAGS)
+///     goto out;
+///
+/// endbyte = offset + nbytes;
+/// if ((s64)offset < 0)
+///     goto out;
+/// if ((s64)endbyte < 0)        // sum < 0  → overflow
+///     goto out;
+/// if (endbyte < offset)        // wrap-around → overflow
+///     goto out;
+/// ...
+/// ret = -EBADF;
+/// f = fdget(fd);
+/// ```
+///
+/// Pre-batch we checked `offset < 0` and `nbytes < 0` but missed the
+/// `offset + nbytes` overflow gate.  A call with `offset = i64::MAX` and
+/// `nbytes = 1` passed our individual-component checks and fell through
+/// to fd validation, returning `EBADF` (or `ok(0)` in kernel context).
+/// Linux computes `endbyte = i64::MAX + 1`, which wraps to `i64::MIN`,
+/// trips the `(s64)endbyte < 0` test, and returns `EINVAL`.  The
+/// overflow-window divergence is observable to applications that pass
+/// a bogus `nbytes = SIZE_MAX` (a common mistake when porting from
+/// `fdatasync` which has no offset/length): Linux rejects with EINVAL,
+/// we silently returned `ok(0)`.
+///
+/// Real-world consumers affected: PostgreSQL, MySQL (InnoDB doublewrite
+/// buffer), Ceph BlueStore — all use `sync_file_range` to durability-
+/// flush specific extents and rely on EINVAL to reject malformed
+/// (offset, nbytes) pairs from upper-layer bugs.
 fn sys_sync_file_range(args: &SyscallArgs) -> SyscallResult {
     const VALID_FLAGS: u32 = 0x7; // WAIT_BEFORE | WRITE | WAIT_AFTER
     #[allow(clippy::cast_possible_truncation)]
@@ -20339,6 +20376,18 @@ fn sys_sync_file_range(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let n = args.arg2 as i64;
     if off < 0 || n < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // offset + nbytes overflow check — Linux ksys_sync_file_range
+    // computes `endbyte = offset + nbytes` and rejects both
+    //   `(s64)endbyte < 0` (signed-sum overflow into negative)
+    //   `endbyte < offset` (unsigned wrap-around)
+    // with EINVAL.  Use checked_add so any wrap surfaces as EINVAL
+    // before we waste a fd lookup on a malformed range.
+    let Some(endbyte) = off.checked_add(n) else {
+        return linux_err(errno::EINVAL);
+    };
+    if endbyte < off {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -51562,6 +51611,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: sync_file_range valid not 0");
             return Err(KernelError::InternalError);
         }
+        // sync_file_range: offset + nbytes overflow -> EINVAL.  Linux's
+        // ksys_sync_file_range computes endbyte = offset + nbytes and
+        // rejects negative endbyte (signed overflow).  Pre-batch we
+        // checked only the individual signs and fell through to fd
+        // validation (EBADF) where Linux returns EINVAL.  i64::MAX as u64
+        // is 0x7fff_ffff_ffff_ffff; + 1 wraps to i64::MIN.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: i64::MAX as u64,
+            arg2: 1,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::SYNC_FILE_RANGE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sync_file_range endbyte overflow not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // sync_file_range: offset = i64::MAX, nbytes = 0 -> valid (no
+        // overflow; endbyte == offset).  Confirms the overflow gate
+        // doesn't false-positive on the boundary.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: i64::MAX as u64,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::SYNC_FILE_RANGE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: sync_file_range boundary endbyte=offset not 0");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sync_file_range endbyte overflow EINVAL gate (offset+nbytes wrap): OK"
+        );
 
         // process_madvise non-zero flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 1, arg5: 0 };

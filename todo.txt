@@ -33472,3 +33472,92 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (38.70s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+401. [BATCH 371 — 2026-06-06 — sys_semctl semid<0 gate + IPC_INFO/
+     SEM_INFO buf-first routing (kernel/src/syscall/linux.rs)]
+
+     Linux divergence: pre-batch sys_semctl was a bare flat
+     EINVAL — no semid gate, no cmd switch, no IPC_INFO/SEM_INFO
+     buf routing.  That accidentally produced the correct errno
+     for many shapes (Linux returns EINVAL on `semid < 0` and on
+     per-semset lookup misses), but was wrong for IPC_INFO and
+     SEM_INFO with a valid buf pointer.
+
+     Linux's ksys_semctl (ipc/sem.c):
+       1. `if (semid < 0) return -EINVAL;`
+          (No explicit `cmd < 0` check — negative cmd falls
+           through to the switch's `default` arm, also -EINVAL.)
+       2. switch on cmd:
+            * IPC_INFO (3) / SEM_INFO (19): semctl_info ->
+              copy_to_user(p, &seminfo, sizeof(seminfo))
+              UNCONDITIONALLY.  p=NULL/unmapped -> EFAULT;
+              valid -> success (max idx, 0 when empty).
+            * IPC_STAT (2) / SEM_STAT (18) / SEM_STAT_ANY (20):
+              semctl_stat -> per-semset lookup -> EINVAL.
+            * GETALL (6) / GETVAL (12) / GETPID (11) /
+              GETNCNT (14) / GETZCNT (15) / SETALL (17) /
+              SETVAL (16): semctl_main -> per-semset lookup
+              -> EINVAL.
+            * IPC_RMID (0) / IPC_SET (1): semctl_down ->
+              per-semset lookup -> EINVAL.
+            * default: -EINVAL.
+
+     Probe shapes that diverged:
+       * semctl(0, 0, IPC_INFO, NULL) -> EFAULT (Linux) vs
+         EINVAL (pre-batch).
+       * semctl(0, 0, IPC_INFO, &valid_buf) -> 0 success
+         (Linux) vs EINVAL (pre-batch).
+       * semctl(0, 0, SEM_INFO, ...) -> same as IPC_INFO.
+
+     Completes the IPC_INFO/*_INFO buf-first routing trio
+     across the three SysV IPC ctl syscalls:
+       Batch 369: shmctl IPC_INFO/SHM_INFO.
+       Batch 370: msgctl IPC_INFO/MSG_INFO.
+       Batch 371: semctl IPC_INFO/SEM_INFO.
+
+     Fix structure (same translator pattern):
+       1. semid<0 -> EINVAL (explicit gate, matches Linux).
+       2. cmd == IPC_INFO || cmd == SEM_INFO:
+              arg==NULL -> EFAULT
+              validate_user_write(arg, 1) fail -> EFAULT
+              else -> ENOSYS (no SysV IPC backing)
+       3. else (per-semset cmds + default): -> EINVAL.
+
+     Note on syscall arg layout: semctl's 4th argument is the
+     variadic `arg` (a `union semun` in userspace).  For
+     IPC_INFO/SEM_INFO/IPC_STAT/SEM_STAT/SEM_STAT_ANY it
+     carries the buf pointer; for GETVAL/GETPID/etc it's
+     unused; for SETVAL it's an int value; for SETALL it's an
+     array pointer.  The kernel sees only the raw 64-bit arg
+     register (args.arg3), which is the right thing to treat
+     as the buf pointer for IPC_INFO/SEM_INFO.
+
+     Probes added (7 new) replacing/extending the existing
+     "semctl -> EINVAL" probe:
+
+       * semctl(semid=-1, 0, cmd=2, _) -> EINVAL via the new
+         explicit semid<0 gate.
+       * semctl(0, 0, IPC_INFO=3, NULL) -> EFAULT (was EINVAL).
+       * semctl(0, 0, SEM_INFO=19, NULL) -> EFAULT (was EINVAL).
+       * semctl(0, 0, IPC_INFO=3, &stack_buf) -> ENOSYS (was
+         EINVAL; the most important fix — valid-buf path now
+         matches translator pattern).
+       * semctl(0, 0, SEM_INFO=19, &stack_buf) -> ENOSYS (was
+         EINVAL).
+       * semctl(0, 0, IPC_STAT=2, &stack_buf) -> EINVAL (per-
+         semset cmd: lookup fails before buf touched;
+         VERIFIES the new routing is not over-broad).
+       * semctl(0, 0, GETVAL=12, _) -> EINVAL (per-semset).
+
+     The existing "semctl(0,0,0,0) -> EINVAL" probe (cmd=0
+     is IPC_RMID, a per-semset cmd) still passes via the new
+     per-semset terminal.
+
+     Final boot-time stamp:
+         "[syscall/linux]   semctl semid<0 gate + IPC_INFO/
+          SEM_INFO buf-first (EFAULT/ENOSYS), per-semset
+          EINVAL: OK"
+
+     Build: cargo build -p kernel clean (38.90s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

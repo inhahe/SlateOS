@@ -15511,7 +15511,78 @@ fn sys_semop(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `semctl(semid, semnum, cmd, arg)`.
-fn sys_semctl(_args: &SyscallArgs) -> SyscallResult {
+///
+/// Linux's `ipc/sem.c::ksys_semctl()` gate order:
+///   1. `if (semid < 0) return -EINVAL;`
+///      (Note: Linux does NOT explicitly check `cmd < 0`; negative
+///      cmds fall through to the switch's `default` arm which
+///      returns -EINVAL.  Same observable errno either way.)
+///   2. switch on cmd:
+///        * IPC_INFO (3) / SEM_INFO (19): GLOBAL info queries.
+///          `semctl_info` zeros a `struct seminfo`, populates
+///          static fields, then `copy_to_user(p, &seminfo,
+///          sizeof(struct seminfo))` runs UNCONDITIONALLY.  arg
+///          (the 4th syscall argument carrying the buf pointer)
+///          == NULL or unmapped -> -EFAULT.  Valid arg -> success
+///          (max idx, 0 when no sem sets exist).
+///        * IPC_STAT (2) / SEM_STAT (18) / SEM_STAT_ANY (20):
+///          PER-SEMSET cmds via `semctl_stat`; the lookup fails
+///          first with -EINVAL when no semset matches.
+///        * GETALL (6) / GETVAL (12) / GETPID (11) / GETNCNT (14) /
+///          GETZCNT (15) / SETALL (17) / SETVAL (16):
+///          PER-SEMSET cmds via `semctl_main` -> -EINVAL on lookup
+///          miss.
+///        * IPC_RMID (0) / IPC_SET (1): PER-SEMSET cmds via
+///          `semctl_down` -> -EINVAL on lookup miss.
+///        * default (unknown cmd): -EINVAL.
+///
+/// Pre-batch sys_semctl was a bare flat EINVAL — neither the
+/// `semid < 0` early gate nor the IPC_INFO/SEM_INFO routing was
+/// implemented (vs. msgctl/shmctl which at least had the negative-
+/// id gate from earlier batches).  Probe shapes that diverged:
+///
+///   * semctl(0, 0, IPC_INFO, NULL) -> EFAULT (Linux) vs EINVAL
+///     (pre-batch).
+///   * semctl(0, 0, IPC_INFO, &valid) -> 0 success (Linux) vs
+///     EINVAL (pre-batch).
+///   * The `semid < 0` shape happens to coincide with EINVAL
+///     pre-batch (Linux returns EINVAL on the early gate) so
+///     observable errno is unchanged, but the gate is now
+///     explicit for fidelity.
+///
+/// Batch 371 implements the full gate sequence — early
+/// `semid < 0 -> EINVAL`, IPC_INFO/SEM_INFO routed through a
+/// buf-first gate (EFAULT for NULL, ENOSYS for valid buf — same
+/// translator-pattern terminal as batches 369 (shmctl) and 370
+/// (msgctl)), per-semset cmds and default arm keep their EINVAL
+/// terminal.
+fn sys_semctl(args: &SyscallArgs) -> SyscallResult {
+    const IPC_INFO: i32 = 3;
+    const SEM_INFO: i32 = 19;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let semid = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd = args.arg2 as i32;
+    if semid < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if cmd == IPC_INFO || cmd == SEM_INFO {
+        // Global info query: Linux's `copy_to_user(p, &seminfo,
+        // sizeof(struct seminfo))` is unconditional.  The arg is
+        // the 4th syscall argument (variadic in userspace, passed
+        // here as args.arg3).
+        if args.arg3 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+        // Valid buf, but we have no SysV IPC backing.
+        return linux_err(errno::ENOSYS);
+    }
+    // Per-semset cmd or default: no sem sets exist, every semid
+    // lookup fails with EINVAL.  arg is intentionally NOT
+    // validated here — Linux defers that to the per-cmd handler.
     linux_err(errno::EINVAL)
 }
 
@@ -46053,7 +46124,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: semop(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // semctl -> EINVAL.
+        // semctl -> EINVAL.  cmd=0=IPC_RMID is a per-semset cmd
+        // whose lookup fails with EINVAL since no semsets exist.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SEMCTL, &a).value
@@ -46061,6 +46133,94 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: semctl not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 371: semctl(semid=-1, _, cmd=2, _) -> EINVAL via the
+        // semid<0 early gate.  Pre-batch: same errno via flat
+        // terminal; post-batch: explicit gate.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 2,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semctl(semid<0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semctl(0, 0, IPC_INFO=3, NULL) -> EFAULT.
+        // Linux's `semctl_info` -> `copy_to_user(p=NULL, &seminfo,
+        // ...)` is unconditional; no semset lookup precedes it.
+        // Pre-batch returned EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 3, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMCTL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semctl(0,0,IPC_INFO,NULL) not EFAULT ({})",
+                dispatch_linux(nr::SEMCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semctl(0, 0, SEM_INFO=19, NULL) -> EFAULT (same gate).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 19, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMCTL, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semctl(0,0,SEM_INFO,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semctl(0, 0, IPC_INFO=3, &stack_buf) -> ENOSYS.
+        // Linux would copy seminfo and return max idx (0).  We
+        // have no SysV IPC backing; ENOSYS terminal after buf
+        // validation (matches shmctl/msgctl IPC_INFO from batches
+        // 369/370).
+        let semctl_buf: [u8; 64] = [0; 64];
+        let buf_addr = semctl_buf.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 3, arg3: buf_addr,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMCTL, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semctl(0,0,IPC_INFO,valid) not ENOSYS ({})",
+                dispatch_linux(nr::SEMCTL, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semctl(0, 0, SEM_INFO=19, &stack_buf) -> ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 19, arg3: buf_addr,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMCTL, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semctl(0,0,SEM_INFO,valid) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semctl(0, 0, IPC_STAT=2, &stack_buf) -> EINVAL.
+        // Per-semset cmd: lookup fails before buf touched.
+        // VERIFIES the IPC_INFO/SEM_INFO routing is not over-broad.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 2, arg3: buf_addr,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semctl(0,0,IPC_STAT,valid) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semctl(0, 0, GETVAL=12, _) -> EINVAL (per-semset).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 12, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMCTL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semctl(0,0,GETVAL,_) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   semctl semid<0 gate + IPC_INFO/SEM_INFO buf-first (EFAULT/ENOSYS), per-semset EINVAL: OK"
+        );
         // semtimedop(NULL,_,1,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };

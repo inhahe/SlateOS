@@ -25327,15 +25327,85 @@ fn sys_uselib(args: &SyscallArgs) -> SyscallResult {
 
 /// `sysfs(option, ...)` — deprecated filesystem-type enumeration.
 ///
-/// Superseded by reading `/proc/filesystems` since Linux 2.4.
-/// option ∈ {1=lookup by name, 2=lookup by index, 3=count}.  Validate
-/// option and return ENOSYS.
+/// Linux source: `fs/filesystems.c::SYSCALL_DEFINE3(sysfs)`:
+///
+/// ```c
+/// SYSCALL_DEFINE3(sysfs, int, option, unsigned long, arg1,
+///                 unsigned long, arg2)
+/// {
+///     int retval = -EINVAL;
+///     switch (option) {
+///     case 1: retval = fs_index((const char __user *)arg1);   break;
+///     case 2: retval = fs_name(arg1, (char __user *)arg2);    break;
+///     case 3: retval = fs_maxindex();                         break;
+///     }
+///     return retval;
+/// }
+/// ```
+///
+/// Pre-batch (374) we returned ENOSYS for every valid option.  This is
+/// the wrong shape: sysfs(2) was never removed, glibc still ships a
+/// `sysfs(3)` wrapper, and uClibc / musl probes rely on the count form
+/// (`option=3`) to enumerate the kernel's mounted-fs registry without
+/// parsing `/proc/filesystems`.  The Linux-faithful answers for a
+/// kernel with zero filesystems registered through this legacy table
+/// are:
+///
+///   * option=1 (fs_index, lookup-by-name):
+///       getname(arg1) first → EFAULT for NULL/bad ptr.
+///       Empty registry → no strcmp match → `err = -EINVAL` at the
+///       trailing `read_unlock; putname; return err;`.  Note that
+///       fs_index returns EINVAL for "not found", NOT ENOENT.
+///   * option=2 (fs_name, lookup-by-index):
+///       Walks file_systems list `arg1` times; `!tmp` after the walk
+///       (index out of range — always, since the list is empty) sets
+///       `res = -EINVAL` BEFORE the copy_to_user call.  Therefore
+///       sysfs(2) NEVER touches the output buffer when the index is
+///       out of range — no EFAULT can be returned by this path in our
+///       environment.
+///   * option=3 (fs_maxindex):
+///       Returns the count of registered filesystems as a non-negative
+///       integer.  Zero registered → 0.  No userspace touch.
+///   * any other option:
+///       `retval = -EINVAL` initializer is never overwritten → EINVAL.
+///
+/// The most important divergence is option=3 returning ENOSYS pre-
+/// batch: a userspace caller probing for "how many filesystems does
+/// this kernel know" was being told the syscall didn't exist when in
+/// fact the Linux-shaped answer is "zero filesystems are registered."
+/// That misreports kernel capability and pushes the caller through a
+/// fallback path (parsing /proc/filesystems) that we don't expose
+/// either.
 fn sys_sysfs(args: &SyscallArgs) -> SyscallResult {
+    // Linux signature: `SYSCALL_DEFINE3(sysfs, int, option, ...)`.
+    // `option` is `int` so the x86_64 syscall ABI truncates to its low
+    // 32 bits before the body runs.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let option = args.arg0 as i32;
-    if !(1..=3).contains(&option) {
-        return linux_err(errno::EINVAL);
+    match option {
+        1 => {
+            // fs_index(name): getname(arg1) → EFAULT/ENAMETOOLONG.
+            // After getname succeeds, the empty-registry scan falls
+            // through to the trailing `err = -EINVAL`.
+            if args.arg1 == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            if let Err(e) = validate_user_str(args.arg1) {
+                return linux_err(linux_errno_for(e));
+            }
+            linux_err(errno::EINVAL)
+        }
+        2 => {
+            // fs_name(index, buf): empty list → `!tmp` → -EINVAL with
+            // NO copy_to_user touch.  Output buffer ptr is irrelevant.
+            linux_err(errno::EINVAL)
+        }
+        3 => {
+            // fs_maxindex(): zero filesystems registered → 0.
+            SyscallResult::ok(0)
+        }
+        _ => linux_err(errno::EINVAL),
     }
-    linux_err(errno::ENOSYS)
 }
 
 /// `vhangup()` — privileged TTY hangup (init / getty reset).
@@ -55628,18 +55698,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // sysfs bad option -> EINVAL.
+        // Batch 374: sysfs is now fully Linux-faithful.
+        //
+        // sysfs(99, ...) -> EINVAL (switch default — initializer never
+        // overwritten).
         let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: sysfs bad option not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: sysfs(99) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // sysfs valid -> ENOSYS.
+        // sysfs(0, ...) -> EINVAL (option 0 is not in the switch).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sysfs(0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // sysfs(1, NULL) -> EFAULT (getname rejects NULL).
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: sysfs(1,NULL) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // sysfs(1, valid_name) -> EINVAL (empty registry, not found).
+        // Pre-batch returned ENOSYS — DIVERGENCE: fs_index actually
+        // returns EINVAL (not ENOENT and not ENOSYS) when the name
+        // doesn't match any registered fs.
+        let a = SyscallArgs { arg0: 1, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sysfs(1,valid) not EINVAL ({})",
+                dispatch_linux(nr::SYSFS, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sysfs(2, idx=0, buf) -> EINVAL.  fs_name's `!tmp` after the
+        // walk sets res=-EINVAL BEFORE copy_to_user; buf ptr is never
+        // touched, so even buf=0 must NOT produce EFAULT.  Pre-batch
+        // returned ENOSYS.
+        let a = SyscallArgs { arg0: 2, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sysfs(2,idx=0,NULL) not EINVAL ({})",
+                dispatch_linux(nr::SYSFS, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sysfs(2, idx=99, ...) -> EINVAL (same path).
+        let a = SyscallArgs { arg0: 2, arg1: 99, arg2: path_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: sysfs(2,idx=99) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // sysfs(3) -> 0 (count of registered filesystems = 0).
+        // Pre-batch returned ENOSYS — DIVERGENCE: this lied to callers
+        // that the syscall didn't exist, when in fact the truthful
+        // Linux-shaped answer is "zero registered filesystems."
         let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SYSFS, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: sysfs valid not ENOSYS");
+        if dispatch_linux(nr::SYSFS, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sysfs(3) not 0 ({})",
+                dispatch_linux(nr::SYSFS, &a).value
+            );
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   sysfs full switch (fs_index EINVAL, fs_name EINVAL pre-copy, fs_maxindex=0, default EINVAL): OK"
+        );
 
         // vhangup -> EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

@@ -33757,3 +33757,91 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (38.02s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 23s).
+
+404. [BATCH 374 — 2026-06-06 — sys_sysfs full Linux switch
+     (kernel/src/syscall/linux.rs)]
+
+     Linux divergence: pre-batch sys_sysfs accepted option in
+     {1, 2, 3} but returned ENOSYS for every valid option.  This
+     is wrong-shape on three counts:
+
+       (a) option=3 (fs_maxindex) returns a COUNT, not an error.
+           Linux iterates the global file_systems list and
+           returns its length.  With zero registered filesystems
+           the answer is 0 — a real, non-error reply.  ENOSYS
+           lies that the syscall doesn't exist, pushing callers
+           toward /proc/filesystems fallback.
+
+       (b) option=1 (fs_index, lookup-by-name) returns EINVAL
+           (NOT ENOENT, NOT ENOSYS) when the name doesn't match
+           a registered fs.  Subtle but real: Linux's fs_index
+           initializes `err = -EINVAL` and only overwrites it
+           on a strcmp hit.  Pre-batch ENOSYS misled probes
+           into thinking the syscall was absent.
+
+       (c) option=2 (fs_name, lookup-by-index) returns EINVAL
+           when the index is out of range, and crucially does
+           NOT touch the output buffer — `copy_to_user` runs
+           only inside the `else` branch after `!tmp` is false.
+           Empty registry means every index path-through hits
+           EINVAL before any user-buffer touch.
+
+     Source: fs/filesystems.c::SYSCALL_DEFINE3(sysfs):
+       int retval = -EINVAL;
+       switch (option) {
+         case 1: retval = fs_index((const char __user *)arg1); break;
+         case 2: retval = fs_name(arg1, (char __user *)arg2);  break;
+         case 3: retval = fs_maxindex();                       break;
+       }
+       return retval;
+
+     The switch initializer `retval = -EINVAL` is the default
+     answer for any option NOT in {1, 2, 3} (and we additionally
+     verified option=0 falls here as well).
+
+     Concrete divergences:
+       * sysfs(99, _, _)            Linux: EINVAL  Pre: EINVAL (ok)
+       * sysfs(0, _, _)             Linux: EINVAL  Pre: EINVAL (ok)
+       * sysfs(1, NULL, _)          Linux: EFAULT  Pre: ENOSYS
+       * sysfs(1, valid_name, _)    Linux: EINVAL  Pre: ENOSYS
+       * sysfs(2, 0, NULL)          Linux: EINVAL  Pre: ENOSYS
+       * sysfs(2, 99, valid_buf)    Linux: EINVAL  Pre: ENOSYS
+       * sysfs(3, _, _)             Linux:  0      Pre: ENOSYS
+
+     Fix: rewrite as a match expression:
+       1 => EFAULT on NULL ptr; validate_user_str; else EINVAL
+            (empty registry, no match).
+       2 => EINVAL unconditionally (no fs at any index; never
+            touches the output buffer).
+       3 => SyscallResult::ok(0) (count of registered fs = 0).
+       _ => EINVAL (switch initializer).
+
+     Architectural note: our kernel has no Linux-style legacy
+     file_systems registry — VFS uses a different mechanism.
+     Reporting "0 registered" via sysfs(3) is the truthful
+     Linux-shaped answer for the empty case, not a lie about
+     syscall existence.  If we later expose a Linux-compat
+     fs registry view, fs_maxindex/fs_name/fs_index will need
+     to scan it; the gate order in this rewrite already matches
+     Linux's, so only the count and the lookup body need
+     updating then.
+
+     Probes replaced (2 old removed, 7 new added):
+       * sysfs(99, _, _)            -> EINVAL.
+       * sysfs(0, _, _)             -> EINVAL.
+       * sysfs(1, NULL, _)          -> EFAULT (was ENOSYS pre).
+       * sysfs(1, &path_buf, _)     -> EINVAL (was ENOSYS pre).
+       * sysfs(2, 0, NULL)          -> EINVAL (was ENOSYS pre;
+         VERIFIES buf=NULL never produces EFAULT).
+       * sysfs(2, 99, &path_buf)    -> EINVAL (was ENOSYS pre).
+       * sysfs(3, _, _)             -> 0      (was ENOSYS pre —
+         the most important fix).
+
+     Final boot-time stamp:
+         "[syscall/linux]   sysfs full switch (fs_index EINVAL,
+          fs_name EINVAL pre-copy, fs_maxindex=0, default
+          EINVAL): OK"
+
+     Build: cargo build -p kernel clean (38.47s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

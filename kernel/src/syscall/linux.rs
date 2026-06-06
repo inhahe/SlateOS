@@ -17852,7 +17852,18 @@ fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
 fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
     const LANDLOCK_ACCESS_FS_MASK: u64 = 0xffff;
     const LANDLOCK_ACCESS_NET_MASK: u64 = 0x3;
-    if args.arg3 != 0 {
+    // Linux signature: `SYSCALL_DEFINE4(landlock_add_rule, const int,
+    // ruleset_fd, const enum landlock_rule_type, rule_type,
+    // const void __user *, rule_attr, const __u32, flags)`.  `flags`
+    // is C `__u32` (unsigned int), delivered in r10.  The AMD64
+    // syscall ABI does not zero-extend `unsigned int` across the
+    // syscall instruction, so Linux observes only the low 32 bits.
+    // Pre-batch we tested args.arg3 as raw u64, so any high-half
+    // garbage (e.g. 0x1_0000_0000) was rejected with EINVAL where
+    // Linux's truncated flags=0 advances to the rule_type / attr gates.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     // rule_type 1 = LANDLOCK_RULE_PATH_BENEATH, 2 = LANDLOCK_RULE_NET_PORT.
@@ -44783,6 +44794,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   landlock_add_rule attr validation: OK");
+
+        // landlock_add_rule flags is C `__u32`; the high 32 bits of
+        // arg3 must be masked before the `flags != 0` rejection gate.
+        // Pre-batch the gate compared at u64 width, so any high-half
+        // garbage returned EINVAL where Linux's truncated flags=0 falls
+        // through to the rule_type / attr gates.
+        //
+        // (a) flags=0x1_0000_0000 (high-only), rule_type=1 (PATH_BENEATH),
+        //     attr=NULL: truncates to 0, flag gate passes, downstream
+        //     attr=NULL gate returns EFAULT.  Pre-fix returned EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock_add_rule(high-only,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) flags=0x1_0000_0001 (high|bad-low 1): truncates to 1, gate
+        //     still rejects.  Verifies the mask continues to reject any
+        //     nonzero low half after the high-bit strip.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock_add_rule(high|bad-low) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) flags=0x1_0000_0000 with bad rule_type=99: truncates to 0,
+        //     flag gate passes, downstream rule_type gate fires EINVAL.
+        //     Verifies subsequent gates still work after flag truncation.
+        let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock_add_rule(high-only,type=99) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) flags=0x1_0000_0000 with valid PATH_BENEATH attr
+        //     (allowed_access=EXECUTE=0x1): truncates to 0, flag gate
+        //     passes, full pre-validate flow runs to the terminal EBADF
+        //     (no real ruleset fd exists).  Pre-fix returned EINVAL on
+        //     the flag gate.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: lpb_attr_ptr, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: landlock_add_rule(high-only,valid) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   landlock_add_rule unsigned-int truncation (high-half ignored): OK"
+        );
+
         // landlock_restrict_self undefined flag bit (0x8) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {

@@ -9078,11 +9078,32 @@ fn sys_munlock(args: &SyscallArgs) -> SyscallResult {
 /// success teaches them to set ONFAULT without CURRENT/FUTURE on
 /// later real calls, which then never actually locks anything.
 fn sys_mlockall(args: &SyscallArgs) -> SyscallResult {
-    const MCL_CURRENT: u64 = 1;
-    const MCL_FUTURE: u64 = 2;
-    const MCL_ONFAULT: u64 = 4;
-    const MCL_ALL: u64 = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
-    let flags = args.arg0;
+    // Linux ABI: `int mlockall(int flags)`.  The high 32 bits of the
+    // syscall register are unobservable to the kernel function body
+    // because the C signature is `int`; glibc/musl place the flag bits
+    // in the low 32 bits but the high 32 bits are caller-uninitialised
+    // garbage from the surrounding x86_64 register state.  Linux's
+    // SYSCALL_DEFINE1(mlockall, int, flags) macro generates a function
+    // that takes `int flags`, which truncates on entry; the mask check
+    // `flags & ~MCL_VALID_MASK` then operates on the 32-bit value.
+    //
+    // Pre-batch we held `flags` as `u64` and ran the mask check at
+    // 64-bit width, so a caller passing e.g. `0x1_0000_0001` (high-half
+    // garbage + valid MCL_CURRENT) saw EINVAL where Linux returns 0.
+    // The `flags == 0` short-circuit was also at 64-bit width, so a
+    // caller passing `0x1_0000_0000` (high-half garbage, low-half zero)
+    // saw success(0)→EINVAL? Actually it would hit the mask check via
+    // !MCL_ALL — the bug surfaced as EINVAL where Linux returns EINVAL
+    // too (for the wrong reason: low-half int truncates to 0).  Probe
+    // (c) below locks in the *correct* error path (low-half==0).
+    const MCL_CURRENT: u32 = 1;
+    const MCL_FUTURE: u32 = 2;
+    const MCL_ONFAULT: u32 = 4;
+    const MCL_ALL: u32 = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg0 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
     if flags == 0 || (flags & !MCL_ALL) != 0 || flags == MCL_ONFAULT {
         return linux_err(errno::EINVAL);
     }
@@ -28358,6 +28379,90 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   dup3 flags-gate validation + int truncation: OK"
+        );
+    }
+
+    // Batch 308: mlockall int truncation — high-half register garbage
+    // must not influence the 32-bit C ABI's flags mask check.
+    //
+    // Linux signature: `int mlockall(int flags)`.  The high 32 bits of
+    // the x86_64 register are caller-uninitialised garbage; the syscall
+    // body sees only the low 32 bits.  Pre-batch we held flags as u64
+    // and did the mask check at 64-bit width, so:
+    //   - 0x1_0000_0001  (high-half garbage | MCL_CURRENT)  saw EINVAL
+    //     (high bits trip !MCL_ALL) where Linux returns 0.
+    //   - u64::MAX        (all bits set, low half also bad)  saw EINVAL
+    //     for the wrong reason (high bits, not low).  Post-batch, the
+    //     low half is 0xFFFF_FFFF which still trips the unknown-bit
+    //     gate at 32-bit width → EINVAL via the documented path.
+    {
+        // (a) mlockall(flags = 0x1_0000_0001) — high-half garbage +
+        //     MCL_CURRENT.  Linux truncates to (int)1 → success(0).
+        //     Pre-batch: 64-bit mask check rejected the high bit.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MLOCKALL, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlockall(high|MCL_CURRENT) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) mlockall(flags = 0x1_0000_0007) — high-half garbage +
+        //     MCL_ALL.  Linux truncates to (int)7 → success(0).
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0007,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MLOCKALL, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlockall(high|MCL_ALL) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) mlockall(flags = 0x1_0000_0000) — high-half garbage only,
+        //     low half zero.  Linux truncates to (int)0 → EINVAL via
+        //     the flags==0 short-circuit.  This locks in the correct
+        //     gate (low-half==0), distinguishing it from the mask gate.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MLOCKALL, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlockall(high-half-zero) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) mlockall(flags = 0x1_0000_0004) — high-half garbage +
+        //     MCL_ONFAULT alone.  Linux truncates to (int)4 → EINVAL
+        //     via the ONFAULT-alone gate (preserved from batch 250).
+        //     Verifies the ONFAULT gate still fires after truncation.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0004,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MLOCKALL, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlockall(high|MCL_ONFAULT) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   mlockall int truncation (high-half ignored): OK"
         );
     }
 

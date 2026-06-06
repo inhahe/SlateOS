@@ -27077,3 +27077,97 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (38.22s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 26s).
+
+338. sys_mlockall int truncation — high-half register garbage
+     must be stripped before the flags mask check.
+
+     Divergence:
+       Linux signature: `int mlockall(int flags)`.  The C
+       `int` parameter forces the kernel function body to
+       observe only the low 32 bits of the syscall register
+       (Linux uses SYSCALL_DEFINE1(mlockall, int, flags),
+       which the macro expands to a function taking
+       `int flags`).  The high 32 bits of the x86_64 RDI
+       register are caller-uninitialised garbage — neither
+       glibc nor musl zero them before issuing the syscall
+       (for an int argument, only the low 32 bits carry
+       semantic meaning).  Linux's `flags & ~MCL_VALID_MASK`
+       check therefore operates at 32-bit width.
+
+       Pre-batch we held `flags` as `u64` and ran the mask
+       check at 64-bit width:
+           let flags = args.arg0;
+           if flags == 0 || (flags & !MCL_ALL) != 0 ...
+       so a caller passing `0x1_0000_0001` (high-half
+       garbage + MCL_CURRENT in the low half) saw EINVAL
+       (the high bit trips `!MCL_ALL`) where Linux returns
+       0 (high bits are truncated away, low bits =
+       MCL_CURRENT, valid).
+
+       The bug surfaces for any caller that relies on the C
+       ABI's natural int truncation — glibc's
+       sysdeps/unix/syscalls.list entry for mlockall does
+       NOT zero-extend before issuing the syscall, so
+       random RDI garbage from the prior register state
+       (e.g. a recent strncmp return) becomes visible to
+       our kernel as ill-formed flags.
+
+     Fix:
+       kernel/src/syscall/linux.rs sys_mlockall:
+         * Cast args.arg0 to i32 (matching Linux's int
+           parameter), then reinterpret as u32 for the
+           mask check.  Convert MCL_CURRENT / MCL_FUTURE /
+           MCL_ONFAULT / MCL_ALL from u64 to u32 since
+           the comparison is now at 32-bit width.
+         * Existing flags==0 / mask / ONFAULT-alone gates
+           preserved exactly; only the carrier width
+           changes.
+
+     Tests (dispatch_linux self-test, after the dup3 block):
+       - (a) mlockall(0x1_0000_0001) → 0
+             (high-half garbage + MCL_CURRENT; verifies
+             int truncation strips the high bits and the
+             flags are accepted as valid).
+       - (b) mlockall(0x1_0000_0007) → 0
+             (high-half garbage + MCL_ALL; verifies the
+             full valid mask survives truncation).
+       - (c) mlockall(0x1_0000_0000) → EINVAL
+             (high-half garbage only, low half zero;
+             verifies the flags==0 short-circuit fires at
+             32-bit width — pre-batch this was already
+             EINVAL but via the wrong gate, post-batch
+             it's via the documented flags==0 path).
+       - (d) mlockall(0x1_0000_0004) → EINVAL
+             (high-half garbage + MCL_ONFAULT alone;
+             verifies the ONFAULT-modifier-alone gate from
+             batch 250 still fires after truncation).
+       Marker: "[syscall/linux]   mlockall int truncation
+       (high-half ignored): OK".
+
+     Preserved behaviour:
+       - Existing mlockall(0) → EINVAL probe still passes.
+       - Existing mlockall(7) → 0 probe still passes.
+       - Existing mlockall(8) → EINVAL (unknown bit) still
+         passes.
+       - Existing batch-250 ONFAULT-alone probes
+         (mlockall(4) → EINVAL, mlockall(5) → 0,
+         mlockall(6) → 0) all still pass.
+       - munlockall still returns 0 unconditionally.
+
+     Known limitations (deferred):
+       - We accept every valid flags value with success(0)
+         without actually pinning pages.  The kernel has
+         no userspace memory pin tracking yet — mlockall
+         is a no-op success, matching how it has been
+         since the syscall was first added.  Real lock-
+         counting and OOM-killer interaction with mlock'd
+         pages are roadmap items, not Linux ABI parity.
+
+     Build: cargo build -p kernel clean (45.10s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 26s)
+                — initial 240s attempt timed out at the
+                rcu self-test before our marker was
+                emitted, but the second run with extra
+                headroom completed normally; the mlockall
+                marker fires regardless.

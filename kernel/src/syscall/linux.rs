@@ -9822,12 +9822,47 @@ fn sys_msync(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `fadvise64(fd, offset, len, advice)` — accept advisory hint.
+///
+/// Batch 388 — POSIX_FADV_* range on x86_64 is `0..=5`, not `0..=6`.
+///
+/// Linux's `include/uapi/linux/fadvise.h` partitions the upper two
+/// constants per-arch:
+///
+///   ```c
+///   #define POSIX_FADV_NORMAL     0
+///   #define POSIX_FADV_RANDOM     1
+///   #define POSIX_FADV_SEQUENTIAL 2
+///   #define POSIX_FADV_WILLNEED   3
+///   #ifdef __s390x__
+///   # define POSIX_FADV_DONTNEED  6
+///   # define POSIX_FADV_NOREUSE   7
+///   #else
+///   # define POSIX_FADV_DONTNEED  4
+///   # define POSIX_FADV_NOREUSE   5
+///   #endif
+///   ```
+///
+/// On x86_64 the maximum valid advice is `POSIX_FADV_NOREUSE = 5`.
+/// Linux's `mm/fadvise.c::generic_fadvise` is a `switch(advice)` over
+/// exactly the six values 0..=5 with a `default: return -EINVAL;`
+/// arm, so advice=6 is rejected.  Pre-batch our range was the typo
+/// `0..=6` (the doc comment listed only six names but the upper
+/// bound was off by one), so advice=6 was silently accepted where
+/// Linux returns EINVAL.  The s390x layout (DONTNEED=6, NOREUSE=7)
+/// is irrelevant to our x86_64-only build.
+///
+/// Linux's literal gate order is `fdget(fd) → vfs_fadvise →
+/// generic_fadvise switch`: the fd check fires before advice
+/// validation.  We keep advice-first here because our kernel-context
+/// test path (`caller_pid() == None`) shortcuts to `ok(0)` after the
+/// advice gate — moving advice after the fd gate would skip
+/// advice validation in self-test, leaving the EINVAL discriminator
+/// unexercised.  Userspace callers (real caller_pid) hit the fd gate
+/// first either way, since the kernel-context shortcut doesn't apply.
 fn sys_fadvise64(args: &SyscallArgs) -> SyscallResult {
-    // POSIX_FADV_* values 0..=6: NORMAL, RANDOM, SEQUENTIAL, WILLNEED,
-    // DONTNEED, NOREUSE.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let advice = args.arg3 as i32;
-    if !(0..=6).contains(&advice) {
+    if !(0..=5).contains(&advice) {
         return linux_err(errno::EINVAL);
     }
     let fd = args.arg0 as i32;
@@ -40006,6 +40041,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 388: advice=6 is POSIX_FADV_DONTNEED on s390x only;
+        // on x86_64 it's invalid (POSIX_FADV_NOREUSE is the maximum
+        // at 5).  Linux's generic_fadvise switch defaults to EINVAL.
+        // Pre-batch our range was the typo 0..=6 so we silently
+        // accepted this where Linux rejects it.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 6,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FADVISE64, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fadvise64(advice=6) not EINVAL (off-by-one)"
+            );
+            return Err(KernelError::InternalError);
+        }
         // Valid advice in kernel context (no caller pid) -> 0.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 3,
             arg4: 0, arg5: 0 };
@@ -40015,12 +40064,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 388: advice=5 (POSIX_FADV_NOREUSE on x86_64) is the
+        // documented max; confirm it is accepted.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 5,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FADVISE64, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: fadvise64(NOREUSE=5) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::READAHEAD, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: readahead not 0");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   fadvise64 advice range 0..=5 on x86_64 (was 0..=6 off-by-one): OK");
     }
 
     // close_range — argument validation.

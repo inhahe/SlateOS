@@ -35006,3 +35006,54 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (46.31s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
+
+418. Batch 388 — fadvise64 advice range off-by-one: was 0..=6, now
+     0..=5 to match POSIX_FADV_NOREUSE=5 on x86_64 (the s390x
+     numbering puts DONTNEED=6 / NOREUSE=7, but we are x86_64-only).
+
+     Divergence table:
+       Linux source : include/uapi/linux/fadvise.h
+                      mm/fadvise.c::generic_fadvise (switch arms)
+       Linux range  : on non-s390x:
+                        POSIX_FADV_NORMAL     = 0
+                        POSIX_FADV_RANDOM     = 1
+                        POSIX_FADV_SEQUENTIAL = 2
+                        POSIX_FADV_WILLNEED   = 3
+                        POSIX_FADV_DONTNEED   = 4
+                        POSIX_FADV_NOREUSE    = 5
+                      generic_fadvise switch covers exactly 0..=5;
+                      default: return -EINVAL;  fires for advice >= 6.
+       Pre-batch    : range 0..=6 (the doc comment listed only six
+                      names but the upper bound was off by one),
+                      so advice=6 was silently accepted where Linux
+                      returns EINVAL.
+       Post-batch   : range 0..=5; advice=6 / 7 both EINVAL.
+
+     Why it matters: glibc's posix_fadvise(2) wrapper passes any
+     positive int through to the syscall; an application that
+     accidentally computes advice=6 (e.g. `advice = highest + 1`
+     bug, or using an s390x-numbered constant on x86_64) saw our
+     pre-batch silent accept where Linux would surface EINVAL.
+     Cached page-eviction tools (vmtouch with `-d` mode, fincore-
+     based prefetch utilities) build their own POSIX_FADV_*
+     dispatcher tables and validate the kernel response — they
+     would treat our advice=6 success as "this kernel has an
+     extra advisory mode that does X" and behave unpredictably.
+
+     Linux's literal gate order is `fdget(fd) → vfs_fadvise →
+     generic_fadvise switch`: fd validation before advice.  We keep
+     advice-first because our kernel-context test path (caller_pid()
+     == None) shortcuts to ok(0) after the advice gate; moving the
+     advice gate after fd would skip advice validation in self-test
+     and leave the EINVAL discriminator unexercised.  Userspace
+     callers (real caller_pid) hit the fd gate first either way.
+
+     Probes added: (1) advice=6 → EINVAL (was silently accepted).
+     (2) advice=5 (POSIX_FADV_NOREUSE on x86_64) → ok(0) (the new
+     upper bound).  Existing advice=7 EINVAL + advice=3 (WILLNEED)
+     ok probes unchanged.  New aggregate stamp:
+       "[syscall/linux]   fadvise64 advice range 0..=5 on x86_64
+        (was 0..=6 off-by-one): OK"
+
+     Build: cargo build -p kernel clean (40.44s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).

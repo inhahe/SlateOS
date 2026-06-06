@@ -10886,6 +10886,20 @@ fn sys_fanotify_init(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::EINVAL);
         }
     }
+    // Batch 245: FAN_REPORT_PIDFD and FAN_REPORT_TID are mutually
+    // exclusive (Linux fs/notify/fanotify/fanotify_user.c
+    // `fanotify_test_fid` / init path).  Rationale: a pidfd refers
+    // to the *thread group leader* (a process), whereas TID asks
+    // fanotify to report the *thread* that triggered the event —
+    // requesting both would be self-contradictory.  Linux 5.15+
+    // returns -EINVAL for this combination; pre-batch we silently
+    // accepted it and advanced to the terminal ENOSYS, so probes
+    // checking the discriminator (e.g. systemd's audit-helper
+    // detection of "kernel supports per-thread reporting") saw
+    // ENOSYS instead of EINVAL.
+    if flags & FAN_REPORT_PIDFD != 0 && flags & FAN_REPORT_TID != 0 {
+        return linux_err(errno::EINVAL);
+    }
 
     // event_f_flags mask (FANOTIFY_INIT_FD_FLAGS, Linux 6.10).
     const O_ACCMODE: u32 = 0x3;
@@ -34279,6 +34293,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fanotify_init full FID trio not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // Batch 245: FAN_REPORT_PIDFD (0x80) + FAN_REPORT_TID (0x100) ->
+        // EINVAL (mutually exclusive — pidfd refers to the process, TID
+        // to the thread, so requesting both contradicts itself).
+        let a = SyscallArgs { arg0: 0x180, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init PIDFD+TID not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 245: FAN_REPORT_PIDFD alone -> ENOSYS (gate passes).
+        let a = SyscallArgs { arg0: 0x80, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init PIDFD alone not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 245: FAN_REPORT_TID alone -> ENOSYS (gate passes).
+        let a = SyscallArgs { arg0: 0x100, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init TID alone not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   fanotify_init PIDFD-TID-mutex gate order: OK"
+        );
+
         // fanotify_init with unknown event_f_flags bit (0x10) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0x10, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

@@ -21390,5 +21390,53 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
+## 274. syscall/linux: fanotify_init — FAN_REPORT_PIDFD /
+##      FAN_REPORT_TID mutual-exclusion gate (batch 245).
+##
+##      Pre-batch divergences:
+##      - `sys_fanotify_init` validated the FANOTIFY_INIT_FLAGS bit mask,
+##        the dual-class exclusion (CONTENT + PRE_CONTENT), the
+##        FAN_REPORT_NAME-requires-DIR_FID gate, and the
+##        FAN_REPORT_TARGET_FID-requires-FID-trio interlock, then
+##        advanced to event_f_flags validation and the terminal ENOSYS.
+##        Linux additionally rejects FAN_REPORT_PIDFD (0x80) combined
+##        with FAN_REPORT_TID (0x100) — these are mutually exclusive
+##        because a pidfd refers to the *thread group leader* (a
+##        process) whereas FAN_REPORT_TID asks fanotify to report the
+##        specific *thread* that triggered the event.  Pre-batch a
+##        userspace probe testing the combination saw ENOSYS instead
+##        of EINVAL, mis-training the discriminator that systemd's
+##        audit-helper uses to detect "this kernel rejects the combo
+##        cleanly" vs "this kernel has no fanotify at all."
+##
+##      Fix:
+##      - Added the mutex gate after FAN_REPORT_TARGET_FID:
+##          if flags & FAN_REPORT_PIDFD != 0
+##              && flags & FAN_REPORT_TID != 0
+##              -> -EINVAL
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - flags = 0x180 (PIDFD | TID)     -> EINVAL  (new mutex gate)
+##      - flags = 0x80  (PIDFD alone)     -> ENOSYS  (gate passes)
+##      - flags = 0x100 (TID   alone)     -> ENOSYS  (gate passes)
+##        Marker: "fanotify_init PIDFD-TID-mutex gate order: OK".
+##
+##      Existing tests preserved (all 10 prior fanotify_init tests
+##      covering flag mask, dual-class exclusion, NAME/DIR_FID
+##      interlock, TARGET_FID/FID-trio interlock, event_f_flags
+##      mask, O_ACCMODE=3 rejection, valid event_f_flags happy
+##      path).
+##
+##      Known limitations:
+##      - fanotify is still ENOSYS terminal — no real fanotify event
+##        delivery, mark database, or perm-event ABI.  Validation
+##        only.
+##      - The FAN_UNLIMITED_QUEUE / FAN_UNLIMITED_MARKS bits require
+##        CAP_SYS_ADMIN on Linux but we accept them silently because
+##        every well-formed call ends at ENOSYS; this is harmless
+##        until a real fanotify implementation lands.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
 
 

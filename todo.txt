@@ -32512,3 +32512,114 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.35s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+392. syscall/linux batch 362 — sys_sched_getparam: close the
+     !param half of Linux's combined `if (!param || pid < 0)
+     return -EINVAL;` first gate.
+
+     LINUX ABI REFERENCE.
+
+       kernel/sched/syscalls.c::SYSCALL_DEFINE2(sched_getparam):
+
+           SYSCALL_DEFINE2(sched_getparam, pid_t, pid,
+                           struct sched_param __user *, param)
+           {
+                   struct sched_param lp = { .sched_priority = 0 };
+                   struct task_struct *p;
+                   int retval;
+
+                   if (!param || pid < 0)
+                           return -EINVAL;
+
+                   rcu_read_lock();
+                   p = find_process_by_pid(pid);
+                   retval = -ESRCH;
+                   if (!p)
+                           goto out_unlock;
+                   ...
+                   retval = copy_to_user(param, &lp, sizeof(*param))
+                            ? -EFAULT : 0;
+                   return retval;
+           ...
+           }
+
+       Two structural properties:
+         (1) NULL `param` returns -EINVAL, not -EFAULT.  EFAULT is
+             reserved for the copy_to_user at the *end* of the
+             happy path (after find_process_by_pid succeeds).
+         (2) The NULL-param check is wired to the SAME first gate
+             as `pid < 0`.  Both are evaluated before
+             find_process_by_pid, so a NULL param with a bogus
+             pid still EINVALs — it must never ESRCH.
+
+     PRE-BATCH STATE.
+
+       Our sys_sched_getparam (linux.rs ~line 8919) had the gate
+       order:
+
+           1. if pid < 0 -> EINVAL                  (batch 290)
+           2. resolve target_pid via pcb::state
+              -> ESRCH on lookup miss
+           3. if param_ptr == 0 -> EFAULT
+           4. validate_user_write(param_ptr, 4)
+           5. copy_to_user
+
+       Two observable divergences vs Linux:
+         (a) NULL-param errno wrong: returned EFAULT instead of
+             EINVAL.  The pre-existing comment in the function
+             acknowledged this as a deferred follow-up (batch 290
+             scoped to "just" the pid<0 half).
+         (b) Gate position wrong: with `bogus_pid + NULL`, our
+             find_process_by_pid lookup ran first and returned
+             ESRCH.  Linux returns EINVAL because the NULL-param
+             half of the first gate fires before the lookup.
+
+     FIX.
+
+       Collapsed the two checks into one combined EINVAL gate at
+       the top of sys_sched_getparam, matching Linux's
+       `if (!param || pid < 0) return -EINVAL;`:
+
+           #[allow(clippy::cast_possible_truncation,
+                   clippy::cast_possible_wrap)]
+           let pid = args.arg0 as i32;
+           let param_ptr = args.arg1;
+           if param_ptr == 0 || pid < 0 {
+               return linux_err(errno::EINVAL);
+           }
+
+       Then the find_process_by_pid resolution and
+       validate_user_write run in the original order — the
+       happy path is unchanged.  No native subsystems touched
+       (this is a pure translator-layer gate-order fix; the
+       native sched store has no opinion on Linux errno
+       mapping).
+
+     BOOT-TIME PROBES.
+
+       Updated one stale probe (was expecting EFAULT; flip to
+       EINVAL) and added two new gate-position probes.  All three
+       run in the existing sched_getparam test island (no new
+       SyscallArgs scaffolding required):
+
+         (1) sched_getparam(0, NULL) -> EINVAL.
+             The flip of the pre-existing probe (was EFAULT).
+             Stops the per-batch regression.
+         (2) sched_getparam(bogus_pid=0x7fff_fffe, NULL) -> EINVAL.
+             Proves the NULL-param check fires *before*
+             find_process_by_pid.  Pre-batch this returned
+             ESRCH (lookup miss).  Pid 0x7fff_fffe (INT_MAX-1)
+             chosen so the pid<0 short-circuit doesn't mask the
+             test.
+         (3) sched_getparam(0, NULL) -> EINVAL re-check.
+             Same args as (1) but listed separately so a
+             failure here points at the post-resolution check
+             specifically (the gate must consistently EINVAL
+             regardless of how the target resolves).
+
+     Final boot-time stamp:
+         "[syscall/linux]   sched_getparam !param-EINVAL gate (before find_process_by_pid): OK"
+
+     Build: cargo build -p kernel clean (36.45s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

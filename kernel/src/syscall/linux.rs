@@ -8921,20 +8921,33 @@ fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
     //   `SYSCALL_DEFINE2(sched_getparam, pid_t, pid,
     //                    struct sched_param __user *, param)`
     // Both pid_t and the pointer are 32/64-bit register-truncated
-    // before the body runs.  Linux opens with
+    // before the body runs.  Linux opens with a single combined
+    // EINVAL gate (kernel/sched/syscalls.c::SYSCALL_DEFINE2):
     //   `if (!param || pid < 0) return -EINVAL;`
-    // Batch 290 narrows scope to *just* the pid truncation half of
-    // this gate: cast pid to i32 and reject pid < 0 with EINVAL.
-    // The !param half — Linux returns EINVAL for NULL, we still
-    // return EFAULT — is a separate, pre-existing divergence (it
-    // matches the wrong errno but the right "fail-fast" outcome).
-    // Tracked in todo.txt as a follow-up.
+    // It is *one* gate emitting -EINVAL, evaluated before any task
+    // lookup (find_process_by_pid → ESRCH) and before copy_to_user
+    // (→ EFAULT).
+    //
+    // Batch 290 fixed the pid<0 half (pid_t truncation + EINVAL).
+    // Batch 362 closes the !param half: NULL `param` is EINVAL, not
+    // EFAULT, AND the check must run at the same gate position as
+    // pid<0 — *before* the find_process_by_pid lookup.  Pre-batch
+    // we resolved the target first, so:
+    //   - sched_getparam(real_pid, NULL) returned EFAULT (Linux:
+    //     EINVAL).
+    //   - sched_getparam(bogus_pid, NULL) returned ESRCH (Linux:
+    //     EINVAL — the NULL-param half of the gate fires first).
+    // Both shapes are observable by callers that probe the gate
+    // ladder with deliberately invalid combinations (e.g. glibc's
+    // pthread_getschedparam test harness).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid = args.arg0 as i32;
-    if pid < 0 {
+    let param_ptr = args.arg1;
+    // Gate 1 (Linux): one EINVAL gate covering both `!param` and
+    // `pid < 0`.  Evaluated before any further work.
+    if param_ptr == 0 || pid < 0 {
         return linux_err(errno::EINVAL);
     }
-    let param_ptr = args.arg1;
     let target_pid = if pid == 0 {
         caller_pid()
     } else {
@@ -8945,9 +8958,6 @@ fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
         }
         Some(pid_u)
     };
-    if param_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
     // struct sched_param is just { int sched_priority; } = 4 bytes,
     // but glibc rounds it up via alignof so callers typically
     // allocate sizeof(int).
@@ -37731,14 +37741,69 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             Ok(()),
             "kernel-context RTPRIO gate must pass through",
         );
-        // sched_getparam(0, NULL) -> EFAULT.
+        // Batch 362: sched_getparam(0, NULL) -> EINVAL.
+        //
+        // Linux's SYSCALL_DEFINE2(sched_getparam) opens with a single
+        // combined gate `if (!param || pid < 0) return -EINVAL;`.  NULL
+        // param is EINVAL, not EFAULT — copy_to_user (which is what
+        // would produce EFAULT) only runs after the find_process_by_pid
+        // lookup, several gates downstream.
+        //
+        // Pre-batch we returned EFAULT here because we resolved the
+        // target first and only checked `param_ptr == 0` after the
+        // task lookup, mapping NULL to EFAULT.  This probe now proves
+        // the corrected gate order.
         if dispatch_linux(nr::SCHED_GETPARAM, &a).value
-            != -i64::from(errno::EFAULT) {
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: sched_getparam(0, NULL) not EFAULT"
+                "[syscall/linux]   FAIL: sched_getparam(0, NULL) not EINVAL ({})",
+                dispatch_linux(nr::SCHED_GETPARAM, &a).value
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 362: gate-position proof — sched_getparam(bogus_pid,
+        // NULL) -> EINVAL, not ESRCH.  This shape requires the
+        // !param check to fire *before* the find_process_by_pid
+        // lookup.  Pre-batch the lookup ran first, so a bogus pid
+        // with NULL param returned ESRCH (lookup miss), masking the
+        // missing NULL-param-EINVAL gate.
+        //
+        // Use 0x7fff_fffe (INT_MAX-1) for the bogus pid so the
+        // upstream pid<0 EINVAL gate (batch 290) doesn't fire — we
+        // want to prove the NULL-param check beats find_process_by_pid,
+        // not the pid<0 short-circuit.
+        {
+            let a_bogus = SyscallArgs { arg0: 0x7fff_fffe, arg1: 0,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_GETPARAM, &a_bogus).value
+                != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getparam(bogus pid, NULL) not EINVAL ({})",
+                    dispatch_linux(nr::SCHED_GETPARAM, &a_bogus).value
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Batch 362: gate-position proof — sched_getparam(real_pid,
+        // NULL) -> EINVAL, not EFAULT and not 0.  This shape
+        // additionally proves the NULL-param check fires before the
+        // *successful* find_process_by_pid path: a NULL param must
+        // never reach copy_to_user.  We re-use the caller pid via 0
+        // (always resolves to the caller task in kernel context, or
+        // None — either way pid >= 0 keeps us out of the EINVAL gate
+        // on the pid axis).  Same SyscallArgs as the first probe;
+        // listed separately so the failure message is unambiguous.
+        if dispatch_linux(nr::SCHED_GETPARAM, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getparam(pid=0, NULL) re-check not EINVAL ({})",
+                dispatch_linux(nr::SCHED_GETPARAM, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_getparam !param-EINVAL gate (before find_process_by_pid): OK"
+        );
         // sched_rr_get_interval(0, NULL) -> EFAULT.
         if dispatch_linux(nr::SCHED_RR_GET_INTERVAL, &a).value
             != -i64::from(errno::EFAULT) {

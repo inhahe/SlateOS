@@ -25654,22 +25654,119 @@ fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
 ///     behaviour as Linux returns when no process matches the
 ///     pgrp/uid; differs from Linux only in that Linux can match
 ///     when the pgrp/uid happens to have live processes.
+///
+/// Batch 431 — class/data validation now mirrors Linux's
+/// `block/ioprio.c::SYSCALL_DEFINE3(ioprio_set)` gate order:
+///
+/// ```c
+///     int class = IOPRIO_PRIO_CLASS(ioprio);
+///     int data  = IOPRIO_PRIO_DATA(ioprio);
+///     int ret   = -ESRCH;
+///
+///     switch (class) {
+///     case IOPRIO_CLASS_RT:
+///         if (!capable(CAP_SYS_ADMIN) && !capable(CAP_SYS_NICE))
+///             return -EPERM;
+///         fallthrough;
+///     case IOPRIO_CLASS_BE:
+///         if (data >= IOPRIO_NR_LEVELS || data < 0)
+///             return -EINVAL;
+///         break;
+///     case IOPRIO_CLASS_IDLE:
+///         break;
+///     case IOPRIO_CLASS_NONE:
+///         if (data)
+///             return -EINVAL;
+///         break;
+///     default:
+///         return -EINVAL;
+///     }
+///
+///     switch (which) { ... default: ret = -EINVAL; }
+/// ```
+///
+/// Three observable pre-batch divergences relative to that body:
+///
+///   * `class = IOPRIO_CLASS_RT, data = 0`           ours: 0      Linux: -EPERM
+///   * `class = IOPRIO_CLASS_NONE, data = 5`         ours: 0      Linux: -EINVAL
+///   * `class = IOPRIO_CLASS_IDLE, data = 99`        ours: -EINVAL Linux: 0
+///
+/// And one gate-order divergence (same errno, different precedence
+/// when both fail):
+///
+///   * `which = 99, class = RT, data = 0`            ours: -EINVAL (which gate)
+///                                                   Linux: -EPERM (class gate first)
+///
+/// Why it matters: ionice(1), util-linux's `chrt -i`, fio's `ioprio`
+/// option, and systemd's `IOSchedulingClass=` directive all probe
+/// the class-switch errno to decide whether to fall back.  A daemon
+/// that asks for RT-class IO and sees success on this kernel
+/// believes it got privileged scheduling — when in reality the
+/// stored value has no effect.  A daemon that asks for NONE-class
+/// at data!=0 (an explicit "default class, but please remember the
+/// hint" call shape produced by some packagers) used to silently
+/// succeed pre-batch, hiding a libc-side bug from the developer.
+/// And IDLE-class callers passing high data values (common from
+/// shell scripts pulling data out of `/proc/.../io` and re-feeding
+/// it) saw EINVAL where Linux ignored the field.
+///
+/// Architectural directive: this is a translator-only fix.  RT
+/// class is uniformly rejected with EPERM because we expose no way
+/// for userspace to acquire CAP_SYS_NICE through this ABI (same
+/// pattern as sys_settimeofday's CAP_SYS_TIME rejection).  No
+/// native API changes, no capability model changes — when a
+/// capability model lands, the RT branch becomes a `capable(...)`
+/// call instead of an unconditional EPERM.
 fn sys_ioprio_set(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let which = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let who = args.arg1 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let ioprio = args.arg2 as i32;
+
+    let class = (ioprio >> pcb::LINUX_IOPRIO_CLASS_SHIFT) & 0x7;
+    let data = ioprio & pcb::LINUX_IOPRIO_DATA_MASK;
+
+    // Linux gate 1: class switch.  Runs BEFORE which-validation.
+    // IOPRIO_NR_LEVELS == 8 (data bits 0..=7 are the meaningful
+    // priority range; the field is 13 bits wide but Linux rejects
+    // anything outside 0..=7 for RT/BE).
+    const IOPRIO_NR_LEVELS: i32 = 8;
+    match class {
+        // RT: Linux checks CAP_SYS_ADMIN || CAP_SYS_NICE.  We
+        // expose no way to acquire either through this ABI, so
+        // RT is uniformly EPERM.  When a capability model lands
+        // this becomes `if (!has_cap(...)) return EPERM;` and the
+        // fallthrough to the BE data-range check runs as in Linux.
+        c if c == pcb::LINUX_IOPRIO_CLASS_RT => {
+            return linux_err(errno::EPERM);
+        }
+        c if c == pcb::LINUX_IOPRIO_CLASS_BE => {
+            if !(0..IOPRIO_NR_LEVELS).contains(&data) {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        c if c == pcb::LINUX_IOPRIO_CLASS_IDLE => {
+            // data is intentionally ignored — Linux's IDLE arm
+            // has no data-range check, the value is stored as-is.
+        }
+        c if c == pcb::LINUX_IOPRIO_CLASS_NONE => {
+            // NONE means "use the scheduler hint", so a non-zero
+            // data field is a contradiction: there's no class to
+            // attach the data to.
+            if data != 0 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        _ => return linux_err(errno::EINVAL),
+    }
+
+    // Linux gate 2: which switch.  Default arm -> -EINVAL.
     if !(1..=3).contains(&which) {
         return linux_err(errno::EINVAL);
     }
-    let class = (ioprio >> pcb::LINUX_IOPRIO_CLASS_SHIFT) & 0x7;
-    let data = ioprio & pcb::LINUX_IOPRIO_DATA_MASK;
-    // Class 0 = NONE (use scheduler hint), 1 = RT, 2 = BE, 3 = IDLE.
-    if !(0..=3).contains(&class) {
-        return linux_err(errno::EINVAL);
-    }
-    if !(0..=7).contains(&data) {
-        return linux_err(errno::EINVAL);
-    }
+
     let target_pid = match resolve_ioprio_target(which, who) {
         Ok(pid) => pid,
         Err(r) => return r,
@@ -56903,8 +57000,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // Set RT/0, BE/7, IDLE/4, NONE/0 — each must round-trip.
-            for (class, data) in [(1, 0), (2, 7), (3, 4), (0, 0)] {
+            // Set BE/7, IDLE/4, NONE/0 — each must round-trip.
+            // RT (class=1) is no longer in this loop because batch 431
+            // routes RT through the EPERM gate (CAP_SYS_NICE absent in
+            // this ABI); see the dedicated RT probe below.
+            for (class, data) in [(2, 7), (3, 4), (0, 0)] {
                 let packed: i32 = (class << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
                 let a = SyscallArgs {
                     arg0: 1, arg1: test_pid, arg2: packed as u64,
@@ -56926,6 +57026,126 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!(
                         "[syscall/linux]   FAIL: ioprio_get after set({},{}) -> {}, expected {}",
                         class, data, r, packed,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Batch 431 — RT class → EPERM (CAP_SYS_NICE check is the
+            // first thing Linux runs; we expose no way to acquire it).
+            for data in [0i32, 3, 7] {
+                let packed: i32 =
+                    (pcb::LINUX_IOPRIO_CLASS_RT
+                        << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                let a = SyscallArgs {
+                    arg0: 1, arg1: test_pid, arg2: packed as u64,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_SET, &a).value
+                    != -i64::from(errno::EPERM)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_set(RT,{}) not EPERM ({})",
+                        data,
+                        dispatch_linux(nr::IOPRIO_SET, &a).value,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Batch 431 — NONE class with non-zero data → EINVAL.
+            // Pre-batch this silently succeeded (data field stored
+            // alongside an empty class), hiding caller bugs.
+            for data in [1i32, 4, 7] {
+                let packed: i32 =
+                    (pcb::LINUX_IOPRIO_CLASS_NONE
+                        << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                let a = SyscallArgs {
+                    arg0: 1, arg1: test_pid, arg2: packed as u64,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_SET, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_set(NONE,{}) not EINVAL ({})",
+                        data,
+                        dispatch_linux(nr::IOPRIO_SET, &a).value,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Batch 431 — IDLE class with arbitrary data → succeeds
+            // (Linux's IDLE arm has no data-range check; pre-batch
+            // we rejected data>=8 here with EINVAL).
+            for data in [0i32, 7, 8, 99, pcb::LINUX_IOPRIO_DATA_MASK] {
+                let packed: i32 =
+                    (pcb::LINUX_IOPRIO_CLASS_IDLE
+                        << pcb::LINUX_IOPRIO_CLASS_SHIFT) | data;
+                let a = SyscallArgs {
+                    arg0: 1, arg1: test_pid, arg2: packed as u64,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_SET, &a).value != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_set(IDLE,{}) not 0 ({})",
+                        data,
+                        dispatch_linux(nr::IOPRIO_SET, &a).value,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                // Round-trip the value through the PCB store.
+                let a = SyscallArgs {
+                    arg0: 1, arg1: test_pid, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                };
+                let r = dispatch_linux(nr::IOPRIO_GET, &a).value;
+                if r != i64::from(packed) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_get after IDLE/{} -> {}, expected {}",
+                        data, r, packed,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Batch 431 gate-order probe — bad which combined with
+            // RT class: Linux runs class gate first (EPERM), pre-
+            // batch we ran which gate first (EINVAL).
+            {
+                let packed: i32 =
+                    (pcb::LINUX_IOPRIO_CLASS_RT
+                        << pcb::LINUX_IOPRIO_CLASS_SHIFT) | 0;
+                let a = SyscallArgs {
+                    arg0: 99, arg1: test_pid, arg2: packed as u64,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_SET, &a).value
+                    != -i64::from(errno::EPERM)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_set(which=99, RT) not EPERM ({})",
+                        dispatch_linux(nr::IOPRIO_SET, &a).value,
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // Batch 431 gate-order probe — bad which combined with
+            // NONE class + non-zero data: Linux runs class gate
+            // first (EINVAL on data), pre-batch we ran which gate
+            // first (also EINVAL, but for a different reason).
+            // Same errno, so we only verify it's still EINVAL — the
+            // gate-order change is internal but worth recording.
+            {
+                let packed: i32 =
+                    (pcb::LINUX_IOPRIO_CLASS_NONE
+                        << pcb::LINUX_IOPRIO_CLASS_SHIFT) | 5;
+                let a = SyscallArgs {
+                    arg0: 99, arg1: test_pid, arg2: packed as u64,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::IOPRIO_SET, &a).value
+                    != -i64::from(errno::EINVAL)
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: ioprio_set(which=99, NONE+5) not EINVAL ({})",
+                        dispatch_linux(nr::IOPRIO_SET, &a).value,
                     );
                     return Err(KernelError::InternalError);
                 }
@@ -56999,12 +57219,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
 
             // pcb helper round-trip.  The last successful syscall-
-            // level set in the loop above installed class=NONE/data=0
-            // (packed value 0), so that's what we read back here.
-            assert_eq!(pcb::get_ioprio(test_pid), Some(0));
+            // level set was the IDLE/LINUX_IOPRIO_DATA_MASK probe
+            // from the batch-431 IDLE loop, packed value
+            // (CLASS_IDLE << SHIFT) | DATA_MASK = (3<<13)|8191 =
+            // 32767.  Re-pack here so the assertion tracks the
+            // constants instead of a magic number.
+            let last_packed: i32 = (pcb::LINUX_IOPRIO_CLASS_IDLE
+                << pcb::LINUX_IOPRIO_CLASS_SHIFT)
+                | pcb::LINUX_IOPRIO_DATA_MASK;
+            assert_eq!(pcb::get_ioprio(test_pid), Some(last_packed));
             // Helper bypass: install an arbitrary value; returns the
-            // prior value (the 0 we just confirmed above).
-            assert_eq!(pcb::set_ioprio(test_pid, 0x1234_5678), Some(0));
+            // prior value (the last_packed we just confirmed above).
+            assert_eq!(
+                pcb::set_ioprio(test_pid, 0x1234_5678),
+                Some(last_packed)
+            );
             assert_eq!(pcb::get_ioprio(test_pid), Some(0x1234_5678));
 
             // Destroy and verify ESRCH from both surfaces.
@@ -57033,6 +57262,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::LINUX_IOPRIO_DATA_MASK, (1 << 13) - 1);
             assert_eq!(pcb::LINUX_IOPRIO_DEFAULT, (2 << 13) | 4);
         }
+        serial_println!(
+            "[syscall/linux]   ioprio_set class-switch matches Linux block/ioprio.c (RT→EPERM, NONE+data→EINVAL, IDLE+any-data→0, class gate ordered before which gate): OK"
+        );
 
         // io_pgetevents bad nr ordering -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 5, arg2: 3, arg3: events_ptr, arg4: 0, arg5: 0 };

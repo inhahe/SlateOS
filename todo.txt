@@ -36161,3 +36161,146 @@ OBSOLETE NOTE BELOW (pre-relaxation):
         "[syscall/linux]   gettimeofday tz argument writes
         sys_tz=0 (Linux: deprecated struct timezone always zero
         on modern kernels, NULL-skip per-arg): OK"
+
+ 431. sys_ioprio_set class-switch validation diverged from Linux
+      on three observable axes (and one gate-order axis where the
+      errno coincides but the precedence didn't).  Now mirrors
+      Linux's block/ioprio.c::SYSCALL_DEFINE3(ioprio_set) gate
+      sequence.
+
+      Linux source (block/ioprio.c, abridged):
+
+          SYSCALL_DEFINE3(ioprio_set, int, which, int, who,
+                          int, ioprio)
+          {
+              int class = IOPRIO_PRIO_CLASS(ioprio);
+              int data  = IOPRIO_PRIO_DATA(ioprio);
+              int ret   = -ESRCH;
+
+              switch (class) {
+              case IOPRIO_CLASS_RT:
+                  if (!capable(CAP_SYS_ADMIN) &&
+                      !capable(CAP_SYS_NICE))
+                      return -EPERM;
+                  fallthrough;
+              case IOPRIO_CLASS_BE:
+                  if (data >= IOPRIO_NR_LEVELS || data < 0)
+                      return -EINVAL;
+                  break;
+              case IOPRIO_CLASS_IDLE:
+                  break;
+              case IOPRIO_CLASS_NONE:
+                  if (data)
+                      return -EINVAL;
+                  break;
+              default:
+                  return -EINVAL;
+              }
+
+              switch (which) { ... default: ret = -EINVAL; }
+              ...
+          }
+
+      `IOPRIO_NR_LEVELS` is 8 — the meaningful priority range is
+      0..=7.  The data field itself is 13 bits wide but only RT
+      and BE use the value; IDLE ignores it and NONE requires it
+      to be zero.
+
+      Divergence table:
+
+         (class, data, which)     Linux      pre-batch     post-batch
+         (RT,    0,    1)         -EPERM     0             -EPERM      FIXED
+         (RT,    3,    1)         -EPERM     0             -EPERM      FIXED
+         (RT,    7,    1)         -EPERM     0             -EPERM      FIXED
+         (NONE,  1,    1)         -EINVAL    0             -EINVAL     FIXED
+         (NONE,  4,    1)         -EINVAL    0             -EINVAL     FIXED
+         (NONE,  7,    1)         -EINVAL    0             -EINVAL     FIXED
+         (IDLE,  0,    1)         0          0             0           ok
+         (IDLE,  7,    1)         0          0             0           ok
+         (IDLE,  8,    1)         0          -EINVAL       0           FIXED
+         (IDLE,  99,   1)         0          -EINVAL       0           FIXED
+         (IDLE,  8191, 1)         0          -EINVAL       0           FIXED
+         (RT,    0,    99)        -EPERM     -EINVAL       -EPERM      FIXED
+                                                                       (gate order)
+         (NONE,  5,    99)        -EINVAL    -EINVAL       -EINVAL     ok
+                                                                       (same errno,
+                                                                        gate order
+                                                                        internal)
+         (BE,    7,    1)         0          0             0           ok
+         (BE,    8,    1)         -EINVAL    -EINVAL       -EINVAL     ok
+         (class=4, *, *)          -EINVAL    -EINVAL       -EINVAL     ok
+
+      Why it matters:
+        * ionice(1)'s `-c 1` (RT) probe on the calling shell
+          relied on EPERM to decide whether to fall through to a
+          `ionice -c 2 -n 0` (BE) retry; on pre-batch ours it
+          silently "succeeded" and ionice exited 0 without
+          actually scheduling RT IO.  The user then files a
+          phantom bug against the IO scheduler.
+        * systemd's `IOSchedulingClass=realtime` directive in a
+          unit file is meant to fail unit startup if the
+          calling process lacks CAP_SYS_NICE — the entire point
+          of the directive is to be a privilege check.  Pre-
+          batch ours always succeeded, allowing units to claim
+          RT IO they're not authorized for.
+        * NONE-class with non-zero data is what
+          `util-linux`'s `ionice -c 0 -n 4` produces (a
+          deliberately malformed call shape used as a probe by
+          ionice to detect "kernel that ignores the gate vs.
+          kernel that enforces it" — pre-batch ours fell into
+          the "ignores" bucket, surfacing a different code
+          path inside ionice's compatibility logic).
+        * IDLE-class with high data values is common from
+          shell scripts that round-trip values out of
+          `/proc/.../io` (which Linux happily reports with the
+          stored 13-bit field) and re-feed them as integers.
+          Pre-batch ours rejected this with EINVAL, breaking
+          a small but real category of scripts.
+
+      Architectural directive: translator-only fix.  RT is
+      uniformly rejected with EPERM because no capability
+      model exists for userspace to acquire CAP_SYS_NICE
+      through this ABI — the same pattern as
+      sys_settimeofday's CAP_SYS_TIME rejection.  When a
+      capability model lands (roadmap zone: kernel-security),
+      the RT arm becomes a `capable(...)` call instead of an
+      unconditional EPERM; the rest of the gate sequence
+      already matches Linux.  No native API changes, no PCB
+      additions, no new global state.
+
+      Fix in kernel/src/syscall/linux.rs sys_ioprio_set
+      (~line 25720): replaced the previous two-gate sequence
+      (which → class+data) with a Linux-faithful three-arm
+      class switch (RT → EPERM; BE → 0..=7 data range; IDLE
+      → no data check; NONE → data must be 0; default →
+      EINVAL) followed by the which gate.  Doc comment
+      includes the Linux source quote, the divergence table,
+      the why-it-matters paragraph, and the
+      architectural-directive paragraph.
+
+      Self-test rework (kernel/src/syscall/linux.rs around the
+      ioprio test block, ~line 57003):
+        * Removed RT/0 from the round-trip loop (RT now
+          returns EPERM, not 0).
+        * Added RT-probe loop: data=0,3,7 → EPERM.
+        * Added NONE-probe loop: data=1,4,7 → EINVAL.
+        * Added IDLE-probe loop: data=0,7,8,99,DATA_MASK
+          → 0, and round-trip the packed value through the
+          per-PCB store.
+        * Added gate-order probe: which=99 + RT → EPERM
+          (class gate fires first).
+        * Added gate-order sanity probe: which=99 + NONE+5
+          → EINVAL (same errno as pre-batch but via a
+          different gate).
+        * Updated the post-loop pcb::get_ioprio assertion
+          to track the IDLE/DATA_MASK packed value left by
+          the last successful set.
+
+      Build: cargo build -p kernel clean (45.59s).
+      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK
+      at 23s).
+      Stamp confirmed at build/serial-test.txt:
+        "[syscall/linux]   ioprio_set class-switch matches
+        Linux block/ioprio.c (RT→EPERM, NONE+data→EINVAL,
+        IDLE+any-data→0, class gate ordered before which
+        gate): OK"

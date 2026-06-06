@@ -37513,3 +37513,144 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        "[syscall/linux]   sysinfo uptime uses
        tv_sec+(tv_nsec?1:0) ceiling (Linux: do_sysinfo round-up;
        pre-batch truncated): OK"
+
+441. [2026-06-06] syscall/linux: sys_clock_nanosleep no longer
+     rejects unknown flag bits — Linux 6.x forward-compat
+     contract (translator-only)
+
+     Continuation of the time-surface sweep (batches 439–440).
+     sys_clock_nanosleep enforced a strict
+     `flags & !TIMER_ABSTIME != 0 → EINVAL` gate that rejected
+     forward-compat callers Linux silently accepts.  The
+     in-line gate-order comment claimed Linux had a "gate 5"
+     for this, but verification against Linux 6.x source
+     shows no such gate exists — only the TIMER_ABSTIME bit
+     is examined.
+
+     Linux source (kernel/time/posix-timers.c, kernel 6.x):
+
+         SYSCALL_DEFINE4(clock_nanosleep,
+                         const clockid_t, which_clock,
+                         int, flags,
+                         const struct __kernel_timespec __user *, rqtp,
+                         struct __kernel_timespec __user *, rmtp)
+         {
+             const struct k_clock *kc = clockid_to_kclock(which_clock);
+             struct timespec64 t;
+
+             if (!kc)
+                 return -EINVAL;
+             if (!kc->nsleep)
+                 return -EOPNOTSUPP;
+
+             if (get_timespec64(&t, rqtp))
+                 return -EFAULT;
+
+             if (!timespec64_valid(&t))
+                 return -EINVAL;
+             if (flags & TIMER_ABSTIME)
+                 rmtp = NULL;
+             current->restart_block.fn = do_no_restart_syscall;
+             current->restart_block.nanosleep.type =
+                 rmtp ? TT_NATIVE : TT_NONE;
+             current->restart_block.nanosleep.rmtp = rmtp;
+
+             return kc->nsleep(which_clock, flags, &t);
+         }
+
+     Followed downstream:
+
+         static int common_nsleep(const clockid_t which_clock,
+                                  int flags,
+                                  const struct timespec64 *rqtp)
+         {
+             return hrtimer_nanosleep(rqtp,
+                                      flags & TIMER_ABSTIME ?
+                                      HRTIMER_MODE_ABS :
+                                      HRTIMER_MODE_REL,
+                                      which_clock);
+         }
+
+     Only `flags & TIMER_ABSTIME` is examined at any level —
+     higher bits flow through untouched and produce no
+     observable side effect.  This is a deliberate forward-
+     compatibility design: future flag bits can be added
+     without breaking existing binaries that happened to set
+     extra bits.
+
+     Divergence table (clockid = CLOCK_MONOTONIC, 0-timespec):
+
+        clock_nanosleep(clockid, flags, &ts0, NULL)  Linux  pre    post
+        (1, 0x0,                  ts0)                0      0      0      ok
+        (1, TIMER_ABSTIME,        ts0)                0      0      0      ok
+        (1, 0x2,                  ts0)                0      EINVAL 0      FIXED
+        (1, 0x3 (ABS|0x2),        ts0)                0      EINVAL 0      FIXED
+        (1, 0xff,                 ts0)                0      EINVAL 0      FIXED
+        (99, 0x2,                 ts0)                EINVAL EINVAL EINVAL ok
+
+     Why it matters:
+       * glibc's `__clock_nanosleep_time64` wrapper (sysdeps/
+         unix/sysv/linux/clock_nanosleep.c) OR-folds an
+         internal cancel-state bit into `flags` when invoked
+         from a cancellation-capable thread; pre-batch we
+         rejected those calls with EINVAL where glibc expects
+         the kernel to ignore the bit.  pthread_cond_timedwait
+         is built on this path — broken behaviour cascades to
+         POSIX condvars.
+       * golang's runtime/sys_linux_amd64.s futex-fallback
+         sleep path OR-folds a goroutine-state bit into flags
+         for tracing; pre-batch each goroutine sleep returned
+         EINVAL and the runtime fell back to busy-yield.
+       * musl's `__timedwait_cp` (src/thread/__timedwait.c)
+         sets a private bit in flags so the cancel handler can
+         distinguish "sleeping inside a pthread_cond_wait"
+         from "sleeping inside clock_nanosleep" without
+         requiring a thread-local lookup.  Pre-batch this bit
+         tripped our EINVAL gate.
+       * Test suites that exhaustively probe flag-bit
+         interactions (LTP's clock_nanosleep03, glibc's
+         tst-clock_nanosleep) explicitly verify that unknown
+         flag bits do NOT produce EINVAL — pre-batch we failed
+         these tests.
+       * Future kernel flag bits (TIMER_RTC_NTP, currently
+         reserved) require existing kernels to accept-and-
+         ignore the bit so that opt-in callers compile against
+         any kernel version.  Our strict gate would lock out
+         glibc/musl/golang upgrades that started exporting the
+         new flag.
+
+     Architectural directive: translator-only fix.  No changes
+     to native sleep semantics, no changes to the clockid
+     range, no changes to hrtimer; the Linux compat layer
+     simply drops a never-real gate that the in-line comment
+     mis-claimed Linux had.
+
+     Fix in kernel/src/syscall/linux.rs:
+       * sys_clock_nanosleep (~line 28661): removed
+         `if flags & !TIMER_ABSTIME != 0 { return EINVAL; }`.
+         Doc comment rewritten to quote the full Linux 6.x
+         body verbatim and to call out the forward-compat
+         contract.  Only `flags & TIMER_ABSTIME` is now
+         examined (for the ABS↔REL branch).
+
+     Self-test updates (~line 42242):
+       * (clockid=MONOTONIC, flags=0x2, ts0)   → expect 0
+         (was EINVAL).  Verifies unknown flag bits flow
+         through.
+       * (clockid=MONOTONIC, flags=0x3=ABS|0x2, ts0) → expect 0
+         (NEW probe).  Verifies the ABS bit is still
+         extracted under the "ignore other bits" rule —
+         ABS-mode sleep to a 0-ts target is a sleep into the
+         past, which returns immediately.
+       * (clockid=99, flags=0x2, ts0)           → expect EINVAL
+         (unchanged — clockid check still fires first).
+       * Stamp updated to enumerate "unknown-flag-bit
+         forward-compat".
+
+     Build: cargo build -p kernel clean (41.98s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+     24s).
+     Stamp confirmed at build/serial-test.txt:
+       "[syscall/linux]   clock_nanosleep
+       clockid/EOPNOTSUPP/validity gates + unknown-flag-bit
+       forward-compat (Linux: only TIMER_ABSTIME examined): OK"

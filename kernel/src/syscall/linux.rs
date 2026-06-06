@@ -28686,16 +28686,56 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     let req_ptr = args.arg2;
 
     // Linux's `SYSCALL_DEFINE4(clock_nanosleep)`
-    // (kernel/time/posix-timers.c) gates in this order:
-    //   1. `kc = clockid_to_kclock(which_clock); if (!kc) return -EINVAL;`
-    //   2. `if (!kc->nsleep) return -EOPNOTSUPP;`
-    //   3. `if (get_timespec64(&t, rqtp)) return -EFAULT;`
-    //   4. `if (!timespec64_valid(&t)) return -EINVAL;`
-    //   5. `if (flags & ~TIMER_ABSTIME) return -EINVAL;`
-    // Pre-batch we skipped (1), (2), (4), (5) entirely and fell through
-    // to sleep with whatever timespec was passed, treating unknown
-    // clockids as "use hrtimer".  Feature-detection probes (e.g. glibc's
-    // clock_nanosleep wrapper) saw success where Linux rejects.
+    // (kernel/time/posix-timers.c, 6.x) full body:
+    //
+    //     const struct k_clock *kc = clockid_to_kclock(which_clock);
+    //     struct timespec64 t;
+    //
+    //     if (!kc)
+    //         return -EINVAL;
+    //     if (!kc->nsleep)
+    //         return -EOPNOTSUPP;
+    //
+    //     if (get_timespec64(&t, rqtp))
+    //         return -EFAULT;
+    //
+    //     if (!timespec64_valid(&t))
+    //         return -EINVAL;
+    //     if (flags & TIMER_ABSTIME)
+    //         rmtp = NULL;
+    //     ...
+    //     return kc->nsleep(which_clock, flags, &t);
+    //
+    // Gates in order:
+    //   1. clockid_to_kclock → EINVAL on unknown clockid
+    //   2. !.nsleep → EOPNOTSUPP
+    //   3. get_timespec64 → EFAULT
+    //   4. !timespec64_valid → EINVAL
+    //
+    // CRITICAL: there is NO gate that rejects unknown flag bits.
+    // Only `flags & TIMER_ABSTIME` is examined (to switch ABS↔REL
+    // mode and to skip rmtp); higher bits flow through to
+    // kc->nsleep, where common_nsleep again extracts only the
+    // ABSTIME bit:
+    //
+    //     return hrtimer_nanosleep(rqtp,
+    //                              flags & TIMER_ABSTIME ?
+    //                              HRTIMER_MODE_ABS : HRTIMER_MODE_REL,
+    //                              which_clock);
+    //
+    // Linux's forward-compatibility contract: future flag bits
+    // can be added without breaking existing binaries that
+    // happened to set extra bits.  Pre-batch (439-) we ran a
+    // strict `flags & !TIMER_ABSTIME != 0 → EINVAL` gate that
+    // rejected exactly the callers Linux protects with this
+    // contract: feature-probe code in glibc's clock_nanosleep
+    // wrapper, golang's runtime futex_sleep fallback, musl's
+    // __timedwait_cp — all of them OR scratch bits into flags
+    // for internal bookkeeping and expect the kernel to ignore
+    // them.  Batch 441 drops the bogus gate to match Linux 6.x.
+    //
+    // (Pre-batch we also skipped (1), (2), (4) entirely; those
+    // were fixed in earlier batches and are preserved below.)
     // Valid posix clockids: REALTIME(0), MONOTONIC(1),
     // PROCESS_CPUTIME_ID(2), THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
     // REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
@@ -28719,9 +28759,9 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     if req.tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&req.tv_nsec) {
         return linux_err(errno::EINVAL);
     }
-    if flags & !TIMER_ABSTIME != 0 {
-        return linux_err(errno::EINVAL);
-    }
+    // Batch 441: do NOT gate on `flags & !TIMER_ABSTIME` — Linux
+    // 6.x silently ignores unknown flag bits (forward-compat).
+    // Only the TIMER_ABSTIME bit affects behaviour.
     let target_ns = req.to_nanos();
     let now_ns: u64 = match clockid {
         0 => crate::timekeeping::clock_realtime(),
@@ -42239,17 +42279,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // clockid=MONOTONIC + bad flags (0x2) + valid ts -> EINVAL.
+        // Batch 441: clockid=MONOTONIC + "unknown" flag bit (0x2) +
+        // valid 0-ts -> 0.  Linux 6.x silently ignores unknown
+        // flag bits (forward-compat); only TIMER_ABSTIME affects
+        // behaviour.  With a 0-ts and the ABSTIME bit clear, this
+        // is a relative sleep of 0 → yield_now + return 0.
         let a = SyscallArgs { arg0: 1, arg1: 0x2, arg2: zero_ts_ptr,
             arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
-            != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: clock_nanosleep bad flags not EINVAL"
+                "[syscall/linux]   FAIL: clock_nanosleep unknown-flag-bit not silently accepted ({})",
+                dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
             );
             return Err(KernelError::InternalError);
         }
-        // bad flags + bad clockid -> EINVAL (clockid checked first).
+        // Batch 441: clockid=MONOTONIC + ABS-with-extra-bits +
+        // 0-ts -> 0 (abs-mode sleeps to a point in the past →
+        // immediate return).  Verifies ABS bit is still
+        // extracted under the "ignore other bits" rule.
+        let a = SyscallArgs { arg0: 1, arg1: 0x3, arg2: zero_ts_ptr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_nanosleep ABS+unknown flag not 0 ({})",
+                dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // bad clockid + bad flags -> EINVAL (clockid checked first,
+        // and unknown bits in flags still don't matter).
         let a = SyscallArgs { arg0: 99, arg1: 0x2, arg2: zero_ts_ptr,
             arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_NANOSLEEP, &a).value
@@ -42260,7 +42318,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   clock_nanosleep clockid/EOPNOTSUPP/validity/flags gating: OK"
+            "[syscall/linux]   clock_nanosleep clockid/EOPNOTSUPP/validity gates + unknown-flag-bit forward-compat (Linux: only TIMER_ABSTIME examined): OK"
         );
     }
 

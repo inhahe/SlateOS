@@ -27839,11 +27839,31 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
 fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::pcb;
 
-    // Linux WAIT4 option flags.
-    const WNOHANG: u64 = 1;
-    const WUNTRACED: u64 = 2;
-    const WCONTINUED: u64 = 8;
-    const VALID_OPTIONS: u64 = WNOHANG | WUNTRACED | WCONTINUED;
+    // Linux WAIT4 option flags.  Per Linux 6.x kernel/exit.c
+    // SYSCALL_DEFINE4(wait4) (cited verbatim — batch 442):
+    //   if (options & ~(WNOHANG|WUNTRACED|WCONTINUED|
+    //                   __WNOTHREAD|__WCLONE|__WALL))
+    //       return -EINVAL;
+    // wait4 accepts six bits, NOT three.  Pre-batch we accepted only
+    // {WNOHANG, WUNTRACED, WCONTINUED} = 0xb, returning EINVAL for any
+    // program that passed __WALL (used by glibc's internal SIGCHLD
+    // wrappers, init scripts that want to reap all clones-including-
+    // non-SIGCHLD, container runtimes managing PID-namespace inits).
+    // Bit values match Linux <bits/waitflags.h>:
+    //   WNOHANG       0x00000001
+    //   WUNTRACED     0x00000002
+    //   WCONTINUED    0x00000008
+    //   __WNOTHREAD   0x20000000
+    //   __WCLONE      0x80000000
+    //   __WALL        0x40000000
+    const WNOHANG: u64 = 0x0000_0001;
+    const WUNTRACED: u64 = 0x0000_0002;
+    const WCONTINUED: u64 = 0x0000_0008;
+    const WNOTHREAD: u64 = 0x2000_0000;
+    const WALL: u64 = 0x4000_0000;
+    const WCLONE: u64 = 0x8000_0000;
+    const VALID_OPTIONS: u64 =
+        WNOHANG | WUNTRACED | WCONTINUED | WNOTHREAD | WALL | WCLONE;
 
     // x86_64 syscall ABI register truncation: Linux declares
     //   pid_t wait4(pid_t pid, int *wstatus, int options,
@@ -27877,6 +27897,18 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
 
     if (options & !VALID_OPTIONS) != 0 {
         return linux_err(errno::EINVAL);
+    }
+    // Linux 6.x kernel/exit.c, immediately after the options gate:
+    //   /* -INT_MIN is not defined */
+    //   if (upid == INT_MIN)
+    //       return -ESRCH;
+    // The kill_pgrp_info() codepath negates the upid; -INT_MIN is UB
+    // in two's complement, so Linux short-circuits with ESRCH (not
+    // ECHILD).  Pre-batch we routed INT_MIN through the wait-specific
+    // path (pid_arg = i64::MIN < 0 -> wait-any), returning ECHILD —
+    // a different errno than Linux.
+    if pid_i32 == i32::MIN {
+        return linux_err(errno::ESRCH);
     }
     let nohang = (options & WNOHANG) != 0;
 
@@ -31871,12 +31903,58 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //     (0xDEAD_BEEF) returns -ECHILD (the "not a child of caller"
     //     path).  Must NOT be -EINVAL.
     {
-        // Unknown option bit (WNOHANG | unknown high bit).
+        // Unknown option bit (WNOHANG | unknown bit 4 = 0x10).  Bit 4
+        // is not in Linux 6.x's wait4 accept-mask
+        //   {WNOHANG, WUNTRACED, WCONTINUED, __WNOTHREAD, __WCLONE, __WALL}
+        // = 0xE000_000b, so EINVAL is required.  (Note: pre-batch 442
+        // this probe used 0x4000_0000 as the "bogus" bit — but that is
+        // __WALL, which Linux accepts.  Updated to 0x10 to remain
+        // genuinely invalid under the corrected gate.)
         let a = SyscallArgs { arg0: u64::MAX /* -1 = wait any */, arg1: 0,
-            arg2: 1 | 0x4000_0000 /* WNOHANG + bogus */, arg3: 0,
+            arg2: 1 | 0x10 /* WNOHANG + truly bogus bit */, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::WAIT4, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: wait4 bad options not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // Batch 442: __WNOTHREAD / __WCLONE / __WALL are valid Linux
+        // wait4 options.  Each combined with WNOHANG must NOT trigger
+        // EINVAL — the call should reach the wait core (and surface
+        // ECHILD or similar in kernel context).
+        for (label, bit) in &[
+            ("__WNOTHREAD", 0x2000_0000u64),
+            ("__WALL", 0x4000_0000u64),
+            ("__WCLONE", 0x8000_0000u64),
+        ] {
+            let a = SyscallArgs { arg0: u64::MAX, arg1: 0,
+                arg2: 1 | *bit /* WNOHANG | <flag> */, arg3: 0,
+                arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::WAIT4, &a).value;
+            if v == -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: wait4 {} | WNOHANG -> EINVAL", label
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Batch 442: INT_MIN pid -> ESRCH (Linux defensive check: -INT_MIN
+        // is UB in two's complement, so kernel/exit.c short-circuits with
+        // ESRCH before any kill_pgrp_info / try_reap call).  Pre-batch
+        // we routed INT_MIN to the wait-any path (i64::from(INT_MIN) < 0)
+        // and returned ECHILD.
+        let a = SyscallArgs {
+            arg0: i32::MIN as u32 as u64,  /* sign-extended bits trimmed by ABI */
+            arg1: 0,
+            arg2: 1 /* WNOHANG, irrelevant — INT_MIN gate is checked after options gate */,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 INT_MIN pid != ESRCH (got {})", v
+            );
             return Err(KernelError::InternalError);
         }
 

@@ -37654,3 +37654,124 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        "[syscall/linux]   clock_nanosleep
        clockid/EOPNOTSUPP/validity gates + unknown-flag-bit
        forward-compat (Linux: only TIMER_ABSTIME examined): OK"
+
+442. syscall/linux: batch 442 — wait4 options accepts
+     __WNOTHREAD/__WCLONE/__WALL + INT_MIN ESRCH gate.
+
+     Linux 6.x source (kernel/exit.c, SYSCALL_DEFINE4(wait4)):
+
+       SYSCALL_DEFINE4(wait4, pid_t, upid, int __user *, stat_addr,
+               int, options, struct rusage __user *, ru)
+       {
+           struct rusage r;
+           long err;
+
+           if (options & ~(WNOHANG|WUNTRACED|WCONTINUED|
+                   __WNOTHREAD|__WCLONE|__WALL))
+               return -EINVAL;
+
+           /* -INT_MIN is not defined */
+           if (upid == INT_MIN)
+               return -ESRCH;
+           ...
+       }
+
+     Bit values per <bits/waitflags.h>:
+       WNOHANG       0x0000_0001
+       WUNTRACED     0x0000_0002
+       WCONTINUED    0x0000_0008
+       __WNOTHREAD   0x2000_0000
+       __WCLONE      0x8000_0000
+       __WALL        0x4000_0000
+     Linux's wait4 accept-mask is thus 0xE000_000b
+     (NOT 0x0000_000b).
+
+     Divergences (pre-batch sys_wait4 ~line 27839):
+
+       1. VALID_OPTIONS was WNOHANG|WUNTRACED|WCONTINUED
+          = 0xb only.  Any program passing __WNOTHREAD,
+          __WCLONE, or __WALL got spurious -EINVAL.
+
+          | options bit    | Linux  | Pre-batch |
+          |----------------|--------|-----------|
+          | WNOHANG (0x1)  | accept | accept    |
+          | WUNTRACED(0x2) | accept | accept    |
+          | WCONTINUED(8)  | accept | accept    |
+          | __WNOTHREAD    | accept | EINVAL    |
+          | __WCLONE       | accept | EINVAL    |
+          | __WALL         | accept | EINVAL    |
+          | other bits     | EINVAL | EINVAL    |
+
+       2. INT_MIN pid: Linux short-circuits with -ESRCH
+          (defensive — kill_pgrp_info negates upid; -INT_MIN
+          is UB in two's complement).  Pre-batch we routed
+          INT_MIN to the wait-any path (i64::from(INT_MIN)
+          is negative) and returned -ECHILD on no children.
+          Different errno than Linux for the same input.
+
+     Why it matters:
+
+       - glibc's internal SIGCHLD wrappers, init scripts
+         that need to reap clone()d-with-non-SIGCHLD
+         children, and PID-namespace-aware container
+         runtimes pass __WALL routinely.  Pre-batch they
+         got EINVAL where Linux returns 0 / ECHILD.
+       - __WCLONE is used by NPTL-aware managers that want
+         to reap only thread-like clones (SIGCHLD-using
+         signals filtered out).
+       - __WNOTHREAD is used by some test harnesses and by
+         glibc when waiting only for direct children (not
+         threads of children).
+       - INT_MIN ESRCH: real programs rarely pass INT_MIN
+         deliberately, but conformance test suites (LTP,
+         glibc tests) and fuzzers do.  Different errno
+         breaks the conformance test and gives fuzzers a
+         spurious divergence to chase.
+
+     Fix in kernel/src/syscall/linux.rs:
+       * sys_wait4 (~line 27843): expanded VALID_OPTIONS to
+         WNOHANG | WUNTRACED | WCONTINUED | __WNOTHREAD |
+         __WCLONE | __WALL (= 0xE000_000b).  Doc comment
+         now quotes the Linux 6.x source verbatim and
+         enumerates all six accepted bits.
+       * sys_wait4 (after options gate): added
+           if pid_i32 == i32::MIN {
+               return linux_err(errno::ESRCH);
+           }
+         in the exact ordering Linux uses (options gate
+         first, then INT_MIN, then the wstatus/rusage
+         pointer validation that is our pre-batch addition).
+
+     Self-test updates (~line 31875):
+       * Bad-options probe changed from
+           options = WNOHANG | 0x4000_0000
+         (which is now __WALL | WNOHANG, accepted) to
+           options = WNOHANG | 0x10
+         (bit 4, unused under Linux's gate).  Still expects
+         EINVAL.  Comment explains the swap.
+       * NEW probe loop: __WNOTHREAD, __WALL, __WCLONE each
+         combined with WNOHANG and pid=-1.  Each must NOT
+         return -EINVAL.  Surfaces ECHILD in kernel context
+         (BSP has no children), which is non-EINVAL.
+       * NEW probe: pid=INT_MIN (passed as
+         `i32::MIN as u32 as u64` so the ABI truncation
+         takes the low 32 bits back to INT_MIN), options=
+         WNOHANG.  Must return exactly -ESRCH (not -EINVAL,
+         not -ECHILD).
+       * Existing high-half truncation probes (a/b/c)
+         still pass: bit 32 in options truncates to 0 or 1
+         (no clash with new accept-mask), and pid =
+         0x1_0000_0000 truncates to 0 (not INT_MIN, so the
+         new ESRCH gate doesn't fire).
+
+     Build: cargo build -p kernel clean (38.39s).
+     Boot test: bash scripts/boot-test.sh — first attempt
+     hit the documented intermittent RCU self-test hang
+     (known-issues.md #1, retry-passes); retry PASSED
+     (BOOT_OK at 23s).
+     Stamp confirmed at build/serial-test.txt:
+       "[syscall/linux]   wait4 pid_t/int options
+       truncation: OK"
+     (gates all wait4 probes — any FAIL in the new probes
+     would emit a "FAIL:" line before this stamp; none
+     appeared.)

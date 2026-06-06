@@ -26929,35 +26929,145 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `gettimeofday(tv, tz)` — fills `struct timeval { sec; usec; }`.
+/// `gettimeofday(tv, tz)` — fills `struct timeval` and, if non-NULL,
+/// also writes the deprecated `struct timezone`.
+///
+/// ## Linux source — `kernel/time/time.c::SYSCALL_DEFINE2(gettimeofday)`
+///
+/// ```c
+/// SYSCALL_DEFINE2(gettimeofday, struct __kernel_old_timeval __user *, tv,
+///                 struct timezone __user *, tz)
+/// {
+///     if (likely(tv != NULL)) {
+///         struct timespec64 ts;
+///         ktime_get_real_ts64(&ts);
+///         if (put_user(ts.tv_sec, &tv->tv_sec) ||
+///             put_user(ts.tv_nsec / 1000, &tv->tv_usec))
+///             return -EFAULT;
+///     }
+///     if (unlikely(tz != NULL)) {
+///         if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
+///             return -EFAULT;
+///     }
+///     return 0;
+/// }
+/// ```
+///
+/// `struct timezone` (`include/uapi/linux/time.h`):
+///
+/// ```c
+/// struct timezone {
+///     int tz_minuteswest;  /* minutes west of Greenwich */
+///     int tz_dsttime;      /* type of DST correction    */
+/// };
+/// ```
+///
+/// 8 bytes total.  `sys_tz` is a kernel global zero-initialised at
+/// boot and never written by modern code (settimeofday's tz arm is
+/// effectively deprecated — glibc 2.31+ never calls it with tz set,
+/// and the kernel itself contains a `WARN_ON_ONCE` for the legacy
+/// adjustment path).  So `gettimeofday(_, valid_tz)` writes
+/// `{0, 0}` (8 zero bytes) on every Linux kernel from 2.6 onward.
+///
+/// ## Gate-order divergence from naive tv-only impl (batch 430)
+///
+/// Pre-batch we ignored `args.arg1` (tz) entirely — the NULL-tv
+/// short-circuit returned 0 without touching tz, and the non-NULL-tv
+/// path returned 0 after writing tv without touching tz.  Concrete
+/// divergence table:
+///
+/// | call shape                          | Linux  | Pre   | This batch |
+/// |-------------------------------------|--------|-------|------------|
+/// | `gettimeofday(NULL, NULL)`          | 0      | 0     | 0          |
+/// | `gettimeofday(valid, NULL)`         | 0+tv   | 0+tv  | 0+tv       |
+/// | `gettimeofday(NULL, valid_tz)`      | 0+tz   | 0     | 0+tz       |
+/// | `gettimeofday(valid, valid_tz)`     | 0+both | 0+tv  | 0+both     |
+/// | `gettimeofday(NULL, BAD_TZ)`        | EFAULT | 0     | EFAULT     |
+/// | `gettimeofday(valid, BAD_TZ)`       | EFAULT | 0+tv  | EFAULT     |
+/// | `gettimeofday(BAD_TV, NULL)`        | EFAULT | EFAULT| EFAULT     |
+/// | `gettimeofday(BAD_TV, valid_tz)`    | EFAULT | EFAULT| EFAULT     |
+///
+/// The third row is the most consequential: a probe passing
+/// `gettimeofday(NULL, &tz_buf)` to fish out the kernel's timezone
+/// view — a pattern used by the `tzset(3)` POSIX shim path on older
+/// glibc (pre-2.31), uClibc's `__localtime_helper`, by `date(1)` and
+/// `hwclock(8)` on systems with `/etc/timezone` missing, and by
+/// `strace`'s tv/tz pretty-printer — saw `tz_buf` left untouched
+/// where Linux fills it with zeros.  Callers that pre-init the
+/// buffer to garbage (then trust the syscall to overwrite) read back
+/// stale bytes.
+///
+/// The fifth row (`gettimeofday(NULL, BAD_TZ)`) is the silent-error
+/// bug-class: Linux returns EFAULT teaching the caller "your tz
+/// pointer is bad, you have a memory-corruption bug or a stale
+/// reference"; pre-batch we returned 0 telling the caller "all
+/// good, nothing to see here," and any later read of `*tz` would
+/// page-fault userspace at a far-removed program point.
+///
+/// ## Architectural directive
+///
+/// Pure ABI translator fidelity.  We have no timezone subsystem and
+/// no plans to add one — system-wide timezone lives in
+/// `/etc/localtime` (read by userspace via `tzset(3)`) on every
+/// modern OS, not in the kernel.  Linux's `sys_tz` global is a
+/// vestigial 1980s-era struct that's been zero for thirty years on
+/// every distro shipping `tzdata`.  We mirror that exact state:
+/// `tz_minuteswest = 0`, `tz_dsttime = 0`.  When/if a userspace
+/// timezone-update protocol is designed, it will plumb through
+/// `localtime` or an IPC channel, NOT through this syscall — the
+/// settimeofday(... , tz) write path is a documented deprecated
+/// no-op in Linux 5.x and we will not exhume it.
 fn sys_gettimeofday(args: &SyscallArgs) -> SyscallResult {
     let tv_ptr = args.arg0;
-    if tv_ptr == 0 {
-        // POSIX: tv may be NULL — succeed.  tz is unused.
-        return SyscallResult::ok(0);
-    }
-    let ns = crate::timekeeping::clock_realtime();
-    let sec = ns / 1_000_000_000;
-    let usec = (ns % 1_000_000_000) / 1_000;
+    let tz_ptr = args.arg1;
 
-    #[repr(C)]
-    struct Timeval {
-        sec: i64,
-        usec: i64,
-    }
-    #[allow(clippy::cast_possible_wrap)]
-    let tv = Timeval { sec: sec as i64, usec: usec as i64 };
+    // Linux gate 1: if (tv != NULL) write tv; on failure return
+    // EFAULT WITHOUT touching tz.
+    if tv_ptr != 0 {
+        let ns = crate::timekeeping::clock_realtime();
+        let sec = ns / 1_000_000_000;
+        let usec = (ns % 1_000_000_000) / 1_000;
 
-    // SAFETY: copy_to_user validates.
-    let r = unsafe {
-        crate::mm::user::copy_to_user(
-            (&raw const tv).cast::<u8>(),
-            tv_ptr,
-            core::mem::size_of::<Timeval>(),
-        )
-    };
-    if let Err(e) = r {
-        return linux_err(linux_errno_for(e));
+        #[repr(C)]
+        struct Timeval {
+            sec: i64,
+            usec: i64,
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        let tv = Timeval { sec: sec as i64, usec: usec as i64 };
+
+        // SAFETY: copy_to_user validates the destination range and
+        // surfaces EFAULT on bad or unmapped user addresses.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(
+                (&raw const tv).cast::<u8>(),
+                tv_ptr,
+                core::mem::size_of::<Timeval>(),
+            )
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    // Linux gate 2: if (tz != NULL) write `sys_tz` (8 zero bytes
+    // — see doc comment above for the rationale that sys_tz is
+    // always {0, 0} on any modern Linux kernel).  On failure
+    // return EFAULT.  Runs after the tv gate, so a probe with
+    // (BAD_TV, BAD_TZ) sees the EFAULT from gate 1 and tz is
+    // never touched — matching Linux's left-to-right gate
+    // sequencing.
+    if tz_ptr != 0 {
+        // struct timezone { int tz_minuteswest; int tz_dsttime; }
+        let tz_zero = [0u8; 8];
+        // SAFETY: copy_to_user validates the destination range and
+        // surfaces EFAULT on bad or unmapped user addresses.
+        let r = unsafe {
+            crate::mm::user::copy_to_user(tz_zero.as_ptr(), tz_ptr, 8)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
     }
     SyscallResult::ok(0)
 }
@@ -34433,6 +34543,121 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   setrlimit/getrlimit unconditional copy_to/from_user EFAULT gate (Linux: legacy wrappers always touch rlim, NULL → EFAULT regardless of resource validity): OK"
+        );
+
+        // Batch 430: gettimeofday(tv, tz) writes 8 zero bytes of the
+        // deprecated `struct timezone` (sys_tz) to *tz when tz != NULL.
+        // Pre-batch the tz argument was silently ignored on every
+        // call shape, including the common tzset(3) / uClibc
+        // __localtime_helper boot probe where applications expect to
+        // observe sys_tz = {0, 0} and use that to decide whether to
+        // load /etc/localtime.  Mirrors Linux's
+        // SYSCALL_DEFINE2(gettimeofday) in kernel/time/time.c which
+        // calls do_sys_settimeofday64(NULL, &sys_tz) path semantics in
+        // reverse — except the SET path writes, GET path reads, and
+        // sys_tz has been hard-zero on every kernel since 2.6.
+        //
+        // Probes below exercise only the NULL discriminator and the
+        // happy path; the kernel-context self-test cannot safely
+        // exercise BAD_PTR cases because validate_user_write bypasses
+        // when there is no owning process and a bad pointer would
+        // synchronously page-fault the kernel.  Userspace BAD_PTR
+        // coverage lives in the syscall integration suite.
+        {
+            // (a) gettimeofday(NULL, NULL) → 0, no observable effect.
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: gettimeofday(NULL, NULL) not 0 ({})",
+                    dispatch_linux(nr::GETTIMEOFDAY, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (b) gettimeofday(valid_tv, NULL) → 0, tv populated with
+            //     monotonically-advancing realtime.  Two reads must
+            //     produce a non-decreasing tv_sec/tv_usec pair (and a
+            //     non-zero tv_sec since clock_realtime is seeded from
+            //     boot epoch).
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            struct Tv { sec: i64, usec: i64 }
+            let mut tv1 = Tv { sec: -1, usec: -1 };
+            let a = SyscallArgs {
+                arg0: (&raw mut tv1).addr() as u64,
+                arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: gettimeofday(valid, NULL) not 0 ({})",
+                    dispatch_linux(nr::GETTIMEOFDAY, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            if tv1.sec < 0 || tv1.usec < 0 || tv1.usec >= 1_000_000 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: gettimeofday(valid, NULL) tv out of range ({}, {})",
+                    tv1.sec, tv1.usec
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (c) gettimeofday(NULL, valid_tz) → 0, tz must be
+            //     overwritten with {0, 0}.  Pre-seed with sentinels to
+            //     detect the silent-skip pre-batch bug.
+            let mut tz = [0xAAi32, 0x55];
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: tz.as_mut_ptr() as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: gettimeofday(NULL, valid_tz) not 0 ({})",
+                    dispatch_linux(nr::GETTIMEOFDAY, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            if tz[0] != 0 || tz[1] != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: gettimeofday tz not overwritten to (0,0): ({}, {})",
+                    tz[0], tz[1]
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (d) gettimeofday(valid_tv, valid_tz) → 0, both populated.
+            let mut tv2 = Tv { sec: -1, usec: -1 };
+            let mut tz2 = [0x33i32, 0x77];
+            let a = SyscallArgs {
+                arg0: (&raw mut tv2).addr() as u64,
+                arg1: tz2.as_mut_ptr() as u64,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: gettimeofday(valid, valid_tz) not 0 ({})",
+                    dispatch_linux(nr::GETTIMEOFDAY, &a).value
+                );
+                return Err(KernelError::InternalError);
+            }
+            if tv2.sec < tv1.sec
+                || (tv2.sec == tv1.sec && tv2.usec < tv1.usec)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: gettimeofday tv not monotonic: ({},{}) -> ({},{})",
+                    tv1.sec, tv1.usec, tv2.sec, tv2.usec
+                );
+                return Err(KernelError::InternalError);
+            }
+            if tz2[0] != 0 || tz2[1] != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: gettimeofday tz (both-valid) not (0,0): ({}, {})",
+                    tz2[0], tz2[1]
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   gettimeofday tz argument writes sys_tz=0 (Linux: deprecated struct timezone always zero on modern kernels, NULL-skip per-arg): OK"
         );
 
         // Batch 68: PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS sticky

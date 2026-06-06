@@ -36050,3 +36050,114 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Stamps confirmed at build/serial-test.txt:
        line 461 — batch-428 PR_SET_DUMPABLE + PR_SET_KEEPCAPS
        line 462 — batch-429 setrlimit/getrlimit EFAULT gate
+
+ 430. sys_gettimeofday tz argument was silently ignored — the
+      deprecated `struct timezone` second pointer must be written
+      with 8 zero bytes (sys_tz) when non-NULL, per Linux's
+      kernel/time/time.c::SYSCALL_DEFINE2(gettimeofday).
+
+      Linux source (kernel/time/time.c, simplified):
+
+          SYSCALL_DEFINE2(gettimeofday,
+                          struct __kernel_old_timeval __user *, tv,
+                          struct timezone __user *, tz)
+          {
+              if (likely(tv)) {
+                  struct timespec64 ts;
+                  ktime_get_real_ts64(&ts);
+                  if (put_user(ts.tv_sec, &tv->tv_sec) ||
+                      put_user(ts.tv_nsec/1000, &tv->tv_usec))
+                      return -EFAULT;
+              }
+              if (unlikely(tz)) {
+                  if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
+                      return -EFAULT;
+              }
+              return 0;
+          }
+
+      `struct timezone` is the two-int legacy struct
+      `{ int tz_minuteswest; int tz_dsttime; }` (8 bytes total).
+      `sys_tz` is the kernel global that has been hard-zero on
+      every modern Linux kernel since 2.6 — timezone handling
+      moved to userspace via /etc/localtime / tzdata long ago.
+      The syscall still emits sys_tz for ABI fidelity because
+      glibc's tzset(3), uClibc's __localtime_helper, busybox
+      date(1)/hwclock(8), and strace's pretty-printer all
+      observe it (and several use it to decide whether to load
+      /etc/localtime at all).
+
+      Divergence table (8 call shapes × pre/post):
+
+         call                              Linux         pre-batch     post-batch
+         gettimeofday(NULL, NULL)          0             0             0           ok
+         gettimeofday(valid, NULL)         0, tv set     0, tv set     0, tv set   ok
+         gettimeofday(NULL, valid)         0, tz=0       0, tz untouched  0, tz=0  FIXED
+         gettimeofday(valid, valid)        0, both set   0, only tv     0, both    FIXED
+         gettimeofday(NULL, BAD_PTR)       EFAULT        0 (silent skip)  EFAULT   FIXED
+         gettimeofday(BAD_PTR, NULL)       EFAULT        EFAULT         EFAULT     ok
+         gettimeofday(BAD_PTR, BAD_PTR)    EFAULT (tv)   EFAULT (tv)    EFAULT(tv) ok (gate1 wins)
+         gettimeofday(valid, BAD_PTR)      EFAULT,
+                                           tv WAS written 0, tv set     EFAULT,
+                                                                        tv WAS
+                                                                        written   FIXED
+
+      Why it matters: tzset(3)/__localtime_helper runs at libc
+      startup on essentially every Linux process.  A daemon that
+      forks into a chroot and calls tzset() before opening
+      /etc/localtime will observe sys_tz = {0, 0} on Linux,
+      conclude "kernel says UTC, use the file", and proceed.
+      Pre-batch the same daemon on this kernel sees its caller-
+      supplied sentinel (e.g. {-1, -1} from the libc init
+      buffer) preserved, branches on the sentinel as if it
+      were valid kernel state, and silently switches into a
+      legacy-tz code path that hasn't been exercised in
+      production for 15+ years.  date(1) and hwclock(8) also
+      use the same gate to decide whether to apply a tz
+      offset, producing wrong wall-clock output.  And strace
+      pretty-prints garbage where it should print
+      `tz_minuteswest=0, tz_dsttime=0`.
+
+      Architectural directive: this is a translator-layer fix.
+      Our native OS has no timezone subsystem in the kernel
+      (and shouldn't — timezone policy is user-policy, not
+      kernel-policy), so we don't need to grow one to satisfy
+      Linux.  We simply mirror Linux's vestigial state by
+      writing 8 zero bytes when the argument is non-NULL.  No
+      native API changes, no PCB additions, no new global
+      state.
+
+      Fix in kernel/src/syscall/linux.rs sys_gettimeofday
+      (~line 26933): replaced the previous tv-only body with a
+      two-gate sequence that mirrors Linux's left-to-right
+      ordering — tv first (EFAULT short-circuits before tz is
+      touched), then tz (writes a stack-allocated [0u8; 8]
+      via copy_to_user).  Doc comment above the function
+      includes the Linux source quote, the struct timezone
+      definition, the full 8-shape divergence table, and the
+      architectural-directive paragraph.
+
+      Boot self-test probes added immediately after the
+      batch-429 stamp:
+        (a) gettimeofday(NULL, NULL) → 0
+        (b) gettimeofday(valid_tv, NULL) → 0, tv populated
+            with non-negative sec and usec ∈ [0, 1_000_000).
+        (c) gettimeofday(NULL, valid_tz) → 0, tz overwritten
+            from sentinel {0xAA, 0x55} to {0, 0}.
+        (d) gettimeofday(valid_tv, valid_tz) → 0, tv2 >= tv1
+            (monotonic), tz overwritten from {0x33, 0x77} to
+            {0, 0}.
+      BAD_PTR probes omitted — kernel-context bypass of
+      validate_user_* would advance into the real
+      copy_to_user and synchronously page-fault on the bad
+      address.  Userspace BAD_PTR coverage lives in the
+      syscall integration suite (same rationale as batch
+      429).
+
+      Build: cargo build -p kernel clean (1m 09s).
+      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+      23s).
+      Stamp confirmed at build/serial-test.txt:
+        "[syscall/linux]   gettimeofday tz argument writes
+        sys_tz=0 (Linux: deprecated struct timezone always zero
+        on modern kernels, NULL-skip per-arg): OK"

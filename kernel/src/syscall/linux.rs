@@ -20372,28 +20372,77 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
     // flags=0 lets the call advance to the pointer gates.
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg3 as u32;
-    if flags != 0 {
-        return linux_err(errno::EINVAL);
+    // Batch 385: Linux's `mm/filemap.c::SYSCALL_DEFINE4(cachestat)`
+    // gate order — straight from the function body:
+    //
+    //   f = fdget(fd);
+    //   if (!fd_file(f)) return -EBADF;                          // (1)
+    //   if (copy_from_user(&csr, cstat_range, ...)) return -EFAULT; // (2)
+    //   if (is_file_hugepages(fd_file(f))) return -EOPNOTSUPP;   // (3)
+    //   if (flags != 0) return -EINVAL;                          // (4)
+    //   ... compute counters ...
+    //   if (copy_to_user(cstat, &cs, ...)) return -EFAULT;       // (5)
+    //
+    // Pre-batch we ran flags first, then both pointer NULL/read+write
+    // checks, then fd validation last.  That mis-ordered three
+    // observable discriminators against Linux:
+    //
+    //   * (flags=99, fd=bogus, csr=valid, cs=valid) — Linux: EBADF
+    //     (fdget fires first); pre-batch: EINVAL.
+    //   * (flags=99, fd=valid, csr=NULL,  cs=valid) — Linux: EFAULT
+    //     (copy_from_user fires before the flags check); pre-batch:
+    //     EINVAL.
+    //   * (flags=0,  fd=bogus, csr=NULL,  cs=valid) — Linux: EBADF
+    //     (fd before pointer); pre-batch: EFAULT.
+    //   * (flags=99, fd=valid, csr=valid, cs=NULL ) — Linux: EINVAL
+    //     (flags before the FINAL copy_to_user); pre-batch: EINVAL
+    //     (matches, since both gates fired before the cs write check).
+    //
+    // The reorder also explicitly defers the cstat (write) NULL/access
+    // check to after the flags gate — Linux's `copy_to_user(cstat, ...)`
+    // is the LAST possible failure mode in the function, firing only
+    // after the counters have been computed.  Our model has no page
+    // cache, so the "compute counters" step is a no-op, but the
+    // observable gate ordering still mirrors Linux's.
+    //
+    // Gate 1 (fdget): EBADF on bad fd.  In kernel-context probes this
+    // is a no-op (validate_linux_fd accepts anything when there's no
+    // caller PCB), but in a real Linux process the fd lookup fires
+    // first.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
     }
-    if args.arg1 == 0 || args.arg2 == 0 {
+    // Gate 2 (copy_from_user(csr)): NULL/unreadable cstat_range -> EFAULT.
+    // struct cachestat_range is 16 bytes (u64 off, u64 len).
+    if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
-    // struct cachestat_range is 16 bytes (u64 off, u64 len).
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 16) {
         return linux_err(linux_errno_for(e));
     }
+    // Gate 3 (is_file_hugepages): we model no hugetlbfs, so skip.
+    // Gate 4 (flags != 0): unknown bits -> EINVAL.  Now after the fd
+    // and csr-read gates, matching Linux.
+    if flags != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 5 (copy_to_user(cs)): NULL/unwritable cstat -> EFAULT.
+    // This is the LAST possible failure mode in Linux's cachestat —
+    // it fires after the counters have already been computed.  Our
+    // model has no page cache, so the "compute counters" step is a
+    // no-op, but we still gate the write access here.
     // struct cachestat is 40 bytes (5 * u64).  Bug fix vs the previous
     // -ENOSYS stub which validated only 32 bytes — that would have
     // allowed a 32-byte-only writable user buffer to pass the gate and
     // then taken a page fault on the 33rd byte once we started writing
     // the answer.
+    if args.arg2 == 0 {
+        return linux_err(errno::EFAULT);
+    }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 40) {
         return linux_err(linux_errno_for(e));
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
     }
     // Only regular files have page-cache pages.  Console / pipe fds
     // are rejected with -EOPNOTSUPP the same way Linux rejects
@@ -51438,7 +51487,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
 
         // cachestat non-zero flags -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 1, arg4: 0, arg5: 0 };
+        // Batch 385: after the gate reorder, the cstat_range read fires
+        // before the flags check, so we must supply a readable csr
+        // buffer (arg1=buf_ptr) for this probe to actually exercise the
+        // flags gate.  Pre-batch the flags check ran first; this probe
+        // would have passed with arg1=0 (EINVAL fired before EFAULT).
+        let a = SyscallArgs { arg0: 0, arg1: buf_ptr, arg2: 0, arg3: 1, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: cachestat flags not EINVAL");
             return Err(KernelError::InternalError);
@@ -51449,6 +51503,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: cachestat NULL range not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // Batch 385 gate-order discriminator: (flags=99, csr=NULL) —
+        // Linux's mm/filemap.c::cachestat reads csr BEFORE the flags
+        // gate, so a NULL cstat_range with garbage flags returns EFAULT
+        // (gate 2) ahead of EINVAL (gate 4).  Pre-batch we ran flags
+        // first and returned EINVAL here.  This is the cleanest single-
+        // probe discriminator for the reorder, since the gate-1 fdget
+        // EBADF can't be triggered in kernel-context (validate_linux_fd
+        // is a no-op without a caller PCB).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: buf_ptr, arg3: 99, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: cachestat (flags=99, csr=NULL) not EFAULT (gate reorder)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   cachestat gate order fd > csr > flags > cs (was flags > csr+cs > fd): OK"
+        );
         // cachestat valid -> 0 with 40 bytes of zeros written
         // (batch 108 upgrade: was unconditional -ENOSYS, now returns
         // the honest "no page cache, all counters zero" answer for a
@@ -51505,7 +51577,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // (b) flags=0x1_0000_0001 (high|bad-low 1): truncates to 1, gate
         //     still rejects.  Verifies the mask gate continues to reject
         //     any nonzero low half after the high-bit strip.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        //     Batch 385: gate reorder requires a valid csr to bypass
+        //     gate 2 and reach the flags gate.
+        let a = SyscallArgs { arg0: 0, arg1: buf_ptr, arg2: 0, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EINVAL) {
             serial_println!(
                 "[syscall/linux]   FAIL: cachestat(high|bad-low 1) not EINVAL"
@@ -51514,8 +51588,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         // (c) flags=0x1_0000_0002 (high|bad-low 2): truncates to 2, gate
         //     still rejects.  Independent low bit confirms the mask
-        //     covers more than the LSB.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0002, arg4: 0, arg5: 0 };
+        //     covers more than the LSB.  Batch 385: same csr-supply
+        //     rationale as (b).
+        let a = SyscallArgs { arg0: 0, arg1: buf_ptr, arg2: 0, arg3: 0x1_0000_0002, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CACHESTAT, &a).value != -i64::from(errno::EINVAL) {
             serial_println!(
                 "[syscall/linux]   FAIL: cachestat(high|bad-low 2) not EINVAL"

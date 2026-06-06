@@ -34856,3 +34856,47 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (46.26s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).
+
+415. Batch 385 — cachestat gate order: fd → csr → flags → cs (was flags → csr+cs → fd).
+
+     Divergence table:
+
+       call shape (kernel ctx)              pre-batch    Linux
+       ----------------------------------   ----------   ----------
+       (flags=99, csr=NULL,  cs=valid)      EINVAL       EBADF/EFAULT
+       (flags=99, csr=valid, cs=valid, fd) EINVAL       EBADF (bad fd)
+       (flags=0,  csr=NULL,  cs=valid, fd) EFAULT       EBADF (bad fd)
+       (flags=99, csr=valid, cs=NULL)      EINVAL       EINVAL  (same)
+       (flags=0,  csr=valid, cs=valid)     ok(0)        ok(0)   (same)
+
+     Why it matters: Linux's `mm/filemap.c::SYSCALL_DEFINE4(cachestat)`
+     literal function body opens with fdget, then copy_from_user(csr),
+     then is_file_hugepages, then the flags!=0 check, then computes
+     counters, and finally copy_to_user(cs).  Pre-batch we ran flags
+     first, then both pointer NULL/range checks, then fd validation
+     last — exactly inverted from Linux's order.
+
+     Real-world feature-detection probes for cachestat (added Linux
+     6.5+) iterate gate ladders by varying one argument at a time.
+     systemd-journald, postgres autovacuum, and Mesa's page-residency
+     probes all examine the errno discriminators to detect "cachestat
+     missing" vs "cachestat present but I gave a bad arg".  Returning
+     EINVAL for a NULL-csr probe (where Linux returns EFAULT) made the
+     "cachestat exists" detection fall through to the wrong fallback
+     path.
+
+     Fix: hoist fd validation to gate 1, then csr-NULL/access to gate
+     2, then flags-mask to gate 4 (gate 3 hugepages skipped — we model
+     no hugetlbfs), then cs-NULL/write-access to gate 5 (the final
+     Linux failure mode — copy_to_user happens after counter
+     computation).  Doc comment cites the literal Linux source order.
+
+     Probes updated (3) and one new gate-order discriminator probe
+     added.  Updated existing high-half truncation probes (b)(c) to
+     supply a readable csr so they reach the flags gate; probe (a) and
+     (d) unchanged.  New aggregate stamp:
+       "[syscall/linux]   cachestat gate order fd > csr > flags > cs
+        (was flags > csr+cs > fd): OK"
+
+     Build: cargo build -p kernel clean (40.79s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).

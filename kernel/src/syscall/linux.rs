@@ -22109,11 +22109,54 @@ fn sys_getpeername(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `sendto(sockfd, buf*, len, flags, dest_addr*, addrlen)`.
+///
+/// ## Batch 436 — fd lookup gates between buf and addr
+///
+/// Linux's `__sys_sendto` (`net/socket.c`):
+/// ```c
+/// int __sys_sendto(int fd, void __user *buff, size_t len,
+///                  unsigned int flags, struct sockaddr __user *addr,
+///                  int addr_len)
+/// {
+///     struct socket *sock;
+///     struct sockaddr_storage address;
+///     int err;
+///     struct msghdr msg;
+///     int fput_needed;
+///
+///     err = import_ubuf(ITER_SOURCE, buff, len,           // Gate 1: buf
+///                       &msg.msg_iter);
+///     if (unlikely(err))
+///         return err;
+///
+///     sock = sockfd_lookup_light(fd, &err, &fput_needed); // Gate 2: fd
+///     if (!sock)
+///         goto out;
+///     ...
+///     if (addr) {                                          // Gate 3: addr,
+///         err = move_addr_to_kernel(addr, addr_len,        //  only if non-NULL
+///                                   &address);
+///         ...
+///     }
+///     ...
+/// }
+/// ```
+/// Gate order is `BUF → FD → ADDR`.  Pre-batch we ran
+/// `BUF → ADDR → FD`, so userspace observed (bad_fd, valid_buf,
+/// BAD_ADDR, 16) as EFAULT and (bad_fd, valid_buf, valid_addr, 0) as
+/// EINVAL where Linux returns EBADF in both cases.  The BUF gate
+/// stays first (Linux's `import_ubuf` fires before
+/// `sockfd_lookup_light`), so callers passing a NULL/bad buf with a
+/// nonzero len still see EFAULT, matching Linux.
+///
+/// Architectural note: translator-only reorder.
 fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let buf = args.arg1;
     let len = args.arg2 as usize;
+    // Linux gate 1: import_ubuf(ITER_SOURCE, buff, len, ...) — buf
+    // access validation.  Fires BEFORE sockfd_lookup_light.
     if len > 0 {
         if buf == 0 {
             return linux_err(errno::EFAULT);
@@ -22122,6 +22165,13 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
+    // Linux gate 2: sockfd_lookup_light → EBADF.  Fires AFTER buf
+    // validation but BEFORE addr validation.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Linux gate 3: move_addr_to_kernel(addr, addr_len, ...) — only
+    // if `addr != NULL`.
     if args.arg4 != 0 {
         #[allow(clippy::cast_possible_truncation)]
         let addr_len = args.arg5 as u32;
@@ -22129,18 +22179,46 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
             return r;
         }
     }
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
     linux_err(errno::EBADF)
 }
 
 /// `recvfrom(sockfd, buf*, len, flags, src_addr*, addrlen*)`.
+///
+/// Linux's `__sys_recvfrom` (`net/socket.c`) shares `__sys_sendto`'s
+/// gate order:
+/// ```c
+/// int __sys_recvfrom(int fd, void __user *ubuf, size_t size,
+///                    unsigned int flags,
+///                    struct sockaddr __user *addr,
+///                    int __user *addr_len)
+/// {
+///     ...
+///     err = import_ubuf(ITER_DEST, ubuf, size,            // Gate 1: buf
+///                       &msg.msg_iter);
+///     if (unlikely(err))
+///         return err;
+///
+///     sock = sockfd_lookup_light(fd, &err, &fput_needed); // Gate 2: fd
+///     if (!sock)
+///         goto out;
+///     ...
+///     if (addr != NULL) {                                  // Gate 3: addr,
+///         err2 = move_addr_to_user(&address,               //  only if non-NULL
+///                                  msg.msg_namelen,
+///                                  addr, addr_len);
+///         ...
+///     }
+/// }
+/// ```
+/// Same BUF → FD → ADDR order as sendto.  See `sys_sendto` for the
+/// full Batch 436 rationale.
 fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let buf = args.arg1;
     let len = args.arg2 as usize;
+    // Linux gate 1: import_ubuf(ITER_DEST, ubuf, size, ...) — buf
+    // access validation.
     if len > 0 {
         if buf == 0 {
             return linux_err(errno::EFAULT);
@@ -22149,10 +22227,14 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    if let Err(r) = validate_sockaddr_out(args.arg4, args.arg5) {
+    // Linux gate 2: sockfd_lookup_light → EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    if let Err(r) = validate_linux_fd(fd) {
+    // Linux gate 3: move_addr_to_user pointer access, only if
+    // `addr != NULL`.  validate_sockaddr_out handles the both-NULL
+    // and half-NULL cases.
+    if let Err(r) = validate_sockaddr_out(args.arg4, args.arg5) {
         return r;
     }
     linux_err(errno::EBADF)
@@ -55449,6 +55531,140 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   bind/connect fd lookup ordered before pointer validation (Linux: sockfd_lookup_light / fdget fires before move_addr_to_kernel; bad fd → EBADF regardless of addr/addrlen): OK"
+        );
+    }
+
+    // Batch 436: sendto / recvfrom — fd lookup gates BETWEEN buf
+    // and addr.  Linux's __sys_sendto / __sys_recvfrom in
+    // net/socket.c run BUF → FD → ADDR (import_ubuf before
+    // sockfd_lookup_light before move_addr_to_kernel /
+    // move_addr_to_user).
+    //
+    // Pre-batch order was BUF → ADDR → FD; userspace observed:
+    //   (bad_fd, valid_buf, BAD_ADDR, 16) pre EFAULT post EBADF
+    //   (bad_fd, valid_buf, valid_addr, 0) pre EINVAL post EBADF
+    //   (bad_fd, valid_buf, valid_addr, 1) pre EINVAL post EBADF
+    //
+    // The BUF gate stays first to match Linux: NULL/bad buf with
+    // len > 0 still surfaces as EFAULT before any fd lookup.
+    //
+    // Same kernel-ctx caveat: validate_linux_fd is a no-op when
+    // caller_pid() is None, so the user-context EBADF-vs-EFAULT/
+    // EINVAL swap is not directly observable here.  These probes
+    // verify the reorder did not regress.
+    {
+        let buf = [0u8; 32];
+        let buf_ptr = buf.as_ptr() as u64;
+        let sockaddr_buf = [0u8; 32];
+        let sockaddr_ptr = sockaddr_buf.as_ptr() as u64;
+        let socklen_buf = [16u8, 0, 0, 0];
+        let socklen_ptr = socklen_buf.as_ptr() as u64;
+
+        // sendto(fd=3, NULL, 16, ...): gate 1 NULL buf with len>0 →
+        // EFAULT.  Must still fire BEFORE any fd lookup.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendto(NULL,16) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::SENDTO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sendto(fd=3, valid, 16, _, NULL, 0): gate 1 OK, fd OK
+        // (kernel ctx), gate 3 skipped (addr NULL) → terminal EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: buf_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendto(valid,16,NULL) post-reorder not EBADF ({})",
+                dispatch_linux(nr::SENDTO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sendto(fd=3, valid, 16, _, valid, 1): gate 1 OK, fd OK,
+        // gate 3 addr_len < 2 → EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: buf_ptr, arg2: 16, arg3: 0, arg4: sockaddr_ptr, arg5: 1 };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendto(valid,16,valid,1) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::SENDTO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sendto(fd=3, valid, 16, _, valid, 16): gate 1 OK, fd OK,
+        // gate 3 OK → terminal EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: buf_ptr, arg2: 16, arg3: 0, arg4: sockaddr_ptr, arg5: 16 };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendto(valid,16,valid,16) post-reorder not EBADF ({})",
+                dispatch_linux(nr::SENDTO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sendto(fd=3, NULL, 0, _, valid, 16): zero-len means buf
+        // gate skipped entirely.  Linux still resolves fd next
+        // (gate 2) — in kernel ctx that's a no-op → gate 3 OK →
+        // EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: sockaddr_ptr, arg5: 16 };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendto(NULL,0,valid,16) post-reorder not EBADF ({})",
+                dispatch_linux(nr::SENDTO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // recvfrom: same BUF → FD → ADDR matrix.
+        // recvfrom(fd=3, NULL, 16, ...): gate 1 → EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvfrom(NULL,16) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::RECVFROM, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvfrom(fd=3, valid, 16, _, NULL, NULL): gate 1 OK, fd
+        // OK, gate 3 (validate_sockaddr_out) both-NULL → Ok →
+        // terminal EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: buf_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvfrom(valid,16,NULL,NULL) post-reorder not EBADF ({})",
+                dispatch_linux(nr::RECVFROM, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvfrom(fd=3, valid, 16, _, valid, NULL): half-NULL → EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: buf_ptr, arg2: 16, arg3: 0, arg4: sockaddr_ptr, arg5: 0 };
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvfrom(valid,16,valid,NULL) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::RECVFROM, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvfrom(fd=3, valid, 16, _, valid, valid): all gates pass → EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: buf_ptr, arg2: 16, arg3: 0, arg4: sockaddr_ptr, arg5: socklen_ptr };
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvfrom(valid,16,valid,valid) post-reorder not EBADF ({})",
+                dispatch_linux(nr::RECVFROM, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvfrom(fd=3, NULL, 0, _, valid, valid): zero-len skips
+        // buf gate → fd → addr OK → EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: sockaddr_ptr, arg5: socklen_ptr };
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvfrom(NULL,0,valid,valid) post-reorder not EBADF ({})",
+                dispatch_linux(nr::RECVFROM, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   sendto/recvfrom fd lookup ordered BETWEEN buf and addr (Linux: import_ubuf → sockfd_lookup_light → move_addr_to_kernel/user; bad fd with valid buf and bad addr → EBADF instead of EFAULT/EINVAL): OK"
         );
     }
 

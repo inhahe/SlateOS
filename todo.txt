@@ -36824,3 +36824,157 @@ OBSOLETE NOTE BELOW (pre-relaxation):
         before pointer validation (Linux: sockfd_lookup_light
         / fdget fires before move_addr_to_kernel; bad fd →
         EBADF regardless of addr/addrlen): OK"
+
+ 436. sys_sendto and sys_recvfrom validated the addr pointer
+      BEFORE looking up the fd (but correctly validated the
+      buf pointer first).  Linux's __sys_sendto and
+      __sys_recvfrom in net/socket.c run BUF → FD → ADDR;
+      pre-batch we ran BUF → ADDR → FD.  Continuation of the
+      socket-family fd-gate-ordering sweep (433: getsockname/
+      getpeername; 434: accept/accept4; 435: bind/connect).
+
+      Linux source (net/socket.c):
+
+          int __sys_sendto(int fd, void __user *buff, size_t len,
+                           unsigned int flags,
+                           struct sockaddr __user *addr,
+                           int addr_len)
+          {
+              struct socket *sock;
+              struct sockaddr_storage address;
+              int err;
+              struct msghdr msg;
+              int fput_needed;
+
+              err = import_ubuf(ITER_SOURCE, buff, len,
+                                &msg.msg_iter);          // Gate 1: buf
+              if (unlikely(err))
+                  return err;
+
+              sock = sockfd_lookup_light(fd, &err,
+                                         &fput_needed);  // Gate 2: fd
+              if (!sock)
+                  goto out;
+              ...
+              if (addr) {                                 // Gate 3: addr,
+                  err = move_addr_to_kernel(addr,         //  only if non-NULL
+                                            addr_len,
+                                            &address);
+                  ...
+              }
+              ...
+          }
+
+          int __sys_recvfrom(int fd, void __user *ubuf,
+                             size_t size, unsigned int flags,
+                             struct sockaddr __user *addr,
+                             int __user *addr_len)
+          {
+              ...
+              err = import_ubuf(ITER_DEST, ubuf, size,
+                                &msg.msg_iter);          // Gate 1: buf
+              if (unlikely(err))
+                  return err;
+
+              sock = sockfd_lookup_light(fd, &err,
+                                         &fput_needed);  // Gate 2: fd
+              if (!sock)
+                  goto out;
+              ...
+              if (addr != NULL) {                         // Gate 3: addr
+                  err2 = move_addr_to_user(&address,
+                                           msg.msg_namelen,
+                                           addr, addr_len);
+                  ...
+              }
+          }
+
+      Both share the same three-gate pattern.  Note the
+      buf gate fires FIRST in Linux, so NULL/bad buf with
+      len > 0 surfaces as EFAULT before any fd lookup —
+      pre-batch already matched this.  Only the FD↔ADDR
+      ordering was wrong.
+
+      Divergence table (fd=99 invalid, buf=valid, len=16):
+
+         sendto(fd,buf,len,fl,addr,addrlen)  Linux pre  post
+         (99,NULL,16,_,_,_)                  EFAULT EFAULT EFAULT  ok
+                                             (gate 1 always wins)
+         (99,valid,16,_,NULL,0)              EBADF  EBADF  EBADF   ok
+                                             (addr NULL skips gate 3)
+         (99,valid,16,_,valid,0)             EBADF  EINVAL EBADF   FIXED
+         (99,valid,16,_,valid,1)             EBADF  EINVAL EBADF   FIXED
+         (99,valid,16,_,BAD_PTR,16)          EBADF  EFAULT EBADF   FIXED
+
+         recvfrom(fd,buf,len,fl,addr,addrlen_ptr) — same shape,
+         except gate 3 uses validate_sockaddr_out (both-NULL
+         is the "I don't want the source addr" idiom, half-NULL
+         is EINVAL).
+
+         (99,NULL,16,_,_,_)                  EFAULT EFAULT EFAULT  ok
+         (99,valid,16,_,NULL,NULL)           EBADF  EBADF  EBADF   ok
+         (99,valid,16,_,valid,NULL)          EBADF  EINVAL EBADF   FIXED
+         (99,valid,16,_,NULL,valid)          EBADF  EINVAL EBADF   FIXED
+         (99,valid,16,_,valid,valid)         EBADF  EBADF  EBADF   ok
+         (99,valid,16,_,BAD_ADDR,valid)      EBADF  EFAULT EBADF   FIXED
+
+      Why it matters:
+        * UDP servers using sendto/recvfrom for stateless
+          peer-addressed I/O frequently encode "is my socket
+          still alive?" probes by reusing the dest_addr slot
+          with a partial or stale buffer.  Pre-batch the
+          stale-pointer EFAULT or short-addrlen EINVAL would
+          mask the real EBADF cause.
+        * QUIC / DTLS implementations use scatter-gather
+          sendto patterns with carefully sized addr_len based
+          on AF_INET vs AF_INET6 detection; an off-by-one
+          (addr_len = 14 instead of 16 for sockaddr_in) on a
+          known-bad fd would pre-batch surface as EINVAL
+          where Linux returns EBADF, leading to "addr is
+          malformed" diagnostic logs when the real cause is
+          a closed socket.
+        * DNS resolvers (musl's __resolvconf, glibc's
+          getaddrinfo workers) build a sockaddr_storage on
+          the stack and pass `sizeof(sockaddr_storage)` —
+          unusually large but legal.  Pre-batch our
+          validate_sockaddr_in didn't enforce a max; this
+          path was OK.  The divergence only bit programs
+          that genuinely had small addrlen, but the EBADF
+          masking still mattered.
+
+      Architectural directive: translator-only fix.  Native
+      sendto/recvfrom path can validate in whatever order it
+      finds convenient.  No native code touched.
+
+      Fix in kernel/src/syscall/linux.rs:
+        * sys_sendto (~line 22111): moved validate_linux_fd
+          to fire AFTER the buf gate but BEFORE the addr
+          gate.  Doc-commented with __sys_sendto source quote.
+        * sys_recvfrom (~line 22138): same reorder.  Doc-
+          commented with __sys_recvfrom source quote.
+        * Did NOT touch sys_sendmsg / sys_recvmsg /
+          sys_sendmmsg / sys_recvmmsg — msghdr-shaped
+          syscalls carry additional gates (iovec walk,
+          control-message size) that need separate analysis.
+
+      Self-test additions (~line 55400):
+        * sendto 5-case matrix: NULL buf+len (EFAULT), valid
+          buf with NULL addr (EBADF), valid+addr_len=1
+          (EINVAL), valid+valid (EBADF), zero-len with valid
+          addr (EBADF).
+        * recvfrom 5-case matrix: NULL buf+len (EFAULT),
+          NULL+NULL addr (EBADF), half-NULL (EINVAL), valid
+          addr/addrlen (EBADF), zero-len with valid addr
+          (EBADF).
+        * Kernel-ctx caveat unchanged: user-context EBADF-
+          vs-EFAULT/EINVAL swap not directly observable.
+
+      Build: cargo build -p kernel clean (39.84s).
+      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+      23s).
+      Stamp confirmed at build/serial-test.txt:
+        "[syscall/linux]   sendto/recvfrom fd lookup ordered
+        BETWEEN buf and addr (Linux: import_ubuf →
+        sockfd_lookup_light → move_addr_to_kernel/user; bad
+        fd with valid buf and bad addr → EBADF instead of
+        EFAULT/EINVAL): OK"

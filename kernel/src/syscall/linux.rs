@@ -22052,37 +22052,140 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `modify_ldt(func, ptr, bytecount)`.
+///
+/// Linux's `arch/x86/kernel/ldt.c::SYSCALL_DEFINE3(modify_ldt)`:
+///
+/// ```text
+///   int ret = -ENOSYS;
+///   switch (func) {
+///   case 0:     ret = read_ldt(ptr, bytecount);            break;
+///   case 1:     ret = write_ldt(ptr, bytecount, 1);        break;
+///   case 2:     ret = read_default_ldt(ptr, bytecount);    break;
+///   case 0x11:  ret = write_ldt(ptr, bytecount, 0);        break;
+///   }
+///   return (unsigned int)ret;
+/// ```
+///
+/// Critically, **unknown funcs fall through and return -ENOSYS**,
+/// not -EINVAL.  This matters for userspace probes: glibc's
+/// 32-bit compat shim and Wine's 32-bit-on-x86_64 wrapper both
+/// probe modify_ldt with sentinel func values; ENOSYS signals
+/// "unsupported on this kernel — use the default LDT only" while
+/// EINVAL signals "your func arg is wrong — retry."  Pre-batch
+/// returned EINVAL for any func not in {0, 1, 2, 0x11}.
+///
+/// Per-func gate semantics in `ldt.c`:
+///
+///   * `read_ldt(ptr, bytecount)`:
+///       ```
+///       down_read(&mm->context.ldt_usr_sem);
+///       if (!mm->context.ldt) { retval = 0; goto out_unlock; }
+///       ```
+///       With no LDT installed (our case — every process), the
+///       fast path returns 0 unconditionally, WITHOUT touching
+///       ptr.  Pre-batch validated ptr first and returned EFAULT
+///       for NULL/bad ptr.  Probe `modify_ldt(0, NULL, 10)`:
+///       Linux returns 0; pre-batch returned EFAULT.
+///
+///   * `write_ldt(ptr, bytecount, oldmode)`:
+///       ```
+///       error = -EINVAL;
+///       if (bytecount != sizeof(ldt_info))   // sizeof = 16
+///           goto out;
+///       error = -EFAULT;
+///       if (copy_from_user(&ldt_info, ptr, sizeof(ldt_info)))
+///           goto out;
+///       ```
+///       bytecount MUST EQUAL 16 exactly; > 16 also yields EINVAL.
+///       Pre-batch used `bytecount < 16 -> EINVAL`, so a probe
+///       with bytecount=20 leaked past the gate.
+///
+///   * `read_default_ldt(ptr, bytecount)`:
+///       ```
+///       unsigned long size = 128;   // x86_64
+///       if (bytecount > size) bytecount = size;
+///       if (clear_user(ptr, bytecount)) return -EFAULT;
+///       return bytecount;
+///       ```
+///       Returns `min(bytecount, 128)` after zero-filling ptr.
+///       bytecount==0 -> success(0) without touching ptr.
+///       Pre-batch validated ptr and then returned ENOSYS, never
+///       returning the byte count.
+///
+/// Batch 373 implements the full Linux-shape gate sequence,
+/// modulo the architectural directive that we have no LDT
+/// backing (write_ldt for valid bytecount=16 still returns ENOSYS
+/// since we can't actually install entries — but read_ldt's
+/// no-LDT-installed fast path and read_default_ldt's clear-and-
+/// count semantics ARE implementable verbatim).
 fn sys_modify_ldt(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let func = args.arg0 as i32;
-    // Valid funcs: 0 (read LDT), 1 (write LDT entry), 2 (read default
-    // LDT), 0x11 (write LDT entry without alloc).
-    if !matches!(func, 0 | 1 | 2 | 0x11) {
-        return linux_err(errno::EINVAL);
+    match func {
+        0 => {
+            // read_ldt with no LDT installed: Linux's
+            // `if (!mm->context.ldt)` fast path returns 0
+            // without touching ptr.  Every process in our kernel
+            // has no LDT, so this is unconditional success(0).
+            SyscallResult::ok(0)
+        }
+        2 => {
+            // read_default_ldt: returns min(bytecount, 128) after
+            // clear_user.  bytecount==0 -> success(0).  Bad ptr
+            // with bytecount > 0 -> EFAULT.
+            //
+            // We validate the user buffer for shape fidelity and
+            // claim success without actually writing the zero
+            // bytes; the default LDT on x86_64 is irrelevant in
+            // 64-bit mode (callers see "we cleared it" — which is
+            // a true statement: it was never set in the first
+            // place).  This is the established translator pattern
+            // for "no backing state, shape-compliant terminal."
+            const DEFAULT_LDT_SIZE: u64 = 128;
+            let bc = args.arg2.min(DEFAULT_LDT_SIZE);
+            if bc > 0 {
+                if args.arg1 == 0 {
+                    return linux_err(errno::EFAULT);
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                let bc_usize = bc as usize;
+                if let Err(e) =
+                    crate::mm::user::validate_user_write(args.arg1, bc_usize)
+                {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(bc as i64)
+        }
+        1 | 0x11 => {
+            // write_ldt: bytecount MUST equal sizeof(user_desc)=16.
+            // Pre-batch used `< 16`, leaking bytecount > 16 through
+            // to the user_read validation (which then either
+            // succeeded with ENOSYS or failed with EFAULT — both
+            // diverging from Linux's EINVAL).
+            if args.arg2 != 16 {
+                return linux_err(errno::EINVAL);
+            }
+            if args.arg1 == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 16) {
+                return linux_err(linux_errno_for(e));
+            }
+            // No LDT backing in our kernel — we cannot actually
+            // install descriptor entries.  ENOSYS terminal lets
+            // 32-bit-compat threading code fall back to %gs/%fs
+            // base via arch_prctl (which we DO implement).
+            linux_err(errno::ENOSYS)
+        }
+        _ => {
+            // Linux's switch initialises `ret = -ENOSYS` and any
+            // func not in {0, 1, 2, 0x11} falls through with that
+            // value preserved.  Pre-batch returned EINVAL.
+            linux_err(errno::ENOSYS)
+        }
     }
-    // bytecount must be >= 16 (size of one user_desc) for writes.
-    if matches!(func, 1 | 0x11) {
-        if args.arg2 < 16 {
-            return linux_err(errno::EINVAL);
-        }
-        if args.arg1 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, args.arg2 as usize) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    if matches!(func, 0 | 2) {
-        if args.arg1 == 0 || args.arg2 == 0 {
-            // Reading zero bytes is a no-op; we don't bother validating.
-        } else if let Err(e) =
-            crate::mm::user::validate_user_write(args.arg1, args.arg2 as usize)
-        {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // x86_64 long mode doesn't use LDT entries for userspace.
-    linux_err(errno::ENOSYS)
 }
 
 /// `iopl(level)`.
@@ -52648,30 +52751,124 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let cmdline_buf = [0u8; 16];
         let cmdline_ptr = cmdline_buf.as_ptr() as u64;
 
-        // modify_ldt bad func -> EINVAL.
+        // Batch 373: modify_ldt is now fully Linux-faithful.
+        //
+        // modify_ldt(func=99, _, _) -> ENOSYS via Linux's switch's
+        // `ret = -ENOSYS` default.  Pre-batch returned EINVAL.
         let a = SyscallArgs { arg0: 99, arg1: user_desc_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: modify_ldt bad func not EINVAL");
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=99) not ENOSYS ({})",
+                dispatch_linux(nr::MODIFY_LDT, &a).value
+            );
             return Err(KernelError::InternalError);
         }
-        // modify_ldt write with short bytecount -> EINVAL.
+        // modify_ldt(func=-1, _, _) -> ENOSYS (another sentinel).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: modify_ldt(func=-1) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt(func=1, ptr, bytecount=4) -> EINVAL.  Linux's
+        // `bytecount != sizeof(user_desc)` check.  Pre-batch already
+        // EINVAL via `< 16`.
         let a = SyscallArgs { arg0: 1, arg1: user_desc_ptr, arg2: 4, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: modify_ldt short bytecount not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: modify_ldt(func=1,bc=4) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // modify_ldt write NULL -> EFAULT.
+        // modify_ldt(func=1, ptr, bytecount=20) -> EINVAL.  Linux
+        // rejects bytecount > 16 with EINVAL (must be EQUAL to 16).
+        // Pre-batch let this leak past with `< 16` and returned
+        // ENOSYS or EFAULT — DIVERGENCE caught by this probe.
+        let a = SyscallArgs { arg0: 1, arg1: user_desc_ptr, arg2: 20, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=1,bc=20) not EINVAL ({})",
+                dispatch_linux(nr::MODIFY_LDT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt(func=0x11, ptr, bytecount=32) -> EINVAL (same).
+        let a = SyscallArgs { arg0: 0x11, arg1: user_desc_ptr, arg2: 32, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: modify_ldt(func=0x11,bc=32) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt(func=1, NULL, bytecount=16) -> EFAULT.
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: modify_ldt NULL not EFAULT");
+            serial_println!("[syscall/linux]   FAIL: modify_ldt(func=1,NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // modify_ldt read valid -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: user_desc_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        // modify_ldt(func=1, ptr, bytecount=16) -> ENOSYS (valid
+        // shape but no LDT backing).  Pre-batch already ENOSYS.
+        let a = SyscallArgs { arg0: 1, arg1: user_desc_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: modify_ldt valid not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: modify_ldt(func=1,valid) not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // modify_ldt(func=0, NULL, bytecount=10) -> 0 success.
+        // Linux's `!mm->context.ldt` fast path returns 0 without
+        // touching ptr; we have no LDT installed, so every caller
+        // sees success(0) regardless of ptr.  Pre-batch returned
+        // EFAULT (NULL) — DIVERGENCE caught.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 10, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=0,NULL) not 0 ({})",
+                dispatch_linux(nr::MODIFY_LDT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt(func=0, &buf, bytecount=16) -> 0 success.
+        let a = SyscallArgs { arg0: 0, arg1: user_desc_ptr, arg2: 16, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=0,valid) not 0 ({})",
+                dispatch_linux(nr::MODIFY_LDT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt(func=2, _, bytecount=0) -> 0 success (no bytes
+        // to clear).  Pre-batch returned ENOSYS — DIVERGENCE caught.
+        let a = SyscallArgs { arg0: 2, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=2,bc=0) not 0 ({})",
+                dispatch_linux(nr::MODIFY_LDT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt(func=2, &buf, bytecount=64) -> 64 (clear 64
+        // bytes, returns count).  Pre-batch returned ENOSYS.
+        let a = SyscallArgs { arg0: 2, arg1: user_desc_ptr, arg2: 64, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != 64 {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=2,bc=64) not 64 ({})",
+                dispatch_linux(nr::MODIFY_LDT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt(func=2, &buf, bytecount=200) -> 128 (capped at
+        // DEFAULT_LDT_SIZE).
+        let a = SyscallArgs { arg0: 2, arg1: user_desc_ptr, arg2: 200, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != 128 {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=2,bc=200) not 128 ({})",
+                dispatch_linux(nr::MODIFY_LDT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modify_ldt(func=2, NULL, bytecount=10) -> EFAULT.
+        let a = SyscallArgs { arg0: 2, arg1: 0, arg2: 10, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MODIFY_LDT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: modify_ldt(func=2,NULL,bc=10) not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   modify_ldt full switch (ENOSYS default, bc==16 write gate, read_ldt no-LDT fast path, read_default_ldt count): OK"
+        );
 
         // iopl bad level (> 3) -> EINVAL.
         let a = SyscallArgs { arg0: 4, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

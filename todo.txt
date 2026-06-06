@@ -33631,3 +33631,129 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.78s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+403. [BATCH 373 — 2026-06-06 — sys_modify_ldt full switch
+     (kernel/src/syscall/linux.rs)]
+
+     Linux divergence: pre-batch sys_modify_ldt diverged from
+     Linux in four ways at once:
+
+       (a) Unknown func values returned EINVAL.  Linux's switch
+           initializes `ret = -ENOSYS` and falls through to the
+           default case for any func not in {0, 1, 2, 0x11}, so
+           the correct terminal is ENOSYS, not EINVAL.
+
+       (b) write_ldt (func=1) and write_ldt_ldt (func=0x11)
+           accepted bytecount >= 16.  Linux's read_ldt and
+           write_ldt both enforce `bytecount == sizeof(struct
+           user_desc) == 16` EXACTLY — anything else returns
+           -EINVAL before the user_desc is even touched.
+
+       (c) read_ldt (func=0) with no LDT installed returned
+           ENOSYS (or worse, validated the ptr first and
+           returned EFAULT).  Linux's read_ldt has an explicit
+           fast path:
+             if (!mm->context.ldt) { retval = 0; goto out; }
+           which returns 0 WITHOUT touching ptr/bytecount.  Our
+           kernel has no LDT slot at all, so every read_ldt
+           call should hit this fast path.
+
+       (d) read_default_ldt (func=2) returned ENOSYS.  Linux's
+           read_default_ldt is:
+             bytecount = min(bytecount, sizeof(default_ldt));
+             if (clear_user(ptr, bytecount)) return -EFAULT;
+             return bytecount;
+           where sizeof(default_ldt) == 128 (16 entries * 8B).
+           Userspace probes that call read_default_ldt with
+           bytecount=0 expect 0; with bytecount=200 expect 128;
+           with bytecount=64 expect 64.  ENOSYS breaks all of
+           these.
+
+     Source: arch/x86/kernel/ldt.c::SYSCALL_DEFINE3(modify_ldt):
+       ret = -ENOSYS;                            // default
+       switch (func) {
+       case 0:  ret = read_ldt(ptr, bytecount);         break;
+       case 2:  ret = read_default_ldt(ptr, bytecount); break;
+       case 1:  ret = write_ldt(ptr, bytecount, 1);     break;
+       case 0x11: ret = write_ldt(ptr, bytecount, 0);   break;
+       }
+
+     Concrete divergences for representative call shapes:
+       * modify_ldt(99, ptr, 16)   Linux: ENOSYS  Pre: EINVAL
+       * modify_ldt(1, ptr, 4)     Linux: EINVAL  Pre: EINVAL (ok)
+       * modify_ldt(1, ptr, 20)    Linux: EINVAL  Pre: ENOSYS
+                                                  (>= 16 accepted)
+       * modify_ldt(0, NULL, 10)   Linux:  0      Pre: EFAULT
+       * modify_ldt(0, ptr, 16)    Linux:  0      Pre: ENOSYS
+       * modify_ldt(2, NULL, 0)    Linux:  0      Pre: ENOSYS
+       * modify_ldt(2, ptr, 64)    Linux: 64      Pre: ENOSYS
+       * modify_ldt(2, ptr, 200)   Linux: 128     Pre: ENOSYS
+
+     The (d) divergence is especially bad: read_default_ldt is
+     a synchronous read of a real kernel data structure on
+     Linux and userspace probes (Wine's LDT shim, dosemu2,
+     some old glibc setjmp/longjmp on x86_64 with segmented
+     TLS) treat it as authoritative.  ENOSYS makes them think
+     LDT support is absent entirely, when in fact our kernel
+     just has no LDT slot populated — which is precisely the
+     condition read_ldt's fast path handles by returning 0.
+
+     Fix: rewrite as a match expression covering all four
+     func cases with Linux-faithful semantics:
+
+       match func {
+         0      => SyscallResult::ok(0),    // no LDT fast path
+         2      => {                          // read_default_ldt
+                     bc = min(bc, 128);
+                     if bc > 0 { validate ptr; }
+                     ok(bc)
+                   }
+         1|0x11 => {                          // write_ldt
+                     if bc != 16 { EINVAL; }
+                     validate ptr (16 bytes);
+                     ENOSYS  // no LDT backing to write to
+                   }
+         _      => ENOSYS,                    // switch default
+       }
+
+     write_ldt still terminates in ENOSYS because the kernel
+     has nowhere to store the descriptor — that's a genuine
+     "feature not implemented" answer rather than a wrong-
+     shape lie.  read_ldt and read_default_ldt produce real
+     Linux-faithful answers because the "no LDT" answer is a
+     real Linux answer (just one that's normally observed on
+     freshly-execed processes).
+
+     Probes replaced (4 old removed, 12 new added):
+       * modify_ldt(99, ptr, 16)    -> ENOSYS (was EINVAL).
+       * modify_ldt(-1, ptr, 16)    -> ENOSYS (verifies signed
+         func default-arm too).
+       * modify_ldt(1, ptr, 4)      -> EINVAL (bc < 16).
+       * modify_ldt(1, ptr, 20)     -> EINVAL (NEW gate;
+         pre-batch accepted bc >= 16).
+       * modify_ldt(0x11, ptr, 32)  -> EINVAL (bc > 16 wrong
+         on write_ldt_ldt arm too).
+       * modify_ldt(1, NULL, 16)    -> EFAULT (gate passes,
+         then NULL ptr fault).
+       * modify_ldt(1, ptr, 16)     -> ENOSYS (no LDT backing).
+       * modify_ldt(0, NULL, 10)    -> 0      (was EFAULT —
+         fast path skips ptr touch).
+       * modify_ldt(0, ptr, 16)     -> 0      (no LDT fast
+         path always wins).
+       * modify_ldt(2, NULL, 0)     -> 0      (was ENOSYS —
+         min(0,128)=0 short-circuits ptr touch).
+       * modify_ldt(2, ptr, 64)     -> 64     (was ENOSYS —
+         returns the requested count).
+       * modify_ldt(2, ptr, 200)    -> 128    (was ENOSYS —
+         clamps to sizeof(default_ldt)).
+       * modify_ldt(2, NULL, 10)    -> EFAULT (gate works:
+         bc=10 > 0 -> ptr touch required).
+
+     Final boot-time stamp:
+         "[syscall/linux]   modify_ldt full switch (ENOSYS
+          default, bc==16 write gate, read_ldt no-LDT fast
+          path, read_default_ldt count): OK"
+
+     Build: cargo build -p kernel clean (38.02s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 23s).

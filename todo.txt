@@ -27589,3 +27589,82 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (44.27s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+344. sys_renameat2 unsigned-int truncation — high-half register
+     garbage must be stripped before the flags mask check.
+
+     Divergence:
+       Linux signature: `int renameat2(int olddirfd, const
+       char *oldpath, int newdirfd, const char *newpath,
+       unsigned int flags)`.  SYSCALL_DEFINE5 narrows the
+       fifth parameter to (unsigned int) on entry; the mask
+       check `flags & ~(RENAME_NOREPLACE|EXCHANGE|
+       WHITEOUT)` runs at 32-bit width.  The C calling
+       convention does not zero-extend unsigned int args
+       any more than int args, so the high 32 bits of R8
+       are caller-uninitialised garbage.
+
+       Pre-batch we held the mask check at 64-bit width:
+           const VALID_FLAGS: u64 = 1 | 2 | 4;
+           if args.arg4 & !VALID_FLAGS != 0 {
+               return EINVAL;
+           }
+       so a caller passing `0x1_0000_0001` (high-half
+       garbage + RENAME_NOREPLACE) saw EINVAL where Linux
+       returns ENOENT (after truncation the low half is 1,
+       mask passes, rename_impl validates pointers and
+       returns ENOENT for our empty FS).  Seventh instance
+       of the same shape after batches 308 (mlockall), 309
+       (msync), 310 (mlock2), 311 (fchmodat), 312
+       (fchownat), and 313 (unlinkat).
+
+     Fix:
+       kernel/src/syscall/linux.rs sys_renameat2:
+         * Cast args.arg4 to u32 (matching Linux's unsigned
+           int flags parameter).
+         * Convert VALID_FLAGS from u64 to u32.
+
+     Tests (dispatch_linux self-test, after the existing
+     renameat2 ENOENT probe):
+       - (a) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0001)
+             → ENOENT (high|RENAME_NOREPLACE; truncates to
+             1, mask passes, rename_impl returns ENOENT).
+       - (b) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0007)
+             → ENOENT (high|all-three-valid-bits;
+             truncates to 7; locks in truncation behaviour
+             — note this combination is NOT mutually-
+             exclusive-valid per Linux, see Limitations).
+       - (c) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0000)
+             → ENOENT (high-half only, low half zero;
+             truncates to 0 → equivalent to plain renameat
+             behaviour).
+       - (d) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0008)
+             → EINVAL (high|bad-low 0x8; truncates to 0x8,
+             mask rejects bit outside valid set).
+       Marker: "[syscall/linux]   renameat2 unsigned-int
+       truncation (high-half ignored): OK".
+
+     Preserved behaviour:
+       - Existing renameat2(_,_,_,_,0x800_0000) → EINVAL
+         probe still passes (bogus low bit, no high bits).
+       - Existing renameat2(_,_,_,_,RENAME_NOREPLACE) →
+         ENOENT probe still passes.
+
+     Known limitations (deferred):
+       - Linux's mutual-exclusion gate:
+           if ((flags & (RENAME_NOREPLACE | RENAME_WHITEOUT))
+               && (flags & RENAME_EXCHANGE))
+               return -EINVAL;
+         is NOT enforced by our stub.  Pre-batch and post-
+         batch we accept e.g. RENAME_NOREPLACE|EXCHANGE and
+         return ENOENT; Linux returns EINVAL.  This is a
+         separate divergence from the int-truncation fix
+         and should be addressed in a future batch
+         dedicated to renameat2's mutual-exclusion gates.
+         (Real callers like libuv/Tokio/golang runtime
+         typically don't combine these flags, but
+         filesystem fuzzers do.)
+
+     Build: cargo build -p kernel clean (59.23s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

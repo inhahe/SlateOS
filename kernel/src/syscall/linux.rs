@@ -10753,8 +10753,29 @@ fn sys_renameat(args: &SyscallArgs) -> SyscallResult {
 ///
 /// RENAME_NOREPLACE=1, RENAME_EXCHANGE=2, RENAME_WHITEOUT=4.
 fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
-    const VALID_FLAGS: u64 = 1 | 2 | 4;
-    if args.arg4 & !VALID_FLAGS != 0 {
+    // Linux ABI: `int renameat2(int olddirfd, const char *oldpath,
+    // int newdirfd, const char *newpath, unsigned int flags)`.
+    // SYSCALL_DEFINE5(renameat2, ..., unsigned int, flags) narrows the
+    // fifth parameter to (unsigned int) on entry; the mask check
+    // `flags & ~(RENAME_NOREPLACE|EXCHANGE|WHITEOUT)` runs at 32-bit
+    // width.  The high 32 bits of R8 are caller-uninitialised garbage
+    // (the C calling convention does not zero-extend unsigned int args
+    // any more than int args).
+    //
+    // Pre-batch we held the mask check at 64-bit width:
+    //     const VALID_FLAGS: u64 = 1 | 2 | 4;
+    //     if args.arg4 & !VALID_FLAGS != 0 { return EINVAL; }
+    // so a caller passing 0x1_0000_0001 (high-half garbage +
+    // RENAME_NOREPLACE) saw EINVAL where Linux returns ENOENT (after
+    // truncation the low half is 1, mask passes, the call proceeds to
+    // rename_impl which validates pointers and returns ENOENT for our
+    // empty FS).  Seventh instance of the same shape after batches 308
+    // (mlockall), 309 (msync), 310 (mlock2), 311 (fchmodat), 312
+    // (fchownat), and 313 (unlinkat).
+    const VALID_FLAGS: u32 = 1 | 2 | 4;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg4 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     rename_impl(args.arg1, args.arg3)
@@ -37510,6 +37531,93 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: renameat2 not ENOENT");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 314: renameat2 unsigned-int truncation — high-half
+        // register garbage must be stripped before the flags mask
+        // check.
+        //
+        // Linux signature: `int renameat2(int olddirfd, const char
+        // *oldpath, int newdirfd, const char *newpath, unsigned int
+        // flags)`.  flags is C unsigned int → low 32 bits only.  Pre-
+        // batch we held flags as u64 and ran the mask check at 64-bit
+        // width, so high-half garbage tripped the gate and returned
+        // EINVAL where Linux returns ENOENT (rename_impl validates
+        // pointers and returns ENOENT for our empty FS).
+        //
+        // (a) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0001) → ENOENT
+        //     (high|RENAME_NOREPLACE; truncates to 1, mask passes,
+        //     rename_impl validates both pointers in kernel context
+        //     and returns ENOENT).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x1_0000_0001, arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(high|NOREPLACE) -> {} (expected -ENOENT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0007) → ENOENT
+        //     (high|NOREPLACE|EXCHANGE|WHITEOUT; truncates to 7, all
+        //     three valid bits set, mask passes; the mutual-exclusion
+        //     between EXCHANGE and NOREPLACE/WHITEOUT is enforced by
+        //     Linux but not by our stub — see Known Limitations.
+        //     For this probe we lock in the truncation behaviour
+        //     specifically.  Pre-batch: EINVAL via 64-bit mask trip).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x1_0000_0007, arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(high|all-valid) -> {} (expected -ENOENT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0000) → ENOENT
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes — flags=0 is equivalent to plain renameat).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x1_0000_0000, arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(high-half-zero) -> {} (expected -ENOENT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0008) → EINVAL
+        //     (high|bad-low 0x8; truncates to 0x8, mask rejects bit
+        //     outside RENAME_NOREPLACE|EXCHANGE|WHITEOUT; verifies
+        //     mask gate still rejects bogus low bits after high half
+        //     is stripped).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg4: 0x1_0000_0008, arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   renameat2 unsigned-int truncation (high-half ignored): OK"
+        );
     }
 
     // readlink / readlinkat / chmod family / chown family / truncate /

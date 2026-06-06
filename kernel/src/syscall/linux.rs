@@ -13783,7 +13783,20 @@ fn sys_finit_module(args: &SyscallArgs) -> SyscallResult {
     // MODULE_INIT_IGNORE_MODVERSIONS = 1, IGNORE_VERMAGIC = 2,
     // COMPRESSED_FILE = 4.
     const VALID_FLAGS: u64 = 1 | 2 | 4;
-    if args.arg2 & !VALID_FLAGS != 0 {
+    // Linux signature:
+    //   `SYSCALL_DEFINE3(finit_module, int, fd, const char __user *,
+    //                    uargs, int, flags)`.
+    // `flags` is declared `int` (32-bit), so the x86_64 syscall ABI
+    // truncates args.arg2 to its low 32 bits before the body runs.
+    // Pre-batch (302) we masked args.arg2 raw, so a probe with
+    // flags=0x1_0000_0000 (truncates to 0) hit the EINVAL flag-mask
+    // gate where Linux truncates to 0 and reaches the terminal EPERM
+    // (no CAP_SYS_MODULE).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg2 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags: u64 = u64::from(flags_i32 as u32);
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -13803,7 +13816,19 @@ fn sys_finit_module(args: &SyscallArgs) -> SyscallResult {
 fn sys_delete_module(args: &SyscallArgs) -> SyscallResult {
     // O_NONBLOCK=0o4000, O_TRUNC=0o1000 (the only valid flags).
     const VALID_FLAGS: u64 = 0o4000 | 0o1000;
-    if args.arg1 & !VALID_FLAGS != 0 {
+    // Linux signature:
+    //   `SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
+    //                    unsigned int, flags)`.
+    // `flags` is declared `unsigned int` (32-bit), so the x86_64 syscall
+    // ABI truncates args.arg1 to its low 32 bits before the body runs.
+    // Pre-batch (302) we masked args.arg1 raw, so a probe with
+    // flags=0x1_0000_0000 (truncates to 0) hit the EINVAL flag-mask
+    // gate where Linux truncates to 0 and reaches the terminal EPERM
+    // (no CAP_SYS_MODULE).
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_u32 = args.arg1 as u32;
+    let flags: u64 = u64::from(flags_u32);
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     if args.arg0 == 0 {
@@ -27777,6 +27802,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   io_setup/swapon/membarrier unsigned-int/int truncation: OK"
+        );
+    }
+
+    // Batch 302 — sys_finit_module + sys_delete_module
+    // int / unsigned-int flag truncation audit.
+    //
+    // Pre-batch reads:
+    //   sys_finit_module: `args.arg2 & !VALID_FLAGS != 0` checked
+    //     against raw u64, so a probe with flags=0x1_0000_0000
+    //     (truncates to 0) hit EINVAL where Linux truncates to 0,
+    //     passes the flag-mask gate, the fd validation (kernel-context
+    //     no-op), the uargs validation (NULL skipped), and reaches
+    //     the terminal EPERM.
+    //   sys_delete_module: same shape with unsigned int instead of
+    //     int and with VALID_FLAGS = O_NONBLOCK|O_TRUNC = 0o5000.
+    {
+        // (a) finit_module(fd=0, uargs=0, flags=0x1_0000_0000).
+        //     Pre-batch: 0x1_0000_0000 & !7 = 0x1_0000_0000 != 0 ->
+        //     EINVAL.  Post-batch: flags truncates to 0, passes the
+        //     flag-mask gate, validate_linux_fd is a kernel-context
+        //     no-op (caller_pid()==None), uargs=0 skips the user-read
+        //     gate, terminal EPERM.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_0000,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::FINIT_MODULE, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: finit_module high-half flags -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) delete_module(name=&buf, flags=0x1_0000_0000).
+        //     Pre-batch: 0x1_0000_0000 & !0o5000 = 0x1_0000_0000 != 0
+        //     -> EINVAL.  Post-batch: flags truncates to 0, passes the
+        //     flag-mask gate, args.arg0 != 0 (skips EFAULT),
+        //     validate_user_read is a kernel-context no-op, terminal
+        //     EPERM.
+        let name_buf = [b'm'; 4];
+        let name_ptr = name_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: name_ptr,
+            arg1: 0x1_0000_0000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::DELETE_MODULE, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: delete_module high-half flags -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   finit_module/delete_module int/unsigned-int flag truncation: OK"
         );
     }
 

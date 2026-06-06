@@ -26597,3 +26597,88 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        Build: cargo build -p kernel clean (36.43s).
        Boot test: bash scripts/boot-test.sh --no-build
                   --timeout=240 PASSED (BOOT_OK at 26s).
+
+  332. Batch 302 — sys_finit_module +
+       sys_delete_module int / unsigned-int flag
+       truncation audit.
+
+       Divergence
+       ----------
+       Two module-load stubs read 32-bit C-typed flag
+       args as raw u64, so probes with the high half
+       set bypass / fail the flag-mask gates in the
+       opposite direction from Linux:
+       - sys_finit_module(int fd, char* uargs, int
+         flags): `args.arg2 & !VALID_FLAGS != 0`
+         compared raw, so flags=0x1_0000_0000
+         (truncates to 0) hit EINVAL where Linux
+         truncates to 0 and reaches the terminal
+         EPERM (no CAP_SYS_MODULE).
+       - sys_delete_module(char* name, unsigned int
+         flags): same shape; flags=0x1_0000_0000 hit
+         EINVAL where Linux returns EPERM.
+
+       Fix
+       ---
+       Cast each arg at function entry to its declared
+       Linux C type, then zero-extend back to u64 for
+       comparison with the existing VALID_FLAGS const:
+       - sys_finit_module: i32->u32->u64 ladder (int
+         flags, sign-extension would alias the kernel-
+         level mask but the existing VALID_FLAGS is
+         3 bits so any negative truncation aliases
+         far away from the mask either way; zero-
+         extending via `as u32` preserves Linux's
+         post-truncation answer).
+       - sys_delete_module: u32->u64 ladder (unsigned
+         int flags).
+
+       New self-tests
+       --------------
+       Added a "Batch 302" block at the end of
+       dispatch_linux's Linux ABI self-tests with two
+       probes:
+         (a) finit_module(fd=0, uargs=0,
+             flags=0x1_0000_0000) -> -EPERM.
+         (b) delete_module(name=&buf,
+             flags=0x1_0000_0000) -> -EPERM.
+       Marker: "[syscall/linux]
+         finit_module/delete_module int/unsigned-int
+         flag truncation: OK".
+
+       Preserved
+       ---------
+       - finit_module gate order (flag-mask EINVAL
+         first, then fd validation, then optional
+         uargs validation, then terminal EPERM).
+       - delete_module gate order (flag-mask EINVAL
+         first, then arg0==0 EFAULT, then user-read
+         validation, then terminal EPERM).
+       - All existing VALID_FLAGS constants (1|2|4
+         and 0o4000|0o1000).
+
+       Known limitations / out of scope
+       --------------------------------
+       - sys_init_module has `unsigned long len`
+         (64-bit on x86_64), no truncation needed.
+       - sys_kexec_load `flags` and `nr_segments`
+         are both `unsigned long` (64-bit), no
+         truncation needed.
+       - sys_kexec_file_load `cmdline_len` and
+         `flags` are both `unsigned long`, no
+         truncation.  kernel_fd and initrd_fd are
+         already cast to i32 (batch ~145).
+       - sys_io_uring_setup `entries` is `u32` and
+         could in principle show a divergence at
+         entries = high_bit + value_above_32768
+         (truncates to above MAX but pre-batch raw
+         u64 also above MAX -> same EINVAL).  Pre-
+         batch raw EINVAL and post-batch EINVAL
+         collapse; not externally observable
+         without a valid params struct in the right
+         offset windows.  Deferred until io_uring
+         actually lands.
+
+       Build: cargo build -p kernel clean (35.51s).
+       Boot test: bash scripts/boot-test.sh --no-build
+                  --timeout=240 PASSED (BOOT_OK at 22s).

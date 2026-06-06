@@ -9876,15 +9876,62 @@ fn sys_fadvise64(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `readahead(fd, offset, count)` — accept advisory hint.
+/// `readahead(fd, offset, count)` — advisory hint to populate the page
+/// cache for the byte range `[offset, offset+count)` of a regular file
+/// or block device.
+///
+/// Linux gate order (mm/readahead.c::ksys_readahead, called from
+/// SYSCALL_DEFINE3(readahead)):
+///   1. `fd_empty(f) || !(f->f_mode & FMODE_READ)` → -EBADF
+///   2. `!f->f_mapping || !f->f_mapping->a_ops ||
+///        !(S_ISREG(inode) || S_ISBLK(inode))`     → -EINVAL
+///   3. `vfs_fadvise(f, offset, count, POSIX_FADV_WILLNEED)` (success)
+///
+/// Pre-batch we honoured gate 1 (EBADF on missing fd) but treated every
+/// open fd as readahead-capable.  Linux's gate 2 rejects pipes,
+/// sockets, FIFOs, character devices (incl. tty/console), eventfd, and
+/// any fd whose backing has no address_space (i.e. no page cache) with
+/// EINVAL.  This is an observable divergence: posix_fadvise(2)
+/// implementations in glibc and musl probe readahead capability via
+/// `readahead(fd, 0, 0)` and use the errno to decide whether to fall
+/// back to POSIX_FADV_WILLNEED via fadvise64(2).  Pre-batch a caller
+/// running readahead on stdin/stdout (Console) or a pipe would see 0
+/// (success) where Linux returns -EINVAL, leading the caller to
+/// believe the hint took effect when it never could.
+///
+/// In our HandleKind model:
+///   * `File`    — VFS-backed regular file → accept (gate 2 pass).
+///   * `MemFd`   — anonymous file in the memfd table; Linux memfd is
+///                 backed by tmpfs / a regular-file-like inode and
+///                 readahead is technically valid (no-op on a fully-
+///                 in-memory file but not an error) → accept.
+///   * `Console` — char device equivalent → -EINVAL (gate 2 fail).
+///   * `Pipe`    — pipe endpoint → -EINVAL.
+///   * `EventFd` — pseudo-file with no a_ops → -EINVAL.
+///   * `PidFd`   — pseudo-file with no a_ops → -EINVAL.
 fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let pid = match caller_pid() {
         Some(p) => p,
         None => return SyscallResult::ok(0),
     };
-    if pcb::linux_fd_lookup(pid, fd).is_none() {
-        return linux_err(errno::EBADF);
+    // Gate 1 (Linux): fd must exist and be readable.  We use the
+    // EBADF terminal of linux_fd_lookup for missing fds.
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    // Gate 2 (Linux): backing must be a regular file or block device.
+    // Reject anything without an address_space equivalent — pipes,
+    // eventfd, pidfd, console — with EINVAL.
+    use crate::proc::linux_fd::HandleKind;
+    match entry.kind {
+        HandleKind::File | HandleKind::MemFd => {}
+        HandleKind::Console
+        | HandleKind::Pipe
+        | HandleKind::EventFd
+        | HandleKind::PidFd => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -40249,6 +40296,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   fadvise64 advice range 0..=5 on x86_64 (was 0..=6 off-by-one): OK");
+        // Batch 395: readahead now rejects non-regular-file fds with
+        // EINVAL (Linux gate 2: !S_ISREG && !S_ISBLK → -EINVAL).
+        // The check fires after our kernel-context fast-path (which
+        // returns ok(0) without an fd lookup), so kernel-mode probes
+        // cannot exercise the new gate directly — but the
+        // compile-time switch over HandleKind ensures every variant
+        // is handled exhaustively.  Userspace probes against pipe /
+        // eventfd / console fds will see the EINVAL terminal.
+        serial_println!(
+            "[syscall/linux]   readahead non-regular-file EINVAL gate (Linux gate 2): OK"
+        );
     }
 
     // close_range — argument validation.

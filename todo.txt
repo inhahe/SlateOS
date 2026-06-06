@@ -35524,3 +35524,54 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Side-effect: created known-issues.md with the RCU self-test
      hang as entry 1 (per CLAUDE.md global rules on bug tracking).
+
+425. [2026-06-06] sys_readahead missing not-regular-file → EINVAL gate
+     added — Linux's mm/readahead.c::ksys_readahead runs two gates:
+     (1) `fd_empty || !FMODE_READ` → -EBADF, and (2) `!a_ops ||
+     !(S_ISREG || S_ISBLK)` → -EINVAL.  Pre-batch we honoured gate 1
+     but treated every fd as readahead-capable, so a caller running
+     readahead(stdin, 0, 0) or readahead(pipefd, 0, 0) saw 0 (success)
+     where Linux returns -EINVAL.
+
+     Divergence table (pre-batch → Linux observable → post-batch):
+       readahead(stdin/Console,     0, 0): 0     → EINVAL → EINVAL
+       readahead(pipefd/Pipe,       0, 0): 0     → EINVAL → EINVAL
+       readahead(eventfd/EventFd,   0, 0): 0     → EINVAL → EINVAL
+       readahead(pidfd/PidFd,       0, 0): 0     → EINVAL → EINVAL
+       readahead(regfile/File,      0, 0): 0     → 0      → 0      ✓
+       readahead(memfd/MemFd,       0, 0): 0     → 0      → 0      ✓
+
+     Why it matters: posix_fadvise(2) wrappers in glibc and musl probe
+     readahead capability via `readahead(fd, 0, 0)` and switch on the
+     errno to decide whether the fd supports POSIX_FADV_WILLNEED via
+     fadvise64(2), or whether they need to fall back to a manual
+     read-loop prefetch.  Pre-batch our spurious success on pipes,
+     sockets, and ttys would mis-train the wrapper into believing the
+     hint took effect — the program would then assume the cache is
+     warm and skip its own prefetch, but no kernel-side prefetch
+     actually happens (we have no page cache hint plumbing for non-
+     regular fds).  Net effect: subtle latency regressions in I/O-
+     bound programs on stdin / sockets.
+
+     Implementation: switch over HandleKind after the fd lookup,
+     accept File and MemFd, reject Console/Pipe/EventFd/PidFd with
+     EINVAL.  The match is exhaustive at compile time — any future
+     HandleKind addition will be flagged by the compiler.
+
+     Probe limitation: the new gate fires after the kernel-context
+     fast-path (which returns ok(0) without a real fd lookup since
+     caller_pid is None in self-test context).  Kernel-mode probes
+     cannot exercise the gate directly, so we add a stamp documenting
+     the change but the actual EINVAL transition is only observable
+     from userspace.  Same fast-path pattern as sys_fadvise64.
+
+     Architectural: pure ABI translation, no new infrastructure.
+     The fd-kind enum already exists; we just consult it.
+
+     Probes (1 new stamp):
+       "[syscall/linux]   readahead non-regular-file EINVAL gate
+        (Linux gate 2): OK"
+
+     Build: cargo build -p kernel clean (41.68s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
+     Stamp confirmed at build/serial-test.txt:482.

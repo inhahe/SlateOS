@@ -8131,11 +8131,39 @@ fn sys_sched_getparam(args: &SyscallArgs) -> SyscallResult {
 ///   - everything else: priority must be exactly 0.
 ///
 /// `param` is a user pointer that must point to at least 4 bytes of
-/// readable memory (we only consume `sched_priority`).  NULL or
-/// unreadable -> EFAULT.
+/// readable memory (we only consume `sched_priority`).
+///
+/// Gate order (matches Linux: sched_setparam routes through
+/// `do_sched_setscheduler(pid, SETPARAM_POLICY, param)`):
+///   1. `!param || pid < 0` -> EINVAL.  NULL param is EINVAL on Linux,
+///      NOT EFAULT — copy_from_user runs only after this gate.  pid is
+///      `pid_t` (i32) in Linux; treat the low 32 bits as signed.
+///   2. `copy_from_user(&lparam, param, sizeof(struct sched_param))`
+///      -> EFAULT.
+///   3. `find_process_by_pid(pid)` -> ESRCH if no such task.
+///   4. priority range check against the target's current policy
+///      -> EINVAL.
+///   5. RTPRIO rlimit gate when current policy is FIFO/RR -> EPERM.
 fn sys_sched_setparam(args: &SyscallArgs) -> SyscallResult {
     let pid = args.arg0;
     let param_ptr = args.arg1;
+
+    // Gate 1: !param || pid < 0 -> EINVAL.  NULL param is EINVAL here,
+    // not EFAULT — the copy_from_user that could produce EFAULT only
+    // runs after this gate passes.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = pid as i32;
+    if param_ptr == 0 || pid_i32 < 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Gate 2: copy_from_user(param) -> EFAULT.
+    let sched_prio = match read_user_sched_priority(param_ptr) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+
+    // Gate 3: find_process_by_pid(pid) -> ESRCH.
     let target_pid = if pid == 0 {
         caller_pid()
     } else {
@@ -8144,19 +8172,19 @@ fn sys_sched_setparam(args: &SyscallArgs) -> SyscallResult {
         }
         Some(pid)
     };
-    let sched_prio = match read_user_sched_priority(param_ptr) {
-        Ok(v) => v,
-        Err(e) => return linux_err(e),
-    };
-    // Look up the target's current policy; default SCHED_OTHER if
-    // unknown (kernel-context caller, no PCB).
+
+    // Gate 4: priority range check against the target's current
+    // policy.  Default SCHED_OTHER if unknown (kernel-context caller,
+    // no PCB).
     let current_policy = target_pid
         .and_then(pcb::get_sched_policy)
         .unwrap_or(0);
     if let Err(e) = sched_priority_check_for_policy(u64::from(current_policy), sched_prio) {
         return linux_err(e);
     }
-    // RTPRIO gate when changing priority within an RT policy.
+
+    // Gate 5: RTPRIO rlimit when changing priority within an RT
+    // policy -> EPERM.
     if current_policy == 1 || current_policy == 2 {
         if let Err(e) = rlimit_rtprio_check_for_caller(sched_prio) {
             return linux_err(e);
@@ -32096,20 +32124,76 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   sched_setscheduler policy<0 > param+pid > read > find > policy gate order: OK"
         );
-        // sched_setparam(0, NULL) -> EFAULT (same reason: needs to
-        // read sched_priority from the param pointer).
-        // Re-bind args explicitly — the previous `a` was the batch-254
-        // discriminator with arg0=12345 and a non-zero arg1.
+        // Batch 255: sched_setparam routes through Linux's
+        // do_sched_setscheduler, so its gate order is:
+        //   1. !param || pid<0 -> EINVAL  (NULL param is EINVAL, NOT EFAULT)
+        //   2. copy_from_user(param) -> EFAULT
+        //   3. find_process_by_pid -> ESRCH
+        //   4. priority vs current policy -> EINVAL
+        //   5. RTPRIO rlimit -> EPERM
+        //
+        // sched_setparam(0, NULL) -> EINVAL.  Pre-batch we returned
+        // EFAULT because the NULL check lived inside
+        // read_user_sched_priority; Linux rejects NULL at the do_*
+        // entry ahead of copy_from_user.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SCHED_SETPARAM, &a).value
-            != -i64::from(errno::EFAULT) {
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: sched_setparam(0, NULL) expected EFAULT, got {}",
+                "[syscall/linux]   FAIL: sched_setparam(0, NULL) expected EINVAL, got {}",
                 dispatch_linux(nr::SCHED_SETPARAM, &a).value,
             );
             return Err(KernelError::InternalError);
         }
+        // Discriminator A (gate 1 vs gate 3): pid=12345 non-existent,
+        // param=NULL -> EINVAL (gate 1 fires before pid lookup).
+        // Pre-batch we checked pid first and returned ESRCH.
+        let a = SyscallArgs { arg0: 12345, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETPARAM, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setparam(12345, NULL) expected EINVAL (gate 1), got {}",
+                dispatch_linux(nr::SCHED_SETPARAM, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Discriminator B (gate 1 pid<0): pid=u64::MAX (== -1 as i32),
+        // param=valid -> EINVAL via gate 1.  Pre-batch we would have
+        // run pcb::state(u64::MAX) -> None and returned ESRCH instead.
+        let setparam_zero = [0u8; 4];
+        let setparam_zero_ptr = setparam_zero.as_ptr() as u64;
+        let a = SyscallArgs { arg0: u64::MAX, arg1: setparam_zero_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETPARAM, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setparam(pid=-1, valid) expected EINVAL (gate 1), got {}",
+                dispatch_linux(nr::SCHED_SETPARAM, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Discriminator C (gate 2 vs gate 3): pid=12345 non-existent,
+        // param=valid -> ESRCH (gates 1+2 pass, gate 3 fires).
+        // Confirms the pid lookup still runs after copy_from_user.
+        let a = SyscallArgs { arg0: 12345, arg1: setparam_zero_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETPARAM, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setparam(12345, valid) expected ESRCH (gate 3), got {}",
+                dispatch_linux(nr::SCHED_SETPARAM, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setparam param+pid > read > find > policy gate order: OK"
+        );
+        // Re-bind `a` to (0,0,NULL) for the sched_getparam and
+        // sched_rr_get_interval probes below.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
 
         // Pure-helper decision table for sched_priority_check_for_policy.
         //   - SCHED_OTHER (0): only priority 0 is valid.

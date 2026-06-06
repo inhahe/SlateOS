@@ -22160,3 +22160,72 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      is out of scope for this batch.  Track for a follow-up.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 284. syscall/linux: sched_setparam — param+pid > copy_from_user >
+##      find_pid > priority > RTPRIO (batch 255)
+##
+##      Pre-batch divergences from Linux's
+##      `SYSCALL_DEFINE2(sched_setparam)` which routes through
+##      `do_sched_setscheduler(pid, SETPARAM_POLICY, param)`:
+##
+##        (a) We checked pid first (ESRCH for unknown pid), then
+##            read_user_sched_priority (which produced EFAULT on
+##            NULL param).  Linux gates `!param || pid<0` FIRST at
+##            the do_sched_setscheduler entry — both conditions
+##            return EINVAL.
+##
+##        (b) NULL param produced EFAULT pre-batch.  Linux returns
+##            EINVAL ahead of copy_from_user.
+##
+##        (c) Negative pid (e.g. u64::MAX) fell through the pid==0
+##            branch into pcb::state(huge_value).is_none() and
+##            returned ESRCH.  Linux returns EINVAL via the pid<0
+##            arm of gate 1.
+##
+##      Fix:
+##
+##        * Reorder sys_sched_setparam to five gates matching
+##          do_sched_setscheduler literally:
+##            1. param_ptr == 0 || (pid as i32) < 0  -> EINVAL
+##            2. copy_from_user(param)               -> EFAULT
+##            3. find_process_by_pid                  -> ESRCH
+##            4. sched_priority_check_for_policy      -> EINVAL
+##            5. rlimit_rtprio_check_for_caller (RT)  -> EPERM
+##
+##      Self-tests added/updated (around the sched_setscheduler
+##      test block):
+##
+##        Pre-existing test updated:
+##          - sched_setparam(0, NULL) -> was EFAULT, now EINVAL.
+##            NULL param is rejected by gate 1, not by
+##            copy_from_user.
+##
+##        New discriminators:
+##          A. sched_setparam(pid=12345, NULL) -> EINVAL.
+##             Gate 1 fires before gate 3 pid lookup; pre-batch
+##             returned ESRCH.
+##          B. sched_setparam(pid=u64::MAX, valid_param) -> EINVAL.
+##             Gate 1 pid<0 arm; pre-batch returned ESRCH via the
+##             pcb::state(huge_value)==None path.
+##          C. sched_setparam(pid=12345, valid_param) -> ESRCH.
+##             Confirms gates 1+2 pass and gate 3 still fires for
+##             unknown pid with a valid param buffer.
+##
+##      Marker:
+##        "[syscall/linux]   sched_setparam param+pid > read >
+##         find > policy gate order: OK"
+##
+##      Existing tests preserved: the sched_setparam kernel-stack-
+##      param success+EINVAL pair (line ~32370) feeds a real pid
+##      and a valid pointer, so gates 1-3 pass and the priority
+##      check still fires.  The local `a` binding was reset to
+##      (0,0,NULL) before the sched_getparam and
+##      sched_rr_get_interval probes so they keep their original
+##      semantics.
+##
+##      Known limitations: none above what Linux does — the
+##      sched_setparam family is now aligned for both
+##      sched_setscheduler (batch 254) and sched_setparam (this
+##      batch).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s).

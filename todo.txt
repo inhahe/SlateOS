@@ -28818,3 +28818,84 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.77s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 25s).
+
+357. Batch 327 — sys_lsm_list_modules unsigned-int
+     truncation (high-half of flags must be masked
+     before the != 0 rejection gate).
+
+     Divergence: Linux's sys_lsm_list_modules signature
+     is `SYSCALL_DEFINE3(lsm_list_modules, u64 __user *,
+     ids, size_t __user *, size, u32, flags)`.  `flags`
+     is C `u32`, delivered in rdx.  The AMD64 syscall
+     ABI does not zero-extend `unsigned int` across the
+     syscall instruction, so Linux observes only the
+     low 32 bits — the high half is caller-controlled
+     garbage that must be ignored.
+
+     Our pre-fix implementation did `if args.arg2 != 0
+     { return EINVAL; }` at u64 width, so any high-half
+     garbage (e.g. 0x1_0000_0000) was rejected with
+     EINVAL even though Linux's truncated flags=0
+     advances to the size-pointer gates.
+
+     Fix: in sys_lsm_list_modules (kernel/src/syscall/
+     linux.rs line ~23909), cast args.arg2 to u32
+     before the != 0 gate:
+       #[allow(clippy::cast_possible_truncation)]
+       let flags = args.arg2 as u32;
+       if flags != 0 {
+           return linux_err(errno::EINVAL);
+       }
+
+     Tests added to dispatch_linux (after existing
+     lsm_list_modules flags-first gating marker around
+     line 48490):
+       (a) lsm_list_modules(ids=NULL, size=NULL,
+                              flags=0x1_0000_0000)
+           → EFAULT (high-only; truncates to 0, flag
+            gate passes, downstream NULL-size gate
+            returns EFAULT).  Pre-fix returned EINVAL.
+       (b) lsm_list_modules(ids=NULL, size=size_ptr,
+                              flags=0x1_0000_0001)
+           → EINVAL (high|bad-low 1; truncates to 1,
+            gate still rejects nonzero low half;
+            verifies the mask still rejects after the
+            high-bit strip).
+       (c) lsm_list_modules(ids=NULL, size=size_ptr,
+                              flags=0x1_0000_0002)
+           → EINVAL (high|bad-low 2; independent low
+            bit confirms the mask covers more than the
+            LSB).
+       (d) lsm_list_modules(ids=NULL, size=size_ptr,
+                              flags=0x1_0000_0000)
+           → EOPNOTSUPP (high-only with valid size
+            pointer; truncates to 0, flag gate passes,
+            full pre-validate flow runs to the
+            terminal EOPNOTSUPP since no LSM modules
+            are registered).  Pre-fix returned EINVAL
+            on the flag gate.
+     Marker: "[syscall/linux]   lsm_list_modules
+              unsigned-int truncation (high-half
+              ignored): OK".
+
+     Preserved: existing lsm_list_modules probes still
+     pass:
+       - NULL size, flags=0 → EFAULT: unaffected.
+       - NULL size, flags=1 → EINVAL (flags-first):
+         works because 1 fits in 32 bits.
+       - valid size, flags=1 → EINVAL: unaffected.
+       - valid size, flags=0xFFFF_FFFF (max u32) →
+         EINVAL: unaffected because this fits in 32
+         bits exactly.
+       - valid size, flags=0 → EOPNOTSUPP: unaffected.
+
+     Known limitations:
+     - There is no LSM infrastructure in this kernel
+       (capabilities replace LSM in our architecture;
+       see entry 350).  EOPNOTSUPP is the permanent
+       terminal — no follow-up probes will be needed
+       when more infrastructure lands.
+
+     Build: cargo build -p kernel clean (39.56s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 15s).

@@ -23908,7 +23908,17 @@ fn sys_futex2_requeue(args: &SyscallArgs) -> SyscallResult {
 /// correct behavior).
 fn sys_lsm_list_modules(args: &SyscallArgs) -> SyscallResult {
     // 1. flags first.  No flags are defined for lsm_list_modules.
-    if args.arg2 != 0 {
+    //
+    // Linux signature: `SYSCALL_DEFINE3(lsm_list_modules, u64 __user *,
+    // ids, size_t __user *, size, u32, flags)`.  `flags` is C `u32`,
+    // delivered in rdx.  The AMD64 syscall ABI does not zero-extend
+    // `unsigned int` across the syscall instruction, so Linux observes
+    // only the low 32 bits.  Pre-batch we tested the raw u64 against 0,
+    // so any high-half garbage was rejected with EINVAL where Linux's
+    // truncated flags=0 advances to the size-pointer gates.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     // 2. size pointer NULL -> EFAULT (Linux: get_user faults).
@@ -48489,6 +48499,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   lsm_list_modules flags-first gating: OK"
+        );
+
+        // lsm_list_modules flags is C `u32`; the high 32 bits of arg2
+        // must be masked before the `flags != 0` rejection gate.  Pre-
+        // batch the gate compared at u64 width, so any high-half
+        // garbage returned EINVAL where Linux's truncated flags=0
+        // falls through to the size-pointer gates.
+        //
+        // (a) flags=0x1_0000_0000 (high-only), size=NULL: truncates to
+        //     0, flag gate passes, downstream NULL-size gate returns
+        //     EFAULT.  Pre-fix returned EINVAL on the flag gate.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_list_modules(high-only,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) flags=0x1_0000_0001 (high|bad-low 1): truncates to 1,
+        //     gate still rejects.  Verifies the mask continues to
+        //     reject any nonzero low half after the high-bit strip.
+        let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 0x1_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_list_modules(high|bad-low 1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) flags=0x1_0000_0002 (high|bad-low 2): truncates to 2,
+        //     gate still rejects.  Independent low bit confirms the
+        //     mask covers more than the LSB.
+        let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 0x1_0000_0002, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_list_modules(high|bad-low 2) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) flags=0x1_0000_0000 with valid size pointer: truncates
+        //     to 0, flag gate passes, full pre-validate flow runs to
+        //     the terminal EOPNOTSUPP (no LSM modules registered).
+        //     Pre-fix returned EINVAL on the flag gate.
+        let a = SyscallArgs { arg0: 0, arg1: size_ptr, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_list_modules(high-only,valid) not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   lsm_list_modules unsigned-int truncation (high-half ignored): OK"
         );
     }
 

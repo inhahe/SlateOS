@@ -22561,3 +22561,59 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      well-formed timespecs always exit EBADF.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+## 290. syscall/linux: recvmmsg — timespec value validation
+##      (batch 261)
+##
+##      Pre-batch divergence from Linux net/socket.c
+##      `SYSCALL_DEFINE5(recvmmsg)` + `__sys_recvmmsg`:
+##
+##      Linux's `__sys_recvmmsg` rejects malformed timespecs with
+##      EINVAL early — before fd lookup or per-mmsghdr work:
+##        if (timeout && (timeout->tv_sec < 0 ||
+##                        timeout->tv_nsec < 0 ||
+##                        timeout->tv_nsec >= NSEC_PER_SEC))
+##            return -EINVAL;
+##
+##      We only validated the timeout pointer was readable; we
+##      never copied or inspected the values.  A probe with
+##      `{ -1, 0 }` or `{ 0, 1e9 }` silently passed our gate and
+##      fell through to the terminal EBADF.
+##
+##      Fix:
+##
+##        * In sys_recvmmsg at kernel/src/syscall/linux.rs:
+##          - validate_user_read(arg4, 16) (EFAULT) [pre-existing]
+##          - copy_from_user(arg4, ts, 16) [NEW]
+##          - parse tv_sec / tv_nsec
+##          - if tv_sec<0 || !(0..NSEC_PER_SEC).contains(&tv_nsec)
+##            -> EINVAL [NEW]
+##        * Subsequent gates (vlen, mmsg ptr, fd) unchanged.
+##
+##      Self-tests added/updated:
+##
+##        Pre-existing test preserved:
+##          - recvmmsg(vlen=2, mmsg=valid, timeout={0,0}) -> EBADF.
+##
+##        New discriminators (added right after the existing
+##        recvmmsg probe):
+##          A. (vlen=0, timeout={-1,0}) -> Linux EINVAL via
+##             __sys_recvmmsg timespec check; pre-batch EBADF.
+##          B. (vlen=2, mmsg=valid, timeout={0, 1e9}) -> Linux
+##             EINVAL; pre-batch EBADF.
+##          C. (vlen=0, timeout=NULL) -> EBADF (NULL-timeout skip
+##             path still hits fd validation; regression guard).
+##
+##      Marker:
+##        "[syscall/linux]   recvmmsg timespec value gating: OK"
+##
+##      Existing tests preserved: sendmmsg gating, recvmmsg valid
+##      with timeout, downstream setsockopt/getsockopt/shutdown
+##      probes.
+##
+##      Known limitations: recvmmsg still terminates as EBADF
+##      because no real socket fd backend reaches userspace yet.
+##      The new gate-1 EINVAL path only fires for malformed
+##      timespecs; well-formed timespecs always exit EBADF.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

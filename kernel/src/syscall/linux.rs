@@ -18636,16 +18636,55 @@ fn sys_sendmmsg(args: &SyscallArgs) -> SyscallResult {
 
 /// `recvmmsg(sockfd, msgvec*, vlen, flags, timeout*)`.
 fn sys_recvmmsg(args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (net/socket.c::SYSCALL_DEFINE5(recvmmsg) +
+    // __sys_recvmmsg):
+    //   1. timeout != NULL: get_timespec64 -> EFAULT, then
+    //      timespec64 value validation (tv_sec < 0 ||
+    //      tv_nsec not in [0, NSEC_PER_SEC)) -> EINVAL.  Linux
+    //      validates the values inside __sys_recvmmsg BEFORE
+    //      socket lookup or any per-msg work.
+    //   2. vlen / mmsg ptr / fd -> EFAULT/EBADF.
+    //
+    // Pre-batch (entry 261) we only validated the timeout pointer
+    // was readable — we never copied or parsed the values.  A
+    // probe with a malformed timespec passed silently and fell
+    // through to the terminal EBADF, where Linux returns EINVAL.
+    //
+    // Discriminators:
+    //   * (vlen=0, timeout={-1,0}) -> Linux EINVAL; pre-batch EBADF.
+    //   * (vlen=2, mmsg=valid, timeout={0, 1e9}) -> Linux EINVAL;
+    //     pre-batch EBADF.
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation)]
     let vlen = args.arg2 as u32;
+
+    // Gate 1: timeout parsing + value validation.
     if args.arg4 != 0 {
-        // struct timespec is 16 bytes.
         if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 16) {
             return linux_err(linux_errno_for(e));
         }
+        let mut ts = [0u8; 16];
+        // SAFETY: validate_user_read above covers 16 bytes at args.arg4.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg4, ts.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let tv_sec = i64::from_ne_bytes([
+            ts[0], ts[1], ts[2], ts[3], ts[4], ts[5], ts[6], ts[7],
+        ]);
+        let tv_nsec = i64::from_ne_bytes([
+            ts[8], ts[9], ts[10], ts[11], ts[12], ts[13], ts[14], ts[15],
+        ]);
+        if tv_sec < 0 || !(0..NSEC_PER_SEC).contains(&tv_nsec) {
+            return linux_err(errno::EINVAL);
+        }
     }
+
+    // Gate 2: vlen / mmsg ptr / fd.
     if vlen == 0 {
         if let Err(r) = validate_linux_fd(fd) {
             return r;
@@ -41806,6 +41845,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: recvmmsg valid not EBADF");
             return Err(KernelError::InternalError);
         }
+        // recvmmsg discriminator A: vlen=0 + timeout={-1,0} -> Linux
+        // EINVAL via __sys_recvmmsg's timespec value check (gate 1b);
+        // pre-batch returned EBADF because the timestamp was only
+        // checked for readability.
+        {
+            let bad_ts: [i64; 2] = [-1, 0];
+            let bad_ts_ptr = (&raw const bad_ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 3,
+                arg1: mmsg_ptr,
+                arg2: 0,
+                arg3: 0,
+                arg4: bad_ts_ptr,
+                arg5: 0,
+            };
+            core::hint::black_box(&bad_ts);
+            if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: recvmmsg vlen=0 + neg tv_sec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // recvmmsg discriminator B: vlen=2 + valid mmsg + timeout
+        // = { 0, 1e9 } (tv_nsec out of range) -> Linux EINVAL via
+        // gate 1b; pre-batch fell through to EBADF.
+        {
+            let bad_ts: [i64; 2] = [0, 1_000_000_000];
+            let bad_ts_ptr = (&raw const bad_ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 3,
+                arg1: mmsg_ptr,
+                arg2: 2,
+                arg3: 0,
+                arg4: bad_ts_ptr,
+                arg5: 0,
+            };
+            core::hint::black_box(&bad_ts);
+            if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: recvmmsg vlen=2 + bad tv_nsec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // recvmmsg discriminator C: vlen=0 + timeout=NULL -> EBADF
+        // (skips gate 1 entirely, hits fd check).  Confirms the
+        // NULL-timeout skip path didn't accidentally bypass other
+        // gates.
+        {
+            let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::RECVMMSG, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: recvmmsg vlen=0 + NULL timeout not EBADF"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[syscall/linux]   recvmmsg timespec value gating: OK");
 
         // setsockopt negative level -> EINVAL.
         let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 1, arg3: optval_ptr, arg4: 4, arg5: 0 };

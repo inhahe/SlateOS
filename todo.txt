@@ -25387,3 +25387,155 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (42.45s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 26s).
+
+322. Linux ABI batch 292 — sys_sched_setattr /
+     sys_sched_getattr: pid_t, unsigned int flags, and
+     unsigned int size register truncation.
+
+     Pre-batch divergences
+     ---------------------
+     Linux declares
+       long sys_sched_setattr(pid_t pid,
+                              struct sched_attr __user *attr,
+                              unsigned int flags);
+       long sys_sched_getattr(pid_t pid,
+                              struct sched_attr __user *attr,
+                              unsigned int size,
+                              unsigned int flags);
+     The x86_64 syscall ABI delivers args in 64-bit
+     registers but truncates each one to its declared
+     C type before the body runs.  Batch 217 had
+     already added the pid_i32 cast to the entry of
+     both stubs for the <0 EINVAL gate, but the rest
+     of each body still touched the raw args.argN u64:
+
+       Probe A — setattr flags truncates to 0:
+         flags = 0x1_0000_0000
+           Linux : (unsigned int)flags = 0 → passes
+                   the combined `if (!uattr || pid<0
+                   || flags)` gate → v0 attr installs
+                   → 0
+           Ours  : raw u64 != 0 → EINVAL
+
+       Probe B — setattr pid truncates to 0:
+         pid = 0x1_0000_0000, valid v0 attr
+           Linux : (int)pid = 0 → caller path → 0
+           Ours  : pid_i32 = 0 passed the <0 gate,
+                   then args.arg0 raw = 0x1_0000_0000
+                   != 0 → pcb::state(raw) = None →
+                   ESRCH
+
+       Probe C — getattr flags truncates to 0:
+         flags = 0x1_0000_0000, attr=valid, size=48
+           Linux : (unsigned int)flags = 0 → passes
+                   combined gate → writes v0 attr → 0
+           Ours  : raw u64 != 0 → EINVAL
+
+       Probe D — getattr size truncates to 48:
+         size = 0x1_0000_0030 (= 0x30 after u32 trunc)
+           Linux : truncated size = 48; passes both
+                   `size > PAGE_SIZE` and
+                   `size < SCHED_ATTR_SIZE_VER0`
+                   gates → writes 48-byte attr → 0,
+                   with attr.size = 0x30 (the value
+                   userspace requested, post-truncation)
+           Ours  : raw u64 = 0x1_0000_0030 > 4096 →
+                   EINVAL
+
+       Probe E — getattr pid truncates to 0:
+         pid = 0x1_0000_0000, valid attr
+           Linux : (int)pid = 0 → caller path → 0
+           Ours  : pid_i32 = 0 passed <0 gate, then
+                   args.arg0 raw != 0 →
+                   pcb::state(raw) = None → ESRCH
+
+     Fixes
+     -----
+     - sys_sched_setattr:
+         * cast args.arg2 to u32 → use as `flags` in
+           the combined EINVAL gate
+         * use the existing pid_i32 (cast from
+           args.arg0) for the resolution branch:
+             pid_i32 == 0 → caller_pid()
+             pid_i32 >  0 → pcb::state(pid_u) lookup
+                            then target_pid = Some(pid_u)
+           where pid_u = pid_i32 as u64 (sign-loss
+           allowed since the <0 case is rejected
+           upstream).
+     - sys_sched_getattr:
+         * cast args.arg2 to u32, widen to u64 as
+           `size` — all subsequent gates (PAGE_SIZE,
+           SCHED_ATTR_SIZE_VER0), the validate_user_write
+           call, the user_size attr.size write-back, and
+           the trailing-zero-fill loop now run against
+           the truncated value
+         * cast args.arg3 to u32 → use as `flags` in
+           the combined EINVAL gate
+         * use pid_i32 for the resolution branch the
+           same way as setattr
+
+     Existing self-tests
+     -------------------
+     None required restructuring.  The pre-existing
+     probes all used small-literal or unambiguously
+     negative pids:
+       - sched_setattr bad flags = 1
+                                  (still != 0 post-trunc → EINVAL)
+       - sched_setattr neg pid = u64::MAX
+                                  (pid_i32 = -1 → still EINVAL)
+       - sched_getattr huge size = 1 << 21
+                                  (= 0x200000, fits in u32, still
+                                   > PAGE_SIZE → EINVAL)
+       - sched_getattr neg pid = u64::MAX
+                                  (pid_i32 = -1 → still EINVAL)
+       - all the v0/policy/priority/forward-compat
+         probes use pid=0, flags=0, size=48 — unchanged
+         by truncation.
+
+     New self-tests demonstrating the truncation
+     -------------------------------------------
+       - sched_setattr(0, valid_v0_attr, 0x1_0000_0000)
+         → 0  (flags truncates to 0; body succeeds)
+       - sched_setattr(0x1_0000_0000, valid_v0_attr, 0)
+         → 0  (pid truncates to 0 → caller path)
+       - sched_getattr(0, attr, 48, 0x1_0000_0000) → 0
+         (flags truncates to 0)
+       - sched_getattr(0, attr, 0x1_0000_0030, 0) → 0
+         AND attr.size == 0x30 (size truncates,
+         user_size echo reflects the truncated value)
+       - sched_getattr(0x1_0000_0000, attr, 48, 0) → 0
+         (pid truncates to 0 → caller path)
+
+     Marker:
+       "sched_{set,get}attr pid_t/uint truncation: OK"
+
+     Preserved self-tests
+     --------------------
+     All prior sched_setattr / sched_getattr probes
+     remain — combined `!uattr|pid<0|flags` EINVAL gate,
+     size<48 EINVAL, SCHED_DEADLINE EOPNOTSUPP,
+     OTHER/non-zero-prio EINVAL, forward-compat
+     trailing-zero E2BIG, the v0 dispatch round-trip
+     and over-write sentinel.  All still pass.
+
+     Known limitations
+     -----------------
+     - sched_attr.sched_flags (the u64 field inside the
+       attr buffer at offset 8..16) still parses as 0
+       and we silently drop any non-zero value.  Linux
+       validates against SCHED_FLAG_RESET_ON_FORK |
+       SCHED_FLAG_RECLAIM | ... and rejects unknown
+       bits.  This is independent of register
+       truncation and deferred — the divergence is
+       documented under entry 217's "Known
+       limitations".
+     - sched_setattr/getattr's combined gate Linux
+       checks `flags` (the register, after truncation)
+       distinctly from the in-buffer `sched_flags`
+       field; we now match that distinction at the
+       register level.  In-buffer field handling is
+       still the same as before this batch.
+
+     Build: cargo build -p kernel clean (44.23s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 25s).

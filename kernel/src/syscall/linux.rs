@@ -17014,7 +17014,14 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     let attr_ptr = args.arg1;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid_i32 = args.arg0 as i32;
-    if args.arg2 != 0 || attr_ptr == 0 || pid_i32 < 0 {
+    // Linux declares `unsigned int flags`; the x86_64 ABI truncates
+    // args.arg2 to 32 bits before the body runs.  Without this cast,
+    // a probe like flags=0x1_0000_0000 would set the raw u64 != 0 and
+    // fire EINVAL where Linux's truncated flags == 0 lets the call
+    // through.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    if flags != 0 || attr_ptr == 0 || pid_i32 < 0 {
         return linux_err(errno::EINVAL);
     }
     // Read the 4-byte size prefix to know how much is readable.
@@ -17107,12 +17114,18 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Resolve target pid and persist into the PCB.
-    let pid = args.arg0;
-    if pid != 0 && pcb::state(pid).is_none() {
+    // Resolve target pid and persist into the PCB.  Use the truncated
+    // pid_i32 (not raw args.arg0) so a probe like pid=0x1_0000_0000
+    // routes to the caller path the way Linux does, instead of falling
+    // through to a pcb::state(raw_u64) miss → ESRCH.  pid_i32 < 0 was
+    // already rejected by the combined EINVAL gate above, so the cast
+    // back to u64 is non-negative.
+    #[allow(clippy::cast_sign_loss)]
+    let pid_u = pid_i32 as u64;
+    if pid_i32 != 0 && pcb::state(pid_u).is_none() {
         return linux_err(errno::ESRCH);
     }
-    let target_pid = if pid == 0 { caller_pid() } else { Some(pid) };
+    let target_pid = if pid_i32 == 0 { caller_pid() } else { Some(pid_u) };
     if let Some(tp) = target_pid {
         let _ = pcb::set_sched_policy(tp, policy);
         let _ = pcb::set_sched_priority(tp, sched_prio);
@@ -17169,10 +17182,20 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     const LINUX_PAGE_SIZE: u64 = 4096;
     const SCHED_ATTR_SIZE_VER0: u64 = 48;
     let attr_ptr = args.arg1;
-    let size = args.arg2;
+    // Linux declares `unsigned int size, unsigned int flags`; the
+    // x86_64 ABI truncates args.arg2 / args.arg3 to 32 bits before the
+    // body runs.  Pre-batch we held both as raw u64 and matched
+    // against them, so probes like size=0x1_0000_0030 fired the
+    // `> PAGE_SIZE` EINVAL gate where Linux's truncated size=0x30
+    // passes; and flags=0x1_0000_0000 fired the `flags != 0` gate
+    // where Linux's truncated flags=0 lets the call through.
+    #[allow(clippy::cast_possible_truncation)]
+    let size = u64::from(args.arg2 as u32);
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid_i32 = args.arg0 as i32;
-    if args.arg3 != 0
+    if flags != 0
         || attr_ptr == 0
         || pid_i32 < 0
         || size > LINUX_PAGE_SIZE
@@ -17185,15 +17208,18 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Resolve target pid: 0 means the caller; non-zero must reference
-    // a live process.
-    let pid = args.arg0;
-    let target_pid = if pid == 0 {
+    // a live process.  Use truncated pid_i32 so pid=0x1_0000_0000
+    // routes to the caller path instead of a pcb::state(raw_u64) miss
+    // → ESRCH.  pid_i32 < 0 already rejected by the gate above.
+    #[allow(clippy::cast_sign_loss)]
+    let pid_u = pid_i32 as u64;
+    let target_pid = if pid_i32 == 0 {
         caller_pid()
     } else {
-        if pcb::state(pid).is_none() {
+        if pcb::state(pid_u).is_none() {
             return linux_err(errno::ESRCH);
         }
-        Some(pid)
+        Some(pid_u)
     };
     let policy: u32 = target_pid
         .and_then(pcb::get_sched_policy)
@@ -41555,6 +41581,123 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Batch 292 int-truncation probes.  Linux declares
+        //   long sys_sched_setattr(pid_t pid,
+        //                          struct sched_attr __user *attr,
+        //                          unsigned int flags);
+        //   long sys_sched_getattr(pid_t pid,
+        //                          struct sched_attr __user *attr,
+        //                          unsigned int size,
+        //                          unsigned int flags);
+        // The x86_64 ABI truncates each arg to its declared type
+        // before the body runs.  Pre-batch we held args as raw u64;
+        // these probes prove the cast-at-entry takes effect.
+
+        // Probe A — sched_setattr flags truncates to 0.  Pre-batch
+        // raw u64 != 0 → EINVAL.  Linux: post-truncation flags == 0,
+        // passes to the body; v0 SCHED_OTHER buffer succeeds (== 0).
+        let mut sa_flags_attr = [0u8; 48];
+        sa_flags_attr[0..4].copy_from_slice(&48u32.to_le_bytes());
+        let sa_flags_ptr = sa_flags_attr.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sa_flags_ptr,
+            arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr flags truncates to 0 not ok(0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe B — sched_setattr pid truncates to 0.  Pre-batch the
+        // <0 gate accepted pid_i32=0, but the resolution branch used
+        // raw args.arg0 (0x1_0000_0000) and ESRCH'd on the lookup.
+        // Linux: pid_i32=0 → caller path → succeeds.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: sa_flags_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr pid truncates to 0 not ok(0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe C — sched_getattr flags truncates to 0.  Pre-batch
+        // raw u64 != 0 → EINVAL.  Linux: 0 after truncation, passes.
+        let mut sga_trunc_buf = [0u8; 48];
+        let sga_trunc_ptr = sga_trunc_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sga_trunc_ptr,
+            arg2: 48,
+            arg3: 0x1_0000_0000,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr flags truncates to 0 not ok(0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe D — sched_getattr size truncates to 48.  Pre-batch
+        // raw 0x1_0000_0030 > PAGE_SIZE → EINVAL.  Linux's truncated
+        // size = 0x30 = 48 passes both gates and writes a v0 attr.
+        let mut sga_size_buf = [0u8; 48];
+        let sga_size_ptr = sga_size_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sga_size_ptr,
+            arg2: 0x1_0000_0030,
+            arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr size truncates to 48 not ok(0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // attr.size field should reflect the truncated u32 size, not
+        // the raw u64 (Linux writes user_size = (unsigned int)size).
+        let trunc_size = u32::from_le_bytes([
+            sga_size_buf[0], sga_size_buf[1], sga_size_buf[2], sga_size_buf[3],
+        ]);
+        if trunc_size != 0x30 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr size truncates attr.size {} (expected 0x30)",
+                trunc_size,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe E — sched_getattr pid truncates to 0.  Pre-batch the
+        // <0 gate passed (pid_i32=0), then args.arg0 raw != 0 →
+        // pcb::state(0x1_0000_0000)=None → ESRCH.  Linux: caller path.
+        let mut sga_pid_buf = [0u8; 48];
+        let sga_pid_ptr = sga_pid_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: sga_pid_ptr,
+            arg2: 48,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr pid truncates to 0 not ok(0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_{{set,get}}attr pid_t/uint truncation: OK"
+        );
 
         // landlock_create_ruleset version-query -> 0 (no landlock).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };

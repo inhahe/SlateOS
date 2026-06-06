@@ -21035,4 +21035,108 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
 
 
+## 270. (batch 241) syscall/linux: fanotify_mark — port Linux's mask-high
+##      gate, ADD/REMOVE-needs-mask rule, and FLUSH-restricted-flags
+##      rule from fs/notify/fanotify/fanotify_user.c::do_fanotify_mark.
+##
+##      Pre-batch-241 divergences from Linux:
+##
+##      a) mask high 32 bits were never inspected.  Linux's FIRST gate
+##         in do_fanotify_mark is `if (mask & ((__u64)0xffffffff <<
+##         32)) return -EINVAL;` — reserves the high half of the u64
+##         mask for future events.  A probe handing in `mask =
+##         FAN_FUTURE_EVENT << 32` to detect kernel support for a
+##         not-yet-defined event would have bypassed validation
+##         entirely and seen ENOSYS (suggesting the syscall doesn't
+##         exist) instead of EINVAL (suggesting "syscall exists, this
+##         event doesn't").
+##
+##      b) FAN_MARK_ADD and FAN_MARK_REMOVE were accepted with
+##         mask==0.  Linux's per-op switch requires non-zero mask:
+##         there's nothing to add or remove from an inode/mount/fs
+##         mark when the event set is empty.  Pre-batch a call like
+##         `fanotify_mark(fd, FAN_MARK_ADD, 0, AT_FDCWD, "/tmp")`
+##         silently advanced to the terminal ENOSYS instead of being
+##         rejected upfront.
+##
+##      c) FAN_MARK_FLUSH was accepted with any other valid flag bit
+##         (DONT_FOLLOW, ONLYDIR, IGNORE, IGNORED_MASK, etc.).  Linux
+##         restricts FLUSH to TYPE_BITS only: `if (flags &
+##         ~(FANOTIFY_MARK_TYPE_BITS | FAN_MARK_FLUSH)) return
+##         -EINVAL;`.  FLUSH clears the entire mark group, so the
+##         per-mark modifier bits are meaningless.  Pre-batch a call
+##         like `fanotify_mark(fd, FAN_MARK_FLUSH | FAN_MARK_ONLYDIR,
+##         ...)` advanced to ENOSYS instead of EINVAL.
+##
+##      Fix:
+##      - Added mask-high-32-bits gate as the FIRST check in
+##        sys_fanotify_mark (Gate 1).
+##      - Reordered subsequent gates to match Linux: flag-mask (Gate
+##        2), then op-switch (Gate 3) with ADD/REMOVE-mask-nonzero and
+##        FLUSH-restricted-flags arms, then the type/EVICTABLE/IGNORE
+##        cross-gates (4-7) preserved from prior batches.
+##      - Added `FANOTIFY_MARK_TYPE_BITS` named constant for clarity
+##        and used it in both the FLUSH gate and the type-exclusivity
+##        gate.
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - (flags=ADD, mask=0x1)             -> ENOSYS  (was ENOSYS;
+##                                                       updated from
+##                                                       mask=0 since
+##                                                       mask=0 now
+##                                                       EINVALs).
+##      - (flags=ADD, mask=0)               -> EINVAL  (new ADD-needs-
+##                                                       mask gate).
+##      - (flags=REMOVE, mask=0)            -> EINVAL  (new REMOVE-
+##                                                       needs-mask
+##                                                       gate).
+##      - (flags=ADD, mask=0x1_0000_0000)   -> EINVAL  (new mask-high-
+##                                                       bits gate).
+##      - (flags=FLUSH|MOUNT, mask=0)       -> ENOSYS  (TYPE_BITS are
+##                                                       permitted
+##                                                       with FLUSH).
+##      - (flags=FLUSH|FILESYSTEM, mask=0)  -> ENOSYS  (FILESYSTEM
+##                                                       also OK).
+##      - (flags=FLUSH|DONT_FOLLOW, mask=0) -> EINVAL  (new FLUSH-
+##                                                       restricted
+##                                                       gate;
+##                                                       pre-batch
+##                                                       ENOSYS).
+##      - (flags=FLUSH|ONLYDIR, mask=0)     -> EINVAL  (FLUSH-
+##                                                       restricted).
+##      - (flags=FLUSH|IGNORE, mask=0)      -> EINVAL  (FLUSH-
+##                                                       restricted).
+##        Marker: "fanotify_mark mask-high > flag-mask > op-switch
+##        (ADD/REMOVE needs mask, FLUSH restricted) gate order: OK".
+##
+##      Existing tests preserved (mask argument bumped to 0x1 where
+##      previously 0 to keep them on the ENOSYS / type-cross paths
+##      now that mask==0 itself is a gate):
+##      - flags=0                       -> EINVAL  (no op bit).
+##      - bad flag bit 0x800            -> EINVAL.
+##      - ADD|REMOVE                    -> EINVAL  (op exclusivity).
+##      - ADD|FLUSH                     -> EINVAL  (op exclusivity).
+##      - ADD|MOUNT|FILESYSTEM          -> EINVAL  (type exclusivity).
+##      - ADD|MOUNT|EVICTABLE           -> EINVAL  (EVICTABLE inode-
+##                                                  only).
+##      - ADD|IGNORE|IGNORED_MASK       -> EINVAL  (mutual exclusion).
+##      - ADD|IGNORED_SURV_MODIFY       -> EINVAL  (requires IGNORE or
+##                                                  IGNORED_MASK).
+##      - ADD|IGNORED_MASK|SURV_MODIFY  -> ENOSYS  (terminal).
+##      - FLUSH                         -> ENOSYS  (terminal).
+##
+##      Known limitations:
+##      - The fanotify dispatcher itself is still ENOSYS: we validate
+##        flags + mask, validate the optional pathname pointer, then
+##        return ENOSYS.  Real mark insertion/removal/flush is not
+##        implemented — that requires the fsnotify mark group plumbing
+##        which is a separate, large piece of work.
+##      - The fanotify_fd argument is not validated against
+##        validate_linux_fd; a real implementation would EBADF on
+##        bogus fds before any of the gates above fire.  Documented
+##        for whoever picks up real fanotify support later.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s).
+
+
 

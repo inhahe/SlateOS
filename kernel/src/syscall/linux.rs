@@ -10939,6 +10939,7 @@ fn sys_fanotify_init(args: &SyscallArgs) -> SyscallResult {
 fn sys_fanotify_mark(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg1 as u32;
+    let mask = args.arg2;
 
     const FAN_MARK_ADD: u32 = 0x1;
     const FAN_MARK_REMOVE: u32 = 0x2;
@@ -10956,39 +10957,73 @@ fn sys_fanotify_mark(args: &SyscallArgs) -> SyscallResult {
         | FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORED_SURV_MODIFY
         | FAN_MARK_FLUSH | FAN_MARK_FILESYSTEM | FAN_MARK_EVICTABLE
         | FAN_MARK_IGNORE;
+    const FANOTIFY_MARK_TYPE_BITS: u32 = FAN_MARK_MOUNT | FAN_MARK_FILESYSTEM;
 
+    // Gate 1 (Linux's first gate in do_fanotify_mark): reject any
+    // mask with reserved high 32 bits set.  Linux: `if (mask &
+    // ((__u64)0xffffffff << 32)) return -EINVAL;`.  Pre-batch-241 we
+    // never inspected `mask` at all — a probe handing in a 64-bit
+    // mask with high bits set (e.g. trying to detect future event
+    // types via `FAN_FUTURE_EVENT << 32`) would have bypassed this
+    // gate and surfaced ENOSYS instead of EINVAL.
+    if mask & 0xFFFF_FFFF_0000_0000 != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 2: flag-mask validation.
     if flags & !FANOTIFY_MARK_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Exactly one operation bit (ADD | REMOVE | FLUSH).
+    // Gate 3 (Linux's op switch): exactly one operation bit must be
+    // set, AND the per-op constraints must hold.  Linux's switch:
+    //   case ADD/REMOVE: if (!mask) return -EINVAL;
+    //   case FLUSH:      if (flags & ~(TYPE_BITS|FLUSH)) return -EINVAL;
+    //   default:         return -EINVAL;  // no op or multiple ops
     const OP_BITS: u32 = FAN_MARK_ADD | FAN_MARK_REMOVE | FAN_MARK_FLUSH;
     let op = flags & OP_BITS;
     if op == 0 || op.count_ones() != 1 {
         return linux_err(errno::EINVAL);
     }
-    // At most one mark-type bit (MOUNT | FILESYSTEM).
-    const TYPE_BITS: u32 = FAN_MARK_MOUNT | FAN_MARK_FILESYSTEM;
-    if flags & TYPE_BITS == TYPE_BITS {
+    if op == FAN_MARK_ADD || op == FAN_MARK_REMOVE {
+        // Pre-batch-241 we accepted (flags=FAN_MARK_ADD, mask=0) and
+        // proceeded to ENOSYS; Linux explicitly requires a non-zero
+        // mask for ADD/REMOVE because there's nothing to add or
+        // remove from an inode/mount/fs mark when the event set is
+        // empty.
+        if mask == 0 {
+            return linux_err(errno::EINVAL);
+        }
+    } else {
+        // op == FAN_MARK_FLUSH: only TYPE_BITS may be set alongside.
+        // Pre-batch-241 we accepted (flags=FLUSH|DONT_FOLLOW) and
+        // proceeded to ENOSYS; Linux rejects because DONT_FOLLOW,
+        // ONLYDIR, IGNORE, etc. are meaningless for FLUSH which
+        // clears the entire mark group.
+        if flags & !(FANOTIFY_MARK_TYPE_BITS | FAN_MARK_FLUSH) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+    }
+    // Gate 4: at most one mark-type bit (MOUNT | FILESYSTEM).
+    if flags & FANOTIFY_MARK_TYPE_BITS == FANOTIFY_MARK_TYPE_BITS {
         return linux_err(errno::EINVAL);
     }
-    // EVICTABLE requires inode-type mark (no MOUNT, no FILESYSTEM).
-    if flags & FAN_MARK_EVICTABLE != 0 && flags & TYPE_BITS != 0 {
+    // Gate 5: EVICTABLE requires inode-type mark (no MOUNT, no
+    // FILESYSTEM).
+    if flags & FAN_MARK_EVICTABLE != 0 && flags & FANOTIFY_MARK_TYPE_BITS != 0 {
         return linux_err(errno::EINVAL);
     }
-    // IGNORE and IGNORED_MASK are mutually exclusive (Linux 6.0+
-    // replaced IGNORED_MASK with IGNORE for new code; setting both
-    // is an explicit error).
+    // Gate 6: IGNORE and IGNORED_MASK are mutually exclusive (Linux
+    // 6.0+ replaced IGNORED_MASK with IGNORE for new code; setting
+    // both is an explicit error).
     if flags & FAN_MARK_IGNORE != 0 && flags & FAN_MARK_IGNORED_MASK != 0 {
         return linux_err(errno::EINVAL);
     }
-    // IGNORED_SURV_MODIFY requires one of IGNORED_MASK or IGNORE.
+    // Gate 7: IGNORED_SURV_MODIFY requires one of IGNORED_MASK or
+    // IGNORE.
     if flags & FAN_MARK_IGNORED_SURV_MODIFY != 0
         && flags & (FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORE) == 0
     {
         return linux_err(errno::EINVAL);
     }
-    // FLUSH does not take a path or mask — Linux ignores mask but
-    // we still validate the pathname for EFAULT visibility below.
 
     // Validate pathname if non-NULL so EFAULT surfaces correctly.
     if args.arg4 != 0 {
@@ -34135,16 +34170,51 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fanotify_mark no-op not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // fanotify_mark with FAN_MARK_ADD (1) only -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1, arg2: 0, arg3: 0,
+        // Batch 241: fanotify_mark with FAN_MARK_ADD (1) and a
+        // non-zero mask -> ENOSYS.  Pre-batch-241 this used mask=0
+        // and returned ENOSYS too — Linux returns EINVAL for
+        // mask==0 on ADD/REMOVE, so the test had to be updated to
+        // exercise the success path (i.e. "now reaches the terminal
+        // ENOSYS through the new mask>0 gate").
+        let a = SyscallArgs { arg0: 0, arg1: 0x1, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_mark ADD not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark ADD+mask not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 241: fanotify_mark with FAN_MARK_ADD and mask==0 ->
+        // EINVAL (Linux's per-op switch requires non-zero mask for
+        // ADD/REMOVE).  This test pins the new gate.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark ADD+mask=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 241: fanotify_mark with FAN_MARK_REMOVE and mask==0
+        // -> EINVAL (same rule, REMOVE arm).
+        let a = SyscallArgs { arg0: 0, arg1: 0x2, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark REMOVE+mask=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 241: mask high 32 bits set -> EINVAL.  Linux's first
+        // gate in do_fanotify_mark: `if (mask & ((__u64)0xffffffff
+        // << 32))`.  Pre-batch-241 we never inspected mask, so a
+        // 64-bit mask with high bits surfaced ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1, arg2: 0x1_0000_0000, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark mask high bits not EINVAL");
             return Err(KernelError::InternalError);
         }
         // fanotify_mark with unknown flag bit (0x800) -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x801, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x801, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::EINVAL) {
@@ -34152,7 +34222,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // fanotify_mark with ADD | REMOVE -> EINVAL (op exclusivity).
-        let a = SyscallArgs { arg0: 0, arg1: 0x3, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x3, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::EINVAL) {
@@ -34160,7 +34230,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // fanotify_mark with ADD | FLUSH -> EINVAL (op exclusivity).
-        let a = SyscallArgs { arg0: 0, arg1: 0x81, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x81, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::EINVAL) {
@@ -34168,7 +34238,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // fanotify_mark with ADD | MOUNT | FILESYSTEM -> EINVAL (type exclusivity).
-        let a = SyscallArgs { arg0: 0, arg1: 0x111, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x111, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::EINVAL) {
@@ -34176,7 +34246,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // fanotify_mark with ADD | MOUNT | EVICTABLE -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x211, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x211, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::EINVAL) {
@@ -34184,7 +34254,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // fanotify_mark with ADD | IGNORE | IGNORED_MASK -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x421, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x421, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::EINVAL) {
@@ -34192,7 +34262,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // fanotify_mark with ADD | IGNORED_SURV_MODIFY (no IGNORED_MASK/IGNORE) -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x41, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x41, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::EINVAL) {
@@ -34200,7 +34270,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // fanotify_mark with ADD | IGNORED_MASK | IGNORED_SURV_MODIFY -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: 0x61, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x61, arg2: 0x1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_MARK, &a).value
             != -i64::from(errno::ENOSYS) {
@@ -34215,7 +34285,55 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fanotify_mark FLUSH not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   fanotify_mark flag validation: OK");
+        // Batch 241: fanotify_mark with FLUSH | MOUNT -> ENOSYS
+        // (Linux allows TYPE_BITS with FLUSH to scope the flush to
+        // mount marks).
+        let a = SyscallArgs { arg0: 0, arg1: 0x90, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark FLUSH|MOUNT not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 241: fanotify_mark with FLUSH | FILESYSTEM -> ENOSYS
+        // (FILESYSTEM also valid with FLUSH).
+        let a = SyscallArgs { arg0: 0, arg1: 0x180, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark FLUSH|FILESYSTEM not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 241: fanotify_mark with FLUSH | DONT_FOLLOW -> EINVAL
+        // (FLUSH does not accept non-TYPE flags; Linux: `if (flags
+        // & ~(TYPE_BITS|FLUSH)) return -EINVAL;`).  Pre-batch-241 we
+        // returned ENOSYS here.
+        let a = SyscallArgs { arg0: 0, arg1: 0x84, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark FLUSH|DONT_FOLLOW not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 241: fanotify_mark with FLUSH | ONLYDIR -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x88, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark FLUSH|ONLYDIR not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 241: fanotify_mark with FLUSH | IGNORE -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x480, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_MARK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_mark FLUSH|IGNORE not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   fanotify_mark mask-high > flag-mask > op-switch (ADD/REMOVE needs mask, FLUSH restricted) gate order: OK"
+        );
     }
 
     // sendfile / splice / tee / vmsplice / copy_file_range / AIO /

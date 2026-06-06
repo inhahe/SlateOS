@@ -1,4 +1,11 @@
 
+## SESSION PREFERENCE (user, 2026-06-06): autonomous-loop pacing
+## At the end of each `<<autonomous-loop-dynamic>>` tick, call
+## ScheduleWakeup with `delaySeconds = 60` (the runtime's hard
+## minimum — the user asked for "0s" but the runtime clamps to
+## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
+## pad above 60 unless something specifically requires waiting.
+
 The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
 ## FLAKY TEST (noticed+FIXED 2026-06-04): ktrace::self_test "Read back"

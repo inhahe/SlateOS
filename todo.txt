@@ -22502,3 +22502,62 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      ppoll (entry 287).
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+## 289. syscall/linux: epoll_pwait2 — timespec value validation
+##      (batch 260)
+##
+##      Pre-batch divergence from Linux fs/eventpoll.c
+##      `SYSCALL_DEFINE6(epoll_pwait2)` + `do_epoll_pwait` +
+##      `do_epoll_wait`:
+##
+##      Linux's gate 1 is two-step:
+##        1a. get_timespec64(&ts, timeout) — copy_from_user 16 bytes;
+##            EFAULT on bad pointer.
+##        1b. poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec) —
+##            EINVAL when tv_sec<0 or tv_nsec is not in [0, 1e9).
+##
+##      We were only doing 1a (and even then merely validating the
+##      pointer was readable, never copying or inspecting the
+##      values).  A probe with `tsp = { -1, 0 }` or `{ 0, 1e9 }`
+##      silently passed our gate and ultimately fell through to the
+##      terminal EBADF, where Linux returns EINVAL.
+##
+##      Fix:
+##
+##        * In sys_epoll_pwait2 at kernel/src/syscall/linux.rs:
+##          - validate_user_read(arg3, 16) (EFAULT) [pre-existing]
+##          - copy_from_user(arg3, ts, 16) [NEW]
+##          - parse tv_sec / tv_nsec
+##          - if tv_sec<0 || !(0..1e9).contains(&tv_nsec) -> EINVAL [NEW]
+##
+##      Self-tests added/updated:
+##
+##        Pre-existing epoll_pwait2 tests preserved unchanged:
+##          - NULL umask + bogus sigsetsize -> EBADF.
+##          - non-NULL umask + sigsetsize=0 -> EINVAL.
+##          - 0 maxevents -> EINVAL.
+##          - maxevents > EP_MAX_EVENTS -> EINVAL.
+##
+##        New discriminators (added at the end of the epoll test
+##        block):
+##          A. tsp = { -1, 0 }, sigmask=NULL, maxevents=1 -> Linux
+##             EINVAL (gate 1b negative tv_sec); pre-batch EBADF.
+##          B. tsp = { 0, 1e9 }, sigmask=NULL, maxevents=1 -> Linux
+##             EINVAL (gate 1b nsec out of range); pre-batch EBADF.
+##          C. tsp = { 0, 0 }, sigmask=NULL, maxevents=1 -> EBADF
+##             (canonical "poll now"; confirms gate 1 accepts the
+##             zero timespec and falls through to fdget).
+##
+##      Marker:
+##        "[syscall/linux]   epoll_pwait2 timespec value gating: OK"
+##
+##      Existing tests preserved: all epoll_wait / epoll_pwait /
+##      epoll_pwait2 sigmask/maxevents/events gating, plus the
+##      boundary maxevents = EP_MAX_EVENTS tests.
+##
+##      Known limitations: epoll_pwait2 still terminates as EBADF
+##      because no real epfd backend exists.  The new gate-1
+##      EINVAL path therefore only fires for malformed timespecs;
+##      well-formed timespecs always exit EBADF.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

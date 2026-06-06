@@ -14978,18 +14978,47 @@ fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
     // Mirror Linux's `SYSCALL_DEFINE6(epoll_pwait2, ...)` gate order:
     //   if (timeout) {
     //       if (get_timespec64(&ts, timeout)) return -EFAULT;
+    //       if (poll_select_set_timeout(to, ts.tv_sec, ts.tv_nsec))
+    //           return -EINVAL;      // tv_sec<0 or tv_nsec out of range
     //   }
-    //   do_epoll_pwait -> set_user_sigmask (same as epoll_pwait above) ->
-    //   do_epoll_wait (maxevents range, then events ptr).
+    //   do_epoll_pwait -> set_user_sigmask (NULL skips, else size+read) ->
+    //   do_epoll_wait (maxevents range, then events ptr, then fdget).
     //
-    // Same sigsetsize fix as epoll_pwait: only validated when umask is
-    // non-NULL.
+    // Pre-batch (256/258 era) we only validated the timespec was
+    // readable; we never parsed its contents.  A probe with
+    // `tsp = { tv_sec=-1, tv_nsec=0 }` or `{ 0, 1_000_000_000 }`
+    // passed silently and ultimately hit EBADF instead of Linux's
+    // EINVAL.  Now we parse and validate.
+    //
+    // Discriminators:
+    //   * (tsp={-1,0}, sigmask=NULL, maxevents=1) -> Linux EINVAL
+    //     (gate 1 negative tv_sec); pre-batch EBADF.
+    //   * (tsp={0, 1e9}, sigmask=NULL, maxevents=1) -> Linux EINVAL
+    //     (gate 1 nsec out of range); pre-batch EBADF.
     if args.arg3 != 0 {
-        // timespec 16 bytes.
+        // Gate 1a: get_timespec64 -> EFAULT.
         if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
             return linux_err(linux_errno_for(e));
         }
+        let mut ts = [0u8; 16];
+        // SAFETY: validate_user_read above covers 16 bytes at args.arg3.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg3, ts.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        // Gate 1b: poll_select_set_timeout -> EINVAL for invalid values.
+        let tv_sec = i64::from_ne_bytes([
+            ts[0], ts[1], ts[2], ts[3], ts[4], ts[5], ts[6], ts[7],
+        ]);
+        let tv_nsec = i64::from_ne_bytes([
+            ts[8], ts[9], ts[10], ts[11], ts[12], ts[13], ts[14], ts[15],
+        ]);
+        if tv_sec < 0 || !(0..1_000_000_000).contains(&tv_nsec) {
+            return linux_err(errno::EINVAL);
+        }
     }
+    // Gate 2: set_user_sigmask: NULL skips entirely (sigsetsize ignored).
     if args.arg4 != 0 {
         if args.arg5 != 8 {
             return linux_err(errno::EINVAL);
@@ -14998,6 +15027,7 @@ fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
+    // Gate 3: do_epoll_wait -> maxevents range -> events ptr -> fdget.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let maxevents = args.arg2 as i32;
     if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
@@ -38976,6 +39006,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         serial_println!(
             "[syscall/linux]   epoll_pwait/pwait2 sigsetsize-iff-umask gating: OK"
+        );
+        // epoll_pwait2 discriminator A: tsp = { tv_sec=-1, tv_nsec=0 }
+        // with valid sigmask=NULL and maxevents=1 -> Linux EINVAL via
+        // gate 1b (poll_select_set_timeout); pre-batch only validated
+        // the timespec was readable, then fell through to gate 3's
+        // terminal EBADF.
+        {
+            let ts: [i64; 2] = [-1, 0];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 1,
+                arg3: ts_ptr,
+                arg4: 0,
+                arg5: 0,
+            };
+            core::hint::black_box(&ts);
+            if dispatch_linux(nr::EPOLL_PWAIT2, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: epoll_pwait2 tsp neg tv_sec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // epoll_pwait2 discriminator B: tsp = { 0, 1_000_000_000 }
+        // (tv_nsec out of range) -> Linux EINVAL; pre-batch EBADF.
+        {
+            let ts: [i64; 2] = [0, 1_000_000_000];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 1,
+                arg3: ts_ptr,
+                arg4: 0,
+                arg5: 0,
+            };
+            core::hint::black_box(&ts);
+            if dispatch_linux(nr::EPOLL_PWAIT2, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: epoll_pwait2 tsp bad tv_nsec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // epoll_pwait2 discriminator C: tsp = { 0, 0 } (valid zero
+        // timeout) with maxevents=1, sigmask=NULL -> EBADF (timespec
+        // gate accepts, then falls through to terminal EBADF).
+        // Confirms the new gate-1 parsing accepts the canonical
+        // "poll-now" timespec rather than rejecting all timespecs.
+        {
+            let ts: [i64; 2] = [0, 0];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 1,
+                arg3: ts_ptr,
+                arg4: 0,
+                arg5: 0,
+            };
+            core::hint::black_box(&ts);
+            if dispatch_linux(nr::EPOLL_PWAIT2, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: epoll_pwait2 tsp {{0,0}} not EBADF"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   epoll_pwait2 timespec value gating: OK"
         );
     }
 

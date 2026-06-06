@@ -23510,58 +23510,121 @@ fn synth_inode(dir_path: &str, name: &str) -> u64 {
 /// fall back to wait4 when waitid returns ECHILD on a process with no
 /// children.
 fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
+    // Linux signature: `SYSCALL_DEFINE5(waitid, int, which, pid_t,
+    // upid, struct siginfo __user *, infop, int, options, struct
+    // rusage __user *, ru)`.  `which`, `upid`, and `options` are all
+    // int-class, so the x86_64 ABI truncates the registers to their
+    // low 32 bits before the body runs.  Pre-batch (360) we held
+    // `id` as raw u64, so the upid<=0 / upid<0 gates Linux applies
+    // per `which` couldn't fire and a program calling
+    // waitid(P_PID, 0, ...) got ECHILD where Linux returns EINVAL.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let idtype = args.arg0 as i32;
-    let id = args.arg1;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let upid = args.arg1 as i32;
     let infop = args.arg2;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let options = args.arg3 as i32;
     let rusage = args.arg4;
 
-    if !(0..=3).contains(&idtype) {
-        return linux_err(errno::EINVAL);
-    }
-    // Mask of recognized options.
-    const VALID: i32 = 1 | 2 | 4 | 8 | 0x100_0000;
-    if options & !VALID != 0 {
+    // Gate order from kernel/exit.c::SYSCALL_DEFINE5(waitid, ...):
+    //   1. options unknown-bit gate (incl. __WNOTHREAD/__WCLONE/__WALL
+    //      as VALID — see below).
+    //   2. options must include at least one of WEXITED/WSTOPPED/
+    //      WCONTINUED.
+    //   3. which switch — invalid → EINVAL.  Per-arm upid gate runs
+    //      inside the switch.
+
+    // Recognized options.  Pre-batch this excluded __WNOTHREAD
+    // (0x2000_0000), __WALL (0x4000_0000), and __WCLONE (0x8000_0000),
+    // so glibc's internal SIGCHLD wrappers (which set __WALL on
+    // every waitid) saw spurious EINVAL.  Linux accepts these
+    // flags silently — they're meaningful for thread-group filtering
+    // we don't model, but rejecting them changes observable userspace
+    // behavior in a way unrelated to "is this a valid waitid?".
+    const WNOHANG:      i32 = 1;
+    const WSTOPPED:     i32 = 2;
+    const WEXITED:      i32 = 4;
+    const WCONTINUED:   i32 = 8;
+    const WNOWAIT:      i32 = 0x0100_0000;
+    const WNOTHREAD:    i32 = 0x2000_0000;
+    const WALL:         i32 = 0x4000_0000;
+    // __WCLONE is bit 31; as i32 that's the sign bit.  Build the
+    // mask via wrapping_neg of the magnitude so we don't trip
+    // arithmetic_side_effects on the i32 literal.
+    const WCLONE:       i32 = i32::MIN; // 0x8000_0000 reinterpreted
+    let valid: i32 = WNOHANG | WSTOPPED | WEXITED | WCONTINUED
+        | WNOWAIT | WNOTHREAD | WALL | WCLONE;
+    if options & !valid != 0 {
         return linux_err(errno::EINVAL);
     }
     // At least one event class must be requested.
-    if options & (4 | 2 | 8) == 0 {
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
         return linux_err(errno::EINVAL);
     }
-    // siginfo_t is 128 bytes on x86_64.
+
+    // `which` switch (P_ALL=0, P_PID=1, P_PGID=2, P_PIDFD=3).
+    // Linux applies a per-arm gate on `upid`:
+    //   P_ALL:    no upid gate.
+    //   P_PID:    upid <= 0 → EINVAL.
+    //   P_PGID:   upid <  0 → EINVAL (pgid==0 means caller's pgrp).
+    //   P_PIDFD:  upid <  0 → EINVAL (pidfd is an fd, so negative
+    //             is invalid before the fd-table lookup).
+    //   default:  EINVAL.
+    match idtype {
+        0 => {} // P_ALL: no upid constraint.
+        1 => {
+            if upid <= 0 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        2 => {
+            if upid < 0 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        3 => {
+            if upid < 0 {
+                return linux_err(errno::EINVAL);
+            }
+            // P_PIDFD: `id` truncates to a non-negative int that
+            // must name a real pidfd entry in our handle table.
+            // Linux's pidfd_get_pid() returns -EBADF for bad fds;
+            // match that — without it we silently accept any value
+            // and roll through to the ECHILD/WNOHANG response,
+            // which is wrong for callers using pidfd-based reapers
+            // (posix_spawn, glibc's posix_spawn_pidfd).
+            if let Err(r) = validate_linux_fd(upid) {
+                return r;
+            }
+            let entry = match lookup_caller_fd(upid) {
+                Ok(e) => e,
+                Err(r) => return r,
+            };
+            if entry.kind != HandleKind::PidFd {
+                return linux_err(errno::EBADF);
+            }
+        }
+        _ => return linux_err(errno::EINVAL),
+    }
+
+    // User-pointer validation runs after the cheap gates so a
+    // user with a bad pointer and bad options sees EINVAL (the
+    // Linux observable) rather than EFAULT.  siginfo_t is 128
+    // bytes on x86_64; struct rusage is 144 bytes.
     if infop != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(infop, 128) {
             return linux_err(linux_errno_for(e));
         }
     }
-    // struct rusage is 144 bytes.
     if rusage != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(rusage, 144) {
             return linux_err(linux_errno_for(e));
         }
     }
-    // P_PIDFD (idtype=3): `id` is a pidfd; Linux's waitid path calls
-    // pidfd_get_pid() and returns -EBADF if it isn't a pidfd or the fd
-    // doesn't exist.  Match that — without this check we'd silently
-    // accept any u64 in `id` as a "pidfd" and roll through to the
-    // ECHILD/WNOHANG response, which is wrong for callers using pidfd-
-    // based reapers (posix_spawn, glibc's posix_spawn_pidfd).
-    if idtype == 3 {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let pidfd = id as i32;
-        if let Err(r) = validate_linux_fd(pidfd) {
-            return r;
-        }
-        let entry = match lookup_caller_fd(pidfd) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
-        if entry.kind != HandleKind::PidFd {
-            return linux_err(errno::EBADF);
-        }
-    }
+
     // WNOHANG: report "no state change" with 0 (Linux convention).
-    if options & 1 != 0 {
+    if options & WNOHANG != 0 {
         return SyscallResult::ok(0);
     }
     // Blocking case: no children eligible.
@@ -53067,6 +53130,121 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   waitid P_PIDFD validation: OK");
+
+        // Batch 361: waitid per-`which` upid gates + options mask.
+        //
+        // Linux's kernel/exit.c::SYSCALL_DEFINE5(waitid,...) gates
+        // upid per `which`:
+        //   P_PID (1):    upid <= 0 → EINVAL
+        //   P_PGID (2):   upid <  0 → EINVAL
+        //   P_PIDFD (3):  upid <  0 → EINVAL (before the fd lookup)
+        // Pre-batch (360) we held `id` as raw u64 and had no per-arm
+        // upid gate, so:
+        //   - waitid(P_PID, 0, _, WEXITED, _) → ECHILD (fell through
+        //     to blocking path).  Linux: EINVAL.
+        //   - waitid(P_PGID, -1, _, WEXITED, _) → ECHILD.  Linux:
+        //     EINVAL.
+        //   - waitid(P_PIDFD, -1, ...) → EBADF via the fd table.
+        //     Linux: EINVAL via the upid<0 gate (which runs first).
+        //
+        // Linux also accepts __WALL (0x4000_0000) / __WCLONE
+        // (0x8000_0000) / __WNOTHREAD (0x2000_0000) in options.
+        // Pre-batch our VALID mask excluded them, so glibc's SIGCHLD
+        // wrappers (which set __WALL on every waitid) saw spurious
+        // EINVAL.
+
+        // (a) P_PID upid==0 → EINVAL (regression probe).
+        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 4,
+            arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAITID, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: waitid(P_PID,0,WEXITED) want EINVAL got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) P_PID upid==-5 (truncated to negative) → EINVAL.
+        #[allow(clippy::cast_sign_loss)]
+        let neg5 = (-5i64) as u64;
+        let a = SyscallArgs { arg0: 1, arg1: neg5, arg2: 0, arg3: 4,
+            arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAITID, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: waitid(P_PID,-5,WEXITED) want EINVAL got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) P_PGID upid==-1 → EINVAL.  (upid==0 for P_PGID is
+        // legal in Linux: it means "caller's pgrp".)
+        #[allow(clippy::cast_sign_loss)]
+        let neg1 = (-1i64) as u64;
+        let a = SyscallArgs { arg0: 2, arg1: neg1, arg2: 0, arg3: 4,
+            arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAITID, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: waitid(P_PGID,-1,WEXITED) want EINVAL got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) P_PIDFD upid==-1 → EINVAL.  Pre-batch this was EBADF
+        // via the fd table; post-batch the upid<0 gate runs first.
+        let a = SyscallArgs { arg0: 3, arg1: neg1, arg2: 0, arg3: 4,
+            arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAITID, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: waitid(P_PIDFD,-1,WEXITED) want EINVAL got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (e) P_ALL with __WALL set in options.  Linux: accepted —
+        // falls through to ECHILD (no children) here.  Pre-batch:
+        // EINVAL (unknown options bit).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0,
+            arg3: 4 | 0x4000_0000, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAITID, &a).value;
+        if v != -i64::from(errno::ECHILD) {
+            serial_println!(
+                "[syscall/linux]   FAIL: waitid(P_ALL,_,WEXITED|__WALL) want ECHILD got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (f) P_ALL with __WCLONE set (bit 31).  Same rationale.
+        // 0x8000_0000 as u64 is u32::MAX+1 ÷ 2; passing it via
+        // arg3 ensures the i32 truncation sees the sign bit.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0,
+            arg3: 4 | 0x8000_0000, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAITID, &a).value;
+        if v != -i64::from(errno::ECHILD) {
+            serial_println!(
+                "[syscall/linux]   FAIL: waitid(P_ALL,_,WEXITED|__WCLONE) want ECHILD got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (g) P_PID upid==1 with WNOHANG | WEXITED → 0.  Positive
+        // control: a legal P_PID call must reach WNOHANG and return
+        // 0 (since there's no eligible child to reap).
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 0,
+            arg3: 1 | 4, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAITID, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: waitid(P_PID,1,WNOHANG|WEXITED) want 0 got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   waitid per-which upid gates + options mask: OK"
+        );
 
         // preadv negative offset -> EINVAL.
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: u64::MAX, arg4: 0, arg5: 0 };

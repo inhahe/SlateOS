@@ -32428,3 +32428,87 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (44.67s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+391. syscall/linux batch 361 — sys_waitid: per-`which`
+     upid gates + widened options mask.  Two structural
+     Linux divergences fixed in one batch (same function,
+     adjacent gates).
+
+     Bug 1 — missing per-`which` upid validation.
+     Linux's kernel/exit.c::SYSCALL_DEFINE5(waitid, ...)
+     applies a per-arm upid gate inside the `which` switch:
+       P_PID:    upid <= 0 → EINVAL
+       P_PGID:   upid <  0 → EINVAL
+       P_PIDFD:  upid <  0 → EINVAL (before the fd lookup)
+     Pre-batch we held `id` as raw u64 and had no per-arm
+     gate, so:
+       - waitid(P_PID, 0, _, WEXITED, _) returned ECHILD
+         (fell through to the blocking path).  Linux: EINVAL.
+         This breaks the common idiom of "did the caller
+         supply a real pid here?" — programs that pass
+         a pidvar that wasn't initialised got ECHILD and
+         thought "no children matched" rather than
+         "your call was malformed".
+       - waitid(P_PIDFD, -1, ...) returned EBADF via the
+         fd lookup.  Linux returns EINVAL because the
+         upid<0 gate runs first.  Same final answer
+         "this call is bad" but wrong errno; tools that
+         distinguish EBADF (bad file descriptor) from
+         EINVAL (bad pid_t) saw the wrong cause.
+
+     Bug 2 — options mask too narrow.
+     Pre-batch VALID = WNOHANG | WSTOPPED | WEXITED |
+     WCONTINUED | WNOWAIT.  Linux additionally accepts
+     __WNOTHREAD (0x2000_0000), __WALL (0x4000_0000), and
+     __WCLONE (0x8000_0000) — they're thread-group filter
+     hints that are no-ops for waitid but valid bits.
+     glibc's internal SIGCHLD wrappers set __WALL on every
+     waitid; those calls saw spurious EINVAL pre-batch.
+
+     Fix: explicit truncation of args.arg0/arg1/arg3 to i32
+     at function entry.  Single per-`which` match
+     statement runs the upid gate inline.  VALID mask
+     widened with WNOTHREAD / WALL / WCLONE (WCLONE as
+     i32::MIN since bit 31 is the sign bit on i32).
+     Pidfd existence check moved inside the P_PIDFD arm so
+     it can't run on a negative upid that should have
+     EINVAL'd.
+
+     Linux gate order preserved overall:
+       1. options unknown bits → EINVAL
+       2. options missing WEXITED|WSTOPPED|WCONTINUED → EINVAL
+       3. which switch (with per-arm upid gate)
+       4. user-pointer validation (siginfo_t, rusage)
+       5. WNOHANG → ok(0), else ECHILD
+     User-pointer validation deliberately runs AFTER the
+     gates so a probe with a bad pointer and bad options
+     sees EINVAL (the Linux observable) rather than EFAULT.
+
+     Probes added (7):
+       (a) waitid(P_PID, 0, _, WEXITED, _) → EINVAL.
+           Primary regression probe for bug 1 P_PID arm.
+       (b) waitid(P_PID, -5, _, WEXITED, _) → EINVAL.
+           Truncation probe — -5 as u64 = 0xFFFF...FFFB; if
+           we held it raw the value > 0 and would have
+           passed the (pre-batch nonexistent) upid gate.
+       (c) waitid(P_PGID, -1, _, WEXITED, _) → EINVAL.
+           Per-arm gate for P_PGID.  upid==0 for P_PGID is
+           still legal (means caller's pgrp).
+       (d) waitid(P_PIDFD, -1, _, WEXITED, _) → EINVAL.
+           Pre-batch this was EBADF; post-batch upid<0
+           wins over the fd table.
+       (e) waitid(P_ALL, _, _, WEXITED|__WALL, _) → ECHILD.
+           Regression probe for bug 2 — __WALL accepted.
+       (f) waitid(P_ALL, _, _, WEXITED|__WCLONE, _) → ECHILD.
+           Same for __WCLONE (the sign-bit case — i32
+           literal would have been awkward).
+       (g) waitid(P_PID, 1, _, WNOHANG|WEXITED, _) → 0.
+           Positive control — a legal P_PID call must reach
+           WNOHANG and return 0 (no eligible child).
+
+     Final boot-time stamp:
+         "[syscall/linux]   waitid per-which upid gates + options mask: OK"
+
+     Build: cargo build -p kernel clean (41.35s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

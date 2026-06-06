@@ -27509,3 +27509,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (39.62s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 26s).
+
+343. sys_unlinkat int truncation — high-half register garbage
+     must be stripped before the flags mask check.
+
+     Divergence:
+       Linux signature: `int unlinkat(int dirfd, const
+       char *pathname, int flags)`.  SYSCALL_DEFINE3 narrows
+       the third parameter to (int) on entry; the mask
+       check `flags & ~AT_REMOVEDIR` runs at 32-bit width.
+
+       Pre-batch we held the mask check at 64-bit width:
+           const AT_REMOVEDIR: u64 = 0x200;
+           const VALID_FLAGS: u64 = AT_REMOVEDIR;
+           if args.arg2 & !VALID_FLAGS != 0 {
+               return EINVAL;
+           }
+       so a caller passing `0x1_0000_0200` (high-half
+       garbage + AT_REMOVEDIR) saw EINVAL where Linux
+       returns ENOENT (after truncation the low half is
+       0x200, mask passes, the call proceeds to the no-
+       such-file gate).  Sixth instance of the same shape
+       after batches 308 (mlockall), 309 (msync), 310
+       (mlock2), 311 (fchmodat), and 312 (fchownat).
+
+     Fix:
+       kernel/src/syscall/linux.rs sys_unlinkat:
+         * Cast args.arg2 to i32 (matching Linux's int
+           flags parameter), then reinterpret as u32 for
+           the mask check.
+         * Convert AT_REMOVEDIR / VALID_FLAGS from u64 to
+           u32.
+
+     Tests (dispatch_linux self-test, after the existing
+     unlinkat ENOENT probe):
+       - (a) unlinkat(0, 0x1000, 0x1_0000_0200) → ENOENT
+             (high|AT_REMOVEDIR; truncates to 0x200, mask
+             passes, validate_user_str succeeds in kernel
+             context, ENOENT terminal).
+       - (b) unlinkat(0, 0x1000, 0x1_0000_0000) → ENOENT
+             (high-half only, low half zero; truncates to
+             0, mask passes, ENOENT terminal).
+       - (c) unlinkat(0, 0, 0x1_0000_0200) → EFAULT
+             (high|AT_REMOVEDIR with NULL path; truncates
+             to 0x200, mask passes, validate_user_str
+             returns InvalidAddress for ptr=0 → EFAULT.
+             Critically locks in the EFAULT-after-mask
+             gate order: pre-batch this returned EINVAL
+             because the 64-bit mask rejected the high bit
+             before the path was examined; post-batch the
+             NULL-path EFAULT gate fires as Linux's path-
+             lookup gate would).
+       - (d) unlinkat(0, 0x1000, 0x1_0000_0010) → EINVAL
+             (high|bad-low 0x10; truncates to 0x10, mask
+             rejects bit outside AT_REMOVEDIR; verifies
+             mask gate still rejects bogus low bits after
+             high half is stripped).
+       Marker: "[syscall/linux]   unlinkat int truncation
+       (high-half ignored): OK".
+
+     Preserved behaviour:
+       - Existing unlinkat(_,path,0x800_0000) → EINVAL
+         probe still passes (huge bogus low bit, no high
+         bits).
+       - Existing unlinkat(_,NULL,0) → EFAULT still passes.
+       - Existing unlinkat(_,0x1000,AT_REMOVEDIR) → ENOENT
+         still passes.
+
+     Known limitations (deferred):
+       - sys_renameat2 (RENAME_NOREPLACE|EXCHANGE|WHITEOUT
+         u64 mask) has the same shape; tracked as a
+         follow-up batch.
+       - sys_linkat (AT_SYMLINK_FOLLOW|AT_EMPTY_PATH u64
+         mask) has the same shape; tracked.
+       - sys_utimensat (AT_SYMLINK_NOFOLLOW); tracked.
+       - sys_statx (full AT_STATX_* mask) has a richer
+         flags surface and may need bespoke handling.
+
+     Build: cargo build -p kernel clean (44.27s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

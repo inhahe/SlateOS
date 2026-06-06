@@ -10693,9 +10693,29 @@ fn sys_unlink(args: &SyscallArgs) -> SyscallResult {
 
 /// `unlinkat(dirfd, path, flags)` — refuse with ENOENT after validation.
 fn sys_unlinkat(args: &SyscallArgs) -> SyscallResult {
-    const AT_REMOVEDIR: u64 = 0x200;
-    const VALID_FLAGS: u64 = AT_REMOVEDIR;
-    if args.arg2 & !VALID_FLAGS != 0 {
+    // Linux ABI: `int unlinkat(int dirfd, const char *pathname,
+    // int flags)`.  SYSCALL_DEFINE3(unlinkat, int, dfd, const char
+    // __user *, pathname, int, flag) narrows the third parameter to
+    // (int) on entry; the mask check `flags & ~AT_REMOVEDIR` runs at
+    // 32-bit width.  The high 32 bits of RDX are caller-uninitialised
+    // garbage.
+    //
+    // Pre-batch we held the mask check at 64-bit width:
+    //     const VALID_FLAGS: u64 = AT_REMOVEDIR;
+    //     if args.arg2 & !VALID_FLAGS != 0 { return EINVAL; }
+    // so a caller passing 0x1_0000_0200 (high-half garbage +
+    // AT_REMOVEDIR) saw EINVAL where Linux returns ENOENT (after
+    // truncation the low half is 0x200, mask passes, the call
+    // proceeds to the no-such-file gate).  Sixth instance of the same
+    // shape after batches 308 (mlockall), 309 (msync), 310 (mlock2),
+    // 311 (fchmodat), and 312 (fchownat).
+    const AT_REMOVEDIR: u32 = 0x200;
+    const VALID_FLAGS: u32 = AT_REMOVEDIR;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg2 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     match validate_user_str(args.arg1) {
@@ -37347,6 +37367,99 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: unlinkat not ENOENT");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 313: unlinkat int truncation — high-half register
+        // garbage must be stripped before the flags mask check.
+        //
+        // Linux signature: `int unlinkat(int dirfd, const char *path,
+        // int flags)`.  flags is C int → low 32 bits only.  Pre-batch
+        // we held flags as u64 and ran the mask check at 64-bit width,
+        // so high-half garbage tripped the gate and returned EINVAL
+        // where Linux returns ENOENT (no such file in our empty FS).
+        //
+        // (a) unlinkat(0, 0x1000, 0x1_0000_0200) → ENOENT
+        //     (high|AT_REMOVEDIR; truncates to 0x200, mask passes,
+        //     validate_user_str succeeds in kernel context, ENOENT
+        //     terminal).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0x1_0000_0200,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UNLINKAT, &a).value;
+        if v != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: unlinkat(high|AT_REMOVEDIR) -> {} (expected -ENOENT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) unlinkat(0, 0x1000, 0x1_0000_0000) → ENOENT
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes, ENOENT terminal).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UNLINKAT, &a).value;
+        if v != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: unlinkat(high-half-zero) -> {} (expected -ENOENT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) unlinkat(0, 0, 0x1_0000_0200) → EFAULT
+        //     (high|AT_REMOVEDIR with NULL path; truncates to 0x200,
+        //     mask passes, validate_user_str returns InvalidAddress for
+        //     ptr=0 → EFAULT.  Verifies the EFAULT NULL-path gate still
+        //     fires AFTER the mask gate when both are reachable —
+        //     pre-batch this returned EINVAL because the 64-bit mask
+        //     check rejected the high bit before the path was
+        //     examined).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_0200,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UNLINKAT, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: unlinkat(high|AT_REMOVEDIR,NULL) -> {} (expected -EFAULT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) unlinkat(0, 0x1000, 0x1_0000_0010) → EINVAL
+        //     (high|bad-low 0x10; truncates to 0x10, mask rejects bit
+        //     outside AT_REMOVEDIR; verifies mask gate still rejects
+        //     bogus low bits after high half is stripped).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0x1_0000_0010,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UNLINKAT, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: unlinkat(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   unlinkat int truncation (high-half ignored): OK"
+        );
+
         // rename(NULL, x) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

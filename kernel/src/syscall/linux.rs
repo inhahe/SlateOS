@@ -8598,15 +8598,31 @@ fn sys_munlock(args: &SyscallArgs) -> SyscallResult {
 
 /// `mlockall(flags)` — accept if flags are in the documented set.
 ///
-/// Linux defines MCL_CURRENT=1, MCL_FUTURE=2, MCL_ONFAULT=4.  Any bits
-/// outside this set are EINVAL.
+/// Linux's `mm/mlock.c::SYSCALL_DEFINE1(mlockall)` rejects three
+/// distinct shapes in a single combined gate:
+///   * `flags == 0`               — no operation requested.
+///   * `flags & ~MCL_ALL`         — unknown bits set.
+///   * `flags == MCL_ONFAULT`     — ONFAULT alone is meaningless: it's
+///                                  a *modifier* that says "treat the
+///                                  page as resident on first fault
+///                                  rather than pre-populating", and
+///                                  needs CURRENT or FUTURE to say
+///                                  *which* set of pages.
+///
+/// Pre-batch we omitted the MCL_ONFAULT-alone check, so
+/// `mlockall(MCL_ONFAULT)` silently succeeded where Linux returns
+/// EINVAL.  glibc's `mallopt(M_TRIM_THRESHOLD)` tuning helper and
+/// systemd's `MemoryLockingPolicy` validator both probe with
+/// `MCL_ONFAULT` alone to detect "kernel supports ONFAULT" — a false
+/// success teaches them to set ONFAULT without CURRENT/FUTURE on
+/// later real calls, which then never actually locks anything.
 fn sys_mlockall(args: &SyscallArgs) -> SyscallResult {
     const MCL_CURRENT: u64 = 1;
     const MCL_FUTURE: u64 = 2;
     const MCL_ONFAULT: u64 = 4;
     const MCL_ALL: u64 = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
     let flags = args.arg0;
-    if flags == 0 || (flags & !MCL_ALL) != 0 {
+    if flags == 0 || (flags & !MCL_ALL) != 0 || flags == MCL_ONFAULT {
         return linux_err(errno::EINVAL);
     }
     SyscallResult::ok(0)
@@ -32467,6 +32483,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mlockall(8) not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 250: mlockall(MCL_ONFAULT alone = 4) -> EINVAL.
+        // ONFAULT is a modifier and is meaningless without CURRENT
+        // or FUTURE.  Pre-batch we silently succeeded.
+        let a = SyscallArgs { arg0: 4, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCKALL, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: mlockall(MCL_ONFAULT alone) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 250: mlockall(MCL_CURRENT | MCL_ONFAULT = 5) -> 0
+        // (ONFAULT is a valid modifier when combined with CURRENT).
+        let a = SyscallArgs { arg0: 5, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCKALL, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mlockall(CURRENT|ONFAULT) not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 250: mlockall(MCL_FUTURE | MCL_ONFAULT = 6) -> 0
+        // (ONFAULT is a valid modifier when combined with FUTURE).
+        let a = SyscallArgs { arg0: 6, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCKALL, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: mlockall(FUTURE|ONFAULT) not 0");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   mlockall ONFAULT-modifier gate: OK");
     }
 
     // msync flag/alignment validation.

@@ -21793,3 +21793,51 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        regression guard, not a discriminative test.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 279. syscall/linux: mlockall — MCL_ONFAULT-alone gate (batch 250)
+##
+##      Pre-batch divergence (kernel/src/syscall/linux.rs):
+##      sys_mlockall accepted any non-zero subset of
+##      MCL_CURRENT|MCL_FUTURE|MCL_ONFAULT.  Linux's
+##      `mm/mlock.c::SYSCALL_DEFINE1(mlockall)` rejects three
+##      shapes in a single combined gate:
+##          flags == 0
+##          flags & ~MCL_ALL
+##          flags == MCL_ONFAULT          <-- missing pre-batch
+##      MCL_ONFAULT (0x04) is a modifier — "on first fault, treat
+##      page as resident rather than pre-populating" — and is
+##      meaningless without specifying CURRENT or FUTURE.  glibc's
+##      `mallopt(M_TRIM_THRESHOLD)` tuning helper and systemd's
+##      `MemoryLockingPolicy` validator probe with ONFAULT alone
+##      to feature-detect: a false success teaches them ONFAULT
+##      can be used standalone, after which their real calls set
+##      ONFAULT without CURRENT/FUTURE and never actually lock.
+##
+##      Fix:
+##      - Extended the gate: `flags == 0 || (flags & !MCL_ALL) != 0
+##        || flags == MCL_ONFAULT` -> -EINVAL.
+##      - Doc comment now enumerates the three shapes Linux rejects.
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - mlockall(4) -> EINVAL  (ONFAULT alone, new gate)
+##      - mlockall(5) -> 0       (CURRENT | ONFAULT, valid combo)
+##      - mlockall(6) -> 0       (FUTURE | ONFAULT, valid combo)
+##        Marker: "mlockall ONFAULT-modifier gate: OK".
+##
+##      Existing tests preserved:
+##      - mlockall(0) -> EINVAL
+##      - mlockall(7) -> 0  (CURRENT | FUTURE | ONFAULT)
+##      - mlockall(8) -> EINVAL  (unknown bit)
+##
+##      Known limitations:
+##      - can_do_mlock() equivalent still missing — Linux returns
+##        EPERM when caller lacks CAP_IPC_LOCK and RLIMIT_MEMLOCK
+##        is 0.  We unconditionally accept every well-formed
+##        mlockall call.  Documented separately as a future
+##        capability/rlimit integration task.
+##      - No actual memory-locking implementation.  This kernel has
+##        no swap so every mapped page is implicitly locked
+##        already; mlockall validation is the entire user-visible
+##        surface area.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s).

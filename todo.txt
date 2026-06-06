@@ -21139,4 +21139,112 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean, boot test PASSED (BOOT_OK at 25s).
 
 
+## 271. (batch 242) syscall/linux: fsconfig — fd<0 first gate + per-cmd
+##      argument validation matching Linux fs/fsopen.c::
+##      SYSCALL_DEFINE5(fsconfig).
+##
+##      Pre-batch-242 divergences:
+##
+##      a) fd<0 was not a gate.  Linux's first check in fsconfig() is
+##         `if (fd < 0) return -EINVAL;`.  Our code only consulted fd
+##         via validate_linux_fd at the END of the function, which in
+##         kernel test context is a no-op — a probe handing in fd=-1
+##         to test the "syscall recognised" path saw EPERM instead of
+##         EINVAL.
+##
+##      b) Per-cmd argument shapes were not enforced.  Linux's switch
+##         arm-by-arm validates that key/value/aux match what each
+##         FSCONFIG_* command expects:
+##           SET_FLAG (0):    key set, value NULL, aux 0
+##           SET_STRING (1):  key set, value set, aux 0
+##           SET_BINARY (2):  key set, value set, 0 < aux <= 1 MiB
+##           SET_PATH (3) /
+##           SET_PATH_EMPTY (4): key set, value set,
+##                            aux == AT_FDCWD or aux >= 0
+##           SET_FD (5):      key set, value NULL, aux >= 0
+##           CMD_CREATE (6) /
+##           CMD_RECONFIGURE (7) /
+##           CMD_CREATE_EXCL (8): all three args 0 (unparameterised)
+##         Our code only range-checked cmd ∈ 0..=8 and validated
+##         whichever of key/value were non-NULL — so e.g.:
+##           - SET_FLAG with key=NULL silently advanced to EPERM
+##             (Linux: EINVAL).
+##           - CMD_CREATE with a stray key/value/aux silently
+##             advanced to EPERM (Linux: EINVAL).
+##           - SET_BINARY with aux=0 or aux>1MiB silently advanced
+##             to EPERM (Linux: EINVAL).
+##           - SET_FD with a non-NULL _value pointer silently
+##             advanced to EPERM (Linux: EINVAL).
+##           - SET_PATH with negative aux (and aux != AT_FDCWD)
+##             silently advanced to EPERM (Linux: EINVAL).
+##         These are observable to userspace mount-API probes — e.g.
+##         glibc's pivot_root-using sandbox setup that issues a
+##         CMD_CREATE handshake will mis-detect "syscall lacks
+##         FSCONFIG_CMD_CREATE support" when the failure mode is
+##         actually "syscall exists, your args are wrong".
+##
+##      Fix:
+##      - Reorganised sys_fsconfig: extract fd/cmd/key/value/aux
+##        upfront, then run the gates in Linux order:
+##          1. fd < 0 -> EINVAL
+##          2. switch(cmd) with per-arm key/value/aux checks (default
+##             -> EINVAL)
+##          3. key user-pointer validation (when set)
+##          4. value user-pointer validation (when set)
+##          5. validate_linux_fd (no-op in kernel test ctx)
+##          6. terminal EPERM
+##      - Added named constants FSCONFIG_SET_FLAG..FSCONFIG_CMD_
+##        CREATE_EXCL, AT_FDCWD, SET_BINARY_MAX (1 MiB).
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - fd<0                                  -> EINVAL  (new gate 1)
+##      - SET_FLAG, key=NULL                    -> EINVAL  (per-cmd)
+##      - SET_FLAG, value!=NULL                 -> EINVAL  (per-cmd)
+##      - SET_FLAG, aux!=0                      -> EINVAL  (per-cmd)
+##      - SET_FLAG happy                        -> EPERM
+##      - SET_STRING, value=NULL                -> EINVAL  (per-cmd)
+##      - SET_STRING happy                      -> EPERM
+##      - SET_BINARY, aux=0                     -> EINVAL  (per-cmd)
+##      - SET_BINARY, aux>1MiB                  -> EINVAL  (per-cmd)
+##      - SET_BINARY, aux=1MiB                  -> EPERM
+##      - SET_PATH, aux=-5                      -> EINVAL  (per-cmd)
+##      - SET_PATH, aux=AT_FDCWD                -> EPERM
+##      - SET_PATH_EMPTY, aux=AT_FDCWD          -> EPERM
+##      - SET_FD, value!=NULL                   -> EINVAL  (per-cmd)
+##      - SET_FD, aux<0                         -> EINVAL  (per-cmd)
+##      - CMD_CREATE, stray key                 -> EINVAL  (per-cmd)
+##      - CMD_CREATE, stray value               -> EINVAL  (per-cmd)
+##      - CMD_CREATE, stray aux                 -> EINVAL  (per-cmd)
+##      - CMD_CREATE happy                      -> EPERM
+##      - CMD_RECONFIGURE happy                 -> EPERM
+##      - CMD_CREATE_EXCL happy                 -> EPERM   (newest cmd)
+##        Marker: "fsconfig fd<0 > per-cmd arg shape (SET_*/CMD_*)
+##        gate order: OK".
+##
+##      Existing tests preserved:
+##      - cmd=99 (out of range)                  -> EINVAL.
+##
+##      The original line-38127 "fsconfig valid cmd -> EPERM" test used
+##      cmd=SET_FLAG with key=NULL, which under correct Linux semantics
+##      is EINVAL — that test was reused as the new "SET_FLAG key=NULL
+##      -> EINVAL" gate test, and a real SET_FLAG-with-key happy path
+##      was added in its place.
+##
+##      Known limitations:
+##      - Actual fsconfig command processing (writing into the fs
+##        context, parsing the parameter, dispatching to the fs's
+##        parse_param callback) is not implemented — every call still
+##        terminates with EPERM after passing the gates.  Real fs
+##        context plumbing is a separate, large piece of work tied to
+##        VFS mount support.
+##      - The value pointer is validated for only 1 byte; the actual
+##        length depends on cmd (BINARY reads aux bytes; STRING reads
+##        a NUL-terminated string).  In kernel test context the
+##        validation is a no-op so this doesn't matter for now;
+##        userspace will need the right length validation when the
+##        terminal EPERM is replaced with real work.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s).
+
+
 

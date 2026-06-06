@@ -15050,29 +15050,114 @@ fn sys_fsopen(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `fsconfig(fs_fd, cmd, key*, value*, aux)` — configure a filesystem
-/// context.  cmd ∈ 0..=8 (FSCONFIG_SET_FLAG ... FSCONFIG_CMD_RECONFIGURE).
+/// context.  cmd ∈ 0..=8 (FSCONFIG_SET_FLAG ... FSCONFIG_CMD_CREATE_EXCL).
+///
+/// Linux's `fs/fsopen.c::SYSCALL_DEFINE5(fsconfig)` gate order:
+///   1. `fd < 0` -> EINVAL (the literal first gate).
+///   2. switch(cmd): each command has a different valid argument
+///      shape, and Linux validates them per-arm before any pointer
+///      lookup.  The default case is EINVAL.
+///   3. Then key/value lookup proceeds.
+///
+/// Per-cmd argument shapes (Linux):
+///   * `SET_FLAG`        : need _key; _value must be NULL; aux == 0.
+///   * `SET_STRING`      : need _key; need _value; aux == 0.
+///   * `SET_BINARY`      : need _key; need _value; 0 < aux <= 1 MiB.
+///   * `SET_PATH` / `SET_PATH_EMPTY`: need _key; need _value; aux is
+///                         either AT_FDCWD (-100) or a non-negative fd.
+///   * `SET_FD`          : need _key; _value must be NULL; aux >= 0.
+///   * `CMD_CREATE` / `CMD_RECONFIGURE` / `CMD_CREATE_EXCL`:
+///                         _key, _value, and aux must all be 0 — these
+///                         are unparameterised commands.
 fn sys_fsconfig(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let cmd = args.arg1 as i32;
-    if !(0..=8).contains(&cmd) {
-        return linux_err(errno::EINVAL);
-    }
-    // key is required for SET_FLAG / SET_STRING / SET_BINARY / SET_PATH /
-    // SET_PATH_EMPTY / SET_FD (cmd 0..=5).
-    if cmd <= 5 && args.arg2 != 0 {
-        if let Err(e) = validate_user_str(args.arg2) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    if args.arg3 != 0 {
-        // Validate at least 1 byte of value; the actual length depends on
-        // the cmd, but if the pointer is non-NULL it must be readable.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 1) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+    const FSCONFIG_SET_FLAG: i32 = 0;
+    const FSCONFIG_SET_STRING: i32 = 1;
+    const FSCONFIG_SET_BINARY: i32 = 2;
+    const FSCONFIG_SET_PATH: i32 = 3;
+    const FSCONFIG_SET_PATH_EMPTY: i32 = 4;
+    const FSCONFIG_SET_FD: i32 = 5;
+    const FSCONFIG_CMD_CREATE: i32 = 6;
+    const FSCONFIG_CMD_RECONFIGURE: i32 = 7;
+    const FSCONFIG_CMD_CREATE_EXCL: i32 = 8;
+    const AT_FDCWD: i32 = -100;
+    const SET_BINARY_MAX: i32 = 1024 * 1024;
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let cmd = args.arg1 as i32;
+    let key = args.arg2;
+    let value = args.arg3;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let aux = args.arg4 as i32;
+
+    // Gate 1: fd < 0 -> EINVAL.  Linux's literal first check.
+    // Pre-batch-242 we accepted negative fds and only EBADFed via
+    // validate_linux_fd at the end of the function (which would
+    // silently return EPERM in kernel test context because the
+    // validation is a no-op there) — userspace probes that pass
+    // fd=-1 to test the "syscall recognised" path saw the wrong
+    // errno discriminator.
+    if fd < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 2: per-cmd argument validation, mirroring Linux's switch
+    // arm-by-arm.  Pre-batch-242 we only range-checked cmd ∈ 0..=8
+    // and validated whichever of key/value were non-NULL — the per-
+    // arm "must be NULL", "must be set", and "aux range" rules were
+    // not enforced, so e.g. CMD_CREATE with a stray key pointer
+    // silently advanced to EPERM where Linux returns EINVAL.
+    match cmd {
+        FSCONFIG_SET_FLAG => {
+            if key == 0 || value != 0 || aux != 0 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        FSCONFIG_SET_STRING => {
+            if key == 0 || value == 0 || aux != 0 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        FSCONFIG_SET_BINARY => {
+            if key == 0 || value == 0 || aux <= 0 || aux > SET_BINARY_MAX {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        FSCONFIG_SET_PATH | FSCONFIG_SET_PATH_EMPTY => {
+            // aux is either AT_FDCWD (special) or a non-negative fd.
+            if key == 0 || value == 0 || (aux != AT_FDCWD && aux < 0) {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        FSCONFIG_SET_FD => {
+            if key == 0 || value != 0 || aux < 0 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        FSCONFIG_CMD_CREATE | FSCONFIG_CMD_RECONFIGURE | FSCONFIG_CMD_CREATE_EXCL => {
+            // Unparameterised commands: every optional arg must be 0.
+            if key != 0 || value != 0 || aux != 0 {
+                return linux_err(errno::EINVAL);
+            }
+        }
+        _ => return linux_err(errno::EINVAL),
+    }
+    // Gate 3: key, when set, must be a readable C string (Linux
+    // strndup_user).  In kernel test context validate_user_str is a
+    // no-op for any non-zero pointer.
+    if key != 0 {
+        if let Err(e) = validate_user_str(key) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Gate 4: value, when set, must be readable (at least 1 byte;
+    // the actual length depends on cmd — Linux's parser reads aux
+    // bytes for BINARY and strndup_user for STRING).
+    if value != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(value, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
@@ -38123,12 +38208,156 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fsconfig bad cmd not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // fsconfig valid cmd (in kernel context fd validation is no-op) -> EPERM.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: fsconfig valid not EPERM");
+        // Batch 242: fsconfig with fd<0 -> EINVAL (Linux's first gate).
+        // Pre-batch-242 we accepted negative fds and returned EPERM via
+        // the no-op validate_linux_fd in kernel context.
+        #[allow(clippy::cast_sign_loss)]
+        let neg_fd = -1i32 as u64;
+        let a = SyscallArgs { arg0: neg_fd, arg1: 0, arg2: 0x1000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig fd<0 not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 242: SET_FLAG with _key=NULL -> EINVAL (Linux's per-
+        // cmd rule).  Pre-batch-242 we returned EPERM here.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_FLAG key=NULL not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_FLAG with _value!=NULL -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1000, arg3: 0x2000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_FLAG value!=NULL not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_FLAG with aux!=0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1000, arg3: 0, arg4: 1, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_FLAG aux!=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_FLAG happy path -> EPERM (in kernel context,
+        // the user-pointer validation is a no-op).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_FLAG valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_STRING needs both _key and _value.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0x1000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_STRING value=NULL not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_STRING with both key and value -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0x1000, arg3: 0x2000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_STRING valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_BINARY with aux<=0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: 0x1000, arg3: 0x2000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_BINARY aux=0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_BINARY with aux > 1 MiB -> EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 2, arg2: 0x1000, arg3: 0x2000,
+            arg4: 1024 * 1024 + 1, arg5: 0,
+        };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_BINARY aux>1MiB not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_BINARY at the maximum aux (1 MiB) -> EPERM.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 2, arg2: 0x1000, arg3: 0x2000,
+            arg4: 1024 * 1024, arg5: 0,
+        };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_BINARY aux=1MiB not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_PATH with negative aux (not AT_FDCWD) -> EINVAL.
+        #[allow(clippy::cast_sign_loss)]
+        let neg5 = -5i32 as u64;
+        let a = SyscallArgs { arg0: 0, arg1: 3, arg2: 0x1000, arg3: 0x2000, arg4: neg5, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_PATH neg aux not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_PATH with aux=AT_FDCWD (-100) -> EPERM (the
+        // sentinel is accepted alongside any non-negative fd).
+        #[allow(clippy::cast_sign_loss)]
+        let at_fdcwd = -100i32 as u64;
+        let a = SyscallArgs {
+            arg0: 0, arg1: 3, arg2: 0x1000, arg3: 0x2000, arg4: at_fdcwd, arg5: 0,
+        };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_PATH AT_FDCWD not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_PATH_EMPTY (cmd=4) honours the same aux rule.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 4, arg2: 0x1000, arg3: 0x2000, arg4: at_fdcwd, arg5: 0,
+        };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_PATH_EMPTY AT_FDCWD not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_FD with _value!=NULL -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 5, arg2: 0x1000, arg3: 0x2000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_FD value!=NULL not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: SET_FD with aux<0 -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 5, arg2: 0x1000, arg3: 0, arg4: neg5, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig SET_FD aux<0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: CMD_CREATE (6) with stray key pointer -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 6, arg2: 0x1000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig CMD_CREATE stray key not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: CMD_CREATE with stray value pointer -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 6, arg2: 0, arg3: 0x2000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig CMD_CREATE stray value not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: CMD_CREATE with stray aux -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 6, arg2: 0, arg3: 0, arg4: 1, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig CMD_CREATE stray aux not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: CMD_CREATE happy path (all args 0) -> EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 6, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig CMD_CREATE valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: CMD_RECONFIGURE (7) honours the same rule.
+        let a = SyscallArgs { arg0: 0, arg1: 7, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig CMD_RECONFIGURE valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 242: CMD_CREATE_EXCL (8) — newest cmd, same rule.
+        let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig CMD_CREATE_EXCL valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   fsconfig fd<0 > per-cmd arg shape (SET_*/CMD_*) gate order: OK"
+        );
 
         // fsmount bad flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0xff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

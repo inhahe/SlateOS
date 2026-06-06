@@ -36304,3 +36304,127 @@ OBSOLETE NOTE BELOW (pre-relaxation):
         Linux block/ioprio.c (RT→EPERM, NONE+data→EINVAL,
         IDLE+any-data→0, class gate ordered before which
         gate): OK"
+
+ 432. sys_getrandom capped every call at 256 bytes, forcing
+      well-formed glibc / OpenSSL / Go callers to loop for what
+      should be a single syscall.  Linux has no per-call cap —
+      `get_random_bytes_user` drains the iov_iter in CHACHA
+      blocks until the buffer is full.
+
+      Linux source (drivers/char/random.c, post-5.6 unified
+      entropy design):
+
+          SYSCALL_DEFINE3(getrandom, char __user *, ubuf,
+                          size_t, len, unsigned int, flags)
+          {
+              struct iov_iter iter;
+              ...
+              ret = import_ubuf(ITER_DEST, ubuf, len, &iter);
+              if (unlikely(ret))
+                  return ret;
+              return get_random_bytes_user(&iter);
+          }
+
+          static ssize_t get_random_bytes_user(
+              struct iov_iter *iter)
+          {
+              u32 chacha_state[CHACHA_STATE_WORDS];
+              u8 block[CHACHA_BLOCK_SIZE];
+              size_t ret = 0, copied;
+
+              if (unlikely(!iov_iter_count(iter)))
+                  return 0;
+
+              crng_make_state(chacha_state,
+                              (u8 *)&chacha_state[4],
+                              CHACHA_KEY_SIZE);
+              for (;;) {
+                  chacha20_block(chacha_state, block);
+                  ...
+                  copied = copy_to_iter(block,
+                                        sizeof(block), iter);
+                  ret += copied;
+                  if (!iov_iter_count(iter) ||
+                      copied != sizeof(block))
+                      break;
+                  ...
+              }
+              ...
+              return ret ? ret : -EFAULT;
+          }
+
+      Divergence table (pre vs post for the requested count):
+
+         getrandom(buf, len, 0)         Linux       pre-batch   post-batch
+         len = 0                        0           0           0           ok
+         len = 8                        8           8           8           ok
+         len = 256                      256         256         256         ok
+         len = 257                      257         256         257         FIXED
+         len = 512                      512         256         512         FIXED
+         len = 1024                     1024        256         1024        FIXED
+         len = 2048                     2048        256         2048        FIXED
+         len = BAD_PTR (any non-zero)   -EFAULT     -EFAULT     -EFAULT     ok
+                                                                            (upfront
+                                                                            validate)
+
+      Why it matters:
+        * Go's `crypto/rand.Read` reads up to 32 KiB in a
+          single call and only loops on EINTR or partial.  Pre-
+          batch every 256-byte chunk was its own syscall — a
+          single 32 KiB read became 128 syscalls.  Same code
+          on Linux completes in 1.
+        * OpenSSL's `RAND_bytes` / `RAND_priv_bytes` use 64-byte
+          and 128-byte working buffers per call, so OpenSSL
+          happened to match our cap — but any consumer feeding
+          OpenSSL a large `len` (e.g. RSA-4096 keygen pulling
+          ~1 KiB of seed) hit the loop.
+        * BoringSSL's CRYPTO_sysrand reads exactly 256 bytes
+          per call — matched our cap by coincidence, OK.
+        * libsodium's `randombytes_buf` reads 8 bytes at a
+          time — OK.
+        * glibc's `arc4random_buf` reads up to 256 bytes —
+          matched our cap by coincidence, OK.
+        * Rust std's `random` (nightly) reads 64 bytes — OK.
+        * Anything pulling a large DRBG seed (libnssckbi,
+          systemd-cryptsetup's volume-key generator, dm-crypt
+          init) — broken.
+        * strace observers would see N×256-byte reads where
+          Linux shows one — a confusing diff when debugging.
+
+      Architectural directive: translator-only fix.  The
+      kernel RNG `rng::fill` already accepts arbitrary slice
+      lengths; we are simply removing the artificial cap that
+      was inserted at the syscall boundary.  No native API
+      changes, no RNG changes, no buffer-size changes
+      elsewhere.
+
+      Fix in kernel/src/syscall/linux.rs sys_getrandom
+      (~line 28350):
+        * Validate the entire user buffer upfront (matches
+          Linux's `import_ubuf` access_ok).
+        * Replaced `let n = buf_len.min(256)` with a chunked
+          fill loop using a 256-byte stack buffer (256 chosen
+          to keep stack usage bounded — Linux uses 64-byte
+          CHACHA blocks, which is fine on the deeper kernel
+          stacks Linux has).
+        * Per-chunk copy_to_user failure mid-loop: if any
+          bytes were already copied, return the partial count
+          (Linux's iov_iter semantics); if zero copied, return
+          -EFAULT.
+
+      Self-test additions (~line 54902):
+        * len=257 → 257 (smallest above-cap probe)
+        * len=512 → 512
+        * len=1024 → 1024
+        * len=2048 → 2048
+        * Statistical sanity on the 2048-byte buffer: at
+          least one non-zero byte must be present (alternative
+          is ~2^-16384, never going to happen).
+
+      Build: cargo build -p kernel clean (44.72s).
+      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+      24s).
+      Stamp confirmed at build/serial-test.txt:
+        "[syscall/linux]   getrandom large-buffer fill
+        (Linux: no per-call cap; pre-batch capped at 256
+        bytes): OK"

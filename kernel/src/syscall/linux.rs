@@ -24110,33 +24110,126 @@ fn sys_lsm_list_modules(args: &SyscallArgs) -> SyscallResult {
 
 /// `syslog(type, bufp, len)` — read / write the kernel log buffer.
 fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
-    // type 0..=10 are defined in Linux.
+    // Linux signature:
+    //   `SYSCALL_DEFINE3(syslog, int, type, char __user *, buf, int, len)`
+    //
+    // Both `type` and `len` are C `int`, delivered in `rdi` and `rdx`
+    // respectively.  The AMD64 syscall ABI does NOT zero/sign-extend
+    // `int` args before the `syscall` instruction, so only the low 32
+    // bits of each register are defined; the high half is caller-
+    // supplied garbage.  Pre-batch 341 we held `len` as raw `u64`/
+    // `usize`, so:
+    //
+    //   * `len = 0x1_0000_0000` (high|0) on typ=3 → ours treats as
+    //     ~4 GiB and trips the `args.arg1 == 0 && len > 0` branch
+    //     (returning EFAULT) or the 4-GiB `validate_user_write`
+    //     (returning EFAULT on unmapped pages).  Linux truncates to
+    //     `len_i32 = 0` → skips the buffer check entirely and
+    //     short-circuits to a 0-byte read.
+    //   * `len = 0xFFFF_FFFF_FFFF_FFFF` (all-high; Linux's "-1") on
+    //     typ=3 → ours treats as huge `usize` → EFAULT.  Linux:
+    //     `len_i32 = -1` → `(!buf || len < 0)` → EINVAL.
+    //
+    // `typ` was already truncated by the existing `args.arg0 as i32`
+    // cast — kept for clarity.
+    //
+    // Pre-batch 341 also encoded a wrong restricted/non-restricted
+    // partition.  Linux `kernel/printk/printk.c::check_syslog_perm-
+    // issions` runs BEFORE `do_syslog`'s type switch and rejects any
+    // restricted type without `CAP_SYSLOG` / `CAP_SYS_ADMIN` with
+    // `-EPERM`.  With `dmesg_restrict = 0` (the default),
+    // `syslog_action_restricted(type)` returns `true` for every type
+    // except `SYSLOG_ACTION_READ_ALL` (3) and
+    // `SYSLOG_ACTION_SIZE_BUFFER` (10).  We do not track
+    // `CAP_SYSLOG` per-process — every Linux caller is effectively
+    // unprivileged in this kernel — so the truthful answer for any
+    // restricted type is `-EPERM`.
+    //
+    // Pre-batch this file returned 0 for types 6/7/9 (which Linux
+    // restricts → EPERM) and EPERM for type 3 (which Linux does NOT
+    // restrict → returns 0 / EINVAL / EFAULT depending on buf/len).
+    // Both partitions are wrong; this batch restructures the gates to
+    // match Linux's order.
+    //
+    // Errno table for unprivileged callers (assuming buf=valid, len=
+    // small valid), pre-batch vs Linux vs post-batch:
+    //
+    //   typ  pre-batch  linux        post-batch
+    //    0    EPERM      EPERM        EPERM   ✓
+    //    1    EPERM      EPERM        EPERM   ✓
+    //    2    EPERM*     EPERM        EPERM   ✓
+    //    3    EPERM      0 / EINVAL   0 / EINVAL ✓
+    //    4    EPERM*     EPERM        EPERM   ✓
+    //    5    EPERM      EPERM        EPERM   ✓
+    //    6    0          EPERM        EPERM   ✓
+    //    7    0          EPERM        EPERM   ✓
+    //    8    EPERM      EPERM        EPERM   ✓
+    //    9    0          EPERM        EPERM   ✓
+    //   10    0          +ve buf size 0      ≈ (truthful: no klog
+    //                                            buffer exists)
+    //
+    //   * = pre-batch the typ=2/4 path could short-circuit to EFAULT
+    //       when buf=NULL/len>0 before reaching the terminal EPERM;
+    //       Linux's permission check wins first.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let typ = args.arg0 as i32;
     if !(0..=10).contains(&typ) {
         return linux_err(errno::EINVAL);
     }
-    // Most useful actions (SYSLOG_ACTION_READ family) need bufp/len;
-    // validate len-pointer writes when applicable, but we don't have
-    // a Linux-shaped klog buffer available so refuse.
-    let len = args.arg2 as usize;
-    if typ == 2 || typ == 3 || typ == 4 {
-        // Read variants: need buffer if len > 0.
-        if args.arg1 == 0 && len > 0 {
-            return linux_err(errno::EFAULT);
-        }
-        if len > 0 {
-            if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len) {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let len_i32 = args.arg2 as i32;
+
+    // `check_syslog_permissions`-equivalent gate.  With
+    // `dmesg_restrict = 0`, only READ_ALL(3) and SIZE_BUFFER(10) are
+    // unrestricted; everything else requires `CAP_SYSLOG`, which we
+    // do not grant to any Linux-ABI caller.
+    let restricted = !matches!(typ, 3 | 10);
+    if restricted {
+        return linux_err(errno::EPERM);
+    }
+
+    match typ {
+        3 => {
+            // SYSLOG_ACTION_READ_ALL — Linux gate order:
+            //   if (!buf || len < 0) return -EINVAL;
+            //   if (!len) return 0;
+            //   if (!access_ok(buf, len)) return -EFAULT;
+            //   syslog_print_all(buf, len, false);  // bytes written
+            //
+            // We have no Linux-shaped klog buffer, so the truthful
+            // answer for any well-formed call is 0 bytes written
+            // (empty log).  Probes can still observe EINVAL / EFAULT
+            // for malformed inputs, matching Linux's gates.
+            if args.arg1 == 0 || len_i32 < 0 {
+                return linux_err(errno::EINVAL);
+            }
+            if len_i32 == 0 {
+                return SyscallResult::ok(0);
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let len_u = len_i32 as usize;
+            if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len_u) {
                 return linux_err(linux_errno_for(e));
             }
+            SyscallResult::ok(0)
+        }
+        10 => {
+            // SYSLOG_ACTION_SIZE_BUFFER — Linux returns the kernel
+            // log buffer size (a compile-time constant, e.g. 131072
+            // on `CONFIG_LOG_BUF_SHIFT=17`).  We have no klog buffer
+            // at all, so 0 is the truthful "no buffer available"
+            // signal.  Userspace `dmesg`-style tools that size their
+            // read buffer from this value will fall back to a default
+            // or skip the read; either is acceptable behaviour for a
+            // kernel that exposes no Linux-shaped log.
+            SyscallResult::ok(0)
+        }
+        _ => {
+            // Unreachable: the `matches!` above limited the
+            // unrestricted set to {3, 10}.
+            linux_err(errno::EINVAL)
         }
     }
-    // SYSLOG_ACTION_SIZE_BUFFER and SIZE_UNREAD return 0 (no log
-    // available).
-    if typ == 6 || typ == 7 || typ == 9 || typ == 10 {
-        return SyscallResult::ok(0);
-    }
-    linux_err(errno::EPERM)
 }
 
 /// `uname(buf)` — fill in `struct utsname` with kernel identity.
@@ -42713,7 +42806,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   reboot EPERM ordering: OK");
 
-        // syslog(99) -> EINVAL.
+        // syslog(99) -> EINVAL (out of 0..=10 range).
         let a = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SYSLOG, &a).value
@@ -42721,22 +42814,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: syslog(99) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // syslog(6) -> 0 (size_buffer).
+        // Batch 341: syslog(6) (CONSOLE_OFF) -> EPERM.  Pre-batch
+        // returned 0; Linux's check_syslog_permissions runs first and
+        // rejects this restricted type without CAP_SYSLOG.  The old
+        // test comment misidentified type 6 as "size_buffer" — that
+        // is type 10, not 6.
         let a = SyscallArgs { arg0: 6, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SYSLOG, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: syslog(6) not 0");
+        if dispatch_linux(nr::SYSLOG, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: syslog(6) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // syslog(2, NULL, 16) read -> EFAULT.
+        // Batch 341: syslog(2, NULL, 16) (READ) -> EPERM.  Pre-batch
+        // surfaced EFAULT from the pre-perm buf-NULL check; Linux's
+        // permission check runs first and returns EPERM for the
+        // restricted READ type without CAP_SYSLOG, regardless of
+        // buf/len shape.
         let a = SyscallArgs { arg0: 2, arg1: 0, arg2: 16, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SYSLOG, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: syslog(2,NULL) not EFAULT");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: syslog(2,NULL) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // syslog(0) (CLOSE) -> EPERM.
+        // syslog(0) (CLOSE) -> EPERM (restricted without CAP_SYSLOG).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SYSLOG, &a).value
@@ -42744,6 +42846,83 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: syslog(0) not EPERM");
             return Err(KernelError::InternalError);
         }
+        // Batch 341: x86_64 syscall ABI register truncation for
+        // syslog's `int type` and `int len` args.  Linux SYSCALL_-
+        // DEFINE3 takes both as C `int`; the syscall instruction
+        // does not zero/sign-extend, so only low 32 bits are defined.
+        // Pre-batch we held `len` as raw u64/usize, so high-half
+        // garbage spuriously tripped the buf-EFAULT branch or
+        // attempted a 4-GiB validate_user_write.  Also pre-batch the
+        // restricted/non-restricted partition was wrong (typ=3
+        // returned EPERM; Linux returns 0 for READ_ALL on an empty
+        // log).  All four probes assume kernel context where
+        // validate_user_write returns Ok regardless.
+
+        // (a) typ=3 (READ_ALL, unrestricted), buf=NULL, len=0
+        //     -> EINVAL via Linux's `(!buf || len < 0)` gate.
+        //     Pre-batch returned EPERM (the terminal arm); now we
+        //     mirror Linux's per-arm gate.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SYSLOG, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: syslog(3,NULL,0) v={} != EINVAL", v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) typ=3, buf=NULL, len=0x1_0000_0000 (high|0)
+        //     -> Linux truncates len_i32=0 → buf=NULL gate first →
+        //        EINVAL.
+        //     Pre-batch: len_usize > 0 + buf=NULL → EFAULT.  Now
+        //     EINVAL — demonstrates len high-half truncation.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SYSLOG, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: syslog(3,NULL,high|0) v={} != EINVAL",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) typ=3, buf=valid (use a non-NULL kernel-context addr —
+        //     validate_user_write returns Ok), len=0xFFFF_FFFF_FFFF_FFFF
+        //     (all-high; Linux's int=-1).
+        //     -> Linux: len_i32 = -1 → `len < 0` gate → EINVAL.
+        //     Pre-batch: len_usize huge → 4-GiB+ validate_user_write
+        //     would succeed in kernel context, then fall to terminal
+        //     EPERM.  Post-batch: len_i32=-1 → EINVAL.  Demonstrates
+        //     len sign-truncation.
+        let a = SyscallArgs { arg0: 3, arg1: 0xDEAD_BEEF,
+            arg2: 0xFFFF_FFFF_FFFF_FFFF, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SYSLOG, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: syslog(3,buf,all-high) v={} != EINVAL",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) typ=10 (SIZE_BUFFER, unrestricted) -> 0 preserved.
+        //     Sanity check that the restricted-check restructure did
+        //     not regress the one unrestricted "no-args" type.
+        let a = SyscallArgs { arg0: 10, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SYSLOG, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: syslog(10) v={} != 0", v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   syslog int truncation + perm gate: OK"
+        );
     }
 
     // SysV IPC and POSIX message queues — input validation plus

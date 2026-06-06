@@ -30104,3 +30104,179 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (34.83s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 23s).
+
+371. syslog int-truncation + restricted-permission
+     gate restructure (batch 341).
+
+     Divergences fixed:
+
+     (i) `len` truncation.  Linux SYSCALL_DEFINE3-
+     (syslog, int, type, char __user *, buf, int,
+     len) declares len as C `int`, delivered in rdx.
+     The AMD64 syscall ABI does not zero/sign-extend
+     `int` args before the syscall instruction, so
+     only the low 32 bits are defined.  Pre-batch
+     we held len as raw `u64`/`usize`:
+       * len=0x1_0000_0000 (high|0) on typ=3 -> ours
+         treated as ~4 GiB, tripping the buf-NULL +
+         len>0 branch and returning EFAULT.  Linux
+         truncates to len_i32=0 -> 0-byte read OK.
+       * len=0xFFFF_FFFF_FFFF_FFFF (all-high; Linux
+         "-1") on typ=3 -> ours treated as huge
+         `usize` -> validate path errors.  Linux:
+         len_i32=-1 -> `len < 0` gate -> EINVAL.
+
+     (ii) Restricted/non-restricted partition.
+     Linux kernel/printk/printk.c::check_syslog_-
+     permissions runs BEFORE do_syslog's type switch
+     and rejects any restricted type without
+     CAP_SYSLOG / CAP_SYS_ADMIN with -EPERM.  With
+     dmesg_restrict=0 (default), syslog_action_-
+     restricted(type) returns true for every type
+     except SYSLOG_ACTION_READ_ALL (3) and
+     SYSLOG_ACTION_SIZE_BUFFER (10).  This kernel
+     does not track CAP_SYSLOG per-process - every
+     Linux-ABI caller is effectively unprivileged -
+     so the truthful answer for any restricted type
+     is -EPERM.  Pre-batch we returned 0 for typ=
+     6/7/9 (Linux: EPERM) and EPERM for typ=3
+     (Linux: 0/EINVAL/EFAULT depending on buf/len).
+     Both partitions were wrong; this batch
+     restructures the gates to match Linux's order.
+
+     Errno table for unprivileged callers (buf=
+     valid, len=small valid):
+
+       typ  pre-batch  linux        post-batch
+        0    EPERM      EPERM        EPERM   match
+        1    EPERM      EPERM        EPERM   match
+        2    EPERM*     EPERM        EPERM   match
+        3    EPERM      0/EINVAL/    0/EINVAL/
+                       EFAULT       EFAULT  match
+        4    EPERM*     EPERM        EPERM   match
+        5    EPERM      EPERM        EPERM   match
+        6    0          EPERM        EPERM   fixed
+        7    0          EPERM        EPERM   fixed
+        8    EPERM      EPERM        EPERM   match
+        9    0          EPERM        EPERM   fixed
+       10    0          +ve klog     0       approximate
+                       buf size              (no klog
+                                              buffer
+                                              exists)
+
+       * = pre-batch typ=2/4 could short-circuit to
+           EFAULT when buf=NULL/len>0 before reaching
+           the terminal EPERM; Linux's permission
+           check wins first.
+
+     Fix (kernel/src/syscall/linux.rs sys_syslog):
+
+       #[allow(clippy::cast_possible_truncation,
+               clippy::cast_possible_wrap)]
+       let typ = args.arg0 as i32;
+       if !(0..=10).contains(&typ) {
+           return linux_err(errno::EINVAL);
+       }
+       #[allow(clippy::cast_possible_truncation,
+               clippy::cast_possible_wrap)]
+       let len_i32 = args.arg2 as i32;
+
+       let restricted = !matches!(typ, 3 | 10);
+       if restricted {
+           return linux_err(errno::EPERM);
+       }
+
+       match typ {
+           3 => {
+               if args.arg1 == 0 || len_i32 < 0 {
+                   return linux_err(errno::EINVAL);
+               }
+               if len_i32 == 0 {
+                   return SyscallResult::ok(0);
+               }
+               let len_u = len_i32 as usize;
+               if let Err(e) = crate::mm::user::
+                   validate_user_write(args.arg1,
+                                       len_u) {
+                   return linux_err(
+                       linux_errno_for(e));
+               }
+               SyscallResult::ok(0)
+           }
+           10 => SyscallResult::ok(0),
+           _ => linux_err(errno::EINVAL),
+       }
+
+     Existing self-test updates:
+       * syslog(6) -> EPERM (was 0).
+       * syslog(2, NULL, 16) -> EPERM (was EFAULT;
+         old expectation was a pre-perm buf-NULL
+         shortcut that does not match Linux's gate
+         order).
+
+     New batch-341 probes (4 added):
+       (a) syslog(3, NULL, 0) -> EINVAL
+           [READ_ALL unrestricted + buf-NULL gate;
+            was EPERM via terminal arm].
+       (b) syslog(3, NULL, 0x1_0000_0000) -> EINVAL
+           [len high|0 truncates to 0; was EFAULT
+            from huge-len + buf-NULL shortcut].
+       (c) syslog(3, 0xDEAD_BEEF, 0xFFFF_FFFF_FFFF_-
+           FFFF) -> EINVAL
+           [len all-high truncates to -1 (signed);
+            was EPERM via terminal arm after huge-
+            len validate succeeded in kernel
+            context].
+       (d) syslog(10, 0, 0) -> 0 preserved
+           [SIZE_BUFFER unrestricted sanity check].
+
+     Marker: "syslog int truncation + perm gate: OK".
+
+     Known limitations:
+
+     * typ=10 (SIZE_BUFFER) returns 0 rather than a
+       positive integer.  Linux returns the kernel
+       log buffer size (a compile-time constant,
+       e.g. 131072 for CONFIG_LOG_BUF_SHIFT=17).
+       We have no klog buffer at all, so 0 is the
+       truthful "no buffer available" signal.
+       Userspace dmesg-style tools that size their
+       read buffer from this value will either fall
+       back to a default or skip the read; both are
+       acceptable for a kernel that exposes no
+       Linux-shaped log.
+
+     * typ=3 (READ_ALL) with valid buf+len returns
+       0 (success, 0 bytes copied).  Linux returns
+       the number of bytes written to buf; we have
+       no klog content to copy, so 0 is truthful.
+       If a future change adds a Linux-shaped klog
+       buffer (currently the design directs all
+       structured logging through native channels,
+       so this is unlikely), this arm will need to
+       actually copy log content.
+
+     * No dmesg_restrict modelling.  Linux exposes a
+       sysctl that flips every type to "restricted"
+       when set.  We hardcode the dmesg_restrict=0
+       partition; if a Linux probe explicitly
+       requests dmesg_restrict=1 via sysctl, our
+       layer will not honour it.  Architectural
+       directive: native logging does not pass
+       through sysctl, so this is intentional - the
+       translator layer reflects the default kernel
+       configuration, not every tunable.
+
+     * No CAP_SYSLOG / CAP_SYS_ADMIN tracking.  All
+       Linux-ABI callers in this kernel are
+       effectively unprivileged from syslog(2)'s
+       point of view.  This is the architectural
+       directive in action: the Linux compat layer
+       does not reshape the native capability model
+       to satisfy Linux's caps.  A future cap-aware
+       Linux process would still see EPERM for
+       restricted types.
+
+     Build: cargo build -p kernel clean (35.49s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 25s).

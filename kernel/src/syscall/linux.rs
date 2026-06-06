@@ -5282,24 +5282,130 @@ fn sys_umask(args: &SyscallArgs) -> SyscallResult {
 /// alongside the Linux-shaped rt_sigframe delivery work — both
 /// require the same signal-delivery refactor.
 fn sys_sigaltstack(args: &SyscallArgs) -> SyscallResult {
+    /// `SS_ONSTACK` from `<signal.h>` — caller is currently executing on
+    /// the alternate stack (and as a flag input, "install the new stack
+    /// in non-disabled mode").
+    const SS_ONSTACK: i32 = 1;
     /// `SS_DISABLE` from `<signal.h>` — communicates "no alternate
     /// stack is in effect" in `stack_t.ss_flags`.
     const SS_DISABLE: i32 = 2;
+    /// `SS_AUTODISARM` (Linux 4.7+, top bit of ss_flags) — opt-in
+    /// "disarm the alt stack on entry to a handler" semantics.  Lives in
+    /// the `SS_FLAG_BITS` mask and is preserved across the mode switch
+    /// in Linux's `do_sigaltstack` (`ss_mode = ss_flags & ~SS_FLAG_BITS`).
+    const SS_AUTODISARM: i32 = 1 << 31;
+    /// `SS_FLAG_BITS` — bits stripped before comparing against the
+    /// {0, SS_DISABLE, SS_ONSTACK} mode set.
+    const SS_FLAG_BITS: i32 = SS_AUTODISARM;
+    /// `MINSIGSTKSZ` on x86_64 Linux (signal/arch/x86/include/uapi/asm/signal.h):
+    /// 2048 bytes.  Linux 6.x exposes a dynamic value via AT_MINSIGSTKSZ
+    /// to account for AVX-512 register-save footprint, but the syscall
+    /// floor enforced by `do_sigaltstack(... , MINSIGSTKSZ)` stays at
+    /// the compile-time 2048.
+    const MINSIGSTKSZ: u64 = 2048;
     const STACK_T_SIZE: usize = 24;
 
     let ss_ptr = args.arg0;
     let old_ss_ptr = args.arg1;
 
-    // Validate ss (input) pointer if non-NULL.  We don't honour its
-    // contents but we MUST fault on a bad user range — Linux does, and
-    // programs sometimes rely on the fault to detect ABI mismatches.
+    // Linux gate order (kernel/signal.c::SYSCALL_DEFINE2(sigaltstack)
+    // -> do_sigaltstack):
+    //   1. If uss != NULL: `copy_from_user(&new, uss, sizeof(stack_t))`
+    //      -> EFAULT on bad pointer.  Reads the full struct before any
+    //      field validation.
+    //   2. do_sigaltstack:
+    //      a. If uoss != NULL: fill `old` from the kernel state
+    //         (no validation, no copy_to_user yet).
+    //      b. If uss != NULL:
+    //          i.   on_stack(sp) -> EPERM (we have no alt-stack
+    //               tracking and no caller-sp model in self-test
+    //               context, so this gate is skipped).
+    //          ii.  `ss_mode = ss_flags & ~SS_FLAG_BITS`; if
+    //               `ss_mode != {0, SS_DISABLE, SS_ONSTACK}` -> EINVAL.
+    //          iii. if mode != SS_DISABLE and ss_size < MINSIGSTKSZ
+    //               -> ENOMEM.
+    //      c. Commit the new alt-stack (we silently drop it).
+    //   3. If uoss != NULL: `copy_to_user(uoss, &old, sizeof(stack_t))`
+    //      -> EFAULT on bad pointer.  Note this happens AFTER the
+    //      uss-side validation gates.
+    //
+    // Pre-batch (354) this stub did:
+    //   - validate_user_read(uss, 24)   [matches gate 1]
+    //   - validate_user_write(uoss, 24) [BEFORE the uss field gates]
+    //   - write SS_DISABLE to uoss      [unconditional]
+    //   - return 0                      [unconditional]
+    //
+    // Divergences:
+    //   * uss with ss_flags = 0xCAFE (unknown mode bits): Linux returns
+    //     -EINVAL.  Pre-batch: 0 (silently accepted).
+    //   * uss with ss_flags = 0 (SS_ONSTACK-equiv install) and ss_size =
+    //     1024 (< MINSIGSTKSZ): Linux returns -ENOMEM.  Pre-batch: 0.
+    //   * uss with ss_flags = SS_AUTODISARM | 0xCAFE (mode bits in the
+    //     SS_FLAG_BITS-stripped low part are 0xCAFE & ~AUTODISARM =
+    //     0xCAFE, invalid): Linux returns -EINVAL.  Pre-batch: 0.
+    //   * uss valid + bad uoss: Linux returns 0 (or commits uss) then
+    //     EFAULT.  Pre-batch: EFAULT immediately without consulting uss
+    //     gates.  (We can't probe this from boot context because
+    //     validate_user_write is bypassed for kernel callers.)
+    //
+    // The SS_AUTODISARM bit must be preserved across the mode strip;
+    // Linux stores the full ss_flags including the AUTODISARM bit, so
+    // a probe with ss_flags = SS_AUTODISARM | SS_DISABLE is valid
+    // (mode = SS_DISABLE).
+
+    // Gate 1: copy_from_user(uss, 24) if uss != NULL.
+    let mut new_flags: i32 = 0;
+    let mut new_size: u64 = 0;
     if ss_ptr != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(ss_ptr, STACK_T_SIZE) {
             return linux_err(linux_errno_for(e));
         }
+        let mut buf = [0u8; STACK_T_SIZE];
+        // SAFETY: validate_user_read above confirmed the 24-byte range.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(ss_ptr, buf.as_mut_ptr(), STACK_T_SIZE)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        // Field layout (verified against x86_64 Linux UAPI):
+        //   [0..8]   ss_sp     (void *, we don't honour but read past)
+        //   [8..12]  ss_flags  (int)
+        //   [12..16] padding
+        //   [16..24] ss_size   (size_t = u64)
+        new_flags = i32::from_ne_bytes(
+            match <[u8; 4]>::try_from(&buf[8..12]) {
+                Ok(b) => b,
+                // SAFETY: 4-byte slice from a 24-byte buf at offset 8
+                // is always Ok.  The unreachable branch is a defensive
+                // EINVAL rather than a panic to keep the syscall
+                // never-panic invariant.
+                Err(_) => return linux_err(errno::EINVAL),
+            },
+        );
+        new_size = u64::from_ne_bytes(
+            match <[u8; 8]>::try_from(&buf[16..24]) {
+                Ok(b) => b,
+                Err(_) => return linux_err(errno::EINVAL),
+            },
+        );
     }
 
-    // Write old_ss (output) as "disabled" if non-NULL.
+    // Gate 2b.ii: ss_mode validation (only if uss != NULL).
+    if ss_ptr != 0 {
+        let ss_mode = new_flags & !SS_FLAG_BITS;
+        if ss_mode != 0 && ss_mode != SS_DISABLE && ss_mode != SS_ONSTACK {
+            return linux_err(errno::EINVAL);
+        }
+        // Gate 2b.iii: size floor when not SS_DISABLE.
+        if ss_mode != SS_DISABLE && new_size < MINSIGSTKSZ {
+            return linux_err(errno::ENOMEM);
+        }
+    }
+
+    // Gate 3: copy_to_user(uoss, &old) if uoss != NULL.  Linux runs
+    // this only after the uss gates have passed (above), so an EFAULT
+    // here surfaces only when the new-stack request was syntactically
+    // valid.
     if old_ss_ptr != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(old_ss_ptr, STACK_T_SIZE) {
             return linux_err(linux_errno_for(e));
@@ -5310,7 +5416,6 @@ fn sys_sigaltstack(args: &SyscallArgs) -> SyscallResult {
         //   [12..16] padding
         //   [16..24] ss_size (0)
         let mut buf = [0u8; STACK_T_SIZE];
-        // ss_flags at offset 8.
         let flags_bytes = SS_DISABLE.to_ne_bytes();
         buf[8] = flags_bytes[0];
         buf[9] = flags_bytes[1];
@@ -31273,6 +31378,188 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Batch 355: ss_flags / ss_size gates.
+        //
+        // Pre-batch the stub validated only pointer ranges and silently
+        // accepted any ss contents.  Post-batch the wrapper mirrors
+        // Linux's `do_sigaltstack`:
+        //   - ss_mode (ss_flags & ~SS_AUTODISARM) must be 0, SS_DISABLE
+        //     (2), or SS_ONSTACK (1) -> else EINVAL.
+        //   - if ss_mode != SS_DISABLE and ss_size < MINSIGSTKSZ=2048
+        //     -> ENOMEM.
+        //
+        // Probes build a stack_t in a kernel-local byte buffer
+        // (validate_user_read is bypassed in kernel context, but
+        // copy_from_user still dereferences the pointer for real, so
+        // the buffer address must be a valid kernel pointer).
+
+        // Helper: pack a stack_t { ss_sp=0, ss_flags, ss_size } into a
+        // 24-byte buffer at &buf, return its kernel-space address.
+        fn pack_stack_t(buf: &mut [u8; 24], flags: i32, size: u64) {
+            // ss_sp = 0 already from zero-init.
+            let fb = flags.to_ne_bytes();
+            buf[8] = fb[0]; buf[9] = fb[1]; buf[10] = fb[2]; buf[11] = fb[3];
+            // padding at [12..16] stays 0.
+            let sb = size.to_ne_bytes();
+            buf[16] = sb[0]; buf[17] = sb[1]; buf[18] = sb[2]; buf[19] = sb[3];
+            buf[20] = sb[4]; buf[21] = sb[5]; buf[22] = sb[6]; buf[23] = sb[7];
+        }
+
+        // (a) ss_flags = 0xCAFE (mode bits unknown, mode=0xCAFE not in
+        //     {0, SS_DISABLE, SS_ONSTACK}) -> EINVAL.  Pre-batch: 0.
+        let mut ss_buf = [0u8; 24];
+        pack_stack_t(&mut ss_buf, 0xCAFE, 8192);
+        let ss_addr = ss_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: ss_addr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGALTSTACK, &a).value
+            != -i64::from(errno::EINVAL)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack(ss_flags=0xCAFE) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) ss_flags = 0 (SS_ONSTACK-equivalent install mode),
+        //     ss_size = 1024 (< MINSIGSTKSZ=2048) -> ENOMEM.  Pre-batch: 0.
+        let mut ss_buf = [0u8; 24];
+        pack_stack_t(&mut ss_buf, 0, 1024);
+        let ss_addr = ss_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: ss_addr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGALTSTACK, &a).value
+            != -i64::from(errno::ENOMEM)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack(size=1024) not ENOMEM"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) ss_flags = SS_ONSTACK (1), ss_size = 1024 -> ENOMEM
+        //     (same size gate, mode 1 is valid).  Pre-batch: 0.
+        let mut ss_buf = [0u8; 24];
+        pack_stack_t(&mut ss_buf, 1, 1024);
+        let ss_addr = ss_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: ss_addr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGALTSTACK, &a).value
+            != -i64::from(errno::ENOMEM)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack(SS_ONSTACK,size=1024) not ENOMEM"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) ss_flags = SS_DISABLE (2), ss_size = 0 -> 0 (DISABLE
+        //     mode skips the size gate).  Both pre- and post-batch
+        //     return 0 — this is a positive regression-guard probe.
+        let mut ss_buf = [0u8; 24];
+        pack_stack_t(&mut ss_buf, 2, 0);
+        let ss_addr = ss_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: ss_addr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGALTSTACK, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack(SS_DISABLE,size=0) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (e) ss_flags = SS_AUTODISARM | SS_DISABLE (0x80000002),
+        //     ss_size = 0 -> 0.  Verifies SS_AUTODISARM is masked out
+        //     before mode comparison.  i32 bit pattern for the top
+        //     bit: 1u32 << 31 = 0x80000000 reinterpreted as i32 is the
+        //     INT_MIN value.
+        #[allow(clippy::cast_possible_wrap)]
+        let autodisarm_disable = (0x8000_0000_u32 | 2) as i32;
+        let mut ss_buf = [0u8; 24];
+        pack_stack_t(&mut ss_buf, autodisarm_disable, 0);
+        let ss_addr = ss_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: ss_addr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGALTSTACK, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack(AUTODISARM|DISABLE) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (f) ss_flags = SS_AUTODISARM | 0xCAFE: mode bits after
+        //     strip = 0xCAFE -> EINVAL.  Verifies the strip happens
+        //     before mode validation.  Pre-batch: 0.
+        #[allow(clippy::cast_possible_wrap)]
+        let autodisarm_bogus = (0x8000_0000_u32 | 0xCAFE) as i32;
+        let mut ss_buf = [0u8; 24];
+        pack_stack_t(&mut ss_buf, autodisarm_bogus, 8192);
+        let ss_addr = ss_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: ss_addr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGALTSTACK, &a).value
+            != -i64::from(errno::EINVAL)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack(AUTODISARM|0xCAFE) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (g) Valid SS_ONSTACK install (mode=1, size=4096 >= 2048)
+        //     with bad uoss pointer.  In kernel context
+        //     validate_user_write is bypassed so we can't probe
+        //     EFAULT directly, but the ss-side gates passing AND the
+        //     uoss-side validation reaching copy_to_user (which then
+        //     succeeds because of the kernel-context bypass) yields
+        //     return 0.  This guards against a regression where
+        //     someone reorders the gates and accidentally short-
+        //     circuits on the ss-side gates after the uoss copy.
+        let mut ss_buf = [0u8; 24];
+        pack_stack_t(&mut ss_buf, 1, 4096);
+        let ss_addr = ss_buf.as_ptr() as u64;
+        let mut old_buf = [0u8; 24];
+        let old_addr = old_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: ss_addr, arg1: old_addr, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SIGALTSTACK, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack(valid ss, valid oss) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // And old_buf should carry SS_DISABLE in the flags field
+        // (offset 8..12).
+        let got_flags = i32::from_ne_bytes(
+            match <[u8; 4]>::try_from(&old_buf[8..12]) {
+                Ok(b) => b,
+                Err(_) => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: sigaltstack old_buf flags slice"
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            },
+        );
+        if got_flags != 2 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigaltstack oss.ss_flags = {} (want SS_DISABLE=2)",
+                got_flags
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   sigaltstack ss_flags + ss_size gates: OK"
+        );
     }
 
     // ioctl dispatch validation:

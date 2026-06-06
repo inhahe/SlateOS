@@ -31915,3 +31915,118 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (51.95s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+385. syscall/linux batch 355 — sys_sigaltstack: Linux ss_flags +
+     ss_size gates.  Second consecutive structural-fix batch after
+     354's rt_sigprocmask gate-order rewrite.
+
+     Pre-batch the stub at kernel/src/syscall/linux.rs:5284 only
+     validated the user pointers and silently accepted any ss
+     contents:
+
+         fn sys_sigaltstack(args: &SyscallArgs) -> SyscallResult {
+             let ss_ptr = args.arg0;
+             let old_ss_ptr = args.arg1;
+             if ss_ptr != 0 {
+                 validate_user_read(ss_ptr, 24)?;   // EFAULT
+             }
+             if old_ss_ptr != 0 {
+                 validate_user_write(old_ss_ptr, 24)?;
+                 /* write SS_DISABLE old_ss */
+             }
+             SyscallResult::ok(0)
+         }
+
+     Missing vs Linux's `do_sigaltstack` (kernel/signal.c):
+       - ss_flags validation: ss_mode = ss_flags & ~SS_FLAG_BITS
+         must be 0, SS_DISABLE (2), or SS_ONSTACK (1) -> else
+         EINVAL.  SS_FLAG_BITS = SS_AUTODISARM = 1 << 31 = 0x80000000.
+       - ss_size floor: if ss_mode != SS_DISABLE and ss_size <
+         MINSIGSTKSZ (= 2048 on x86_64) -> ENOMEM.
+       - oss copy_to_user ordering: Linux runs the uss-side gates
+         FIRST inside do_sigaltstack, then the SYSCALL_DEFINE2
+         wrapper copies oss out.  Pre-batch we validated uoss
+         writable BEFORE the uss contents, so a (valid uss with
+         bad flags) + (bad uoss) call returned EFAULT instead of
+         EINVAL.
+
+     Concrete pre-batch divergences:
+       * uss with ss_flags = 0xCAFE: Linux returns EINVAL.
+         Pre-batch: 0 (silently accepted, alt-stack was a no-op
+         drop, but the EINVAL discriminator was lost).
+       * uss with ss_flags = 0, ss_size = 1024: Linux returns
+         ENOMEM.  Pre-batch: 0.
+       * uss with ss_flags = SS_AUTODISARM | 0xCAFE: Linux strips
+         SS_AUTODISARM before mode comparison, mode = 0xCAFE,
+         returns EINVAL.  Pre-batch: 0.
+
+     Post-batch (kernel/src/syscall/linux.rs:5284) implements the
+     full Linux gate sequence:
+
+       Gate 1: copy_from_user(uss, 24) if uss != NULL -> EFAULT.
+       Gate 2: do_sigaltstack:
+                 2a. fill old from kernel state (no validation —
+                     we have no alt-stack tracking, so we report
+                     SS_DISABLE with sp=NULL, size=0).
+                 2b. if uss != NULL:
+                       - on_stack(sp) gate skipped (no caller-sp
+                         model in this stub).
+                       - ss_mode = ss_flags & ~SS_AUTODISARM;
+                         if mode not in {0, SS_DISABLE, SS_ONSTACK}
+                         -> EINVAL.
+                       - if mode != SS_DISABLE and ss_size <
+                         MINSIGSTKSZ -> ENOMEM.
+                 2c. (commit silently dropped — the alt-stack is
+                     still a no-op, but the validation now matches
+                     Linux's surface contract).
+       Gate 3: copy_to_user(uoss, &old, 24) -> EFAULT, AFTER the
+                 uss-side gates.
+
+     Constants (signal/include/uapi/asm-generic/signal-defs.h):
+       SS_ONSTACK      = 1
+       SS_DISABLE      = 2
+       SS_AUTODISARM   = 1 << 31      // SS_FLAG_BITS mask
+       MINSIGSTKSZ     = 2048         // x86_64 syscall floor
+
+     Note on MINSIGSTKSZ: Linux 6.x exposes a dynamic value via
+     AT_MINSIGSTKSZ that accounts for AVX-512 register-save
+     footprint, but the floor enforced by do_sigaltstack stays
+     at the compile-time 2048.  We mirror the syscall-layer floor.
+
+     Probes added to self_test() right after the existing
+     (NULL, NULL) -> 0 probe, exercising every new gate from boot
+     context.  Probes use kernel-stack byte buffers as stack_t
+     storage so copy_from_user dereferences a valid pointer
+     (validate_user_read is bypassed in kernel context, but the
+     raw memcpy still happens).
+
+       a. ss_flags=0xCAFE -> EINVAL via gate 2b mode check.
+          Pre-batch: 0.
+       b. ss_flags=0, ss_size=1024 -> ENOMEM via gate 2b size
+          check.  Pre-batch: 0.
+       c. ss_flags=SS_ONSTACK(1), ss_size=1024 -> ENOMEM.  Same
+          size gate, mode is valid.  Pre-batch: 0.
+       d. ss_flags=SS_DISABLE(2), ss_size=0 -> 0.  Regression
+          guard: DISABLE mode skips the size floor.
+       e. ss_flags=SS_AUTODISARM|SS_DISABLE -> 0.  Verifies
+          AUTODISARM strip before mode comparison.
+       f. ss_flags=SS_AUTODISARM|0xCAFE -> EINVAL.  Verifies the
+          strip happens before mode validation (i.e. mode bits
+          0xCAFE remain after stripping AUTODISARM).
+       g. Valid SS_ONSTACK install + valid oss pointer -> 0 and
+          oss.ss_flags == SS_DISABLE.  Pin-down on the successful
+          query path: the stub still reports "no alt-stack in
+          effect" to the caller.
+
+     Architectural directive: alt-stack delivery is still not
+     implemented (signals deliver on the main thread stack), so
+     accepting a valid request is still a silent drop.  But the
+     validation surface is now Linux-shaped: callers that probe
+     argument validity (libc bootstrap, runtime trampoline setup,
+     fuzzers) get the right errno discriminator.  The delivery
+     work is tracked under the same todo entry as Linux-shaped
+     rt_sigframe.
+
+     Build: cargo build -p kernel clean (45.13s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 26s).

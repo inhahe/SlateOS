@@ -35575,3 +35575,64 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (41.68s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
      Stamp confirmed at build/serial-test.txt:482.
+
+426. [2026-06-06] sys_landlock_add_rule + sys_landlock_restrict_self
+     terminals migrated to EOPNOTSUPP — completing batch 384's
+     unification of the Landlock family on EOPNOTSUPP terminals.
+     Pre-batch both terminated at EBADF, predating batch 384's
+     create_ruleset update.  Linux's gate 1 in
+     security/landlock/syscalls.c::SYSCALL_DEFINE4(landlock_add_rule)
+     and SYSCALL_DEFINE2(landlock_restrict_self) is:
+       if (!landlock_initialized) return -EOPNOTSUPP;
+     We model landlock_initialized=false (no Landlock LSM in this
+     kernel), so every well-formed call shape must terminate
+     EOPNOTSUPP to match Linux's no-Landlock observable.
+
+     Divergence table (pre-batch → Linux observable → post-batch):
+       landlock_add_rule       valid PATH_BENEATH  : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_add_rule       valid NET_PORT      : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_add_rule       (high-only,valid)   : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_add_rule       (rule_type high|1,v): EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_restrict_self  valid (flags=0)     : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_restrict_self  LOG_SAME_EXEC_OFF   : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_restrict_self  LOG_NEW_EXEC_ON     : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_restrict_self  LOG_SUBDOMAINS_OFF  : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_restrict_self  all log flags (0x7) : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_restrict_self  (high|LOG_SAME_*)   : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_restrict_self  (high|all-valid)    : EBADF → EOPNOTSUPP → EOPNOTSUPP
+       landlock_restrict_self  (high-half-zero)    : EBADF → EOPNOTSUPP → EOPNOTSUPP
+
+     Why it matters: a userspace sandbox probe (e.g. libseccomp's
+     landlock detection, or a Rust `landlock` crate's
+     supports_v1() helper) calls
+     landlock_restrict_self(ruleset_fd=-1, flags=0) early in startup
+     to decide whether to enforce Landlock or fall back.  The errno
+     discriminator: EOPNOTSUPP → "kernel lacks Landlock, fall back
+     gracefully"; EBADF → "kernel has Landlock but your ruleset fd
+     is wrong, fix your code."  Pre-batch our EBADF would mis-train
+     the probe into believing Landlock is available — the program
+     would then try to construct a real ruleset, see EOPNOTSUPP from
+     create_ruleset (batch 384), and end up in a confused state
+     where one Landlock call says "I'm here" and another says "I'm
+     not."  Post-batch the errno is consistent across the family.
+
+     We keep the diagnostic pre-terminal EINVAL/EFAULT/ENOMSG gates
+     intact (same rationale as the kept gates in create_ruleset per
+     batch 384): they're observable only on a kernel WITH Landlock,
+     so they don't reach Linux-observable paths today, but they're
+     useful diagnostics for future Landlock implementation work and
+     for tests that bypass the terminal answer.
+
+     Architectural: pure ABI translation, no Landlock infrastructure
+     change.  This is the missing half of batch 384.
+
+     Probes updated (12 reshape + 1 new aggregate stamp):
+       12 EBADF → EOPNOTSUPP terminal updates across add_rule and
+       restrict_self test families (valid, log-flag, truncation).
+     New aggregate stamp:
+       "[syscall/linux]   landlock_add_rule + landlock_restrict_self
+        terminal EOPNOTSUPP (Linux gate 1 !landlock_initialized): OK"
+
+     Build: cargo build -p kernel clean (40.48s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 23s).
+     Stamp confirmed at build/serial-test.txt:602.

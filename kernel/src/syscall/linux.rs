@@ -19624,10 +19624,19 @@ fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    // No real ruleset fd exists because landlock_create_ruleset returned
-    // ENOSYS for the create path.  EBADF matches Linux behaviour after
-    // the ruleset fd is closed.
-    linux_err(errno::EBADF)
+    // Batch 396: terminal was EBADF, predating the batch-384 unification
+    // of Landlock terminal answers on EOPNOTSUPP.  Linux's literal gate 1
+    // in security/landlock/syscalls.c::SYSCALL_DEFINE4(landlock_add_rule)
+    // is `if (!landlock_initialized) return -EOPNOTSUPP;` — strictly,
+    // every call on our kernel (which models landlock_initialized=false)
+    // should return EOPNOTSUPP, but we keep the diagnostic EINVAL/EFAULT/
+    // ENOMSG gates intact so future Landlock implementation work doesn't
+    // need to re-derive them (same rationale as the kept gates in
+    // sys_landlock_create_ruleset).  The terminal — the answer Linux
+    // gives for a *valid* call shape — must be EOPNOTSUPP to match
+    // gate 1, not EBADF (which is what Linux gates 2-N would return
+    // *if* landlock_initialized were true and the fd were bogus).
+    linux_err(errno::EOPNOTSUPP)
 }
 
 /// `landlock_restrict_self(ruleset_fd, flags)`.
@@ -19670,7 +19679,12 @@ fn sys_landlock_restrict_self(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    linux_err(errno::EBADF)
+    // Batch 396: terminal was EBADF, predating batch 384's unification of
+    // Landlock terminals on EOPNOTSUPP.  Linux's gate 1 in
+    // security/landlock/syscalls.c::SYSCALL_DEFINE2(landlock_restrict_self)
+    // is `if (!landlock_initialized) return -EOPNOTSUPP;`.  See the
+    // matching comment in sys_landlock_add_rule above.
+    linux_err(errno::EOPNOTSUPP)
 }
 
 /// `kcmp(pid1, pid2, type, idx1, idx2)` — compare two processes'
@@ -50511,7 +50525,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // landlock_add_rule valid PATH_BENEATH (allowed_access=EXECUTE=0x1,
-        // parent_fd=0) -> EBADF (terminal — ruleset_fd never real).
+        // parent_fd=0) -> EOPNOTSUPP (batch 396: terminal switched from
+        // EBADF to EOPNOTSUPP to match Linux gate 1
+        // !landlock_initialized).
         let lpb_attr: [u8; 16] = {
             let mut b = [0u8; 16];
             b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
@@ -50519,8 +50535,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let lpb_attr_ptr = lpb_attr.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: lpb_attr_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid PATH_BENEATH not EBADF");
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid PATH_BENEATH not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
         // landlock_add_rule PATH_BENEATH with allowed_access=0 -> ENOMSG
@@ -50546,7 +50562,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // landlock_add_rule valid NET_PORT (allowed_access=BIND_TCP=0x1,
-        // port=8080) -> EBADF.
+        // port=8080) -> EOPNOTSUPP (batch 396 terminal switch).
         let lnp_attr: [u8; 16] = {
             let mut b = [0u8; 16];
             b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
@@ -50555,8 +50571,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let lnp_attr_ptr = lnp_attr.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: 2, arg2: lnp_attr_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid NET_PORT not EBADF");
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid NET_PORT not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
         // landlock_add_rule NET_PORT with allowed_access bit outside
@@ -50625,13 +50641,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         // (d) flags=0x1_0000_0000 with valid PATH_BENEATH attr
         //     (allowed_access=EXECUTE=0x1): truncates to 0, flag gate
-        //     passes, full pre-validate flow runs to the terminal EBADF
-        //     (no real ruleset fd exists).  Pre-fix returned EINVAL on
-        //     the flag gate.
+        //     passes, full pre-validate flow runs to the terminal
+        //     EOPNOTSUPP (batch 396).  Pre-fix returned EINVAL on the
+        //     flag gate.
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: lpb_attr_ptr, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EBADF) {
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock_add_rule(high-only,valid) not EBADF"
+                "[syscall/linux]   FAIL: landlock_add_rule(high-only,valid) not EOPNOTSUPP"
             );
             return Err(KernelError::InternalError);
         }
@@ -50680,12 +50696,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         // (d) rule_type=0x1_0000_0001 with valid PATH_BENEATH attr
         //     (allowed_access=EXECUTE=0x1): truncates to 1, full pre-
-        //     validate flow runs to the terminal EBADF (no real
-        //     ruleset_fd exists).  Pre-fix returned EINVAL.
+        //     validate flow runs to the terminal EOPNOTSUPP (batch
+        //     396).  Pre-fix returned EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0001, arg2: lpb_attr_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EBADF) {
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1,valid) not EBADF"
+                "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|1,valid) not EOPNOTSUPP"
             );
             return Err(KernelError::InternalError);
         }
@@ -50699,35 +50715,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock_restrict_self undef flag not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self valid (flags=0) -> EBADF.
+        // Batch 396: terminals switched from EBADF to EOPNOTSUPP.
+        // Linux gate 1 in restrict_self is !landlock_initialized →
+        // EOPNOTSUPP before any flag/fd touch; we model
+        // landlock_initialized=false so every valid call shape
+        // terminates EOPNOTSUPP.
+        // landlock_restrict_self valid (flags=0) -> EOPNOTSUPP.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self valid not EBADF");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self LOG_SAME_EXEC_OFF=0x1 -> EBADF
+        // landlock_restrict_self LOG_SAME_EXEC_OFF=0x1 -> EOPNOTSUPP
         // (well-formed; Linux 6.10).
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_SAME_EXEC_OFF not EBADF");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_SAME_EXEC_OFF not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self LOG_NEW_EXEC_ON=0x2 -> EBADF (Linux 6.10).
+        // landlock_restrict_self LOG_NEW_EXEC_ON=0x2 -> EOPNOTSUPP (Linux 6.10).
         let a = SyscallArgs { arg0: 0, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_NEW_EXEC_ON not EBADF");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_NEW_EXEC_ON not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self LOG_SUBDOMAINS_OFF=0x4 -> EBADF (Linux 6.12).
+        // landlock_restrict_self LOG_SUBDOMAINS_OFF=0x4 -> EOPNOTSUPP (Linux 6.12).
         let a = SyscallArgs { arg0: 0, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_SUBDOMAINS_OFF not EBADF");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_SUBDOMAINS_OFF not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self all three log flags (0x7) -> EBADF.
+        // landlock_restrict_self all three log flags (0x7) -> EOPNOTSUPP.
         let a = SyscallArgs { arg0: 0, arg1: 7, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self all log flags not EBADF");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self all log flags not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
         // landlock_restrict_self LOG_SAME_EXEC_OFF + undef high bit
@@ -50749,42 +50770,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // width, so high-half garbage returned spurious EINVAL where
         // Linux returns EBADF (no landlock ruleset fd in our kernel).
         //
-        // (a) landlock_restrict_self(0, 0x1_0000_0001) → EBADF
-        //     (high|LOG_SAME_EXEC_OFF; truncates to 1, mask passes,
-        //     fd check passes in kernel context, EBADF terminal).
+        // (a) landlock_restrict_self(0, 0x1_0000_0001) → EOPNOTSUPP
+        //     (batch 396 terminal; high|LOG_SAME_EXEC_OFF truncates to
+        //     1, mask passes, fd check passes in kernel context).
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0001, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-        if v != -i64::from(errno::EBADF) {
+        if v != -i64::from(errno::EOPNOTSUPP) {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock_restrict_self(high|LOG_SAME_EXEC_OFF) -> {} (expected -EBADF)",
+                "[syscall/linux]   FAIL: landlock_restrict_self(high|LOG_SAME_EXEC_OFF) -> {} (expected -EOPNOTSUPP)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
-        // (b) landlock_restrict_self(0, 0x1_0000_0007) → EBADF
-        //     (high|all-valid 0x7; truncates to 7, mask passes, EBADF).
+        // (b) landlock_restrict_self(0, 0x1_0000_0007) → EOPNOTSUPP
+        //     (high|all-valid 0x7; truncates to 7, mask passes).
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0007, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-        if v != -i64::from(errno::EBADF) {
+        if v != -i64::from(errno::EOPNOTSUPP) {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock_restrict_self(high|all-valid) -> {} (expected -EBADF)",
+                "[syscall/linux]   FAIL: landlock_restrict_self(high|all-valid) -> {} (expected -EOPNOTSUPP)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
-        // (c) landlock_restrict_self(0, 0x1_0000_0000) → EBADF
+        // (c) landlock_restrict_self(0, 0x1_0000_0000) → EOPNOTSUPP
         //     (high-half only, low half zero; truncates to 0, mask
-        //     passes, EBADF).
+        //     passes).
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0000, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-        if v != -i64::from(errno::EBADF) {
+        if v != -i64::from(errno::EOPNOTSUPP) {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock_restrict_self(high-half-zero) -> {} (expected -EBADF)",
+                "[syscall/linux]   FAIL: landlock_restrict_self(high-half-zero) -> {} (expected -EOPNOTSUPP)",
                 v
             );
             return Err(KernelError::InternalError);
@@ -50808,6 +50829,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   landlock_restrict_self unsigned-int truncation (high-half ignored): OK"
+        );
+        serial_println!(
+            "[syscall/linux]   landlock_add_rule + landlock_restrict_self terminal EOPNOTSUPP (Linux gate 1 !landlock_initialized): OK"
         );
 
         // kcmp bad type, valid pids -> EINVAL.  Type validation lives

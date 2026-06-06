@@ -14355,41 +14355,39 @@ fn sys_poll(args: &SyscallArgs) -> SyscallResult {
 
 /// `ppoll(fds*, nfds, timespec*, sigmask*, sigsetsize)` — like poll with
 /// nanosecond-precision timeout and atomic sigmask swap.
+///
+/// Gate order (matches Linux fs/select.c::SYSCALL_DEFINE5(ppoll) +
+/// set_user_sigmask + do_sys_poll):
+///   1. tsp != NULL: get_timespec64(tsp) -> EFAULT, then
+///      poll_select_set_timeout (tv_sec<0 or tv_nsec out-of-range)
+///      -> EINVAL.
+///   2. set_user_sigmask(sigmask, sigsetsize):
+///        a. sigmask == NULL -> skip (sigsetsize is IGNORED).
+///        b. sigsetsize != sizeof(sigset_t) -> EINVAL.
+///        c. copy_from_user(sigmask, 8) -> EFAULT.
+///   3. do_sys_poll:
+///        a. nfds > rlimit(RLIMIT_NOFILE) (we cap at 1<<20) -> EINVAL.
+///        b. nfds > 0: validate ufds.
+///
+/// Pre-batch we ran the nfds/fds gates first, then sigsetsize, then
+/// sigmask, then tsp.  The sigsetsize check also fired when
+/// sigmask was NULL — Linux ignores sigsetsize in that case.
+/// Discriminators:
+///   * (nfds=huge, tsp=bogus) -> Linux EFAULT; pre-batch EINVAL.
+///   * (NULL sigmask, sigsetsize != 8) -> Linux 0/timeout;
+///     pre-batch EINVAL.
 fn sys_ppoll(args: &SyscallArgs) -> SyscallResult {
-    let nfds = args.arg1;
-    if nfds > (1 << 20) {
-        return linux_err(errno::EINVAL);
-    }
-    if nfds > 0 {
-        if args.arg0 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        let len = nfds.saturating_mul(8);
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg0, len as usize) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // sigsetsize must equal sizeof(sigset_t) = 8 on x86_64.
-    if args.arg4 != 0 && args.arg4 != 8 {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg3 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 8) {
-            return linux_err(linux_errno_for(e));
-        }
-        // The sigmask is intentionally ignored: we have no signal
-        // delivery, so atomic swap-in / swap-out has no observable
-        // effect.  Validating the read keeps callers honest.
-    }
-    // Translate timespec -> int ms.  NULL timespec means "wait forever"
-    // (per Linux man page) — encoded as -1 ms for poll_core.
+    // Gate 1: tsp != NULL: get_timespec64 + poll_select_set_timeout.
     let timeout_ms_signed: i64 = if args.arg2 == 0 {
+        // NULL timespec means "wait forever" (per Linux man page) —
+        // encoded as -1 ms for poll_core.
         -1
     } else {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 16) {
             return linux_err(linux_errno_for(e));
         }
         let mut ts = [0u8; 16];
+        // SAFETY: validate_user_read above covers 16 bytes at args.arg2.
         let r = unsafe {
             crate::mm::user::copy_from_user(args.arg2, ts.as_mut_ptr(), 16)
         };
@@ -14415,6 +14413,36 @@ fn sys_ppoll(args: &SyscallArgs) -> SyscallResult {
         // Cap at i32::MAX (~24.8 days) to fit poll's int timeout.
         core::cmp::min(total_ms, i64::from(i32::MAX))
     };
+
+    // Gate 2: set_user_sigmask(sigmask, sigsetsize).  When sigmask is
+    // NULL, set_user_sigmask returns 0 immediately — sigsetsize is
+    // ignored.  The sigmask itself is intentionally consumed (just
+    // validated readable) because we have no signal delivery, so
+    // atomic swap-in / swap-out has no observable effect.
+    if args.arg3 != 0 {
+        if args.arg4 != 8 {
+            return linux_err(errno::EINVAL);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    // Gate 3: do_sys_poll: nfds + ufds.  Linux caps nfds at
+    // RLIMIT_NOFILE; we accept up to 1<<20 as the sanity bound.
+    let nfds = args.arg1;
+    if nfds > (1 << 20) {
+        return linux_err(errno::EINVAL);
+    }
+    if nfds > 0 {
+        if args.arg0 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        let len = nfds.saturating_mul(8);
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg0, len as usize) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
 
     poll_core(args.arg0, nfds, timeout_ms_signed)
 }
@@ -38400,12 +38428,85 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             crate::ipc::pipe::close(rh);
         }
-        // ppoll with nfds=0 and NULL timespec — sigmask invalid size -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 16, arg5: 0 };
-        if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: ppoll bad sigsetsize not EINVAL");
-            return Err(KernelError::InternalError);
+        // ppoll: non-NULL sigmask + bad sigsetsize -> EINVAL.  Linux's
+        // set_user_sigmask only checks sigsetsize when umask != NULL; we
+        // mirror that.  The sigmask buffer is stack-allocated and the
+        // dummy bytes are intentionally non-zero so any future signal-
+        // delivery code that observes them sees a real mask.
+        {
+            let dummy_sigmask: [u8; 8] = [0; 8];
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: (&raw const dummy_sigmask[0]) as u64,
+                arg4: 16,
+                arg5: 0,
+            };
+            core::hint::black_box(&dummy_sigmask);
+            if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: ppoll bad sigsetsize not EINVAL");
+                return Err(KernelError::InternalError);
+            }
         }
+        // ppoll discriminator A: nfds>0 + NULL ufds + timespec with
+        // negative tv_sec -> EINVAL.  Linux runs get_timespec64 +
+        // poll_select_set_timeout before do_sys_poll, so the negative
+        // tv_sec wins over the NULL ufds.  Pre-batch we ran the nfds/fds
+        // gate first and returned EFAULT.
+        {
+            let ts: [i64; 2] = [-1, 0];
+            let ts_ptr = (&raw const ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 2,
+                arg2: ts_ptr,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            core::hint::black_box(&ts);
+            if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: ppoll nfds>0+NULL ufds + neg tv_sec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // ppoll discriminator B: NULL sigmask with bad sigsetsize must
+        // NOT EINVAL — Linux's set_user_sigmask returns 0 immediately
+        // when umask is NULL, ignoring sigsetsize.  With nfds=0 + NULL
+        // tsp we then fall through to poll_core(0,...,-1) which returns
+        // 0 instantly because the no-fds fast path hits before any wait.
+        {
+            let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 16, arg5: 0 };
+            let v = dispatch_linux(nr::PPOLL, &a).value;
+            if v != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: ppoll NULL sigmask + bad sigsetsize {} != 0",
+                    v
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // ppoll discriminator C: huge nfds + NULL tsp + NULL sigmask +
+        // bad sigsetsize -> EINVAL via the nfds gate, confirming the
+        // sigsetsize check did not fire for the NULL sigmask.
+        {
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: 2_000_000,
+                arg2: 0,
+                arg3: 0,
+                arg4: 16,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::PPOLL, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: ppoll huge nfds not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[syscall/linux]   ppoll timespec > sigmask+sigsetsize > nfds gate order: OK");
         // ppoll with nfds=0 and timespec={0,0} -> instant 0 (no wait).
         {
             let ts: [i64; 2] = [0, 0];

@@ -22357,3 +22357,72 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      result is still ENOSYS since no real ring backend exists.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 287. syscall/linux: ppoll — timespec > sigmask+sigsetsize > nfds
+##      gate order (batch 258)
+##
+##      Pre-batch divergences from Linux fs/select.c
+##      `SYSCALL_DEFINE5(ppoll)` + `set_user_sigmask` + `do_sys_poll`:
+##
+##        (a) Our gate order ran nfds/ufds first, then sigsetsize,
+##            then sigmask, then tsp.  Linux's literal order is:
+##              1. tsp != NULL: get_timespec64 + poll_select_set_timeout.
+##              2. set_user_sigmask(umask, sigsetsize).
+##              3. do_sys_poll: nfds + ufds.
+##            Discriminator: (nfds=2, ufds=NULL, tsp={-1,0}) ->
+##              Linux EINVAL (gate 1 negative tv_sec) vs pre-batch
+##              EFAULT (nfds gate fired ufds=NULL EFAULT first).
+##
+##        (b) Our sigsetsize check ran unconditionally, including
+##            when umask was NULL.  Linux's `set_user_sigmask` does
+##            `if (!umask) return 0;` so sigsetsize is IGNORED when
+##            sigmask is NULL.
+##            Discriminator: (NULL sigmask, sigsetsize=16) ->
+##              Linux 0 (poll fast path) vs pre-batch EINVAL.
+##
+##      Fix:
+##
+##        * Reorder sys_ppoll at kernel/src/syscall/linux.rs to three
+##          gates matching Linux literally:
+##            1. tsp != NULL -> validate + parse timespec ->
+##               EFAULT/EINVAL.
+##            2. sigmask != NULL -> sigsetsize==8 + validate read ->
+##               EINVAL/EFAULT.  Skipped entirely when sigmask=NULL.
+##            3. nfds > 1<<20 -> EINVAL; nfds>0 + ufds=NULL ->
+##               EFAULT; nfds>0 -> validate ufds.
+##          poll_core called once at the end.
+##
+##      Self-tests added/updated (around the existing ppoll block):
+##
+##        Pre-existing test updated:
+##          - (nfds=0, NULL tsp, NULL sigmask, sigsetsize=16) -> EINVAL
+##            switched to use a stack-allocated dummy sigmask buffer
+##            so the sigsetsize gate still fires (Linux ignores
+##            sigsetsize when sigmask is NULL, so the old NULL-sigmask
+##            form would now return 0).  Intent preserved: bad
+##            sigsetsize -> EINVAL.
+##
+##        New discriminators:
+##          A. (nfds=2, ufds=NULL, tsp={-1,0}) -> EINVAL  (gate 1
+##             ahead of gate 3; was EFAULT).
+##          B. (NULL sigmask, sigsetsize=16, nfds=0) -> 0  (gate 2
+##             skipped because umask=NULL; was EINVAL).
+##          C. (huge nfds, NULL tsp, NULL sigmask, sigsetsize=16) ->
+##             EINVAL  (confirms gate 2 skip lets the nfds EINVAL
+##             through; pre-batch was also EINVAL but via sigsetsize).
+##
+##      Marker:
+##        "[syscall/linux]   ppoll timespec > sigmask+sigsetsize >
+##         nfds gate order: OK"
+##
+##      Existing tests preserved: timespec={0,0} -> 0, neg tv_sec ->
+##      EINVAL, tv_nsec >= 1e9 -> EINVAL, and the downstream
+##      pipe-readiness probes.
+##
+##      Known limitations: poll_core ignores the sigmask entirely
+##      (no signal delivery yet), so the "atomic swap-in / swap-out"
+##      semantics are stubbed — the validate-only behavior matches
+##      Linux for the no-pending-signal case but loses the EINTR
+##      paths.  Tracked under the general signal-delivery work.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

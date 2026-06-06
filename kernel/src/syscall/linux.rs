@@ -7099,16 +7099,38 @@ fn sys_setsid(_args: &SyscallArgs) -> SyscallResult {
 /// PRIO_USER lookups silently succeed because we don't model process
 /// groups or per-user task lists.
 fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
-    let which = args.arg0;
-    let who = args.arg1;
+    // Linux's syscall signature is `SYSCALL_DEFINE2(getpriority,
+    // int, which, int, who)`.  Both args are truncated to int before
+    // the body runs; the explicit gate is `if (which > 2 || which <
+    // 0) goto out;` (kernel/sys.c).  Pre-batch we held `which` and
+    // `who` as raw u64 — a probe with which = 0x1_0000_0001 saw
+    // EINVAL where Linux truncates to (int)1 = PRIO_PGRP and
+    // returns the caller's pgrp nice.  Same `int` truncation pattern
+    // we applied to sched_get_priority_{max,min} in batch 285.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let which = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let who = args.arg1 as i32;
     // Valid `which` values: PRIO_PROCESS=0, PRIO_PGRP=1, PRIO_USER=2.
-    if which > 2 {
+    // Linux explicitly rejects which < 0 too (the original C check is
+    // `which > 2 || which < 0`); a raw-u64 compare implicitly caught
+    // negatives via "huge unsigned > 2", but the post-truncation int
+    // compare needs the explicit lower bound.
+    if !(0..=2).contains(&which) {
         return linux_err(errno::EINVAL);
     }
     // PRIO_PROCESS with a specific target: enforce existence.  who==0
-    // means "the caller", which we accept unconditionally.
+    // means "the caller", which we accept unconditionally.  A negative
+    // `who` can't refer to any pid, so it surfaces as ESRCH (Linux's
+    // find_task_by_vpid path returns NULL for any pid <= 0 except the
+    // "self" semantics of pid==0, which we handle above).
     if which == 0 && who != 0 {
-        if pcb::state(who).is_none() {
+        if who < 0 {
+            return linux_err(errno::ESRCH);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let who_pid = who as u64;
+        if pcb::state(who_pid).is_none() {
             return linux_err(errno::ESRCH);
         }
     }
@@ -7117,7 +7139,8 @@ fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
     // accepted (we don't model groups / per-uid nice yet) and
     // report the caller's nice.
     let target_pid: Option<u64> = if which == 0 && who != 0 {
-        Some(who)
+        #[allow(clippy::cast_sign_loss)]
+        Some(who as u64)
     } else {
         caller_pid()
     };
@@ -7159,19 +7182,32 @@ fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
 ///     / RLIMIT_FSIZE: the rlimit is a userspace policy, not a kernel
 ///     boundary.
 fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
-    let which = args.arg0;
-    let who = args.arg1;
+    // Linux signature: `SYSCALL_DEFINE3(setpriority, int, which, int,
+    // who, int, niceval)`.  All three args truncate to int before the
+    // body; `prio` was already cast below.  Pre-batch we held `which`
+    // and `who` as raw u64, so a probe with which = 0x1_0000_0001 saw
+    // EINVAL where Linux truncates to 1 (PRIO_PGRP) and accepts the
+    // call.  See sys_getpriority for the matching divergence.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let which = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let who = args.arg1 as i32;
     // `prio` is `int` in the Linux ABI; read it as i32 (truncating the
     // upper bits) before clamping.  The full 64-bit value is what
     // would arrive in a register, but only the low 32 bits matter.
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let raw_prio = args.arg2 as i32;
 
-    if which > 2 {
+    if !(0..=2).contains(&which) {
         return linux_err(errno::EINVAL);
     }
     if which == 0 && who != 0 {
-        if pcb::state(who).is_none() {
+        if who < 0 {
+            return linux_err(errno::ESRCH);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let who_pid = who as u64;
+        if pcb::state(who_pid).is_none() {
             return linux_err(errno::ESRCH);
         }
     }
@@ -7188,9 +7224,13 @@ fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Resolve target pid for the per-PCB store.
-    let target_pid: Option<u64> = if which == 0 && who != 0 {
-        Some(who)
+    // Resolve target pid for the per-PCB store.  `who` is i32 here;
+    // the negative case was already rejected above (ESRCH for which==0,
+    // ignored otherwise — PRIO_PGRP/PRIO_USER targets fall through to
+    // caller_pid() since we don't model pgrps or per-uid nice).
+    let target_pid: Option<u64> = if which == 0 && who > 0 {
+        #[allow(clippy::cast_sign_loss)]
+        Some(who as u64)
     } else {
         caller_pid()
     };
@@ -32282,6 +32322,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Batch 286: get/setpriority must truncate `which` and `who`
+        // to int before validating, mirroring Linux's
+        // `SYSCALL_DEFINE2(getpriority, int, int)` and
+        // `SYSCALL_DEFINE3(setpriority, int, int, int)` signatures.
+        //
+        // `which` truncation: 0x1_0000_0001 -> (int)1 = PRIO_PGRP,
+        // which post-truncation is valid; target_pid resolves to
+        // caller (None in kernel context), nice = 0, return value
+        // = 20 - 0 = 20.  Pre-batch we matched on raw u64 and
+        // returned EINVAL for `which > 2`.
+        let a = SyscallArgs { arg0: 0x1_0000_0001, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPRIORITY, &a).value != 20 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(0x1_0000_0001,0) not 20 ({})",
+                dispatch_linux(nr::GETPRIORITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpriority(0x1_0000_0001,0,0) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // `who` truncation: with which=PRIO_PROCESS (0), Linux treats
+        // who=0 as "the caller", and who=0x1_0000_0000 truncates to
+        // (int)0 → same caller-self path → nice=0 → returns 20.
+        // Pre-batch we used the raw u64 for the existence probe, so
+        // pcb::state(0x1_0000_0000) returned None and we surfaced
+        // ESRCH.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPRIORITY, &a).value != 20 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(0, 0x1_0000_0000) not 20 ({})",
+                dispatch_linux(nr::GETPRIORITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpriority(0, 0x1_0000_0000, 0) not 0"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Negative `which` after truncation → EINVAL.  u64::MAX truncates
+        // to (int)-1, which Linux rejects via the explicit `which < 0`
+        // gate.  Pre-batch the raw-u64 compare `which > 2` caught this
+        // implicitly (u64::MAX > 2), so the errno is preserved across
+        // the fix — this probe is a regression guard for the explicit
+        // lower bound.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPRIORITY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(-1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   get/setpriority int truncation: OK"
+        );
 
         // rlimit_nice_check_with decision table.  Exercises the
         // pure-function gate directly, without standing up a fake

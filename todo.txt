@@ -24644,4 +24644,114 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 22s).
 
+316. [2026-06-06] Batch 286: Linux ABI translation —
+     sys_getpriority and sys_setpriority now truncate
+     `which` and `who` to int before validating, mirroring
+     Linux's `SYSCALL_DEFINE2(getpriority, int, int)` and
+     `SYSCALL_DEFINE3(setpriority, int, int, int)`
+     signatures.  Follow-up to batch 285's `int` truncation
+     audit.
+
+     Pre-batch divergences
+     ---------------------
+     Linux's kernel/sys.c handlers declare both args as
+     `int`, so the x86_64 syscall ABI truncates the 64-bit
+     registers to the low 32 bits before the body runs.
+     Our pre-batch stubs held `which = args.arg0` and
+     `who = args.arg1` as raw u64, so two distinct probes
+     diverged:
+
+       Probe A — `which` truncation:
+         getpriority(0x1_0000_0001, 0)
+           Linux : (int)which = 1 = PRIO_PGRP
+                   → caller's pgrp nice
+                   → returns 20 (= 20 - 0)
+           Ours  : raw u64 > 2 → EINVAL
+
+       Probe B — `who` truncation:
+         getpriority(0, 0x1_0000_0000)
+           Linux : (int)who = 0 → "the caller" path
+                   → returns 20
+           Ours  : raw u64 != 0 → pcb::state(0x1_0000_0000)
+                   = None → ESRCH
+
+     Same divergences in setpriority via the symmetric
+     args.  prio was already cast to i32 (it was the
+     existing model), so its truncation was already
+     correct.
+
+     Fixes
+     -----
+     Cast args.arg0 and args.arg1 to i32 at the top of
+     both routines.  Tightened the `which` gate from
+     `if which > 2` (raw u64) to
+     `if !(0..=2).contains(&which)` so the explicit
+     negative-int case mirrors Linux's
+       `if (which > 2 || which < 0) goto out;`
+     (the raw-u64 form caught negatives implicitly via
+     "huge unsigned > 2", but the post-truncation int
+     form needs the lower bound spelled out).
+
+     For the PRIO_PROCESS path, `who < 0` is now an
+     explicit ESRCH (no valid pid is negative; the
+     find_task_by_vpid path in Linux returns NULL
+     for any pid <= 0 except the special pid==0 "self"
+     semantics).  Casts to u64 for the pcb::state /
+     pcb::set_nice lookups are gated by the positive-int
+     branch.
+
+     New self-tests:
+       - getpriority(0x1_0000_0001, 0) -> 20
+       - setpriority(0x1_0000_0001, 0, 0) -> 0
+         (which truncates to PRIO_PGRP; pre-batch saw
+          EINVAL)
+       - getpriority(0, 0x1_0000_0000) -> 20
+       - setpriority(0, 0x1_0000_0000, 0) -> 0
+         (who truncates to 0 = "caller"; pre-batch saw
+          ESRCH)
+       - getpriority(u64::MAX, 0) -> EINVAL
+         (regression guard for the explicit lower bound
+          on `which`; same errno as pre-batch via the
+          "huge unsigned > 2" implicit catch)
+
+     Marker:
+       "get/setpriority int truncation: OK"
+
+     Preserved self-tests (still pass):
+       - getpriority(PRIO_PROCESS, 0) -> 20
+       - setpriority(PRIO_PROCESS, 0, 0) -> 0
+       - setpriority(PRIO_PROCESS, 0, 19) -> 0
+       - setpriority(PRIO_PROCESS, 0, 100) -> 0 (silent
+         clamp to 19 — Linux saturates, doesn't error)
+       - setpriority(PRIO_PROCESS, u64::MAX, 0) -> ESRCH
+         (who truncates to -1, who<0 gate → ESRCH)
+       - getpriority(PRIO_PROCESS, u64::MAX) -> ESRCH
+         (same path)
+       - get/setpriority(3, 0) -> EINVAL
+         (which==3 is out of range either pre- or post-
+         truncation)
+
+     Known limitations
+     -----------------
+     - PRIO_PGRP and PRIO_USER are still accepted but
+       not actually applied — we don't model process
+       groups or per-uid nice tables.  Both paths fall
+       through to caller_pid() for the per-PCB nice
+       store, matching the documented behaviour from
+       earlier batches.
+     - For setpriority's PRIO_PROCESS path with `who > 0`
+       referring to a pid that exists but has no PCB
+       nice slot, we silently no-op the set (the
+       pcb::set_nice call returns an Err which we
+       discard).  Linux would set the nice and return 0;
+       we return 0 too, so externally indistinguishable
+       — but a `getpriority` follow-up would see the
+       old nice.  Tracked in earlier batches as a "no
+       per-pid nice storage" limitation; not addressed
+       here.
+
+     Build: cargo build -p kernel clean.
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 22s).
+
 

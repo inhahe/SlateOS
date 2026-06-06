@@ -23683,3 +23683,104 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      __reserved_3 field validation.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+305.  syscall/linux: socket/socketpair EAFNOSUPPORT + EOPNOTSUPP,
+##      flag-mask-first gate order (batch 276).
+##
+##      Pre-batch divergence: Linux's net/socket.c distinguishes
+##      three rejection modes for socket / socketpair:
+##        * "Unknown address family"  -> -EAFNOSUPPORT (errno 97)
+##        * "Family known but ops->X is NULL" -> -EOPNOTSUPP
+##        * "Caller passed garbage"   -> -EINVAL
+##      and applies them in this order:
+##        Gate 1: type-flag bits (~SOCK_TYPE_MASK & ~(CLOEXEC|NONBLOCK))
+##                                                  -> -EINVAL
+##        Gate 2: __sock_create:
+##          family < 0 || family >= NPROTO  -> -EAFNOSUPPORT
+##          type out of [1,SOCK_MAX)        -> -EINVAL
+##        Gate 3: (socketpair only) ops->socketpair == NULL
+##                                                  -> -EOPNOTSUPP
+##        Gate 4: (socketpair only) usockvec validation -> -EFAULT
+##
+##      Pre-batch our errno table didn't even define EAFNOSUPPORT,
+##      so we returned -EINVAL for any unknown family on both
+##      socket and socketpair, and for any non-AF_UNIX domain on
+##      socketpair.  That collapsed three distinct probe outcomes
+##      to one errno, which loses information for userspace
+##      probes that distinguish "kernel doesn't recognise this
+##      AF_*" from "kernel rejected the call".  We also checked
+##      family BEFORE the type-flag mask, so a probe with a bad
+##      flag bit AND a bad family hit the family branch (correct
+##      errno but wrong gate).
+##
+##      Fix:
+##        * Add `pub const EAFNOSUPPORT: i32 = 97;` to the
+##          errno module.
+##        * sys_socket (line ~18534): reorder gates to Linux's
+##          flag-mask -> family -> type sequence; return
+##          -EAFNOSUPPORT for unknown family.
+##        * sys_socketpair (line ~18579): reorder identically;
+##          add the Linux ops->socketpair gate so non-AF_UNIX
+##          (but otherwise valid) families return -EOPNOTSUPP
+##          instead of -EINVAL.  AF_UNIX still falls through to
+##          ENOSYS (no socketpair backend yet).
+##        * Function docs spell out the Linux gate order.
+##
+##      Self-tests added in dispatch_linux (after the
+##      listen/shutdown block); socket/socketpair EAFNOSUPPORT
+##      quintuple:
+##        A. socket(domain=99, type=SOCK_STREAM)
+##             pre: -EINVAL; post: -EAFNOSUPPORT.
+##        B. socket(domain=99, type=0x10001)
+##             Acceptance: bad flag bit fires gate 1 first;
+##             both pre and post return -EINVAL but for a
+##             different reason (pre: family collapse; post:
+##             reordered gate-1).
+##        C. socketpair(domain=2 (AF_INET), type=SOCK_STREAM,
+##             sv=valid)
+##             pre: -EINVAL; post: -EOPNOTSUPP.
+##        D. socketpair(domain=99, type=SOCK_STREAM, sv=valid)
+##             pre: -EINVAL; post: -EAFNOSUPPORT.
+##        E. socketpair(domain=1 (AF_UNIX), type=SOCK_STREAM,
+##             sv=valid)
+##             Acceptance: AF_UNIX still terminates at -ENOSYS
+##             (no backend), unchanged pre/post.
+##      Stack-allocated sv buffer via (&raw const buf[0]) plus
+##      core::hint::black_box(&buf).
+##
+##      Marker:
+##        "[syscall/linux]   socket/socketpair EAFNOSUPPORT gating: OK"
+##
+##      Legacy tests updated:
+##        * line ~42190: "socket bad domain -> EINVAL" -> EAFNOSUPPORT
+##          with comment explaining the pre/post discriminant.
+##        * line ~42215: "socketpair non-AF_UNIX -> EINVAL" ->
+##          EOPNOTSUPP with comment explaining the gate.
+##        * Sibling assertions for socket bad type, socket bad
+##          flag, socket valid -> ENOSYS, socketpair NULL sv,
+##          socketpair valid -> ENOSYS still hold (the reorder
+##          doesn't move their gates).
+##
+##      Existing tests preserved: listen/shutdown drop entry
+##      gates (batch 275), setsockopt/getsockopt no-level
+##      gate (batch 274), mremap PAGE_ALIGN overflow (batch
+##      273), pread64/pwrite64 fd-before-count (batch 272),
+##      capset pid EPERM (batch 270), prctl(PR_SET_NAME)
+##      NULL-arg2 (batch 269), capget/capset NULL-data
+##      quadruple (batch 268), preadv/pwritev iov_len
+##      SSIZE_MAX (batch 267) — all unaffected.
+##
+##      Known limitations: still pending — accept/accept4
+##      sockaddr-before-fd reorder (Linux: flags -> fd ->
+##      sockaddr; ours: flags -> sockaddr -> fd); bind /
+##      connect sockaddr-before-fd (similar shape); per-protocol
+##      protocol-number validation (e.g. socket(AF_INET,
+##      SOCK_STREAM, 99) should -EPROTONOSUPPORT, we accept it
+##      and return ENOSYS); ESOCKTNOSUPPORT for type valid but
+##      unimplemented; pread/pwrite EOVERFLOW gate and
+##      MAX_RW_COUNT silent clamp; mremap MREMAP_FIXED new_addr
+##      bounds; sys_perf_event_open in-struct __reserved_2 /
+##      __reserved_3 field validation.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 21s).
+

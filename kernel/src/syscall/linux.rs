@@ -959,6 +959,7 @@ pub mod errno {
     pub const ENOMSG: i32 = 42;
     pub const EOVERFLOW: i32 = 75;
     pub const EOPNOTSUPP: i32 = 95;
+    pub const EAFNOSUPPORT: i32 = 97;
     pub const ETIMEDOUT: i32 = 110;
     pub const ECANCELED: i32 = 125;
     pub const ENODATA: i32 = 61;
@@ -18532,27 +18533,47 @@ fn validate_sockaddr_out(addr_ptr: u64, addrlen_ptr: u64) -> Result<(), SyscallR
 
 /// `socket(domain, type, protocol)`.
 fn sys_socket(args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (net/socket.c::__sys_socket_create + __sock_create):
+    //   1. `(type & ~SOCK_TYPE_MASK) & ~(SOCK_CLOEXEC|SOCK_NONBLOCK)`
+    //                                          -> -EINVAL  (flag bits)
+    //   2. `family < 0 || family >= NPROTO`    -> -EAFNOSUPPORT
+    //   3. `type & SOCK_TYPE_MASK` out of range -> -EINVAL
+    //
+    // Pre-batch divergences fixed here:
+    //   * Unknown family returned -EINVAL; Linux returns
+    //     -EAFNOSUPPORT (errno 97), which userspace probes use to
+    //     distinguish "kernel doesn't know this AF_*" from
+    //     "kernel rejected the call shape".
+    //   * Family was checked BEFORE the flag-mask gate, so a
+    //     probe with `(domain=99, type=0x10001)` reported -EINVAL
+    //     from the family branch where Linux returns -EINVAL but
+    //     from the flag-mask branch (different gate, same errno
+    //     for this specific input, but the position matters when
+    //     a future probe combines family=99 with valid flags).
     #[allow(clippy::cast_possible_truncation)]
     let domain = args.arg0 as u32;
     #[allow(clippy::cast_possible_truncation)]
     let typ = args.arg1 as u32;
-    // Known address families: AF_UNIX=1, AF_INET=2, AF_INET6=10,
-    // AF_NETLINK=16, AF_PACKET=17.  Anything else is EAFNOSUPPORT (97)
-    // on Linux; we collapse to EINVAL which is the closest portable
-    // answer when we don't have errno 97 defined.
-    match domain {
-        1 | 2 | 10 | 16 | 17 => {}
-        _ => return linux_err(errno::EINVAL),
-    }
-    // type low 4 bits = SOCK_STREAM(1) / SOCK_DGRAM(2) / SOCK_RAW(3) /
-    // SOCK_RDM(4) / SOCK_SEQPACKET(5).  Upper bits: SOCK_CLOEXEC
-    // (0o2_000_000) and SOCK_NONBLOCK (0o4000).
     let sock_type = typ & 0xf;
     let sock_flags = typ & !0xf;
-    if !(1..=5).contains(&sock_type) {
+    // Gate 1: type-flag bits (SOCK_CLOEXEC=0o2_000_000,
+    // SOCK_NONBLOCK=0o4000) — anything outside this mask is -EINVAL.
+    if sock_flags & !(0o2_000_000 | 0o4000) != 0 {
         return linux_err(errno::EINVAL);
     }
-    if sock_flags & !(0o2_000_000 | 0o4000) != 0 {
+    // Gate 2: unknown address family -> -EAFNOSUPPORT.  Known
+    // families on Linux: AF_UNIX=1, AF_INET=2, AF_INET6=10,
+    // AF_NETLINK=16, AF_PACKET=17 (we don't enumerate the long
+    // tail of AF_BLUETOOTH/AF_TIPC/... families since we don't
+    // implement them — they'd all reach the protocol handler
+    // and return -EAFNOSUPPORT or -EPROTONOSUPPORT anyway).
+    match domain {
+        1 | 2 | 10 | 16 | 17 => {}
+        _ => return linux_err(errno::EAFNOSUPPORT),
+    }
+    // Gate 3: type range — SOCK_STREAM(1) / SOCK_DGRAM(2) /
+    // SOCK_RAW(3) / SOCK_RDM(4) / SOCK_SEQPACKET(5).
+    if !(1..=5).contains(&sock_type) {
         return linux_err(errno::EINVAL);
     }
     // protocol is opaque and family-specific; 0 = "default for type" is
@@ -18562,23 +18583,51 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `socketpair(domain, type, protocol, sv[2])`.
+///
+/// Linux gate order (net/socket.c::__sys_socketpair):
+///   1. type-flag bits (same as socket)              -> -EINVAL
+///   2. sock_create(family, ...) -> __sock_create:
+///        family unknown                             -> -EAFNOSUPPORT
+///        type out of range                          -> -EINVAL
+///   3. sock_create succeeds but sock->ops->socketpair == NULL
+///        (e.g. AF_INET, AF_INET6, AF_PACKET, AF_NETLINK)  -> -EOPNOTSUPP
+///   4. usockvec validation                          -> -EFAULT
+///
+/// Pre-batch divergences fixed here:
+///   * Any domain != AF_UNIX returned -EINVAL.  Linux returns
+///     -EAFNOSUPPORT for genuinely unknown families and
+///     -EOPNOTSUPP for known families whose ops->socketpair is
+///     NULL (the common AF_INET/AF_INET6 case).
+///   * Family was checked BEFORE the flag-mask gate (same shape
+///     of position bug as sys_socket pre-batch).
 fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let domain = args.arg0 as u32;
     #[allow(clippy::cast_possible_truncation)]
     let typ = args.arg1 as u32;
-    // Only AF_UNIX supports socketpair on Linux.
-    if domain != 1 {
-        return linux_err(errno::EINVAL);
-    }
     let sock_type = typ & 0xf;
     let sock_flags = typ & !0xf;
-    if !(1..=5).contains(&sock_type) {
-        return linux_err(errno::EINVAL);
-    }
+    // Gate 1: type-flag bits -> -EINVAL.
     if sock_flags & !(0o2_000_000 | 0o4000) != 0 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 2: family lookup.  Known families (per the same list as
+    // sys_socket) pass through; anything else is -EAFNOSUPPORT.
+    match domain {
+        1 | 2 | 10 | 16 | 17 => {}
+        _ => return linux_err(errno::EAFNOSUPPORT),
+    }
+    // Gate 2 (continued): type range.
+    if !(1..=5).contains(&sock_type) {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 3: only AF_UNIX implements ops->socketpair.  AF_INET,
+    // AF_INET6, AF_NETLINK, AF_PACKET return -EOPNOTSUPP because
+    // their ops table has socketpair == NULL.
+    if domain != 1 {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    // Gate 4: usockvec validation.
     if args.arg3 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -42187,10 +42236,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let timeout_buf = [0u8; 16];
         let timeout_ptr = timeout_buf.as_ptr() as u64;
 
-        // socket bad domain -> EINVAL.
+        // socket bad domain -> EAFNOSUPPORT (post batch 276).
+        // Linux's __sock_create returns -EAFNOSUPPORT for unknown
+        // families; pre-batch we collapsed that to -EINVAL.  Now
+        // that errno 97 is defined we surface the real answer.
         let a = SyscallArgs { arg0: 99, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: socket bad domain not EINVAL");
+        if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EAFNOSUPPORT) {
+            serial_println!("[syscall/linux]   FAIL: socket bad domain not EAFNOSUPPORT");
             return Err(KernelError::InternalError);
         }
         // socket bad type -> EINVAL.
@@ -42212,10 +42264,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // socketpair non-AF_UNIX -> EINVAL.
+        // socketpair non-AF_UNIX (AF_INET=2) -> EOPNOTSUPP
+        // (post batch 276).  Linux's sock_create succeeds for
+        // AF_INET, then __sys_socketpair calls
+        // sock1->ops->socketpair which is NULL for AF_INET, so
+        // the kernel returns -EOPNOTSUPP.  Pre-batch we returned
+        // -EINVAL across the board for non-AF_UNIX.
         let a = SyscallArgs { arg0: 2, arg1: 1, arg2: 0, arg3: sv_ptr, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: socketpair non-unix not EINVAL");
+        if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: socketpair non-unix not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
         // socketpair NULL sv -> EFAULT.
@@ -46296,6 +46353,94 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   listen/shutdown drop entry gates: OK"
+            );
+        }
+
+        // ---- socket/socketpair EAFNOSUPPORT + EOPNOTSUPP ----
+        // Linux's net/socket.c distinguishes "unknown family"
+        // (-EAFNOSUPPORT) from "family known but operation not
+        // supported by its ops table" (-EOPNOTSUPP) and from
+        // "caller passed garbage" (-EINVAL).  Pre-batch we
+        // collapsed all three to -EINVAL because errno 97 wasn't
+        // defined.  Batch 276 introduces EAFNOSUPPORT and the
+        // proper gate order: flag-mask -> family -> type.
+        {
+            // Discriminator A: socket(domain=99, type=SOCK_STREAM)
+            //   pre-batch: -EINVAL  (family collapse)
+            //   post-batch: -EAFNOSUPPORT
+            let a = SyscallArgs {
+                arg0: 99, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EAFNOSUPPORT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(domain=99) not EAFNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: socket(domain=99, type=0x10001)
+            //   Acceptance: high flag bit fires FIRST now (gate 1),
+            //   so even an unknown family still returns -EINVAL
+            //   when a bad flag is set.  This confirms the
+            //   reordered gate 1 fires before gate 2.
+            let a = SyscallArgs {
+                arg0: 99, arg1: 0x1_0000 | 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(bad-flag + bad-family) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator C: socketpair(domain=2 (AF_INET),
+            //   type=SOCK_STREAM, sv=valid)
+            //   pre-batch: -EINVAL  (non-AF_UNIX collapse)
+            //   post-batch: -EOPNOTSUPP (family known but ops
+            //     ->socketpair == NULL on Linux)
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET) not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator D: socketpair(domain=99 (unknown),
+            //   type=SOCK_STREAM, sv=valid)
+            //   pre-batch: -EINVAL  (family collapse)
+            //   post-batch: -EAFNOSUPPORT (unknown family)
+            let a = SyscallArgs {
+                arg0: 99, arg1: 1, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EAFNOSUPPORT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(domain=99) not EAFNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator E: socketpair(domain=1 (AF_UNIX),
+            //   type=SOCK_STREAM, sv=valid)
+            //   Acceptance: AF_UNIX still falls through to the
+            //   terminal -ENOSYS (no socketpair backend yet).
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   socket/socketpair EAFNOSUPPORT gating: OK"
             );
         }
 

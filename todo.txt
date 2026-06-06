@@ -29709,3 +29709,91 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (36.86s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+367. Batch 337 — sys_faccessat2 `flags` int
+     truncation (high-half ignored).
+
+     Divergence: Linux's prototype is
+       SYSCALL_DEFINE4(faccessat2,
+                       int, dfd,
+                       const char __user *, filename,
+                       int, mode,
+                       int, flags)
+     where `flags` is `int`, delivered in r10.  The
+     AMD64 syscall ABI does not zero- or sign-extend
+     `int` args before issuing syscall, so only the
+     low 32 bits of `flags` are defined; the high
+     half is caller-supplied garbage.
+
+     Pre-batch sys_faccessat2 held `flags` as raw
+     u64:
+       let flags = args.arg3;
+       const VALID_FLAGS: u64 = AT_EACCESS
+                              | AT_SYMLINK_NOFOLLOW
+                              | AT_EMPTY_PATH;
+       if flags & !VALID_FLAGS != 0 { EINVAL }
+     High-bit sentinels whose low 32 encoded a valid
+     flag set (e.g. arg3 = 0x1_0000_0200, low =
+     AT_EACCESS = 0x200) tripped the raw mask and
+     surfaced EINVAL where Linux truncates to 0x200,
+     passes the mask, and falls through to the path
+     lookup (ENOENT in our empty-FS context).
+
+     Fix: cast `args.arg3` through i32 then to u32
+     (mirroring Linux's `int flags` signature with
+     standard sign-loss/wrap allows), narrow
+     `VALID_FLAGS` to u32, run the mask check at
+     32-bit width.  `mode` (arg2) was already cast
+     to u32 from a prior batch, so no change there.
+
+     Tests: four boot-time probes added inside the
+     existing access/faccessat/faccessat2 block,
+     all using arg1=0x1000 (passes
+     validate_user_read in kernel context) so the
+     post-mask success path lands at the terminal
+     ENOENT — discriminating cleanly from EINVAL.
+       (a) flags=0x1_0000_0000 (low=0, no flags)
+           -> ENOENT (was EINVAL pre-batch).
+       (b) flags=0x1_0000_0200 (low=AT_EACCESS) ->
+           ENOENT (was EINVAL).  Primary post-
+           truncation discriminator — low 32 bits
+           encode a valid flag.
+       (c) flags=0x1_0000_0080 (low=0x80 unknown
+           bit) -> EINVAL preserved (low half has
+           an invalid bit so the mask check still
+           fires post-truncation).
+       (d) flags=0xFFFF_FFFF_0000_0000 (all-high,
+           low=0) -> ENOENT (was EINVAL).  Same
+           discriminator as (a) with a different
+           high-bit pattern.
+     Marker: "[syscall/linux]   faccessat2 flags
+              int-truncation (high-half ignored):
+              OK".
+
+     Preserved: existing access / faccessat /
+     faccessat2 probes still pass:
+       - access(_, 8) -> EINVAL (bogus mode bit).
+       - access(NULL, _) -> EFAULT.
+       - access(0x1000, _) -> ENOENT.
+       - faccessat(_, NULL, _, _) -> EFAULT.
+       - faccessat2(_, 0x1000, _, 0x800_0000) ->
+         EINVAL (bogus flag bit, low half).
+       - faccessat2(_, 0x1000, _, 0x200) ->
+         ENOENT (valid AT_EACCESS).
+
+     Known limitations:
+     - `dfd` (arg0) is `int` but is unused in our
+       stub (we always return ENOENT regardless of
+       dfd lookup), so its truncation is unobservable.
+     - `mode` (arg2) is `int` in Linux but already
+       held at u32 width here (`args.arg2 as u32`).
+       The same low-32 mask check applies — no
+       further fix needed in this batch.
+     - sys_faccessat (no '2') explicitly ignores its
+       flags argument per Linux's historical behaviour
+       (the bug that motivated faccessat2 in 5.8), so
+       there is no truncation issue to fix there.
+
+     Build: cargo build -p kernel clean (41.11s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

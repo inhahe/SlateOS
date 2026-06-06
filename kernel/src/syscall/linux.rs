@@ -10157,15 +10157,31 @@ fn sys_faccessat(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Differs from `faccessat` in that it validates flag bits.
 fn sys_faccessat2(args: &SyscallArgs) -> SyscallResult {
-    const AT_EACCESS: u64 = 0x200;
-    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-    const AT_EMPTY_PATH: u64 = 0x1000;
-    const VALID_FLAGS: u64 = AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+    // Linux ABI: `SYSCALL_DEFINE4(faccessat2, int, dfd, const char
+    // __user *, filename, int, mode, int, flags)`.  Both `mode` and
+    // `flags` are declared `int`, delivered in rdx and r10; the
+    // x86_64 syscall ABI leaves their high 32 bits undefined.
+    //
+    // Pre-batch (337) `flags` was held at raw u64 width:
+    //     let flags = args.arg3;
+    //     if flags & !VALID_FLAGS != 0 { EINVAL }
+    // High-bit sentinels whose low 32 encoded a valid flag set
+    // (e.g. arg3 = 0x1_0000_0200, low = AT_EACCESS) tripped the raw
+    // mask check and surfaced EINVAL — divergent from Linux, which
+    // truncates to AT_EACCESS, accepts, and proceeds to the path
+    // lookup (ENOENT in our empty-FS context).
+    const AT_EACCESS: u32 = 0x200;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const VALID_FLAGS: u32 = AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
 
     let path = args.arg1;
     #[allow(clippy::cast_possible_truncation)]
     let mode = args.arg2 as u32;
-    let flags = args.arg3;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg3 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
 
     if mode & !ACCESS_VALID_MODE != 0 {
         return linux_err(errno::EINVAL);
@@ -37494,6 +37510,67 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 337: faccessat2 `flags` is declared `int` in Linux,
+        // delivered in r10.  The x86_64 syscall ABI leaves the high
+        // 32 bits undefined.  Pre-batch we held `flags` as raw u64
+        // and ran `flags & !VALID_FLAGS != 0`; high-bit sentinels
+        // whose low 32 encoded a valid flag set tripped the mask
+        // check.  Path arg1 = 0x1000 passes validate_user_read in
+        // kernel context (bypass), so the success path lands at the
+        // terminal ENOENT.
+        //
+        // (a) flags=0x1_0000_0000 (low=0, no flags) -> ENOENT.
+        //     Pre-batch: high bits ANDed into !VALID_FLAGS -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FACCESSAT2, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: faccessat2(flags=0x1_0000_0000) expected ENOENT, got {}",
+                dispatch_linux(nr::FACCESSAT2, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) flags=0x1_0000_0200 (low=AT_EACCESS) -> ENOENT.
+        //     Primary discriminator: low 32 bits encode a valid flag
+        //     that Linux accepts; pre-batch EINVAL via the raw mask.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0x1_0000_0200, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FACCESSAT2, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: faccessat2(flags=0x1_0000_0200) expected ENOENT, got {}",
+                dispatch_linux(nr::FACCESSAT2, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) flags=0x1_0000_0080 (low=0x80 = unknown bit) ->
+        //     EINVAL preserved.  Low half has an invalid bit so the
+        //     mask check still fires post-truncation.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0x1_0000_0080, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FACCESSAT2, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: faccessat2(flags=0x1_0000_0080) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) flags=0xFFFF_FFFF_0000_0000 (all-high, low=0) -> ENOENT.
+        //     Same discriminator as (a) with a different high pattern.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+            arg3: 0xFFFF_FFFF_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FACCESSAT2, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: faccessat2(flags=0xFFFF_FFFF_0000_0000) expected ENOENT, got {}",
+                dispatch_linux(nr::FACCESSAT2, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   faccessat2 flags int-truncation (high-half ignored): OK"
+        );
     }
 
     // stat / lstat / fstat / newfstatat — input validation.

@@ -5386,10 +5386,19 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         15 => {
             let user_buf = args.arg1;
             if user_buf == 0 {
-                // Linux ignores NULL here — comm is unchanged but the
-                // call still succeeds (the kernel just sees a single
-                // NUL byte and stores an empty string).
-                return SyscallResult::ok(0);
+                // Linux's PR_SET_NAME (kernel/sys.c) calls
+                //   strncpy_from_user(comm, (char __user *)arg2,
+                //                     sizeof(me->comm) - 1)
+                // and surfaces -EFAULT on a negative return.  On
+                // x86_64 the NULL pointer passes access_ok() (since
+                // NULL < TASK_SIZE_MAX) and then faults on the first
+                // byte fetch, so strncpy_from_user returns -EFAULT
+                // and the syscall fails with -EFAULT.  Pre-batch we
+                // treated NULL arg2 as a silent OK ("comm unchanged"),
+                // observably wrong — a probe like
+                // `prctl(PR_SET_NAME, NULL)` returned 0 here where
+                // Linux returns -EFAULT.
+                return linux_err(errno::EFAULT);
             }
             let mut buf = [0u8; 16];
             // SAFETY: copy_from_user validates the read range itself
@@ -27399,14 +27408,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   - Recognised options return 0 (or their documented value).
     //   - Unknown options return EINVAL.
     {
-        // PR_SET_NAME (15) with NULL buf — Linux silently ignores
-        // (no name change) and returns 0.  Matches our early-NULL
-        // path.
+        // PR_SET_NAME (15) with NULL buf — Linux's strncpy_from_user
+        // (kernel/sys.c) returns -EFAULT on a NULL pointer (NULL
+        // passes access_ok() then faults on the first byte fetch),
+        // so the syscall surfaces -EFAULT.  Updated in batch 269 —
+        // pre-batch we treated NULL as silent OK (returned 0)
+        // following an incorrect "Linux silently ignores" comment.
+        // The full discriminator + acceptance pair lives in the
+        // batch-269 block below; this is just the legacy probe.
         let a = SyscallArgs { arg0: 15, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
             serial_println!(
-                "[syscall/linux]   FAIL: prctl(PR_SET_NAME, NULL) not 0 ({})",
+                "[syscall/linux]   FAIL: prctl(PR_SET_NAME, NULL) not EFAULT ({})",
                 dispatch_linux(nr::PRCTL, &a).value
             );
             return Err(KernelError::InternalError);
@@ -45730,6 +45744,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   capget/capset NULL-data error matrix: OK"
+            );
+        }
+
+        // ---- prctl(PR_SET_NAME) NULL-arg2 -> EFAULT ----
+        // Linux's PR_SET_NAME arm in kernel/sys.c calls
+        //   strncpy_from_user(comm, (char __user *)arg2,
+        //                     sizeof(me->comm) - 1)
+        // and returns -EFAULT on a negative result.  On x86_64 NULL
+        // passes access_ok() (NULL < TASK_SIZE_MAX) and the first
+        // byte fetch faults, so PR_SET_NAME with arg2 == NULL
+        // surfaces -EFAULT.  Pre-batch we treated NULL as silent OK
+        // ("comm unchanged"), observably wrong.
+        {
+            const PR_SET_NAME: u64 = 15;
+
+            // Discriminator A: prctl(PR_SET_NAME, NULL)
+            //   pre-batch -> 0 (silent OK)
+            //   post-batch -> -EFAULT (matches Linux's strncpy_from_user
+            //                fault path).
+            let a = SyscallArgs {
+                arg0: PR_SET_NAME, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_NAME, NULL) not EFAULT"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: prctl(PR_SET_NAME, valid_stack_buf_with_name)
+            //   acceptance: a well-formed call still succeeds (pre- and
+            //   post-batch), confirming the new gate is restricted to
+            //   the NULL/unreadable case.  Kernel context has no PCB so
+            //   the name isn't actually stored, but the arm still
+            //   returns 0.
+            let name_buf: [u8; 16] = *b"prctl-batch269\0\0";
+            let name_ptr = (&raw const name_buf[0]) as u64;
+            core::hint::black_box(&name_buf);
+            let a = SyscallArgs {
+                arg0: PR_SET_NAME, arg1: name_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: prctl(PR_SET_NAME, valid name) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   prctl(PR_SET_NAME) NULL-arg2 gating: OK"
             );
         }
 

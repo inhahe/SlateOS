@@ -23127,3 +23127,74 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      cosmetic until we actually maintain per-task cap state.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+298.  syscall/linux: prctl(PR_SET_NAME) NULL-arg2 EFAULT (batch 269).
+##
+##      Pre-batch divergence: Linux's kernel/sys.c PR_SET_NAME arm
+##      executes
+##        comm[sizeof(me->comm) - 1] = 0;
+##        if (strncpy_from_user(comm, (char __user *)arg2,
+##                              sizeof(me->comm) - 1) < 0)
+##            return -EFAULT;
+##      strncpy_from_user with a NULL pointer passes access_ok() on
+##      x86_64 (NULL < TASK_SIZE_MAX) and then faults on the very
+##      first byte fetch, returning a negative errno.  The syscall
+##      therefore surfaces -EFAULT.  Our pre-batch sys_prctl arm 15
+##      did
+##        if user_buf == 0 { return SyscallResult::ok(0); }
+##      based on a docstring claim that "Linux ignores NULL here —
+##      comm is unchanged but the call still succeeds (the kernel
+##      just sees a single NUL byte and stores an empty string)".
+##      That claim is wrong — strncpy_from_user does NOT special-case
+##      NULL; it just access_ok()s and reads, and the NULL deref
+##      raises a #PF that the page fault handler reports as -EFAULT.
+##      A probe `prctl(PR_SET_NAME, NULL)` therefore returned 0
+##      where Linux returns -EFAULT.
+##
+##      Fix in sys_prctl arm 15 (line ~5386):
+##        Replace the early-NULL silent-OK with
+##          if user_buf == 0 { return linux_err(errno::EFAULT); }
+##        with a citation comment naming strncpy_from_user and the
+##        access_ok-then-fault path.  The rest of the arm (16-byte
+##        read, first-NUL-or-15 truncation, UTF-8-or-EINVAL
+##        narrowing, pcb::set_name on caller PCB) is unchanged.
+##
+##      Existing PR_SET_NAME self-test updated (line ~27414):
+##        The legacy probe at the top of the prctl block asserted
+##        `prctl(PR_SET_NAME, NULL) == 0` and would have been
+##        broken by the fix.  Switched the assertion to
+##        `== -EFAULT` and updated the citation comment to match
+##        kernel/sys.c.  The neighbouring PR_GET_NAME EFAULT probe
+##        and the PR_CAPBSET_READ probe are untouched.
+##
+##      Self-tests added in dispatch_linux (PR_SET_NAME pair):
+##        A. prctl(PR_SET_NAME, NULL)                -> -EFAULT.
+##           Pre-batch: 0; post-batch: -EFAULT.  Direct discriminator
+##           for the new gate.
+##        B. prctl(PR_SET_NAME, &"prctl-batch269\0\0"[16]) -> 0.
+##           Acceptance: a well-formed 16-byte name buffer still
+##           succeeds (kernel context has no PCB, so the name isn't
+##           actually persisted, but the arm still returns 0).
+##           Confirms the new gate is restricted to NULL/unreadable
+##           pointers and does not regress the happy path.
+##
+##      Marker:
+##        "[syscall/linux]   prctl(PR_SET_NAME) NULL-arg2 gating: OK"
+##
+##      Existing tests preserved: capget/capset NULL-data quadruple
+##      (batch 268) directly above; preadv/pwritev iov_len gating
+##      (batch 267) above that; futimesat tv_usec triple (batch 266)
+##      below.  The legacy prctl PR_GET_NAME EFAULT probe and
+##      PR_CAPBSET_READ probe remain in their original positions
+##      and pass unchanged.
+##
+##      Known limitations: this batch does not also tighten the
+##      other prctl arms that quietly drop NULL pointers — most
+##      notably PR_SET_MM and the PR_SET_VMA arm — though those
+##      either gate NULL themselves (PR_SET_MM) or are not yet
+##      implemented (PR_SET_VMA).  Also: we still narrow the comm
+##      to UTF-8 with EINVAL (Linux accepts raw bytes); documented
+##      as a known limitation in the arm's existing comment.  Both
+##      tracked here for a future cleanup pass.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

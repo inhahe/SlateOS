@@ -24450,3 +24450,106 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 24s).
 
+314. [2026-06-06] Batch 284: Linux ABI translation —
+     sys_msync: mirror Linux's C unsigned-long wrap
+     semantics for the page-aligned length computation,
+     so probes with len = u64::MAX see 0 (success) and
+     probes with addr+len overflowing past u64::MAX see
+     ENOMEM, matching the real kernel.
+
+     Pre-batch divergence
+     --------------------
+     Linux's mm/msync.c::SYSCALL_DEFINE3(msync) computes
+     the rounded length and end pointer with native C
+     unsigned-long arithmetic, which wraps silently:
+         error = -ENOMEM;
+         len = (len + ~PAGE_MASK) & PAGE_MASK;
+         end = start + len;
+         if (end < start) goto out;          // ENOMEM
+         error = 0;
+         if (end == start) goto out;         // success
+     For len = u64::MAX, `len + 0xFFF` wraps to 0xFFE,
+     `& ~0xFFF` zeroes to 0.  end = start + 0 = start, so
+     end < start is false and end == start fires the
+     success exit — the syscall returns 0.
+
+     Our pre-batch stub used checked_add for both the
+     rounding and the addr+len computation, returning
+     ENOMEM for either overflow.  A probe
+       msync(0x4000, u64::MAX, MS_ASYNC)
+     therefore saw -ENOMEM where Linux returns 0.  An
+     existing self-test (batch 109 era) asserted ENOMEM
+     for exactly this input — it correctly described our
+     stub's behaviour but mis-described Linux's, and was
+     updated to the Linux value as part of this batch.
+
+     Fix
+     ---
+     Replace the two checked_add calls with
+     wrapping_add, then keep the explicit `end < addr`
+     test for the genuine "end overflowed but didn't
+     wrap to zero" case:
+         let len_aligned = len
+             .wrapping_add(ABI_PAGE_SIZE - 1)
+             & !(ABI_PAGE_SIZE - 1);
+         let end = addr.wrapping_add(len_aligned);
+         if end < addr {
+             return linux_err(errno::ENOMEM);
+         }
+         if end == addr {
+             return SyscallResult::ok(0);
+         }
+     This is a single-instruction rewrite that mirrors
+     Linux's C semantics exactly, and keeps the rest of
+     the routine (the validate_user_read range check)
+     untouched.
+
+     Updated self-test:
+       - msync(0x4000, u64::MAX, MS_ASYNC):
+           pre-fix expected/observed: -ENOMEM
+           post-fix expected/observed: 0
+           (matches Linux's wrap-to-zero behaviour).
+     New self-test:
+       - msync(0xFFFF_FFFF_FFFF_F000, 0x4000, MS_ASYNC):
+           addr+len overflows past u64::MAX (end wraps to
+           0x3000, end < addr) -> ENOMEM
+           (exercises the genuine end<start path, distinct
+           from the wrap-to-zero path).
+
+     Marker: "msync wrap-to-zero / end<start: OK"
+
+     Preserved self-tests (still pass):
+       - msync(0, 0, 0) -> 0
+       - msync(0, 0, MS_INVALIDATE) -> 0
+       - msync(0, 0, MS_SYNC|MS_ASYNC) -> EINVAL
+       - msync(0, 0, 0x10) -> EINVAL (unknown flag)
+       - msync(0x1234, 4096, MS_ASYNC) -> EINVAL (addr
+         not 4 KiB-aligned)
+       - msync(0, 0, MS_ASYNC) -> 0
+       - msync(0x1000, 0, MS_ASYNC) -> 0 (4K-aligned
+         sub-frame addr)
+
+     Known limitations
+     -----------------
+     - The ABI page size used for alignment and rounding
+       is 4 KiB, matching Linux's x86_64 ABI.  Our
+       internal frame size is 16 KiB, but msync doesn't
+       expose frame boundaries to userspace — the
+       alignment gate is therefore purely an ABI check,
+       not a backing-store check.
+     - validate_user_read(addr, len) is still called at
+       the end for in-bounds (non-trivial-end) ranges.
+       In kernel context it's a no-op; in user context
+       it surfaces EFAULT for unmapped ranges.  Linux's
+       VMA walk would surface ENOMEM for unmapped ranges
+       and ENOMEM for unmapped sub-ranges within a
+       mapped span; our single-shot validate_user_read
+       maps both cases to EFAULT.  Tracked separately
+       (the ENOMEM-on-unmapped-VMA gap requires a real
+       VMA tree, not just a page-table walk).
+
+     Build: cargo build -p kernel clean.
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 22s).
+
+

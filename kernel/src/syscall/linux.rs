@@ -8834,19 +8834,36 @@ fn sys_msync(args: &SyscallArgs) -> SyscallResult {
     if (flags & MS_SYNC) != 0 && (flags & MS_ASYNC) != 0 {
         return linux_err(errno::EINVAL);
     }
-    // 4. Round len up to a page boundary, then check for overflow.
-    //    Linux: `len = (len + ~PAGE_MASK) & PAGE_MASK;` then
-    //    `end = start + len; if (end < start) goto out` with
-    //    `error = -ENOMEM` already set.  Rounding can overflow on its
-    //    own when len = u64::MAX - small_constant.
-    let len_aligned = match len.checked_add(ABI_PAGE_SIZE - 1) {
-        Some(v) => v & !(ABI_PAGE_SIZE - 1),
-        None => return linux_err(errno::ENOMEM),
-    };
-    let end = match addr.checked_add(len_aligned) {
-        Some(v) => v,
-        None => return linux_err(errno::ENOMEM),
-    };
+    // 4. Round len up to a page boundary.  Linux:
+    //        len = (len + ~PAGE_MASK) & PAGE_MASK;
+    //        end = start + len;
+    //        if (end < start) goto out;          // -ENOMEM
+    //        error = 0;
+    //        if (end == start) goto out;         // success
+    //    Both arithmetic operations use C unsigned-long wrap.  When
+    //    `len` is close to u64::MAX the `+ ~PAGE_MASK` step wraps past
+    //    2^64; the result `& PAGE_MASK` zeroes the bottom 12 bits, so
+    //    e.g. len = u64::MAX rounds to len_aligned = 0 (since
+    //    u64::MAX.wrapping_add(0xFFF) = 0xFFE and 0xFFE & ~0xFFF = 0).
+    //    With len_aligned == 0, end = start, end < start is false, and
+    //    the routine returns 0 via the end==start exit.
+    //
+    //    Pre-batch we used `checked_add` and returned ENOMEM for both
+    //    the rounding overflow AND the end-overflow case, so a probe
+    //    with (addr=0x4000, len=u64::MAX, flags=MS_ASYNC) saw ENOMEM
+    //    where Linux returns 0.  Switching to `wrapping_add` mirrors
+    //    Linux's C semantics exactly — len wraps to 0, end==start
+    //    fires, success.
+    //
+    //    The end<start check (the genuine "addr+len exceeds u64::MAX
+    //    with non-trivial len") still produces ENOMEM, matching Linux.
+    let len_aligned = len
+        .wrapping_add(ABI_PAGE_SIZE - 1)
+        & !(ABI_PAGE_SIZE - 1);
+    let end = addr.wrapping_add(len_aligned);
+    if end < addr {
+        return linux_err(errno::ENOMEM);
+    }
     // 5. end == start -> trivial success (no VMAs to walk).
     if end == addr {
         return SyscallResult::ok(0);
@@ -33682,19 +33699,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // len overflow on rounding -> ENOMEM (not EINVAL).  Linux sets
-        // error = -ENOMEM before the overflow check.
+        // Batch 284: msync(addr, u64::MAX, MS_ASYNC) -> 0.  Linux's
+        // C code does `len = (len + ~PAGE_MASK) & PAGE_MASK;` which
+        // silently wraps for len near u64::MAX, collapsing to 0.
+        // With len_aligned = 0, end == start, and the routine takes
+        // the success exit.  Pre-batch we used checked_add and
+        // returned ENOMEM here, which a probe with len=u64::MAX
+        // could observe.
         let a = SyscallArgs { arg0: 0x4000, arg1: u64::MAX, arg2: 1,
             arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MSYNC, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(len=u64::MAX) not 0 (wrap-to-zero)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 284: msync(addr=large, len=large) where the rounding
+        // does NOT wrap to 0, but end overflows past u64::MAX, must
+        // still return ENOMEM (Linux's `end < start` gate).  Use
+        // addr just below u64::MAX, len = 0x4000 → end wraps and
+        // becomes 0x3FFF, which is < addr.
+        let a = SyscallArgs {
+            arg0: 0xFFFF_FFFF_FFFF_F000,
+            arg1: 0x4000,
+            arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::MSYNC, &a).value
             != -i64::from(errno::ENOMEM) {
             serial_println!(
-                "[syscall/linux]   FAIL: msync(len=u64::MAX) not ENOMEM"
+                "[syscall/linux]   FAIL: msync(addr+len wrap) not ENOMEM"
             );
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   msync flags=0 / 4K-aligned / ENOMEM: OK"
+            "[syscall/linux]   msync wrap-to-zero / end<start: OK"
         );
     }
 

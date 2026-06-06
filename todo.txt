@@ -22283,3 +22283,77 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      signalfd would receive a mask update.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+## 286. syscall/linux: io_uring_setup — copy_from_user > resv > flags
+##      > entries gate order (batch 257)
+##
+##      Pre-batch divergences from Linux io_uring/io_uring.c
+##      `io_uring_setup` + `io_uring_create`:
+##
+##        (a) Our entries==0 (EINVAL) and entries>MAX (EINVAL) gates
+##            fired BEFORE the param fetch.  Linux runs both checks
+##            inside io_uring_create, AFTER io_uring_setup has
+##            already copy_from_user'd the params struct.
+##            Discriminators:
+##              (entries=0, NULL)     -> Linux EFAULT, pre-batch EINVAL.
+##              (entries=65536, NULL) -> Linux EFAULT, pre-batch EINVAL.
+##
+##        (b) Our flag-mask check on header[8..12] fired BEFORE the
+##            resv check on header[28..40].  Linux's loop over
+##            p.resv[i] runs first, then the flag-mask gate.  Both
+##            ultimately produce EINVAL, but the reason differs.
+##
+##        (c) The entries>MAX gate didn't honour IORING_SETUP_CLAMP.
+##            Linux silently clamps to IORING_MAX_ENTRIES when CLAMP
+##            is set; only the no-CLAMP case returns EINVAL.  We now
+##            require `!CLAMP` before the EINVAL gate fires.
+##
+##      Fix:
+##
+##        * Reorder sys_io_uring_setup at kernel/src/syscall/linux.rs
+##          to five gates matching Linux literally:
+##            1. params != NULL && validate_user_read(params, 120) +
+##               copy_from_user(40 bytes) -> EFAULT
+##            2. header[28..40] non-zero (resv) -> EINVAL
+##            3. flags & !VALID -> EINVAL
+##            4. entries == 0 -> EINVAL
+##            5. entries > IORING_MAX_ENTRIES && !CLAMP -> EINVAL
+##
+##      Self-tests added/updated (around line 35435):
+##
+##        Pre-existing tests updated:
+##          - io_uring_setup(0, 0x1000) -> EINVAL:  switched to a
+##            stack-allocated zero-buffer.  0x1000 is no longer safe
+##            to dereference post-reorder (the param fetch runs
+##            ahead of the entries gate).  Still EINVAL but via
+##            gate 4.
+##          - Stale comment on the resv probe updated; the explicit
+##            "clear flags first so the bad-flag gate doesn't
+##            shadow the resv gate" is no longer load-bearing since
+##            the resv gate now wins per Linux ordering.
+##
+##        New discriminators:
+##          A. io_uring_setup(entries=0, NULL) -> EFAULT  (gate 1
+##             ahead of gate 4; was EINVAL).
+##          B. io_uring_setup(entries=65536, NULL) -> EFAULT (gate 1
+##             ahead of gate 5; was EINVAL).
+##          C. io_uring_setup(8, params with bad flag AND non-zero
+##             resv) -> EINVAL.  Both gates produce EINVAL, but the
+##             post-test reset cleans up both fields; the call
+##             reaching the resv gate is what keeps the later
+##             ENOSYS probe clean.
+##
+##      Marker:
+##        "[syscall/linux]   io_uring_setup read > resv > flags >
+##         entries gate order: OK"
+##
+##      Existing tests preserved: (entries=8, NULL) -> EFAULT, the
+##      bad-flag probe, the non-zero-resv probe, the all-zero
+##      ENOSYS terminal probe, and io_uring_enter/register
+##      validation downstream.
+##
+##      Known limitations: still terminates as ENOSYS; the CLAMP
+##      flag now silently bypasses the entries>MAX gate but the
+##      result is still ENOSYS since no real ring backend exists.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

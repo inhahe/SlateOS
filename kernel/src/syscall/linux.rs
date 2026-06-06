@@ -10418,9 +10418,23 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
         | AT_STATX_FORCE_SYNC
         | AT_STATX_DONT_SYNC;
 
+    // x86_64 syscall ABI register truncation: Linux declares statx as
+    //   int statx(int dirfd, const char *pathname, int flags,
+    //             unsigned int mask, struct statx *statxbuf)
+    // so dirfd / flags truncate to i32 and mask to u32 before the
+    // function body sees them.  Pre-batch dirfd was already truncated,
+    // and the STATX_RESERVED check on mask uses a local `(mask as u32)`
+    // cast (which is exactly Linux's view), but `flags` was read as raw
+    // u64 — so a probe with `flags = 0x1_0000_1000` saw EINVAL from
+    // `flags & !VALID_FLAGS != 0` where Linux truncates the high bits
+    // away and proceeds via AT_EMPTY_PATH (0x1000).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let dirfd = args.arg0 as i32;
     let path = args.arg1;
-    let flags = args.arg2;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg2 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags: u64 = u64::from(flags_i32 as u32);
     let mask = args.arg3;
     let statxbuf = args.arg4;
 
@@ -13799,12 +13813,20 @@ fn sys_setns(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    // Reject any bit outside the documented CLONE_NEW* mask.  Linux
-    // returns EINVAL on both paths for such inputs; the kind-specific
-    // checks (proc_ns_file: exact type match; pidfd: must be non-zero)
-    // are unreachable in our kernel-context model since no real ns
-    // files or pidfds with namespace bindings exist.
-    if args.arg1 & !CLONE_NEWNS_FLAGS != 0 {
+    // x86_64 syscall ABI register truncation: Linux declares setns as
+    //   int setns(int fd, int nstype)
+    // so nstype is delivered in rsi but only its low 32 bits are
+    // visible to the kernel function body.  Pre-batch we masked
+    // args.arg1 raw, so a probe with `nstype = 0x1_0002_0000` (high
+    // bit 32 + CLONE_NEWNS) returned EINVAL where Linux truncates to
+    // 0x20000 (CLONE_NEWNS) and falls through to the resource-failure
+    // arm (EPERM in our model since the namespace fd plumbing is not
+    // implemented).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let nstype_i32 = args.arg1 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let nstype: u64 = u64::from(nstype_i32 as u32);
+    if nstype & !CLONE_NEWNS_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::EPERM)
@@ -35744,6 +35766,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   statx mask-RESERVED-EINVAL > sync-type-collision-EINVAL gate order: OK"
         );
+
+        // Batch 296: x86_64 syscall ABI register truncation for
+        // statx's `int flags` arg.  Pre-batch flags was read as raw
+        // u64, so a probe with the high half of the register set saw
+        // EINVAL from `flags & !VALID_FLAGS != 0` where Linux can only
+        // see the low 32 bits.
+
+        // (a) flags = 0x1_0000_1000 + valid statxbuf.  Linux truncates
+        // to AT_EMPTY_PATH (0x1000), takes the kernel-Console fast
+        // path -> 0.  Pre-batch: EINVAL via unknown-flag check.
+        let mut xbuf2 = [0u8; 256];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_1000,
+            arg3: 0,
+            arg4: xbuf2.as_mut_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx flags high-half not truncated for AT_EMPTY_PATH"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) flags = 0x1_0000_0000 + NULL path + NULL statxbuf.  Linux
+        // truncates to 0, hits the NULL-statxbuf -> EFAULT gate.
+        // Pre-batch: EINVAL via unknown-flag check (bit 32).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_0000,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx flags high-half not truncated for EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) flags = 0x1_0000_6000 + valid statxbuf.  Linux truncates
+        // to AT_STATX_SYNC_TYPE (both FORCE_SYNC|DONT_SYNC) -> EINVAL
+        // via the sync-collision gate, ahead of the unknown-flag
+        // gate.  Pre-batch we also returned EINVAL but via the
+        // unknown-flag path (the sync-collision check used == so the
+        // high bit prevented the equality match).  Right answer, but
+        // for the wrong reason — the truncation aligns the gate.
+        let mut xbuf3 = [0u8; 256];
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0x1_0000_6000,
+            arg3: 0,
+            arg4: xbuf3.as_mut_ptr() as u64,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx flags high-half + SYNC_TYPE not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!("[syscall/linux]   statx int flags truncation: OK");
     }
 
     // mkdir / mkdirat / rmdir / unlink / unlinkat / rename family —
@@ -39193,6 +39283,51 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   setns nstype mask: OK");
+
+        // Batch 296: x86_64 syscall ABI register truncation for
+        // setns's `int nstype` arg.  Pre-batch nstype was masked raw
+        // as u64.
+
+        // (a) nstype = 0x1_0002_0000 (high bit 32 + CLONE_NEWNS).
+        // Linux truncates -> 0x20000 (CLONE_NEWNS), valid mask check
+        // passes, falls through to our EPERM stub.  Pre-batch the
+        // bit-32 sentinel was outside CLONE_NEWNS_FLAGS -> EINVAL.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1_0002_0000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::SETNS, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setns nstype high-half not truncated"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) nstype = 0x1_0000_0001 (high bit 32 + bit-0).  Linux
+        // truncates to 0x1, which is not a CLONE_NEW* bit -> EINVAL.
+        // Pre-batch also EINVAL but via the high bit being outside
+        // the mask — right answer, wrong reason.  Confirms post-batch
+        // the EINVAL still fires on the truncated value.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1_0000_0001,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::SETNS, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setns nstype high-half + bit-0 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!("[syscall/linux]   setns int nstype truncation: OK");
 
         // mount(NULL target) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

@@ -25937,3 +25937,112 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (46.16s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 24s).
+
+326. Linux ABI batch 296 — sys_statx `int flags`
+     and sys_setns `int nstype` register
+     truncation per x86_64 syscall ABI.
+
+     Divergence
+     ----------
+     Linux declares:
+         int statx(int dirfd, const char *pathname,
+                   int flags, unsigned int mask,
+                   struct statx *statxbuf)
+         int setns(int fd, int nstype)
+     so `flags` (statx) and `nstype` (setns) are
+     32-bit C ints delivered in 64-bit registers but
+     only their low 32 bits are visible to the kernel
+     function body.  Pre-batch we read both as raw
+     u64 directly off args.argN.
+
+     - statx: `let flags = args.arg2;`.  The downstream
+       gates `flags & AT_STATX_SYNC_TYPE == ...`,
+       `flags & !VALID_FLAGS != 0`, and the
+       `flags & AT_EMPTY_PATH` branch all saw the high
+       half of the register.  A probe with `flags =
+       0x1_0000_1000` (high bit 32 + AT_EMPTY_PATH)
+       returned EINVAL via the unknown-flag check
+       where Linux truncates to 0x1000, takes the
+       AT_EMPTY_PATH branch, and returns 0 against a
+       valid statxbuf.
+     - setns: `if args.arg1 & !CLONE_NEWNS_FLAGS != 0
+       { EINVAL; }`.  A probe with `nstype =
+       0x1_0002_0000` (high bit 32 + CLONE_NEWNS)
+       returned EINVAL where Linux truncates to
+       0x20000 (CLONE_NEWNS), passes the mask gate,
+       and falls through to the namespace-fd plumbing
+       (EPERM in our stub).
+
+     statx's `mask` arg was already handled correctly
+     pre-batch via a local `(mask as u32)` cast at the
+     STATX_RESERVED check — that's Linux's exact
+     view (`unsigned int mask`), and `mask` is not
+     read anywhere else in our stub.  No fix needed
+     for mask.  statx's `dirfd` was already cast to
+     i32 at entry pre-batch (batch unrecorded).
+
+     Fix
+     ---
+     - kernel/src/syscall/linux.rs ~10421 (sys_statx):
+       Cast args.arg2 to i32 then re-widen via u32 to
+       u64.  Re-derive `flags` from the truncated
+       value; the downstream gates remain unchanged
+       but now see only the low 32 bits.
+     - kernel/src/syscall/linux.rs ~13797 (sys_setns):
+       Same shape — cast args.arg1 to i32 / re-widen
+       to u64, mask the truncated value against
+       CLONE_NEWNS_FLAGS.
+
+     New self-tests
+     --------------
+     statx block, new marker
+       "[syscall/linux]   statx int flags truncation: OK":
+       (a) (path=NULL, flags=0x1_0000_1000, statxbuf=
+           valid) -> 0 via AT_EMPTY_PATH Console fast
+           path (was EINVAL pre-batch).
+       (b) (path=NULL, flags=0x1_0000_0000, statxbuf=
+           NULL) -> EFAULT via the NULL-statxbuf gate
+           (was EINVAL pre-batch).
+       (c) (path=valid, flags=0x1_0000_6000, statxbuf=
+           valid) -> EINVAL via sync-type-collision
+           gate (was EINVAL via unknown-flag gate
+           pre-batch — same answer, different path).
+
+     setns block, new marker
+       "[syscall/linux]   setns int nstype truncation: OK":
+       (a) (nstype=0x1_0002_0000) -> EPERM (truncates
+           to CLONE_NEWNS).  Was EINVAL pre-batch.
+       (b) (nstype=0x1_0000_0001) -> EINVAL (truncates
+           to 0x1, not a CLONE_NEW* bit).  Was EINVAL
+           pre-batch via different path.
+
+     Preserved
+     ---------
+     - statx's mask-RESERVED-EINVAL gate order vs the
+       sync-type-collision-EINVAL gate (batch 225's
+       fix) is unchanged.
+     - statx's AT_EMPTY_PATH Console-fd fast path,
+       NULL-statxbuf -> EFAULT, path-validation, and
+       ENOENT fallback all unchanged.
+     - setns's validate_linux_fd gate order
+       (fd-validation ahead of the nstype mask check)
+       unchanged.
+
+     Known limitations / out of scope
+     --------------------------------
+     - statx's path-resolution arm still returns
+       ENOENT against any non-empty path because we
+       have no backing filesystem at boot time.
+       Documented under earlier statx entries.
+     - setns still answers EPERM for every well-formed
+       (fd, nstype) pair because the namespace-fd
+       plumbing is not implemented.  Independent of
+       truncation.
+     - statx's `unsigned int mask`: the local
+       `(mask as u32)` cast at the STATX_RESERVED
+       check matches Linux's view exactly, and mask
+       is not consulted again.  Not changed.
+
+     Build: cargo build -p kernel clean (47.55s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 24s).

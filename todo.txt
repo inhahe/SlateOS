@@ -25249,3 +25249,141 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean.
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 24s).
+
+321. Linux ABI batch 291 — sys_sched_getaffinity /
+     sys_sched_setaffinity: pid_t and unsigned int
+     register truncation.
+
+     Pre-batch divergences
+     ---------------------
+     Linux declares
+       long sys_sched_getaffinity(pid_t pid,
+                                  unsigned int len,
+                                  unsigned long __user *user_mask_ptr);
+       long sys_sched_setaffinity(pid_t pid,
+                                  unsigned int len,
+                                  unsigned long __user *user_mask_ptr);
+     The x86_64 syscall ABI delivers args in 64-bit
+     registers but truncates each one to its declared
+     C type before the body runs.  Our stubs held
+     args.arg0 / args.arg1 as raw u64 and matched
+     against them, so probes with garbage in the high
+     32 bits exercised the wrong control-flow paths:
+
+       Probe A — pid truncates to 0 (caller path):
+         pid = 0x1_0000_0000
+           Linux : (int)pid = 0 → resolves to "current"
+                   → fills the affinity mask for the
+                   caller (return = effective len)
+                   or no-ops the setter (return 0)
+           Ours  : raw u64 != 0 → pcb::state(0x1_0000_0000)
+                   = None → ESRCH
+
+       Probe B — len truncates to a small value:
+         len = 0x1_0000_0008
+           Linux : (unsigned int)len = 8 → bookkeeps 8
+                   bytes of the mask
+           Ours  : raw u64 → flowed through as a giant
+                   length, hitting our EINVAL "too
+                   large" gate
+
+       Probe C — alignment invariant after truncation:
+         len = 0x1_0000_000F
+           Linux : (unsigned int)len = 0xF → fails the
+                   "len % sizeof(long) == 0" check →
+                   EINVAL
+           Ours  : raw u64 0x1_0000_000F mod 8 == 7 →
+                   incidentally hit EINVAL, but for the
+                   wrong reason and unstable under
+                   future refactors
+
+       Probe D — negative pid:
+         pid = u64::MAX
+           Linux : (int)pid = -1.  Linux affinity has no
+                   explicit `if (pid < 0)` gate; it
+                   falls through to find_task_by_vpid()
+                   which returns NULL → ESRCH.
+           Ours  : raw u64 = u64::MAX → pcb::state
+                   returns None → ESRCH (accidentally
+                   correct errno, wrong reasoning).
+
+     Fixes
+     -----
+     - sys_sched_getaffinity: cast args.arg0 to i32 at
+       entry; cast args.arg1 to u32 then widen to usize
+       (so the high 32 bits are dropped before any
+       size/alignment math).  The size cap and
+       alignment-divisible-by-sizeof(long) checks now
+       run against the truncated len, matching Linux's
+       gate order.  The pid resolution branch:
+         pid == 0 → caller mask
+         pid  > 0 → pcb::state(pid as u64), ESRCH on miss
+         pid  < 0 → ESRCH directly (matches Linux's
+                    find_task_by_vpid → NULL path
+                    without faking an EINVAL we don't
+                    have evidence Linux returns)
+     - sys_sched_setaffinity: identical truncation
+       treatment.  The len==0 short-circuit, mask
+       validate_user_read, and per-PCB no-op semantics
+       are preserved against the truncated len.
+     - The existing `validate_user_write(mask_ptr,
+       cpusetsize)` etc. now run against the truncated
+       cpusetsize, so we no longer touch usermem with
+       the raw 64-bit length.
+
+     Existing self-tests restructured
+     --------------------------------
+     None — the prior sched_*affinity gate-order tests
+     used small literal pids (0, valid test_pid,
+     small bogus pid) and small literal lens, so they
+     pass unchanged.
+
+     New self-tests demonstrating the truncation
+     -------------------------------------------
+       - sched_getaffinity(0x1_0000_0000, 8, mask) > 0
+         (pid truncates to 0 → caller fills mask)
+       - sched_setaffinity(0x1_0000_0000, 8, mask) == 0
+         (pid truncates to 0 → no-op setter in kernel
+          context)
+       - sched_getaffinity(0, 0x1_0000_0008, mask) == 8
+         (len truncates to 8 → 8 bytes of mask copied)
+       - sched_getaffinity(0, 0x1_0000_000F, 0) ==
+         EINVAL (after truncation 0xF is not divisible
+         by sizeof(long), alignment gate)
+       - sched_getaffinity(u64::MAX, 8, mask) == ESRCH
+         (pid truncates to -1 → Linux NULL-task
+          fallback)
+
+     Marker:
+       "sched_{get,set}affinity pid_t/uint truncation: OK"
+
+     Preserved self-tests
+     --------------------
+     - All previously documented "sched_getaffinity ...
+       gate order: OK" probes (NULL mask EFAULT, len==0
+       short-circuit, mask too-large EINVAL, mask
+       misalignment EINVAL, unknown small-pid ESRCH).
+     - The dispatch-level real-PCB round-trip from
+       earlier batches.
+
+     Known limitations
+     -----------------
+     - The MAX_CPU_MASK_BYTES cap is our own (8 bytes,
+       64 CPUs).  Linux's NR_CPUS is configurable.
+       This is a deliberate, pre-existing scope choice
+       documented under entry 215 and unchanged here.
+     - sys_personality (`unsigned long`, high bits
+       carry meaningful flags on Linux) was audited
+       in this batch and already truncates correctly
+       via `args.arg0 as u32` at the entry point —
+       no change required.
+     - sys_sched_setattr / sys_sched_getattr (pid_t pid,
+       unsigned int flags) still hold args as raw u64.
+       Deferred to a future batch since they have
+       independent gate-order work (flags validation
+       against SCHED_FLAG_*) that should land in the
+       same change.
+
+     Build: cargo build -p kernel clean (42.45s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 26s).

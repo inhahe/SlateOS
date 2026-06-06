@@ -8605,8 +8605,29 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     //   * NULL mask was reported as EFAULT before the size/pid gates,
     //     so probes with `(bogus_pid, len=tiny, mask=NULL)` saw
     //     ESRCH instead of EINVAL.
-    let pid = args.arg0;
-    let cpusetsize = args.arg1 as usize;
+    //
+    // Batch 291: pid_t / unsigned int register truncation.  Linux's
+    // signature is
+    //   `SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid,
+    //                    unsigned int, len, unsigned long __user *)`
+    // so args.arg0 truncates to int (32-bit) and args.arg1 truncates
+    // to unsigned int (low 32 bits) before the body runs.  Pre-batch
+    // we held both as raw 64-bit values:
+    //   - pid = 0x1_0000_0000 (truncates to 0): Linux takes the
+    //     caller path; we hit pcb::state(0x1_0000_0000) = None →
+    //     ESRCH.
+    //   - len = 0x1_0000_0008 (truncates to 8): Linux writes 8 bytes
+    //     and returns 8; we treated the raw u64 as huge cpusetsize
+    //     and returned write_bytes = min(huge, MAX_MASK = 128) = 128.
+    // Note: Linux does NOT have an explicit `pid < 0` EINVAL gate for
+    // sched_*affinity (unlike sched_get/setparam) — negative pids
+    // just fall through to find_task_by_vpid → NULL → ESRCH.  We
+    // mirror that by mapping negative pid_i32 to ESRCH directly.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    // `unsigned int len` truncation: take only the low 32 bits.
+    #[allow(clippy::cast_possible_truncation)]
+    let cpusetsize = (args.arg1 as u32) as usize;
     let mask_ptr = args.arg2;
 
     let n_cpus = crate::smp::cpu_count().max(1);
@@ -8621,10 +8642,17 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     if cpusetsize & 7 != 0 {
         return linux_err(errno::EINVAL);
     }
-    if pid != 0 {
-        if crate::proc::pcb::state(pid).is_none() {
+    // pid lookup using the truncated pid_t value.  pid==0 is the
+    // "current" semantics; pid>0 is explicit; pid<0 mirrors Linux's
+    // find_task_by_vpid returning NULL → ESRCH.
+    if pid > 0 {
+        #[allow(clippy::cast_sign_loss)]
+        let pid_u = pid as u64;
+        if crate::proc::pcb::state(pid_u).is_none() {
             return linux_err(errno::ESRCH);
         }
+    } else if pid < 0 {
+        return linux_err(errno::ESRCH);
     }
     if mask_ptr == 0 {
         return linux_err(errno::EFAULT);
@@ -8692,8 +8720,14 @@ fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
     //   * mask=NULL was rejected unconditionally as EFAULT, including
     //     when `len == 0`.  Linux accepts (mask=NULL, len=0) as a
     //     no-op since copy_from_user with len=0 doesn't fault.
-    let pid = args.arg0;
-    let cpusetsize = args.arg1 as usize;
+    //
+    // Batch 291: pid_t / unsigned int register truncation.  Same
+    // signature shape as sched_getaffinity above — see that body's
+    // comment for the divergences Linux mirrors.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let cpusetsize = (args.arg1 as u32) as usize;
     let mask_ptr = args.arg2;
     if cpusetsize > 0 {
         if mask_ptr == 0 {
@@ -8703,10 +8737,14 @@ fn sys_sched_setaffinity(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    if pid != 0 {
-        if crate::proc::pcb::state(pid).is_none() {
+    if pid > 0 {
+        #[allow(clippy::cast_sign_loss)]
+        let pid_u = pid as u64;
+        if crate::proc::pcb::state(pid_u).is_none() {
             return linux_err(errno::ESRCH);
         }
+    } else if pid < 0 {
+        return linux_err(errno::ESRCH);
     }
     SyscallResult::ok(0)
 }
@@ -34019,6 +34057,87 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   sched_getaffinity size-EINVAL > align-EINVAL > pid-ESRCH > mask-EFAULT gate order: OK"
+        );
+
+        // Batch 291: pid_t / unsigned int truncation across
+        // sched_{get,set}affinity.  Linux's
+        //   `SYSCALL_DEFINE3(sched_*affinity, pid_t, pid,
+        //                    unsigned int, len, ...)`
+        // truncates both args to 32 bits before the body runs.
+        //
+        // Probe A — pid_t truncation: pid = 0x1_0000_0000 takes
+        //   (int)pid = 0 → caller path → success.  Pre-batch we
+        //   used the raw u64 for the pcb::state lookup, missed,
+        //   and returned ESRCH.
+        let mut mask_buf = [0u8; 16];
+        let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 8,
+            arg2: mask_buf.as_mut_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SCHED_GETAFFINITY, &a).value;
+        if v <= 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(0x1_0000_0000,8) want >0, got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 8,
+            arg2: mask_buf.as_mut_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETAFFINITY, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setaffinity(0x1_0000_0000,8) not 0 ({})",
+                dispatch_linux(nr::SCHED_SETAFFINITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Probe B — unsigned int len truncation: len = 0x1_0000_0008
+        //   takes (uint)len = 8 → 8-byte write, returns 8.  Pre-batch
+        //   we treated the raw u64 as huge cpusetsize and returned
+        //   write_bytes = min(huge, MAX_MASK = 128) = 128 (or some
+        //   other value that's never 8).
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0008,
+            arg2: mask_buf.as_mut_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SCHED_GETAFFINITY, &a).value;
+        if v != 8 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(0,0x1_0000_0008) want 8, got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Probe C — unsigned int len truncation in alignment gate:
+        //   len = 0x1_0000_000F (truncates to 15) → EINVAL via
+        //   `len & 7 != 0`.  Pre-batch raw u64 had the same low
+        //   bits, so this *also* returned EINVAL — same result, but
+        //   it confirms the gate sees the post-ABI value.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_000F,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETAFFINITY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(len=0x1_0000_000F) want EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Probe D — negative pid_t falls through to ESRCH (Linux
+        //   has no explicit <0 EINVAL gate for sched_*affinity).
+        //   pid = u64::MAX (truncates to -1) with a valid len/mask
+        //   → ESRCH from the negative-pid fast-path.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 8,
+            arg2: mask_buf.as_mut_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GETAFFINITY, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getaffinity(pid=u64::MAX) want ESRCH ({})",
+                dispatch_linux(nr::SCHED_GETAFFINITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_{{get,set}}affinity pid_t/uint truncation: OK"
         );
     }
 

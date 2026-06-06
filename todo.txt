@@ -20827,4 +20827,83 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
 
 
+## 268. [DONE 2026-06-05] Linux ABI: name_to_handle_at — accept
+##      AT_HANDLE_MNT_ID_UNIQUE / AT_HANDLE_CONNECTABLE, gate
+##      CONNECTABLE|FID mutual exclusion (batch 239).
+##
+##      Linux reference: fs/fhandle.c, SYSCALL_DEFINE5(name_to_handle_at).
+##      Modern (>= 6.10) gate order:
+##
+##          1. flags & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH |
+##                       AT_HANDLE_FID | AT_HANDLE_MNT_ID_UNIQUE |
+##                       AT_HANDLE_CONNECTABLE)              -> -EINVAL
+##          2. (flags & AT_HANDLE_CONNECTABLE) &&
+##             (flags & AT_HANDLE_FID)                       -> -EINVAL
+##          3. user_path_at + handle_to_path                  -> -EFAULT
+##                                                              / -ENOENT
+##                                                              / ...
+##          4. terminal -EOPNOTSUPP in our kernel (no fs exports
+##             persistent handles yet).
+##
+##      Pre-batch divergences:
+##      - Flag mask did not include AT_HANDLE_MNT_ID_UNIQUE (0x1) or
+##        AT_HANDLE_CONNECTABLE (0x2).  Probes passing either bit
+##        alone saw -EINVAL where Linux 6.5+/6.10+ accepts them and
+##        proceeds to path resolution.
+##      - The CONNECTABLE|FID mutual-exclusion gate (step 2) was
+##        missing.  Pre-batch the combination returned -EINVAL only
+##        because CONNECTABLE was treated as an unknown bit; the
+##        gate fired on the mask check rather than the documented
+##        mutual exclusion.  Now both bits are accepted, so the
+##        explicit exclusion gate must do the rejecting.
+##
+##      Fix:
+##      - Add AT_HANDLE_MNT_ID_UNIQUE (0x1) and AT_HANDLE_CONNECTABLE
+##        (0x2) to the accepted flag mask, named explicitly via a
+##        new NAME_TO_HANDLE_AT_MASK constant for clarity.
+##      - Insert the `(flags & CONNECTABLE) && (flags & FID) ->
+##        -EINVAL` gate immediately after the mask check, before
+##        any path validation.
+##
+##      Self-tests added (after the existing valid -> EOPNOTSUPP
+##      assertion):
+##      - (flags = AT_HANDLE_MNT_ID_UNIQUE)        -> EOPNOTSUPP
+##                                                    (was EINVAL).
+##      - (flags = AT_HANDLE_CONNECTABLE)          -> EOPNOTSUPP
+##                                                    (was EINVAL).
+##      - (flags = CONNECTABLE | FID)              -> EINVAL via the
+##                                                    documented
+##                                                    mutual-exclusion
+##                                                    gate (same errno
+##                                                    as pre-batch but
+##                                                    via a different
+##                                                    gate; test pins
+##                                                    the new gate).
+##      - (flags = FID alone)                      -> EOPNOTSUPP
+##                                                    (proves the
+##                                                    exclusion is
+##                                                    keyed on BOTH
+##                                                    bits, not just
+##                                                    FID).
+##        Marker: "name_to_handle_at MNT_ID_UNIQUE/CONNECTABLE accept
+##        + CONNECTABLE|FID EINVAL: OK".
+##
+##      Existing tests preserved:
+##      - bad flags (0xff) -> EINVAL (0xfc still falls outside the
+##        new wider mask).
+##      - NULL mount_id -> EFAULT.
+##      - valid (flags=0) -> EOPNOTSUPP.
+##
+##      Known limitations:
+##      - path resolution still stubbed: any readable user string
+##        passes validate_user_str and proceeds to the terminal
+##        EOPNOTSUPP.  Real Linux's -ENOENT for missing dentries,
+##        -ELOOP for symlink cycles, etc. is not implemented.
+##      - mnt_id semantics are not modeled: MNT_ID_UNIQUE asks for a
+##        uniquified mount id; we surface EOPNOTSUPP before any
+##        mount-id work is done.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+
 

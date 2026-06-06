@@ -14873,13 +14873,45 @@ fn sys_execveat(args: &SyscallArgs) -> SyscallResult {
 /// `struct file_handle { u32 handle_bytes; int handle_type; u8 f_handle[0]; }`
 /// — minimum 8 bytes for the header, but we just validate the header so
 /// the caller learns the right errno.
+///
+/// Linux fs/fhandle.c::SYSCALL_DEFINE5(name_to_handle_at) (6.5+) gate
+/// order:
+///
+///   1. flags & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH | AT_HANDLE_FID |
+///                AT_HANDLE_MNT_ID_UNIQUE | AT_HANDLE_CONNECTABLE)
+///                                                       -> -EINVAL
+///   2. (flags & AT_HANDLE_CONNECTABLE) &&
+///      (flags & AT_HANDLE_FID)                          -> -EINVAL
+///      (a connectable file handle and a FID-only handle are
+///      semantically incompatible — Linux rejects the combination
+///      before any path resolution runs.)
+///   3. user_path_at / handle_to_path / put_handle_at  -> -EFAULT,
+///                                                       -ENOENT, etc.
+///   4. EOPNOTSUPP at the terminal in this kernel (no fs export
+///      persistent handles).
 fn sys_name_to_handle_at(args: &SyscallArgs) -> SyscallResult {
     const AT_EMPTY_PATH: u32 = 0x1000;
     const AT_SYMLINK_FOLLOW: u32 = 0x400;
     const AT_HANDLE_FID: u32 = 0x200;
+    const AT_HANDLE_MNT_ID_UNIQUE: u32 = 0x1;
+    const AT_HANDLE_CONNECTABLE: u32 = 0x2;
+    const NAME_TO_HANDLE_AT_MASK: u32 = AT_EMPTY_PATH
+        | AT_SYMLINK_FOLLOW
+        | AT_HANDLE_FID
+        | AT_HANDLE_MNT_ID_UNIQUE
+        | AT_HANDLE_CONNECTABLE;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg4 as u32;
-    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_FOLLOW | AT_HANDLE_FID) != 0 {
+    if flags & !NAME_TO_HANDLE_AT_MASK != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // AT_HANDLE_CONNECTABLE asks for a handle suitable for nfsd-style
+    // reconnection (carries enough state to find the parent directory
+    // from the handle alone).  AT_HANDLE_FID asks for an opaque
+    // file-ID-only handle (no path reconnection).  Linux rejects the
+    // combination because the two requests have incompatible storage
+    // requirements — see fs/fhandle.c.
+    if flags & AT_HANDLE_CONNECTABLE != 0 && flags & AT_HANDLE_FID != 0 {
         return linux_err(errno::EINVAL);
     }
     if args.arg1 != 0 {
@@ -37803,6 +37835,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: n_t_h_a valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        // Batch 239: AT_HANDLE_MNT_ID_UNIQUE (0x1) and
+        // AT_HANDLE_CONNECTABLE (0x2) were added by Linux 6.5 and 6.10
+        // respectively to the name_to_handle_at flag set.  Pre-batch
+        // our mask rejected them as unknown bits -> EINVAL, where
+        // Linux accepts them and reaches the path-resolution code
+        // path.  Verify each bit individually now passes the flag
+        // mask gate and reaches the EOPNOTSUPP terminal.
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: handle_ptr,
+            arg3: mount_id_ptr, arg4: 0x1, arg5: 0,
+        };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: n_t_h_a AT_HANDLE_MNT_ID_UNIQUE not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: handle_ptr,
+            arg3: mount_id_ptr, arg4: 0x2, arg5: 0,
+        };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: n_t_h_a AT_HANDLE_CONNECTABLE not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // CONNECTABLE | FID is a Linux-defined mutual-exclusion
+        // -EINVAL.  Pre-batch we rejected it because CONNECTABLE was
+        // an unknown bit; post-batch the mutual-exclusion gate is
+        // what fires.  Same errno, different reason; the test pins
+        // the new gate.
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: handle_ptr,
+            arg3: mount_id_ptr, arg4: 0x2 | 0x200, arg5: 0,
+        };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: n_t_h_a CONNECTABLE|FID not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // FID alone is still legal (and reaches EOPNOTSUPP), proving
+        // the mutual-exclusion gate is keyed on BOTH bits and not
+        // just FID.
+        let a = SyscallArgs {
+            arg0: 0, arg1: path_ptr, arg2: handle_ptr,
+            arg3: mount_id_ptr, arg4: 0x200, arg5: 0,
+        };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: n_t_h_a FID (alone) not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   name_to_handle_at MNT_ID_UNIQUE/CONNECTABLE accept + CONNECTABLE|FID EINVAL: OK"
+        );
 
         // open_by_handle_at with NULL handle -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

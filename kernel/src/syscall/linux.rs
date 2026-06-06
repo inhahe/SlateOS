@@ -7759,8 +7759,9 @@ fn sys_capget(args: &SyscallArgs) -> SyscallResult {
         V1 => 1,
         V2 | V3 => 2,
         _ => {
-            // Rewrite header version to V3 and return EINVAL —
-            // Linux's documented retry protocol.
+            // Rewrite header version to V3 — Linux's documented retry
+            // protocol via cap_validate_magic's `put_user(VERSION_3,
+            // &header->version)` (kernel/capability.c).
             if let Err(e) = crate::mm::user::validate_user_write(hdrp, 8) {
                 return linux_err(linux_errno_for(e));
             }
@@ -7771,6 +7772,18 @@ fn sys_capget(args: &SyscallArgs) -> SyscallResult {
             let r = unsafe { crate::mm::user::copy_to_user(hdr_buf.as_ptr(), hdrp, 8) };
             if let Err(e) = r {
                 return linux_err(linux_errno_for(e));
+            }
+            // Linux's sys_capget final ternary:
+            //   ret = cap_validate_magic(...);  // -EINVAL with V3 rewrite
+            //   if ((dataptr == NULL) || (ret != 0))
+            //       return ((dataptr == NULL) && (ret == -EINVAL)) ? 0 : ret;
+            // i.e. a probe `capget(bad_version, NULL)` is the canonical
+            // version-detection idiom and returns 0 (the V3 was rewritten
+            // into the header — the caller now knows which version to
+            // pass).  Pre-batch we always returned EINVAL here, defeating
+            // the probe.
+            if datap == 0 {
+                return SyscallResult::ok(0);
             }
             return linux_err(errno::EINVAL);
         }
@@ -7829,7 +7842,28 @@ fn sys_capset(args: &SyscallArgs) -> SyscallResult {
     }
     let version = u32::from_ne_bytes([hdr_buf[0], hdr_buf[1], hdr_buf[2], hdr_buf[3]]);
     match version {
-        V1 | V2 | V3 => SyscallResult::ok(0),
+        V1 | V2 | V3 => {
+            // Linux's sys_capset (kernel/capability.c) calls
+            // `copy_from_user(&kdata, data, copybytes)` after
+            // cap_validate_magic succeeds, with `copybytes = tocopy
+            // * sizeof(struct __user_cap_data_struct)` (12 bytes per
+            // element).  A NULL or unreadable data pointer surfaces
+            // EFAULT — there is no NULL-data probe form for capset
+            // (unlike capget, where the NULL-datap probe returns 0).
+            // Pre-batch we accepted any valid-version capset call
+            // as silent OK without ever inspecting `data`, so a
+            // probe `capset(V3, NULL)` returned 0 where Linux
+            // returns EFAULT.
+            let elems: usize = if version == V1 { 1 } else { 2 };
+            let total = elems * 12;
+            if args.arg1 == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
+                return linux_err(linux_errno_for(e));
+            }
+            SyscallResult::ok(0)
+        }
         _ => {
             if let Err(e) = crate::mm::user::validate_user_write(hdrp, 8) {
                 return linux_err(linux_errno_for(e));
@@ -45593,6 +45627,109 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   preadv/pwritev iov_len SSIZE_MAX gating: OK"
+            );
+        }
+
+        // ---- capget / capset NULL-data error matrix ----
+        // Linux's cap_validate_magic (kernel/capability.c) is the version
+        // probe protocol: any unknown header version triggers a put_user
+        // of _LINUX_CAPABILITY_VERSION_3 into the header AND returns
+        // -EINVAL.  sys_capget then runs the final ternary
+        //   if ((dataptr == NULL) || (ret != 0))
+        //       return ((dataptr == NULL) && (ret == -EINVAL)) ? 0 : ret;
+        // which turns (bad_version, NULL) into 0 — the canonical
+        // version-detection idiom (the caller now knows V3 is correct).
+        // sys_capset has no such ternary: a NULL data pointer alongside
+        // a valid version surfaces EFAULT from copy_from_user(&kdata, ...).
+        {
+            const V3: u32 = 0x2008_0522;
+            // Discriminator A: capget(bad_version_header, NULL datap)
+            //   pre-batch -> -EINVAL (we always returned EINVAL on the
+            //                version-rewrite arm regardless of datap);
+            //   post-batch -> 0 (header rewritten to V3 in-place,
+            //                returning success so the caller can retry
+            //                with the now-correct version).
+            let mut hdr_a: [u8; 8] = [0x99, 0x99, 0x99, 0x99, 0, 0, 0, 0];
+            let hdr_a_ptr = (&raw mut hdr_a[0]) as u64;
+            core::hint::black_box(&hdr_a);
+            let a = SyscallArgs {
+                arg0: hdr_a_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPGET, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capget(bad_version, NULL) not 0 (version probe)"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // The header must have been rewritten in place to V3.
+            let v_after = u32::from_ne_bytes([hdr_a[0], hdr_a[1], hdr_a[2], hdr_a[3]]);
+            if v_after != V3 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capget(bad_version, NULL) did not rewrite header to V3"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: capget(bad_version_header, valid datap)
+            //   acceptance: still -EINVAL, proving the post-batch ternary
+            //   only converts the NULL-datap arm.  Pre-batch also -EINVAL.
+            let mut hdr_b: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0];
+            let hdr_b_ptr = (&raw mut hdr_b[0]) as u64;
+            let mut datap_buf = [0u8; 24];
+            let datap_b = (&raw mut datap_buf[0]) as u64;
+            core::hint::black_box(&hdr_b);
+            core::hint::black_box(&datap_buf);
+            let a = SyscallArgs {
+                arg0: hdr_b_ptr, arg1: datap_b, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capget(bad_version, valid datap) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator C: capset(V3_header, NULL data)
+            //   pre-batch -> 0 (we accepted any valid-version capset
+            //                without inspecting data);
+            //   post-batch -> -EFAULT (data pointer is unreadable for
+            //                the required 24 bytes of cap_user_data).
+            let mut hdr_c: [u8; 8] = [0; 8];
+            hdr_c[0] = V3.to_ne_bytes()[0];
+            hdr_c[1] = V3.to_ne_bytes()[1];
+            hdr_c[2] = V3.to_ne_bytes()[2];
+            hdr_c[3] = V3.to_ne_bytes()[3];
+            let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
+            core::hint::black_box(&hdr_c);
+            let a = SyscallArgs {
+                arg0: hdr_c_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EFAULT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capset(V3, NULL data) not EFAULT"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator D: capset(V3_header, valid data) -> 0
+            //   acceptance: well-formed call still succeeds (pre- and
+            //   post-batch).  Proves the new gate is restricted to the
+            //   NULL/unreadable case.
+            let data_buf = [0u8; 24];
+            let data_ptr = (&raw const data_buf[0]) as u64;
+            core::hint::black_box(&data_buf);
+            let a = SyscallArgs {
+                arg0: hdr_c_ptr, arg1: data_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPSET, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capset(V3, valid data) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   capget/capset NULL-data error matrix: OK"
             );
         }
 

@@ -23048,3 +23048,82 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      batch.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+297.  syscall/linux: capget/capset NULL-data semantics (batch 268).
+##
+##      Pre-batch divergences vs Linux kernel/capability.c:
+##
+##      sys_capget — Linux's cap_validate_magic rewrites unknown
+##      header versions to _LINUX_CAPABILITY_VERSION_3 in-place
+##      and returns -EINVAL.  The wrapping sys_capget then runs
+##        if ((dataptr == NULL) || (ret != 0))
+##            return ((dataptr == NULL) && (ret == -EINVAL)) ? 0 : ret;
+##      which means `capget(bad_version_header, NULL datap)` is
+##      the canonical version-detection probe and returns 0 (the
+##      header has been rewritten — the caller now knows V3 is
+##      correct).  Pre-batch we always returned EINVAL on the
+##      version-rewrite arm regardless of datap, breaking glibc /
+##      libcap-style probes.
+##
+##      sys_capset — Linux calls
+##        copy_from_user(&kdata, data, copybytes)
+##      after cap_validate_magic succeeds, where
+##        copybytes = tocopy * sizeof(struct __user_cap_data_struct)
+##                  = 12 (V1) or 24 (V2/V3) bytes.
+##      A NULL or unreadable data pointer surfaces EFAULT — there
+##      is no NULL-data probe form for capset (unlike capget).
+##      Pre-batch we accepted any valid-version capset call as
+##      silent OK without ever inspecting `data`, so `capset(V3,
+##      NULL)` returned 0 where Linux returns EFAULT.
+##
+##      Fix in sys_capget (line ~7757):
+##        Inside the unknown-version arm, after the V3 in-place
+##        rewrite + copy_to_user, branch on datap:
+##          if datap == 0 { return SyscallResult::ok(0); }
+##          return linux_err(errno::EINVAL);
+##        Cite Linux's ternary in the comment.
+##
+##      Fix in sys_capset (line ~7831):
+##        Replace the bare `V1 | V2 | V3 => SyscallResult::ok(0)`
+##        arm with one that computes
+##          let elems = if V1 { 1 } else { 2 };
+##          let total = elems * 12;
+##        and gates `args.arg1 == 0 -> EFAULT` and
+##        `validate_user_read(args.arg1, total) -> EFAULT`
+##        before returning ok(0).
+##
+##      Self-tests added in dispatch_linux (capget/capset quadruple):
+##        A. capget(hdr={0x99999999}, NULL datap)  -> 0
+##           AND post-call hdr[0..4] == V3 (0x20080522 LE).
+##           Pre-batch: EINVAL; post-batch: 0 with V3 rewrite.
+##        B. capget(hdr={0x44332211}, valid datap) -> EINVAL.
+##           Acceptance: proves the new ternary only converts the
+##           NULL-datap arm.  Pre- and post-batch both EINVAL.
+##        C. capset(hdr={V3}, NULL data)           -> EFAULT.
+##           Pre-batch: 0; post-batch: EFAULT.
+##        D. capset(hdr={V3}, valid data buf)      -> 0.
+##           Acceptance: well-formed call still succeeds.
+##
+##      Marker:
+##        "[syscall/linux]   capget/capset NULL-data error matrix: OK"
+##
+##      Existing tests preserved: preadv/pwritev iov_len gating
+##      (batch 267) directly above this block; futimesat tv_usec
+##      triple (batch 266) directly below; legacy-syscall ENOSYS
+##      sweep further up.
+##
+##      Known limitations: we still do not enforce Linux's
+##      pid != 0 && pid != current -> EPERM gate in sys_capset
+##      (kernel/capability.c does `get_user(pid, &header->pid)`
+##      after cap_validate_magic and rejects non-self pids).  In
+##      kernel context (no caller PCB) this is moot, but a real
+##      userspace caller would see a divergence on
+##      capset(V3, pid=other, valid_data).  Track in a future
+##      batch — needs caller_pid() integration and the existing
+##      pid==0 special case to be wired up.  Also: we still
+##      silently accept any cap_user_data values (Linux validates
+##      that the requested set is a subset of the bounding set);
+##      our impl is a no-op so subset enforcement would be
+##      cosmetic until we actually maintain per-task cap state.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

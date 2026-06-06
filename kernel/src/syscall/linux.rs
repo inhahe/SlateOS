@@ -14736,6 +14736,7 @@ fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
     //   Q_SYNC=0x800001, Q_QUOTAON=0x800002, Q_QUOTAOFF=0x800003,
     //   Q_GETFMT=0x800004, Q_GETINFO=0x800005, Q_SETINFO=0x800006,
     //   Q_GETQUOTA=0x800007, Q_SETQUOTA=0x800008, Q_GETNEXTQUOTA=0x800009.
+    const Q_SYNC: u64 = 0x800001;
     let generic_ok = (0x800001..=0x800009).contains(&cmds);
     // XFS quotactl ops (XQM_CMD(n) = ('X'<<8) | n = 0x5800 | n):
     //   Q_XQUOTAON..Q_XGETNEXTQUOTA = 0x5801..0x5809.
@@ -14743,11 +14744,39 @@ fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
     if !generic_ok && !xfs_ok {
         return linux_err(errno::EINVAL);
     }
-    // special is a path pointer (when needed); validate if non-NULL.
-    if args.arg1 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-            return linux_err(linux_errno_for(e));
+    // Batch 382: Linux's !special branch fires after the cmds and
+    // type gates and BEFORE the privilege check:
+    //
+    //   if (!special) {
+    //       if (cmds == Q_SYNC) return quota_sync_all(type);
+    //       return -ENODEV;
+    //   }
+    //
+    // Pre-batch we ignored this branch entirely and fell through to
+    // the terminal EPERM, so a quota-aware probe walking commands
+    // with special=NULL saw EPERM (a privilege error) where Linux
+    // returns 0 (Q_SYNC: no-op when no fs has quotas) or ENODEV
+    // (every other command: the "needs a device" answer).
+    //
+    // userspace impact: util-linux's `quota` and `quotacheck`,
+    // and quota.h-using fs-management daemons, probe with
+    // special=NULL during init to discover whether the kernel has
+    // quota support at all.  Pre-batch the EPERM made them think
+    // the kernel knows about quotas but refuses; ENODEV is the
+    // correct "no device available" answer.
+    //
+    // Q_SYNC on a no-quota system is a no-op — quota_sync_all
+    // iterates supers and per-fs quota_sync, all of which are
+    // empty here.  Return 0.
+    if args.arg1 == 0 {
+        if cmds == Q_SYNC {
+            return SyscallResult::ok(0);
         }
+        return linux_err(errno::ENODEV);
+    }
+    // special is a path pointer (when non-NULL); validate readability.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+        return linux_err(linux_errno_for(e));
     }
     linux_err(errno::EPERM)
 }
@@ -30645,7 +30674,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //     Pre-batch: u64 shift 0x1_8000_0100 >> 8 = 0x180_0001, not
         //     in 0x800001..=0x800009 -> EINVAL.  Post-batch: truncates
         //     cmd to u32 0x8000_0100, shifts to 0x800001 (Q_SYNC), passes
-        //     the whitelist and reaches the terminal EPERM.
+        //     the whitelist and reaches the !special branch.  Batch 382:
+        //     !special + Q_SYNC returns 0 (was EPERM via terminal CAP
+        //     check).  Verifies the truncation continues to hit the
+        //     correct downstream gate.
         let a = SyscallArgs {
             arg0: 0x1_8000_0100,
             arg1: 0,
@@ -30655,9 +30687,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg5: 0,
         };
         let v = dispatch_linux(nr::QUOTACTL, &a).value;
-        if v != -i64::from(errno::EPERM) {
+        if v != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: quotactl high-half cmd -> {} (expected -EPERM)",
+                "[syscall/linux]   FAIL: quotactl high-half cmd -> {} (expected 0)",
                 v
             );
             return Err(KernelError::InternalError);
@@ -45669,14 +45701,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         // quotactl(cmd=Q_SYNC<<8|USRQUOTA=0x80000100) NULL special
-        // -> EPERM.  Q_SYNC=0x800001 is a valid generic op and
-        // type=0 (USRQUOTA) is valid, so the gate passes and we
-        // land on the terminal privilege check.
+        // -> 0.  Batch 382: Linux's !special branch returns
+        // quota_sync_all(type) for Q_SYNC, which on a no-quota
+        // kernel iterates supers and per-fs sync (all no-ops),
+        // returning 0.  Pre-batch this returned EPERM via the
+        // terminal CAP check, defeating quota-aware libraries
+        // that use Q_SYNC as a "is quotactl reachable" probe.
         let a = SyscallArgs { arg0: 0x8000_0100, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::QUOTACTL, &a).value
-            != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: quotactl(Q_SYNC) not EPERM");
+        if dispatch_linux(nr::QUOTACTL, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_SYNC,NULL) not 0");
             return Err(KernelError::InternalError);
         }
         // quotactl with type=3 (>= MAXQUOTAS) -> EINVAL.  cmd encodes
@@ -45703,28 +45737,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // `cmds = cmd >> 8` and dispatches; anything outside the
         // known op tables falls through to the default `-EINVAL`
         // arm ahead of the privilege check.
-        // Q_GETQUOTA=0x800007 with type=0 -> valid op, EPERM.
+        // Q_GETQUOTA=0x800007 with type=0, special=NULL -> ENODEV
+        // (Batch 382: !special branch returns ENODEV for every
+        // command that isn't Q_SYNC, ahead of the terminal CAP
+        // check).  Pre-batch this returned EPERM.
         let a = SyscallArgs { arg0: 0x8000_0700, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::QUOTACTL, &a).value
-            != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: quotactl(Q_GETQUOTA) not EPERM");
+            != -i64::from(errno::ENODEV) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_GETQUOTA,NULL) not ENODEV");
             return Err(KernelError::InternalError);
         }
-        // Q_XQUOTAON=0x5801 with type=0 -> valid XFS op, EPERM.
+        // Q_XQUOTAON=0x5801 with type=0, special=NULL -> ENODEV
+        // (XFS write op, but still rejected at !special branch
+        // before reaching the CAP check).
         let a = SyscallArgs { arg0: 0x580100, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::QUOTACTL, &a).value
-            != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: quotactl(Q_XQUOTAON) not EPERM");
+            != -i64::from(errno::ENODEV) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_XQUOTAON,NULL) not ENODEV");
             return Err(KernelError::InternalError);
         }
-        // Q_XGETNEXTQUOTA=0x5809 with type=0 -> valid XFS op, EPERM.
+        // Q_XGETNEXTQUOTA=0x5809 with type=0, special=NULL -> ENODEV.
         let a = SyscallArgs { arg0: 0x580900, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::QUOTACTL, &a).value
-            != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: quotactl(Q_XGETNEXTQUOTA) not EPERM");
+            != -i64::from(errno::ENODEV) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_XGETNEXTQUOTA,NULL) not ENODEV");
             return Err(KernelError::InternalError);
         }
         // cmd=0 with type=0 -> cmds=0 is not in any whitelist -> EINVAL.
@@ -45760,6 +45799,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   quotactl cmd validation: OK");
+
+        // Batch 382: !special branch verification.
+        // Q_QUOTAON=0x800002 with special=NULL -> ENODEV (write op,
+        // but !special branch fires first per Linux's gate order).
+        let a = SyscallArgs { arg0: 0x8000_0200, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value != -i64::from(errno::ENODEV) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_QUOTAON,NULL) not ENODEV");
+            return Err(KernelError::InternalError);
+        }
+        // Q_SETQUOTA=0x800008 with special=NULL -> ENODEV.
+        let a = SyscallArgs { arg0: 0x8000_0800, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::QUOTACTL, &a).value != -i64::from(errno::ENODEV) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_SETQUOTA,NULL) not ENODEV");
+            return Err(KernelError::InternalError);
+        }
+        // Q_GETQUOTA with non-NULL special -> EPERM (special-non-NULL
+        // path skips the !special branch and falls through to the
+        // terminal CAP check).  Use a stack buffer as the special
+        // pointer (kernel-context validate_user_read bypasses NULL
+        // checks, so any valid pointer satisfies the read gate).
+        let q_special_buf = b"/dev/sda1\0";
+        let q_special_ptr = q_special_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0x8000_0700, arg1: q_special_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::QUOTACTL, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_GETQUOTA,/dev/sda1) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   quotactl !special branch (Q_SYNC=0, else ENODEV): OK"
+        );
         // quotactl_fd(fd=0, cmd=Q_SYNC<<8|USRQUOTA) -> EPERM (valid
         // cmd, terminal CAP check).  Pre-batch this test passed
         // cmd=0 expecting EPERM, but cmd=0 now hits the new cmds

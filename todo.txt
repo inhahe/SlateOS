@@ -34609,3 +34609,111 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
 
+412. Batch 382 — sys_quotactl !special branch (Q_SYNC=0, else ENODEV)
+     (kernel/src/syscall/linux.rs)
+
+     Divergence (table):
+       Input                                  | Linux                | Pre-batch
+       ---------------------------------------|----------------------|----------
+       quotactl(Q_SYNC,    NULL, 0, 0)        | 0 (sync all = no-op  | EPERM
+                                              |  on quota-less kernel|  (terminal
+                                              |  via quota_sync_all) |   CAP check)
+       quotactl(Q_GETQUOTA,NULL, 0, 0)        | ENODEV               | EPERM
+       quotactl(Q_QUOTAON, NULL, 0, 0)        | ENODEV               | EPERM
+       quotactl(Q_SETQUOTA,NULL, 0, 0)        | ENODEV               | EPERM
+       quotactl(Q_XQUOTAON,NULL, 0, 0)        | ENODEV               | EPERM
+       quotactl(Q_X*       NULL, 0, 0)        | ENODEV               | EPERM
+
+     Why it matters: Linux's `fs/quota/quota.c::SYSCALL_DEFINE4
+     (quotactl)` runs a !special branch AFTER the cmds and type
+     validation gates and BEFORE the privilege check:
+
+       cmds = cmd >> SUBCMDSHIFT;          // u32 shift
+       type = cmd & SUBCMDMASK;
+       if (!quotactl_cmd_valid(cmds)) return -EINVAL;
+       if (type >= MAXQUOTAS)         return -EINVAL;
+       if (!special) {
+           if (cmds == Q_SYNC) return quota_sync_all(type);
+           return -ENODEV;
+       }
+       // ... per-cmd path-resolution / quotactl_block / EPERM ...
+
+     On a kernel without quota support compiled in, the body
+     reduces to:
+       - Q_SYNC + NULL special: iterate_supers runs over a list
+         of supers none of which has quota_op, so each per-sb
+         call is a no-op; quota_sync_all returns 0.
+       - Anything-else + NULL special: explicit ENODEV.
+
+     Pre-batch we ignored !special entirely.  Every NULL-special
+     call walked straight through to the terminal `linux_err(
+     errno::EPERM)`, conflating "you can't do this without
+     CAP_SYS_ADMIN" with "you forgot to tell me which device".
+
+     Userspace impact: util-linux's `quota`, `quotacheck`, and
+     `quotaon` use Q_SYNC with NULL special as a "is the kernel's
+     quota subsystem reachable at all" probe.  Pre-batch they saw
+     EPERM and assumed quotas are present but locked down, then
+     fell through to a privilege-escalation prompt or refused to
+     run.  ENODEV / 0 is the correct answer that lets them detect
+     a no-quota build cleanly.
+
+     fs-management daemons (mountd, autofsd) similarly use
+     Q_GETQUOTA with NULL special to discover whether to wire up
+     quota event hooks; pre-batch EPERM made them think the
+     subsystem exists.
+
+     Fix: insert the !special branch after the cmds/type
+     whitelist:
+
+       if args.arg1 == 0 {
+           if cmds == Q_SYNC { return SyscallResult::ok(0); }
+           return linux_err(errno::ENODEV);
+       }
+       // non-NULL special: validate readability + fall through
+       // to terminal EPERM.
+
+     Q_SYNC constant is 0x800001 per include/uapi/linux/quota.h
+     (the generic shifted opcode, before OR-ing with the type
+     byte).
+
+     Architectural directive: translator-layer fix only.  We have
+     no quota subsystem (`fs::quota` does not exist), so Q_SYNC's
+     "no-op success" is the truthful answer Linux would emit.
+     When quota lands on a real filesystem, Q_SYNC will still
+     return 0 because quota_sync_all only enumerates active fs;
+     no probe contract needs to change.  The !special EFAULT/
+     readability check was also removed because Linux's branch
+     short-circuits before any pointer-touching.
+
+     Probes added (3 new, 4 updated, 9 kept):
+       * quotactl(Q_QUOTAON, NULL)      -> ENODEV (NEW; verifies
+         the ENODEV arm fires for write-side ops too).
+       * quotactl(Q_SETQUOTA, NULL)     -> ENODEV (NEW; another
+         write op).
+       * quotactl(Q_GETQUOTA, "/dev/sda1") -> EPERM (NEW; verifies
+         non-NULL special skips the !special branch and reaches
+         the terminal CAP check).
+       * quotactl(Q_SYNC,    NULL)      -> 0      (UPDATED; was
+         EPERM).
+       * quotactl(Q_GETQUOTA,NULL)      -> ENODEV (UPDATED; was
+         EPERM).
+       * quotactl(Q_XQUOTAON,NULL)      -> ENODEV (UPDATED; was
+         EPERM).
+       * quotactl(Q_XGETNEXTQUOTA,NULL) -> ENODEV (UPDATED; was
+         EPERM).
+       * quotactl(high-half|Q_SYNC, NULL) -> 0    (UPDATED in
+         truncation series; was EPERM — verifies the truncation
+         continues to hit the new !special branch correctly).
+       * 9 existing probes (type validation, cmds whitelist,
+         quotactl_fd variants, etc.) keep their expectations
+         because they don't intersect the !special branch.
+
+     Final boot-time stamp:
+         "[syscall/linux]   quotactl !special branch (Q_SYNC=0,
+          else ENODEV): OK"
+
+     Build: cargo build -p kernel clean (38.74s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 23s).
+

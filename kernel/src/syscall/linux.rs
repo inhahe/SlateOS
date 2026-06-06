@@ -5045,58 +5045,55 @@ fn sys_kill(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     if sig == 0 {
-        let probe_args = SyscallArgs {
-            arg0: args.arg0,
-            arg1: 1, // SIGHUP — valid, won't fail signal-number gate
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        // We can't actually let SIGHUP be delivered as a probe (the
-        // wake target might catch it).  Instead, hand-roll the same
-        // existence + authority checks the native handler performs.
+        // sig==0 is the existence probe: same gates as a real signal
+        // send, but no actual delivery.  We've already proven the
+        // target exists (target_u via pcb::state above), so all that
+        // remains is the authority check that handlers::sys_signal_send
+        // would have performed.  Use the *truncated* target_u
+        // throughout — not raw args.arg0 — so a probe like
+        // kill(0x1_0000_0001, 0) hits pid 1 consistently with the
+        // earlier existence gate.  Pre-batch (358) this path
+        // re-loaded args.arg0 and pcb::state(0x1_0000_0001) → None →
+        // ESRCH, diverging from Linux's "pid was truncated to 1, and
+        // 1 exists, so existence probe succeeds".
         use crate::proc::{pcb, thread};
-        let target = args.arg0;
-        if target == 0 {
-            return linux_err(errno::EINVAL);
-        }
         let task_id = crate::sched::current_task_id();
         let caller = thread::owner_process(task_id).unwrap_or(0);
-        if target != caller {
-            let target_parent = match pcb::parent(target) {
+        if target_u != caller {
+            let target_parent = match pcb::parent(target_u) {
                 Some(p) => p,
+                // We checked pcb::state(target_u) earlier so this
+                // would only fire on a TOCTOU race with the target's
+                // reaper.  Surface ESRCH in that window — same as
+                // Linux's later check_kill_permission when the task
+                // is reaped underneath us.
                 None => return linux_err(errno::ESRCH),
             };
             let has_parent_auth = caller == 0 || caller == target_parent;
             let has_cap_auth = pcb::has_capability_for(
                 caller,
                 crate::cap::ResourceType::Process,
-                target,
+                target_u,
                 crate::cap::Rights::DELETE,
             );
             if !has_parent_auth && !has_cap_auth {
                 return linux_err(errno::EPERM);
             }
         }
-        match pcb::state(target) {
-            Some(pcb::ProcessState::Zombie) | None => return linux_err(errno::ESRCH),
-            _ => {}
-        }
-        // Existence probe succeeds — suppress the unused-warning on the
-        // probe_args placeholder so it documents the intent.
-        let _ = probe_args;
         return SyscallResult::ok(0);
     }
     // Real signal: delegate to native.  Native SYS_SIGNAL_SEND:
-    // arg0 = target pid, arg1 = signum.  Pass the truncated sig (sig
-    // is non-negative here) so signal_send sees the post-ABI value;
-    // otherwise a probe with sig = 0x1_0000_007F (truncates to 127,
-    // i.e. > NSIG → EINVAL on Linux) would still produce EINVAL —
-    // same answer — but a probe with sig = 0x1_0000_0009 (truncates
-    // to 9 = SIGKILL) must enter the SIGKILL path.  Forwarding the
-    // raw u64 would diverge.
+    // arg0 = target pid, arg1 = signum.  Pass the truncated target
+    // (target_u, derived from pid_i32) and truncated sig so
+    // signal_send sees the post-ABI values.  Pre-batch (358)
+    // forwarded args.arg0 raw, so a probe like
+    // kill(0x1_0000_0001, 9) would send to pid 0x1_0000_0001 rather
+    // than pid 1 and fail with ESRCH even though the truncation gate
+    // had already proven pid 1 lives.
     #[allow(clippy::cast_sign_loss)]
     let sig_u = sig as u64;
     let send_args = SyscallArgs {
-        arg0: args.arg0,
+        arg0: target_u,
         arg1: sig_u,
         arg2: args.arg2,
         arg3: args.arg3,
@@ -28328,6 +28325,113 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   kill ESRCH-before-EINVAL gate order: OK");
+    }
+
+    // Batch 359: kill() pid-truncation propagation.
+    //
+    // sys_kill truncates args.arg0 to pid_i32 at the top, then uses
+    // the resulting target_u (= pid_i32 as u64) for the pcb::state
+    // existence gate.  Pre-batch the sig==0 path and the native
+    // signal-send forward then *re-read args.arg0 raw*, so a probe
+    // like kill(0x1_0000_0000 | 1, 0) would
+    //   - pass the truncation gate (pid_i32 = 1, pcb::state(1) lives);
+    //   - then re-load args.arg0 = 0x1_0000_0001 and pcb::state on
+    //     *that* → None → spurious ESRCH.
+    // Post-batch (359) the sig==0 path and the native forward both
+    // use target_u — exactly matching the value the existence gate
+    // approved.  Mirrors Linux's behavior where pid is truncated
+    // once via the SYSCALL_DEFINE2 ABI shim and every downstream
+    // user sees the same post-ABI pid.
+    {
+        use crate::proc::pcb;
+        // Create a live PCB whose pid we know.  We then construct a
+        // probe arg0 that *raw* differs from the truncated form,
+        // both sharing the same low 32 bits.
+        let test_pid = pcb::create("kill-trunc-prop-test", 0);
+        // The PCB API returns u64 — for this probe to be meaningful
+        // the truncated low 32 bits must round-trip back to test_pid
+        // itself (i.e. the pid must fit in 31 bits, which all
+        // newly-created pids do in our model).  Assert that
+        // explicitly so a future pid-allocator change doesn't
+        // silently invalidate this probe.
+        if test_pid > i32::MAX as u64 {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill-trunc test_pid too large ({})",
+                test_pid
+            );
+            pcb::destroy(test_pid);
+            return Err(KernelError::InternalError);
+        }
+        // Probe (a): sig==0 existence probe with high-bit-set arg0
+        // that truncates to test_pid.  Pre-batch: ESRCH (re-loaded
+        // raw arg0 in sig==0 path).  Post-batch: 0 (existence
+        // succeeds via target_u).
+        let raw_arg0 = 0x1_0000_0000u64 | test_pid;
+        let a = SyscallArgs {
+            arg0: raw_arg0, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill(0x1_0000_0000|pid, 0) want 0 got {}", v
+            );
+            pcb::destroy(test_pid);
+            return Err(KernelError::InternalError);
+        }
+        // Probe (b): the same arg0 with a real signal.  The exact
+        // outcome depends on the native sys_signal_send authority
+        // model (caller==kernel may not have rights to signal a
+        // freshly-created PCB without parent linkage).  What we
+        // assert is the *negative*: never ESRCH on the looked-up
+        // pid, never EINVAL on a valid sig.  Pre-batch this path
+        // forwarded args.arg0=0x1_0000_0001 raw → sys_signal_send
+        // → pcb::state(0x1_0000_0001) → None → ESRCH.  Post-batch
+        // it forwards target_u=test_pid; sys_signal_send sees a
+        // real pid and answers either 0 (signal queued) or EPERM
+        // (no authority).  Either is acceptable here; ESRCH and
+        // EINVAL are the regression signatures.
+        let a = SyscallArgs {
+            arg0: raw_arg0, arg1: 9, // SIGKILL — valid
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v == -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill(0x1_0000_0000|pid, 9) ESRCH (raw forwarded)"
+            );
+            pcb::destroy(test_pid);
+            return Err(KernelError::InternalError);
+        }
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill(0x1_0000_0000|pid, 9) EINVAL"
+            );
+            pcb::destroy(test_pid);
+            return Err(KernelError::InternalError);
+        }
+        // Probe (c): same target via the *raw-equal* path (arg0 =
+        // test_pid directly), sig=0.  This is the control — both
+        // pre- and post-batch should return 0 here; if it doesn't,
+        // something else is broken (the existence gate, or PCB
+        // creation).  Catches a "we fixed truncation but broke the
+        // baseline" regression.
+        let a = SyscallArgs {
+            arg0: test_pid, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill(pid, 0) baseline want 0 got {}", v
+            );
+            pcb::destroy(test_pid);
+            return Err(KernelError::InternalError);
+        }
+        pcb::destroy(test_pid);
+        serial_println!(
+            "[syscall/linux]   kill pid truncation propagation: OK"
+        );
     }
 
     // rt_sigreturn:

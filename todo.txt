@@ -32280,3 +32280,79 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (42.20s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 27s).
+
+389. syscall/linux batch 359 — sys_kill: propagate the
+     pid_t truncation through the sig==0 existence-probe
+     path and the native-forward path.
+
+     Bug: batch 358 truncated args.arg0 to pid_i32 at the
+     top of sys_kill and used the resulting target_u for the
+     pcb::state existence gate.  But the two paths that ran
+     *after* that gate succeeded —
+       (a) the sig==0 existence-probe path
+       (b) the real-sig native-forward to
+           handlers::sys_signal_send
+     — both re-read args.arg0 raw and used it for downstream
+     lookups.  So a probe like kill(0x1_0000_0001, 0):
+       - truncates pid_i32 = 1, target_u = 1;
+       - pcb::state(1) lives → gate accepts;
+       - sig==0 path then `let target = args.arg0` =
+         0x1_0000_0001, runs pcb::state(0x1_0000_0001) →
+         None → spurious ESRCH.
+     Similarly kill(0x1_0000_0001, 9) forwarded arg0 raw to
+     sys_signal_send, which doesn't know about Linux's pid_t
+     truncation and ESRCH'd on the high-bit pid.  This
+     defeats the entire point of batch 358 — the truncation
+     is meaningless if it isn't propagated to the consumers.
+
+     Linux's SYSCALL_DEFINE2(kill, pid_t, pid, ...) shim
+     truncates pid to int once at entry; every downstream
+     caller in kernel/signal.c sees the post-ABI value.  Our
+     translator must do the same.
+
+     Fix: in sys_kill's body, after the truncation gate,
+     replace every remaining `args.arg0` reference with
+     `target_u`:
+       - sig==0 existence path now uses target_u for the
+         caller-vs-target equality check, pcb::parent
+         lookup, has_capability_for target, and (implicitly)
+         the existence check via the gate above.
+       - native-forward send_args.arg0 = target_u, not
+         args.arg0.
+     Also removed the stale `let target = args.arg0` /
+     `if target == 0` re-check inside sig==0 — pid_i32 <= 0
+     was already gated above so target_u > 0 is invariant
+     here, and the redundant probe_args placeholder.
+
+     Probes added (3, all guarded by a fresh pcb::create
+     scaffolded PCB so we have a known-live target):
+       (a) kill(0x1_0000_0000 | test_pid, 0): existence
+           probe with high-bit-set arg0 that truncates to
+           test_pid.  Pre-batch: ESRCH (re-loaded raw arg0
+           in sig==0 path).  Post-batch: 0 (existence
+           succeeds via target_u).
+       (b) kill(0x1_0000_0000 | test_pid, 9): real signal
+           via SIGKILL with the same raw-vs-truncated split.
+           Pre-batch: ESRCH (raw arg0 forwarded to native
+           sys_signal_send).  Post-batch: 0 or EPERM (depends
+           on authority — what's asserted is the *negative*:
+           never ESRCH, never EINVAL).
+       (c) kill(test_pid, 0) baseline.  Control — must be
+           0 both pre- and post-batch.  Catches a "fix broke
+           the baseline" regression.
+     Guard: probe (a) is meaningful only if test_pid round-
+     trips through (u64 → i32 → u64) cleanly.  We assert
+     test_pid <= i32::MAX before running the probes; any
+     future pid allocator change that issues 32-bit-high pids
+     would fail this guard with a clear message.
+
+     test_pid is destroyed via pcb::destroy on every exit
+     path (success and each failure) so the self-test
+     doesn't leak a PCB into the rest of boot.
+
+     Final boot-time stamp:
+         "[syscall/linux]   kill pid truncation propagation: OK"
+
+     Build: cargo build -p kernel clean (41.34s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 23s).

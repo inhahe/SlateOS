@@ -14452,8 +14452,30 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
 ///     not implemented; surface a syscall-level error rather than an
 ///     fd error so userspace can tell apart "kernel doesn't know
 ///     `process_mrelease`" from "wrong fd type").
+///
+/// Batch 386 — unsigned-int truncation for `flags`.
+///
+/// Linux's signature is
+/// `SYSCALL_DEFINE2(process_mrelease, int, pidfd, unsigned int, flags)`
+/// (mm/oom_kill.c).  The `SYSCALL_DEFINE` macro stamps each parameter
+/// at its declared C width, so on entry the high 32 bits of the `flags`
+/// register are *truncated away* before the body's `if (flags) return
+/// -EINVAL;` check runs.  The AMD64 syscall ABI does **not** zero-extend
+/// `unsigned int` arguments (only `unsigned long`/pointer arguments are
+/// passed through unchanged); the user-mode register may carry arbitrary
+/// high-half garbage, and Linux ignores it.
+///
+/// Pre-batch we compared `args.arg1` at full u64 width, so a userspace
+/// caller invoking `process_mrelease(pidfd, 0x1_0000_0000)` — value
+/// `flags = 0` after truncation, which Linux accepts and advances to the
+/// pidfd validation gate — got EINVAL from us instead.  Cast to `u32`
+/// first to match Linux's truncation semantics.  This is the 15th
+/// instance of this pattern across the compat layer (cf. batches 308–318
+/// for the original int-truncation sweep, batch 319 for memfd_secret).
 fn sys_process_mrelease(args: &SyscallArgs) -> SyscallResult {
-    if args.arg1 != 0 {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg1 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -45443,6 +45465,39 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   process_mrelease pidfd discrimination: OK");
+
+        // Batch 386: `flags` is C `unsigned int` per
+        //   SYSCALL_DEFINE2(process_mrelease, int, pidfd, unsigned int, flags)
+        // in mm/oom_kill.c.  The AMD64 syscall ABI does not zero-extend
+        // `unsigned int` register arguments — the high 32 bits may carry
+        // arbitrary user garbage and Linux's SYSCALL_DEFINE macro truncates
+        // them before the body runs.  Therefore `flags = 0x1_0000_0000`
+        // must *not* be rejected as EINVAL: after truncation flags=0, and
+        // execution advances to the pidfd-validation gate (here EBADF in
+        // kernel context since arg0=0 has no fd entry).  Pre-batch we
+        // compared at full u64 width and returned EINVAL; verify the cast.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let r = dispatch_linux(nr::PROCESS_MRELEASE, &a).value;
+        if r == -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: process_mrelease(flags=0x1_0000_0000) rejected as EINVAL (high half not truncated)");
+            return Err(KernelError::InternalError);
+        }
+        if r != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: process_mrelease(flags=0x1_0000_0000) not EBADF (got {})", r);
+            return Err(KernelError::InternalError);
+        }
+        // And a discriminator: low-half nonzero must still be EINVAL even
+        // when high-half also has bits.  `flags = 0x1_0000_0001`
+        // truncates to 1 — Linux rejects.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0001, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PROCESS_MRELEASE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: process_mrelease(flags=0x1_0000_0001) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   process_mrelease unsigned-int truncation (high-half ignored): OK");
     }
 
     // Batch 113: fcntl(F_GETLK / F_SETLK / F_SETLKW) and OFD

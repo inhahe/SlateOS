@@ -34900,3 +34900,54 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (40.79s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).
+
+416. Batch 386 — process_mrelease `flags` is C `unsigned int`; honor
+     AMD64 syscall-ABI non-zero-extension by truncating to u32 before
+     the gate-1 EINVAL check.
+
+     Divergence table:
+       Linux source : mm/oom_kill.c
+                      SYSCALL_DEFINE2(process_mrelease,
+                                      int, pidfd,
+                                      unsigned int, flags)
+       Linux body   : if (flags) return -EINVAL;
+                      // ^^ runs *after* SYSCALL_DEFINE has truncated
+                      //    `flags` to its declared C type (u32).
+       ABI rule     : AMD64 syscall passes scalar args in registers
+                      with no zero-extension of `int`/`unsigned int`.
+                      User-mode high 32 bits are *whatever was last
+                      in the high half of the register* — kernels
+                      reading at C-type width must truncate.
+       Pre-batch    : if args.arg1 != 0 { return EINVAL; }
+                      (u64 comparison — high-half garbage rejected)
+       Post-batch   : let flags = args.arg1 as u32;
+                      if flags != 0 { return EINVAL; }
+                      (matches Linux's SYSCALL_DEFINE truncation)
+
+     Why it matters: an OOM-killer userspace daemon (the canonical
+     consumer of process_mrelease; cf. systemd-oomd's PSI-driven
+     reaper, Android's lmkd, the in-kernel oom-reaper analogue
+     surfaced to userspace) that calls process_mrelease via a libc
+     wrapper builds `flags` by computing a `u32` zero in a wider
+     temporary or reusing a syscall register from a prior call.
+     Linux's `unsigned int` parameter truncates the high half away;
+     pre-batch our layer returned EINVAL where Linux would advance
+     to pidfd validation.  This is the canonical "kernel rejected a
+     zero flags arg" footgun and breaks libc wrappers that re-use
+     general-purpose registers across syscall sites — exactly the
+     case the int-truncation sweep (batches 308–318, 319) was built
+     to neutralize.  This is the 15th cite of the pattern in the
+     compat layer.
+
+     Probes added: (1) flags=0x1_0000_0000 → must NOT be EINVAL
+     (high half truncated; advances to fd gate, yields EBADF in
+     kernel ctx with arg0=0).  (2) Discriminator flags=0x1_0000_0001
+     → must be EINVAL (truncated low half = 1, nonzero).  Both new
+     probes preserved alongside the existing pidfd-discrimination
+     probe; existing "flags=1 → EINVAL" and "fd=0 → EBADF" probes
+     unchanged (they happen to be u64-clean inputs).  New stamp:
+       "[syscall/linux]   process_mrelease unsigned-int truncation
+        (high-half ignored): OK"
+
+     Build: cargo build -p kernel clean (39.78s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).

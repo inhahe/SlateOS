@@ -21106,104 +21106,131 @@ fn sys_get_thread_area(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `kexec_load(entry, nr_segments, segments*, flags)`.
-///
-/// Linux's `kernel/kexec.c::kexec_load_check()` validates `flags`
-/// ahead of the nr_segments cap (after the `CAP_SYS_BOOT` check):
-///
-///   `if ((flags & KEXEC_FLAGS) != (flags & ~KEXEC_ARCH_MASK))`
-///       return -EINVAL;
-///   `if (((flags & KEXEC_ARCH_MASK) != KEXEC_ARCH) &&
-///       ((flags & KEXEC_ARCH_MASK) != KEXEC_ARCH_DEFAULT))`
-///       return -EINVAL;
-///
-/// `KEXEC_FLAGS = KEXEC_ON_CRASH | KEXEC_PRESERVE_CONTEXT = 0x3`.
-/// `KEXEC_ARCH_MASK = 0xffff_0000`.  The arch field is the ELF
-/// e_machine value for the target architecture, shifted left 16.  On
-/// x86_64 the only accepted non-zero arch is `EM_X86_64 (62) << 16 =
-/// 0x003e_0000`.  Zero means "current architecture", which is what
-/// glibc passes when not building a cross-image.
-///
-/// We run these gates ahead of the `nr_segments` cap (matching
-/// Linux's order) so a probe passing garbage flag bits sees -EINVAL
-/// regardless of nr_segments.
-fn sys_kexec_load(args: &SyscallArgs) -> SyscallResult {
-    const KEXEC_FLAGS: u64 = 0x3;
-    const KEXEC_ARCH_MASK: u64 = 0xffff_0000;
-    const KEXEC_ARCH_X86_64: u64 = 62 << 16;
-
-    let flags = args.arg3;
-    // Low 16 bits may only contain KEXEC_FLAGS bits.  Equivalent to
-    // Linux's `(flags & KEXEC_FLAGS) != (flags & ~KEXEC_ARCH_MASK)`
-    // — a reserved low bit makes the two sides differ.
-    if flags & !KEXEC_ARCH_MASK & !KEXEC_FLAGS != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // Arch field must be 0 (use current) or x86_64.  A foreign arch
-    // request from x86_64 is meaningless and Linux rejects it.
-    let arch = flags & KEXEC_ARCH_MASK;
-    if arch != 0 && arch != KEXEC_ARCH_X86_64 {
-        return linux_err(errno::EINVAL);
-    }
-    // nr_segments hard-capped at 16 in Linux (KEXEC_SEGMENT_MAX).
-    if args.arg1 > 16 {
-        return linux_err(errno::EINVAL);
-    }
-    // segments pointer required when nr_segments > 0.
-    if args.arg1 > 0 {
-        if args.arg2 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        // struct kexec_segment is 32 bytes (4x void* fields).
-        let total = (args.arg1 as usize).saturating_mul(32);
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, total) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // Loading a replacement kernel from userspace is a root-only
-    // operation we don't support.
+fn sys_kexec_load(_args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/kexec.c::SYSCALL_DEFINE4(kexec_load) +
+    // kexec_load_check, modern mainline):
+    //
+    //   SYSCALL_DEFINE4(kexec_load, unsigned long, entry,
+    //                   unsigned long, nr_segments,
+    //                   struct kexec_segment __user *, segments,
+    //                   unsigned long, flags)
+    //   {
+    //       int result;
+    //
+    //       result = kexec_load_check(nr_segments, flags);
+    //       if (result) return result;
+    //       ...
+    //   }
+    //
+    //   static inline int kexec_load_check(unsigned long nr_segments,
+    //                                      unsigned long flags)
+    //   {
+    //       int image_type = (flags & KEXEC_ON_CRASH) ?
+    //                        KEXEC_TYPE_CRASH : KEXEC_TYPE_DEFAULT;
+    //       int result;
+    //
+    //       /* We only trust the superuser with rebooting */
+    //       if (!kexec_load_permitted(image_type))
+    //           return -EPERM;            // (1) CAP_SYS_BOOT
+    //
+    //       result = security_kernel_load_data(LOADING_KEXEC_IMAGE,
+    //                                          false);
+    //       if (result < 0) return result;// (2) LSM hook
+    //
+    //       if (((flags & KEXEC_FLAGS) != (flags & ~KEXEC_ARCH_MASK))
+    //           && ((flags & KEXEC_ARCH_MASK) == KEXEC_ARCH_DEFAULT))
+    //           return -EINVAL;           // (3) flag mask 1
+    //
+    //       if ((flags & KEXEC_ARCH_MASK) != KEXEC_ARCH_DEFAULT &&
+    //           (flags & KEXEC_ARCH_MASK) != KEXEC_ARCH)
+    //           return -EINVAL;           // (4) arch mask
+    //
+    //       if (nr_segments > KEXEC_SEGMENT_MAX)
+    //           return -EINVAL;           // (5) segment cap
+    //
+    //       return 0;
+    //   }
+    //
+    // So Linux validates CAP_SYS_BOOT BEFORE any flag or segment-count
+    // inspection.  Pre-batch we ran:
+    //   * flag mask & arch mask -> EINVAL
+    //   * nr_segments > 16      -> EINVAL
+    //   * NULL segments         -> EFAULT
+    //   * validate_user_read    -> EFAULT
+    //   * then EPERM.
+    //
+    // Concrete divergences:
+    //   * kexec_load(_, 99, _,    _)     Linux: EPERM.  Pre-batch:
+    //     EINVAL (nr_segments > 16).
+    //   * kexec_load(_, 1,  NULL, 0)     Linux: EPERM.  Pre-batch:
+    //     EFAULT (NULL segments).
+    //   * kexec_load(_, 2,  ptr,  0x4)   Linux: EPERM.  Pre-batch:
+    //     EINVAL (reserved flag bit).
+    //   * kexec_load(_, 2,  ptr, 0x10000) Linux: EPERM.  Pre-batch:
+    //     EINVAL (foreign arch bits).
+    //
+    // The errno selection matters to system-update tooling.  kexec-
+    // tools, fwupd, and crash-dump initialisers all gate "should I
+    // attempt to load a replacement kernel?" on EPERM-vs-EINVAL.
+    // EPERM tells them to escalate (or abort if running unprivileged)
+    // and EINVAL tells them their flag/segment shape is wrong and to
+    // retry with a different layout - which can never succeed without
+    // CAP_SYS_BOOT first.  Returning Linux's actual EPERM lets the
+    // tools fail fast.
+    //
+    // Architectural directive: we are a microkernel.  There is no
+    // kexec subsystem and there never will be (replacing the running
+    // kernel image is incompatible with our channel-IPC and
+    // capability-state architecture - all kernel objects would
+    // dangle).  No caller can ever hold CAP_SYS_BOOT.  Linux's
+    // gate-1 always trips.  EPERM unconditionally.
     linux_err(errno::EPERM)
 }
 
 /// `kexec_file_load(kernel_fd, initrd_fd, cmdline_len, cmdline*, flags)`.
-///
-/// Linux's `kernel/kexec_file.c::SYSCALL_DEFINE5(kexec_file_load)`
-/// validates `flags` against `KEXEC_FILE_FLAGS` after the
-/// `CAP_SYS_BOOT` check:
-///
-///   `if (flags != (flags & KEXEC_FILE_FLAGS))
-///       return -EINVAL;`
-///
-/// `KEXEC_FILE_FLAGS = KEXEC_FILE_UNLOAD | KEXEC_FILE_ON_CRASH |
-/// KEXEC_FILE_NO_INITRAMFS | KEXEC_FILE_DEBUG = 0xf` (as of Linux
-/// 6.10).  An out-of-range flag bit indicates either an old kernel
-/// or a typo; probes expect EINVAL to distinguish "unsupported flag
-/// bit" from "unprivileged."
-fn sys_kexec_file_load(args: &SyscallArgs) -> SyscallResult {
-    const KEXEC_FILE_FLAGS: u64 = 0xf;
-
-    let flags = args.arg4;
-    if flags & !KEXEC_FILE_FLAGS != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let kernel_fd = args.arg0 as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let initrd_fd = args.arg1 as i32;
-    if kernel_fd < 0 {
-        return linux_err(errno::EBADF);
-    }
-    // initrd_fd == -1 means "no initrd"; otherwise validate.
-    if initrd_fd != -1 && initrd_fd < 0 {
-        return linux_err(errno::EBADF);
-    }
-    if args.arg2 > 0 {
-        if args.arg3 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, args.arg2 as usize) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+fn sys_kexec_file_load(_args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (kernel/kexec_file.c::SYSCALL_DEFINE5
+    // (kexec_file_load), modern mainline):
+    //
+    //   SYSCALL_DEFINE5(kexec_file_load, int, kernel_fd,
+    //                   int, initrd_fd, unsigned long, cmdline_len,
+    //                   const char __user *, cmdline_ptr,
+    //                   unsigned long, flags)
+    //   {
+    //       int image_type = (flags & KEXEC_FILE_ON_CRASH) ?
+    //                        KEXEC_TYPE_CRASH : KEXEC_TYPE_DEFAULT;
+    //       struct kimage **dest_image, *image;
+    //       int ret = 0, i;
+    //
+    //       /* We only trust the superuser with rebooting */
+    //       if (!kexec_load_permitted(image_type))
+    //           return -EPERM;            // (1) CAP_SYS_BOOT
+    //
+    //       if (flags != (flags & KEXEC_FILE_FLAGS))
+    //           return -EINVAL;           // (2) flag mask
+    //       ...
+    //   }
+    //
+    // Same gate-first inversion as sys_kexec_load (batch 344).  Pre-
+    // batch we ran:
+    //   * flag mask check        -> EINVAL
+    //   * kernel_fd < 0 / EBADF
+    //   * initrd_fd < 0 / EBADF (except -1)
+    //   * NULL cmdline w/ len>0  -> EFAULT
+    //   * validate_user_read     -> EFAULT
+    //   * then EPERM.
+    //
+    // Divergences:
+    //   * kexec_file_load(-1, _, _, _, 0)     Linux: EPERM.  Pre-batch:
+    //     EBADF (negative kernel_fd).
+    //   * kexec_file_load(3, _, 4, NULL, 0)   Linux: EPERM.  Pre-batch:
+    //     EFAULT (NULL cmdline w/ len>0).
+    //   * kexec_file_load(3, _, 4, ptr, 0x10) Linux: EPERM.  Pre-batch:
+    //     EINVAL (reserved flag bit 0x10).
+    //
+    // Architectural directive: see sys_kexec_load - no kexec subsystem
+    // exists or will exist.  EPERM is the only structurally honest
+    // answer.
     linux_err(errno::EPERM)
 }
 
@@ -49326,57 +49353,70 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // kexec_load too many segments -> EINVAL.
+        // Batch 344: kexec_load / kexec_file_load gate-order
+        // inversion fix.  Linux's kexec_load_check() runs
+        // kexec_load_permitted() (CAP_SYS_BOOT) BEFORE any flag or
+        // segment validation, and kexec_file_load opens with the same
+        // gate ahead of the flag-mask check.  Pre-batch we ran
+        // flag/segment validation first, so probes that should hit
+        // EPERM saw EINVAL or EFAULT or EBADF.
+
+        // (a) kexec_load(_, 99, _, _) - pre-batch EINVAL
+        //     (nr_segments > 16); Linux EPERM (gate-1).
         let a = SyscallArgs { arg0: 0, arg1: 99, arg2: kexec_seg_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: kexec_load nr_seg>16 not EINVAL");
+        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_load nr_seg>16 not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_load segments NULL with nr>0 -> EFAULT.
+        // (b) kexec_load(_, 1, NULL, 0) - pre-batch EFAULT (NULL
+        //     segments w/ nr>0); Linux EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: kexec_load NULL seg not EFAULT");
+        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_load NULL seg not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_load valid -> EPERM.
+        // (c) kexec_load valid - baseline stays EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 2, arg2: kexec_seg_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: kexec_load valid not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_file_load bad kernel_fd -> EBADF.
+        // (d) kexec_file_load bad kernel_fd - pre-batch EBADF
+        //     (kernel_fd < 0); Linux EPERM.
         let a = SyscallArgs { arg0: u64::from(u32::MAX), arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EBADF) {
-            serial_println!("[syscall/linux]   FAIL: kexec_file_load bad fd not EBADF");
+        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_file_load bad fd not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_file_load cmdline non-zero len NULL ptr -> EFAULT.
+        // (e) kexec_file_load cmdline non-zero len NULL ptr -
+        //     pre-batch EFAULT; Linux EPERM.
         let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 4, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: kexec_file_load NULL cmdline not EFAULT");
+        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_file_load NULL cmdline not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_file_load valid -> EPERM.
+        // (f) kexec_file_load valid - baseline stays EPERM.
         let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 4, arg3: cmdline_ptr, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: kexec_file_load valid not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_load reserved-low-bit flag (0x4) -> EINVAL ahead of
-        // EPERM (see todo 179, batch 151 — KEXEC_FLAGS=0x3 only).
+        // (g) kexec_load reserved-low-bit flag (0x4) - pre-batch
+        //     EINVAL (KEXEC_FLAGS=0x3 only); Linux EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 2, arg2: kexec_seg_ptr, arg3: 0x4, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: kexec_load reserved flag not EINVAL");
+        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_load reserved flag not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_load reserved high bit (foreign arch 0x0001_0000) ->
-        // EINVAL (we are x86_64, accept only 0 or EM_X86_64<<16).
+        // (h) kexec_load foreign arch (0x0001_0000) - pre-batch
+        //     EINVAL (we are x86_64); Linux EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 2, arg2: kexec_seg_ptr, arg3: 0x0001_0000, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: kexec_load foreign arch not EINVAL");
+        if dispatch_linux(nr::KEXEC_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_load foreign arch not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_load valid flags (ON_CRASH=1 | x86_64 arch) -> EPERM.
+        // (i) kexec_load valid flags (ON_CRASH=1 | x86_64 arch) -
+        //     stays EPERM (baseline).
         let a = SyscallArgs {
             arg0: 0, arg1: 2, arg2: kexec_seg_ptr,
             arg3: 0x1 | (62u64 << 16), arg4: 0, arg5: 0,
@@ -49385,18 +49425,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: kexec_load valid flags not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_file_load reserved flag (0x10) -> EINVAL ahead of
-        // EPERM (KEXEC_FILE_FLAGS=0xf only).
+        // (j) kexec_file_load reserved flag (0x10) - pre-batch EINVAL
+        //     (KEXEC_FILE_FLAGS=0xf only); Linux EPERM.
         let a = SyscallArgs {
             arg0: 3, arg1: u64::from(u32::MAX), arg2: 4, arg3: cmdline_ptr,
             arg4: 0x10, arg5: 0,
         };
-        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: kexec_file_load reserved flag not EINVAL");
+        if dispatch_linux(nr::KEXEC_FILE_LOAD, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: kexec_file_load reserved flag not EPERM");
             return Err(KernelError::InternalError);
         }
-        // kexec_file_load valid flag (KEXEC_FILE_DEBUG=8) -> EPERM
-        // (every accepted flag still terminates at EPERM).
+        // (k) kexec_file_load valid flag (KEXEC_FILE_DEBUG=8) -
+        //     stays EPERM (baseline).
         let a = SyscallArgs {
             arg0: 3, arg1: u64::from(u32::MAX), arg2: 4, arg3: cmdline_ptr,
             arg4: 0x8, arg5: 0,
@@ -49405,7 +49445,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: kexec_file_load DEBUG flag not EPERM");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   kexec_load/kexec_file_load flag validation: OK");
+        serial_println!(
+            "[syscall/linux]   kexec_load/kexec_file_load gate-order EPERM-first: OK"
+        );
 
         // Linux's copy_mnt_id_req reads the leading u32 `size` field
         // from the user-supplied request and gates on it:

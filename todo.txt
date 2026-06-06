@@ -30586,3 +30586,166 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.10s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+374. syscall/linux batch 344 — kexec_load and
+     kexec_file_load EPERM-first gate inversion.
+
+     Linux gate-order facts (from
+     kernel/kexec_core.c, kernel/kexec.c,
+     kernel/kexec_file.c, modern mainline):
+
+       sys_kexec_load:
+         gate 1: kexec_load_check()
+                 -> kexec_load_permitted()
+                    -> capable(CAP_SYS_BOOT)
+                    -> kexec_load_disabled check
+                 returns EPERM on fail.
+         gate 2: LSM hook (also EPERM-class).
+         gate 3: flags & ~KEXEC_FLAGS  -> EINVAL.
+         gate 4: arch-image-type mask  -> EINVAL.
+         gate 5: nr_segments > KEXEC_SEGMENT_MAX
+                 -> EINVAL.
+         gate 6: copy_from_user segments
+                 -> EFAULT.
+
+       sys_kexec_file_load:
+         gate 1: kexec_load_check(0, flags)
+                 -> kexec_load_permitted (EPERM).
+         gate 2: LSM hook (EPERM-class).
+         gate 3: flags & ~KEXEC_FILE_FLAGS
+                 -> EINVAL.
+         gate 4: fdget(kernel_fd) check -> EBADF.
+         gate 5: copy_from_user cmdline -> EFAULT.
+
+     Our pre-batch behaviour:
+
+       sys_kexec_load:
+         - returned EINVAL for any unknown flag
+           BEFORE checking the (always-unauth)
+           CAP_SYS_BOOT gate
+         - returned EFAULT for NULL segments
+           BEFORE the CAP gate
+         - never reached EPERM unless every other
+           validation passed
+
+       sys_kexec_file_load:
+         - returned EBADF for bad kernel_fd
+           BEFORE the CAP gate
+         - returned EFAULT for NULL cmdline BEFORE
+           the CAP gate
+         - returned EINVAL for reserved flag bits
+           BEFORE the CAP gate
+
+     Why this matters for userspace porting:
+
+       kexec-tools, fwupd's UEFI capsule
+       fallback, kdump initialisers, and various
+       crash-dump bootstrap scripts use the errno
+       from a probe kexec_load(0, 0, NULL, 0) (or
+       kexec_file_load with a known-bad fd) to
+       decide whether the kernel supports kexec
+       at all on this host.  The expected
+       triage is:
+
+         EPERM   -> kexec is compiled in and
+                    callable, this caller just
+                    lacks CAP_SYS_BOOT.  Abort
+                    politely.
+         ENOSYS  -> kexec stripped from this
+                    kernel build, skip silently.
+         EINVAL/EFAULT/EBADF -> probe was
+                    malformed, retry with a
+                    different shape.
+
+       Returning EINVAL for an unknown flag bit
+       BEFORE the CAP check is the worst possible
+       outcome: it tricks the probe into a retry
+       loop trying combinations of flag bits.
+       Returning EFAULT for NULL segments tricks
+       the probe into allocating a real segment
+       buffer to "fix" the EFAULT before learning
+       it never had the cap to begin with.
+
+       Returning EPERM unconditionally is
+       structurally honest: the native OS has no
+       kexec subsystem, will never have a kexec
+       subsystem (it conflicts with the
+       capability-microkernel model where
+       boot-time secrets live in the
+       capability namespace and a soft-boot via
+       a wholly different image would invalidate
+       every live cap), and no Linux-ABI caller
+       in this kernel will ever hold an
+       equivalent of CAP_SYS_BOOT.
+
+     Fix:
+
+       sys_kexec_load body reduced to
+         linux_err(errno::EPERM)
+       with a multi-paragraph comment naming the
+       gate order being mirrored and explicitly
+       calling out which side-effects (flag
+       mask, segment cap, fd validation) we
+       deliberately omit because the EPERM gate
+       short-circuits before them.
+
+       sys_kexec_file_load body reduced to the
+       same single line + comment.
+
+     Self-test rewrite (11 probes, a..k):
+
+         a. kexec_load(_, 99, _, _)           EPERM
+         b. kexec_load(_, 1, NULL, 0)         EPERM
+         c. kexec_load valid baseline         EPERM
+         d. kexec_file_load bad kernel_fd     EPERM
+         e. kexec_file_load NULL cmdline      EPERM
+         f. kexec_file_load valid baseline    EPERM
+         g. kexec_load reserved flag 0x4      EPERM
+         h. kexec_load foreign arch 0x10000   EPERM
+         i. kexec_load valid flags baseline   EPERM
+         j. kexec_file_load reserved 0x10     EPERM
+         k. kexec_file_load DEBUG 0x8         EPERM
+
+       Probes (a), (b), (d), (e), (g), (h), (j)
+       previously expected EINVAL/EFAULT/EBADF
+       and have been updated to expect EPERM
+       because those checks are now correctly
+       short-circuited by the CAP gate.
+
+     Marker: kexec_load/kexec_file_load
+             gate-order EPERM-first: OK
+
+     Known limitations / judgment calls:
+
+     * No CAP_SYS_BOOT modelling.  Every
+       Linux-ABI caller is effectively
+       unprivileged for the kexec family.
+       Intentional under the architectural
+       directive: a capability-microkernel can
+       never sanely re-host an arbitrary kernel
+       image because the boot-time capability
+       seed and the running cap namespace would
+       have to be reconciled.
+
+     * No kexec subsystem at all.  No image
+       parsing, no segment loading, no purgatory,
+       no reserved memory pool.  EPERM is
+       structurally honest, not a stub-pending-
+       implementation.
+
+     * No KEXEC_FLAGS / KEXEC_FILE_FLAGS mask
+       enforcement post-EPERM.  Linux also
+       doesn't reach that gate for unprivileged
+       callers, so we are observationally
+       equivalent to upstream from the
+       unprivileged caller's perspective.
+
+     * No kexec_load_disabled bit.  Linux exposes
+       /proc/sys/kernel/kexec_load_disabled which
+       turns the EPERM into a permanent EPERM
+       even for CAP_SYS_BOOT.  We are
+       permanently in that mode by construction.
+
+     Build: cargo build -p kernel clean (36.94s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

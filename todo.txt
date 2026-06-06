@@ -32982,3 +32982,113 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.01s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+396. syscall/linux batch 366 — sys_semget: implement ipcget gate
+     routing (IPC_PRIVATE -> newary EINVAL/ENOSYS / public miss
+     ENOENT / IPC_CREAT -> newary EINVAL/ENOSYS / key_t truncation).
+
+     Pre-batch sys_semget validated the top nsems gate (correctly:
+     EINVAL for nsems < 0 or nsems > SEMMSL=32000) but then
+     returned a flat ENOSYS regardless of key, semflg, or
+     nsems == 0:
+
+         fn sys_semget(args: &SyscallArgs) -> SyscallResult {
+             const SEMMSL: i32 = 32000;
+             let nsems = args.arg1 as i32;
+             if nsems < 0 || nsems > SEMMSL {
+                 return linux_err(errno::EINVAL);
+             }
+             linux_err(errno::ENOSYS)
+         }
+
+     Linux's SYSCALL_DEFINE3(semget, key_t, key, int, nsems, int,
+     semflg) routes through the same ipc/util.c::ipcget machinery
+     as shmget (batch 364) and msgget (batch 365), with newary as
+     the getnew callback.  Gate order:
+
+         1. SYSCALL_DEFINE3 top: nsems < 0 || nsems > sc_semmsl
+            -> EINVAL.  (Already correct pre-batch.)
+         2. ipcget:
+            * key == IPC_PRIVATE -> newary:
+                if (!nsems) return -EINVAL;
+                [our stub: terminal ENOSYS]
+            * key != IPC_PRIVATE -> ipcget_public ->
+              ipc_findkey miss:
+                !IPC_CREAT -> ENOENT;
+                IPC_CREAT  -> newary -> !nsems EINVAL,
+                                        else ENOSYS.
+
+     newary's `if (!nsems) return -EINVAL;` short-circuits before
+     the SYSCALL_DEFINE3 top gate runs (since the top gate accepts
+     nsems == 0).  newary fires only when ipcget actually routes
+     into create-or-newkey; the !IPC_CREAT public-miss path returns
+     ENOENT without touching newary at all — so semget(key=5,
+     nsems=0, semflg=0) returns ENOENT, not EINVAL.
+
+     Three observable divergences pre-batch:
+
+       * semget(key=5, nsems=any, semflg=0) -> ENOSYS (Linux: ENOENT)
+         Same observability problem as shmget/msgget pre-batches:
+         callers probing a known well-known SysV semset key
+         couldn't distinguish "set not yet created" from "SysV sem
+         unsupported".  Linux's ENOENT is the standard signal to
+         attempt creation with IPC_CREAT.
+
+       * semget(IPC_PRIVATE=0, nsems=0, semflg=0) -> ENOSYS
+         (Linux: EINVAL via newary !nsems gate.)
+         IPC_PRIVATE always routes to newary; nsems == 0 there is
+         the canonical "you didn't ask for any semaphores" error.
+
+       * semget(key=5, nsems=0, semflg=IPC_CREAT) -> ENOSYS
+         (Linux: EINVAL via newary after ipcget_public miss.)
+
+     Secondary fix: key_t (C `int`) truncation.  Pre-batch the
+     key was not inspected at all, so high-bit args.arg0 values
+     leaked through harmlessly.  Post-batch the routing must
+     truncate correctly: key=0x1_0000_0000 wraps to 0 ==
+     IPC_PRIVATE under Linux's x86_64 ABI.  Handled by the same
+     `as i32` cast pattern used in batches 362/364/365.
+
+     Fix shape:
+
+         let key = args.arg0 as i32;
+         let nsems = args.arg1 as i32;
+         let semflg = args.arg2 as i32;
+         if nsems < 0 || nsems > SEMMSL {
+             return linux_err(errno::EINVAL);
+         }
+         if key == IPC_PRIVATE {
+             if nsems == 0 { return linux_err(errno::EINVAL); }
+             return linux_err(errno::ENOSYS);
+         }
+         if semflg & IPC_CREAT == 0 {
+             return linux_err(errno::ENOENT);
+         }
+         if nsems == 0 { return linux_err(errno::EINVAL); }
+         linux_err(errno::ENOSYS)
+
+     Existing probes still pass:
+       * semget(0, -1, 0) -> EINVAL (top gate, nsems < 0)
+       * semget(0, 4, 0)  -> ENOSYS (IPC_PRIVATE + nsems=4)
+       * semget(0, 32001, 0) -> EINVAL (top gate, nsems > SEMMSL)
+
+     Six new probes added:
+       * semget(5, 1, 0) -> ENOENT
+       * semget(5, 0, 0) -> ENOENT
+         (nsems=0 passes top gate; ENOENT short-circuits newary)
+       * semget(IPC_PRIVATE=0, 0, 0) -> EINVAL
+         (newary !nsems gate via IPC_PRIVATE route)
+       * semget(5, 0, IPC_CREAT) -> EINVAL
+         (newary !nsems gate after public-miss + IPC_CREAT)
+       * semget(5, 1, IPC_CREAT) -> ENOSYS
+         (terminal: valid nsems, no backing)
+       * semget(0x1_0000_0000, 0, 0) -> EINVAL
+         (key_t-trunc to IPC_PRIVATE -> newary !nsems)
+
+     Final boot-time stamp:
+         "[syscall/linux]   semget ipcget gate routing
+          (IPC_PRIVATE/newary / ENOENT / key_t-trunc): OK"
+
+     Build: cargo build -p kernel clean (40.30s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

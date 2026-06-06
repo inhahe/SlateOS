@@ -15334,21 +15334,88 @@ fn sys_shmdt(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EINVAL)
 }
 
-/// `semget(key, nsems, semflg)`.
+/// `semget(key, nsems, semflg)` — create / get SysV semaphore set.
 ///
-/// Linux's `ipc/sem.c::SYSCALL_DEFINE3(semget)` rejects unreasonable
-/// nsems ahead of the namespace lookup:
+/// Linux gate order (ipc/sem.c::SYSCALL_DEFINE3(semget) ->
+/// ipc/util.c::ipcget -> newary):
 ///
-///   `if (nsems < 0 || nsems > ns->sc_semmsl) return -EINVAL;`
+///   1. SYSCALL_DEFINE3 top:
+///        if (nsems < 0 || nsems > ns->sc_semmsl) return -EINVAL;
+///   2. ipcget:
+///        if (key == IPC_PRIVATE) {
+///            newary -> if (!nsems) return -EINVAL;
+///                      [our stub: ENOSYS terminal]
+///        } else {
+///            ipcget_public -> ipc_findkey(key)
+///                if (!found) {
+///                    if (!(semflg & IPC_CREAT)) return -ENOENT;
+///                    newary -> if (!nsems) return -EINVAL;
+///                              [our stub: ENOSYS]
+///                } else { return existing id (no nsems check here); }
+///        }
 ///
-/// `sc_semmsl` defaults to `SEMMSL = 32000`.  `nsems == 0` is allowed
-/// for `IPC_PRIVATE` lookups of an existing semset, which is why the
-/// lower bound is exclusive.
+/// `sc_semmsl` defaults to `SEMMSL = 32000`.  nsems == 0 is allowed
+/// by the top gate (it's only rejected inside newary, which Linux
+/// short-circuits before reaching when key != IPC_PRIVATE and
+/// !IPC_CREAT — ENOENT wins).
+///
+/// Pre-batch we ran the top nsems gate (correctly) but then returned
+/// flat ENOSYS regardless of key/semflg/nsems-zero.  Three divergences:
+///
+///   * semget(key=5, nsems=any-valid, semflg=0)
+///     Linux: -ENOENT (ipc_findkey miss + !IPC_CREAT).  Pre-batch:
+///     ENOSYS.  Same observability problem as shmget / msgget
+///     pre-batches-364/365: callers probing for a known well-known
+///     SysV semset key couldn't distinguish "set not yet created"
+///     from "SysV sem unsupported".
+///
+///   * semget(IPC_PRIVATE=0, nsems=0, semflg=0)
+///     Linux: -EINVAL (newary !nsems gate; top gate accepts nsems=0).
+///     Pre-batch: ENOSYS.  newary's `if (!nsems) return -EINVAL;`
+///     fires AFTER the IPC_PRIVATE -> newary route.
+///
+///   * semget(key=5, nsems=0, semflg=IPC_CREAT)
+///     Linux: -EINVAL (ipcget_public miss + IPC_CREAT -> newary ->
+///     !nsems).  Pre-batch: ENOSYS.
+///
+/// Key truncation: args.arg0 is u64; key_t is C `int`.  High-bit
+/// values truncate to their low 32 bits, which means e.g.
+/// key=0x1_0000_0000 truncates to 0 == IPC_PRIVATE.  Pre-batch the
+/// key wasn't inspected so this didn't matter, but the new routing
+/// must mirror Linux's truncation precisely (already covered by the
+/// `as i32` cast).
 fn sys_semget(args: &SyscallArgs) -> SyscallResult {
     const SEMMSL: i32 = 32000;
+    const IPC_PRIVATE: i32 = 0;
+    const IPC_CREAT: i32 = 0o1000;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let key = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let nsems = args.arg1 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let semflg = args.arg2 as i32;
+
+    // Gate 1 (SYSCALL_DEFINE3 top): nsems range.
     if nsems < 0 || nsems > SEMMSL {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Gate 2 (ipcget): routing.
+    if key == IPC_PRIVATE {
+        // newary: !nsems -> EINVAL, else ENOSYS (no backing).
+        if nsems == 0 {
+            return linux_err(errno::EINVAL);
+        }
+        return linux_err(errno::ENOSYS);
+    }
+
+    // key != IPC_PRIVATE: ipcget_public path.  ipc_findkey misses
+    // because no semsets exist.
+    if semflg & IPC_CREAT == 0 {
+        return linux_err(errno::ENOENT);
+    }
+    // IPC_CREAT and not found -> newary -> !nsems -> EINVAL.
+    if nsems == 0 {
         return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
@@ -45764,6 +45831,92 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: semget(32001) not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 366: semget routes through Linux's ipcget machinery
+        // (ipc/util.c::ipcget -> newary).  Pre-batch we returned
+        // ENOSYS after the top nsems gate, regardless of key/semflg
+        // or nsems==0.  Linux distinguishes:
+        //   - ENOENT: public key, not found, !IPC_CREAT
+        //   - EINVAL: routed to newary with nsems == 0
+        //   - ENOSYS: routed to newary with valid nsems (our stub)
+        const SEMGET_IPC_CREAT: u64 = 0o1000;
+        // semget(key=5, nsems=1, semflg=0) -> ENOENT.
+        //   ipcget_public miss + !IPC_CREAT.  Pre-batch: ENOSYS.
+        let a = SyscallArgs { arg0: 5, arg1: 1, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semget(5,1,0) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semget(key=5, nsems=0, semflg=0) -> ENOENT.
+        //   nsems==0 passes the top gate; ipcget_public miss +
+        //   !IPC_CREAT short-circuits before newary's !nsems check.
+        let a = SyscallArgs { arg0: 5, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semget(5,0,0) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semget(IPC_PRIVATE=0, nsems=0, semflg=0) -> EINVAL.
+        //   IPC_PRIVATE routes straight to newary; !nsems -> EINVAL.
+        //   Pre-batch: ENOSYS.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semget(IPC_PRIVATE,0,0) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semget(key=5, nsems=0, semflg=IPC_CREAT) -> EINVAL.
+        //   ipcget_public miss + IPC_CREAT -> newary -> !nsems.
+        //   Pre-batch: ENOSYS.
+        let a = SyscallArgs { arg0: 5, arg1: 0, arg2: SEMGET_IPC_CREAT,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semget(5,0,IPC_CREAT) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semget(key=5, nsems=1, semflg=IPC_CREAT) -> ENOSYS.
+        //   ipcget_public miss + IPC_CREAT -> newary -> valid nsems
+        //   -> terminal ENOSYS (no backing).
+        let a = SyscallArgs { arg0: 5, arg1: 1, arg2: SEMGET_IPC_CREAT,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semget(5,1,IPC_CREAT) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // semget(key=0x1_0000_0000, nsems=0, semflg=0) -> EINVAL.
+        //   key_t (C `int`) truncation: high-bit arg0 wraps to 0 ==
+        //   IPC_PRIVATE under Linux's syscall ABI -> newary ->
+        //   !nsems -> EINVAL.  Pre-batch (which didn't look at key
+        //   at all): ENOSYS.
+        let a = SyscallArgs { arg0: 0x1_0000_0000, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMGET, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: semget(0x1_0000_0000,0,0) \
+                 key_t truncation -> EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   semget ipcget gate routing \
+             (IPC_PRIVATE/newary / ENOENT / key_t-trunc): OK"
+        );
         // Batch 204: sops EFAULT now ordered AHEAD of semid<0 / SEMOPM
         // gates, matching Linux's do_semtimedop -> __do_semtimedop
         // sequence.  Tests that exercise the semid<0 / E2BIG gates

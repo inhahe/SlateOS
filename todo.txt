@@ -31653,3 +31653,101 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (39.68s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 25s).
+
+383. syscall/linux batch 353 — sys_rt_sigaction sig int truncation.
+
+     Linux ABI (kernel/signal.c):
+
+       SYSCALL_DEFINE4(rt_sigaction, int, sig,
+                                     const struct sigaction __user *, act,
+                                     struct sigaction __user *, oact,
+                                     size_t, sigsetsize)
+
+     `sig` is declared `int`, so the x86_64 syscall ABI truncates
+     rdi to its low 32 bits before do_sigaction runs.  Linux's
+     do_sigaction opens with
+
+       if (!valid_signal(sig) || sig < 1 || sig_kernel_only(sig))
+           return -EINVAL;
+
+     where valid_signal casts to `(unsigned int)` (inspecting low
+     32 bits only) and `sig < 1` is a signed-int comparison.
+
+     Pre-batch divergence:
+
+       let sig = args.arg0;                  // raw u64, no truncation
+       if sig == 0 || sig > u64::from(NSIG) {
+           return EINVAL;
+       }
+
+     Probes that observed the divergence:
+
+       sig=0x1_0000_0001 (high|SIGHUP=1): Linux truncates to 1,
+         accepts (with non-NULL act installs the handler).  Pre-
+         batch: EINVAL via the raw-u64 `sig > NSIG=64` gate.
+       sig=0x1_0000_0040 (high|NSIG=64): Linux truncates to 64
+         (the highest valid signal), accepts.  Pre-batch: EINVAL.
+       sig=0x1_0000_0009 (high|SIGKILL=9) with act=NULL (query):
+         Linux truncates to 9, passes the SIGKILL "act-must-be-
+         NULL" gate, returns the (default) disposition.  Pre-
+         batch: EINVAL.
+
+     Fix:
+
+       #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+       let sig_i32 = args.arg0 as i32;
+       if sig_i32 < 1 {
+           return linux_err(errno::EINVAL);
+       }
+       #[allow(clippy::cast_sign_loss)]
+       let sig: u64 = u64::from(sig_i32 as u32);
+       ...
+       if sig > u64::from(crate::proc::signal::NSIG) {
+           return linux_err(errno::EINVAL);
+       }
+
+     The signed lower-bound gate (sig_i32 < 1) replaces the old
+     `sig == 0` test and additionally catches negative inputs
+     post-truncation, matching Linux's `sig < 1` ordering.  The
+     upper-bound gate now sees the truncated value.  SIGKILL /
+     SIGSTOP / sigsetsize gates downstream are unchanged — they
+     already operated on the post-truncation `sig`.
+
+     Self-test probes (5, labelled a..e) added to the existing
+     rt_sigaction validation block (sig=0 / sig=65 / sigsetsize=7
+     gates retained as regression guards):
+
+       a. sig=0x1_0000_0001 (high|SIGHUP), act=NULL -> truncates
+          to 1, passes all signum gates, reaches caller_pid ->
+          ESRCH (boot context has no owning process).  Pre-batch:
+          EINVAL.
+       b. sig=0x1_0000_0040 (high|NSIG=64), act=NULL -> truncates
+          to 64 (highest valid), ESRCH.  Pre-batch: EINVAL.
+       c. sig=0x1_0000_0009 (high|SIGKILL=9), act=NULL (query
+          only) -> truncates to 9, passes SIGKILL "act-must-be-
+          NULL" gate, ESRCH.  Pre-batch: EINVAL.
+       d. sig=0xFFFF_FFFF (i32 = -1) -> EINVAL via the new
+          sig_i32 < 1 lower-bound gate.  Regression guard for the
+          gate restructuring: the signed lower-bound check must
+          fire before the unsigned upper-bound check so that
+          negative inputs do not accidentally wrap into the valid
+          1..=NSIG range.
+       e. 4-case cast-isolation table verifies the u64 -> i32 ->
+          u32 -> u64 chain preserves the low 32 bits and zeroes
+          the high half across high-garbage, sign-extended-
+          looking, and SIGKILL/NSIG-targeted inputs.
+
+     Kernel-context observation: dispatch_linux at boot has no
+     caller PID, so successful signum validation surfaces as
+     ESRCH from the post-validation `caller_pid().ok_or(ESRCH)`
+     lookup.  Probes (a)..(c) leverage this — they distinguish
+     "rejected at signum gate" (EINVAL pre-batch) from "passed
+     signum gate, failed caller lookup" (ESRCH post-batch),
+     proving the truncation actually reached the body.
+
+     Thirteenth int-truncation batch after 308, 309, 310, 311,
+     312, 313, 314, 340, 348, 349, 350, 351, 352.
+
+     Build: cargo build -p kernel clean (56.11s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 26s).

@@ -5051,40 +5051,81 @@ fn sys_kill(args: &SyscallArgs) -> SyscallResult {
 /// `rt_sigpending(set, sigsetsize)` — report the pending-signal mask
 /// for the calling process.
 ///
-/// Semantics (Linux man 2 rt_sigpending):
+/// Semantics (Linux man 2 rt_sigpending / kernel/signal.c
+/// `SYSCALL_DEFINE2(rt_sigpending, ...)`):
 ///   - `set`: user pointer to `sigset_t` to fill with the bitmap of
-///     signals that have been raised on this process but not yet
-///     consumed (delivered to a handler, dropped, or used to terminate).
-///   - `sigsetsize`: must equal `sizeof(sigset_t)` (8 bytes on x86_64
-///     Linux), else `-EINVAL`.
-///   - `set` may not be NULL — Linux returns `-EFAULT` for NULL.  Our
-///     [`validate_user_write`] returns the same.
+///     signals that are pending **and** currently blocked from
+///     delivery.  POSIX/Linux: sigpending returns the intersection of
+///     pending and blocked — unblocked pending signals would be
+///     delivered immediately, so the user-visible "pending" set is
+///     exactly the masked-off bits.  See `do_sigpending` in
+///     kernel/signal.c — `sigandsets(set, &current->blocked, set);`
+///   - `sigsetsize`: Linux gate is `sigsetsize > sizeof(sigset_t)` →
+///     `-EINVAL` (note: `>`, not `!=` — shorter sizes are accepted
+///     and `copy_to_user` writes exactly `sigsetsize` low bytes).
+///   - `set` may not be NULL when `sigsetsize > 0` — Linux's
+///     `copy_to_user` returns `-EFAULT` for NULL.  Our
+///     [`validate_user_write`] returns the same.  When
+///     `sigsetsize == 0` we skip the copy entirely (matching Linux's
+///     zero-byte `copy_to_user` no-op which never touches the
+///     pointer).
 ///
-/// We use [`crate::proc::signal::pending`] which mirrors the in-kernel
-/// pending mask exactly; for tasks with no owning process (kernel
-/// self-tests), the pending mask is reported as 0.
+/// Pre-batch (356) divergences fixed:
+///   1. Reported raw `pending` without intersecting with `blocked` —
+///      so userspace saw pending signals that should have been
+///      hidden until masked.  This made `sigpending()` always agree
+///      with the kernel's internal pending set, which is wrong; the
+///      Linux contract is only the masked-off subset is visible.
+///   2. Gate rejected any `sigsetsize != 8` — Linux only rejects
+///      `> 8`.  So a Linux libc passing `sigsetsize=4` (legitimate
+///      historical sigset_t size on some arches, and a deliberate
+///      short read on a few wrappers) used to get spurious EINVAL.
+///   3. Always wrote 8 bytes even if `sigsetsize` was smaller —
+///      could overrun a 4-byte user buffer.  Now copies exactly
+///      `sigsetsize` low bytes (matching Linux's
+///      `copy_to_user(uset, &set, sigsetsize)`).
+///
+/// We use [`crate::proc::signal::pending`] and
+/// [`crate::proc::signal::blocked`]; for tasks with no owning
+/// process (kernel self-tests), both report 0 by default and the
+/// intersection is 0.
 fn sys_rt_sigpending(args: &SyscallArgs) -> SyscallResult {
     let set_ptr = args.arg0;
     let sigsetsize = args.arg1 as usize;
 
-    // Validate sigsetsize == 8 first (Linux rejects mismatched sizes
-    // before touching the pointer).
-    if sigsetsize != core::mem::size_of::<u64>() {
+    // Gate 1: Linux rejects only `sigsetsize > sizeof(sigset_t)`.
+    // Smaller sizes (including 0) are accepted.
+    if sigsetsize > core::mem::size_of::<u64>() {
         return linux_err(errno::EINVAL);
     }
 
-    // Validate user pointer.
-    if let Err(e) = crate::mm::user::validate_user_write(set_ptr, 8) {
+    // Compute the user-visible pending set = pending ∩ blocked.
+    // This matches Linux's `do_sigpending` (kernel/signal.c).
+    let pid = caller_pid().unwrap_or(0);
+    let pending_set: u64 = crate::proc::signal::pending(pid);
+    let blocked_set: u64 = crate::proc::signal::blocked(pid);
+    let visible: u64 = pending_set & blocked_set;
+
+    // Zero-byte case: nothing to copy, success.  Linux's
+    // `copy_to_user(_, _, 0)` is a no-op that does not touch the
+    // pointer, so we don't validate it either.
+    if sigsetsize == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // Gate 2: validate the user buffer for exactly `sigsetsize` bytes.
+    if let Err(e) = crate::mm::user::validate_user_write(set_ptr, sigsetsize) {
         return linux_err(linux_errno_for(e));
     }
 
-    let pid = caller_pid().unwrap_or(0);
-    let mask: u64 = crate::proc::signal::pending(pid);
-
-    let bytes = mask.to_ne_bytes();
-    // SAFETY: validate_user_write above confirmed an 8-byte writable
-    // user range; we copy exactly 8 bytes from a kernel-owned array.
-    let r = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), set_ptr, 8) };
+    // Copy exactly `sigsetsize` low bytes (matching Linux).
+    let bytes = visible.to_ne_bytes();
+    // SAFETY: validate_user_write above confirmed `sigsetsize` writable
+    // user bytes at `set_ptr`; `sigsetsize <= 8` per Gate 1 so the
+    // kernel-owned `bytes` array fully covers the copy length.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(bytes.as_ptr(), set_ptr, sigsetsize)
+    };
     if let Err(e) = r {
         return linux_err(linux_errno_for(e));
     }
@@ -31122,21 +31163,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
-    // rt_sigpending dispatch validation:
-    //   - sigsetsize != 8 -> EINVAL (before pointer fault).
-    //   - sigsetsize == 8 with a NULL set pointer would normally EFAULT,
-    //     but validate_user_write's documented kernel-context bypass
-    //     returns Ok for tasks with no owning process (see comment near
-    //     sys_wait4 self-tests).  So we can only verify the
-    //     size-validation path here; the EFAULT path is exercised by
-    //     every other syscall under real userspace.
+    // rt_sigpending dispatch validation (batch 356 — structural fix).
+    //
+    // Linux's `SYSCALL_DEFINE2(rt_sigpending, ...)` rejects only
+    // `sigsetsize > sizeof(sigset_t)` (note: `>`, not `!=`), then
+    // returns `pending ∩ blocked` (kernel/signal.c `do_sigpending`),
+    // copying exactly `sigsetsize` low bytes.  Pre-batch we
+    // (a) rejected any `sigsetsize != 8`, (b) reported raw
+    // `pending` without intersecting with `blocked`, and (c) always
+    // wrote 8 bytes regardless of `sigsetsize`.
+    //
+    // Probes:
+    //   (a) sigsetsize > 8 → EINVAL  [{16, u64::MAX}]
+    //   (b) sigsetsize == 0 → 0 (success, no write, ptr unread)
+    //   (c) pending & blocked intersection: seed signal::set_pending
+    //       and signal::set_blocked on pid=0 (caller_pid in the
+    //       boot self-test path returns None → unwrap_or(0)), then
+    //       verify only the masked bits appear
+    //   (d) sigsetsize == 4 short copy: only the low 4 bytes are
+    //       written; the trailing 4 sentinel bytes are untouched
     {
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::RT_SIGPENDING, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: rt_sigpending bad sigsetsize=0");
-            return Err(KernelError::InternalError);
-        }
+        // (a) Oversized sigsetsize → EINVAL (before any pointer touch).
         let a = SyscallArgs { arg0: 0, arg1: 16, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RT_SIGPENDING, &a).value != -i64::from(errno::EINVAL) {
@@ -31149,6 +31196,102 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: rt_sigpending u64-max sigsetsize");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   rt_sigpending sigsetsize > 8 EINVAL: OK");
+
+        // (b) sigsetsize == 0 succeeds with no pointer touch.  We pass
+        //     a NULL set pointer to prove the wrapper never dereferences
+        //     it in the zero-byte fast path (Linux's
+        //     `copy_to_user(_, _, 0)` is likewise a no-op).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGPENDING, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigpending sigsetsize=0 not success ({})",
+                dispatch_linux(nr::RT_SIGPENDING, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   rt_sigpending sigsetsize == 0 success: OK");
+
+        // (c) pending ∩ blocked intersection.
+        //
+        // Seed signal state on pid=0 (caller_pid yields None in the
+        // boot self-test → wrapper falls back to pid=0).  Plant
+        // pending = {SIG 10, SIG 15}, blocked = {SIG 10, SIG 11}.
+        // Linux: rt_sigpending → 10 only (the bit in both sets).
+        //
+        // We clean up with signal::remove(0) at the end so subsequent
+        // probes see a fresh state.
+        crate::proc::signal::remove(0);
+        let _ = crate::proc::signal::set_pending(0, 10);
+        let _ = crate::proc::signal::set_pending(0, 15);
+        let _ = crate::proc::signal::set_blocked(
+            0,
+            (1u64 << (10 - 1)) | (1u64 << (11 - 1)),
+        );
+        let mut buf: [u8; 8] = [0xAA; 8];
+        let a = SyscallArgs {
+            arg0: core::ptr::addr_of_mut!(buf) as u64,
+            arg1: 8,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let rc = dispatch_linux(nr::RT_SIGPENDING, &a).value;
+        if rc != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigpending intersection rc={}", rc
+            );
+            crate::proc::signal::remove(0);
+            return Err(KernelError::InternalError);
+        }
+        let got = u64::from_ne_bytes(buf);
+        let expect: u64 = 1u64 << (10 - 1);
+        if got != expect {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigpending intersect got=0x{:x} expect=0x{:x}",
+                got, expect
+            );
+            crate::proc::signal::remove(0);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   rt_sigpending pending & blocked intersection: OK"
+        );
+
+        // (d) sigsetsize == 4: writes exactly 4 low bytes; the trailing
+        //     4 sentinel bytes are left untouched.  Reuses the seeded
+        //     state from (c) so the user-visible mask is still
+        //     `1<<(10-1) = 0x200`.
+        let mut buf4: [u8; 8] = [0xCD; 8];
+        let a = SyscallArgs {
+            arg0: core::ptr::addr_of_mut!(buf4) as u64,
+            arg1: 4,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let rc = dispatch_linux(nr::RT_SIGPENDING, &a).value;
+        if rc != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigpending sigsetsize=4 rc={}", rc
+            );
+            crate::proc::signal::remove(0);
+            return Err(KernelError::InternalError);
+        }
+        // Low 4 bytes of 0x200 little-endian = [0x00, 0x02, 0x00, 0x00].
+        // High 4 bytes must still be the 0xCD sentinel.
+        let expect4: [u8; 8] = [0x00, 0x02, 0x00, 0x00, 0xCD, 0xCD, 0xCD, 0xCD];
+        if buf4 != expect4 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigpending sigsetsize=4 short-copy buf={:?}",
+                buf4
+            );
+            crate::proc::signal::remove(0);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   rt_sigpending sigsetsize == 4 short copy: OK"
+        );
+
+        // Cleanup seeded state.
+        crate::proc::signal::remove(0);
     }
 
     // tkill / tgkill dispatch validation:

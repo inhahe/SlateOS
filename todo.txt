@@ -32030,3 +32030,95 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (45.13s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 26s).
+
+386. syscall/linux batch 356 — sys_rt_sigpending: Linux
+     do_sigpending semantics + sigsetsize gate.
+
+     Pre-batch bugs in `fn sys_rt_sigpending` (kernel/src/syscall/
+     linux.rs):
+
+       Bug A (the structural one — missing pending ∩ blocked):
+         The wrapper returned `crate::proc::signal::pending(pid)`
+         directly to userspace.  Linux's `do_sigpending`
+         (kernel/signal.c) intersects pending with the calling
+         task's blocked mask:
+
+           sigorsets(set, &current->pending.signal,
+                          &current->signal->shared_pending.signal);
+           sigandsets(set, &current->blocked, set);
+
+         The intersection is the POSIX semantic: sigpending(2)
+         reports "signals pending AND blocked from delivery."
+         Unblocked pending signals would have been delivered
+         already, so they are intentionally hidden from the
+         user-visible pending set.  We exposed the raw in-kernel
+         pending bitmap, which broke libcs and runtimes that
+         consult sigpending() to decide whether to drain queued
+         signals after temporarily blocking a set.
+
+       Bug B (the sigsetsize gate — `!=` vs `>`):
+         Linux's gate is `sigsetsize > sizeof(sigset_t)` →
+         -EINVAL (note: strict greater-than, not !=).  Smaller
+         sizes are accepted and `copy_to_user(uset, &set,
+         sigsetsize)` writes exactly the requested number of low
+         bytes.  Pre-batch we rejected any `sigsetsize != 8`, so
+         a Linux libc calling rt_sigpending with sigsetsize=4
+         (legitimate on legacy 32-bit interfaces forwarded
+         through 64-bit syscalls, or a deliberate short read)
+         got spurious EINVAL.
+
+       Bug C (the always-8-bytes write):
+         Pre-batch we always wrote 8 bytes regardless of the
+         user-passed sigsetsize.  Even if the gate had accepted
+         sigsetsize=4, we would have overrun the caller's
+         4-byte sigset_t.  Now we copy exactly `sigsetsize` low
+         bytes (matching Linux's
+         `copy_to_user(uset, &set, sigsetsize)`).
+
+     Post-batch flow:
+       1. If sigsetsize > 8 → EINVAL (before any pointer touch).
+       2. Compute visible = pending(pid) & blocked(pid).
+       3. If sigsetsize == 0 → success, skip validate+copy (Linux
+          treats zero-byte copy_to_user as a no-op that never
+          dereferences the pointer).
+       4. Else validate_user_write(set_ptr, sigsetsize) →
+          maps to Linux errno on failure.
+       5. copy_to_user(visible.to_ne_bytes()[..sigsetsize],
+          set_ptr, sigsetsize).
+
+     Self-test probes (boot output prefix
+     `[syscall/linux]   rt_sigpending ...`):
+
+       (a) sigsetsize > 8 EINVAL: dispatch_linux with
+           sigsetsize ∈ {16, u64::MAX} → -EINVAL.  Verifies
+           the gate fires before any pointer access.
+       (b) sigsetsize == 0 success: dispatch_linux with
+           set_ptr=NULL, sigsetsize=0 → 0 (success, no pointer
+           dereference).  Verifies the zero-byte fast path.
+       (c) pending & blocked intersection: seed
+           signal::set_pending(0, 10), set_pending(0, 15),
+           set_blocked(0, bit10|bit11) on pid=0 (caller_pid()
+           is None during boot self-test → wrapper falls back
+           to pid=0).  dispatch_linux with valid kernel-stack
+           buffer → exactly bit 10 set (the only bit in both
+           pending and blocked).  Verifies the intersection
+           operation is wired correctly.
+       (d) sigsetsize == 4 short copy: with the same seeded
+           state, dispatch_linux with sigsetsize=4 → writes
+           only the low 4 bytes of the mask; the trailing 4
+           sentinel bytes (0xCD) of the kernel-stack buffer
+           remain untouched.  Verifies copy length tracks
+           sigsetsize, not sizeof(sigset_t).
+
+       Cleanup: signal::remove(0) at the end so subsequent
+       self-test probes see fresh state.
+
+     Architectural directive: this is a TRANSLATOR-only fix.
+     The native signal subsystem keeps its raw `pending()` and
+     `blocked()` accessors; we apply the POSIX intersection in
+     the Linux wrapper.  No change to native ABI, no change to
+     proc/signal.rs.
+
+     Build: cargo build -p kernel clean (44.35s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 27s).

@@ -18606,13 +18606,19 @@ fn sys_bind(args: &SyscallArgs) -> SyscallResult {
 
 /// `listen(sockfd, backlog)`.
 fn sys_listen(args: &SyscallArgs) -> SyscallResult {
+    // Linux's net/socket.c __sys_listen has NO syscall-entry
+    // validation of `backlog`.  It does:
+    //   sock = sockfd_lookup_light(fd, ...);        // EBADF
+    //   if ((unsigned int)backlog > somaxconn)
+    //       backlog = somaxconn;                    // silent clamp
+    //   sock->ops->listen(sock, backlog);
+    // i.e. a negative backlog casts to a huge unsigned and is
+    // silently clamped to somaxconn, not rejected.  Pre-batch we
+    // returned -EINVAL for backlog < 0 at syscall entry, hijacking
+    // -EBADF for a bogus fd.  Removing the spurious gate matches
+    // Linux's documented surface.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let backlog = args.arg1 as i32;
-    if backlog < 0 {
-        return linux_err(errno::EINVAL);
-    }
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
@@ -18983,15 +18989,20 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `shutdown(sockfd, how)`.
+///
+/// Linux's net/socket.c __sys_shutdown does:
+///   sock = sockfd_lookup_light(fd, ...);          // EBADF / ENOTSOCK
+///   security_socket_shutdown(sock, how);
+///   sock->ops->shutdown(sock, how);
+/// i.e. there is NO syscall-entry validation of `how` — the
+/// per-protocol handler (e.g. inet_shutdown) is what returns
+/// -EINVAL for an out-of-range value, and that only runs after
+/// the fd lookup succeeds.  Pre-batch we returned -EINVAL for
+/// `how` out of [0,2] at syscall entry, hijacking -EBADF for a
+/// bogus fd.  Removing the spurious gate matches Linux.
 fn sys_shutdown(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let how = args.arg1 as i32;
-    // SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2.
-    if !(0..=2).contains(&how) {
-        return linux_err(errno::EINVAL);
-    }
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
@@ -42239,10 +42250,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // listen negative backlog -> EINVAL.
+        // listen negative backlog -> EBADF (post batch 275).  Linux
+        // silently clamps backlog to somaxconn rather than rejecting
+        // negative values, so a probe with bogus fd reaches the fd
+        // gate and returns -EBADF.  In kernel context the fd no-op
+        // falls through to terminal EBADF.  Pre-batch-275 returned
+        // -EINVAL via a spurious entry-layer backlog<0 gate.
         let a = SyscallArgs { arg0: 3, arg1: u64::from(u32::MAX), arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: listen negative backlog not EINVAL");
+        if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: listen negative backlog not EBADF");
             return Err(KernelError::InternalError);
         }
         // listen valid -> EBADF.
@@ -42470,10 +42486,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // shutdown bad how -> EINVAL.
+        // shutdown bad how -> EBADF (post batch 275).  Linux
+        // delegates `how` validation to the per-protocol handler
+        // (inet_shutdown returns -EINVAL for out-of-range), which
+        // only runs after sockfd_lookup_light succeeds.  With a
+        // bogus fd Linux returns -EBADF; pre-batch-275 we returned
+        // -EINVAL via a spurious entry-layer how-range gate.
         let a = SyscallArgs { arg0: 3, arg1: 9, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: shutdown bad how not EINVAL");
+        if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: shutdown bad how not EBADF");
             return Err(KernelError::InternalError);
         }
         // shutdown valid -> EBADF.
@@ -46203,6 +46224,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   setsockopt/getsockopt no-level gate: OK"
+            );
+        }
+
+        // ---- listen/shutdown drop spurious entry-layer gates ----
+        // Linux's net/socket.c does no syscall-entry validation of
+        // listen's backlog (it's silently clamped to somaxconn) or
+        // shutdown's how (rejected only by the per-protocol handler).
+        // Pre-batch we returned -EINVAL for both, hijacking -EBADF
+        // for bogus fds.  Batch 275 removes those gates, matching
+        // Linux's "fd first" entry-layer surface.
+        {
+            // Discriminator A: listen(fd=3, backlog=-1)
+            //   pre-batch: -EINVAL  (spurious backlog<0 gate)
+            //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
+            //                        through to terminal EBADF)
+            let a = SyscallArgs {
+                arg0: 3, arg1: u64::from(u32::MAX), arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: listen(backlog=-1) not EBADF"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: listen(fd=3, backlog=5)
+            //   Acceptance: a valid backlog still reaches the
+            //   terminal EBADF (unchanged pre/post).
+            let a = SyscallArgs {
+                arg0: 3, arg1: 5, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: listen(backlog=5) not EBADF"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator C: shutdown(fd=3, how=9)
+            //   pre-batch: -EINVAL  (spurious how-range gate)
+            //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
+            //                        through to terminal EBADF;
+            //                        on a real socket Linux would
+            //                        also reach the inet_shutdown
+            //                        EINVAL response, just after
+            //                        the fd succeeds.)
+            let a = SyscallArgs {
+                arg0: 3, arg1: 9, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: shutdown(how=9) not EBADF"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator D: shutdown(fd=3, how=2) (SHUT_RDWR)
+            //   Acceptance: a valid how still reaches the terminal
+            //   EBADF (unchanged pre/post).
+            let a = SyscallArgs {
+                arg0: 3, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: shutdown(how=2) not EBADF"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   listen/shutdown drop entry gates: OK"
             );
         }
 

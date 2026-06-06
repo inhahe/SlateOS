@@ -1,8 +1,10 @@
 add to roadmap-detailed to make the window frames, task bar, start menu, file explorer, search dialog, and file/folder select dialog just like in 'Aero Desktop (offline).html' as the default theme.
 
-add microsoft-like ribbons to roadmap-detailed, with a note not to copy them to the degree that they would violate microsoft patents.
+add microsoft-like ribbons to roadmap-detailed, with a note not to copy them to the degree that they would violate microsoft patents. add that i once found the specs to exactly how microsoft arranges ribbons depending on the things that are added, and to see if claude can find those specs online and use them, but only if/to the degree that it doesn't violate patents. add a note that all ribbon patents should be expiring within a year or so, so we can update it then. 
 
-add that the programs should be able to register thumbnail generators for filetyes that belong to them for use in thumbnail view in the file explorer. make it so that a crash in the thumbnail generator doesn't crash the explorer.
+if it's not already there, add to roadmap-detailed that the programs should be able to register thumbnail generators for filetyes that belong to them for use in thumbnail view in the file explorer. add to make it so that a crash in any thumbnail generator (native or third-party) doesn't crash he explorer by running things in their own processes as appropriate.
+
+
 
 The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
@@ -23590,3 +23592,94 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      clamp still not implemented.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+304.  syscall/linux: listen/shutdown drop spurious entry gates
+##      (batch 275).
+##
+##      Pre-batch divergence: Linux's net/socket.c __sys_listen
+##      and __sys_shutdown both delegate everything past fd
+##      lookup to the per-protocol handler.
+##        __sys_listen:
+##          sock = sockfd_lookup_light(fd, ...);   // -EBADF
+##          if ((unsigned int)backlog > somaxconn)
+##              backlog = somaxconn;               // SILENT clamp
+##          sock->ops->listen(sock, backlog);
+##        __sys_shutdown:
+##          sock = sockfd_lookup_light(fd, ...);   // -EBADF
+##          security_socket_shutdown(sock, how);
+##          sock->ops->shutdown(sock, how);        // -EINVAL here
+##      i.e. negative backlog is silently clamped (not rejected)
+##      and `how` out-of-range is rejected inside the protocol
+##      handler (e.g. inet_shutdown), not at syscall entry.
+##      Pre-batch we returned -EINVAL at syscall entry for both,
+##      hijacking -EBADF for bogus fds:
+##        listen(fd=-1, backlog=-1)
+##          pre: -EINVAL  (spurious backlog<0 gate)
+##          Linux: -EBADF (fd gate)
+##        shutdown(fd=-1, how=9)
+##          pre: -EINVAL  (spurious how-range gate)
+##          Linux: -EBADF (fd gate)
+##
+##      Fix in sys_listen (line ~18608) and sys_shutdown
+##      (line ~18985):
+##        * Remove `backlog < 0 -> EINVAL`.  Linux silently
+##          clamps; we'll do the same when a real socket layer
+##          lands (the clamp is per-namespace somaxconn).  For
+##          now the terminal EBADF is the truthful answer.
+##        * Remove `!(0..=2).contains(&how) -> EINVAL`.  Linux's
+##          per-protocol shutdown handler (e.g. inet_shutdown)
+##          returns -EINVAL for out-of-range how, but only after
+##          fd lookup succeeds.  Same "moved into handler"
+##          treatment we'll apply when the socket layer lands.
+##        * Function docs now spell out the Linux gate order.
+##
+##      Self-tests added in dispatch_linux (after the
+##      setsockopt/getsockopt block); listen/shutdown drop-entry
+##      quadruple:
+##        A. listen(fd=3, backlog=-1)
+##             pre: -EINVAL; post: -EBADF (terminal, fd no-op).
+##        B. listen(fd=3, backlog=5)
+##             Acceptance: a valid backlog still terminates at
+##             -EBADF (unchanged pre/post).
+##        C. shutdown(fd=3, how=9)
+##             pre: -EINVAL; post: -EBADF (terminal, fd no-op).
+##        D. shutdown(fd=3, how=2 == SHUT_RDWR)
+##             Acceptance: a valid how still terminates at
+##             -EBADF (unchanged pre/post).
+##
+##      Marker:
+##        "[syscall/linux]   listen/shutdown drop entry gates: OK"
+##
+##      Legacy tests updated:
+##        * line ~42244: "listen negative backlog -> EINVAL"
+##          flipped to "-> EBADF" with a comment explaining the
+##          pre/post discriminant.
+##        * line ~42496: "shutdown bad how -> EINVAL"
+##          flipped to "-> EBADF" with the same kind of comment.
+##        * The sibling "listen valid -> EBADF" and "shutdown
+##          valid -> EBADF" assertions still hold (the changes
+##          don't move those gates).
+##
+##      Existing tests preserved: setsockopt/getsockopt no-level
+##      gate (batch 274), mremap PAGE_ALIGN overflow (batch 273),
+##      pread64/pwrite64 fd-before-count (batch 272), capset pid
+##      EPERM (batch 270), prctl(PR_SET_NAME) NULL-arg2 (batch
+##      269), capget/capset NULL-data quadruple (batch 268),
+##      preadv/pwritev iov_len SSIZE_MAX (batch 267) — all
+##      unaffected by this addition.
+##
+##      Known limitations: same as batch 274 — no real socket
+##      layer yet, so the terminal -EBADF in shutdown's valid
+##      branch and listen's valid branch is a stand-in for the
+##      handler's response.  When the socket layer lands, both
+##      will need a per-protocol handler call after fd lookup,
+##      which is the natural place for the somaxconn clamp and
+##      the how-range check to live.  Also still pending from
+##      earlier batches: accept/accept4 sockaddr-before-fd
+##      reorder (Linux: flags -> fd -> sockaddr; ours: flags ->
+##      sockaddr -> fd); pread/pwrite EOVERFLOW gate and
+##      MAX_RW_COUNT silent clamp; mremap MREMAP_FIXED new_addr
+##      bounds; sys_perf_event_open in-struct __reserved_2 /
+##      __reserved_3 field validation.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

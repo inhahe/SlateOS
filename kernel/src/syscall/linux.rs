@@ -19645,6 +19645,32 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `fallocate(fd, mode, offset, len)`.
+///
+/// Gate order matches Linux's syscall entry + `fs/open.c::vfs_fallocate`:
+///   1. fdget(fd)                                          → -EBADF
+///   2. offset < 0 || len <= 0                             → -EINVAL
+///   3. mode & ~FALLOC_FL_SUPPORTED_MASK                   → -EOPNOTSUPP
+///   4. PUNCH_HOLE | ZERO_RANGE both set (mutex)           → -EOPNOTSUPP
+///   5. PUNCH_HOLE && !KEEP_SIZE                           → -EOPNOTSUPP
+///   6. COLLAPSE_RANGE && (mode & ~COLLAPSE_RANGE)         → -EINVAL
+///   7. INSERT_RANGE  && (mode & ~INSERT_RANGE)            → -EINVAL
+///   8. UNSHARE_RANGE && (mode & ~(UNSHARE|KEEP_SIZE))     → -EINVAL
+///
+/// Note the errno discriminators: unknown-mode-bits and the
+/// PUNCH/ZERO/PUNCH-needs-KEEP_SIZE gates return EOPNOTSUPP (filesystem
+/// doesn't support this *mode*), not EINVAL (caller passed garbage).
+/// glibc's `posix_fallocate` and many DB engines (sqlite, PostgreSQL
+/// WAL preallocation) discriminate on this — EOPNOTSUPP triggers the
+/// "fall back to writing zeros" path; EINVAL gets propagated as a
+/// hard error.
+///
+/// FALLOC_FL_SUPPORTED_MASK here is the pre-FALLOC_FL_WRITE_ZEROES set
+/// (= KEEP_SIZE | PUNCH_HOLE | COLLAPSE_RANGE | ZERO_RANGE |
+/// INSERT_RANGE | UNSHARE_RANGE = 0x7B).  Adding WRITE_ZEROES (0x80)
+/// would require an actual hole-punching implementation; until then
+/// rejecting 0x80 as "unsupported mode" matches both older Linux and
+/// the user-observable behavior of a filesystem that just hasn't
+/// implemented the operation yet.
 fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
@@ -19654,21 +19680,57 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
     let offset = args.arg2 as i64;
     #[allow(clippy::cast_possible_wrap)]
     let len = args.arg3 as i64;
+    const KEEP_SIZE: u32 = 0x01;
+    const PUNCH_HOLE: u32 = 0x02;
+    const COLLAPSE_RANGE: u32 = 0x08;
+    const ZERO_RANGE: u32 = 0x10;
+    const INSERT_RANGE: u32 = 0x20;
+    const UNSHARE_RANGE: u32 = 0x40;
+    const SUPPORTED_MASK: u32 = KEEP_SIZE
+        | PUNCH_HOLE
+        | COLLAPSE_RANGE
+        | ZERO_RANGE
+        | INSERT_RANGE
+        | UNSHARE_RANGE;
+
+    // (1) fd validation — first gate in Linux's syscall entry
+    // (ksys_fallocate -> fdget).
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // (2) offset/len bounds (vfs_fallocate first check).
     if offset < 0 || len <= 0 {
         return linux_err(errno::EINVAL);
     }
-    // mode flags: FALLOC_FL_KEEP_SIZE=1, FALLOC_FL_PUNCH_HOLE=2,
-    // _COLLAPSE_RANGE=8, _ZERO_RANGE=0x10, _INSERT_RANGE=0x20,
-    // _UNSHARE_RANGE=0x40.
-    if mode & !0x7B != 0 {
+    // (3) unknown mode bits → EOPNOTSUPP (NOT EINVAL).
+    if mode & !SUPPORTED_MASK != 0 {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    // (4) PUNCH_HOLE | ZERO_RANGE are mutually exclusive — the kernel
+    // refuses to attempt both "make this hole" and "zero this range"
+    // in one call, as the semantics conflict on the unaligned head/tail
+    // sub-blocks.
+    if mode & (PUNCH_HOLE | ZERO_RANGE) == (PUNCH_HOLE | ZERO_RANGE) {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    // (5) PUNCH_HOLE requires KEEP_SIZE — punching can never extend
+    // the file, so requiring KEEP_SIZE makes the intent explicit.
+    if mode & PUNCH_HOLE != 0 && mode & KEEP_SIZE == 0 {
+        return linux_err(errno::EOPNOTSUPP);
+    }
+    // (6) COLLAPSE_RANGE must be used exclusively — combining with
+    // any other bit (including KEEP_SIZE) is rejected.
+    if mode & COLLAPSE_RANGE != 0 && mode & !COLLAPSE_RANGE != 0 {
         return linux_err(errno::EINVAL);
     }
-    // PUNCH_HOLE requires KEEP_SIZE.
-    if mode & 2 != 0 && mode & 1 == 0 {
+    // (7) INSERT_RANGE must be used exclusively (same rationale).
+    if mode & INSERT_RANGE != 0 && mode & !INSERT_RANGE != 0 {
         return linux_err(errno::EINVAL);
     }
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
+    // (8) UNSHARE_RANGE may only be combined with KEEP_SIZE (it is
+    // an allocate-mode modifier).  Any other bit is rejected.
+    if mode & UNSHARE_RANGE != 0 && mode & !(UNSHARE_RANGE | KEEP_SIZE) != 0 {
+        return linux_err(errno::EINVAL);
     }
     // Our VFS doesn't expose fallocate; calls fall through to
     // ftruncate-equivalent semantics elsewhere.  Most callers (sqlite,
@@ -42385,16 +42447,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fallocate len=0 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // fallocate bad mode -> EINVAL.
+        // Batch 247: unknown mode bits return EOPNOTSUPP, not EINVAL
+        // (matches vfs_fallocate).
         let a = SyscallArgs { arg0: 3, arg1: 0x80, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fallocate bad mode not EINVAL");
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fallocate bad mode not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // fallocate PUNCH_HOLE without KEEP_SIZE -> EINVAL.
+        // Batch 247: PUNCH_HOLE without KEEP_SIZE returns EOPNOTSUPP,
+        // not EINVAL (matches vfs_fallocate).
         let a = SyscallArgs { arg0: 3, arg1: 2, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fallocate PUNCH without KEEP not EINVAL");
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fallocate PUNCH without KEEP not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
         // fallocate valid -> EOPNOTSUPP.
@@ -42403,6 +42467,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fallocate valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        // Batch 247: PUNCH_HOLE | ZERO_RANGE mutex (0x12) -> EOPNOTSUPP.
+        let a = SyscallArgs { arg0: 3, arg1: 0x12, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fallocate PUNCH|ZERO not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 247: COLLAPSE_RANGE combined with KEEP_SIZE (0x09) -> EINVAL
+        // (collapse must be used exclusively).
+        let a = SyscallArgs { arg0: 3, arg1: 0x09, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fallocate COLLAPSE+other not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 247: INSERT_RANGE combined with KEEP_SIZE (0x21) -> EINVAL
+        // (insert must be used exclusively).
+        let a = SyscallArgs { arg0: 3, arg1: 0x21, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fallocate INSERT+other not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 247: UNSHARE_RANGE combined with ZERO_RANGE (0x50) -> EINVAL
+        // (UNSHARE may only be combined with KEEP_SIZE; ZERO is chosen
+        // here because the PUNCH/COLLAPSE/INSERT exclusivity gates
+        // would fire earlier for those combinations, so ZERO is the
+        // only "other" bit that reaches the UNSHARE gate as the
+        // discriminator).
+        let a = SyscallArgs { arg0: 3, arg1: 0x50, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fallocate UNSHARE+ZERO not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 247: UNSHARE_RANGE | KEEP_SIZE (0x41) -> EOPNOTSUPP
+        // (allowed combination, falls through to terminal).
+        let a = SyscallArgs { arg0: 3, arg1: 0x41, arg2: 0, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FALLOCATE, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fallocate UNSHARE|KEEP not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   fallocate vfs_fallocate gate order: OK");
 
         // mlock2 bad flag -> EINVAL.
         let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };

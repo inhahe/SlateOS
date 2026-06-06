@@ -21525,3 +21525,108 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        fn doc comment.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 276. syscall/linux: fallocate — vfs_fallocate errno + missing
+##      exclusivity gates (batch 247)
+##
+##      Pre-batch divergences (kernel/src/syscall/linux.rs):
+##      - sys_fallocate ran offset/len, then mode-mask, then
+##        PUNCH-needs-KEEP_SIZE, then fd validation, then terminal
+##        EOPNOTSUPP.  Two errno discriminators were wrong, three
+##        Linux-mandated gates were missing entirely, and the fd
+##        gate was last instead of first.
+##
+##      Errno discriminator divergences:
+##      - mode & ~SUPPORTED_MASK returned EINVAL — Linux's
+##        vfs_fallocate returns EOPNOTSUPP (it's the *filesystem*
+##        refusing the operation, not the caller passing garbage).
+##      - PUNCH_HOLE without KEEP_SIZE returned EINVAL — Linux
+##        returns EOPNOTSUPP for the same reason.
+##
+##      Missing exclusivity gates:
+##      - PUNCH_HOLE | ZERO_RANGE both set → -EOPNOTSUPP (mutex —
+##        the two operations have conflicting semantics on
+##        unaligned head/tail sub-blocks).
+##      - COLLAPSE_RANGE && (mode & ~COLLAPSE_RANGE) → -EINVAL
+##        (collapse must be used exclusively, not even with
+##        KEEP_SIZE).
+##      - INSERT_RANGE && (mode & ~INSERT_RANGE) → -EINVAL
+##        (same rationale).
+##      - UNSHARE_RANGE && (mode & ~(UNSHARE_RANGE | KEEP_SIZE))
+##        → -EINVAL (UNSHARE is an allocate-mode modifier; may
+##        only be combined with KEEP_SIZE).
+##
+##      Real-world impact: glibc's posix_fallocate, sqlite, and
+##      PostgreSQL WAL preallocation discriminate on the
+##      EINVAL/EOPNOTSUPP boundary.  EOPNOTSUPP triggers the
+##      "fall back to writing zeros" path; EINVAL gets propagated
+##      to the application as a hard error.  Pre-batch, three
+##      Linux scenarios that should have triggered the
+##      zero-fallback path were instead surfacing as hard errors.
+##
+##      Fix:
+##      - Reordered sys_fallocate gates to match Linux's syscall
+##        entry + vfs_fallocate sequence:
+##          (1) fdget(fd) → -EBADF
+##          (2) offset < 0 || len <= 0 → -EINVAL
+##          (3) mode & ~SUPPORTED_MASK → -EOPNOTSUPP
+##          (4) PUNCH | ZERO mutex → -EOPNOTSUPP
+##          (5) PUNCH without KEEP_SIZE → -EOPNOTSUPP
+##          (6) COLLAPSE + any other bit → -EINVAL
+##          (7) INSERT + any other bit → -EINVAL
+##          (8) UNSHARE + any non-(UNSHARE|KEEP_SIZE) bit → -EINVAL
+##          (terminal) → -EOPNOTSUPP (no VFS fallocate hookup).
+##      - Hoisted the FALLOC_FL_* constants into named locals at
+##        the top of the function so the gates read self-explanatory
+##        rather than as bare hex.
+##      - Doc comment now enumerates the Linux gate sequence and
+##        flags the choice to leave FALLOC_FL_WRITE_ZEROES (0x80)
+##        out of SUPPORTED_MASK (requires real hole-punching).
+##
+##      Self-tests added (boot-time, dispatch_linux):
+##      - Pre-existing 5 tests preserved; 2 had their expected
+##        errno corrected from EINVAL → EOPNOTSUPP:
+##          * bad mode (0x80)                  → EOPNOTSUPP
+##          * PUNCH_HOLE without KEEP_SIZE (2) → EOPNOTSUPP
+##      - 5 new exclusivity tests:
+##          * 0x12 (PUNCH | ZERO)                → EOPNOTSUPP
+##          * 0x09 (COLLAPSE | KEEP_SIZE)        → EINVAL
+##          * 0x21 (INSERT  | KEEP_SIZE)         → EINVAL
+##          * 0x50 (UNSHARE | ZERO_RANGE)        → EINVAL
+##          * 0x41 (UNSHARE | KEEP_SIZE)         → EOPNOTSUPP
+##                (allowed combo → falls to terminal).
+##        Marker: "fallocate vfs_fallocate gate order: OK".
+##
+##      Note on UNSHARE+other test: UNSHARE+PUNCH (0x42) would
+##      hit the earlier PUNCH-needs-KEEP_SIZE gate, returning
+##      EOPNOTSUPP — that matches Linux exactly (Linux also fires
+##      that earlier gate first), but it doesn't serve as a
+##      discriminator for the UNSHARE check.  UNSHARE+ZERO (0x50)
+##      is the only "other" combination that passes all prior
+##      gates and reaches the UNSHARE exclusivity check.  Found
+##      this on first boot test (UNSHARE+PUNCH test failed
+##      expecting EINVAL but got EOPNOTSUPP from the earlier
+##      gate); fixed by switching to ZERO.
+##
+##      Existing tests preserved (negative offset, len=0, valid
+##      call → EOPNOTSUPP).
+##
+##      Known limitations:
+##      - sys_fallocate still terminates at EOPNOTSUPP — no actual
+##        preallocation, hole-punching, range-zeroing, range
+##        collapsing, range insertion, or unshare implementation.
+##        Validation only.  Callers that handle EOPNOTSUPP
+##        gracefully (sqlite, PostgreSQL, glibc posix_fallocate)
+##        will fall back to write-zeros and work correctly.
+##      - FALLOC_FL_WRITE_ZEROES (0x80) is not in SUPPORTED_MASK
+##        and is rejected as unknown-mode → EOPNOTSUPP.  Adding it
+##        would require a real implementation; until then the
+##        rejection looks identical to userspace as "filesystem
+##        doesn't support this mode yet".
+##      - fd validation in kernel-context self-tests is a no-op
+##        (validate_linux_fd returns Ok when caller_pid is None),
+##        so the fd-first ordering can't be directly tested from
+##        kernel-ctx.  The reorder is still correct for real
+##        userspace callers and matches Linux's structure.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

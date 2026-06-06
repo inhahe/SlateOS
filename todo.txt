@@ -22973,3 +22973,78 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      utimensat-fallback path.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+296.  syscall/linux: validate_iov — gate iov_len > SSIZE_MAX
+##      with EINVAL before access check (batch 267).
+##
+##      Pre-batch divergence: Linux's __import_iovec /
+##      iovec_from_user (fs/iov_iter.c) returns EINVAL when an
+##      iovec entry's iov_len does not fit in ssize_t, via
+##        `len = (ssize_t)iov_len; if (len < 0) return -EINVAL;`
+##      executed BEFORE access_ok() on iov_base.  This catches
+##      every iov_len in (SSIZE_MAX, ULONG_MAX] (i.e.
+##      (i64::MAX as u64, u64::MAX] on 64-bit) as EINVAL with
+##      the right errno discriminator.
+##
+##      Our prior validate_iov did:
+##        if iov.len == 0 { continue; }
+##        let len = usize::try_from(iov.len)
+##                      .map_err(|_| EINVAL)?;
+##        validate_user_read/write(iov.base, len)?;
+##      On x86_64 usize == u64, so usize::try_from never fails;
+##      validate_user_read in kernel context is a no-op; so an
+##      oversize iov_len silently slipped past validate_iov and
+##      surfaced as EBADF from lookup_caller_fd (wrong errno) or
+##      worse — depended on backend overflow checks at I/O time.
+##
+##      Fix in validate_iov (line 21300):
+##        After the `iov.len == 0` skip, before the existing
+##        usize::try_from cast, insert
+##          if iov.len > i64::MAX as u64 {
+##              return Err(linux_err(errno::EINVAL));
+##          }
+##        with a SAFETY-style comment citing __import_iovec and
+##        explaining why the cast survives (gate is strict `>`).
+##        All six callers — sys_readv, sys_writev, sys_preadv,
+##        sys_pwritev, sys_preadv2, sys_pwritev2, plus the iov
+##        path inside sys_process_vm_{readv,writev} which shares
+##        the helper — pick up the new gate.
+##
+##      Self-tests added in dispatch_linux (preadv triple):
+##        A. ([{base=0, len=u64::MAX}], fd=-1) -> EINVAL
+##            via the new SSIZE_MAX gate; pre-batch returned
+##            EBADF from the fd lookup since validate_user_read
+##            is a no-op in kernel context.
+##        B. ([{base=0, len=i64::MAX as u64 + 1}], fd=-1) on
+##            PWRITEV -> EINVAL — smallest SSIZE_MAX-boundary
+##            failure, also covers the writev path (for_write
+##            branch of validate_iov).
+##        C. ([{base=0, len=i64::MAX as u64}], fd=-1) -> EBADF.
+##            Acceptance case: proves the gate is exclusive
+##            (strict `>`), exactly matching Linux's
+##            `(ssize_t)len < 0` test.  Pre-fix would also have
+##            returned EBADF here, but the discriminator pair
+##            (A,B) → EINVAL is what proves the gate fires.
+##
+##      Marker:
+##        "[syscall/linux]   preadv/pwritev iov_len SSIZE_MAX gating: OK"
+##
+##      Existing tests preserved: futimesat tv_usec triple
+##      directly below this block, the legacy-syscall ENOSYS
+##      sweep above it, and every (p)readv/(p)writev call site
+##      that already supplied well-formed iov entries.
+##
+##      Known limitations: we do not implement Linux's silent
+##      MAX_RW_COUNT clamp (which truncates iov_len down to
+##      ((1<<31) - PAGE_SIZE) without erroring) — for our
+##      current per-handle backends the absence is benign
+##      because pread_file_to_user / pwrite_file_from_user
+##      themselves bound the transfer length, but if we ever
+##      add a backend that fans iov entries out to a syscall
+##      that distinguishes large counts, the clamp will need to
+##      be ported.  Also: we still do not validate
+##      sum(iov_len) > SSIZE_MAX (Linux returns EOVERFLOW/EINVAL
+##      via rw_verify_area on the total).  Track in a future
+##      batch.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

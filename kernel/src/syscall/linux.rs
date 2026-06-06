@@ -21335,6 +21335,19 @@ fn validate_iov(iov_ptr: u64, iovcnt: i32, for_write: bool) -> Result<(), Syscal
         if iov.len == 0 {
             continue;
         }
+        // Linux's __import_iovec rejects iov_len > SSIZE_MAX with EINVAL,
+        // via `len = (ssize_t)iov_len; if (len < 0) return -EINVAL;`
+        // (see fs/iov_iter.c iovec_from_user / __import_iovec).  On 64-bit
+        // Linux SSIZE_MAX == i64::MAX, so iov_len ∈ (i64::MAX, u64::MAX]
+        // must surface as EINVAL — *before* the access_ok() / range check.
+        // Our prior `usize::try_from(iov.len)` cast never fails on x86_64
+        // (usize == u64), so without this gate we would silently accept
+        // the value and then either pass it to validate_user_read/write
+        // (which sums base + len and may produce EFAULT instead of EINVAL)
+        // or, worse, depend on backend-side overflow checks.  Match Linux.
+        if iov.len > i64::MAX as u64 {
+            return Err(linux_err(errno::EINVAL));
+        }
         let len = match usize::try_from(iov.len) {
             Ok(v) => v,
             Err(_) => return Err(linux_err(errno::EINVAL)),
@@ -45505,6 +45518,82 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: legacy syscall {} not ENOSYS", n);
                 return Err(KernelError::InternalError);
             }
+        }
+
+        // ---- preadv/pwritev iov_len > SSIZE_MAX gating (validate_iov) ----
+        // Linux's __import_iovec returns EINVAL when iov_len does not fit
+        // in ssize_t (i.e. iov_len > i64::MAX as u64), *before* the access
+        // check on iov_base.  Pre-batch we only gated `usize::try_from`,
+        // which never fails on 64-bit, so an oversize iov_len would slip
+        // through to validate_user_read/write (kernel-context no-op) and
+        // ultimately surface as EBADF from lookup_caller_fd — i.e. the
+        // wrong errno.  Tests use a fd value of -1 so the unfixed path
+        // resolves to EBADF (the post-fix path stops earlier at EINVAL).
+        {
+            #[repr(C)]
+            struct Iov { base: u64, len: u64 }
+            // Discriminator A: iov_len = u64::MAX -> EINVAL (pre-batch: EBADF).
+            let iov_bad: [Iov; 1] = [Iov { base: 0, len: u64::MAX }];
+            let iov_ptr_bad = (&raw const iov_bad[0]) as u64;
+            core::hint::black_box(&iov_bad);
+            let a = SyscallArgs {
+                arg0: u64::MAX, // fd = -1
+                arg1: iov_ptr_bad,
+                arg2: 1,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: preadv iov_len=u64::MAX not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Discriminator B: iov_len = i64::MAX as u64 + 1 -> EINVAL
+            // (smallest SSIZE_MAX boundary failure).
+            let iov_b: [Iov; 1] = [Iov { base: 0, len: (i64::MAX as u64) + 1 }];
+            let iov_ptr_b = (&raw const iov_b[0]) as u64;
+            core::hint::black_box(&iov_b);
+            let a = SyscallArgs {
+                arg0: u64::MAX,
+                arg1: iov_ptr_b,
+                arg2: 1,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::PWRITEV, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: pwritev iov_len=SSIZE_MAX+1 not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Discriminator C: iov_len = i64::MAX exactly -> *passes* the
+            // SSIZE_MAX gate, so the call advances to the fd lookup and
+            // returns EBADF.  This proves the new gate is upper-bound
+            // exclusive (i.e. strictly `> i64::MAX as u64`), matching
+            // Linux's `(ssize_t)len < 0` test.
+            let iov_ok: [Iov; 1] = [Iov { base: 0, len: i64::MAX as u64 }];
+            let iov_ptr_ok = (&raw const iov_ok[0]) as u64;
+            core::hint::black_box(&iov_ok);
+            let a = SyscallArgs {
+                arg0: u64::MAX,
+                arg1: iov_ptr_ok,
+                arg2: 1,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EBADF) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: preadv iov_len=SSIZE_MAX not EBADF (gate is not exclusive)"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   preadv/pwritev iov_len SSIZE_MAX gating: OK"
+            );
         }
 
         // futimesat NULL path -> EFAULT.

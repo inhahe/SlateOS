@@ -36978,3 +36978,110 @@ OBSOLETE NOTE BELOW (pre-relaxation):
         sockfd_lookup_light → move_addr_to_kernel/user; bad
         fd with valid buf and bad addr → EBADF instead of
         EFAULT/EINVAL): OK"
+
+ 437. sys_sendmsg and sys_recvmsg validated the msghdr
+      pointer BEFORE looking up the fd, so userspace observed
+      EFAULT where Linux returns EBADF for an invalid fd.
+      Continuation of the socket-family fd-gate-ordering
+      sweep (433: getsockname/getpeername; 434: accept/
+      accept4; 435: bind/connect; 436: sendto/recvfrom).
+
+      Linux source (net/socket.c).  __sys_sendmsg and
+      __sys_recvmsg share the shape:
+
+          long __sys_sendmsg(int fd,
+                             struct user_msghdr __user *msg,
+                             unsigned int flags,
+                             bool forbid_cmsg_compat)
+          {
+              int fput_needed, err;
+              struct msghdr msg_sys;
+              struct socket *sock;
+
+              sock = sockfd_lookup_light(fd, &err,
+                                         &fput_needed);
+              if (!sock)
+                  goto out;
+
+              err = ___sys_sendmsg(sock, msg, &msg_sys,
+                                   flags, NULL, 0);
+
+              fput_light(sock->file, fput_needed);
+          out:
+              return err;
+          }
+
+          static int ___sys_sendmsg(...)
+          {
+              ...
+              err = copy_msghdr_from_user(msg_sys, msg, &iov);
+              ...
+          }
+
+      sockfd_lookup_light runs FIRST: a bogus fd short-
+      circuits with -EBADF regardless of whether msg is NULL,
+      faulting, or perfectly valid.  Only after the fd
+      resolves does Linux walk into copy_msghdr_from_user
+      where copy_from_user(msg) can surface EFAULT.
+
+      Divergence table (fd=99 invalid):
+
+         sendmsg(fd, msg, flags)        Linux  pre    post
+         (99, NULL, 0)                  EBADF  EFAULT EBADF  FIXED
+         (99, BAD_PTR, 0)               EBADF  EFAULT EBADF  FIXED
+         (99, valid, 0)                 EBADF  EBADF  EBADF  ok
+
+         recvmsg(fd, msg, flags)        Linux  pre    post
+         (same matrix)
+
+      Why it matters:
+        * Highly-multiplexed I/O loops (HAProxy, Envoy,
+          nginx) wrap sendmsg/recvmsg in connection-multiplex
+          paths where the fd may be closed by a sibling
+          worker between the loop's epoll wakeup and the
+          sendmsg/recvmsg call.  These loops classify EBADF
+          as "drop this connection from the pool" but EFAULT
+          as a "I built a bad message structure" bug —
+          completely different recovery paths.
+        * SCM_RIGHTS / SCM_CREDENTIALS users (systemd, dbus,
+          PulseAudio) probe AF_UNIX socket validity by
+          attempting recvmsg(fd, &probe_hdr, MSG_PEEK |
+          MSG_DONTWAIT).  Probe code that passes NULL for an
+          uninitialised iteration would pre-batch surface
+          EFAULT where Linux returns EBADF, breaking the
+          probe.
+        * QUIC userspace stacks (msquic, quiche, picoquic)
+          using sendmsg with control-message offload (GSO,
+          UDP_SEGMENT) — same diagnostic concerns.
+
+      Architectural directive: translator-only fix.  No
+      changes to validate_user_read / validate_user_write,
+      no changes to validate_linux_fd, no native code
+      touched.
+
+      Fix in kernel/src/syscall/linux.rs:
+        * sys_sendmsg (~line 22243): moved validate_linux_fd
+          to fire BEFORE the NULL check and the
+          validate_user_read(56) gate.  Doc-commented with
+          __sys_sendmsg source quote.
+        * sys_recvmsg (~line 22276): same reorder; both
+          read and write access checks on the msghdr (recvmsg
+          writes msg_flags) stay after the fd gate.
+        * Did NOT touch sys_sendmmsg / sys_recvmmsg — the
+          mmsg shapes carry vlen-based size math and (for
+          recvmmsg) a timeout-first gate that needs separate
+          Linux gate-order analysis.
+
+      Self-test additions (~line 55505):
+        * sendmsg 2-case: (NULL,0) → EFAULT, (valid,0) → EBADF.
+        * recvmsg 2-case: (NULL,0) → EFAULT, (valid,0) → EBADF.
+        * Kernel-ctx caveat unchanged.
+
+      Build: cargo build -p kernel clean (43.12s).
+      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+      25s).
+      Stamp confirmed at build/serial-test.txt:
+        "[syscall/linux]   sendmsg/recvmsg fd lookup ordered
+        before msghdr validation (Linux: sockfd_lookup_light
+        fires before copy_msghdr_from_user; bad fd → EBADF
+        regardless of msghdr pointer validity): OK"

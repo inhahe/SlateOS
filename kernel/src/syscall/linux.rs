@@ -22241,40 +22241,93 @@ fn sys_recvfrom(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `sendmsg(sockfd, msghdr*, flags)`.
+///
+/// ## Batch 437 — fd lookup gates before msghdr validation
+///
+/// Linux's `__sys_sendmsg` (`net/socket.c`):
+/// ```c
+/// long __sys_sendmsg(int fd, struct user_msghdr __user *msg,
+///                    unsigned int flags, bool forbid_cmsg_compat)
+/// {
+///     int fput_needed, err;
+///     struct msghdr msg_sys;
+///     struct socket *sock;
+///
+///     sock = sockfd_lookup_light(fd, &err, &fput_needed);  // Gate 1: fd
+///     if (!sock)
+///         goto out;
+///
+///     err = ___sys_sendmsg(sock, msg, &msg_sys, flags,      // Gate 2: msg
+///                          NULL, 0);
+///     ...
+/// }
+///
+/// static int ___sys_sendmsg(...)
+/// {
+///     ...
+///     err = copy_msghdr_from_user(msg_sys, msg, &iov);     // copy_from_user
+///     ...
+/// }
+/// ```
+/// FD lookup runs FIRST.  Pre-batch we ran the msghdr NULL check
+/// and the `validate_user_read(args.arg1, 56)` access check BEFORE
+/// the fd lookup, so userspace observed `sendmsg(99, NULL, 0)` as
+/// EFAULT where Linux returns EBADF.  Translator-only swap.
 fn sys_sendmsg(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
+    // Linux gate 1: sockfd_lookup_light → EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Linux gate 2: copy_msghdr_from_user → EFAULT.  struct msghdr
+    // on x86_64 is 56 bytes (msg_name*, msg_namelen, msg_iov*,
+    // msg_iovlen, msg_control*, msg_controllen, msg_flags + padding).
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
-    // struct msghdr on x86_64 is 56 bytes (msg_name*, msg_namelen,
-    // msg_iov*, msg_iovlen, msg_control*, msg_controllen, msg_flags +
-    // padding).
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 56) {
         return linux_err(linux_errno_for(e));
-    }
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
     }
     linux_err(errno::EBADF)
 }
 
 /// `recvmsg(sockfd, msghdr*, flags)`.
+///
+/// Linux's `__sys_recvmsg` (`net/socket.c`) shares `__sys_sendmsg`'s
+/// gate order:
+/// ```c
+/// long __sys_recvmsg(int fd, struct user_msghdr __user *msg,
+///                    unsigned int flags, bool forbid_cmsg_compat)
+/// {
+///     ...
+///     sock = sockfd_lookup_light(fd, &err, &fput_needed);  // Gate 1: fd
+///     if (!sock)
+///         goto out;
+///
+///     err = ___sys_recvmsg(sock, msg, &msg_sys, flags, 0);  // Gate 2: msg
+///     ...
+/// }
+/// ```
+/// Same FD → MSG order as sendmsg.  See `sys_sendmsg` for the full
+/// Batch 437 rationale.
 fn sys_recvmsg(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
+    // Linux gate 1: sockfd_lookup_light → EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
+        return r;
+    }
+    // Linux gate 2: msghdr access.  recvmsg is read-modify-write
+    // (msg_flags gets updated), so validate both read and write.
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
-    // msghdr is read-modify-write for recvmsg (msg_flags gets updated).
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 56) {
         return linux_err(linux_errno_for(e));
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 56) {
         return linux_err(linux_errno_for(e));
-    }
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
     }
     linux_err(errno::EBADF)
 }
@@ -55665,6 +55718,66 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   sendto/recvfrom fd lookup ordered BETWEEN buf and addr (Linux: import_ubuf → sockfd_lookup_light → move_addr_to_kernel/user; bad fd with valid buf and bad addr → EBADF instead of EFAULT/EINVAL): OK"
+        );
+    }
+
+    // Batch 437: sendmsg / recvmsg — fd lookup gates BEFORE msghdr
+    // pointer validation, matching Linux's __sys_sendmsg /
+    // __sys_recvmsg in net/socket.c (sockfd_lookup_light runs before
+    // ___sys_sendmsg / ___sys_recvmsg, which call
+    // copy_msghdr_from_user).
+    //
+    // Pre-batch order was MSGHDR → FD; userspace observed:
+    //   sendmsg(99, NULL, 0)        pre EFAULT  Linux EBADF
+    //   sendmsg(99, BAD_PTR, 0)     pre EFAULT  Linux EBADF
+    //   recvmsg(99, NULL, 0)        pre EFAULT  Linux EBADF
+    //   recvmsg(99, BAD_PTR, 0)     pre EFAULT  Linux EBADF
+    //
+    // Kernel-ctx caveat unchanged.
+    {
+        let msghdr_buf = [0u8; 56];
+        let msghdr_ptr = msghdr_buf.as_ptr() as u64;
+
+        // sendmsg(fd=3, NULL, 0): fd OK (kernel ctx) → NULL msghdr
+        // → EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMSG, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendmsg(NULL,0) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::SENDMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sendmsg(fd=3, valid, 0): fd OK → ptr OK → terminal EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: msghdr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SENDMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendmsg(valid,0) post-reorder not EBADF ({})",
+                dispatch_linux(nr::SENDMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvmsg(fd=3, NULL, 0): fd OK → NULL → EFAULT.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RECVMSG, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvmsg(NULL,0) post-reorder not EFAULT ({})",
+                dispatch_linux(nr::RECVMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvmsg(fd=3, valid, 0): fd OK → ptr OK → EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: msghdr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RECVMSG, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvmsg(valid,0) post-reorder not EBADF ({})",
+                dispatch_linux(nr::RECVMSG, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   sendmsg/recvmsg fd lookup ordered before msghdr validation (Linux: sockfd_lookup_light fires before copy_msghdr_from_user; bad fd → EBADF regardless of msghdr pointer validity): OK"
         );
     }
 

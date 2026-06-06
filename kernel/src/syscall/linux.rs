@@ -20642,19 +20642,6 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
     let buf = args.arg1;
     let count = args.arg2;
     let offset = args.arg3 as i64;
-    // Linux's rw_verify_area (fs/read_write.c) is invoked before
-    // file operations and gates `(ssize_t)count < 0` with -EINVAL,
-    // BEFORE the fd lookup.  On 64-bit Linux ssize_t == i64, so the
-    // check rejects every count in (i64::MAX as u64, u64::MAX] with
-    // EINVAL.  Pre-batch our impl let oversized counts slip through
-    // to lookup_caller_fd, which then returned EBADF in kernel
-    // context (wrong errno) or — for a valid fd — handed an
-    // oversized length to the backend.  Match Linux's gate order:
-    // SSIZE_MAX overflow surfaces as EINVAL with strict `>` (the
-    // boundary value i64::MAX is accepted by Linux too).
-    if count > i64::MAX as u64 {
-        return linux_err(errno::EINVAL);
-    }
     if offset < 0 {
         return linux_err(errno::EINVAL);
     }
@@ -20666,6 +20653,23 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
         Ok(e) => e,
         Err(r) => return r,
     };
+    // Linux's gate order (fs/read_write.c ksys_pread64):
+    //   1. pos < 0     -> -EINVAL   (above)
+    //   2. fd lookup   -> -EBADF    (above)
+    //   3. FMODE_PREAD -> -ESPIPE   (below per-kind switch)
+    //   4. vfs_read -> rw_verify_area:
+    //        (ssize_t)count < 0 -> -EINVAL   <-- here
+    // Position the count > SSIZE_MAX gate AFTER fd lookup to match
+    // Linux exactly.  Batch 271 incorrectly placed this gate before
+    // the fd lookup, which made pread64(fd=-1, count=u64::MAX, 0)
+    // return EINVAL where Linux returns EBADF.  Batch 272 corrects
+    // the position.  In kernel context (caller_pid() == None) this
+    // gate is unreachable (lookup_caller_fd always errors EBADF
+    // first), but it correctly fires for any future userspace
+    // caller with a valid fd and an oversized count.
+    if count > i64::MAX as u64 {
+        return linux_err(errno::EINVAL);
+    }
     match entry.kind {
         HandleKind::File => {
             #[allow(clippy::cast_sign_loss)]
@@ -20706,13 +20710,6 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
     let buf = args.arg1;
     let count = args.arg2;
     let offset = args.arg3 as i64;
-    // Linux's rw_verify_area gates `(ssize_t)count < 0` -> -EINVAL
-    // ahead of the fd lookup; see the matching comment in sys_pread64.
-    // Pre-batch oversized counts slipped through to lookup_caller_fd
-    // and surfaced as EBADF in kernel context (wrong errno).
-    if count > i64::MAX as u64 {
-        return linux_err(errno::EINVAL);
-    }
     if offset < 0 {
         return linux_err(errno::EINVAL);
     }
@@ -20724,6 +20721,12 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
         Ok(e) => e,
         Err(r) => return r,
     };
+    // Linux gate order is pos -> fd -> ESPIPE -> count via
+    // rw_verify_area; see the matching comment in sys_pread64.
+    // Batch 272 corrects batch 271's pre-fd placement.
+    if count > i64::MAX as u64 {
+        return linux_err(errno::EINVAL);
+    }
     match entry.kind {
         HandleKind::File => {
             #[allow(clippy::cast_sign_loss)]
@@ -45934,67 +45937,68 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
 
-        // ---- pread64/pwrite64 count > SSIZE_MAX -> EINVAL ----
-        // Linux's rw_verify_area (fs/read_write.c) is invoked from
-        // every positional-I/O syscall and gates
-        //   if (unlikely((ssize_t) count < 0)) return -EINVAL;
-        // BEFORE the fd lookup.  On 64-bit Linux ssize_t == i64,
-        // so the check rejects every count in
-        // (i64::MAX as u64, u64::MAX] with EINVAL.  Pre-batch our
-        // sys_pread64 / sys_pwrite64 let oversized counts slip
-        // through to lookup_caller_fd, which returned EBADF in
-        // kernel context (wrong errno discriminator) or — for a
-        // valid fd — handed an oversized length to the backend.
-        // Mirror Linux exactly with a strict `>` test: count ==
-        // i64::MAX is accepted.
+        // ---- pread64/pwrite64 fd-before-count gate order ----
+        // Linux's gate order in ksys_pread64 / ksys_pwrite64
+        // (fs/read_write.c) is:
+        //   1. pos < 0     -> -EINVAL
+        //   2. fd lookup   -> -EBADF
+        //   3. FMODE_PREAD -> -ESPIPE
+        //   4. rw_verify_area count -> -EINVAL (inside vfs_read)
+        // Batch 271 mistakenly placed the count > SSIZE_MAX gate
+        // BEFORE the fd lookup, which made
+        // pread64(fd=-1, count=u64::MAX, pos=0) return -EINVAL
+        // where Linux returns -EBADF (fd checked first).  Batch 272
+        // moves the count gate to AFTER lookup_caller_fd so it
+        // matches Linux's order exactly.  In kernel context the
+        // gate is unreachable (lookup_caller_fd always errors EBADF
+        // first), so the discriminators verify the EBADF priority
+        // — i.e., that the fd gate still fires for oversized
+        // counts.
         {
-            // Discriminator A: pread64(fd=-1, buf=0, count=u64::MAX,
-            // offset=0) -> -EINVAL (the new SSIZE_MAX gate fires
-            // before lookup_caller_fd).  Pre-batch returned EBADF.
+            // Discriminator A: pread64(fd=-1, count=u64::MAX, pos=0)
+            //   batch-271-buggy -> -EINVAL (count gate fired first)
+            //   batch-272-fix  -> -EBADF  (fd gate fires first,
+            //                              matches Linux)
             let a = SyscallArgs {
                 arg0: u64::MAX, arg1: 0, arg2: u64::MAX, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EINVAL) {
+            if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EBADF) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: pread64 count=u64::MAX not EINVAL"
+                    "[syscall/linux]   FAIL: pread64(fd=-1, count=u64::MAX) not EBADF"
                 );
                 return Err(KernelError::InternalError);
             }
 
-            // Discriminator B: pwrite64(fd=-1, buf=0,
-            // count=i64::MAX as u64 + 1, offset=0) -> -EINVAL —
-            // smallest SSIZE_MAX-boundary failure, also covers the
-            // pwrite path.  Pre-batch returned EBADF.
+            // Discriminator B: pwrite64(fd=-1, count=SSIZE_MAX+1, pos=0)
+            //   Same correction symmetrically for pwrite.
             let too_big = (i64::MAX as u64).wrapping_add(1);
             let a = SyscallArgs {
                 arg0: u64::MAX, arg1: 0, arg2: too_big, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::PWRITE64, &a).value != -i64::from(errno::EINVAL) {
+            if dispatch_linux(nr::PWRITE64, &a).value != -i64::from(errno::EBADF) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: pwrite64 count=SSIZE_MAX+1 not EINVAL"
+                    "[syscall/linux]   FAIL: pwrite64(fd=-1, count=SSIZE_MAX+1) not EBADF"
                 );
                 return Err(KernelError::InternalError);
             }
 
-            // Discriminator C: pread64(fd=-1, buf=0,
-            // count=i64::MAX as u64, offset=0) -> -EBADF.
-            // Acceptance: proves the gate is strict `>` exactly
-            // matching Linux's `(ssize_t)count < 0`.  Pre-batch
-            // would also have returned EBADF here, but the (A, B)
-            // -> EINVAL pair is what proves the gate fires.
-            let max_ok = i64::MAX as u64;
+            // Discriminator C: pread64(fd=-1, pos < 0, count=1) -> -EINVAL
+            //   Acceptance: pos < 0 still fires BEFORE the fd
+            //   lookup (Linux gate 1).  Confirms the pos gate's
+            //   position is unchanged by batch 272's count gate
+            //   move.  u64::MAX as i64 == -1, so pos < 0.
             let a = SyscallArgs {
-                arg0: u64::MAX, arg1: 0, arg2: max_ok, arg3: 0, arg4: 0, arg5: 0,
+                arg0: u64::MAX, arg1: 0, arg2: 1, arg3: u64::MAX, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EBADF) {
+            if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EINVAL) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: pread64 count=i64::MAX not EBADF (gate is not exclusive)"
+                    "[syscall/linux]   FAIL: pread64(fd=-1, pos<0) not EINVAL"
                 );
                 return Err(KernelError::InternalError);
             }
 
             serial_println!(
-                "[syscall/linux]   pread64/pwrite64 count SSIZE_MAX gating: OK"
+                "[syscall/linux]   pread64/pwrite64 fd-before-count gate order: OK"
             );
         }
 

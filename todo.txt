@@ -23347,3 +23347,76 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      batch.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+301.  syscall/linux: pread64/pwrite64 — correct count gate
+##      position (batch 272 — fixes batch 271).
+##
+##      Pre-batch (i.e. post-batch-271) divergence: Linux's actual
+##      gate order in ksys_pread64 / ksys_pwrite64 (fs/read_write.c)
+##      is:
+##        1. pos < 0     -> -EINVAL
+##        2. fd lookup   -> -EBADF
+##        3. FMODE_PREAD -> -ESPIPE
+##        4. vfs_read -> rw_verify_area:
+##             (ssize_t)count < 0 -> -EINVAL   <-- count check HERE
+##      Batch 271 incorrectly placed the count > SSIZE_MAX gate
+##      BEFORE the fd lookup based on a misreading of where
+##      rw_verify_area sits in the call chain (it's invoked from
+##      inside vfs_read, AFTER fdget).  The observable consequence:
+##      pread64(fd=-1, count=u64::MAX, pos=0) returned -EINVAL
+##      where Linux returns -EBADF (fd checked first).  Caught on
+##      a pre-tick review of Linux 6.x source rather than a
+##      regression in the boot test, since the boot test itself
+##      was written against the wrong expectation.
+##
+##      Fix in sys_pread64 (line ~20640) and sys_pwrite64
+##      (line ~20691): move the
+##        if count > i64::MAX as u64 {
+##            return linux_err(errno::EINVAL);
+##        }
+##      gate from "before offset check" to "after lookup_caller_fd
+##      succeeds".  This restores Linux's exact order:
+##      pos < 0 -> EINVAL, then fd -> EBADF, then count -> EINVAL.
+##      In kernel context (caller_pid() == None) the count gate is
+##      unreachable (lookup_caller_fd always errors EBADF first),
+##      but it correctly fires for any future userspace caller
+##      with a valid fd and an oversized count.
+##
+##      Self-tests rewritten (pread/pwrite gate-order triple):
+##        A. pread64(fd=-1, count=u64::MAX, pos=0)
+##             batch-271: -EINVAL (BUG); batch-272: -EBADF (Linux).
+##        B. pwrite64(fd=-1, count=SSIZE_MAX+1, pos=0)
+##             batch-271: -EINVAL (BUG); batch-272: -EBADF (Linux).
+##        C. pread64(fd=-1, pos<0, count=1) -> -EINVAL.
+##             Acceptance: pos < 0 still fires BEFORE the fd
+##             lookup (Linux gate 1).  Pre- and post-batch.
+##
+##      Marker:
+##        "[syscall/linux]   pread64/pwrite64 fd-before-count gate order: OK"
+##        (renamed from "count SSIZE_MAX gating" to reflect what
+##         the discriminators actually verify in kernel context.)
+##
+##      Lesson captured: when porting a Linux gate sequence, also
+##      check the FUNCTION CALL CHAIN — `rw_verify_area` is
+##      defined in fs/read_write.c but called from `vfs_read` /
+##      `vfs_write`, not the syscall entry.  The user-visible
+##      gate position is determined by the call site, not the
+##      function definition.  Future batches: when in doubt, dump
+##      the actual ksys_* function body and verify the order
+##      against the SYSCALL_DEFINE wrapper.
+##
+##      Existing tests preserved: capset pid != current EPERM
+##      (batch 270), prctl(PR_SET_NAME) NULL-arg2 (batch 269),
+##      capget/capset NULL-data quadruple (batch 268),
+##      preadv/pwritev iov_len SSIZE_MAX (batch 267) — all
+##      unaffected by this position move.  The pread64/pwrite64
+##      negative-offset + valid-args probes at line ~44230 are
+##      unchanged and continue to behave as documented.
+##
+##      Known limitations: unchanged from batch 271 — pos+count
+##      EOVERFLOW gate and MAX_RW_COUNT silent clamp are still
+##      not implemented.  Both are benign with our current
+##      backends but should land before we gain a backend that
+##      honours `pos + count` directly.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

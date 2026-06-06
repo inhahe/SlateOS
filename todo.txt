@@ -25829,3 +25829,111 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (53.55s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 24s).
+
+325. Linux ABI batch 295 — sys_kcmp pid_t/int
+     register truncation per x86_64 syscall ABI.
+
+     Divergence
+     ----------
+     Linux's signature is
+         SYSCALL_DEFINE5(kcmp, pid_t, pid1, pid_t, pid2,
+                         int, type,
+                         unsigned long, idx1,
+                         unsigned long, idx2)
+     so on x86_64 the kernel function body only sees the
+     low 32 bits of arg0/arg1/arg2.  Pre-batch our
+     dispatcher already truncated pid1/pid2 to i32 for
+     the negative-pid ESRCH gate (added in batch 290's
+     gate-order fix), but downstream we still read:
+       - `let typ = args.arg2;` (raw u64)
+       - `let tid1: u64 = args.arg0;`
+       - `let tid2: u64 = args.arg1;`
+     These raw values fed both the type switch (`typ > 7
+     -> EINVAL`) and the kernel-context fallbacks for
+     same_proc / VM-ordering / FILE-ordering.  A probe
+     with sentinel high bits in any of these three args
+     produced results Linux cannot observe:
+       - typ = 0x1_0000_0007: Linux truncates to int 7
+         (KCMP_EPOLL_TFD), returns 3; we returned EINVAL
+         because 0x1_0000_0007 > 7 as u64.
+       - typ = 0xFFFF_FFFF: Linux treats as int -1, hits
+         the switch default -> EINVAL.  We also returned
+         EINVAL, but via the unsigned > 7 path — right
+         answer for the wrong reason (a pre-batch
+         test-only divergence, not user-observable).
+       - (pid1 = 0x1_0000_0001, pid2 = 0x2, type =
+         KCMP_VM, kernel ctx): Linux compares truncated
+         (1, 2) -> 1; we compared raw u64
+         0x1_0000_0001 > 2 -> 2.
+       - (pid1 = 0x1_0000_0005, pid2 = 0x5, type =
+         KCMP_FILE, idx1 = idx2 = 4, kernel ctx): Linux
+         truncates both to 5, same_proc fallback
+         (tid1 == tid2), idx eq -> 0; we saw raw tids
+         differ and went to the "different owners" arm,
+         returning 2.
+
+     Fix
+     ---
+     In sys_kcmp at kernel/src/syscall/linux.rs ~17604:
+       - Re-widen tid1/tid2 from pid1_i32/pid2_i32 (via
+         `pid_i32 as u64` with clippy::cast_sign_loss
+         allow) so the thread-table key and the
+         kernel-ctx ordering operand both honour Linux's
+         post-truncation view.
+       - Cast args.arg2 to i32 at entry, reject
+         negative via EINVAL (matches Linux's switch
+         default), then check truncated typ > 7 ->
+         EINVAL.  Re-widen via `typ_i32 as u64` for the
+         downstream KCMP_* matches that still take u64.
+       - Preserved the existing pid-ESRCH-ahead-of-type-
+         EINVAL gate order (batch 290) and the
+         KCMP_EPOLL_TFD null/validate-user-read handling.
+
+     New self-tests
+     --------------
+     Added four probes in dispatch_linux's kcmp block
+     before a new marker
+       "[syscall/linux]   kcmp pid_t/int truncation: OK":
+       (a) (pid1=1, pid2=1, type=0x1_0000_0007, idx2=
+           valid kcmp_epoll_slot) -> 3 (was EINVAL).
+       (b) (pid1=1, pid2=1, type=0xFFFF_FFFF) -> EINVAL
+           via the new sign check.  Result unchanged
+           pre/post-batch but path differs.
+       (c) (pid1=0x1_0000_0001, pid2=0x2, type=KCMP_VM)
+           -> 1 (was 2).
+       (d) (pid1=0x1_0000_0005, pid2=0x5, type=KCMP_FILE,
+           idx1=idx2=4) -> 0 (was 2).
+
+     Preserved
+     ---------
+     - Existing pid-ESRCH-ahead-of-type-EINVAL gate
+       order, including u64::MAX-as-pid probes.
+     - KCMP_EPOLL_TFD pointer validation (NULL ->
+       EFAULT, valid -> 3 since we have no epoll).
+     - KCMP_FILE userspace path's pcb::linux_fd_lookup
+       and HandleKind ordering — unchanged because that
+       arm runs only when caller_pid() is Some, and the
+       i32 truncation of args.arg3/args.arg4 was already
+       in place pre-batch.
+
+     Known limitations / out of scope
+     --------------------------------
+     - Linux's ptrace_may_access EPERM gate (between
+       find_task and the type switch) is still not
+       modeled; we have no ptrace ACL.  Independent of
+       truncation.
+     - Linux's KCMP_FILE compares struct file pointers
+       across processes; our model has no shared
+       open-file description layer, so cross-proc
+       KCMP_FILE always returns a deterministic order
+       rather than a true identity result.  Documented
+       under entry 111's known limitations; not a
+       truncation issue.
+     - KCMP_EPOLL_TFD always returns 3 ("not
+       comparable") regardless of the slot's tfd/efd
+       values because we have no epoll instances.
+       Independent of this batch.
+
+     Build: cargo build -p kernel clean (46.16s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 24s).

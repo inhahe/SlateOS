@@ -17601,6 +17601,14 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
     // returns `ESRCH` (the pid lookup fires first).  Hoist the pid /
     // task-liveness gate ahead of the type-range gate so probes see
     // the Linux-shaped errno discriminator.
+    // x86_64 syscall ABI register truncation: pid_t and int are 32-bit
+    // C types delivered in 64-bit registers.  Linux's prototype
+    // `SYSCALL_DEFINE5(kcmp, pid_t pid1, pid_t pid2, int type, ...)`
+    // means the kernel function body only ever sees the low 32 bits.
+    // Cast at entry so probes with sentinel high bits (e.g.
+    // `pid1 = 0x1_0000_0001`) behave identically to the truncated form
+    // (`pid1 = 1`), both for the ESRCH gate and for the downstream
+    // thread/owner lookups that drive the same-process predicate.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid1_i32 = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -17609,8 +17617,13 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::ESRCH);
     }
 
-    let tid1: u64 = args.arg0;
-    let tid2: u64 = args.arg1;
+    // Re-widen post-truncation for the thread table key.  Using the raw
+    // 64-bit arg here would let probes distinguish the high half of the
+    // register, which Linux cannot observe.
+    #[allow(clippy::cast_sign_loss)]
+    let tid1: u64 = pid1_i32 as u64;
+    #[allow(clippy::cast_sign_loss)]
+    let tid2: u64 = pid2_i32 as u64;
     let owner1 = crate::proc::thread::owner_process(tid1);
     let owner2 = crate::proc::thread::owner_process(tid2);
     let kernel_ctx = caller_pid().is_none();
@@ -17624,10 +17637,17 @@ fn sys_kcmp(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::ESRCH);
     }
 
-    let typ = args.arg2;
-    if typ > 7 {
+    // Linux's `int type` truncates to i32 before the switch; a sentinel
+    // arg of `0x1_0000_0007` reaches the KCMP_EPOLL_TFD arm rather than
+    // the default EINVAL.  Negative values fall through to the default
+    // arm in Linux (no signed match), so we map them to EINVAL.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let typ_i32 = args.arg2 as i32;
+    if typ_i32 < 0 || typ_i32 > 7 {
         return linux_err(errno::EINVAL);
     }
+    #[allow(clippy::cast_sign_loss)]
+    let typ = typ_i32 as u64;
 
     // KCMP_EPOLL_TFD: idx2 is a pointer to struct kcmp_epoll_slot
     // (u32 efd, u32 tfd, u64 toff = 16 bytes).  Honour the pointer
@@ -42250,6 +42270,91 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   kcmp pid-ESRCH-ahead-of-type-EINVAL gate order: OK"
         );
+
+        // Batch 295: x86_64 syscall ABI register truncation for kcmp's
+        // declared C types — `pid_t pid1`, `pid_t pid2`, `int type`.
+        // Pre-batch the dispatcher read `arg2` raw (u64) and used the
+        // raw 64-bit `args.arg0`/`args.arg1` as the thread-table key and
+        // ordering operand, so probes with sentinel high bits saw
+        // results Linux cannot produce.
+
+        // (a) type = 0x1_0000_0007 + valid kcmp_epoll_slot ptr.
+        // Linux truncates to int -> 7 (KCMP_EPOLL_TFD), returns 3.
+        // Pre-batch: raw 0x1_0000_0007 > 7 -> EINVAL (wrong).
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: 1,
+            arg2: 0x1_0000_0007,
+            arg3: 0,
+            arg4: slot_ptr,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::KCMP, &a).value != 3 {
+            serial_println!(
+                "[syscall/linux]   FAIL: kcmp type high-half not truncated to EPOLL_TFD"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) type = 0xFFFF_FFFF.  As i32 this is -1, which has no
+        // matching switch arm -> EINVAL (default).  Pre-batch we already
+        // returned EINVAL via the unsigned > 7 path, but for the wrong
+        // reason; the truncation-aware sign-check is the Linux gate.
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: 1,
+            arg2: 0xFFFF_FFFF,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::KCMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: kcmp type i32(-1) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) (pid1 = 0x1_0000_0001, pid2 = 0x2, type = KCMP_VM).
+        // Linux truncates both pids to i32 -> (1, 2).  In kernel-ctx the
+        // owner table is empty, so the fallback compares the *truncated*
+        // tids: 1 < 2 -> result 1.  Pre-batch the raw-u64 tids gave
+        // 0x1_0000_0001 > 2 -> result 2.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001,
+            arg1: 0x2,
+            arg2: 1,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::KCMP, &a).value != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: kcmp pid high-half not truncated for VM order"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) (pid1 = 0x1_0000_0005, pid2 = 0x5, type = KCMP_FILE,
+        //      idx1 = 4, idx2 = 4).  Linux truncates both pids -> (5, 5),
+        // the kernel-context fallback sees same_proc via tid1 == tid2,
+        // and idx1 == idx2 -> 0.  Pre-batch the raw tids differed, so
+        // we took the "different owners" arm and returned 2 because
+        // 0x1_0000_0005 > 5.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0005,
+            arg1: 0x5,
+            arg2: 0,
+            arg3: 4,
+            arg4: 4,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::KCMP, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: kcmp pid high-half not truncated for FILE same_proc"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!("[syscall/linux]   kcmp pid_t/int truncation: OK");
 
         // restart_syscall -> EINTR.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

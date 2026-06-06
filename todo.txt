@@ -24552,4 +24552,96 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=240 PASSED (BOOT_OK at 22s).
 
+315. [2026-06-06] Batch 285: Linux ABI translation —
+     sys_sched_get_priority_max and sys_sched_get_priority_min
+     now truncate `policy` to int before matching, mirroring
+     Linux's syscall stub which declares `int policy` and
+     thereby drops the high 32 bits of the syscall register.
+
+     Pre-batch divergence
+     --------------------
+     Linux's kernel/sched/syscalls.c::SYSCALL_DEFINE1(
+       sched_get_priority_max, int, policy)
+     casts the 64-bit syscall register to the declared `int`
+     before entering the switch, so a probe with
+       policy = 0x0000_0001_0000_0001
+     truncates to (int)0x0000_0001 = 1 = SCHED_FIFO and
+     returns 99 (MAX_USER_RT_PRIO - 1).
+
+     Our pre-batch stub matched on `args.arg0 as u64`
+     directly, with no truncation:
+         match args.arg0 {
+             1 | 2 => ok(99),
+             0 | 3 | 5 | 6 | 7 => ok(0),
+             _ => EINVAL,
+         }
+     so 0x0000_0001_0000_0001 fell into the catch-all arm and
+     returned EINVAL.  Same divergence for
+     sys_sched_get_priority_min — the two routines are
+     symmetric and shared the same bug.
+
+     This is probe-distinguishable in kernel context: the
+     routines are pure value-based, no validate_user_*, no
+     fd lookup.  A fuzzer or libc shim that happens to leave
+     dirty high bits in the syscall register (which can
+     occur when the C-level prototype is `long` rather than
+     `int`, common in older glibc stubs and in hand-rolled
+     assembly callers) would see a Linux-only "policy 1
+     works" / our "EINVAL" split.
+
+     Fix
+     ---
+     Cast args.arg0 to i32 BEFORE the match, with the
+     standard truncation/wrap allowances:
+         let policy = args.arg0 as i32;
+         match policy {
+             1 | 2 => SyscallResult::ok(99),
+             0 | 3 | 5 | 6 | 7 => SyscallResult::ok(0),
+             _ => linux_err(errno::EINVAL),
+         }
+     Identical change in sys_sched_get_priority_min.  This is
+     the same `int` truncation pattern we already use for
+     sys_sched_setscheduler / sys_sched_getscheduler /
+     sys_sched_rr_get_interval and most other "int-arg-0"
+     syscalls — both routines were outliers.
+
+     New self-tests:
+       - sched_get_priority_max(0x1_0000_0001) -> 99
+         (Linux truncates to SCHED_FIFO)
+       - sched_get_priority_min(0x1_0000_0001) -> 1
+       - sched_get_priority_max(0x1_0000_0063) -> EINVAL
+         (Linux truncates to 99 == invalid policy; high
+         bits must not "rescue" the value)
+       - sched_get_priority_max(u64::MAX) -> EINVAL
+         (confirms the (int)-1 path; this happens to work
+         pre-fix too via the same catch-all, but is included
+         so the truncation contract is documented in tests).
+
+     Marker:
+       "sched_get_priority_{max,min} int truncation: OK"
+
+     Preserved self-tests (still pass):
+       - sched_get_priority_max(SCHED_OTHER=0) -> 0
+       - sched_get_priority_max(SCHED_FIFO=1)  -> 99
+       - sched_get_priority_min(SCHED_FIFO=1)  -> 1
+       - sched_get_priority_max(99)            -> EINVAL
+
+     Known limitations
+     -----------------
+     - i32 truncation is signed.  For policy values in
+       [2^31, 2^32), the low 32 bits are interpreted as a
+       negative int (e.g. 0x80000000 -> -2147483648).  This
+       matches Linux's `int policy` semantics — the kernel
+       doesn't accept any negative policy value, so all of
+       these correctly fall to EINVAL.
+     - SCHED_EXT (policy 7) was added in Linux 6.12.  We
+       continue to accept it (returning max=0, min=0) to
+       match the modern kernel; older kernels return EINVAL
+       here.  Same call shape as before the batch — no
+       change to SCHED_EXT acceptance.
+
+     Build: cargo build -p kernel clean.
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=240 PASSED (BOOT_OK at 22s).
+
 

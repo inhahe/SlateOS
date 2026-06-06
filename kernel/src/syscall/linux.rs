@@ -8281,7 +8281,15 @@ fn sys_sched_setparam(args: &SyscallArgs) -> SyscallResult {
 /// We mirror that exactly even though we don't honour real-time
 /// priorities — programs sanity-check the value before using it.
 fn sys_sched_get_priority_max(args: &SyscallArgs) -> SyscallResult {
-    let policy = args.arg0;
+    // Linux's syscall signature is `SYSCALL_DEFINE1(sched_get_priority_max,
+    // int, policy)`.  The x86_64 syscall ABI passes args in 64-bit
+    // registers, but the syscall stub casts to the declared `int` type,
+    // truncating to the low 32 bits before the switch runs.  Pre-batch
+    // we matched on the raw u64, so probes that left high bits dirty
+    // (e.g. policy = 0x1_0000_0001) saw EINVAL where Linux truncates
+    // to 1 (SCHED_FIFO) and returns 99.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let policy = args.arg0 as i32;
     match policy {
         1 | 2 => SyscallResult::ok(99),                 // FIFO / RR
         0 | 3 | 5 | 6 | 7 => SyscallResult::ok(0),      // OTHER / BATCH / IDLE / DEADLINE / EXT
@@ -8297,7 +8305,10 @@ fn sys_sched_get_priority_max(args: &SyscallArgs) -> SyscallResult {
 ///   - SCHED_OTHER / SCHED_BATCH / SCHED_IDLE -> 0
 ///   - unknown -> -EINVAL
 fn sys_sched_get_priority_min(args: &SyscallArgs) -> SyscallResult {
-    let policy = args.arg0;
+    // Same `int policy` truncation as sched_get_priority_max — see that
+    // function's comment for the divergence Linux mirrors.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let policy = args.arg0 as i32;
     match policy {
         1 | 2 => SyscallResult::ok(1),
         0 | 3 | 5 | 6 | 7 => SyscallResult::ok(0),
@@ -32856,6 +32867,55 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 285: sched_get_priority_max/min must truncate policy
+        // to int before matching, since Linux's syscall stub declares
+        // `int policy`.  Probes with high bits set in the 64-bit reg
+        // (policy = 0x1_0000_0001) should be treated as 1 (SCHED_FIFO)
+        // and return 99 / 1, not EINVAL.  Pre-batch we matched on the
+        // raw u64 and returned EINVAL.
+        let a = SyscallArgs { arg0: 0x1_0000_0001, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value != 99 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_max(0x1_0000_0001) not 99 ({})",
+                dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MIN, &a).value != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_min(0x1_0000_0001) not 1"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Also exercise the negative-policy (sign-extended) path.
+        // policy = 0xFFFF_FFFF_FFFF_FFFF -> int policy = -1, no switch
+        // arm matches -> EINVAL.  This already happened pre-batch
+        // (no arm for u64::MAX), so it's a confirmation probe.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_max(-1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // And the truncation must drop high bits entirely — high bits
+        // setting policy = 0x1_0000_0063 (low 32 = 99) should return
+        // EINVAL (policy 99 isn't valid), not silently succeed.
+        let a = SyscallArgs { arg0: 0x1_0000_0063, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_max(high+99) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_get_priority_{{max,min}} int truncation: OK"
+        );
         // Batch 254: sched_setscheduler now matches Linux's gate
         // order — outer policy<0 > param NULL/pid<0 > copy_from_user
         // > find_pid > policy switch > priority > RTPRIO.  Stack-

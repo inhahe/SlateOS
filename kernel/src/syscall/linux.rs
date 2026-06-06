@@ -17715,9 +17715,30 @@ fn sys_name_to_handle_at(args: &SyscallArgs) -> SyscallResult {
 ///   3. `handle_bytes` (first 4 bytes of the header) must be > 0 and
 ///      ≤ `MAX_HANDLE_SZ (128)` — Linux rejects both extremes with
 ///      `EINVAL` before any further work.
-///   4. The full handle payload (`8 + handle_bytes`) must be readable.
-///   5. Terminal: `EPERM` — open-by-handle requires `CAP_DAC_READ_SEARCH`
-///      which we never grant.
+///   4. `handle_type` (next 4 bytes of the header as signed int) must
+///      be ≥ 0.  Linux's `fs/fhandle.c::handle_to_path` rejects
+///      negative `handle_type` with `EINVAL` ahead of payload copying
+///      because negative values are reserved for kernel-internal
+///      sentinels (`FILEID_INVALID = 0xff`, expressed as `255`, is
+///      positive at u32 width but negative at i32 width).
+///   5. The full handle payload (`8 + handle_bytes`) must be readable.
+///   6. Terminal: `EOPNOTSUPP` — batch 387 fix.  Linux's
+///      `handle_to_path` runs the privilege check (`may_decode_fh`)
+///      inside `vfs_dentry_acceptable`, which is only invoked AFTER
+///      `eops = mnt->mnt_sb->s_export_op` and `eops->fh_to_dentry`
+///      are confirmed non-NULL.  No filesystem in our kernel
+///      registers an `s_export_op`, so `eops == NULL` fires first
+///      and the syscall terminates with `EOPNOTSUPP`, not `EPERM`.
+///      This mirrors batch 383's fix for `name_to_handle_at`: the
+///      same "no fs exports handles" early-out applies symmetrically
+///      to both ends of the fhandle API.  Userspace probes (CRIU's
+///      checkpoint snapshot, systemd-nspawn's pivot-root resolver)
+///      treat `EOPNOTSUPP` as "kernel has fhandle but FS doesn't
+///      export it" and fall back to path-based lookup; pre-batch
+///      `EPERM` was interpreted as "kernel rejects you for lacking
+///      `CAP_DAC_READ_SEARCH`" and the probes retried with elevated
+///      caps or aborted with a permission error message, neither of
+///      which matches the real situation.
 fn sys_open_by_handle_at(args: &SyscallArgs) -> SyscallResult {
     const AT_FDCWD: i32 = -100;
     const MAX_HANDLE_SZ: u32 = 128;
@@ -17749,15 +17770,39 @@ fn sys_open_by_handle_at(args: &SyscallArgs) -> SyscallResult {
     if handle_bytes == 0 || handle_bytes > MAX_HANDLE_SZ {
         return linux_err(errno::EINVAL);
     }
+    // Batch 387: handle_type < 0 → EINVAL.  Linux fs/fhandle.c:
+    //
+    //   if (f_handle.handle_type < 0 ||
+    //       FILEID_USER_FLAGS(f_handle.handle_type) &
+    //       ~FILEID_VALID_USER_FLAGS)
+    //       return -EINVAL;
+    //
+    // We mirror the literal `< 0` clause; the FILEID_USER_FLAGS
+    // sub-clause is version-dependent (FILEID_VALID_USER_FLAGS varies
+    // across 6.5/6.8/6.10) and our terminal is EOPNOTSUPP regardless,
+    // so the conservative `< 0` check is sufficient to surface the
+    // Linux-shaped EINVAL discriminator for the most common bogus
+    // values (e.g., the `FILEID_INVALID = 0xff` sentinel parsed as
+    // i32 is positive, so it does NOT trigger here — Linux treats
+    // it identically and lets it through to EOPNOTSUPP).
+    let handle_type = i32::from_ne_bytes(match <[u8; 4]>::try_from(&header[4..8]) {
+        Ok(b) => b,
+        Err(_) => return linux_err(errno::EINVAL),
+    });
+    if handle_type < 0 {
+        return linux_err(errno::EINVAL);
+    }
     let total = 8usize.saturating_add(handle_bytes as usize);
     if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
         return linux_err(linux_errno_for(e));
     }
-    // Same flags as openat (O_RDONLY/RDWR/WRONLY plus mode bits); Linux's
-    // file_open_root ignores O_CREAT/O_TRUNC/O_EXCL silently for handle
-    // opens, so no flag gate fires here.  Real open-by-handle requires
-    // CAP_DAC_READ_SEARCH, which we don't grant; mirror Linux's EPERM.
-    linux_err(errno::EPERM)
+    // Batch 387: was EPERM; corrected to EOPNOTSUPP.  Linux's
+    // handle_to_path checks `mnt->mnt_sb->s_export_op` for non-NULL
+    // BEFORE the may_decode_fh privilege check runs.  No filesystem
+    // in our kernel registers an s_export_op, so we never reach
+    // EPERM — the EOPNOTSUPP arm fires first.  Mirrors name_to_handle_at
+    // (batch 383) for symmetric fhandle behaviour.
+    linux_err(errno::EOPNOTSUPP)
 }
 
 /// `fsopen(fsname*, flags)` — create a filesystem context.  Flags are
@@ -49144,28 +49189,50 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: open_by_handle_at handle_bytes>MAX not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // open_by_handle_at with handle_bytes=8 and the full 16-byte
-        // buffer available -> EPERM (terminal; no CAP_DAC_READ_SEARCH).
+        // Batch 387: open_by_handle_at with valid handle_bytes=8 but
+        // handle_type < 0 -> EINVAL.  Linux fs/fhandle.c's handle_to_path
+        // explicitly rejects negative handle_type before any payload
+        // copy.  Encode handle_type = -1 (0xffff_ffff) at offset 4.
+        let neg_type_handle: [u8; 16] = {
+            let mut b = [0u8; 16];
+            b[0..4].copy_from_slice(&8u32.to_ne_bytes());
+            b[4..8].copy_from_slice(&(-1i32).to_ne_bytes());
+            b
+        };
+        let neg_type_ptr = neg_type_handle.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: neg_type_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: open_by_handle_at handle_type<0 not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 387: open_by_handle_at with handle_bytes=8, handle_type=0
+        // (positive), full 16-byte buffer -> EOPNOTSUPP (terminal; no
+        // filesystem in this kernel registers s_export_op, so Linux's
+        // handle_to_path returns EOPNOTSUPP before the may_decode_fh
+        // privilege check ever runs).  Pre-batch this was EPERM.
         let valid_handle: [u8; 16] = {
             let mut b = [0u8; 16];
             b[0..4].copy_from_slice(&8u32.to_ne_bytes());
+            // handle_type at offset 4..8 left as zero (a valid positive
+            // type, doesn't trigger handle_type<0 gate).
             b
         };
         let valid_handle_ptr = valid_handle.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: valid_handle_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: open_by_handle_at valid not EPERM");
+        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: open_by_handle_at valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
         // open_by_handle_at with mountdirfd=AT_FDCWD(-100) and valid
-        // handle -> EPERM (AT_FDCWD bypasses the fd-table check,
-        // matching Linux's get_path_anchor).
+        // handle -> EOPNOTSUPP (AT_FDCWD bypasses the fd-table check,
+        // matching Linux's get_path_anchor; terminal corrected to
+        // EOPNOTSUPP in batch 387).
         let a = SyscallArgs { arg0: -100i64 as u64, arg1: valid_handle_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: open_by_handle_at AT_FDCWD not EPERM");
+        if dispatch_linux(nr::OPEN_BY_HANDLE_AT, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: open_by_handle_at AT_FDCWD not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   open_by_handle_at handle validation: OK");
+        serial_println!("[syscall/linux]   open_by_handle_at handle_type<0 EINVAL + terminal EOPNOTSUPP (was EPERM): OK");
 
         // fsopen with bad flags -> EINVAL.
         let a = SyscallArgs { arg0: path_ptr, arg1: 0xff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

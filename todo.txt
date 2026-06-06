@@ -34951,3 +34951,58 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (39.78s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 25s).
+
+417. Batch 387 — open_by_handle_at: add handle_type < 0 EINVAL gate
+     and change terminal EPERM → EOPNOTSUPP (mirrors batch 383's
+     name_to_handle_at fix for the symmetric fhandle API end).
+
+     Divergence table:
+       Linux source : fs/fhandle.c::SYSCALL_DEFINE3(open_by_handle_at)
+                      → do_handle_open → handle_to_path
+       Gate added   : Linux handle_to_path():
+                        if (f_handle.handle_type < 0 ||
+                            FILEID_USER_FLAGS(handle_type) &
+                            ~FILEID_VALID_USER_FLAGS)
+                            return -EINVAL;
+                      Pre-batch we did not validate handle_type at all.
+                      Mirror the `< 0` clause; the FILEID_USER_FLAGS
+                      sub-clause is version-dependent across 6.5/6.8/
+                      6.10 and our terminal is EOPNOTSUPP regardless,
+                      so the conservative `< 0` check suffices.
+       Terminal fix : was EPERM (assumed CAP_DAC_READ_SEARCH gate);
+                      now EOPNOTSUPP.  Linux's handle_to_path checks
+                      `mnt->mnt_sb->s_export_op` for non-NULL BEFORE
+                      may_decode_fh runs:
+                        eops = ctx.root.mnt->mnt_sb->s_export_op;
+                        if (!eops) {
+                            retval = -EOPNOTSUPP;
+                            goto out_handle;
+                        }
+                      No filesystem in our kernel registers an
+                      s_export_op, so eops == NULL and EOPNOTSUPP
+                      fires first.  may_decode_fh (and thus EPERM)
+                      never runs.
+
+     Why it matters: CRIU's checkpoint snapshotter calls
+     open_by_handle_at to reopen files by their captured fhandle.
+     On a kernel where no FS exports handles (our state), Linux
+     returns EOPNOTSUPP and CRIU falls back to path-based reopening.
+     Pre-batch EPERM was interpreted by CRIU as "this kernel has
+     fhandle but rejected me for caps" — it retried with elevated
+     CAP_DAC_READ_SEARCH attempts or aborted with a permission
+     message, neither of which matched reality.  Same story for
+     systemd-nspawn's pivot-root resolver, which builds fhandles for
+     image rootfs reopen and treats EOPNOTSUPP as "use bind-mount
+     fallback" but EPERM as a fatal config error.
+
+     Probes added: (1) handle_type=-1 (i32) at offset 4 of the
+     16-byte handle buffer → EINVAL (new gate).  Existing two probes
+     (valid handle at mountdirfd=0 / mountdirfd=AT_FDCWD) updated:
+     was EPERM, now EOPNOTSUPP — and the valid_handle buffer now
+     explicitly comments that handle_type=0 at offset 4..8 is a
+     positive type (doesn't trip the new gate).  New aggregate stamp:
+       "[syscall/linux]   open_by_handle_at handle_type<0 EINVAL
+        + terminal EOPNOTSUPP (was EPERM): OK"
+
+     Build: cargo build -p kernel clean (46.31s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).

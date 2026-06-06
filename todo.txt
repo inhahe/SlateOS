@@ -29010,3 +29010,97 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (36.52s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 24s).
+
+359. Batch 329 — sys_futex_waitv unsigned-int
+     truncation (high-half of flags must be masked
+     before the != 0 reject gate).
+
+     Divergence: Linux's sys_futex_waitv signature is
+     `SYSCALL_DEFINE5(futex_waitv, struct futex_waitv
+     __user *, waiters, unsigned int, nr_futexes,
+     unsigned int, flags, struct __kernel_timespec
+     __user *, timeout, clockid_t, clockid)`.  `flags`
+     is C `unsigned int`, delivered in rdx.  The AMD64
+     syscall ABI does not zero-extend `unsigned int`
+     across the syscall instruction, so Linux observes
+     only the low 32 bits.
+
+     Our pre-fix implementation did `if args.arg2 != 0
+     { return EINVAL; }` at u64 width.  A caller
+     passing flags=0x1_0000_0000 (high-only) hit the
+     u64 gate and was rejected with EINVAL where
+     Linux's truncated flags=0 advances past the flag
+     gate into the nr/waiters check.  More importantly,
+     in the nr=1 fast path success route, this
+     pre-mature EINVAL prevented the dispatched
+     sys_futex_wait from being reached.
+
+     Fix: in sys_futex_waitv (kernel/src/syscall/
+     linux.rs line ~20248), cast args.arg2 to u32
+     before the != 0 gate:
+       #[allow(clippy::cast_possible_truncation)]
+       let flags = args.arg2 as u32;
+       if flags != 0 {
+           return linux_err(errno::EINVAL);
+       }
+
+     Tests added to dispatch_linux (after existing
+     "futex_waitv nr=1 fast path wiring: OK" marker
+     around line 47486).  All four probes reuse the
+     SIZE_U32 `valid` WaitvEntry from the fast-path
+     block (uaddr=0) so the dispatched sys_futex_wait
+     returns EFAULT as the success-path discriminator:
+       (a) flags=0x1_0000_0000, nr=1, waitv=v_ptr
+           → EFAULT (high|0; truncates to 0, advances
+            through gates to fast-path uaddr=0
+            EFAULT).  Pre-fix returned EINVAL via the
+            un-truncated flag gate.
+       (b) flags=0x1_0000_0001, nr=1, waitv=v_ptr
+           → EINVAL (high|bad-low 1; truncates to 1,
+            flag gate still rejects nonzero low half).
+       (c) flags=0x1_0000_0002, nr=1, waitv=v_ptr
+           → EINVAL (high|bad-low 2; independent low
+            bit confirms the mask covers more than the
+            LSB).
+       (d) flags=0x1_0000_0000, nr=2, waitv=v_ptr
+           → ENOSYS (high|0; truncates to 0,
+            nr/waiters gate accepts nr=2, nr>1 path
+            returns ENOSYS for multi-key wait).
+            Distinct terminal from (a) confirms the
+            flag mask doesn't accidentally re-trip an
+            EINVAL downstream.
+     Marker: "[syscall/linux]   futex_waitv unsigned-
+              int truncation (high-half ignored): OK".
+
+     Preserved: existing futex_waitv probes still
+     pass:
+       - nr=0, flags=0 → EINVAL (combined gate).
+       - nr=200, flags=0 → EINVAL (FUTEX_WAITV_MAX
+         exceeded).
+       - waiters=valid, nr=1, flags=1 → EINVAL (flag
+         gate rejects 1 as bad bit).
+       - NULL waiters, nr=1, flags=0 → EINVAL.
+       - nr=0, flags=0xdead_beef → EINVAL (flag gate
+         fires first; mask truncates 0xdead_beef
+         which is still nonzero so still rejects).
+       - bad clockid with timeout → EINVAL.
+       - SIZE_U16/U8 → EINVAL (per-entry gate).
+       - reserved!=0 → EINVAL.
+       - unknown per-entry flag bit → EINVAL.
+       - FUTEX2_NUMA bit → EINVAL.
+       - SIZE_U32 entry with uaddr=0 → EFAULT.
+       - SIZE_U32 | PRIVATE with uaddr=0 → EFAULT.
+
+     Known limitations:
+     - `nr_futexes` (arg1) was already cast to u32 in
+       a prior batch — the FUTEX_WAITV_MAX comparison
+       remains correct against the truncated form.
+     - `clockid` (arg4) is C int and was already cast
+       to i32 in a prior batch.
+     - The `nr > 1` path still returns ENOSYS until
+       multi-key wait infrastructure lands (tracked
+       separately).
+
+     Build: cargo build -p kernel clean (36.25s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 26s).

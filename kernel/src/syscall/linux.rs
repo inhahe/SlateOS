@@ -20245,8 +20245,19 @@ fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
     // Fixes: reorder flags first, fold `!waiters` into the combined
     // -EINVAL gate, and move the clockid range check into the
     // `timeout != NULL` branch.
-    if args.arg2 != 0 {
-        // flags must be 0 for the v1 ABI.
+    // flags must be 0 for the v1 ABI.
+    //
+    // Linux signature: SYSCALL_DEFINE5(futex_waitv, struct futex_waitv __user *,
+    // waiters, unsigned int, nr_futexes, unsigned int, flags,
+    // struct __kernel_timespec __user *, timeout, clockid_t, clockid).
+    // `flags` is C `unsigned int`, delivered in rdx.  The AMD64 syscall ABI
+    // does not zero-extend `unsigned int` across the syscall instruction,
+    // so Linux observes only the low 32 bits.  Pre-batch we compared the
+    // raw u64 against 0, so any high-half garbage was rejected with EINVAL
+    // where Linux's truncated flags=0 advances to the nr/waiters gate.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation)]
@@ -47483,6 +47494,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   futex_waitv nr=1 fast path wiring: OK",
+        );
+        // ---------- futex_waitv flags unsigned-int truncation ----------
+        // Linux's `flags` arg is C `unsigned int` (delivered in rdx).
+        // High-half garbage above the low 32 bits must be ignored before
+        // the `flags != 0` reject gate.  Reuse the SIZE_U32-shaped
+        // `valid` entry from the fast-path block: with uaddr=0 the
+        // dispatched sys_futex_wait returns EFAULT, giving a non-EINVAL
+        // discriminator for the success path.
+        // (a) high-only (low=0): flags=0x1_0000_0000 → truncates to 0,
+        //     advances through gates to the fast path which returns
+        //     EFAULT on uaddr=0.  Pre-batch returned EINVAL via the
+        //     un-truncated flag gate.
+        let a = SyscallArgs { arg0: v_ptr, arg1: 1, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: futex_waitv flags=0x1_0000_0000 not EFAULT (truncation)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) high|bad-low 1: flags=0x1_0000_0001 → truncates to 1,
+        //     flag gate still rejects with EINVAL.
+        let a = SyscallArgs { arg0: v_ptr, arg1: 1, arg2: 0x1_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: futex_waitv flags=0x1_0000_0001 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) high|bad-low 2: independent low bit confirms the mask
+        //     covers more than the LSB.
+        let a = SyscallArgs { arg0: v_ptr, arg1: 1, arg2: 0x1_0000_0002, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: futex_waitv flags=0x1_0000_0002 not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) high-only with nr=2: flags=0x1_0000_0000 truncates to 0,
+        //     the nr/waiters gate accepts nr=2, and the nr>1 path
+        //     returns ENOSYS (multi-key wait not yet implemented).
+        //     Distinct terminal from (a) confirms the flag mask doesn't
+        //     accidentally re-trip an EINVAL downstream.
+        let a = SyscallArgs { arg0: v_ptr, arg1: 2, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: futex_waitv flags=0x1_0000_0000 nr=2 not ENOSYS (truncation)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   futex_waitv unsigned-int truncation (high-half ignored): OK"
         );
 
         // pkey_alloc bad flags -> EINVAL.

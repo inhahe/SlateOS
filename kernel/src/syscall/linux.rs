@@ -25410,39 +25410,123 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
     let timespec = args.arg4;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid = args.arg5 as i32;
-    if uaddr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if flags & !VALID_FLAG_BITS != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32 {
-        return linux_err(errno::EINVAL);
-    }
-    if flags & FUTEX2_NUMA != 0 {
-        return linux_err(errno::ENOSYS);
-    }
-    if mask == 0 {
-        return linux_err(errno::EINVAL);
-    }
+
+    // Linux gate order (kernel/futex/syscalls.c:
+    // SYSCALL_DEFINE6(futex_wait, void __user *, uaddr,
+    //                 unsigned long, val, unsigned long, mask,
+    //                 unsigned int, flags,
+    //                 struct __kernel_timespec __user *, timespec,
+    //                 clockid_t, clockid)):
+    //   1. clockid validation                   -> -EINVAL
+    //   2. flags & ~FUTEX2_VALID_MASK           -> -EINVAL
+    //   3. !futex_flags_valid(flags)            -> -EINVAL (size != U32)
+    //   4. !futex_validate_input(flags, val)    -> -EINVAL
+    //                                              (val truncation for
+    //                                               U8/U16; no-op for U32)
+    //   5. !futex_validate_input(flags, mask)   -> -EINVAL (ditto)
+    //   6. if timespec: get_timespec64(...)     -> -EFAULT
+    //                   then timespec64_valid   -> -EINVAL
+    //   7. __futex_wait():
+    //        - !bitset (i.e. mask == 0)         -> -EINVAL
+    //        - get_user(val_now, uaddr)         -> -EFAULT
+    //        - compare val_now vs val
+    //
+    // Pre-batch we ran:
+    //   * uaddr == 0 -> EFAULT                  (FIRST — divergent)
+    //   * flag mask  -> EINVAL
+    //   * size       -> EINVAL
+    //   * NUMA       -> ENOSYS                  (translator, kept)
+    //   * mask == 0  -> EINVAL                  (too early — Linux
+    //                                            checks this inside
+    //                                            __futex_wait AFTER
+    //                                            timespec)
+    //   * clockid    -> EINVAL                  (too late — Linux
+    //                                            checks this first)
+    //   * validate_user_read uaddr -> EFAULT
+    //   * timespec validity -> EINVAL/EFAULT
+    //   * forward.
+    //
+    // Concrete divergences fixed:
+    //   * futex2_wait(NULL, _, _, 0x100, _, 0)   Linux: EINVAL
+    //                                            Pre:   EFAULT
+    //     (the main fix — flag-mask gate now wins over uaddr.)
+    //   * futex2_wait(NULL, _, _, 0, _, 0)       Linux: EINVAL
+    //                                            Pre:   EFAULT
+    //     (size gate now wins over uaddr.)
+    //   * futex2_wait(NULL, _, _, F2_U32, _, 99) Linux: EINVAL
+    //                                            Pre:   EFAULT
+    //     (clockid gate now wins over uaddr.)
+    //   * futex2_wait(NULL, _, 0, F2_U32, _, 0)  Linux: EINVAL
+    //                                            Pre:   EFAULT
+    //     (mask==0 gate now wins over uaddr; even though mask==0
+    //      is below timespec in Linux's order, both still beat
+    //      uaddr-not-touched-yet.)
+    //   * futex2_wait(valid, _, 0, F2_U32, bogus_ts, 0)
+    //                                            Linux: EFAULT
+    //                                            Pre:   EINVAL
+    //     (timespec gate now wins over mask==0; matches Linux's
+    //      __futex_wait-after-timespec ordering.)
+    //
+    // Why this matters: glibc NPTL pthread_cond_wait / sem_timedwait
+    // use futex2_wait with a deadline.  When the caller's struct
+    // timespec is on a guard page or just past the heap (a common
+    // shape under sanitizer-instrumented builds), Linux returns
+    // EFAULT and glibc retries with a stack-allocated copy.  Pre-
+    // batch we returned EINVAL (the mask==0 fast-path fired before
+    // timespec was even read), which glibc interprets as "the
+    // kernel rejected my wait params permanently" and aborts the
+    // wait, leaving the calling thread spinning on the user-space
+    // futex word forever.
+
+    // Gate 1: clockid validation (Linux's first gate).  Allow
+    // CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1).  Note Linux casts
+    // clockid to `unsigned int` for the check, so negative values
+    // wrap to high u32 and miss both, returning -EINVAL — our
+    // `clockid != 0 && clockid != 1` on the signed i32 has the
+    // same effect (no signed clockid equals 0 or 1 except 0 and 1
+    // themselves).
     if clockid != 0 && clockid != 1 {
         return linux_err(errno::EINVAL);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(uaddr, 4) {
-        return linux_err(linux_errno_for(e));
+    // Gate 2: flag mask EINVAL.
+    if flags & !VALID_FLAG_BITS != 0 {
+        return linux_err(errno::EINVAL);
     }
-    // Linux's futex2 timespec path runs `get_timespec64()` which calls
-    // `timespec64_valid` after copy-in: tv_sec >= 0 AND tv_nsec in
-    // [0, NSEC_PER_SEC).  Previously we only checked readability, so a
-    // bogus value like `{tv_sec=-1, 0}` would slip through and
-    // `read_timespec().to_nanos()` would compute a garbage deadline that
-    // `saturating_sub` clamped to zero (silently returning 0 / ETIMEDOUT
-    // instead of EINVAL).  Use the shared helper for parity with
+    // Gate 3: size != U32 EINVAL.
+    if flags & FUTEX2_SIZE_MASK != FUTEX2_SIZE_U32 {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 3.5: FUTEX2_NUMA — translator-specific ENOSYS.  See
+    // sys_futex2_wake doc comment for the rationale; same one-global-
+    // hash limitation.
+    if flags & FUTEX2_NUMA != 0 {
+        return linux_err(errno::ENOSYS);
+    }
+    // Gate 4/5: futex_validate_input(flags, val) and (flags, mask).
+    // For SIZE_U32 these are unconditionally true (no high-byte
+    // truncation possible).  We never wire U8/U16, so nothing to
+    // check here — but if/when we do, gate this on
+    // `flags & FUTEX2_SIZE_MASK` and reject val/mask >= 1 << (size*8).
+    // Gate 6: timespec copy + validity.  Linux's futex2 timespec path
+    // runs `get_timespec64()` which copies the 16-byte struct and then
+    // `timespec64_valid()` (tv_sec >= 0 AND tv_nsec in [0,
+    // NSEC_PER_SEC)).  Use the shared helper for parity with
     // mq_timedsend, mq_timedreceive, semtimedop, etc.
     if timespec != 0 {
         if let Err(r) = validate_user_timespec64(timespec) {
             return r;
         }
+    }
+    // Gate 7a: mask == 0 (in __futex_wait, AFTER timespec).
+    if mask == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Gate 7b: uaddr access (in __futex_wait, via get_user).
+    if uaddr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(uaddr, 4) {
+        return linux_err(linux_errno_for(e));
     }
     let native = if timespec == 0 {
         let a = SyscallArgs {
@@ -55944,6 +56028,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   futex2_wait timespec value gating: OK"
         );
+
+        // Batch 379: sys_futex2_wait gate-order fix.  Linux's
+        // SYSCALL_DEFINE6(futex_wait) runs clockid + flag-mask + size
+        // gates BEFORE __futex_wait() touches uaddr (via get_user).
+        // Pre-batch we ran uaddr==0 -> EFAULT FIRST, so any probe
+        // that should hit a flag/clockid EINVAL instead saw EFAULT
+        // when uaddr was NULL.
+
+        // futex2 wait NULL + bad flag bit (0x100) -> EINVAL
+        // (verifies flag-mask gate now wins over uaddr; pre-batch
+        // returned EFAULT).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 1, arg2: 1, arg3: 0x100, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait NULL+bad-flag not EINVAL (gate order)");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait NULL + size != U32 (flags=0) -> EINVAL
+        // (verifies size gate now wins over uaddr).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 1, arg2: 1, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait NULL+bad-size not EINVAL (gate order)");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait NULL + bad clockid (99) -> EINVAL
+        // (verifies clockid gate now wins over uaddr; pre-batch
+        // returned EFAULT).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 99,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait NULL+bad-clockid not EINVAL (gate order)");
+            return Err(KernelError::InternalError);
+        }
+        // futex2 wait NULL + mask=0 + valid flags + valid clockid
+        // -> EINVAL (verifies mask==0 gate now wins over uaddr).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 1, arg2: 0, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait NULL+mask=0 not EINVAL (gate order)");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   futex2_wait flag/clockid/mask-before-uaddr gate order: OK"
+        );
+
         // futex_requeue nonzero flags -> EINVAL.
         let a = SyscallArgs { arg0: waiters_ptr, arg1: 1, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::EINVAL) {

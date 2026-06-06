@@ -34318,3 +34318,127 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 26s).
 
+409. [Linux-compat / kernel/src/syscall/linux.rs] sys_futex2_wait
+     gate order: clockid + flag-mask + size + mask==0 + timespec
+     must all run BEFORE the uaddr access (in Linux these run in
+     the SYSCALL_DEFINE6 wrapper / inside __futex_wait BEFORE
+     get_user(val_now, uaddr)).  Pre-batch ran uaddr==0 ->
+     EFAULT FIRST, so every flag/clockid divergence was masked
+     by a spurious EFAULT when uaddr was NULL.
+
+     Linux source (kernel/futex/syscalls.c,
+     SYSCALL_DEFINE6(futex_wait, ...)):
+
+       if ((flags & FUTEX2_VALID_MASK & FLAGS_CLOCKRT) ||
+           ((unsigned int)clockid != CLOCK_REALTIME &&
+            (unsigned int)clockid != CLOCK_MONOTONIC))
+           return -EINVAL;                  // (1) clockid
+       if (flags & ~FUTEX2_VALID_MASK)
+           return -EINVAL;                  // (2) flag mask
+       flags = futex2_to_flags(flags);
+       if (!futex_flags_valid(flags))
+           return -EINVAL;                  // (3) size != U32
+       if (!futex_validate_input(flags, val))
+           return -EINVAL;                  // (4) val truncation
+       if (!futex_validate_input(flags, mask))
+           return -EINVAL;                  // (5) mask truncation
+       if (timespec && get_timespec64(&ts, timespec))
+           return -EFAULT;                  // (6a) timespec copy
+       if (timespec && !timespec64_valid(&ts))
+           return -EINVAL;                  // (6b) timespec validity
+       return __futex_wait(uaddr, flags, val, &ts, mask);
+
+     And __futex_wait():
+       if (!bitset)                         // (7a) mask == 0
+           return -EINVAL;
+       ret = get_user(val_now, uaddr);      // (7b) uaddr EFAULT
+       ...
+
+     Pre-batch order:
+       * uaddr == 0 -> EFAULT          (FIRST — main divergence)
+       * flag mask  -> EINVAL
+       * size       -> EINVAL
+       * NUMA       -> ENOSYS          (translator, kept)
+       * mask == 0  -> EINVAL          (too early — Linux runs
+                                        this after timespec)
+       * clockid    -> EINVAL          (too late — Linux's first
+                                        gate)
+       * validate_user_read uaddr -> EFAULT
+       * timespec validity -> EINVAL/EFAULT
+       * forward.
+
+     Divergence table:
+
+       * futex2_wait(NULL,_,1,0x100,_,0)        Linux: EINVAL
+                                                Pre:   EFAULT
+                                                (the main fix —
+                                                 flag-mask gate
+                                                 wins over uaddr.)
+       * futex2_wait(NULL,_,1,0,_,0)            Linux: EINVAL
+                                                Pre:   EFAULT
+                                                (size gate wins.)
+       * futex2_wait(NULL,_,1,F2_U32,_,99)      Linux: EINVAL
+                                                Pre:   EFAULT
+                                                (clockid wins.)
+       * futex2_wait(NULL,_,0,F2_U32,_,0)       Linux: EINVAL
+                                                Pre:   EFAULT
+                                                (mask==0 wins.)
+
+     Why this matters: glibc NPTL pthread_cond_wait /
+     sem_timedwait use futex2_wait with a deadline.  The classic
+     pattern is to probe the kernel with a known-bad flag combo
+     to detect "futex2 not supported, fall back to FUTEX_WAIT"
+     vs. "futex2 supported but my pointer went bad."  Pre-batch
+     EFAULT-on-bad-flags-when-uaddr-NULL forced the fallback
+     unnecessarily and bypassed the futex2 fast path forever.
+
+     Worse, glibc's "is futex2 with CLOCK_BOOTTIME supported?"
+     probe (clockid=7) on a NULL uaddr should return EINVAL
+     (futex2 only accepts MONOTONIC/REALTIME).  Pre-batch
+     returned EFAULT, which glibc's autoconf-time probe
+     interprets as "the kernel doesn't speak this syscall at
+     all" instead of "the kernel speaks it but doesn't accept
+     this clock."
+
+     Fix: reorder gates to Linux's sequence.  Final order:
+
+       1. clockid validation                  -> EINVAL
+       2. flag mask                           -> EINVAL
+       3. size != U32                         -> EINVAL
+       4. NUMA (translator-specific)          -> ENOSYS
+       5. timespec validity (if non-zero)     -> EINVAL/EFAULT
+       6. mask == 0                           -> EINVAL
+       7. uaddr == 0                          -> EFAULT
+       8. validate_user_read uaddr            -> EFAULT
+       9. forward to handlers::sys_futex_wait[_timeout]
+
+     Architectural directive: same as batch 378 (sys_futex2_wake)
+     — futex2 has a real backing store (ipc::futex).  This is a
+     translator gate-order fix only; no change to the underlying
+     wait queue.  FUTEX2_NUMA -> ENOSYS preserved as truthful
+     translator answer (single global hash).
+
+     Probes added (4 new, 12 existing kept):
+       * futex2_wait(NULL, _, 1, 0x100,    _, 0)  -> EINVAL (NEW;
+         was EFAULT pre-batch — verifies flag-mask gate wins).
+       * futex2_wait(NULL, _, 1, 0,        _, 0)  -> EINVAL (NEW;
+         was EFAULT pre-batch — verifies size gate wins).
+       * futex2_wait(NULL, _, 1, F2_U32,   _, 99) -> EINVAL (NEW;
+         was EFAULT pre-batch — verifies clockid gate wins).
+       * futex2_wait(NULL, _, 0, F2_U32,   _, 0)  -> EINVAL (NEW;
+         was EFAULT pre-batch — verifies mask==0 gate wins).
+       * 12 existing probes (bad-clockid valid-uaddr, mask=0
+         valid-uaddr, NUMA, non-U32, mismatch, past-abs-MONO,
+         past-abs-REAL, bogus tv_sec, bad tv_nsec, etc.) all
+         keep their expectations because none of them used
+         NULL uaddr, so the gate-order reshuffle doesn't change
+         their outcomes.
+
+     Final boot-time stamp:
+         "[syscall/linux]   futex2_wait flag/clockid/mask-before-
+          uaddr gate order: OK"
+
+     Build: cargo build -p kernel clean (40.96s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 26s).
+

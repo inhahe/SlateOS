@@ -24189,3 +24189,140 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 22s).
 
+## 311. syscall/linux: sys_socket + sys_socketpair —
+##      AF_NETLINK / AF_PACKET socket-type allowlist
+##      (batch 282).
+##
+##      Pre-batch divergence: Linux's netlink_create
+##      (net/netlink/af_netlink.c) explicitly rejects
+##      sock->type not in {SOCK_RAW, SOCK_DGRAM} with
+##      -ESOCKTNOSUPPORT; packet_create (net/packet/
+##      af_packet.c) does the same for AF_PACKET
+##      (additionally accepting SOCK_PACKET=10, which is
+##      outside our 1..=5 type range and already rejected
+##      by gate 3 EINVAL).  Pre-batch we fell through for
+##      these families with any sock_type in 1..=5,
+##      returning ENOSYS from sys_socket and EOPNOTSUPP
+##      from sys_socketpair (the domain != AF_UNIX gate).
+##      Probes use ESOCKTNOSUPPORT to discriminate "family
+##      known but this type unsupported" from "kernel
+##      doesn't speak this syscall".
+##
+##      Fix: widen the per-family socket-type allowlist
+##      gate (introduced for AF_UNIX/AF_INET/AF_INET6 in
+##      batch 280) to a single match expression covering
+##      all five well-known families:
+##          match (domain, sock_type) {
+##              (1, 4)                  => ESOCKTNOSUPPORT,
+##              (2 | 10, 4)             => ESOCKTNOSUPPORT,
+##              (16 | 17, 1 | 4 | 5)    => ESOCKTNOSUPPORT,
+##              _                       => {}
+##          }
+##      Applied identically to sys_socket and
+##      sys_socketpair so socketpair() surfaces the same
+##      ESOCKTNOSUPPORT discriminator before reaching the
+##      EOPNOTSUPP "ops->socketpair == NULL" gate.
+##
+##      Self-tests (kernel-context probe set in
+##      dispatch_linux):
+##        socket():
+##          A. socket(AF_NETLINK, SOCK_STREAM, 0)
+##             pre: ENOSYS ; post: ESOCKTNOSUPPORT
+##          B. socket(AF_NETLINK, SOCK_SEQPACKET, 0)
+##             pre: ENOSYS ; post: ESOCKTNOSUPPORT
+##          C. socket(AF_PACKET,  SOCK_STREAM, 0)
+##             pre: ENOSYS ; post: ESOCKTNOSUPPORT
+##          D. socket(AF_PACKET,  SOCK_RDM, 0)
+##             pre: ENOSYS ; post: ESOCKTNOSUPPORT
+##          E. socket(AF_NETLINK, SOCK_DGRAM, 0)
+##             Acceptance — DGRAM in allowlist; ENOSYS.
+##          F. socket(AF_PACKET,  SOCK_RAW, 0)
+##             Acceptance — RAW in allowlist; ENOSYS.
+##        socketpair():
+##          G. socketpair(AF_NETLINK, SOCK_STREAM, 0, sv)
+##             pre: EOPNOTSUPP ; post: ESOCKTNOSUPPORT
+##          H. socketpair(AF_PACKET, SOCK_RDM, 0, sv)
+##             pre: EOPNOTSUPP ; post: ESOCKTNOSUPPORT
+##          I. socketpair(AF_NETLINK, SOCK_DGRAM, 0, sv)
+##             Acceptance — DGRAM in allowlist, falls
+##             through to the EOPNOTSUPP gate (netlink
+##             ops->socketpair == NULL).
+##      Marker: "AF_NETLINK/AF_PACKET ESOCKT gating: OK".
+##
+##      Updated test in batch 280's ESOCKTNOSUPPORT block:
+##      discriminator E (AF_NETLINK / SOCK_RDM) was
+##      "ENOSYS (acceptance — not in allowlist)" pre-282;
+##      it now expects ESOCKTNOSUPPORT because batch 282
+##      widens the gate to include AF_NETLINK.
+##
+##      Existing tests preserved: socketpair ESOCKT/EPROTO
+##      gating (281) — discriminators A (AF_INET/RDM/0/sv)
+##      and E (AF_UNIX/RDM/0/sv) still return
+##      ESOCKTNOSUPPORT (now via the merged match arm);
+##      D (AF_INET/STREAM/0/sv) regression still
+##      EOPNOTSUPP; B/C still EPROTONOSUPPORT.  socket
+##      ESOCKTNOSUPPORT (280), socket EPROTONOSUPPORT
+##      (279), mremap MREMAP_FIXED new_addr bounds (278),
+##      perf_event_open __reserved_2 gating (277), and the
+##      legacy socket/socketpair tests at lines ~42367+
+##      and the EAFNOSUPPORT gating (276) all unaffected.
+##
+##      Known limitations: still pending — accept/accept4
+##      and bind/connect sockaddr-before-fd reorders (not
+##      probe-distinguishable in kernel context);
+##      pread/pwrite EOVERFLOW gate at pos+count and silent
+##      MAX_RW_COUNT clamp; sys_mremap rejecting
+##      MREMAP_FIXED below the userspace mmap floor;
+##      SOCK_PACKET (type 10) support on AF_PACKET (we
+##      reject it as out-of-range EINVAL where Linux
+##      accepts it as a deprecated raw-packet type).
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s on
+##      retry; first run hit a known intermittent hang
+##      between the [rcu] "Callback registration: OK"
+##      step and BOOT_OK — same machine, same kernel,
+##      passes on rerun).  See entry 312 below for the
+##      RCU self-test flake.
+
+## 312. [bug] kernel/src/rcu: intermittent hang between
+##      "[rcu]   Callback registration: OK" and BOOT_OK.
+##
+##      Observed during batch 282 boot test: the first run
+##      timed out at 240s with the serial log frozen at
+##      "[rcu]   Callback registration: OK" — no panic, no
+##      further output.  Re-running the same kernel binary
+##      with no changes booted to BOOT_OK in 23s.  The
+##      hang is not caused by this batch's syscall edits
+##      (the [syscall/linux] block above it completed all
+##      its self-tests including the new
+##      "AF_NETLINK/AF_PACKET ESOCKT gating: OK" marker
+##      before the hang).
+##
+##      Reproducer: bash scripts/boot-test.sh --no-build
+##      --timeout=240 in a loop; the hang reproduces at
+##      something like 1-in-10 frequency on this machine.
+##
+##      Suspected cause: a race between the RCU callback
+##      registration self-test step and either the
+##      scheduler picking up a callback-worker task or a
+##      per-CPU RCU state-machine transition.  The next
+##      test phase ([futex] in successful runs) starts on
+##      a different code path, so the hang sits squarely
+##      in the RCU subsystem between "Callback
+##      registration: OK" and whatever the next [rcu]
+##      step is meant to log.
+##
+##      Investigation TODO (not blocking the autonomous
+##      loop on the Linux ABI translation batch series):
+##        - Run the kernel under qemu -d int,cpu_reset to
+##          see whether the CPU is spinning, halted, or
+##          deadlocked on a lock.
+##        - Add a serial trace at the start of each [rcu]
+##          self-test sub-step so the hung step is
+##          identifiable.
+##        - If reproduction stays flaky, add a watchdog
+##          timer that panics with a stack trace if the
+##          [rcu] self-test runs for > 30s, converting
+##          the silent hang into an observable panic.
+##
+

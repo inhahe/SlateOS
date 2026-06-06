@@ -18617,39 +18617,50 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
     if !(1..=5).contains(&sock_type) {
         return linux_err(errno::EINVAL);
     }
-    // Gate 4: family does not implement this socket type ->
+    // Gate 4: family-specific socket-type allowlist ->
     // -ESOCKTNOSUPPORT.
     //
-    // Linux's inet_create / inet6_create / unix_create all set
-    // `err = -ESOCKTNOSUPPORT;` before walking inetsw[type]; for
-    // a type that has no entries in the family's switch (e.g.
-    // SOCK_RDM on AF_INET, AF_INET6, or AF_UNIX) the loop never
-    // executes and the function returns ESOCKTNOSUPPORT, NOT
-    // EPROTONOSUPPORT and NOT ENOSYS.  Probes (notably netperf,
-    // glibc's getaddrinfo, and the Linux Test Project's
-    // socket01) use this errno to discriminate "kernel knows
-    // family but not this type within it" from "kernel doesn't
-    // know this protocol number".
+    // Linux's per-family create paths (inet_create,
+    // inet6_create, unix_create, netlink_create, packet_create)
+    // all initialise err = -ESOCKTNOSUPPORT (or check
+    // sock->type explicitly against an allowlist) and return
+    // that errno for types the family doesn't implement.
+    // Probes (netperf, glibc's getaddrinfo, the Linux Test
+    // Project's socket01) use this errno to discriminate
+    // "kernel knows family but not this type within it" from
+    // "kernel doesn't know this protocol number".
     //
-    // We over-accept on the long-tail (AF_NETLINK, AF_PACKET)
-    // since their type/protocol semantics are family-specific
-    // and we'd rather under-reject than over-reject without
-    // modelling each family.  The well-known cases we DO gate:
-    //   AF_UNIX (1): supports STREAM / DGRAM / RAW / SEQPACKET
-    //                only — SOCK_RDM (4) -> ESOCKTNOSUPPORT.
-    //   AF_INET (2) / AF_INET6 (10): supports STREAM / DGRAM /
-    //                RAW / SEQPACKET (with SCTP) — SOCK_RDM (4)
-    //                -> ESOCKTNOSUPPORT (Linux's inetsw[4] is
-    //                empty in mainline).
+    // Per-family supported sock_type sets:
+    //   AF_UNIX    (1): STREAM(1), DGRAM(2), RAW(3), SEQPACKET(5)
+    //                   — SOCK_RDM(4) rejected.
+    //   AF_INET    (2),
+    //   AF_INET6  (10): STREAM(1), DGRAM(2), RAW(3),
+    //                   SEQPACKET(5 via SCTP) — SOCK_RDM(4)
+    //                   rejected (Linux's inetsw[4] empty).
+    //   AF_NETLINK(16): RAW(3) and DGRAM(2) only —
+    //                   netlink_create explicitly rejects
+    //                   everything else with ESOCKTNOSUPPORT.
+    //   AF_PACKET (17): RAW(3) and DGRAM(2) (and the legacy
+    //                   SOCK_PACKET=10 which lies outside our
+    //                   1..=5 type range and was already
+    //                   rejected by gate 3 EINVAL) —
+    //                   packet_create rejects STREAM/RDM/
+    //                   SEQPACKET with ESOCKTNOSUPPORT.
+    //
+    // Batch 280 introduced this gate for the AF_UNIX/AF_INET/
+    // AF_INET6 SOCK_RDM cases; batch 282 widens it to include
+    // AF_NETLINK and AF_PACKET, which similarly reject
+    // STREAM/RDM/SEQPACKET with ESOCKTNOSUPPORT.
+    //
     // This gate fires BEFORE the per-protocol EPROTONOSUPPORT
     // gate below because Linux's err init is ESOCKTNOSUPPORT
     // and only gets overwritten to EPROTONOSUPPORT inside the
     // (empty for these slots) list walk.
-    if sock_type == 4 {
-        match domain {
-            1 | 2 | 10 => return linux_err(errno::ESOCKTNOSUPPORT),
-            _ => {}
-        }
+    match (domain, sock_type) {
+        (1, 4) => return linux_err(errno::ESOCKTNOSUPPORT),
+        (2 | 10, 4) => return linux_err(errno::ESOCKTNOSUPPORT),
+        (16 | 17, 1 | 4 | 5) => return linux_err(errno::ESOCKTNOSUPPORT),
+        _ => {}
     }
     // Gate 5: per-(family, type) protocol whitelist -> -EPROTONOSUPPORT.
     //
@@ -18754,19 +18765,22 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     if !(1..=5).contains(&sock_type) {
         return linux_err(errno::EINVAL);
     }
-    // Gate 3a: sock_create walks inet_create / unix_create which
-    // initialise err=-ESOCKTNOSUPPORT before the type-list walk.
-    // For SOCK_RDM (type 4) on AF_UNIX/AF_INET/AF_INET6 the list
-    // is empty so the syscall returns ESOCKTNOSUPPORT BEFORE the
-    // ops->socketpair == NULL EOPNOTSUPP gate below.  Pre-batch
-    // we jumped straight to "domain != AF_UNIX -> EOPNOTSUPP",
-    // collapsing this discriminator into EOPNOTSUPP.  Mirrors
-    // sys_socket batch 280.
-    if sock_type == 4 {
-        match domain {
-            1 | 2 | 10 => return linux_err(errno::ESOCKTNOSUPPORT),
-            _ => {}
-        }
+    // Gate 3a: sock_create walks inet_create / unix_create /
+    // netlink_create / packet_create which apply the same
+    // per-family socket-type allowlist as in sys_socket gate 4.
+    // For a (family, type) combination the family doesn't
+    // implement, sock_create returns ESOCKTNOSUPPORT BEFORE
+    // ops->socketpair is consulted.  Pre-batch (before 281) we
+    // jumped straight to "domain != AF_UNIX -> EOPNOTSUPP",
+    // collapsing this discriminator.  Batch 281 covered AF_UNIX
+    // /AF_INET/AF_INET6 + SOCK_RDM; batch 282 widens to
+    // AF_NETLINK/AF_PACKET + STREAM/RDM/SEQPACKET.  Mirrors
+    // sys_socket batch 280+282.
+    match (domain, sock_type) {
+        (1, 4) => return linux_err(errno::ESOCKTNOSUPPORT),
+        (2 | 10, 4) => return linux_err(errno::ESOCKTNOSUPPORT),
+        (16 | 17, 1 | 4 | 5) => return linux_err(errno::ESOCKTNOSUPPORT),
+        _ => {}
     }
     // Gate 3b: per-(family, type) protocol whitelist ->
     // -EPROTONOSUPPORT, applied INSIDE sock_create's family-create
@@ -47004,14 +47018,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // E: AF_NETLINK / SOCK_RDM is NOT in the gate's
-            // family allowlist; falls through to ENOSYS.
+            // E: AF_NETLINK / SOCK_RDM now hits the widened
+            // gate from batch 282 (AF_NETLINK supports only
+            // SOCK_RAW and SOCK_DGRAM, mirroring Linux's
+            // netlink_create switch).  Pre-280 this was
+            // ENOSYS; pre-282 the comment said "ENOSYS
+            // (AF_NETLINK not in allowlist)"; post-282 it is
+            // ESOCKTNOSUPPORT just like AF_INET/RDM.
             let a = SyscallArgs {
                 arg0: 16, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
                 serial_println!(
-                    "[syscall/linux]   FAIL: socket(AF_NETLINK,RDM) not ENOSYS"
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,RDM) not ESOCKTNOSUPPORT"
                 );
                 return Err(KernelError::InternalError);
             }
@@ -47125,6 +47146,157 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socketpair ESOCKT/EPROTO gating: OK"
+            );
+        }
+
+        // ---- AF_NETLINK / AF_PACKET socket-type allowlist ----
+        // Linux's netlink_create explicitly rejects sock->type
+        // not in {SOCK_RAW, SOCK_DGRAM} with -ESOCKTNOSUPPORT;
+        // packet_create does the same for AF_PACKET (plus
+        // SOCK_PACKET=10 which is outside our 1..=5 range and
+        // already rejected by gate 3 EINVAL).  Pre-282 these
+        // families fell through to ENOSYS for any sock_type
+        // in 1..=5.  Batch 282 widens the family-specific
+        // type allowlist gate to cover them.
+        //
+        // Discriminator sextet (kernel-context) — socket():
+        //   A. socket(AF_NETLINK=16, SOCK_STREAM=1, 0)
+        //      pre: ENOSYS ; post: ESOCKTNOSUPPORT
+        //   B. socket(AF_NETLINK, SOCK_SEQPACKET=5, 0)
+        //      pre: ENOSYS ; post: ESOCKTNOSUPPORT
+        //   C. socket(AF_PACKET=17, SOCK_STREAM=1, 0)
+        //      pre: ENOSYS ; post: ESOCKTNOSUPPORT
+        //   D. socket(AF_PACKET, SOCK_RDM=4, 0)
+        //      pre: ENOSYS ; post: ESOCKTNOSUPPORT
+        //   E. socket(AF_NETLINK, SOCK_DGRAM=2, 0)
+        //      Acceptance — DGRAM in allowlist; ENOSYS.
+        //   F. socket(AF_PACKET, SOCK_RAW=3, 0)
+        //      Acceptance — RAW in allowlist; ENOSYS.
+        // Mirror tests for socketpair():
+        //   G. socketpair(AF_NETLINK, SOCK_STREAM, 0, sv)
+        //      pre: EOPNOTSUPP ; post: ESOCKTNOSUPPORT
+        //   H. socketpair(AF_PACKET, SOCK_RDM, 0, sv)
+        //      pre: EOPNOTSUPP ; post: ESOCKTNOSUPPORT
+        //   I. socketpair(AF_NETLINK, SOCK_DGRAM, 0, sv)
+        //      Acceptance — DGRAM in allowlist, falls
+        //      through to the EOPNOTSUPP gate (netlink
+        //      ops->socketpair == NULL).
+        {
+            // A: AF_NETLINK / SOCK_STREAM
+            let a = SyscallArgs {
+                arg0: 16, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_NETLINK / SOCK_SEQPACKET
+            let a = SyscallArgs {
+                arg0: 16, arg1: 5, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,SEQPACKET) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_PACKET / SOCK_STREAM
+            let a = SyscallArgs {
+                arg0: 17, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_PACKET,STREAM) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_PACKET / SOCK_RDM
+            let a = SyscallArgs {
+                arg0: 17, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_PACKET,RDM) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: AF_NETLINK / SOCK_DGRAM (acceptance — DGRAM in allowlist)
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: AF_PACKET / SOCK_RAW (acceptance — RAW in allowlist)
+            let a = SyscallArgs {
+                arg0: 17, arg1: 3, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_PACKET,RAW) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // socketpair mirror tests:
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+
+            // G: socketpair(AF_NETLINK, SOCK_STREAM, 0, sv)
+            let a = SyscallArgs {
+                arg0: 16, arg1: 1, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: socketpair(AF_PACKET, SOCK_RDM, 0, sv)
+            let a = SyscallArgs {
+                arg0: 17, arg1: 4, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_PACKET,RDM) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // I: socketpair(AF_NETLINK, SOCK_DGRAM, 0, sv)
+            // Acceptance — DGRAM is in the allowlist; the call
+            // then proceeds to the ops->socketpair == NULL gate
+            // and returns EOPNOTSUPP (netlink has no socketpair).
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM) not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   AF_NETLINK/AF_PACKET ESOCKT gating: OK"
             );
         }
 

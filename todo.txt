@@ -30461,3 +30461,128 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (39.32s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+373. Batch 343 - Linux ABI sys_pivot_root /
+     sys_swapoff gate-order inversion fix: EPERM
+     must be the terminal-and-only answer.
+
+     Same divergence shape as batch 342 (module
+     syscalls).  Linux's pivot_root and swapoff
+     both validate CAP_SYS_ADMIN before any
+     user-pointer touch, but pre-batch we ran
+     EFAULT-on-NULL / EFAULT-on-bad-range first.
+
+     Linux source (modern mainline):
+
+       SYSCALL_DEFINE2(pivot_root,
+                       const char __user *, new_root,
+                       const char __user *, put_old)
+       {
+           ...
+           if (!may_mount())               // CAP_SYS_ADMIN
+               return -EPERM;
+           error = user_path_at(AT_FDCWD,
+                                new_root, ..., &new);
+           if (error)
+               goto out0;                  // EFAULT / ENOENT
+           ...
+       }
+
+       SYSCALL_DEFINE1(swapoff,
+                       const char __user *, specialfile)
+       {
+           ...
+           if (!capable(CAP_SYS_ADMIN))
+               return -EPERM;
+           BUG_ON(!current->mm);
+           pathname = getname(specialfile);
+           if (IS_ERR(pathname))
+               return PTR_ERR(pathname);
+           ...
+       }
+
+     Note: sys_swapon is unaffected.  Linux's
+     SYSCALL_DEFINE2(swapon) validates the
+     swap_flags mask BEFORE the CAP gate (the only
+     Linux syscall in this family that does so),
+     which we already mirror.  Only swapoff has
+     the CAP-first ordering among the swap calls.
+
+     Pre-batch errno table:
+
+       Probe                          Linux  Pre-batch  Post-batch
+       -----------------------------  -----  ---------  ----------
+       pivot_root(NULL, NULL)         EPERM  EFAULT     EPERM
+       pivot_root(NULL, valid)        EPERM  EFAULT     EPERM
+       pivot_root(valid, NULL)        EPERM  EFAULT     EPERM
+       pivot_root(valid, valid)       EPERM  EPERM      EPERM
+       swapoff(NULL)                  EPERM  EFAULT     EPERM
+       swapoff(valid)                 EPERM  EPERM      EPERM
+
+     Same fail-fast rationale as batch 342: sandbox
+     setup code that uses pivot_root as a CAP_SYS_
+     ADMIN probe needs EPERM to decide "abort, the
+     caller is unprivileged".  Swap-management
+     daemons (swapd, systemd-swap-generator) likewise
+     branch on EPERM vs EFAULT.
+
+     Fix: both bodies reduced to
+     `linux_err(errno::EPERM)`.  Architectural
+     directive: we have no swap subsystem, no
+     per-mount-namespace user-ns model, and no
+     caller holds CAP_SYS_ADMIN.  Linux's gate-1
+     always trips.
+
+     Code changes:
+       kernel/src/syscall/linux.rs
+         sys_pivot_root: body replaced with EPERM-
+           only; NULL-OR check and two
+           validate_user_read calls removed.
+         sys_swapoff: body replaced with EPERM-
+           only; NULL check and validate_user_read
+           call removed.
+
+     Self-tests (kernel/src/syscall/linux.rs):
+       pivot_root probes (a..d): NULL+NULL, NULL+
+         valid, valid+NULL, valid+valid - all EPERM.
+         Marker:
+         "pivot_root gate-order EPERM-first: OK"
+       swapoff probes: valid path stays EPERM
+         (baseline); NULL probe now EPERM.  Marker:
+         "swapoff gate-order EPERM-first: OK"
+
+       The pre-existing test
+       `pivot_root(NULL, NULL) -> EFAULT` at line
+       ~42797 was updated in-place to expect EPERM;
+       no other existing probe needed adjustment.
+
+     Known limitations / judgment calls:
+
+     * Pointer-validity feedback removed for these
+       two calls.  Userspace can no longer learn
+       via pivot_root or swapoff whether a specific
+       address is mapped - Linux doesn't offer
+       this either.  Userspace tools that want to
+       probe page presence should use mincore() or
+       msync() instead, which we already implement.
+
+     * No CAP_SYS_ADMIN modelling.  All Linux-ABI
+       callers in this kernel are effectively
+       unprivileged from these syscalls' point of
+       view - intentional under the architectural
+       directive.  A future cap-aware Linux process
+       would still see EPERM here for the same
+       structural reason (no swap, no
+       pivot-namespace).
+
+     * swapoff vs swapon asymmetry preserved.
+       Linux's pre-CAP swap_flags mask in swapon
+       is observationally important (lets unpriv
+       callers learn about new flag bits as kernels
+       upgrade); we keep mirroring that.  swapoff
+       has no equivalent because it takes no flag
+       argument.
+
+     Build: cargo build -p kernel clean (37.10s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

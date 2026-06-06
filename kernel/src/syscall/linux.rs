@@ -14396,16 +14396,48 @@ fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `pivot_root(new_root, put_old)`.
-fn sys_pivot_root(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 || args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-        return linux_err(linux_errno_for(e));
-    }
+fn sys_pivot_root(_args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (fs/namespace.c::SYSCALL_DEFINE2(pivot_root)):
+    //
+    //   SYSCALL_DEFINE2(pivot_root, const char __user *, new_root,
+    //                   const char __user *, put_old)
+    //   {
+    //       ...
+    //       if (!may_mount())                  // (1) CAP_SYS_ADMIN
+    //           return -EPERM;
+    //
+    //       error = user_path_at(AT_FDCWD, new_root,
+    //                            LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &new);
+    //       if (error)
+    //           goto out0;                      // (2) EFAULT / ENOENT
+    //       ...
+    //   }
+    //
+    //   static inline bool may_mount(void) {
+    //       return ns_capable(current->nsproxy->mnt_ns->user_ns,
+    //                         CAP_SYS_ADMIN);
+    //   }
+    //
+    // Linux validates CAP_SYS_ADMIN BEFORE any pointer touch.  Pre-
+    // batch we ran:
+    //   * args.arg0 == 0 || args.arg1 == 0 -> EFAULT
+    //   * validate_user_read(args.arg0, 1)  -> EFAULT on bad range
+    //   * validate_user_read(args.arg1, 1)  -> EFAULT on bad range
+    //   * then EPERM.
+    //
+    // Two concrete divergences from a userspace probe:
+    //   * pivot_root(NULL, NULL)   — Linux: EPERM.  Pre-batch: EFAULT.
+    //   * pivot_root(NULL, valid)  — Linux: EPERM.  Pre-batch: EFAULT.
+    //
+    // Same errno-selection consequence as the module syscalls: tools
+    // that probe whether they have CAP_SYS_ADMIN by attempting a
+    // namespace pivot (some sandbox-setup code does this) need EPERM
+    // to decide "abort, the caller is unprivileged" rather than EFAULT
+    // "the pointer was bad, maybe retry with a different one".
+    //
+    // Architectural directive: we do not yet have a per-mount-namespace
+    // user-ns model and no caller can hold CAP_SYS_ADMIN.  Linux's
+    // gate-1 always trips.  Return EPERM unconditionally.
     linux_err(errno::EPERM)
 }
 
@@ -14450,13 +14482,41 @@ fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `swapoff(path)`.
-fn sys_swapoff(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
+fn sys_swapoff(_args: &SyscallArgs) -> SyscallResult {
+    // Linux gate order (mm/swapfile.c::SYSCALL_DEFINE1(swapoff)):
+    //
+    //   SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
+    //   {
+    //       ...
+    //       if (!capable(CAP_SYS_ADMIN))       // (1) EPERM
+    //           return -EPERM;
+    //
+    //       BUG_ON(!current->mm);
+    //       pathname = getname(specialfile);   // (2) EFAULT / ENAMETOOLONG
+    //       if (IS_ERR(pathname))
+    //           return PTR_ERR(pathname);
+    //       ...
+    //   }
+    //
+    // Unlike sys_swapon - where the swap_flags mask check intentionally
+    // precedes the CAP gate so unprivileged callers learn that a
+    // particular flag bit is unknown - swapoff has no such pre-CAP
+    // mask: the very first action is capable(CAP_SYS_ADMIN).  Pre-
+    // batch we did the inverse:
+    //   * args.arg0 == 0       -> EFAULT
+    //   * validate_user_read   -> EFAULT on bad range
+    //   * then EPERM.
+    //
+    // Divergence:
+    //   * swapoff(NULL)   - Linux: EPERM.  Pre-batch: EFAULT.
+    //
+    // Same fail-fast consequence for swap-management daemons that
+    // probe CAP_SYS_ADMIN; EPERM aborts cleanly, EFAULT triggers
+    // pointer-shape retries that can never succeed.
+    //
+    // Architectural directive: we have no swap subsystem and no caller
+    // holds CAP_SYS_ADMIN.  Linux's gate-1 always trips.  EPERM
+    // unconditionally.
     linux_err(errno::EPERM)
 }
 
@@ -42794,22 +42854,50 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   umount2 int truncation (high-half ignored): OK"
         );
 
-        // pivot_root(NULL, NULL) -> EFAULT.
+        // Batch 343: pivot_root / swapoff gate-order EPERM-first.
+        // Linux's pivot_root opens with may_mount() (CAP_SYS_ADMIN)
+        // before any user_path lookup, and swapoff opens with
+        // capable(CAP_SYS_ADMIN) before getname() of the path.  Pre-
+        // batch we ran pointer-shape validation first, so NULL probes
+        // saw EFAULT where Linux returns EPERM.
+
+        // (a) pivot_root(NULL, NULL) - pre-batch EFAULT; Linux EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIVOT_ROOT, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: pivot_root(NULL) not EFAULT");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: pivot_root(NULL,NULL) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // pivot_root(x, y) -> EPERM.
+        // (b) pivot_root(NULL, valid) - pre-batch EFAULT (NULL arg0
+        //     fired the OR'd NULL check); Linux EPERM (CAP gate first).
+        let a = SyscallArgs { arg0: 0, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIVOT_ROOT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: pivot_root(NULL,_) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // (c) pivot_root(valid, NULL) - pre-batch EFAULT (NULL arg1
+        //     fired the OR'd NULL check); Linux EPERM.
+        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::PIVOT_ROOT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: pivot_root(_,NULL) not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // (d) pivot_root(valid, valid) - stays EPERM (baseline).
         let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIVOT_ROOT, &a).value
             != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: pivot_root not EPERM");
+            serial_println!("[syscall/linux]   FAIL: pivot_root(valid,valid) not EPERM");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   pivot_root gate-order EPERM-first: OK"
+        );
 
         // swapon(path, 0) -> EPERM (valid flags, EPERM path).
         let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
@@ -42846,7 +42934,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: swapoff not EPERM");
             return Err(KernelError::InternalError);
         }
+        // Batch 343: swapoff(NULL) - pre-batch EFAULT (NULL ptr check
+        // ran first); Linux EPERM (CAP_SYS_ADMIN check is the very
+        // first thing in mm/swapfile.c::SYSCALL_DEFINE1(swapoff)).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SWAPOFF, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: swapoff(NULL) not EPERM");
+            return Err(KernelError::InternalError);
+        }
         serial_println!("[syscall/linux]   swapon flags validation: OK");
+        serial_println!(
+            "[syscall/linux]   swapoff gate-order EPERM-first: OK"
+        );
 
         // reboot with bad magic1 -> EPERM (Linux's CAP_SYS_BOOT check
         // runs *before* the magic validation, so unprivileged callers

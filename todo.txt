@@ -35412,3 +35412,61 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
      Build: cargo build -p kernel clean (39.99s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 24s).
+
+423. [2026-06-06] sys_fsmount CAP-first gate inversion fixed — Linux
+     gate 1 is may_mount() → EPERM (literal first check in
+     fs/fsopen.c::SYSCALL_DEFINE3(fsmount)), but pre-batch we ran the
+     flag mask, attr_flags mask, AND fd validation before EPERM.  Any
+     caller passing garbage flags or a bad fs_fd would see EINVAL or
+     EBADF where Linux returns EPERM.
+
+     Divergence table (pre-batch → Linux observable → post-batch):
+       fsmount(bad_fs_fd, 0xff,        0          ) : EINVAL → EPERM → EPERM
+       fsmount(0,         0,           0x4000_0000) : EINVAL → EPERM → EPERM
+       fsmount(u64::MAX,  1,           0x1        ) : EBADF  → EPERM → EPERM
+       fsmount(0,         FSMOUNT_CLOE, MOUNT_RDONLY): EPERM  → EPERM → EPERM  ✓
+
+     Why it matters: fsmount is the second step in the new-mount-API
+     pipeline (fsopen → fsconfig → fsmount → move_mount).  Mount
+     orchestration tools (systemd-mount, util-linux libmount,
+     fuser-mount) probe capability progressively at each step,
+     stopping at the first errno that indicates a terminal
+     diagnosis.  Linux's CAP-first convention means an unprivileged
+     caller sees EPERM at fsmount and routes to a sudo prompt or
+     polkit dialog; pre-batch our EINVAL on flag bits would route
+     to "your flags are wrong, fix your code" — a dead end for the
+     orchestrator since the flag values came from the same util-linux
+     constants that Linux itself accepts under root.  The EBADF case
+     is even worse: pre-batch the tool would see EBADF and conclude
+     "the fs_fd you allocated from fsopen is invalid — your fsconfig
+     chain corrupted it" and start unwinding the pipeline to retry
+     fsopen, rather than the correct "you can't mount; needs root"
+     diagnosis.
+
+     This is the sister fix to batches 343 (swapoff CAP-first),
+     348 (acct CAP-first), and 392 (fsopen CAP-first).  All four
+     follow the same Linux gate-1-is-may_mount/CAP pattern.  swapon
+     remains the deliberate exception (todo 173 — Linux's swapon
+     literally checks flag mask before CAP per a documented ABI
+     quirk; we mirror that quirk faithfully).
+
+     Architectural: pure ABI translation.  No mount infrastructure
+     exists either way; gate 1 is terminal and the answer is
+     unchanged.  We only reorder the gates so the errno discriminator
+     matches Linux's unprivileged-caller observable.  Since gate 1
+     terminates, no flag/attr/fd touch happens — sys_fsmount is now
+     a single-line linux_err(EPERM) with the entire gate cascade
+     elided.
+
+     Probes updated (3 reshape + 1 new + new aggregate stamp):
+       - fsmount(0, 0xff, 0)              : EINVAL → EPERM
+       - fsmount(0, 0, 0x4000_0000)       : EINVAL → EPERM
+       - fsmount(u64::MAX, 1, 0x1)        : (new) EPERM  (bad fd)
+       - fsmount(0, 1, 0x1)               : EPERM → EPERM   ✓ unchanged
+     New aggregate stamp:
+       "[syscall/linux]   fsmount may_mount EPERM-first gate
+        (Linux gate 1 fires before flag/attr/fd): OK"
+
+     Build: cargo build -p kernel clean (47.77s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 23s).
+     Stamp confirmed at build/serial-test.txt:584.

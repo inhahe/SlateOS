@@ -18053,29 +18053,27 @@ fn sys_fsconfig(args: &SyscallArgs) -> SyscallResult {
 
 /// `fsmount(fs_fd, flags, attr_flags)` — create a mount object from a
 /// configured fs context.  flags = FSMOUNT_CLOEXEC (1).
-fn sys_fsmount(args: &SyscallArgs) -> SyscallResult {
-    const FSMOUNT_CLOEXEC: u32 = 0x1;
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg1 as u32;
-    if flags & !FSMOUNT_CLOEXEC != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // attr_flags are MOUNT_ATTR_* bits — RDONLY (0x1), NOSUID (0x2),
-    // NODEV (0x4), NOEXEC (0x8), _ATIME mask (0x70), STRICTATIME (0x20),
-    // NOATIME (0x10), NODIRATIME (0x80), IDMAP (0x100_000), NOSYMFOLLOW
-    // (0x20_0000) — accept the union conservatively and reject anything
-    // above.
-    const MOUNT_ATTR_MASK: u32 = 0x20_00ff;
-    #[allow(clippy::cast_possible_truncation)]
-    let attr_flags = args.arg2 as u32;
-    if attr_flags & !MOUNT_ATTR_MASK != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = validate_linux_fd(fd) {
-        return r;
-    }
+///
+/// Linux gate order (fs/fsopen.c::SYSCALL_DEFINE3(fsmount)):
+///   1. `if (!may_mount()) return -EPERM;`  ← LITERAL FIRST CHECK
+///   2. `if (flags & ~FSMOUNT_CLOEXEC) return -EINVAL;`
+///   3. attr_flags mask check → -EINVAL
+///   4. `fdget(fs_fd)` → -EBADF on bad fd
+///   5. fs context kind / state validation
+///
+/// Pre-batch we ran the flag mask, attr_flags mask, and fd validation
+/// before the EPERM, so a caller passing garbage flags would see
+/// EINVAL where Linux returns EPERM.  That breaks observability for
+/// any mount-orchestration tool that probes capability via fsmount:
+/// it would falsely conclude "my flags are wrong" instead of "I lack
+/// CAP_SYS_ADMIN".  Sister fixes: batches 343 (swapoff), 348 (acct),
+/// 392 (fsopen) — all CAP-first gate reorderings.  Since we never
+/// grant CAP_SYS_ADMIN to Linux-ABI callers, gate 1 is terminal and
+/// no flag/attr/fd touch happens at all.
+fn sys_fsmount(_args: &SyscallArgs) -> SyscallResult {
+    // Gate 1 (Linux's literal first check): may_mount() → EPERM.
+    // We never grant CAP_SYS_ADMIN to Linux-ABI callers, so the
+    // gate-1 EPERM is terminal — no flag/attr/fd touch.
     linux_err(errno::EPERM)
 }
 
@@ -49699,24 +49697,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   fsconfig fd<0 > per-cmd arg shape (SET_*/CMD_*) gate order: OK"
         );
 
-        // fsmount bad flags -> EINVAL.
+        // fsmount: batch 393 — CAP-first EPERM gate.  Linux's literal
+        // gate 1 is `if (!may_mount()) return -EPERM;` before any flag,
+        // attr_flags, or fd touch.  Sister of batches 343 (swapoff),
+        // 348 (acct), 392 (fsopen).
+        // bad flags -> EPERM (CAP gate fires first; pre-batch was EINVAL).
         let a = SyscallArgs { arg0: 0, arg1: 0xff, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fsmount bad flags not EINVAL");
+        if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsmount bad flags not EPERM (CAP-first)");
             return Err(KernelError::InternalError);
         }
-        // fsmount bad attr_flags -> EINVAL.
+        // bad attr_flags -> EPERM (CAP gate fires first; pre-batch was EINVAL).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x4000_0000, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fsmount bad attr_flags not EINVAL");
+        if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsmount bad attr_flags not EPERM (CAP-first)");
             return Err(KernelError::InternalError);
         }
-        // fsmount valid -> EPERM.
+        // bad fd -> EPERM (CAP gate fires first; pre-batch was EBADF).
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 1, arg2: 0x1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fsmount bad fd not EPERM (CAP-first)");
+            return Err(KernelError::InternalError);
+        }
+        // valid -> EPERM (unchanged terminal answer).
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0x1, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FSMOUNT, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: fsmount valid not EPERM");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   fsmount may_mount EPERM-first gate (Linux gate 1 fires before flag/attr/fd): OK"
+        );
 
         // fspick bad flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0xff, arg3: 0, arg4: 0, arg5: 0 };

@@ -30749,3 +30749,137 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (36.94s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+375. syscall/linux batch 345 — sys_setgroups
+     EPERM-before-EINVAL gate reorder.
+
+     Linux gate-order facts
+     (kernel/groups.c::SYSCALL_DEFINE2(setgroups),
+     modern mainline):
+
+       gate 1: may_setgroups()
+               -> ns_capable(CAP_SETGID) +
+                  setgroups_allowed user-ns flag
+               returns EPERM on fail.
+       gate 2: (unsigned)gidsetsize > NGROUPS_MAX
+               returns EINVAL.
+       gate 3: groups_alloc() failure -> ENOMEM.
+       gate 4: copy_from_user list -> EFAULT.
+       gate 5: groups_sort + set_current_groups
+               -> 0.
+
+     Our pre-batch order:
+
+       1. (unsigned)gidsetsize > NGROUPS_MAX
+          -> EINVAL.
+       2. caller_pid() == None -> ok(0).
+       3. credentials.uid != 0 -> EPERM.
+       ... rest of body ...
+
+     The gate-2-before-gate-1 inversion produced
+     EINVAL where Linux produces EPERM for the
+     "unprivileged caller, bad size" case.
+
+     Why this matters for userspace porting:
+
+       libc's setgroups(3) wrapper, newgrp(1),
+       gpasswd(1), and various initscript
+       privilege-drop helpers (start-stop-daemon,
+       runuser, su) all use the errno from a
+       single setgroups() call to drive a
+       triage tree:
+
+         EPERM   -> caller is not privileged.
+                    Abort or fall back to a
+                    different mechanism (setuid,
+                    setresgid, etc).
+         EINVAL  -> retry with a different
+                    gidsetsize / sanitised list.
+         ENOMEM  -> back off, try smaller list.
+         EFAULT  -> caller bug, fix the pointer.
+
+       Returning EINVAL where Linux returns
+       EPERM tricks the probe into a retry loop
+       trying different gidsetsize values to
+       "find a size the kernel accepts," and the
+       caller eventually times out or aborts
+       with a misleading "invalid group list
+       size" error.  Returning EPERM lets the
+       caller branch into the proper privilege-
+       drop path immediately.
+
+     Fix:
+
+       Restructured sys_setgroups body so the
+       CAP_SETGID gate fires before the
+       NGROUPS_MAX bound:
+
+         1. truncate gidsetsize to i32 then to
+            u32 (batch-306 contract preserved).
+         2. CAP gate: if caller_pid() == Some(p)
+            and PCB uid != 0 -> EPERM.
+            (kernel context = None = bypass.)
+         3. NGROUPS_MAX: u32 > 65536 -> EINVAL.
+         4. kernel-context: pid_opt == None
+            -> ok(0).
+         5. PCB-missing race -> ok(0).
+         6. size==0: clear groups, write back.
+         7. list_ptr == 0 -> EFAULT.
+         8. copy_from_user + set_credentials.
+
+     Self-test (4 new probes, e..h, joining the
+     batch-306 a..d truncation guards):
+
+         e. setgroups(0, NULL)            ok(0)
+         f. setgroups(NGROUPS_MAX,  NULL) ok(0)
+         g. setgroups(NGROUPS_MAX+1,NULL) EINVAL
+         h. setgroups(INT_MIN, NULL)      EINVAL
+
+       Kernel-context cannot directly observe
+       gate-1 firing because caller_pid() is
+       None and the CAP gate bypasses.  Probes
+       e..h instead lock in the post-reorder
+       gate-2 behaviour as a regression guard
+       against any future restructure that
+       breaks NGROUPS_MAX while moving the CAP
+       gate around.
+
+     Marker: setgroups gate-order
+             EPERM-before-EINVAL: OK
+
+     Known limitations / judgment calls:
+
+     * No setgroups_allowed user-namespace
+       policy modelling.  Linux's may_setgroups
+       also checks the per-user-ns
+       "/proc/self/setgroups" flag, which can
+       block CAP_SETGID even for root callers
+       when a user-ns has been written
+       "deny" to that file.  We don't have
+       user-ns / setns plumbing, so the flag
+       is implicitly "allow" for every caller
+       that passes the uid==0 check.
+
+     * Kernel-context cannot probe EPERM-first
+       directly.  Would require either a fake
+       caller_pid() injection harness or a
+       proper userspace test runner; both are
+       out of scope for a single tick.  The
+       structural reorder is verifiable by
+       reading the body in source.
+
+     * PCB-missing race resolves to bypass.  If
+       a userspace caller's PCB has been torn
+       down between syscall entry and the
+       cap check (e.g. concurrent kill), we
+       treat the missing PCB as "no privilege
+       to check, no state to write" and fall
+       through to the kernel-context ok(0)
+       arm.  Linux would not see this race
+       because the PCB equivalent (task_struct)
+       is pinned for the duration of the
+       syscall by the current macro.
+
+     Build: cargo build -p kernel clean (36.14s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

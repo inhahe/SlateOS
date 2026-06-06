@@ -8277,18 +8277,29 @@ fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
 
     // Gate 5 (__sched_setscheduler policy switch): unknown policy
     // -> EINVAL.  4 is the deprecated SCHED_ISO slot; Linux rejects it.
-    match policy {
+    //
+    // x86_64 ABI: `policy` is declared `int` in Linux, so only the low
+    // 32 bits are defined.  Pre-batch (335) we matched on the raw u64
+    // `policy`, which made high-half sentinels (e.g. policy =
+    // 0x1_0000_0001, low = SCHED_FIFO) miss every arm and return
+    // EINVAL — divergent from Linux which sees policy=1 and accepts.
+    // `policy_i32` is already validated >= 0 by gate 1, so the
+    // sign-loss cast to u32 is safe; we keep policy_u32 in scope for
+    // gates 6/7 and the per-PCB store below.
+    #[allow(clippy::cast_sign_loss)]
+    let policy_u32 = policy_i32 as u32;
+    match policy_u32 {
         0 | 1 | 2 | 3 | 5 | 6 | 7 => {}
         _ => return linux_err(errno::EINVAL),
     }
 
     // Gate 6: policy/priority compatibility check -> EINVAL.
-    if let Err(e) = sched_priority_check_for_policy(policy, sched_prio) {
+    if let Err(e) = sched_priority_check_for_policy(u64::from(policy_u32), sched_prio) {
         return linux_err(e);
     }
 
     // Gate 7: RTPRIO gate for real-time policies -> EPERM.
-    if policy == 1 || policy == 2 {
+    if policy_u32 == 1 || policy_u32 == 2 {
         if let Err(e) = rlimit_rtprio_check_for_caller(sched_prio) {
             return linux_err(e);
         }
@@ -8300,8 +8311,6 @@ fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
     // it exists via pcb::state() above.
     let target_pid = if pid_i32 == 0 { caller_pid() } else { Some(pid_u) };
     if let Some(tp) = target_pid {
-        #[allow(clippy::cast_possible_truncation)]
-        let policy_u32 = policy as u32;
         let _ = pcb::set_sched_policy(tp, policy_u32);
         let _ = pcb::set_sched_priority(tp, sched_prio);
     }
@@ -35406,6 +35415,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   sched_setscheduler policy<0 > param+pid > read > find > policy gate order: OK"
+        );
+        // Batch 335: sched_setscheduler `policy` is declared `int` in
+        // Linux, so the x86_64 ABI leaves the high 32 bits of arg1
+        // undefined.  Pre-batch we matched gate 5 (the policy switch),
+        // gate 6 (sched_priority_check_for_policy), and gate 7 (the
+        // RTPRIO arms `policy == 1 || policy == 2`) against the raw
+        // u64.  High-bit sentinels whose low 32 = a valid policy fell
+        // through every match arm and returned EINVAL — divergent from
+        // Linux which sees only the truncated int and accepts.
+        //
+        // Probes use stack-allocated sched_param buffers so the param
+        // pointer is valid for the gate-3 copy and we exercise the
+        // post-gate-3 match arms specifically.
+        let sched_param_fifo = 1i32.to_ne_bytes();
+        let sched_param_fifo_ptr = sched_param_fifo.as_ptr() as u64;
+
+        // (a) policy = 0x1_0000_0000 (low = 0 = SCHED_OTHER), pid=0,
+        //     valid zero param -> Ok(0).  Pre-batch the raw-u64 match
+        //     missed every arm and returned EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0000,
+            arg2: sched_param_zero_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(policy=0x1_0000_0000, OTHER) expected 0, got {}",
+                dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) policy = 0x1_0000_0001 (low = 1 = SCHED_FIFO), pid=0,
+        //     valid fifo param (prio=1) -> Ok(0).  Pre-batch the
+        //     raw-u64 match returned EINVAL; this is the primary
+        //     post-truncation discriminator (SCHED_FIFO is reachable
+        //     only because RTPRIO gate 7 returns Ok in kernel context).
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0001,
+            arg2: sched_param_fifo_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(policy=0x1_0000_0001, FIFO) expected 0, got {}",
+                dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) policy = 0x1_0000_0008 (low = 8 = unknown), pid=0, valid
+        //     zero param -> EINVAL via gate 5.  Pre-batch also EINVAL
+        //     (raw u64 didn't match either) — preserved.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0008,
+            arg2: sched_param_zero_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(0x1_0000_0008) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) policy = 0xFFFF_FFFF_0000_0001 (low = 1 = SCHED_FIFO, all
+        //     high bits set), pid=0, valid fifo param -> Ok(0).  Same
+        //     discriminator as (b) with a different high-bit pattern.
+        let a = SyscallArgs { arg0: 0, arg1: 0xFFFF_FFFF_0000_0001,
+            arg2: sched_param_fifo_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(0xFFFF_FFFF_0000_0001) expected 0, got {}",
+                dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setscheduler policy int-truncation (high-half ignored): OK"
         );
         // Batch 255: sched_setparam routes through Linux's
         // do_sched_setscheduler, so its gate order is:

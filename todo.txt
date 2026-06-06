@@ -29541,3 +29541,91 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (35.70s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 23s).
+
+365. Batch 335 — sys_sched_setscheduler `policy`
+     int truncation (high-half ignored).
+
+     Divergence: Linux's prototype is
+       SYSCALL_DEFINE3(sched_setscheduler,
+                       pid_t, pid,
+                       int, policy,
+                       struct sched_param __user *, param)
+     where `policy` is `int`, delivered in rsi.  The
+     AMD64 syscall ABI does not sign- or zero-extend
+     `int` args before issuing syscall, so only the
+     low 32 bits of `policy` are defined; the high
+     half is caller-supplied garbage.
+
+     Pre-batch sys_sched_setscheduler gated three
+     downstream uses of `policy` at u64 width:
+       - gate 5: `match policy { 0|1|2|3|5|6|7 => {}
+                                  _ => EINVAL }`
+       - gate 6: `sched_priority_check_for_policy(
+                    policy, sched_prio)`
+       - gate 7: `if policy == 1 || policy == 2`
+     Gate 1 already cast to i32 (`policy_i32 < 0`),
+     but the post-gate-1 path went back to the raw
+     u64.  High-bit sentinels whose low 32 bits
+     encoded a *valid* policy (e.g. arg1 =
+     0x1_0000_0001, low = SCHED_FIFO) missed every
+     match arm in gate 5 and surfaced EINVAL — Linux
+     sees policy=1 and accepts.
+
+     Fix: introduce `policy_u32 = policy_i32 as u32`
+     after gate 1 (sign loss safe — gate 1 proved
+     policy_i32 >= 0) and route gates 5, 6, 7 plus
+     the per-PCB store through it.  Gate 6 widens
+     back to u64 at the call site to keep
+     sched_priority_check_for_policy's signature
+     untouched (it is shared with sched_setparam and
+     sched_setattr).
+
+     Tests: four boot-time probes added after the
+     existing "sched_setscheduler policy<0 > ... >
+     policy gate order: OK" marker, all with pid=0
+     (caller, kernel-context skips the per-PCB
+     store) and a stack-allocated valid param:
+       (a) policy=0x1_0000_0000 (low=0=SCHED_OTHER),
+           param prio=0 -> Ok(0).  Pre-batch the
+           raw-u64 match missed every arm -> EINVAL.
+       (b) policy=0x1_0000_0001 (low=1=SCHED_FIFO),
+           param prio=1 -> Ok(0).  Primary post-
+           truncation discriminator (success vs
+           pre-batch EINVAL).  Reachable because
+           gate 7's RTPRIO check returns Ok in
+           kernel context.
+       (c) policy=0x1_0000_0008 (low=8=unknown),
+           param prio=0 -> EINVAL.  Preserved:
+           pre-batch also EINVAL via the raw match
+           miss; post-batch via the u32 match miss.
+       (d) policy=0xFFFF_FFFF_0000_0001 (low=1=
+           SCHED_FIFO, all high bits set), param
+           prio=1 -> Ok(0).  Same discriminator as
+           (b) with a different high-bit pattern.
+     Marker: "[syscall/linux]   sched_setscheduler
+              policy int-truncation (high-half
+              ignored): OK".
+
+     Preserved: existing sched_setscheduler probes
+     still pass:
+       - (0, 8, valid) -> EINVAL (policy=8 rejected).
+       - (0, 4, valid) -> EINVAL (deprecated ISO).
+       - (0, 0, NULL) -> EINVAL (gate 2 param NULL).
+       - (0, u64::MAX, valid) -> EINVAL (gate 1
+         policy_i32 < 0).
+       - (0, 99, NULL) -> EINVAL (gate 2 NULL beats
+         gate 5).
+       - (12345, 99, valid) -> ESRCH (gate 4 pid
+         lookup beats gate 5).
+
+     Known limitations:
+     - `pid` (arg0) is already cast through pid_i32
+       at gates 1, 2, and 4.
+     - SCHED_DEADLINE (6) is accepted at gate 5 but
+       not actually wired into the kernel scheduler;
+       its per-task store ignores priority semantics.
+       Not a regression from this batch.
+
+     Build: cargo build -p kernel clean (41.71s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 26s).

@@ -36563,3 +36563,146 @@ OBSOLETE NOTE BELOW (pre-relaxation):
         ordered before pointer validation (Linux:
         sockfd_lookup_light fires before move_addr_to_user;
         bad fd → EBADF regardless of pointer validity): OK"
+
+ 434. sys_accept and sys_accept4 validated user pointers
+      BEFORE looking up the fd, so userspace observed EINVAL
+      on half-NULL pointer pairs (or EFAULT on bad pointers)
+      where Linux returns EBADF for an invalid fd.  Direct
+      continuation of batch 433 for the accept family.
+
+      Linux source (net/socket.c).  __sys_accept is a thin
+      wrapper around __sys_accept4(fd, addr, addrlen, 0), and
+      __sys_accept4 is:
+
+          int __sys_accept4(int fd,
+                            struct sockaddr __user *upeer_sockaddr,
+                            int __user *upeer_addrlen,
+                            int flags)
+          {
+              struct file *file;
+              struct socket *newsock;
+              int newfd;
+              int err;
+
+              if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
+                  return -EINVAL;            // Gate 1: flags
+              ...
+              f = fdget(fd);                  // (in caller of
+              if (!f.file)                    //   do_accept)
+                  return -EBADF;              // Gate 2: fd
+
+              newfile = do_accept(file, file_flags,
+                                  upeer_sockaddr,
+                                  upeer_addrlen, flags);
+              ...
+          }
+
+          static struct file *do_accept(struct file *file,
+                                        unsigned file_flags, ...)
+          {
+              ...
+              if (upeer_sockaddr) {            // Gate 3: pointer,
+                  ...                          //   only if non-NULL
+                  err = move_addr_to_user(&address, len,
+                                          upeer_sockaddr,
+                                          upeer_addrlen);
+                  ...
+              }
+              ...
+          }
+
+      Note the critical Linux detail: move_addr_to_user is
+      only called when `upeer_sockaddr != NULL`.  Both
+      pointers being NULL is a legal "I don't want the peer
+      address" call — accept(fd, NULL, NULL) succeeds (or
+      returns the same errno an in-progress accept would).
+
+      Divergence table (fd=99 invalid; flags=0o4000 = SOCK_NONBLOCK
+      legal; flags=0x1_0000 outside the SOCK_CLOEXEC|SOCK_NONBLOCK
+      mask):
+
+         accept(fd, addr, addrlen)         Linux    pre-batch  post-batch
+         (99-bad, NULL, NULL)              EBADF    EBADF      EBADF      ok
+                                                    (validate_sockaddr_out
+                                                     allows both-NULL,
+                                                     then fd → EBADF)
+         (99-bad, valid, NULL)             EBADF    EINVAL     EBADF      FIXED
+         (99-bad, NULL, valid)             EBADF    EINVAL     EBADF      FIXED
+         (99-bad, valid, valid)            EBADF    EBADF      EBADF      ok
+         (99-bad, BAD_PTR, valid)          EBADF    EFAULT     EBADF      FIXED
+
+         accept4(fd, addr, addrlen, flags) Linux    pre-batch  post-batch
+         (any, any, any, BAD_FLAGS)        EINVAL   EINVAL     EINVAL     ok
+                                                    (gate 1 is
+                                                     always first)
+         (99-bad, valid, NULL, 0o4000)     EBADF    EINVAL     EBADF      FIXED
+         (99-bad, NULL, valid, 0o4000)     EBADF    EINVAL     EBADF      FIXED
+         (99-bad, BAD_PTR, valid, 0o4000)  EBADF    EFAULT     EBADF      FIXED
+
+      Why it matters:
+        * Server-side socket code commonly does
+          `for (;;) { int s = accept(listener, NULL, NULL);
+           if (s < 0) { if (errno == EBADF) break;
+                        if (errno == EINTR) continue; ... } }`
+          to detect "listener was closed while I was blocking
+          in accept".  Pre-batch a process with a stale or
+          racing-closed listener fd would see EBADF correctly
+          (both pointers NULL, no pointer gate fires), so the
+          common case worked.  But code that passes the peer-
+          address out args (`accept(listener, &peer, &len)`)
+          would on a closed listener see EBADF too — unless a
+          partial NULL slipped in from a refactor, in which
+          case the pre-batch path returned EINVAL and the loop
+          would abort with the wrong reason.
+        * accept4-based servers (most modern code uses
+          accept4 with SOCK_CLOEXEC | SOCK_NONBLOCK) hit the
+          same divergence with the additional confusing twist
+          that the flags gate is correctly Linux-faithful, so
+          one out of three gates was right.
+        * tcpdump's socket-monitor probe path (CAP_NET_RAW
+          probes use accept on AF_PACKET sockets with NULL
+          peer args to test capability presence) — affected
+          identically to the getsockname/getpeername batch.
+
+      Architectural directive: translator-only fix.  Native
+      socket layer continues to validate in whatever order it
+      finds convenient; this reorder is purely so the Linux-
+      numbered entrypoint reports the errno Linux would.  No
+      changes to validate_sockaddr_out, no changes to
+      validate_linux_fd, no changes to any native code path.
+
+      Fix in kernel/src/syscall/linux.rs:
+        * sys_accept (~line 21851): moved validate_linux_fd
+          to fire BEFORE validate_sockaddr_out.  Doc-commented
+          with Linux source quote.
+        * sys_accept4 (~line 21899): kept flags gate first
+          (matches Linux), then moved fd before pointer.
+        * Did NOT touch sys_connect / sys_sendto / sys_recvfrom
+          / sys_sendmsg / sys_recvmsg — each carries its own
+          gate matrix (addr_len, buf_len, msghdr size) that
+          needs separate Linux gate-order analysis and will be
+          addressed in subsequent batches.
+
+      Self-test additions (~line 55186):
+        * accept 4-case matrix: (NULL,NULL) → EBADF (legal
+          ignore-peer), (valid,NULL) → EINVAL (half-NULL),
+          (NULL,valid) → EINVAL, (valid,valid) → EBADF.
+        * accept4 5-case matrix: bad-flags pin (EINVAL),
+          bad-flags + valid ptrs (EINVAL — gate 1 wins),
+          legal-flags + NULL/NULL (EBADF), legal-flags +
+          half-NULL (EINVAL), legal-flags + valid/valid
+          (EBADF).
+        * Kernel-ctx limitation acknowledged in comment: the
+          user-context EBADF-vs-EINVAL/EFAULT swap is not
+          directly observable here.  The probes verify the
+          reorder did not regress the kernel-ctx flow.
+
+      Build: cargo build -p kernel clean (41.58s).
+      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at
+      24s).
+      Stamp confirmed at build/serial-test.txt:
+        "[syscall/linux]   accept/accept4 fd lookup ordered
+        before pointer validation (Linux: do_accept's fdget
+        fires before move_addr_to_user; accept4 flags gate
+        stays first; bad fd → EBADF regardless of pointer
+        validity): OK"

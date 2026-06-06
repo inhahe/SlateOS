@@ -21848,33 +21848,108 @@ fn sys_listen(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `accept(sockfd, addr*, addrlen*)`.
+///
+/// ## Batch 434 — fd lookup gates before pointer validation
+///
+/// Continuation of batch 433.  Linux's `__sys_accept` is a thin
+/// wrapper around `__sys_accept4(fd, addr, addrlen, 0)`, which in
+/// turn calls `do_accept` after the flags check.  `do_accept`
+/// (`net/socket.c`):
+/// ```c
+/// static struct file *do_accept(struct file *file, unsigned file_flags,
+///                               struct sockaddr __user *upeer_sockaddr,
+///                               int __user *upeer_addrlen, int flags)
+/// {
+///     struct socket *sock, *newsock;
+///     struct file *newfile;
+///     int err, len;
+///     struct sockaddr_storage address;
+///     const struct proto_ops *ops;
+///
+///     sock = sock_from_file(file);     // <-- fd was already resolved
+///     ...
+///     if (upeer_sockaddr) {              // <-- pointer access ONLY if non-NULL
+///         len = ops->accept(sock, ...);
+///         ...
+///         err = move_addr_to_user(&address, len,
+///                                 upeer_sockaddr, upeer_addrlen);
+///         ...
+///     }
+///     ...
+/// }
+/// ```
+/// File resolution happens in the caller via `fdget(fd)` which
+/// returns -EBADF before `do_accept` runs.  The pointer access in
+/// `move_addr_to_user` only fires when `upeer_sockaddr != NULL` —
+/// so `accept(fd, NULL, NULL)` is a legal "I don't want the peer
+/// address" call.  Both pointers being NULL is OK; mixing NULL with
+/// non-NULL would surface inside `move_addr_to_user` as an EFAULT on
+/// the NULL `ulen` arg (Linux's `get_user(len, ulen)`).
+///
+/// Pre-batch our code ran `validate_sockaddr_out` before
+/// `validate_linux_fd`, so userspace observed:
+///   * `(bad_fd, valid, NULL)` → EINVAL where Linux returns EBADF
+///   * `(bad_fd, NULL, valid)` → EINVAL where Linux returns EBADF
+///   * `(bad_fd, BAD_PTR, valid)` → EFAULT where Linux returns EBADF
+///
+/// Architectural note: translator-only reorder.  Native socket layer
+/// can validate in whatever order it likes — this swap is purely so
+/// the Linux-numbered entrypoint reports the errno Linux would.
 fn sys_accept(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
+    // Linux gate 1: fdget(fd) inside do_accept's caller → EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    if let Err(r) = validate_linux_fd(fd) {
+    // Linux gate 2: move_addr_to_user pointer access, only if
+    // upeer_sockaddr != NULL.  validate_sockaddr_out matches that
+    // semantic (both-NULL → Ok, half-NULL → EINVAL, valid pair →
+    // access check).
+    if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
     }
     linux_err(errno::EBADF)
 }
 
 /// `accept4(sockfd, addr*, addrlen*, flags)`.
+///
+/// Linux's `__sys_accept4` (`net/socket.c`):
+/// ```c
+/// int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
+///                   int __user *upeer_addrlen, int flags)
+/// {
+///     ...
+///     if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))    // Gate 1: flags
+///         return -EINVAL;
+///     ...
+///     newfile = do_accept(file, ..., upeer_sockaddr,    // Gate 2: fd
+///                         upeer_addrlen, flags);         // (inside do_accept)
+///     ...                                                // Gate 3: pointer
+/// }                                                      // (inside do_accept,
+///                                                        //  only if non-NULL)
+/// ```
+/// So the gate order is FLAGS → FD → POINTER.  Pre-batch we had
+/// FLAGS → POINTER → FD; this reorder swaps the last two.  See
+/// `sys_accept` for the full Batch 434 rationale.
 fn sys_accept4(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg3 as u32;
-    // SOCK_CLOEXEC (0o2_000_000) and SOCK_NONBLOCK (0o4000) are the
-    // only defined flag bits.
+    // Linux gate 1: SOCK_CLOEXEC (0o2_000_000) and SOCK_NONBLOCK
+    // (0o4000) are the only defined flag bits.  Linux validates
+    // flags BEFORE calling do_accept (so before fd lookup).
     if flags & !(0o2_000_000 | 0o4000) != 0 {
         return linux_err(errno::EINVAL);
     }
-    if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
+    // Linux gate 2: fdget(fd) → EBADF.
+    if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    if let Err(r) = validate_linux_fd(fd) {
+    // Linux gate 3: move_addr_to_user pointer access, only if
+    // upeer_sockaddr != NULL.
+    if let Err(r) = validate_sockaddr_out(args.arg1, args.arg2) {
         return r;
     }
     linux_err(errno::EBADF)
@@ -55106,6 +55181,126 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   getsockname/getpeername fd lookup ordered before pointer validation (Linux: sockfd_lookup_light fires before move_addr_to_user; bad fd → EBADF regardless of pointer validity): OK"
+        );
+    }
+
+    // Batch 434: accept / accept4 — fd lookup gates BEFORE pointer
+    // validation, matching Linux's __sys_accept4 → do_accept order in
+    // net/socket.c.  For accept4 the flags gate stays first (Linux:
+    // bad-flag check fires before do_accept).
+    //
+    // Pre-batch order was POINTER → FD (and FLAGS → POINTER → FD for
+    // accept4).  Userspace observed:
+    //   (bad_fd, valid, NULL)   pre EINVAL  post EBADF (Linux)
+    //   (bad_fd, NULL, valid)   pre EINVAL  post EBADF (Linux)
+    //   (bad_fd, BAD_PTR, valid) pre EFAULT post EBADF (Linux)
+    //
+    // Kernel-context self-test cannot directly observe the
+    // user-context swap (validate_linux_fd is a no-op when
+    // caller_pid() is None); these probes verify the reorder did
+    // not regress the existing kernel-ctx flow:
+    //   * NULL/NULL still surfaces as final EBADF (legal "ignore
+    //     peer" call shape — both pointers optional but symmetric).
+    //   * half-NULL still surfaces as EINVAL from
+    //     validate_sockaddr_out.
+    //   * accept4's flags gate still fires before everything else.
+    {
+        let sockaddr_buf = [0u8; 32];
+        let sockaddr_ptr = sockaddr_buf.as_ptr() as u64;
+        let socklen_buf = [16u8, 0, 0, 0];
+        let socklen_ptr = socklen_buf.as_ptr() as u64;
+
+        // accept(fd=3, NULL, NULL): fd gate passes, both-NULL is the
+        // "don't return peer addr" call → final EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept(NULL,NULL) post-reorder not EBADF ({})",
+                dispatch_linux(nr::ACCEPT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept(fd=3, valid, NULL): fd gate passes → half-NULL
+        // surfaces as EINVAL from validate_sockaddr_out.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept(valid,NULL) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::ACCEPT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept(fd=3, NULL, valid): same — half-NULL → EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept(NULL,valid) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::ACCEPT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept(fd=3, valid, valid): fd OK → pointer OK → EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept(valid,valid) post-reorder not EBADF ({})",
+                dispatch_linux(nr::ACCEPT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // accept4 flags gate (bit 0x1_0000 outside SOCK_CLOEXEC /
+        // SOCK_NONBLOCK mask): EINVAL regardless of fd / pointer.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0x1_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept4 bad flags post-reorder not EINVAL ({})",
+                dispatch_linux(nr::ACCEPT4, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept4 with bad flags AND valid ptrs: flags still wins
+        // over the reorder (gate 1 short-circuits before gates 2/3).
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0x1_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept4(flags=0x1_0000, valid) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::ACCEPT4, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept4(fd=3, NULL, NULL, NONBLOCK): legal flags, both-
+        // NULL allowed → EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: 0, arg2: 0, arg3: 0o4000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept4(NULL,NULL,NONBLOCK) post-reorder not EBADF ({})",
+                dispatch_linux(nr::ACCEPT4, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept4(fd=3, valid, NULL, NONBLOCK): half-NULL → EINVAL.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0o4000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept4(valid,NULL,NONBLOCK) post-reorder not EINVAL ({})",
+                dispatch_linux(nr::ACCEPT4, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept4(fd=3, valid, valid, CLOEXEC): all gates pass →
+        // EBADF.
+        let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: socklen_ptr, arg3: 0o2_000_000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept4(valid,valid,CLOEXEC) post-reorder not EBADF ({})",
+                dispatch_linux(nr::ACCEPT4, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   accept/accept4 fd lookup ordered before pointer validation (Linux: do_accept's fdget fires before move_addr_to_user; accept4 flags gate stays first; bad fd → EBADF regardless of pointer validity): OK"
         );
     }
 

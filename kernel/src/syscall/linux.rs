@@ -21186,7 +21186,17 @@ fn sys_lsm_set_self_attr(args: &SyscallArgs) -> SyscallResult {
     const LSM_MAX_CTX_SIZE: u64 = 16384; // PAGE_SIZE on 16 KiB target
     // 1. flags first.  Only 0 is currently valid; LSM_FLAG_SINGLE
     //    is a get-side flag, not honored on set.
-    if args.arg3 != 0 {
+    //
+    // Linux signature: `SYSCALL_DEFINE4(lsm_set_self_attr, unsigned int,
+    // attr, struct lsm_ctx __user *, ctx, u32, size, u32, flags)`.
+    // `flags` is C `u32`, delivered in r10.  The AMD64 syscall ABI does
+    // not zero-extend `unsigned int` across the syscall instruction, so
+    // Linux observes only the low 32 bits.  Pre-batch we tested the raw
+    // u64 against 0, so any high-half garbage was rejected with EINVAL
+    // where Linux's truncated flags=0 advances to the size gates.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     // 2. size < sizeof(lsm_ctx) -> EINVAL (includes size == 0).
@@ -48384,6 +48394,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   lsm_set_self_attr flags/size/E2BIG gating: OK"
         );
+
+        // lsm_set_self_attr flags is C `u32`; the high 32 bits of arg3
+        // must be masked before the `flags != 0` rejection gate.  Pre-
+        // batch the gate compared at u64 width, so any high-half
+        // garbage returned EINVAL where Linux's truncated flags=0 falls
+        // through to the size gates.
+        //
+        // (a) flags=0x1_0000_0000 (high-only), attr=100, size=32,
+        //     ctx=NULL: truncates to 0, flag gate passes, size gate
+        //     passes (32 == LSM_CTX_SIZE), downstream NULL-ctx gate
+        //     returns EFAULT.  Pre-fix returned EINVAL on the flag
+        //     gate.
+        let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 32, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr(high-only,NULL) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) flags=0x1_0000_0001 (high|bad-low 1): truncates to 1,
+        //     gate still rejects.  Verifies the mask continues to
+        //     reject any nonzero low half after the high-bit strip.
+        let a = SyscallArgs { arg0: 100, arg1: lsm_ctx_ptr, arg2: 32, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr(high|bad-low 1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) flags=0x1_0000_0002 (high|bad-low 2): truncates to 2,
+        //     gate still rejects.  Independent low bit confirms the
+        //     mask covers more than the LSB.
+        let a = SyscallArgs { arg0: 100, arg1: lsm_ctx_ptr, arg2: 32, arg3: 0x1_0000_0002, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr(high|bad-low 2) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) flags=0x1_0000_0000 with size > PAGE_SIZE (16385) and
+        //     valid ctx: truncates to 0, flag gate passes, size > 32
+        //     passes the lower bound, then size > 16384 trips the E2BIG
+        //     gate.  Verifies subsequent gates still fire after flag
+        //     truncation.  Pre-fix returned EINVAL on the flag gate.
+        let a = SyscallArgs {
+            arg0: 100, arg1: lsm_ctx_ptr, arg2: 16385, arg3: 0x1_0000_0000, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::LSM_SET_SELF_ATTR, &a).value != -i64::from(errno::E2BIG) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lsm_set_self_attr(high-only,size>PAGE) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   lsm_set_self_attr unsigned-int truncation (high-half ignored): OK"
+        );
+
         // lsm_list_modules NULL size, flags=0 -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LSM_LIST_MODULES, &a).value != -i64::from(errno::EFAULT) {

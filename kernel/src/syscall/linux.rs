@@ -17651,23 +17651,35 @@ fn sys_name_to_handle_at(args: &SyscallArgs) -> SyscallResult {
     } else if flags & AT_EMPTY_PATH == 0 {
         return linux_err(errno::EFAULT);
     }
-    // mount_id is required.
-    if args.arg3 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 4) {
-        return linux_err(linux_errno_for(e));
-    }
-    // handle ptr is required.
-    if args.arg2 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    // struct file_handle header is 8 bytes (4 + 4); validate header read
-    // so we can see handle_bytes, which is what Linux does first.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 8) {
-        return linux_err(linux_errno_for(e));
-    }
-    // No filesystem exports persistent handles in this kernel.
+    // Batch 383: Linux's do_sys_name_to_handle (fs/fhandle.c) runs
+    // the export_op feasibility check BEFORE touching either `ufh`
+    // or `mnt_id` pointers:
+    //
+    //   if (!exportfs_can_encode_fh(path->dentry->d_sb->s_export_op,
+    //                               fh_flags))
+    //       return -EOPNOTSUPP;
+    //   if (copy_from_user(&f_handle, ufh, sizeof(struct file_handle)))
+    //       return -EFAULT;
+    //   ...
+    //   if (put_user(real_mnt_id, mnt_id))
+    //       err = -EFAULT;
+    //
+    // No filesystem in our model registers an s_export_op, so the
+    // EOPNOTSUPP arm always fires before any pointer dereference.
+    // Pre-batch we EFAULTed on NULL handle / NULL mnt_id, which is
+    // what Linux would return only for a *handle-exporting* fs.
+    // Userspace handle-feature probes (CRIU's fhandle test, systemd's
+    // file-handle support detector) call name_to_handle_at(AT_FDCWD,
+    // "/", NULL, NULL, 0) to ask "does this kernel have fhandle?";
+    // Linux on a non-exporting filesystem (e.g., tmpfs without
+    // CONFIG_TMPFS_INODE64) answers EOPNOTSUPP, which lets the probe
+    // immediately fall back to inotify/dnotify.  Pre-batch we
+    // answered EFAULT, which CRIU interprets as "the syscall is
+    // supported but my buffers are bad" — and it retries with
+    // page-aligned heap buffers, never reaching the fallback.
+    //
+    // Fix: drop the handle / mnt_id pointer gates; EOPNOTSUPP
+    // unconditionally after the name/flags gates pass.
     linux_err(errno::EOPNOTSUPP)
 }
 
@@ -48847,12 +48859,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: n_t_h_a bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // name_to_handle_at with NULL mount_id -> EFAULT.
+        // Batch 383: name_to_handle_at with NULL mount_id -> EOPNOTSUPP
+        // (was EFAULT pre-batch).  Linux's export_op check fires
+        // before mnt_id is dereferenced; we don't export any handle-
+        // capable filesystem, so EOPNOTSUPP is the truthful answer.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: handle_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: n_t_h_a NULL mount_id not EFAULT");
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: n_t_h_a NULL mount_id not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        // Batch 383: NULL handle pointer -> EOPNOTSUPP (was EFAULT).
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: mount_id_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: n_t_h_a NULL handle not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 383: both NULL -> EOPNOTSUPP (CRIU-style fhandle
+        // feature probe — see the fix's design rationale comment).
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: n_t_h_a both NULL not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 383: NULL handle + valid mount_id + AT_HANDLE_FID -> EOPNOTSUPP.
+        // Verifies the EOPNOTSUPP path fires before *any* of the
+        // pre-batch pointer-NULL fast-fails, across the full flag
+        // set this syscall recognises.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: mount_id_ptr, arg4: 0x200, arg5: 0 };
+        if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: n_t_h_a NULL handle+FID not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   name_to_handle_at NULL pointers -> EOPNOTSUPP before pointer deref: OK"
+        );
         // name_to_handle_at with valid args -> EOPNOTSUPP.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: handle_ptr, arg3: mount_id_ptr, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::NAME_TO_HANDLE_AT, &a).value != -i64::from(errno::EOPNOTSUPP) {

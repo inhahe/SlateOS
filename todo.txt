@@ -34717,3 +34717,91 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 23s).
 
+
+413. Batch 383 — sys_name_to_handle_at: drop pointer NULL/EFAULT
+     gates, return EOPNOTSUPP unconditionally after name+flag gates.
+
+     Divergence:
+       Linux fs/fhandle.c::do_sys_name_to_handle gate order (post-
+       path-resolution, in the helper called by the SYSCALL_DEFINE5
+       entry):
+
+         if (!exportfs_can_encode_fh(path->dentry->d_sb->s_export_op,
+                                     fh_flags))
+             return -EOPNOTSUPP;
+         if (copy_from_user(&f_handle, ufh, sizeof(struct file_handle)))
+             return -EFAULT;
+         ...
+         if (put_user(real_mnt_id, mnt_id))
+             err = -EFAULT;
+
+       EOPNOTSUPP is checked BEFORE either `ufh` or `mnt_id` is
+       dereferenced.  Any filesystem that doesn't register an
+       s_export_op (or whose op rejects the requested fh_flags) is
+       reported as not-supported regardless of pointer validity.
+
+       No filesystem in our model registers s_export_op (we have
+       no persistent inode IDs, no nfsd-style fhandle path).  The
+       truthful answer for every (path-valid, flags-valid) call is
+       EOPNOTSUPP — including calls with NULL handle or NULL mnt_id.
+
+       Pre-batch we gated NULL handle / NULL mnt_id with EFAULT
+       before reaching the EOPNOTSUPP terminal.  Linux's actual
+       behaviour for the same arguments on a non-exporting fs is
+       EOPNOTSUPP, not EFAULT.
+
+     Why it matters:
+       Userspace handle-feature probes (CRIU's fhandle support
+       detector, systemd's logind/file-handle test, kdbus stream
+       fd-pass test) call:
+
+         name_to_handle_at(AT_FDCWD, "/", NULL, NULL, 0)
+
+       as a "is this kernel's fhandle feature usable" probe.  On
+       Linux's tmpfs (no export op) the answer is EOPNOTSUPP, which
+       the probe interprets as "feature not available, fall back".
+       Pre-batch we returned EFAULT, which the probe interprets as
+       "syscall supported but my buffers are bad" — leading to
+       retries with page-aligned heap buffers, never reaching the
+       fallback path.  CRIU's fhandle support test then loops
+       indefinitely on NULL-pointer EFAULTs, and systemd's
+       open_by_handle path stays in the "trying again" state.
+
+     Fix:
+       Remove four lines from sys_name_to_handle_at body:
+         - args.arg3 == 0 -> EFAULT
+         - validate_user_write(args.arg3, 4) -> EFAULT
+         - args.arg2 == 0 -> EFAULT
+         - validate_user_read(args.arg2, 8) -> EFAULT
+
+       Replace with a doc-comment block citing Linux's actual gate
+       order from fs/fhandle.c, and a single `linux_err(errno::
+       EOPNOTSUPP)` terminal after the existing flag and name gates.
+
+     Architectural directive: translator-layer fix.  Our native fs
+     model doesn't register handle-exporting superblocks; no native
+     code path changes.  When a real handle-capable filesystem
+     lands (e.g., a future ext4 port with NFS-export support), the
+     EOPNOTSUPP terminal becomes the OPNOTSUPP-fallthrough that
+     proceeds into the handle-encode + put_user pipeline, at which
+     point NULL pointers become EFAULTs naturally — no probe
+     contract changes.
+
+     Probes:
+       * Updated: NULL mount_id -> EOPNOTSUPP (was EFAULT).
+       * NEW: NULL handle (valid mount_id) -> EOPNOTSUPP.
+       * NEW: both NULL -> EOPNOTSUPP (the CRIU probe).
+       * NEW: NULL handle + valid mount_id + AT_HANDLE_FID
+              -> EOPNOTSUPP (verifies the EOPNOTSUPP path fires
+              before the pointer-NULL fast-fails across the full
+              flag set).
+       * Unchanged: bad flags -> EINVAL, valid args -> EOPNOTSUPP,
+         AT_HANDLE_MNT_ID_UNIQUE -> EOPNOTSUPP, AT_HANDLE_CONNECTABLE
+         -> EOPNOTSUPP, CONNECTABLE|FID -> EINVAL, FID alone -> EOPNOTSUPP.
+
+     Final stamp:
+       "[syscall/linux]   name_to_handle_at NULL pointers ->
+        EOPNOTSUPP before pointer deref: OK"
+
+     Build: cargo build -p kernel clean (49.99s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 23s).

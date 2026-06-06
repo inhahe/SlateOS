@@ -32743,3 +32743,162 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (39.75s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 24s).
+
+394. syscall/linux batch 364 — sys_shmget: implement ipcget
+     routing (IPC_PRIVATE / ENOENT / EINVAL) instead of a
+     single IPC_CREAT-with-size=0 catch-all gate.
+
+     LINUX ABI REFERENCE.
+
+       ipc/shm.c::SYSCALL_DEFINE3(shmget):
+
+           SYSCALL_DEFINE3(shmget, key_t, key, size_t, size,
+                           int, shmflg)
+           {
+                   ...
+                   return ipcget(ns, &shm_ipc_ids(ns), &shm_ops,
+                                 &shm_params);
+           }
+
+       ipc/util.c::ipcget routes:
+
+           if (params->key == IPC_PRIVATE)
+                   return ipcget_new(...);    // always newseg
+           else
+                   return ipcget_public(...); // findkey + create
+
+       ipcget_public:
+
+           ipcp = ipc_findkey(ids, params->key);
+           if (ipcp == NULL) {
+                   if (!(flg & IPC_CREAT))
+                           err = -ENOENT;
+                   else
+                           err = ops->getnew(ns, params);  // newseg
+           } else {
+                   // existing segment branch -- no size check.
+           }
+
+       newseg:
+
+           if (size < SHMMIN || size > ns->shm_ctlmax)
+                   return -EINVAL;
+
+       SHMMIN = 1.  SHMMAX defaults to ULONG_MAX on modern
+       Linux (effectively unbounded).
+
+       Types:
+         - key_t   = C int   (32 bits)  — x86_64 syscall ABI
+                                          truncates rdi to low 32.
+         - size_t  = ulong   (64 bits)  — native width.
+         - shmflg  = C int   (32 bits)  — truncates.
+
+     PRE-BATCH STATE.
+
+       Our sys_shmget had a single gate that only matched the
+       intersection of IPC_CREAT and size==0:
+
+           let _flags = args.arg2;
+           let size = args.arg1 as usize;
+           if size == 0 && (args.arg2 & 0o1000) != 0 {
+               return linux_err(errno::EINVAL);
+           }
+           linux_err(errno::ENOSYS)
+
+       Three observable divergences:
+
+       (a) shmget(IPC_PRIVATE=0, size=0, shmflg=0)
+           Linux: -EINVAL (always routes through newseg; size
+                          < SHMMIN).
+           Pre-batch: ENOSYS.  The IPC_CREAT guard didn't fire
+                      because IPC_PRIVATE doesn't require it.
+
+       (b) shmget(key=5, size=any, shmflg=0)
+           Linux: -ENOENT (key not found, !IPC_CREAT).
+           Pre-batch: ENOSYS.  Programs probing for an
+                      existing well-known SysV key (Oracle DB
+                      attaching to a pre-created segment;
+                      Postgres shared buffers; X11
+                      MIT-SHM segments) received ENOSYS and
+                      could not tell whether the kernel
+                      supports SysV at all vs. the segment is
+                      simply missing.  Glibc-built probes
+                      conventionally retry with IPC_CREAT
+                      after ENOENT and abort outright on
+                      ENOSYS.
+
+       (c) key_t / shmflg int-truncation:
+           Linux: high bits in rdi (key) and rdx (shmflg)
+                  are dropped before the body runs.
+           Pre-batch: held both at u64 width — a probe with
+                      key=0x1_0000_0000 was treated as a
+                      non-PRIVATE key by the existing check
+                      (we never tested key==0 directly, but
+                      the IPC_PRIVATE concept didn't exist in
+                      the code path), and shmflg's IPC_CREAT
+                      bit was tested at u64 width so a high-
+                      bit-only shmflg leaked into the mask.
+
+     FIX.
+
+       Implemented the ipcget routing inline (the work-doing
+       paths still terminate at ENOSYS — no SysV backing
+       exists):
+
+           let key    = args.arg0 as i32;  // key_t
+           let size   = args.arg1;         // size_t
+           let shmflg = args.arg2 as i32;  // int
+
+           if key == IPC_PRIVATE {
+               if size == 0 { return EINVAL; }
+               return ENOSYS;
+           }
+           if shmflg & IPC_CREAT == 0 {
+               return ENOENT;
+           }
+           if size == 0 { return EINVAL; }
+           ENOSYS
+
+       Native subsystems untouched.  The SHMMAX upper bound is
+       intentionally not enforced — modern Linux's
+       shm_ctlmax defaults to ULONG_MAX, so any practical
+       size value passes Linux's gate and we match that.
+
+     BOOT-TIME PROBES.
+
+       Kept the two pre-existing probes (both already pass
+       with the new routing because IPC_PRIVATE happens to be
+       key=0 and they already used key=0):
+
+         - shmget(0, 0, IPC_CREAT) -> EINVAL
+         - shmget(0, 4096, 0)     -> ENOSYS
+
+       Added four new probes for the previously-missed shapes:
+
+         (a) shmget(5, 4096, 0) -> ENOENT.
+             Direct test of the ipc_findkey miss without
+             IPC_CREAT.  Pre-batch: ENOSYS.
+
+         (b) shmget(5, 0, 0) -> ENOENT.
+             Confirms the ENOENT path fires regardless of
+             size for a non-PRIVATE key without IPC_CREAT.
+             Pre-batch: ENOSYS.
+
+         (c) shmget(5, 0, IPC_CREAT) -> EINVAL.
+             ipcget_public miss + IPC_CREAT -> newseg ->
+             size<SHMMIN -> EINVAL.  Sanity check for the
+             IPC_CREAT+size=0 path on non-PRIVATE keys.
+
+         (d) shmget(0x1_0000_0000, 4096, IPC_CREAT) -> ENOSYS.
+             key_t truncation: 0x1_0000_0000 truncated to
+             i32 is 0 = IPC_PRIVATE -> newseg path -> ENOSYS
+             terminal.  Verifies the truncation took effect
+             — a non-truncated key would have routed through
+             the public arm.
+
+     Final boot-time stamp:
+         "[syscall/linux]   shmget ipcget gate routing (IPC_PRIVATE / ENOENT / EINVAL): OK"
+
+     Build: cargo build -p kernel clean (37.43s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 24s).

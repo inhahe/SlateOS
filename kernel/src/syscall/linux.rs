@@ -21005,9 +21005,14 @@ fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
 fn sys_listmount(args: &SyscallArgs) -> SyscallResult {
     const MNT_ID_REQ_SIZE_VER0: u32 = 24;
     const LINUX_PAGE_SIZE: u32 = 4096;
-    const LISTMOUNT_REVERSE: u64 = 1;
-    // 1. flags first.
-    if args.arg3 & !LISTMOUNT_REVERSE != 0 {
+    const LISTMOUNT_REVERSE: u32 = 1;
+    // 1. flags first.  Linux signature is `unsigned int flags`, delivered
+    // in r10.  The AMD64 ABI does not zero-extend `unsigned int` across the
+    // syscall instruction, so only the low 32 bits are defined — high-half
+    // garbage must be masked before the bit gate.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    if flags & !LISTMOUNT_REVERSE != 0 {
         return linux_err(errno::EINVAL);
     }
     // 2a. get_user(size, &req->size) -> EFAULT on bad req.
@@ -47964,6 +47969,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   listmount flags-first / size gates / REVERSE accepted: OK"
+        );
+
+        // listmount flags is C `unsigned int`; the high 32 bits of arg3
+        // must be masked before the LISTMOUNT_REVERSE bit gate.  Pre-fix
+        // the mask compared at u64 width, so any high-half garbage
+        // returned EINVAL where Linux truncates and falls through.
+        //
+        // (a) high|LISTMOUNT_REVERSE (req=NULL): truncates to 1, mask
+        //     passes, gate 2a EFAULT on the NULL req pointer.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: listmount(high|REVERSE) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) high-only (req=NULL): truncates to 0, mask passes, EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: listmount(high-only) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) high|bad-low 0x2: truncates to 0x2, mask rejects (bit 1 is
+        //     not LISTMOUNT_REVERSE).  Verifies the mask gate still
+        //     rejects invalid bits after the high half is stripped.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0x1_0000_0002, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: listmount(high|bad-low) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) high|REVERSE with small_mnt_req (req->size=16 < 24):
+        //     truncates to 1, mask passes, downstream gate 2c EINVAL on
+        //     too-small size.  Verifies flag truncation does not mask
+        //     subsequent gates.
+        let a = SyscallArgs { arg0: small_mnt_req_ptr, arg1: mnt_outbuf_ptr, arg2: 8, arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: listmount(high|REVERSE,size<24) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   listmount unsigned-int truncation (high-half ignored): OK"
         );
 
         // lsm_get_self_attr attr=0 (LSM_ATTR_UNDEF) -> EINVAL.

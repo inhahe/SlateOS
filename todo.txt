@@ -23275,3 +23275,75 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      Tracked here for a future cleanup pass.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 24s).
+
+300.  syscall/linux: pread64/pwrite64 count > SSIZE_MAX EINVAL
+##      (batch 271).
+##
+##      Pre-batch divergence: Linux's rw_verify_area
+##      (fs/read_write.c) is invoked from every positional-I/O
+##      syscall and gates
+##        if (unlikely((ssize_t)count < 0))
+##            return -EINVAL;
+##      BEFORE the fd lookup.  On 64-bit Linux ssize_t == i64, so
+##      this rejects every count in (i64::MAX as u64, u64::MAX]
+##      with EINVAL.  Our pre-batch sys_pread64 / sys_pwrite64 did
+##      the offset < 0 check and then a noop
+##      `usize::try_from(count)` (on x86_64 usize == u64 so it
+##      never fails) before calling lookup_caller_fd, so an
+##      oversized count surfaced as EBADF in kernel context
+##      (wrong errno discriminator) or — for a valid fd — got
+##      handed to the backend as an oversized length.
+##
+##      Fix in sys_pread64 (line ~20640) and sys_pwrite64
+##      (line ~20691): add
+##        if count > i64::MAX as u64 {
+##            return linux_err(errno::EINVAL);
+##        }
+##      immediately above the existing `offset < 0` check, with a
+##      comment citing rw_verify_area's `(ssize_t)count < 0`
+##      gate.  Match Linux's strict `>` exactly — count ==
+##      i64::MAX is accepted.  This is the same SSIZE_MAX pattern
+##      that batch 267 added to validate_iov for preadv/pwritev.
+##
+##      Self-tests added in dispatch_linux (pread/pwrite SSIZE_MAX
+##      triple):
+##        A. pread64(fd=-1, buf=0, count=u64::MAX, offset=0)
+##             -> -EINVAL.
+##           Pre-batch: -EBADF; post-batch: -EINVAL.  Direct
+##           discriminator for the new gate vs the lookup_caller_fd
+##           fallback.
+##        B. pwrite64(fd=-1, buf=0, count=i64::MAX as u64 + 1,
+##                    offset=0) -> -EINVAL.
+##           Smallest SSIZE_MAX-boundary failure; also exercises
+##           the pwrite path symmetrically.
+##        C. pread64(fd=-1, buf=0, count=i64::MAX as u64,
+##                   offset=0) -> -EBADF.
+##           Acceptance: proves the gate is strict `>` exactly
+##           matching Linux's `(ssize_t)count < 0` test.  Pre-batch
+##           would also have returned EBADF here.
+##
+##      Marker:
+##        "[syscall/linux]   pread64/pwrite64 count SSIZE_MAX gating: OK"
+##
+##      Existing tests preserved: the pread64/pwrite64 negative-
+##      offset EINVAL and valid-args EBADF probes at line ~44230
+##      use small counts and continue to behave as documented.
+##      capset pid != current EPERM (batch 270) directly above;
+##      prctl(PR_SET_NAME) NULL-arg2 (batch 269) above that;
+##      capget/capset NULL-data quadruple (batch 268) above that;
+##      preadv/pwritev iov_len SSIZE_MAX (batch 267) above that;
+##      futimesat tv_usec triple (batch 266) below.
+##
+##      Known limitations: we still do not implement Linux's
+##      rw_verify_area pos + count overflow check (which returns
+##      -EOVERFLOW when the u64 sum wraps).  In practice with
+##      our backends the absence is benign (pread_file_to_user /
+##      pwrite_file_from_user cap their transfers at the file
+##      size), but if a future backend honours `pos + count`
+##      directly it will need the EOVERFLOW gate.  Also: we still
+##      do not implement Linux's silent MAX_RW_COUNT clamp (which
+##      truncates count down to ((1<<31) - PAGE_SIZE) without
+##      erroring); same rationale.  Tracked here for a future
+##      batch.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 24s).

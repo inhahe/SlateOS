@@ -11530,8 +11530,21 @@ fn sys_timerfd_create(args: &SyscallArgs) -> SyscallResult {
 ///     malformed timespec would now match Linux's "first-fire"
 ///     EINVAL regardless.
 fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
+    // Linux ABI: `int timerfd_settime(int fd, int flags, const struct
+    // itimerspec *new_value, struct itimerspec *old_value)`.
+    // SYSCALL_DEFINE4(timerfd_settime, int, ufd, int, flags, ...)
+    // narrows the second parameter to (int) on entry; do_timerfd_settime
+    // runs the mask check `flags & ~TFD_SETTIME_FLAGS` at 32-bit width.
+    // Pre-batch we held flags as u64 and ran the mask check at 64-bit
+    // width, so the AMD64 syscall ABI's high-half garbage (the kernel
+    // does not zero-extend int args before issuing the syscall) leaked
+    // into the mask and returned spurious EINVAL where Linux either
+    // returns EBADF (in kernel context after the read+itimerspec gate)
+    // or EFAULT (with NULL new_value — gate 1 fires before the mask).
+    // Twelfth instance of the int-flags truncation pattern after
+    // batches 308-318.
     // TFD_TIMER_ABSTIME=1, TFD_TIMER_CANCEL_ON_SET=2.
-    const VALID_FLAGS: u64 = 1 | 2;
+    const VALID_FLAGS: u32 = 1 | 2;
     const NSEC_PER_SEC: i64 = 1_000_000_000;
 
     // Gate 1 (SYSCALL_DEFINE4 wrapper: get_itimerspec64): read the
@@ -11567,7 +11580,11 @@ fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
     let valid = |sec: i64, nsec: i64| -> bool {
         sec >= 0 && (0..NSEC_PER_SEC).contains(&nsec)
     };
-    if args.arg1 & !VALID_FLAGS != 0
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg1 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+    if flags & !VALID_FLAGS != 0
         || !valid(it_interval_sec, it_interval_nsec)
         || !valid(it_value_sec, it_value_nsec)
     {
@@ -38781,6 +38798,98 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   timerfd_settime read > flag+spec > fd > otmr gate order: OK"
         );
+
+        // Batch 319: timerfd_settime int truncation — high-half
+        // register garbage must be stripped before the combined gate-2
+        // mask check (flag mask + itimerspec validity).
+        //
+        // Linux signature: `int timerfd_settime(int fd, int flags,
+        // const struct itimerspec *new_value, struct itimerspec
+        // *old_value)`.  flags is C int → low 32 bits only.  Pre-batch
+        // we held flags as u64 and ran the mask check at 64-bit width,
+        // so high-half garbage returned spurious EINVAL where Linux
+        // either returns EBADF (after read+itimerspec gate passes in
+        // kernel context with no real fd) or progresses to the (no-op)
+        // timer-set step.
+        //
+        // All four probes use a valid all-zero itimerspec — that
+        // clears gate 2's timespec check so any post-truncation
+        // discriminator is driven purely by the flag mask.
+        let valid_itspec_trunc = [0u8; 32];
+        let valid_ptr_trunc = valid_itspec_trunc.as_ptr() as u64;
+
+        // (a) timerfd_settime(0, 0x1_0000_0001, &valid, NULL) → EBADF
+        //     (high|TFD_TIMER_ABSTIME; truncates to 1, mask passes,
+        //     itimerspec valid, kernel context returns EBADF at gate 3).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1_0000_0001, arg2: valid_ptr_trunc,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::TIMERFD_SETTIME, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime(high|ABSTIME) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) timerfd_settime(0, 0x1_0000_0003, &valid, NULL) → EBADF
+        //     (high|all-valid 0x3 = ABSTIME|CANCEL_ON_SET; truncates
+        //     to 3, mask passes, itimerspec valid, EBADF at gate 3).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1_0000_0003, arg2: valid_ptr_trunc,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::TIMERFD_SETTIME, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime(high|all-valid) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) timerfd_settime(0, 0x1_0000_0000, &valid, NULL) → EBADF
+        //     (high-half only, low half zero; truncates to 0, mask
+        //     passes, itimerspec valid, EBADF at gate 3).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1_0000_0000, arg2: valid_ptr_trunc,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::TIMERFD_SETTIME, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime(high-half-zero) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) timerfd_settime(0, 0x1_0000_0004, &valid, NULL) → EINVAL
+        //     (high|bad-low 0x4; truncates to 0x4, mask rejects bit
+        //     outside TFD_TIMER_ABSTIME|TFD_TIMER_CANCEL_ON_SET;
+        //     verifies mask gate still rejects invalid bits after the
+        //     high half is stripped, fired by the combined gate-2
+        //     OR before the itimerspec check is consulted).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x1_0000_0004, arg2: valid_ptr_trunc,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::TIMERFD_SETTIME, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: timerfd_settime(high|bad-low) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        core::hint::black_box(&valid_itspec_trunc);
+        serial_println!(
+            "[syscall/linux]   timerfd_settime int truncation (high-half ignored): OK"
+        );
+
         // timerfd_gettime: Linux's `do_timerfd_gettime` (fs/timerfd.c) does
         // fd lookup first, before touching the curr_value pointer. In
         // kernel-context the caller has no pid, so any fd lookup short-

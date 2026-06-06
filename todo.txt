@@ -28044,3 +28044,98 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.68s).
      Boot test: bash scripts/boot-test.sh --no-build
                 --timeout=360 PASSED (BOOT_OK at 25s).
+
+349. sys_timerfd_settime int truncation — high-half register
+     garbage leaked into the combined gate-2 flag+itimerspec
+     EINVAL check (batch 319).
+
+     Divergence: Linux signature is
+       `int timerfd_settime(int fd, int flags,
+                            const struct itimerspec *new_value,
+                            struct itimerspec *old_value)`.
+     The second parameter is C int → only the low 32 bits are
+     defined; the AMD64 syscall ABI does NOT zero-extend int
+     args before issuing the syscall, so the high 32 bits of
+     %rsi are caller-uninitialised garbage.  SYSCALL_DEFINE4
+     (timerfd_settime, int, ufd, int, flags, ...) narrows to
+     (int) on entry; do_timerfd_settime's combined gate-2
+     check `(flags & ~TFD_SETTIME_FLAGS) ||
+     !itimerspec64_valid(new)` runs at 32-bit width.
+
+     Pre-batch we held flags as u64 and ran the mask check
+     against the full 64-bit register, so a caller with
+     non-zero high bits saw spurious EINVAL where Linux either
+     returns EBADF (in kernel context after read+itimerspec
+     gate passes with no real fd) or progresses to the (no-op)
+     timer-set step on a real timerfd.
+
+     Twelfth instance of the int-flags truncation pattern
+     after batches 308 (mlockall), 309 (msync), 310 (mlock2),
+     311 (fchmodat), 312 (fchownat), 313 (unlinkat), 314
+     (renameat2), 315 (linkat), 316 (utimensat), 317
+     (umount2), and 318 (memfd_secret).
+
+     Fix: cast args.arg1 (u64) to i32, then re-widen to u32
+     for the mask check.  Same pattern as batches 308, 311,
+     312, 313, 315-317.  Also changed VALID_FLAGS const from
+     u64 to u32 (no behavioural difference; mask 1|2=0x3 fits
+     either width).
+
+     Tests: four boot-time probes added in dispatch_linux
+     after the existing TIMERFD_SETTIME gate-order markers,
+     each covering one shape (all four use a valid all-zero
+     itimerspec so the combined gate's timespec check is
+     trivially satisfied):
+       (a) timerfd_settime(0, 0x1_0000_0001, &valid, NULL)
+           → EBADF (high|TFD_TIMER_ABSTIME; truncates to 1,
+            mask passes, itimerspec valid, EBADF at gate 3
+            in kernel context).
+       (b) timerfd_settime(0, 0x1_0000_0003, &valid, NULL)
+           → EBADF (high|all-valid 0x3 =
+            ABSTIME|CANCEL_ON_SET; truncates to 3, mask
+            passes, EBADF).
+       (c) timerfd_settime(0, 0x1_0000_0000, &valid, NULL)
+           → EBADF (high-half only, low half zero; truncates
+            to 0, mask passes, EBADF).
+       (d) timerfd_settime(0, 0x1_0000_0004, &valid, NULL)
+           → EINVAL (high|bad-low 0x4; truncates to 0x4,
+            mask rejects bit outside ABSTIME|CANCEL_ON_SET;
+            verifies mask gate still rejects invalid bits
+            after the high half is stripped via the
+            combined-OR semantics).
+     Marker: "[syscall/linux]   timerfd_settime int truncation
+              (high-half ignored): OK".
+
+     Preserved: existing timerfd_settime probes still pass:
+       - (bad flag 0x8000_0000, valid new) → EINVAL: bit 31
+         survives the i32→u32 round-trip (i32::MIN cast back
+         to u32 is still 0x8000_0000), so the mask still
+         rejects.
+       - (bad flag, NULL new) → EFAULT: NULL gate fires before
+         the truncation matters (gate 1, ahead of gate 2).
+       - (0, 0, NULL new) → EFAULT: same — gate 1 fires first.
+       - Various itimerspec-validity probes (bad nsec, neg
+         sec, boundary nsec=1e9, just-below 999_999_999) all
+         still return EINVAL/EBADF as before; truncation
+         doesn't affect the timespec path.
+       - (valid new, valid flags, bad fd, bad otmr) → EBADF:
+         gate-5 ordering preserved; truncation in gate 2 ran
+         and passed.
+
+     Known limitations:
+     - The probes drive every fall-through to EBADF rather
+       than to the "timer set" success path, because in kernel
+       context there is no real timerfd to operate on.  When
+       we land a real timerfd_create + fd-installation
+       infrastructure, the int-truncation behaviour should
+       also be verified end-to-end (valid flags + valid new
+       + real fd + valid otmr → 0).
+     - args.arg0 (fd) is already i32-truncated at line 11580
+       — no separate fix needed for the fd parameter, just
+       the flags.
+     - args.arg2 (new_value) and args.arg3 (old_value) are
+       pointers (correctly u64); no truncation concerns.
+
+     Build: cargo build -p kernel clean (43.80s).
+     Boot test: bash scripts/boot-test.sh --no-build
+                --timeout=360 PASSED (BOOT_OK at 24s).

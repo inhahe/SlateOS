@@ -22754,3 +22754,81 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      future cleanup if observable.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 25s).
+
+## 293. syscall/linux: utimensat — gate reorder + OMIT shortcut +
+##      nsec_valid (batch 264)
+##
+##      Pre-batch divergences (three, all on one syscall):
+##        Linux's `fs/utimes.c::SYSCALL_DEFINE4(utimensat)` runs:
+##          (a) copy both `struct timespec` entries via
+##              get_timespec64 — EFAULT on bad pointer;
+##          (b) if both `tv_nsec == UTIME_OMIT`, return 0 with NO
+##              path resolution, NO flag check, NO mnt_want_write
+##              (kernel comment: "we must not even check the path");
+##          (c) do_utimes() runs the flag mask check ->
+##              EINVAL on `flags & ~AT_SYMLINK_NOFOLLOW`;
+##          (d) path resolution;
+##          (e) vfs_utimes() runs nsec_valid on each entry — accepts
+##              UTIME_NOW, UTIME_OMIT, or [0, NSEC_PER_SEC) -> EINVAL
+##              otherwise;
+##          (f) mnt_want_write -> EROFS on read-only mounts.
+##        Pre-batch: flag check first, then path readability, then
+##        only readability check on the 32-byte times array — no
+##        copy, no UTIME_OMIT shortcut, no nsec_valid.
+##        Observable divergences:
+##          - (path=bogus, times=(_,OMIT,_,OMIT), flags=bogus) saw
+##            EINVAL (our flag-first); Linux returns 0.
+##          - (times=valid ptr, tv_nsec[0]=1_000_000_000) saw EROFS;
+##            Linux returns EINVAL.
+##          - (tv_nsec[1] = -1) saw EROFS; Linux returns EINVAL.
+##
+##      Fix:
+##        Restructured to mirror SYSCALL_DEFINE4:
+##          1. If `arg2 != 0`: validate_user_read(32) + copy_from_user
+##             of both timespecs.
+##          2. If both tv_nsec == UTIME_OMIT (0x3fff_fffe): return 0
+##             without any further work.
+##          3. Flag mask check.
+##          4. Path readability.
+##          5. nsec_valid on each tv_nsec (UTIME_NOW=0x3fff_ffff,
+##             UTIME_OMIT, or [0, 1_000_000_000)) -> EINVAL on bad.
+##          6. Terminal EROFS.
+##        tv_sec is intentionally not gated — Linux's vfs_utimes
+##        allows negative tv_sec for pre-epoch timestamps; only
+##        tv_nsec is constrained.
+##
+##      Self-tests added/updated:
+##
+##        Pre-existing tests preserved:
+##          - utimensat (path=0x1000, times=NULL, flags=0x800_0000)
+##            -> EINVAL (times=NULL skips the new gates; flag check
+##            still fires).
+##          - utimensat (everything NULL) -> EROFS (terminal).
+##
+##        New discriminators (inserted right after the NULL/NULL
+##        probe):
+##          A. (path=0x1000, times=(0,OMIT,0,OMIT), flags=0x800_0000)
+##              -> 0 via the OMIT-shortcut bypass of path + flag +
+##              fs gates; pre-batch flag-first returned EINVAL.
+##          B. (path=NULL, times=(0, 1e9, 0, 0)) -> EINVAL via
+##              vfs_utimes nsec_valid on entry 0; pre-batch EROFS.
+##          C. (path=NULL, times=(0, 0, 0, -1)) -> EINVAL via
+##              nsec_valid on entry 1; confirms both entries gated.
+##          D. (path=NULL, times=(0,NOW,0,NOW)) -> EROFS
+##              (acceptance: UTIME_NOW != UTIME_OMIT so shortcut
+##              doesn't fire; nsec_valid passes; terminal EROFS).
+##
+##      Marker:
+##        "[syscall/linux]   utimensat OMIT-shortcut + nsec_valid: OK"
+##
+##      Existing tests preserved: utimes/utime gates, broader
+##      *at-family suite, downstream linkat/symlinkat/etc probes.
+##
+##      Known limitations: tv_sec is intentionally unvalidated to
+##      match Linux's tolerance of pre-epoch timestamps.  Once a
+##      writable FS is wired up the EROFS terminal will be replaced
+##      by real timestamp updates, at which point the full
+##      do_utimes path (notify_change, etc.) will need to be
+##      implemented.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 23s).

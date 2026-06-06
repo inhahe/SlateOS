@@ -10599,9 +10599,64 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `utimensat(dirfd, path, times[2], flags)`.
+///
+/// Linux's `fs/utimes.c::SYSCALL_DEFINE4(utimensat)` gate order:
+///   1. If `utimes != NULL`: `get_timespec64()` for each of the two
+///      entries — `copy_from_user(&kts, &utimes[i], 16)` — returns
+///      `-EFAULT` on bad pointer.
+///   2. If both tv_nsec == UTIME_OMIT: return 0 **without** entering
+///      `do_utimes` (no path resolution, no flags check, no fs
+///      hit).  Documented as "we must not even check the path".
+///   3. `do_utimes()`: `flags & ~AT_SYMLINK_NOFOLLOW` -> -EINVAL.
+///   4. Path resolution → `vfs_utimes()`: `nsec_valid()` for each
+///      entry (accepts UTIME_NOW, UTIME_OMIT, or [0, NSEC_PER_SEC))
+///      -> -EINVAL.
+///   5. `mnt_want_write()` -> -EROFS on read-only mounts.
+///
+/// Pre-batch we ran the flag check *first*, never copied or
+/// validated tv_nsec, and never honoured the (OMIT, OMIT)
+/// shortcut, so probes saw EINVAL/EROFS where Linux returns 0 or
+/// EINVAL respectively.
 fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
     const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
     const VALID_FLAGS: u64 = AT_SYMLINK_NOFOLLOW;
+    // UAPI <linux/stat.h>: ((1<<30)-1) and ((1<<30)-2).
+    const UTIME_NOW: i64 = 0x3fff_ffff;
+    const UTIME_OMIT: i64 = 0x3fff_fffe;
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
+
+    // Gate 1: SYSCALL_DEFINE4 copies both timespecs before the
+    // flag check.  Track validity status so we can replay the
+    // nsec gate after the path-resolution stub below.
+    let times: Option<[(i64, i64); 2]> = if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 32) {
+            return linux_err(linux_errno_for(e));
+        }
+        let mut buf = [0u8; 32];
+        // SAFETY: validate_user_read above confirmed 32 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg2, buf.as_mut_ptr(), 32)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let read_i64 = |o: usize| -> i64 {
+            match <[u8; 8]>::try_from(&buf[o..o + 8]) {
+                Ok(b) => i64::from_ne_bytes(b),
+                Err(_) => 0,
+            }
+        };
+        let t0 = (read_i64(0), read_i64(8));
+        let t1 = (read_i64(16), read_i64(24));
+        // Gate 2: both nsec == UTIME_OMIT short-circuits with no
+        // path check, no flags check, no FS hit.
+        if t0.1 == UTIME_OMIT && t1.1 == UTIME_OMIT {
+            return SyscallResult::ok(0);
+        }
+        Some([t0, t1])
+    } else {
+        None
+    };
+    // Gate 3: do_utimes flag check.
     if args.arg3 & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -10611,13 +10666,22 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
-    // times may legitimately be NULL (use current time).  When non-NULL
-    // it points at two timespecs = 32 bytes.
-    if args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 32) {
-            return linux_err(linux_errno_for(e));
+    // Gate 4: vfs_utimes nsec_valid (accepts UTIME_NOW, UTIME_OMIT,
+    // or [0, NSEC_PER_SEC) — tv_sec is intentionally unconstrained
+    // here because Linux allows negative tv_sec for pre-epoch
+    // timestamps).
+    if let Some([t0, t1]) = times {
+        let nsec_valid = |nsec: i64| -> bool {
+            nsec == UTIME_OMIT
+                || nsec == UTIME_NOW
+                || (0..NSEC_PER_SEC).contains(&nsec)
+        };
+        if !nsec_valid(t0.1) || !nsec_valid(t1.1) {
+            return linux_err(errno::EINVAL);
         }
     }
+    // Gate 5: mnt_want_write -> EROFS (terminal — we have no
+    // writable FS to mutate timestamps on).
     linux_err(errno::EROFS)
 }
 
@@ -34609,6 +34673,89 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: utimensat NULL/NULL not EROFS");
             return Err(KernelError::InternalError);
         }
+        // utimensat discriminator A: (OMIT, OMIT) short-circuit
+        // bypasses path resolution, flag check, and the FS hit.
+        // Pre-batch flag-first returned EINVAL for the bogus flag
+        // (or EROFS for valid flag); Linux returns 0 unconditionally.
+        // Probe the strongest form: bogus flag + bogus path + both
+        // nsec == UTIME_OMIT.
+        {
+            const UTIME_OMIT: i64 = 0x3fff_fffe;
+            let omit_times: [i64; 4] = [0, UTIME_OMIT, 0, UTIME_OMIT];
+            let omit_ptr = (&raw const omit_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0x1000, arg2: omit_ptr,
+                arg3: 0x800_0000, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&omit_times);
+            if dispatch_linux(nr::UTIMENSAT, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: utimensat (OMIT,OMIT) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // utimensat discriminator B: bogus tv_nsec on entry 0
+        // (e.g. NSEC_PER_SEC) with everything else valid -> Linux
+        // EINVAL via vfs_utimes->nsec_valid; pre-batch returned
+        // EROFS because we never inspected the value.
+        {
+            let bad_times: [i64; 4] = [0, 1_000_000_000, 0, 0];
+            let bad_ptr = (&raw const bad_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: bad_ptr, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&bad_times);
+            if dispatch_linux(nr::UTIMENSAT, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: utimensat bad tv_nsec[0] not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // utimensat discriminator C: bogus tv_nsec on entry 1 -> EINVAL
+        // (confirms both entries are gated, not just entry 0).
+        {
+            let bad_times: [i64; 4] = [0, 0, 0, -1];
+            let bad_ptr = (&raw const bad_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: bad_ptr, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&bad_times);
+            if dispatch_linux(nr::UTIMENSAT, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: utimensat bad tv_nsec[1] not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // utimensat discriminator D: acceptance — both entries use
+        // UTIME_NOW (a valid sentinel != UTIME_OMIT) so the shortcut
+        // doesn't fire; nsec_valid passes and EROFS surfaces.
+        {
+            const UTIME_NOW: i64 = 0x3fff_ffff;
+            let now_times: [i64; 4] = [0, UTIME_NOW, 0, UTIME_NOW];
+            let now_ptr = (&raw const now_times[0]) as u64;
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: now_ptr, arg3: 0, arg4: 0, arg5: 0,
+            };
+            core::hint::black_box(&now_times);
+            if dispatch_linux(nr::UTIMENSAT, &a).value
+                != -i64::from(errno::EROFS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: utimensat (NOW,NOW) not EROFS"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   utimensat OMIT-shortcut + nsec_valid: OK"
+        );
         // utimes(NULL, _) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

@@ -13641,11 +13641,19 @@ fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
     // then path validation, then the terminal EPERM.
     const SUBCMDMASK: u64 = 0xff;
     const SUBCMDSHIFT: u32 = 8;
-    let typ = (args.arg0 & SUBCMDMASK) as u32;
+    // Linux declares cmd as `unsigned int` (32-bit).  Pre-batch we
+    // shifted args.arg0 as u64, so a sentinel like cmd=0x1_8000_0100
+    // shifted to 0x180_0001 which fails the generic_ok / xfs_ok ranges
+    // and returns EINVAL — Linux truncates to (u32)0x8000_0100, shifts
+    // to 0x800001 (Q_SYNC), and continues to the per-cmd EPERM.
+    #[allow(clippy::cast_possible_truncation)]
+    let cmd_u32 = args.arg0 as u32;
+    let cmd: u64 = u64::from(cmd_u32);
+    let typ = (cmd & SUBCMDMASK) as u32;
     if typ >= 3 {
         return linux_err(errno::EINVAL);
     }
-    let cmds = args.arg0 >> SUBCMDSHIFT;
+    let cmds = cmd >> SUBCMDSHIFT;
     // Generic quotactl ops (include/uapi/linux/quota.h):
     //   Q_SYNC=0x800001, Q_QUOTAON=0x800002, Q_QUOTAOFF=0x800003,
     //   Q_GETFMT=0x800004, Q_GETINFO=0x800005, Q_SETINFO=0x800006,
@@ -13682,9 +13690,16 @@ fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
 fn sys_quotactl_fd(args: &SyscallArgs) -> SyscallResult {
     const SUBCMDMASK: u64 = 0xff;
     const SUBCMDSHIFT: u32 = 8;
+    // Linux declares cmd as `unsigned int` (32-bit).  Same shape as the
+    // sys_quotactl divergence: pre-batch we shifted args.arg1 as raw u64
+    // so high-half-set sentinels with a valid low-half cmd encoding
+    // failed the cmds whitelist.
+    #[allow(clippy::cast_possible_truncation)]
+    let cmd_u32 = args.arg1 as u32;
+    let cmd: u64 = u64::from(cmd_u32);
     // 1. type check before fd lookup.  Linux gates this first;
     //    matches the existing sys_quotactl behaviour.
-    let typ = (args.arg1 & SUBCMDMASK) as u32;
+    let typ = (cmd & SUBCMDMASK) as u32;
     if typ >= 3 {
         return linux_err(errno::EINVAL);
     }
@@ -13696,7 +13711,7 @@ fn sys_quotactl_fd(args: &SyscallArgs) -> SyscallResult {
     }
     // 3. cmds whitelist.  Same generic + XFS ranges as sys_quotactl;
     //    Q_SYNC..Q_GETNEXTQUOTA + Q_X variants.
-    let cmds = args.arg1 >> SUBCMDSHIFT;
+    let cmds = cmd >> SUBCMDSHIFT;
     let generic_ok = (0x800001..=0x800009).contains(&cmds);
     let xfs_ok = (0x5801..=0x5809).contains(&cmds);
     if !generic_ok && !xfs_ok {
@@ -17876,8 +17891,21 @@ fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
 /// the highest accepted value) terminates correctly.
 fn sys_seccomp(args: &SyscallArgs) -> SyscallResult {
     const SECCOMP_FILTER_FLAG_MASK: u64 = 0x3f;
-    let op = args.arg0;
-    let flags = args.arg1;
+    // Linux `SYSCALL_DEFINE3(seccomp, unsigned int, op, unsigned int,
+    // flags, void __user *, uargs)`: both `op` and `flags` are `unsigned
+    // int` (32-bit) but arrive in 64-bit registers.  Pre-batch we held
+    // both as raw u64, so a sentinel like op=0x1_0000_0000 (low 32 == 0
+    // == SET_MODE_STRICT) failed the `match op { 0 => ..., _ => EINVAL }`
+    // dispatch and hit the EINVAL default — Linux truncates to 0 and
+    // takes the STRICT arm.  Similarly flags=0x1_0000_0000 set the
+    // raw u64 != 0 and triggered EINVAL on ops 0/2/3 even though Linux
+    // sees a zero flags value.
+    #[allow(clippy::cast_possible_truncation)]
+    let op_u32 = args.arg0 as u32;
+    let op: u64 = u64::from(op_u32);
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_u32 = args.arg1 as u32;
+    let flags: u64 = u64::from(flags_u32);
     let uargs = args.arg2;
     match op {
         // SET_MODE_STRICT: no flags, no uargs.
@@ -27482,6 +27510,113 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   clock_gettime/clock_nanosleep clockid_t/int flags truncation: OK"
+        );
+    }
+
+    // Batch 300 — sys_seccomp + sys_quotactl + sys_quotactl_fd
+    // unsigned-int truncation audit.
+    //
+    // Pre-batch reads:
+    //   sys_seccomp: `let op = args.arg0; let flags = args.arg1;` raw
+    //     u64 against u64-typed match arms / flag-mask gates.
+    //   sys_quotactl / sys_quotactl_fd: cmd shifted as u64
+    //     (`args.arg{0,1} >> SUBCMDSHIFT`) so the high half leaked into
+    //     the cmds whitelist comparison and turned valid Linux ops into
+    //     EINVAL.
+    {
+        // (a) seccomp(op=0x1_0000_0000, flags=0, uargs=0) — truncates
+        //     to SET_MODE_STRICT(0).  Pre-batch: u64 0x1_0000_0000 did
+        //     not equal the `0u64` match arm and fell to `_ => EINVAL`.
+        //     Post-batch the call hits the STRICT body's
+        //     `flags!=0 || uargs!=0` early return (both 0) and falls
+        //     through to ENOSYS.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::SECCOMP, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: seccomp high-half op -> {} (expected -ENOSYS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) seccomp(op=2 GET_ACTION_AVAIL, flags=0x1_0000_0000,
+        //     uargs=&buf).  Truncates flags to 0.  Pre-batch: raw
+        //     0x1_0000_0000 != 0 triggered the `flags != 0` EINVAL gate
+        //     for ops 2/3.  Post-batch the gate passes; the uargs read
+        //     succeeds and we fall through to ENOSYS.
+        let buf = [0u8; 8];
+        let a = SyscallArgs {
+            arg0: 2,
+            arg1: 0x1_0000_0000,
+            arg2: buf.as_ptr() as u64,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::SECCOMP, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: seccomp high-half flags -> {} (expected -ENOSYS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) quotactl(cmd=0x1_8000_0100, special=NULL, id=0, addr=0).
+        //     Pre-batch: u64 shift 0x1_8000_0100 >> 8 = 0x180_0001, not
+        //     in 0x800001..=0x800009 -> EINVAL.  Post-batch: truncates
+        //     cmd to u32 0x8000_0100, shifts to 0x800001 (Q_SYNC), passes
+        //     the whitelist and reaches the terminal EPERM.
+        let a = SyscallArgs {
+            arg0: 0x1_8000_0100,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::QUOTACTL, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: quotactl high-half cmd -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) quotactl_fd(fd=-1, cmd=0x1_8000_0100, ...).  Pre-batch:
+        //     same shift divergence as quotactl -> EINVAL via the cmds
+        //     whitelist gate, before reaching the terminal EPERM.
+        //     Post-batch: cmd truncates, type=0<3 passes, validate_linux_fd
+        //     is a kernel-context no-op (caller_pid()==None), cmds=0x800001
+        //     passes the whitelist, and we reach the terminal EPERM.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0x1_8000_0100,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::QUOTACTL_FD, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: quotactl_fd high-half cmd -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   seccomp/quotactl/quotactl_fd unsigned-int truncation: OK"
         );
     }
 

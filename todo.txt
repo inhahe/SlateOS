@@ -26382,3 +26382,119 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        Build: cargo build -p kernel clean (45.19s).
        Boot test: bash scripts/boot-test.sh --no-build
                   --timeout=240 PASSED (BOOT_OK at 27s).
+
+  330. Batch 300 — sys_seccomp + sys_quotactl +
+       sys_quotactl_fd unsigned-int register truncation.
+
+       Divergence
+       ----------
+       Three syscalls read declared 32-bit C-type args
+       as raw u64:
+
+       (a) sys_seccomp (kernel/src/syscall/linux.rs ~17877):
+           `let op = args.arg0; let flags = args.arg1;`.
+           Linux signature is SYSCALL_DEFINE3(seccomp,
+           unsigned int op, unsigned int flags,
+           void __user *uargs).  The `match op` arms
+           compare against bare integer literals which
+           Rust infers as u64.  A sentinel like op =
+           0x1_0000_0000 (low 32 == SET_MODE_STRICT)
+           fell to `_ => EINVAL` because the u64
+           literal 0 is not equal to 0x1_0000_0000.
+           Linux truncates to (u32)0 and takes the
+           STRICT arm.
+           Similarly flags=0x1_0000_0000 raw-u64 != 0
+           tripped the `flags != 0` EINVAL gate on ops
+           0/2/3 even though the truncated flags is 0.
+
+       (b) sys_quotactl (~13626): cmd is `unsigned int`
+           in the Linux ABI.  Pre-batch computed `cmds
+           = args.arg0 >> SUBCMDSHIFT` as a u64 shift,
+           so any high bit set in args.arg0 leaked into
+           the cmds whitelist comparison.  Sentinel cmd
+           = 0x1_8000_0100: u64 shift -> 0x180_0001,
+           not in 0x800001..=0x800009 -> EINVAL.  Linux
+           truncates to u32 0x8000_0100, shifts to
+           0x800001 (Q_SYNC), passes the whitelist, and
+           reaches the terminal EPERM.
+
+       (c) sys_quotactl_fd (~13682): same cmd shape but
+           the cmd is at args.arg1 (fd is at args.arg0).
+           Same divergence as (b).
+
+       Fix
+       ---
+       For sys_seccomp: cast both op and flags via a
+       u32 intermediate then re-widen to u64 so the
+       existing match-against-u64-literals and
+       flag-mask gate logic sees the truncated value:
+           let op_u32 = args.arg0 as u32;
+           let op: u64 = u64::from(op_u32);
+           let flags_u32 = args.arg1 as u32;
+           let flags: u64 = u64::from(flags_u32);
+
+       For sys_quotactl / sys_quotactl_fd: introduce a
+       local `cmd` re-widened from u32 and feed both
+       the SUBCMDMASK extract and the SUBCMDSHIFT
+       right-shift from that value.  The existing
+       cmds-as-u64 whitelist comparison still works
+       because the value is now bounded by u32::MAX
+       before the shift.
+
+       New self-tests
+       --------------
+       Four probes appended before a new marker
+         "[syscall/linux]   seccomp/quotactl/quotactl_fd
+          unsigned-int truncation: OK"
+       inserted after the batch-299 clock marker:
+
+       (a) seccomp(op=0x1_0000_0000, flags=0, uargs=0)
+           -> -ENOSYS.  Pre-batch: -EINVAL (default arm).
+       (b) seccomp(op=GET_ACTION_AVAIL=2, flags=
+           0x1_0000_0000, &buf) -> -ENOSYS.  Pre-batch:
+           -EINVAL via flags != 0 gate.
+       (c) quotactl(cmd=0x1_8000_0100, NULL, 0, 0)
+           -> -EPERM.  Pre-batch: -EINVAL via the cmds
+           whitelist gate.
+       (d) quotactl_fd(fd=u64::MAX, cmd=0x1_8000_0100,
+           ...) -> -EPERM.  Pre-batch: -EINVAL via the
+           cmds whitelist gate.  Kernel-context
+           validate_linux_fd is a no-op (caller_pid()
+           returns None), so the fd value doesn't
+           matter; what we're testing is the cmd path.
+
+       Preserved
+       ---------
+       - seccomp gate order (op match -> per-op
+         flag/uargs checks -> ENOSYS terminal).
+       - quotactl gate order (type<3 -> cmds whitelist
+         -> special path validation -> EPERM terminal).
+       - quotactl_fd gate order (type<3 -> fd validate
+         -> cmds whitelist -> EPERM terminal).
+       - SECCOMP_FILTER_FLAG_MASK (0x3f) and the
+         generic_ok / xfs_ok cmds ranges unchanged.
+
+       Known limitations / out of scope
+       --------------------------------
+       - First boot test attempt expected -EBADF for
+         probe (d) by passing fd=u64::MAX, but kernel-
+         context validate_linux_fd short-circuits to
+         Ok(()) when caller_pid() is None, so the path
+         continues past the fd check.  Corrected the
+         expected to -EPERM and noted the rationale in
+         the probe comment.
+       - sys_io_uring_setup has a similar shape (entries
+         is unsigned int, args.arg0 read raw) but the
+         pre-batch gates collapse to EINVAL via either
+         the entries-as-0 gate (truncated 0) or the
+         entries>32768 gate (raw u64 high bits), so the
+         divergence is not externally observable without
+         a valid io_uring_params struct.  Deferred until
+         a real io_uring_params setup helper is needed.
+       - sys_perf_event_open audit (pid_t pid + int cpu
+         + int group_fd) still pending — its body wasn't
+         fully traversed in this batch.
+
+       Build: cargo build -p kernel clean (38.61s).
+       Boot test: bash scripts/boot-test.sh --no-build
+                  --timeout=240 PASSED (BOOT_OK at 22s).

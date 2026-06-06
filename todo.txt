@@ -33928,3 +33928,136 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (37.75s).
      Boot test: bash scripts/boot-test.sh PASSED
                 (BOOT_OK at 23s).
+
+406. [Linux-compat / kernel/src/syscall/linux.rs] sys_userfaultfd
+     gate ordering: EPERM (no UFFD_USER_MODE_ONLY + no
+     CAP_SYS_PTRACE + sysctl_unprivileged_userfaultfd=0) must run
+     BEFORE the flag-mask EINVAL gate, not after.
+
+     Linux source (fs/userfaultfd.c, SYSCALL_DEFINE1(userfaultfd,
+     int, flags)):
+
+       SYSCALL_DEFINE1(userfaultfd, int, flags)
+       {
+           if (!sysctl_unprivileged_userfaultfd &&
+               (flags & UFFD_USER_MODE_ONLY) == 0 &&
+               !capable(CAP_SYS_PTRACE))
+               return -EPERM;
+           return userfaultfd_new(flags);
+       }
+
+       static int userfaultfd_new(int flags)
+       {
+           ...
+           if (flags & ~(UFFD_SHARED_FCNTL_FLAGS | UFFD_USER_MODE_ONLY))
+               return -EINVAL;
+           ...
+       }
+
+     Gate-1 (EPERM) runs in the SYSCALL_DEFINE1 wrapper.  Only
+     if gate-1 passes does control reach userfaultfd_new, where
+     gate-2 (EINVAL on unknown flags) sits.
+
+     Pre-batch: linux.rs ran the mask check FIRST and the EPERM
+     check second, so userfaultfd(0x8000_0000) — high bit set,
+     UFFD_USER_MODE_ONLY clear — returned EINVAL.  Linux on the
+     same call returns EPERM, because gate-1 trips before
+     userfaultfd_new is ever entered.
+
+     Divergence table for the call shapes that matter:
+
+       * userfaultfd(0x8000_0000)   Linux: EPERM  Pre: EINVAL
+                                    (the main fix.  Unknown
+                                     flag bit set but
+                                     UFFD_USER_MODE_ONLY clear
+                                     — Linux says "not allowed,"
+                                     not "wrong flag shape.")
+       * userfaultfd(0x8000_0001)   Linux: EINVAL Pre: EINVAL
+                                    (UFFD_USER_MODE_ONLY set
+                                     passes gate-1, gate-2
+                                     trips on the high bit.
+                                     Verifies gate-2 still wins
+                                     when gate-1 passes.)
+       * userfaultfd(0)             Linux: EPERM  Pre: EPERM
+                                    (gate-1 trips on no
+                                     UFFD_USER_MODE_ONLY + no
+                                     CAP_SYS_PTRACE.  Same
+                                     terminal both sides.)
+       * userfaultfd(1)             Linux: <fd>   Pre: ENOSYS
+                                    (gate-1 passes via
+                                     UFFD_USER_MODE_ONLY, gate-2
+                                     passes via clean flags.
+                                     Linux mints an fd; we don't
+                                     have the UFFD subsystem so
+                                     ENOSYS is the truthful "we
+                                     parsed your flags but the
+                                     feature isn't built."
+                                     Translator-correct.)
+
+     Why this matters: feature-probing tools (CRIU, ptrace
+     daemons, container runtimes that test whether they can
+     create UFFD handles without CAP_SYS_PTRACE) call
+     userfaultfd with various flag combinations and branch on
+     the errno.  EPERM means "ask the admin to set
+     sysctl_unprivileged_userfaultfd=1 or grant CAP_SYS_PTRACE."
+     EINVAL means "the flag shape itself is invalid; try again
+     with different flags."  Reversing the gates causes the
+     "high bit set" probe — which exists specifically to confirm
+     the kernel rejects bogus flags via EINVAL — to instead
+     report EPERM-or-EINVAL based on an unrelated capability
+     dimension.  Conversely, a probe that should diagnose
+     "missing privilege" gets the EINVAL answer and the daemon
+     concludes "this kernel doesn't support userfaultfd at all"
+     and falls back to a slower path.
+
+     Fix: reverse the two gates in linux.rs to match Linux's
+     SYSCALL_DEFINE1-then-userfaultfd_new structure.  Since we
+     have no UFFD subsystem and no caller holds CAP_SYS_PTRACE,
+     gate-1 is "no UFFD_USER_MODE_ONLY -> EPERM."  Gate-2 is
+     "any bit outside UFFD_USER_MODE_ONLY | O_CLOEXEC |
+     O_NONBLOCK -> EINVAL."  Terminal (both gates pass) is
+     ENOSYS because the feature isn't built.
+
+       const UFFD_USER_MODE_ONLY: u64 = 1;
+       const VALID_FLAGS: u64 = UFFD_USER_MODE_ONLY
+                              | 0o4000          // O_NONBLOCK
+                              | 0o2_000_000;    // O_CLOEXEC
+       let flags = (args.arg0 as i32) as u32 as u64;
+       if flags & UFFD_USER_MODE_ONLY == 0 {
+           return linux_err(errno::EPERM);
+       }
+       if flags & !VALID_FLAGS != 0 {
+           return linux_err(errno::EINVAL);
+       }
+       linux_err(errno::ENOSYS)
+
+     Architectural directive: this is a pure translator fix.
+     No userfaultfd subsystem is being added.  The fix only
+     adjusts which errno the translator emits for which gate
+     and in which order — exactly mirroring Linux's gate
+     sequencing so probes get truthful answers about WHY their
+     call was rejected.
+
+     Probes added (1 new, 1 reused with changed expectation,
+     3 existing kept):
+       * userfaultfd(0x8000_0000)  -> EPERM (was EINVAL pre-
+         batch — the main fix; verifies gate-1 now runs
+         before gate-2 so the unknown high bit gets EPERM
+         instead of EINVAL when UFFD_USER_MODE_ONLY is clear).
+       * userfaultfd(0x8000_0001)  -> EINVAL (NEW; verifies
+         gate-2 still wins when UFFD_USER_MODE_ONLY passes
+         gate-1).
+       * userfaultfd(0)            -> EPERM (existing; gate-1
+         baseline).
+       * userfaultfd(1)            -> ENOSYS (existing;
+         terminal — both gates pass, feature not built).
+       * userfaultfd(1|O_CLOEXEC)  -> ENOSYS (existing;
+         O_CLOEXEC is in VALID_FLAGS so gate-2 passes).
+
+     Final boot-time stamp:
+         "[syscall/linux]   userfaultfd EPERM-before-EINVAL
+          gate order: OK"
+
+     Build: cargo build -p kernel clean (47.60s).
+     Boot test: bash scripts/boot-test.sh PASSED
+                (BOOT_OK at 26s).

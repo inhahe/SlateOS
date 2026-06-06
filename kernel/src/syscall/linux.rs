@@ -13596,14 +13596,62 @@ fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
     let flags_i32 = args.arg0 as i32;
     #[allow(clippy::cast_sign_loss)]
     let flags: u64 = u64::from(flags_i32 as u32);
-    if flags & !VALID_FLAGS != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // Kernel-fault mode requires CAP_SYS_PTRACE, which no caller can
-    // currently hold — Linux returns EPERM in that case before the
-    // open-file allocation.
+    // Linux gate order (fs/userfaultfd.c::SYSCALL_DEFINE1(userfaultfd) +
+    // userfaultfd_new):
+    //
+    //   SYSCALL_DEFINE1(userfaultfd, int, flags)
+    //   {
+    //       if (!sysctl_unprivileged_userfaultfd &&
+    //           (flags & UFFD_USER_MODE_ONLY) == 0 &&
+    //           !capable(CAP_SYS_PTRACE))
+    //           return -EPERM;                         // (1) EPERM
+    //
+    //       return userfaultfd_new(flags);
+    //   }
+    //
+    //   static int userfaultfd_new(int flags)
+    //   {
+    //       if (flags & ~(UFFD_SHARED_FCNTL_FLAGS | UFFD_USER_MODE_ONLY))
+    //           return -EINVAL;                        // (2) EINVAL
+    //       ...
+    //   }
+    //
+    // The EPERM gate runs BEFORE the EINVAL mask check.  Pre-batch we
+    // ran EINVAL first, so a probe like `flags = 0x8000_0000` (high
+    // bit, no UFFD_USER_MODE_ONLY) saw EINVAL where Linux returns
+    // EPERM.  Concrete divergence:
+    //
+    //   * userfaultfd(0x8000_0000)
+    //       Linux: EPERM   (no UFFD_USER_MODE_ONLY, no CAP_SYS_PTRACE;
+    //                       gate-1 fires before unknown bit is examined)
+    //       Pre:   EINVAL  (mask gate caught bit 31 first)
+    //
+    //   * userfaultfd(0x8000_0001) = bit31 | UFFD_USER_MODE_ONLY
+    //       Linux: EINVAL  (gate-1 skipped because UFFD_USER_MODE_ONLY
+    //                       is set; gate-2 then catches bit 31)
+    //       Pre:   EINVAL  (same answer, ok.)
+    //
+    //   * userfaultfd(0)
+    //       Linux: EPERM   (gate-1)
+    //       Pre:   EPERM   (after passing EINVAL gate; same.)
+    //
+    // Tools that probe userfaultfd availability under
+    // sysctl=unprivileged_userfaultfd=0 (Linux's default since 5.11)
+    // and an unprivileged caller need EPERM to decide "I need to
+    // escalate or use UFFD_USER_MODE_ONLY"; EINVAL signals "your flag
+    // shape is wrong, retry with different bits" — a retry loop that
+    // can't ever clear the privilege gate.
+    //
+    // Architectural directive: we model sysctl_unprivileged_userfaultfd
+    // at its Linux default (0), and no caller can hold CAP_SYS_PTRACE.
+    // So gate-1 trips on any flags whose UFFD_USER_MODE_ONLY bit is 0,
+    // regardless of other bits.  Gate-2 then catches unknown bits when
+    // UFFD_USER_MODE_ONLY IS set.
     if flags & UFFD_USER_MODE_ONLY == 0 {
         return linux_err(errno::EPERM);
+    }
+    if flags & !VALID_FLAGS != 0 {
+        return linux_err(errno::EINVAL);
     }
     linux_err(errno::ENOSYS)
 }
@@ -44082,12 +44130,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   request_key callout/type/desc validation: OK");
 
-        // userfaultfd with bogus flag -> EINVAL.
+        // Batch 376: userfaultfd gate order reversed.  Linux's
+        // SYSCALL_DEFINE1(userfaultfd) checks EPERM (no UFFD_USER_MODE_ONLY
+        // + no CAP_SYS_PTRACE + sysctl=0) BEFORE userfaultfd_new's mask
+        // gate.  Pre-batch we ran EINVAL first.
+        //
+        // userfaultfd(0x8000_0000): unknown high bit, no UFFD_USER_MODE_ONLY
+        //   -> Linux: EPERM (gate-1 fires before the unknown bit is
+        //      examined).
+        //   -> Pre-batch: EINVAL (mask gate caught bit 31 first).
         let a = SyscallArgs { arg0: 0x8000_0000, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::USERFAULTFD, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: userfaultfd(0x8000_0000) not EPERM ({})",
+                dispatch_linux(nr::USERFAULTFD, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // userfaultfd(0x8000_0001) = bit31 | UFFD_USER_MODE_ONLY:
+        //   gate-1 passes (UFFD_USER_MODE_ONLY is set), gate-2 catches
+        //   bit 31.  EINVAL in both Linux and post-batch.
+        let a = SyscallArgs { arg0: 0x8000_0001, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USERFAULTFD, &a).value
             != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: userfaultfd(bad flag) not EINVAL");
+            serial_println!(
+                "[syscall/linux]   FAIL: userfaultfd(0x8000_0001) not EINVAL ({})",
+                dispatch_linux(nr::USERFAULTFD, &a).value
+            );
             return Err(KernelError::InternalError);
         }
         // userfaultfd(0) -> EPERM.  Linux requires CAP_SYS_PTRACE when
@@ -44119,7 +44191,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: userfaultfd(USER_MODE_ONLY|CLOEXEC) not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   userfaultfd privilege gate: OK");
+        serial_println!(
+            "[syscall/linux]   userfaultfd EPERM-before-EINVAL gate order: OK"
+        );
 
         // memfd_create(NULL, flags=0) -> EFAULT: flags pass the gate
         // (no reserved bits, no EXEC+NOEXEC_SEAL collision), then the

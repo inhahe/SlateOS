@@ -35470,3 +35470,57 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Build: cargo build -p kernel clean (47.77s).
      Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 23s).
      Stamp confirmed at build/serial-test.txt:584.
+
+424. [2026-06-06] sys_fspick CAP-first gate inversion fixed — Linux
+     gate 1 is may_mount() → EPERM (literal first check in
+     fs/fsopen.c::SYSCALL_DEFINE3(fspick)), but pre-batch we ran flag
+     mask, NULL pointer check, AND user_path_at() validation before
+     EPERM.  Any unprivileged caller passing garbage flags, a NULL
+     path, or a bad pointer saw EINVAL/EFAULT where Linux returns
+     EPERM.
+
+     Divergence table (pre-batch → Linux observable → post-batch):
+       fspick(0, "path",        0xff): EINVAL → EPERM → EPERM
+       fspick(0, NULL,           0  ): EFAULT → EPERM → EPERM
+       fspick(0, 0xDEAD_BEEF,    0  ): EFAULT → EPERM → EPERM
+       fspick(0, "path",         0  ): EPERM  → EPERM → EPERM  ✓
+
+     Why it matters: fspick is the "pick existing mount" reconfigure
+     entry point in the new mount API (counterpart to fsopen).  It's
+     used by tools like `mount -o remount,...` and systemd-mount's
+     reconfiguration path to attach to an existing mountpoint and
+     change its options.  These tools probe capability progressively:
+     a user can sometimes reconfigure their own mounts (e.g. user
+     mounts owned by their UID), so the tool tries fspick first and
+     routes on errno.  EPERM → "needs root", EINVAL → "your flags are
+     wrong" — pre-batch our EINVAL would falsely indicate the user's
+     flag set was malformed.
+
+     Sister of batches 343 (swapoff CAP-first), 348 (acct CAP-first),
+     392 (fsopen CAP-first), 393 (fsmount CAP-first).  All five
+     follow the Linux convention of CAP_SYS_ADMIN-equivalent check
+     before any other gate.  swapon remains the deliberate exception
+     (todo 173 — Linux quirk).
+
+     Architectural: pure ABI translation.  No mount infrastructure
+     exists either way; gate 1 is terminal and the terminal answer
+     is unchanged.  sys_fspick collapses to a single linux_err(EPERM)
+     with the entire gate cascade elided.
+
+     Probes updated (3 reshape + 1 new + new aggregate stamp):
+       - fspick(0, path, 0xff)        : EINVAL → EPERM
+       - fspick(0, NULL, 0)           : EFAULT → EPERM
+       - fspick(0, 0xDEAD_BEEF, 0)    : (new) EPERM  (bad ptr)
+       - fspick(0, path, 0)           : EPERM → EPERM   ✓ unchanged
+     New aggregate stamp:
+       "[syscall/linux]   fspick may_mount EPERM-first gate
+        (Linux gate 1 fires before flag/path): OK"
+
+     Build: cargo build -p kernel clean (40.71s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 26s on
+       retry; first attempt timed out due to unrelated intermittent
+       RCU self-test hang documented in known-issues.md).
+     Stamp confirmed at build/serial-test.txt:585.
+
+     Side-effect: created known-issues.md with the RCU self-test
+     hang as entry 1 (per CLAUDE.md global rules on bug tracking).

@@ -18080,19 +18080,26 @@ fn sys_fsmount(_args: &SyscallArgs) -> SyscallResult {
 /// `fspick(dirfd, path*, flags)` — pick an existing mount to reconfigure.
 /// flags = FSPICK_CLOEXEC (1) | FSPICK_SYMLINK_NOFOLLOW (2) | NO_AUTOMOUNT
 /// (4) | EMPTY_PATH (8).
-fn sys_fspick(args: &SyscallArgs) -> SyscallResult {
-    const FSPICK_MASK: u32 = 0xf;
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg2 as u32;
-    if flags & !FSPICK_MASK != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = validate_user_str(args.arg1) {
-        return linux_err(linux_errno_for(e));
-    }
+///
+/// Linux gate order (fs/fsopen.c::SYSCALL_DEFINE3(fspick)):
+///   1. `if (!may_mount()) return -EPERM;`  ← LITERAL FIRST CHECK
+///   2. `if (flags & ~FSPICK_VALID) return -EINVAL;`
+///   3. `user_path_at()` (path/EFAULT lookup)
+///   4. fs context allocation / mount lookup
+///
+/// Pre-batch we ran flag mask, NULL pointer check, and user-string
+/// validation before the EPERM, so an unprivileged caller passing
+/// garbage flags or a NULL path saw EINVAL/EFAULT where Linux returns
+/// EPERM.  Mount-orchestration tools (systemd-mount reconfigure path,
+/// `mount -o remount,...`) probe capability via fspick on a known-good
+/// mountpoint and route on errno: EPERM → "needs root", EINVAL → "your
+/// flags are wrong, fix your code".  Pre-batch our EINVAL would
+/// mis-route the diagnosis.  Sister of batches 343 (swapoff), 348
+/// (acct), 392 (fsopen), 393 (fsmount).  Gate 1 is terminal — we never
+/// grant CAP_SYS_ADMIN to Linux-ABI callers.
+fn sys_fspick(_args: &SyscallArgs) -> SyscallResult {
+    // Gate 1 (Linux's literal first check): may_mount() → EPERM.
+    // Terminal — no flag or pointer touch.
     linux_err(errno::EPERM)
 }
 
@@ -49729,24 +49736,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   fsmount may_mount EPERM-first gate (Linux gate 1 fires before flag/attr/fd): OK"
         );
 
-        // fspick bad flags -> EINVAL.
+        // fspick: batch 394 — CAP-first EPERM gate.  Linux's literal
+        // gate 1 is `if (!may_mount()) return -EPERM;` before any flag
+        // mask or user_path_at lookup.  Sister of batches 343 (swapoff),
+        // 348 (acct), 392 (fsopen), 393 (fsmount).
+        // bad flags -> EPERM (CAP gate fires first; pre-batch was EINVAL).
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0xff, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fspick bad flags not EINVAL");
+        if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fspick bad flags not EPERM (CAP-first)");
             return Err(KernelError::InternalError);
         }
-        // fspick NULL path -> EFAULT.
+        // NULL path -> EPERM (CAP gate fires first; pre-batch was EFAULT).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: fspick NULL not EFAULT");
+        if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fspick NULL not EPERM (CAP-first)");
             return Err(KernelError::InternalError);
         }
-        // fspick valid -> EPERM.
+        // bad path ptr -> EPERM (CAP gate fires first; pre-batch was EFAULT).
+        let a = SyscallArgs { arg0: 0, arg1: 0xDEAD_BEEFu64, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fspick bad ptr not EPERM (CAP-first)");
+            return Err(KernelError::InternalError);
+        }
+        // valid -> EPERM (unchanged terminal answer).
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FSPICK, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: fspick valid not EPERM");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   fspick may_mount EPERM-first gate (Linux gate 1 fires before flag/path): OK"
+        );
 
         // open_tree bad flags -> EINVAL.  Use bit 30 which is outside the
         // OPEN_TREE_MASK (the mask tops out at AT_RECURSIVE = 0x8000 and

@@ -22617,3 +22617,72 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      timespecs; well-formed timespecs always exit EBADF.
 ##
 ##      Build clean, boot test PASSED (BOOT_OK at 23s).
+
+## 291. syscall/linux: futex2_wait — timespec value validation
+##      (batch 262)
+##
+##      Pre-batch divergence:
+##        Linux 6.7+ `SYSCALL_DEFINE6(futex_wait)` in
+##        kernel/futex/syscalls.c runs `get_timespec64()` after the
+##        FUTEX2 flag/clockid checks; `get_timespec64()` calls
+##        `timespec64_valid` (tv_sec >= 0 AND
+##        tv_nsec in [0, NSEC_PER_SEC)) and returns -EINVAL on
+##        out-of-range values.  Our pre-batch path only validated
+##        readability via `validate_user_read(timespec, 16)` and
+##        then called `read_timespec()` (which is just a
+##        copy_from_user — no value check).  A malformed timespec
+##        such as `{tv_sec=-1, 0}` or `{0, 1_000_000_000}` slipped
+##        through; `to_nanos()` produced a garbage absolute
+##        deadline, `saturating_sub(now)` clamped it to 0, and
+##        `handlers::sys_futex_wait_timeout` returned 0
+##        (value-mismatch short-circuit) — silently wrong vs.
+##        Linux EINVAL.
+##
+##      Fix:
+##        Replaced the readable-only check at the timespec arg
+##        with a call to the existing `validate_user_timespec64`
+##        helper (same one used by mq_timedsend, mq_timedreceive,
+##        semtimedop).  The helper does the
+##        validate_user_read+copy_from_user+timespec64_valid
+##        sequence and returns the precomputed SyscallResult on
+##        failure (EFAULT for unreadable; EINVAL for invalid).
+##
+##      Self-tests added/updated:
+##
+##        Pre-existing tests preserved:
+##          - futex2 wait bad clockid (99) -> EINVAL
+##          - futex2 wait clockid=2 -> EINVAL
+##          - futex2 wait mask=0 -> EINVAL
+##          - futex2 wait NUMA -> ENOSYS
+##          - futex2 wait non-U32 size -> EINVAL
+##          - futex2 wait mismatch, no timeout -> 0
+##          - futex2 wait past-abs MONOTONIC ts=(0,0) -> 0
+##          - futex2 wait past-abs REALTIME ts=(0,0) -> 0
+##
+##        New discriminators (inserted between the REALTIME-abs
+##        test and the futex_requeue tests):
+##          A. (uaddr=u32_ptr, val=1, mask=1, flags=F2_SIZE_U32,
+##              timespec={tv_sec=-1, 0}, clockid=0) -> Linux EINVAL
+##              via timespec64_valid; pre-batch silently returned
+##              0 from the value-mismatch short-circuit.
+##          B. (timespec={0, 1_000_000_000}) -> Linux EINVAL
+##              (tv_nsec out of range); pre-batch silently 0.
+##        Acceptance for valid {0,0} ts was already covered by the
+##        pre-existing past-abs tests at lines 44972 / 44981 that
+##        continue to exit cleanly with 0 — confirming the new
+##        gate doesn't falsely reject well-formed timespecs.
+##
+##      Marker:
+##        "[syscall/linux]   futex2_wait timespec value gating: OK"
+##
+##      Existing tests preserved: futex2 wake gate suite,
+##      futex_requeue tests, and the broader futex/futex_waitv
+##      probes earlier in the test block all unchanged.
+##
+##      Known limitations: futex2_wait still terminates with 0 on
+##      value-mismatch instead of -EAGAIN.  This pre-existing
+##      classic-FUTEX_WAIT behaviour is shared with the futex2
+##      path and documented in the test comment; converting to
+##      EAGAIN requires a handler-side change tracked separately.
+##
+##      Build clean, boot test PASSED (BOOT_OK at 25s).

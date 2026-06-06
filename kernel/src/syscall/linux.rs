@@ -22168,9 +22168,17 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(uaddr, 4) {
         return linux_err(linux_errno_for(e));
     }
+    // Linux's futex2 timespec path runs `get_timespec64()` which calls
+    // `timespec64_valid` after copy-in: tv_sec >= 0 AND tv_nsec in
+    // [0, NSEC_PER_SEC).  Previously we only checked readability, so a
+    // bogus value like `{tv_sec=-1, 0}` would slip through and
+    // `read_timespec().to_nanos()` would compute a garbage deadline that
+    // `saturating_sub` clamped to zero (silently returning 0 / ETIMEDOUT
+    // instead of EINVAL).  Use the shared helper for parity with
+    // mq_timedsend, mq_timedreceive, semtimedop, etc.
     if timespec != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(timespec, 16) {
-            return linux_err(linux_errno_for(e));
+        if let Err(r) = validate_user_timespec64(timespec) {
+            return r;
         }
     }
     let native = if timespec == 0 {
@@ -44978,6 +44986,52 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: futex2 wait past abs REAL not 0");
             return Err(KernelError::InternalError);
         }
+        // futex2 wait discriminator A: bogus timespec {tv_sec=-1, 0}
+        // -> Linux EINVAL via `get_timespec64`->`timespec64_valid`;
+        // pre-batch read_timespec accepted the negative value,
+        // `to_nanos()` produced a garbage absolute deadline, and
+        // `saturating_sub` clamped it to 0 — the handler then
+        // returned 0 (value-mismatch short-circuit) silently.
+        {
+            let bad_ts: [i64; 2] = [-1, 0];
+            let bad_ts_ptr = (&raw const bad_ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: u32_ptr, arg1: 1, arg2: 1,
+                arg3: F2_SIZE_U32, arg4: bad_ts_ptr, arg5: 0,
+            };
+            core::hint::black_box(&bad_ts);
+            if dispatch_linux(nr::FUTEX_WAIT, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: futex2 wait neg tv_sec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // futex2 wait discriminator B: tv_nsec = NSEC_PER_SEC (1e9)
+        // -> Linux EINVAL (out of [0, NSEC_PER_SEC) range).  Same
+        // pre-batch fall-through as A.
+        {
+            let bad_ts: [i64; 2] = [0, 1_000_000_000];
+            let bad_ts_ptr = (&raw const bad_ts[0]) as u64;
+            let a = SyscallArgs {
+                arg0: u32_ptr, arg1: 1, arg2: 1,
+                arg3: F2_SIZE_U32, arg4: bad_ts_ptr, arg5: 0,
+            };
+            core::hint::black_box(&bad_ts);
+            if dispatch_linux(nr::FUTEX_WAIT, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: futex2 wait bad tv_nsec not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   futex2_wait timespec value gating: OK"
+        );
         // futex_requeue nonzero flags -> EINVAL.
         let a = SyscallArgs { arg0: waiters_ptr, arg1: 1, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::EINVAL) {

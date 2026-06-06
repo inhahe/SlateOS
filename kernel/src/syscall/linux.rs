@@ -9806,10 +9806,22 @@ const ITIMERVAL_SIZE: usize = 32;
 
 /// `getitimer(which, value)` — write a zeroed itimerval (no timer pending).
 fn sys_getitimer(args: &SyscallArgs) -> SyscallResult {
-    let which = args.arg0;
+    // Linux signature: `SYSCALL_DEFINE2(getitimer, int, which,
+    // struct __kernel_old_itimerval __user *, value)`.  `which` is
+    // declared `int` (32-bit), so the x86_64 syscall ABI truncates
+    // args.arg0 to its low 32 bits before the body runs.  Pre-batch
+    // (304) we held which as raw u64 and tested `which > 2`, so a
+    // probe with which=0x1_0000_0000 hit EINVAL where Linux truncates
+    // to ITIMER_REAL=0 and proceeds to fill the user buffer.  Same
+    // `int` truncation thread as batches 285/286/287/288/303.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let which_i32 = args.arg0 as i32;
     let value = args.arg1;
 
-    if which > 2 {
+    // Linux's getitimer body checks the which range as a signed-int
+    // switch: ITIMER_REAL(0), ITIMER_VIRTUAL(1), ITIMER_PROF(2), else
+    // EINVAL.  Negative which falls through to the default arm.
+    if !(0..=2).contains(&which_i32) {
         return linux_err(errno::EINVAL);
     }
     if value == 0 {
@@ -9833,7 +9845,18 @@ fn sys_getitimer(args: &SyscallArgs) -> SyscallResult {
 /// `setitimer(which, new_value, old_value)` — accept cancellation;
 /// refuse arming with ENOSYS.
 fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
-    let which = args.arg0;
+    // Linux signature: `SYSCALL_DEFINE3(setitimer, int, which,
+    // struct __kernel_old_itimerval __user *, value,
+    // struct __kernel_old_itimerval __user *, ovalue)`.  `which` is
+    // declared `int` (32-bit), so the x86_64 syscall ABI truncates
+    // args.arg0 to its low 32 bits.  Pre-batch (304) we held which
+    // as raw u64 and tested `which > 2` (after copy_from_user +
+    // timeval_valid).  Probe: which=0x1_0000_0000, new_value=NULL,
+    // old_value=NULL — Linux truncates to 0, zero buffer is valid,
+    // cancel path returns 0.  Pre-batch: raw 0x1_0000_0000 > 2 ->
+    // EINVAL.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let which_i32 = args.arg0 as i32;
     let new_value = args.arg1;
     let old_value = args.arg2;
 
@@ -9885,8 +9908,9 @@ fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
     }
     // `which` validation happens inside do_setitimer's switch default
     // (AFTER copy_from_user and timeval_valid).  Valid: ITIMER_REAL(0),
-    // ITIMER_VIRTUAL(1), ITIMER_PROF(2).
-    if which > 2 {
+    // ITIMER_VIRTUAL(1), ITIMER_PROF(2).  Negative which (post-
+    // truncation) falls through to the default arm -> EINVAL.
+    if !(0..=2).contains(&which_i32) {
         return linux_err(errno::EINVAL);
     }
 
@@ -27940,6 +27964,66 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   arch_prctl int code truncation: OK"
+        );
+    }
+
+    // Batch 304 — sys_getitimer + sys_setitimer int which
+    // truncation audit.
+    //
+    // Pre-batch reads: `let which = args.arg0; if which > 2 ->
+    // EINVAL` on raw u64.  Linux declares `which` as `int`, so
+    // probes with the high half set (e.g. which=0x1_0000_0000,
+    // truncates to ITIMER_REAL=0) hit EINVAL where Linux truncates
+    // and passes the gate.
+    {
+        // (a) getitimer(which=0x1_0000_0000, value=&buf).
+        //     Pre-batch: raw 0x1_0000_0000 > 2 -> EINVAL.
+        //     Post-batch: which truncates to 0, passes the range
+        //     gate, value!=0 skips EFAULT, validate_user_write is
+        //     a kernel-context no-op, zero buffer copied -> 0.
+        let mut itv_buf = [0u8; 32];
+        let itv_ptr = itv_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: itv_ptr,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETITIMER, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getitimer high-half which -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) setitimer(which=0x1_0000_0000, new=NULL, old=NULL).
+        //     Pre-batch: raw 0x1_0000_0000 > 2 -> EINVAL (after
+        //     the zero-buffer timeval_valid pass).  Post-batch:
+        //     which truncates to 0, passes the range gate,
+        //     is_cancel=true (all zeros), old=NULL skip -> 0.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETITIMER, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setitimer high-half which -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   getitimer/setitimer int which truncation: OK"
         );
     }
 

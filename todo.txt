@@ -26760,3 +26760,79 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        Build: cargo build -p kernel clean (35.84s).
        Boot test: bash scripts/boot-test.sh --no-build
                   --timeout=240 PASSED (BOOT_OK at 24s).
+
+  334. Batch 304 — sys_getitimer + sys_setitimer
+       int which truncation audit.
+
+       Divergence
+       ----------
+       Linux's `SYSCALL_DEFINE2(getitimer, int, which, ...)`
+       and `SYSCALL_DEFINE3(setitimer, int, which, ...)`
+       declare which as `int` (32-bit), so the x86_64
+       syscall ABI truncates args.arg0 to its low 32
+       bits before the body runs.  Pre-batch we held
+       which as raw u64 and tested `which > 2 ->
+       EINVAL`, so probes with the high half set
+       (e.g. which=0x1_0000_0000, truncates to
+       ITIMER_REAL=0) hit EINVAL where Linux truncates
+       and reaches the timer's normal path.
+
+       Fix
+       ---
+       Cast args.arg0 to i32 at function entry, then
+       use the i32-typed range check
+       `(0..=2).contains(&which_i32)` to mirror
+       Linux's signed-switch default arm.  This also
+       captures negative which (post-truncation) which
+       the raw u64 form was implicitly handling via
+       "huge unsigned > 2".
+
+       New self-tests
+       --------------
+       Added a "Batch 304" block at the end of
+       dispatch_linux's Linux ABI self-tests with two
+       probes:
+         (a) getitimer(which=0x1_0000_0000, value=&buf)
+             -> 0.  Pre-batch: -EINVAL.
+         (b) setitimer(which=0x1_0000_0000, new=NULL,
+             old=NULL) -> 0.  Pre-batch: -EINVAL.
+       Marker: "[syscall/linux]
+         getitimer/setitimer int which truncation: OK".
+
+       Preserved
+       ---------
+       - getitimer gate order (which validation,
+         then NULL-value EFAULT, then user-write
+         validation, then zero-buffer copy).
+       - setitimer gate order (copy_from_user first
+         to honour Linux's "value NULL means cancel",
+         then timeval_valid, then which validation,
+         then is_cancel branching).
+       - is_cancel vs ENOSYS arming behaviour
+         unchanged.
+
+       Known limitations / out of scope
+       --------------------------------
+       - sys_prctl(int option) still deferred — its
+         match block is too large to lift the i32
+         cast in a single batch without re-auditing
+         every arm.  Marked as deferred in batch 303.
+       - sys_pipe2 already truncates flags to u32 at
+         entry (missing #[allow] but functionally
+         correct).
+       - sys_getrusage(int who) does not validate who
+         at all — Linux returns EINVAL for who not in
+         {RUSAGE_SELF=0, RUSAGE_CHILDREN=-1,
+         RUSAGE_THREAD=1}.  This is a missing-input-
+         validation divergence rather than a
+         truncation divergence; deferred to a separate
+         "missing input validation" sweep.
+       - sys_sched_getparam/setparam (pid_t pid)
+         already cast pid to i32 in prior batches.
+       - sys_setrlimit/getrlimit (unsigned int
+         resource) — should audit; deferred to next
+         batch.
+
+       Build: cargo build -p kernel clean (39.83s).
+       Boot test: bash scripts/boot-test.sh --no-build
+                  --timeout=240 PASSED (BOOT_OK at 25s).

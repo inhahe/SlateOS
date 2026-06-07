@@ -24367,7 +24367,21 @@ fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
     // Linux x86_64 PAGE_SIZE for ABI; do not use our 16 KiB internal frame.
     const LINUX_PAGE_SIZE: u32 = 4096;
     // 1. flags first — Linux gates this ahead of every pointer touch.
-    if args.arg3 != 0 {
+    //
+    // Batch 453: Linux signature is
+    // `SYSCALL_DEFINE4(statmount, ..., unsigned int, flags)`, delivered
+    // in r10.  The AMD64 syscall ABI does not zero-extend `unsigned int`
+    // across the syscall instruction, so Linux observes only the low 32
+    // bits — the high half is caller-controlled garbage that must be
+    // masked before the bit gate.  Pre-batch we tested the raw u64
+    // against 0, so any high-half garbage (e.g. flags=0x1_0000_0000)
+    // was rejected with EINVAL where Linux's truncated flags=0 advances
+    // to the req/size gates.  Companion fix to listmount's truncation
+    // (already in place since the listmount unsigned-int batch); both
+    // syscalls share the `unsigned int flags` parameter.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     // 2a. get_user(size, &req->size) -> EFAULT on bad req.
@@ -57982,6 +57996,58 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   listmount unsigned-int truncation (high-half ignored): OK"
+        );
+
+        // Batch 453: statmount flags is C `unsigned int`; the high 32
+        // bits of arg3 must be masked before the != 0 gate.  Pre-batch
+        // statmount tested the raw u64 (companion to listmount, which
+        // already truncates) so high-half garbage returned EINVAL
+        // where Linux's truncated flags=0 advances to the req/size
+        // gates.  Probes mirror the listmount truncation block.
+        //
+        // (a) high-only flags, req=NULL: truncates to 0, gate 2a EFAULT
+        //     on the NULL req pointer.  Pre-batch this was EINVAL
+        //     because the != 0 test compared against the raw u64.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0x1_0000_0000, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statmount(high-only) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) high|valid-low 0 with valid req: truncates to 0, advances
+        //     through all req-size gates and reaches ENOENT (no mount
+        //     tree).  Verifies high-half noise is fully stripped even
+        //     when the downstream chain runs to completion.
+        let a = SyscallArgs {
+            arg0: valid_mnt_req_ptr, arg1: mnt_outbuf_ptr,
+            arg2: 128, arg3: 0x1_0000_0000, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statmount(high-only,valid) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) high|bad-low 0x1: truncates to 0x1, Linux's `if (flags)`
+        //     fires (statmount has NO flag-bits defined yet, unlike
+        //     listmount), → EINVAL.  Verifies the truncated value
+        //     still drives the gate, not the raw u64.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0x1_0000_0001, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::STATMOUNT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statmount(high|bad-low) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   statmount unsigned-int truncation (high-half ignored): OK"
         );
 
         // Batch 381: copy_mnt_id_req spare-field gate.  Linux's

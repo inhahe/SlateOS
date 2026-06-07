@@ -39101,3 +39101,144 @@ Verified present in `build/serial-test.txt` after boot test PASS.
 after 22s.
 
 **Files touched:** `kernel/src/syscall/linux.rs` only.
+
+
+---
+
+## Batch 453 — sys_statmount: unsigned int flags high-half truncation fidelity
+
+**Where:** `kernel/src/syscall/linux.rs` — `sys_statmount` (approximately
+line 24370 — flags handling at function head) and the self-test probe
+block (approximately lines 57986-58040 — three new probes added
+immediately after the existing listmount unsigned-int truncation block).
+
+**Linux source quoted (verbatim, fs/namespace.c, kernel 6.8+):**
+
+```c
+SYSCALL_DEFINE4(statmount, const struct mnt_id_req __user *, req,
+                struct statmount __user *, buf, size_t, bufsize,
+                unsigned int, flags)
+{
+    struct mnt_id_req kreq;
+    int ret;
+
+    if (flags)
+        return -EINVAL;
+
+    ret = copy_mnt_id_req(req, &kreq);
+    if (ret)
+        return ret;
+    ...
+}
+```
+
+Crucial: the prototype declares `unsigned int flags`.  In the AMD64
+syscall ABI `unsigned int` is delivered in r10 (the fourth syscall
+argument register), and the kernel does NOT zero-extend `int`-typed
+arguments across the `syscall` instruction — only the low 32 bits are
+defined.  Linux's `if (flags)` therefore observes only the truncated
+low half; high-half register garbage is silently dropped.
+
+**Divergence table (pre-batch vs Linux):**
+
+| flags value (raw u64)           | pre-batch (ours) | Linux                  |
+|---------------------------------|------------------|------------------------|
+| 0x0000_0000_0000_0000           | (advances)       | (advances)             |
+| 0x0000_0000_0000_0001           | EINVAL           | EINVAL                 |
+| **0x0000_0001_0000_0000** (h-o) | **EINVAL**       | **(truncates to 0, advances)** |
+| **0x0000_0001_0000_0001**       | **EINVAL**       | **(truncates to 1) EINVAL** |
+| 0xDEAD_BEEF_0000_0000 (h-o)     | EINVAL           | (truncates to 0, advances) |
+
+Two of these five input shapes are observably divergent.  The
+high-only and the high|nonzero-low cases produce EINVAL on the raw u64
+test pre-batch where Linux would advance through the flags gate and
+continue to the req/size gate chain (eventually EFAULT on NULL req or
+ENOENT on a valid empty mount tree).
+
+**Why it matters:**
+
+statmount is one of the new (kernel 6.8) FS info syscalls used by
+systemd-mount, libmount, util-linux's findmnt, and the mountinfo crate.
+glibc-side wrappers typically zero-initialize the flags argument
+(`flags = 0`), but several patterns produce high-half noise:
+
+  1. **Probe code that reuses a stale register.**  Userspace code that
+     issues a raw syscall via inline asm and forgets to clear r10
+     between calls (e.g. when probing statmount support directly after
+     another syscall that wrote a 64-bit value to r10) sees Linux
+     truncate and advance, while we EINVAL — misleading the probe
+     into reporting statmount unavailable.
+  2. **Caller-side bitwise-OR builds.**  A future-proofing helper that
+     OR-ins a u32 flag mask into a u64 (e.g. `flags = base | (1ULL <<
+     32)` as a sentinel for "this caller understands the future
+     extension") would, on Linux, treat the high-half sentinel as
+     ignored and advance.  Our pre-batch impl rejected the call.
+  3. **Symmetry with listmount.**  listmount's `unsigned int flags`
+     already gets the u32 truncation treatment in this file (it
+     accepts LISTMOUNT_REVERSE).  statmount shared a copy of the same
+     ABI but kept the raw u64 test, creating an asymmetric quirk
+     where the same probe pattern produced different errnos across
+     two paired syscalls — exactly the kind of inconsistency that
+     looks like a kernel bug to anyone running mount-aware userspace.
+
+**Fix (translator-only):**
+
+One-line change at the flags gate head — replace `if args.arg3 != 0`
+with:
+
+```rust
+#[allow(clippy::cast_possible_truncation)]
+let flags = args.arg3 as u32;
+if flags != 0 {
+    return linux_err(errno::EINVAL);
+}
+```
+
+Mirrors the truncation pattern applied to listmount earlier in this
+file.  No other gate ordering, struct layout, or terminal-errno
+behavior changes.  Translator-only — no native handler touched, no
+kernel state changed.
+
+**Probes added (three new, after the listmount unsigned-int truncation
+block):**
+
+  (a) statmount(0, 0, 0, 0x1_0000_0000) — high-only flags, req=NULL.
+      Truncates to 0, advances to gate 2a → EFAULT on NULL req.
+      Pre-batch: EINVAL (raw-u64 != 0).
+
+  (b) statmount(valid_req, mnt_outbuf, 128, 0x1_0000_0000) — high-only
+      flags, valid req+buf.  Truncates to 0, advances through all
+      req-size gates and through the spare gate, reaches do_statmount →
+      ENOENT (no mount tree exposed).  Verifies high-half noise is
+      fully stripped and the downstream chain runs unaffected.
+      Pre-batch: EINVAL.
+
+  (c) statmount(0, 0, 0, 0x1_0000_0001) — high|bad-low 0x1.  Truncates
+      to 1, Linux's `if (flags)` fires → EINVAL.  Verifies the
+      truncated value (not the raw u64) drives the gate so legitimate
+      low-half garbage is still rejected after high-half stripping.
+      Pre-batch: EINVAL (coincidentally matches under raw-u64).
+
+Stamp emitted:
+
+```
+[syscall/linux]   statmount unsigned-int truncation (high-half ignored): OK
+```
+
+Verified present in `build/serial-test.txt` after boot test PASS.
+
+**Architectural posture:**
+
+Translator-only.  Native OS architecture unchanged — we still expose
+no mount tree (ENOENT is the truthful terminal answer).  Only the
+flags-argument handling in the Linux compat translator is adjusted to
+mirror Linux's `unsigned int` register-width truncation.  Companion
+to the existing listmount truncation fix; both syscalls now share the
+identical flag-width discipline.
+
+**Build:** `cargo build -p kernel` — clean, 38.44s.
+
+**Boot test:** `bash scripts/boot-test.sh` — PASS, BOOT_OK detected
+after 22s.
+
+**Files touched:** `kernel/src/syscall/linux.rs` only.

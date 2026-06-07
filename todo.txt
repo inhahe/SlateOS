@@ -41388,3 +41388,140 @@ Probe block stamp:
 
 **Build:** `cargo build -p kernel` clean, 40.12s.
 **Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).
+
+## Batch 469 — sys_socketpair AF_INET/AF_INET6 protocol IPPROTO_MAX gate
+
+**Linux 6.x source quote** (same gate as batch 468 — sys_socketpair
+also routes through sock_create which calls inet_create / inet6_create):
+
+    /* net/ipv4/af_inet.c::inet_create
+       AND  net/ipv6/af_inet6.c::inet6_create */
+    static int inet_create(struct net *net, struct socket *sock,
+                           int protocol, int kern)
+    {
+            ...
+            if (protocol < 0 || protocol >= IPPROTO_MAX)
+                    return -EINVAL;
+
+            sock->state = SS_UNCONNECTED;
+
+    lookup_protocol:
+            err = -ESOCKTNOSUPPORT;
+            rcu_read_lock();
+            list_for_each_entry_rcu(answer, &inetsw[sock->type], list) {
+                    ...
+
+with IPPROTO_MAX = 256 (pre-MPTCP, conservative spec-stable bound).
+
+For socketpair, the call flow is __sys_socketpair → sock_create →
+__sock_create → inet_create.  inet_create's open IPPROTO_MAX check
+fires BEFORE the inetsw[] walk that produces ESOCKTNOSUPPORT /
+EPROTONOSUPPORT, and BEFORE __sys_socketpair touches ops->socketpair
+at all (which would produce EOPNOTSUPP for AF_INET because
+inet_stream_ops.socketpair == NULL).
+
+So (AF_INET, *, -1) and (AF_INET, *, >=256) must surface EINVAL,
+not EOPNOTSUPP and not EPROTONOSUPPORT.
+
+**Divergence table**
+
+    Shape                                            pre-batch       Linux 6.x
+    ----------------------------------------------   ------------    ------------------
+    socketpair(AF_INET=2,  STREAM=1, -1, sv)         EOPNOTSUPP      EINVAL
+                                                     (gate 3b's
+                                                      args.arg2 as
+                                                      u32 turned
+                                                      -1 into
+                                                      0xFFFFFFFF;
+                                                      fell through
+                                                      gate 3b's
+                                                      per-(family,
+                                                      type) match;
+                                                      hit gate 3c
+                                                      domain != 1)
+    socketpair(AF_INET=2,  STREAM=1, 256, sv)        EOPNOTSUPP      EINVAL
+    socketpair(AF_INET6=10,DGRAM=2,  256, sv)        EOPNOTSUPP      EINVAL
+    socketpair(AF_INET=2,  SOCK_RAW=3, 256, sv)      EOPNOTSUPP      EINVAL
+    socketpair(AF_INET=2,  SOCK_RAW=3, -1, sv)       EOPNOTSUPP      EINVAL
+    socketpair(AF_INET=2,  SOCK_RDM=4, 256, sv)      ESOCKTNOSUPPORT EINVAL
+                                                     (batch 467
+                                                      err-init for
+                                                      type=4)         (open gate
+                                                                       precedes
+                                                                       err-init)
+    socketpair(AF_INET=2,  STREAM=1, TCP=6, sv)      EOPNOTSUPP      unchanged
+                                                                     (in valid
+                                                                      range,
+                                                                      falls to
+                                                                      gate 3c
+                                                                      domain != 1)
+    socketpair(AF_UNIX=1,  STREAM=1, -1, sv)         EPROTONOSUPPORT unchanged
+                                                                     (AF_UNIX
+                                                                      not in
+                                                                      gate)
+
+The (AF_INET, SOCK_RDM=4, 256) case is the gate-ordering proof:
+batch 467 made socketpair(AF_INET, SOCK_RDM, *) surface
+ESOCKTNOSUPPORT (type=4 has no inetsw entries).  Batch 469's
+IPPROTO_MAX gate, which runs BEFORE batch 467's family allowlist,
+flips it to EINVAL when protocol >= 256.  This matches Linux's
+"inet_create opens with range check" ordering exactly.
+
+**Why it matters**
+
+Direct parallel of batch 468's rationale for sys_socket.
+sys_socketpair was the second of the two affected entry points.
+Capability-detection probes that distinguish EINVAL from
+EOPNOTSUPP/EPROTONOSUPPORT on socketpair (e.g., kernel-feature
+detection via socketpair() with sentinel protocol values like -1)
+would have read our return as "this kernel doesn't implement
+ops->socketpair for AF_INET" rather than "this kernel rejects
+out-of-range protocols at parse time."  Mischaracterising the
+errno class at this layer cascades into wrong probe verdicts
+upstream.
+
+The sign-cast aspect mirrors batch 468: x86_64 ABI places int
+args in low 32 bits of the u64 register, so `args.arg2 as i32`
+preserves negative values and lets the `protocol < 0` half of
+Linux's check apply.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs::sys_socketpair`, new Gate 2-continued
+inserted between the SOCK_MAX type-range gate (batch 467, line ~23477)
+and Gate 3a (ESOCKTNOSUPPORT family allowlist, batch 467):
+
+  * Family-restricted match (domain == 2 || domain == 10).
+  * `let proto_signed = args.arg2 as i32;` — sign-preserving cast.
+  * `if !(0..256).contains(&proto_signed)
+       { return linux_err(errno::EINVAL); }`.
+  * Other families (AF_UNIX=1, AF_NETLINK=16, AF_PACKET=17) are
+    NOT in this gate — they have their own protocol gates tracked
+    as separate batches.
+
+Translator-only — no native socketpair code changed.
+
+**Probes added (post the existing "socketpair type-range gate
+widened" block):**
+
+  A. socketpair(AF_INET=2, STREAM=1, u64::MAX, sv)   -> EINVAL
+     (sign cast: low 32 = 0xFFFFFFFF; `as i32` = -1)
+  B. socketpair(AF_INET=2, STREAM=1, 256, sv)        -> EINVAL
+  C. socketpair(AF_INET6=10, DGRAM=2, 256, sv)       -> EINVAL
+  D. socketpair(AF_INET=2, SOCK_RAW=3, 256, sv)      -> EINVAL
+  E. socketpair(AF_INET=2, SOCK_RAW=3, -1, sv)       -> EINVAL
+  F. socketpair(AF_INET=2, SOCK_RDM=4, 256, sv)      -> EINVAL
+     (gate ordering proof — IPPROTO_MAX precedes batch 467's
+     ESOCKTNOSUPPORT for type=4)
+  G. Regression: socketpair(AF_INET, STREAM, TCP=6, sv) -> EOPNOTSUPP
+     (in-range protocol; falls through to gate 3c domain != 1)
+  H. Regression: socketpair(AF_UNIX=1, STREAM=1, -1, sv) -> EPROTONOSUPPORT
+     (AF_UNIX not in IPPROTO_MAX gate; batch 467 gate 3b's (1,_) arm
+     fires when args.arg2 as u32 != 0)
+
+Probe block stamp:
+
+    [syscall/linux]   socketpair AF_INET/AF_INET6 protocol range 0..IPPROTO_MAX=256 (Linux inet_create/inet6_create open gate; precedes ESOCKTNOSUPPORT, EPROTONOSUPPORT, and EOPNOTSUPP): OK
+
+**Build:** `cargo build -p kernel` clean, 40.96s.
+**Boot test:** PASS @ 23s (`bash scripts/boot-test.sh`).

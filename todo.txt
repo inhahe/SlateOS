@@ -46003,3 +46003,57 @@ batch 501): OK` (serial-test.txt).
 **Build:** clean (`cargo build -p kernel`, 53.8s).
 
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+## Batch 502 — Linux ABI fidelity: bpf() cmd cap tightened from 36 to 35 (BPF_PROG_BIND_MAP) to match Linux v6.6 (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_bpf`).
+
+**Change:** `if cmd > BPF_TOKEN_CREATE (=36)` → `if cmd > BPF_PROG_BIND_MAP (=35)`.
+
+**Linux v6.6 source** — `include/uapi/linux/bpf.h` lines 867-905 of
+the `enum bpf_cmd` definition (verbatim, tail of the enum):
+
+```c
+enum bpf_cmd {
+    BPF_MAP_CREATE,
+    BPF_MAP_LOOKUP_ELEM,
+    BPF_MAP_UPDATE_ELEM,
+    BPF_MAP_DELETE_ELEM,
+    ...
+    BPF_LINK_DETACH,
+    BPF_PROG_BIND_MAP,
+};
+```
+
+`BPF_PROG_BIND_MAP` is the last member of the enum at v6.6, with
+implicit value 35.  Linux 6.10 later added `BPF_TOKEN_CREATE = 36`;
+v6.6 doesn't recognise that cmd, and its
+`kernel/bpf/syscall.c::__sys_bpf` switch returns `-EINVAL` via the
+`default` arm for any unrecognised cmd.
+
+**Pre-batch behaviour:** translator capped at `cmd > 36`, treating
+`cmd=36` as "in-switch" (returned `-ENOSYS`).  This kept a one-cmd
+forward-compat buffer for 6.10's BPF_TOKEN_CREATE.  The translator-
+only directive overrides that — match v6.6's CURRENT switch surface.
+
+**Post-batch behaviour:** `cmd=35` still reaches the per-cmd handler
+(translator returns `-ENOSYS` because we don't implement any bpf
+cmd's payload); `cmd=36` now falls to the cmd-range gate and returns
+`-EINVAL`, matching v6.6's switch-default.  `cmd >= 37` continues to
+return `-EINVAL` (unchanged).
+
+**Boot probes added.** Two-probe cluster covering the boundary plus
+regression guards:
+
+1. `cmd=35` (BPF_PROG_BIND_MAP, last v6.6 cmd) -> ENOSYS (baseline)
+2. `cmd=36` -> EINVAL (was ENOSYS)
+   + `cmd=37`, `cmd=50`, `cmd=64`, `cmd=100`, `cmd=0x1_0000_0025`
+     all preserved at EINVAL (regression guards)
+   + `cmd=0` -> ENOSYS (in-switch regression guard)
+
+Summary stamp: `bpf size-first / NULL-iff-size>0 / switch-default
+EINVAL at cmd>=36 (v6.6 cap=BPF_PROG_BIND_MAP): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 45.4s).
+
+**Boot test:** PASS @ 26s (`bash scripts/boot-test.sh`).

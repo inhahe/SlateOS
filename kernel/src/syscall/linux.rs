@@ -15400,11 +15400,21 @@ fn sys_bpf(args: &SyscallArgs) -> SyscallResult {
     // Truncate rdi to its declared 32-bit width before the bound check.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let cmd = args.arg0 as i32;
-    // Linux's switch covers cases 0..=36 (BPF_MAP_CREATE through
-    // BPF_TOKEN_CREATE).  Anything else hits the `default` arm.
-    const BPF_TOKEN_CREATE: i32 = 36;
-    if cmd < 0 || cmd > BPF_TOKEN_CREATE {
-        // Matches Linux's switch-default -> -EINVAL for unknown cmds.
+    // ## Batch 502 — tighten BPF cmd cap from 36 to 35 (v6.6 set)
+    //
+    // Linux v6.6 `include/uapi/linux/bpf.h` (lines 867-905) defines
+    // the bpf cmd enum ending in:
+    //     BPF_PROG_BIND_MAP,         // = 35
+    // — i.e. valid cmds are 0..=35.  Linux 6.10 later added
+    // BPF_TOKEN_CREATE = 36 as the next switch arm.  Pre-batch we
+    // capped at 36 to leave a one-cmd forward-compat buffer; the
+    // translator-only directive overrides that — match Linux v6.6's
+    // CURRENT switch surface.  cmd=36 now reaches the switch's
+    // `default` arm in v6.6 and returns -EINVAL.
+    const BPF_PROG_BIND_MAP: i32 = 35;
+    if cmd < 0 || cmd > BPF_PROG_BIND_MAP {
+        // Matches Linux v6.6 kernel/bpf/syscall.c::__sys_bpf
+        // switch-default -> -EINVAL for unknown cmds.
         return linux_err(errno::EINVAL);
     }
     // In-range cmd with no BPF backend: ENOSYS is acceptable stub
@@ -51123,16 +51133,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: bpf(cmd=100) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // Batch 455: bpf(cmd=36=BPF_TOKEN_CREATE, attr, 8) -> ENOSYS.
-        // Linux's highest defined cmd; still inside the switch.
+        // Batch 502: bpf(cmd=35=BPF_PROG_BIND_MAP, attr, 8) -> ENOSYS.
+        // Last cmd in Linux v6.6's bpf cmd enum (include/uapi/linux/bpf.h
+        // lines 867-905 ending in `BPF_PROG_BIND_MAP, // = 35`); still
+        // inside the kernel/bpf/syscall.c::__sys_bpf switch.
+        let a = SyscallArgs {
+            arg0: 35,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: bpf(cmd=35) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 502: bpf(cmd=36=BPF_TOKEN_CREATE, attr, 8) -> EINVAL.
+        // Linux 6.10 added BPF_TOKEN_CREATE as cmd=36; v6.6 doesn't
+        // recognise it, so the switch default returns -EINVAL.  Pre-
+        // batch we accepted 36 as forward-compat (returned ENOSYS); the
+        // translator-only directive overrides — match v6.6's CURRENT
+        // switch surface.
         let a = SyscallArgs {
             arg0: 36,
             arg1: attr.as_ptr() as u64,
             arg2: 8, arg3: 0, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::BPF, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: bpf(cmd=36) not ENOSYS");
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: bpf(cmd=36) not EINVAL");
             return Err(KernelError::InternalError);
         }
         // Batch 455: bpf(cmd=37, attr, 8) -> EINVAL.  First cmd past
@@ -51224,7 +51252,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   bpf size-first / NULL-iff-size>0 / switch-default EINVAL at cmd>=37: OK"
+            "[syscall/linux]   bpf size-first / NULL-iff-size>0 / switch-default EINVAL at cmd>=36 (v6.6 cap=BPF_PROG_BIND_MAP): OK"
         );
         // perf_event_open(NULL, flags=0) -> EFAULT (flag mask passes,
         // then NULL faults during get_user-equivalent header read).

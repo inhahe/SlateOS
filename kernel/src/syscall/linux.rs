@@ -28027,15 +28027,55 @@ fn sys_creat(args: &SyscallArgs) -> SyscallResult {
 
 /// `uselib(library)` — deprecated dynamic-linker primitive.
 ///
-/// Removed from glibc in 2.23 (2016).  Validate path and return
-/// ENOSYS — any conformant caller already handles the absence.
-fn sys_uselib(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = validate_user_str(args.arg0) {
-        return linux_err(linux_errno_for(e));
-    }
+/// ## Linux source — `fs/exec.c` (kernel 6.x)
+///
+/// ```c
+/// #ifdef CONFIG_USELIB
+/// SYSCALL_DEFINE1(uselib, const char __user *, library)
+/// {
+///     struct linux_binfmt *fmt;
+///     struct file *file;
+///     struct filename *tmp = getname(library);
+///     int retval = PTR_ERR(tmp);
+///     ...
+/// }
+/// #endif
+/// ```
+///
+/// On modern x86_64 kernels `CONFIG_USELIB=n` is the default (the option
+/// was marked obsolete in 5.18; many distros ship it disabled).  With the
+/// option disabled, the syscall slot is filled by `sys_ni_syscall` which
+/// returns `-ENOSYS` unconditionally without inspecting any argument —
+/// the same shape glibc / musl probes expect when feature-testing for
+/// `uselib(2)` support.
+///
+/// ## Divergence (pre-batch → post-batch)
+///
+/// | Probe              | Linux (CONFIG_USELIB=n) | Pre-batch | Post-batch |
+/// |--------------------|-------------------------|-----------|------------|
+/// | `uselib(NULL)`     | `ENOSYS`                | `EFAULT`  | `ENOSYS`   |
+/// | `uselib(0xDEAD)`   | `ENOSYS`                | `EFAULT`  | `ENOSYS`   |
+/// | `uselib(valid)`    | `ENOSYS`                | `ENOSYS`  | `ENOSYS`   |
+///
+/// ## Why it matters
+///
+/// glibc removed its `uselib(3)` wrapper in 2.23 (2016), but the kernel
+/// slot stayed; LSB-probe suites and a couple of legacy CRT shims still
+/// issue `uselib(NULL)` purely as a "is this kernel slot wired up?"
+/// feature-probe and branch on `ENOSYS` vs `EFAULT`.  `ENOSYS` ("slot
+/// not implemented") makes the probe skip the entire a.out-library path
+/// in one step.  `EFAULT` ("you passed me a bad pointer") makes it
+/// retry with a real allocated string, only to be told `ENOSYS` on the
+/// second try — wasted work and confused diagnostic output.
+///
+/// ## Architectural directive
+///
+/// We have no a.out binfmt and no kernel-side library loader (and there
+/// never will be — library loading is userspace dynamic-linker territory
+/// in a microkernel).  Modelling ourselves as `CONFIG_USELIB=n` is the
+/// truthful answer and matches modern desktop Linux defaults.  Pure
+/// translator-only fix: drop the pre-ENOSYS pointer gate.
+fn sys_uselib(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
@@ -28131,18 +28171,51 @@ fn sys_vhangup(_args: &SyscallArgs) -> SyscallResult {
 
 /// `_sysctl(struct __sysctl_args *)` — removed in Linux 5.5 (2020).
 ///
-/// Always returns ENOSYS on any modern kernel; emulating the removal
-/// keeps us consistent with what glibc 2.32+ expects.
+/// ## Linux source — `kernel/sysctl.c` (kernel 5.5 — 6.x)
+///
+/// ```c
+/// SYSCALL_DEFINE1(_sysctl, struct __sysctl_args __user *, args)
+/// {
+///     pr_warn_once("warning: process `%s' used the deprecated sysctl "
+///              "system call with ", current->comm);
+///     return -ENOSYS;
+/// }
+/// ```
+///
+/// The `args` argument is referenced ONLY for the once-per-boot warning
+/// log; it is never dereferenced and the return code is the literal
+/// `-ENOSYS` regardless of pointer validity.
+///
+/// ## Divergence (pre-batch → post-batch)
+///
+/// | Probe                    | Linux    | Pre-batch | Post-batch |
+/// |--------------------------|----------|-----------|------------|
+/// | `_sysctl(NULL)`          | `ENOSYS` | `EFAULT`  | `ENOSYS`   |
+/// | `_sysctl(0xDEAD)`        | `ENOSYS` | `EFAULT`  | `ENOSYS`   |
+/// | `_sysctl(valid_struct)`  | `ENOSYS` | `ENOSYS`  | `ENOSYS`   |
+///
+/// ## Why it matters
+///
+/// glibc 2.32+ removed the `sysctl(3)` wrapper but kept the syscall
+/// number for ABI stability; a few stale LSB-test suites and old
+/// monitoring agents (collectd's `kernel/sysctl` shim) still issue
+/// `_sysctl(NULL)` as a one-shot probe to discriminate "removed"
+/// (`ENOSYS`) from "wrong argument shape" (`EFAULT`).  Pre-batch's
+/// `EFAULT` made them assume the syscall still exists but they had
+/// the struct layout wrong, and they retry with a freshly-allocated
+/// `__sysctl_args` — only to see `ENOSYS` on the second attempt.
+/// `ENOSYS` on the first attempt skips the whole retry path.
+///
+/// ## Architectural directive
+///
+/// Pure translator-only fix: Linux removed sysctl(2) five years ago
+/// (Apr 2020) and emits `-ENOSYS` unconditionally; we already had the
+/// terminal `ENOSYS` but ran a spurious pointer gate before it.  Drop
+/// the gate.  All sysctl-style tunables live under `/proc/sys` (or
+/// the orchestrator's config system in our model) — no struct ever
+/// crosses the syscall boundary.
 #[allow(non_snake_case)]
-fn sys__sysctl(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    // struct __sysctl_args is 48 bytes (name*, nlen, oldval*, oldlenp*,
-    // newval*, newlen).
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 48) {
-        return linux_err(linux_errno_for(e));
-    }
+fn sys__sysctl(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
@@ -61538,16 +61611,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // uselib NULL -> EFAULT.
+        // Batch 458: uselib is sys_ni_syscall on CONFIG_USELIB=n
+        // (modern x86_64 default).  ENOSYS for ALL inputs — NULL,
+        // bad pointer, valid path — no pointer touch.  Pre-batch
+        // returned EFAULT for NULL, lying that the slot was wired.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::USELIB, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: uselib NULL not EFAULT");
+        if dispatch_linux(nr::USELIB, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: uselib(NULL) not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // uselib valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0xDEAD, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::USELIB, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: uselib(0xDEAD) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
         let a = SyscallArgs { arg0: path_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::USELIB, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: uselib valid not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: uselib(valid) not ENOSYS");
             return Err(KernelError::InternalError);
         }
 
@@ -61625,18 +61705,28 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // _sysctl NULL -> EFAULT.
+        // Batch 458: _sysctl was removed in Linux 5.5 (Apr 2020) and
+        // is now an unconditional ENOSYS one-liner — no pointer touch.
+        // Pre-batch ran an EFAULT gate on the args ptr, lying that
+        // the slot still validates its struct.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::_SYSCTL, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: _sysctl NULL not EFAULT");
+        if dispatch_linux(nr::_SYSCTL, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: _sysctl(NULL) not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // _sysctl valid -> ENOSYS.
+        let a = SyscallArgs { arg0: 0xDEAD, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::_SYSCTL, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: _sysctl(0xDEAD) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
         let a = SyscallArgs { arg0: sysctl_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::_SYSCTL, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: _sysctl valid not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: _sysctl(valid) not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   uselib + _sysctl unconditional ENOSYS (no pre-ENOSYS arg touch): OK"
+        );
 
         // Permanent-ENOSYS stubs.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

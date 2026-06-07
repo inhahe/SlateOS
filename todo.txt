@@ -40945,3 +40945,172 @@ Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.
 
      Build: cargo build -p kernel -> Finished `dev` profile in 39.45s.
      Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.
+
+---
+
+## Batch 466 — sys_socket type-range gate matches Linux SOCK_MAX=11
+
+**Linux 6.x source quote** (net/socket.c::__sock_create, abridged
+to the relevant gates):
+
+    static int __sock_create(struct net *net, int family, int type,
+                             int protocol, struct socket **res, int kern)
+    {
+            int err;
+            struct socket *sock;
+            const struct net_proto_family *pf;
+
+            /*
+             *      Check protocol is in range
+             */
+            if (family < 0 || family >= NPROTO)
+                    return -EAFNOSUPPORT;
+            if (type < 0 || type >= SOCK_MAX)
+                    return -EINVAL;
+            ...
+    }
+
+with the SOCK_MAX definition from include/linux/net.h:
+
+    enum sock_type {
+            SOCK_STREAM     = 1,
+            SOCK_DGRAM      = 2,
+            SOCK_RAW        = 3,
+            SOCK_RDM        = 4,
+            SOCK_SEQPACKET  = 5,
+            SOCK_DCCP       = 6,
+            SOCK_PACKET     = 10,
+            ...
+    };
+    #define SOCK_MAX (SOCK_PACKET + 1)
+
+i.e. SOCK_MAX = 11.  After the outer __sys_socket_create strips
+flag bits and the inner __sock_create receives the masked
+`type & SOCK_TYPE_MASK` (0xF), the effective domain is 0..=15,
+so only values 11..=15 actually trip the EINVAL gate above.
+Lower values that don't correspond to any registered sock_type
+(0, 6 = SOCK_DCCP, 7, 8, 9 reserved, 10 = SOCK_PACKET) PASS the
+range gate and are then surfaced as -ESOCKTNOSUPPORT (or, for
+(AF_PACKET, SOCK_PACKET), accepted) by the per-family create
+path:
+
+  * unix_create (net/unix/af_unix.c) — switch on sock->type:
+      case SOCK_STREAM: ...
+      case SOCK_RAW:  sock->type = SOCK_DGRAM; fallthrough;
+      case SOCK_DGRAM: ...
+      case SOCK_SEQPACKET: ...
+      default: return -ESOCKTNOSUPPORT;
+  * inet_create / inet6_create (net/ipv4/af_inet.c,
+    net/ipv6/af_inet6.c) — err init:
+      err = -ESOCKTNOSUPPORT;
+      list_for_each_entry_rcu(answer, &inetsw[sock->type], list) { ... }
+      if (unlikely(err)) goto out_rcu_unlock;
+    inetsw[] is sized SOCK_MAX (11) and populated only at
+    indices 1 (STREAM-TCP), 2 (DGRAM-UDP/UDPLITE/ICMP), 3
+    (RAW), 5 (SEQPACKET-SCTP, when module loaded).  All other
+    slots stay empty so err stays at the -ESOCKTNOSUPPORT
+    init value.
+  * netlink_create (net/netlink/af_netlink.c) — switch:
+      if (sock->type != SOCK_RAW && sock->type != SOCK_DGRAM)
+              return -ESOCKTNOSUPPORT;
+  * packet_create (net/packet/af_packet.c) — switch:
+      if (sock->type != SOCK_DGRAM && sock->type != SOCK_RAW &&
+          sock->type != SOCK_PACKET)
+              return -ESOCKTNOSUPPORT;
+
+**Divergence table**
+
+    Shape                                      pre-batch      Linux 6.x
+    ----------------------------------------   -----------    --------------------
+    socket(AF_INET=2,  SOCK_DCCP=6,    0)      EINVAL         ESOCKTNOSUPPORT
+    socket(AF_INET=2,  SOCK_PACKET=10, 0)      EINVAL         ESOCKTNOSUPPORT
+    socket(AF_INET=2,  type=7 reserved,0)      EINVAL         ESOCKTNOSUPPORT
+    socket(AF_UNIX=1,  type=0,         0)      EINVAL         ESOCKTNOSUPPORT
+    socket(AF_NETLINK, SOCK_DCCP=6,    0)      EINVAL         ESOCKTNOSUPPORT
+    socket(AF_PACKET,  SOCK_DCCP=6,    0)      EINVAL         ESOCKTNOSUPPORT
+    socket(AF_PACKET,  SOCK_PACKET=10, 0)      EINVAL         success (allocates
+                                                              packet socket)
+    socket(AF_INET,    type=11,        0)      EINVAL         EINVAL (unchanged —
+                                                              hits SOCK_MAX gate)
+
+**Why it matters**
+
+The ESOCKTNOSUPPORT errno is the canonical Linux discriminator
+for "kernel knows this address family but doesn't implement
+this socket type within it" (errno 94).  glibc's getaddrinfo,
+the Linux Test Project's socket01 suite, netperf, and
+capability-detection probes in tools that look for SCTP / DCCP
+support all use this errno to differentiate from EINVAL ("kernel
+rejected the call shape") and ENOSYS ("kernel doesn't recognize
+the syscall").  Collapsing it into a blanket EINVAL hid the
+discriminator entirely — and additionally rejected
+(AF_PACKET, SOCK_PACKET, 0), the legacy raw packet socket which
+Linux still accepts, with the wrong errno-class.
+
+The SOCK_PACKET case is particularly observable: a userspace
+network tool probing for legacy raw-packet support (e.g.
+tcpdump's fallback path when AF_PACKET + SOCK_RAW isn't
+available) would see EINVAL where it expected success, masking
+the kernel's actual capability surface.  Post-batch we route
+through to the ENOSYS terminal — honest about the missing
+backend but no longer the wrong errno-class.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs::sys_socket`, gate 3 (type-range)
+and gate 4 (per-family socket-type allowlist):
+
+  * Gate 3 widened: `if !(1..=5).contains(&sock_type)` →
+    `if sock_type >= 11`.  Matches Linux's
+    `if (type < 0 || type >= SOCK_MAX) return -EINVAL;`
+    where SOCK_MAX = 11.  After SOCK_TYPE_MASK (0xF) stripping
+    only 11..=15 reach this gate.
+  * Gate 4 widened to cover the now-passing types
+    {0, 6, 7, 8, 9, 10} per the per-family create switches:
+      - AF_UNIX  (1):  reject {0, 4, 6, 7, 8, 9, 10}.
+      - AF_INET  (2),
+        AF_INET6 (10): reject {0, 4, 6, 7, 8, 9, 10}
+                       (inetsw[] empty at those indices).
+      - AF_NETLINK(16): reject everything except {2, 3}
+                       (netlink_create switch).
+      - AF_PACKET (17): reject everything except {2, 3, 10}
+                       (packet_create switch).  SOCK_PACKET
+                       on AF_PACKET intentionally NOT listed
+                       — it falls through to the ENOSYS
+                       terminal, matching Linux's accept
+                       path.
+  * Old self-test probe at the head of the socket-gating
+    section, `socket(AF_INET=2, type=0) → EINVAL`, updated to
+    expect ESOCKTNOSUPPORT (the post-fix Linux-faithful errno).
+
+Translator-only — no native socket code changed.  sys_socketpair
+has the same gate shape but is intentionally NOT modified in
+this batch: it shares the broken `!(1..=5)` range gate but
+also has an additional ops->socketpair-NULL → EOPNOTSUPP
+short-circuit that needs its own probe matrix.  Deferred to a
+follow-up batch.
+
+**Probes added (post the existing socket ESOCKTNOSUPPORT block):**
+
+  A. socket(AF_INET=2, SOCK_DCCP=6, 0)  -> ESOCKTNOSUPPORT
+  B. socket(AF_INET=2, SOCK_PACKET=10, 0) -> ESOCKTNOSUPPORT
+  C. socket(AF_INET=2, type=7, 0)  -> ESOCKTNOSUPPORT
+  D. socket(AF_UNIX=1, type=0, 0)  -> ESOCKTNOSUPPORT
+  E. socket(AF_NETLINK=16, SOCK_DCCP=6, 0)  -> ESOCKTNOSUPPORT
+  F. socket(AF_PACKET=17, SOCK_DCCP=6, 0)  -> ESOCKTNOSUPPORT
+  G. socket(AF_PACKET=17, SOCK_PACKET=10, 0)  -> ENOSYS
+     (accepted by gate 4 family-allowlist, no networking
+     backend → terminal ENOSYS)
+  H. socket(AF_INET=2, type=11, 0)  -> EINVAL
+     (regression: confirms type=11 still hits the loosened
+     >= SOCK_MAX gate at the new boundary)
+
+Probe block stamp:
+
+    [syscall/linux]   socket type-range gate widened to Linux SOCK_MAX=11 (was 1..=5); 0/6/7/8/9 surface ESOCKTNOSUPPORT per family-create err-init; SOCK_PACKET on AF_PACKET accepted: OK
+
+The earlier "socket bad type" probe stamp also flips its
+expectation from EINVAL to ESOCKTNOSUPPORT.
+
+**Build:** `cargo build -p kernel` clean, 39.09s.
+**Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).

@@ -21753,9 +21753,9 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
 /// path, systemd's per-unit policy installer), but it's wrong: -EPERM
 /// means "you'd be allowed if you had CAP_SYS_NICE", whereas the
 /// actual story for SCHED_OTHER / FIFO / RR is "I can do this, here it
-/// is", and for SCHED_DEADLINE / SCHED_EXT it's "I can't do this at
-/// all" (-EOPNOTSUPP, the honest answer for unimplemented scheduling
-/// classes).
+/// is", and for SCHED_DEADLINE it's "I can't do this at all"
+/// (-EOPNOTSUPP, the honest answer for an unimplemented but
+/// v6.6-defined scheduling class).
 ///
 /// Behaviour now:
 ///   * Read the 48-byte v0 sched_attr (any larger size is accepted but
@@ -21765,8 +21765,20 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
 ///     same `sched_priority_check_for_policy` helper used by
 ///     sys_sched_setscheduler.
 ///   * Enforce RLIMIT_RTPRIO for FIFO/RR via the same gate.
-///   * SCHED_DEADLINE (6) and SCHED_EXT (7) return -EOPNOTSUPP — Linux
-///     uses this errno when the scheduling class is compiled out.
+///   * SCHED_DEADLINE (6) returns -EOPNOTSUPP — Linux uses this errno
+///     when a v6.6-defined scheduling class is compiled out, which
+///     mirrors our state (no RT/DL support to back it).
+///   * SCHED_EXT (7) returns -EINVAL via `sched_priority_check_for_policy`'s
+///     default arm — v6.6 has no SCHED_EXT at all (added in Linux
+///     6.12), so `valid_policy(7)` returns false and
+///     `__sched_setscheduler`'s `!valid_policy && !RESET_ON_FORK`
+///     guard fires with -EINVAL.  Pre-batch (506) we returned
+///     -EOPNOTSUPP here, treating SCHED_EXT as a known-but-unimplemented
+///     class on the same footing as DEADLINE.  Under v6.6 the two cases
+///     are categorically different: DEADLINE is named in the v6.6
+///     policy enum and rejected only because our kernel lacks the
+///     class implementation; SCHED_EXT is not named at all and is
+///     rejected by the generic "unknown policy" arm.
 ///   * sched_flags is accepted (only RESET_ON_FORK = 0x01 is non-zero
 ///     interesting and we silently drop it — same approach as the
 ///     sched_nice / sched_runtime / etc. fields).
@@ -21774,7 +21786,6 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
 ///     sys_sched_setscheduler.
 fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     const SCHED_DEADLINE: u32 = 6;
-    const SCHED_EXT: u32 = 7;
 
     // Linux kernel/sched/syscalls.c::SYSCALL_DEFINE3(sched_setattr)
     // opens with a single combined gate:
@@ -21869,9 +21880,28 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     let policy = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
     let priority = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
 
-    // Reject unimplemented scheduling classes with -EOPNOTSUPP, the
-    // errno Linux uses when the class is compiled out.
-    if policy == SCHED_DEADLINE || policy == SCHED_EXT {
+    // Reject SCHED_DEADLINE (a v6.6-defined class our kernel doesn't
+    // implement) with -EOPNOTSUPP — the errno Linux uses when a
+    // scheduling class is compiled out.
+    //
+    // ## Batch 506 — split SCHED_EXT out of this EOPNOTSUPP gate
+    //
+    // Pre-batch SCHED_EXT(=7) was bundled into this same EOPNOTSUPP arm
+    // alongside SCHED_DEADLINE.  v6.6 has no SCHED_EXT at all (added in
+    // Linux 6.12 alongside the BPF-driven extensible scheduler) — its
+    // `valid_policy()` returns false for policy=7, and
+    // `__sched_setscheduler` returns -EINVAL via
+    //   if (!valid_policy(policy) &&
+    //       !(attr->sched_flags & SCHED_FLAG_RESET_ON_FORK))
+    //       return -EINVAL;
+    // The right v6.6 answer for SCHED_EXT in sched_setattr is therefore
+    // -EINVAL, not -EOPNOTSUPP.  Letting policy=7 fall through to the
+    // shared `sched_priority_check_for_policy` helper hits the helper's
+    // default `_` arm (post-batch 505, which removed the `7` arm from
+    // the zero-priority bucket) and returns -EINVAL — matching v6.6
+    // exactly.  Mirrors batch 505's tightening of sys_sched_setscheduler
+    // gate 5 across the sister policy-install ABI.
+    if policy == SCHED_DEADLINE {
         return linux_err(errno::EOPNOTSUPP);
     }
     // Cap priority to i32 range before the shared validator; Linux
@@ -57540,8 +57570,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // sched_setattr SCHED_DEADLINE -> -EOPNOTSUPP (unimplemented
-        // class).
+        // sched_setattr SCHED_DEADLINE -> -EOPNOTSUPP (a v6.6-defined
+        // class our kernel doesn't back; translator concession, not a
+        // v6.6 fidelity claim — proper fix would wire up dl_attr
+        // validation).
         let mut dl = [0u8; 48];
         dl[0..4].copy_from_slice(&48u32.to_le_bytes());
         dl[4..8].copy_from_slice(&6u32.to_le_bytes()); // SCHED_DEADLINE
@@ -57551,6 +57583,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: sched_setattr DEADLINE not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        // Batch 506: sched_setattr SCHED_EXT(=7) -> -EINVAL.  v6.6 has
+        // no SCHED_EXT (added in Linux 6.12), so its valid_policy()
+        // returns false and __sched_setscheduler returns -EINVAL.
+        // Pre-batch we returned -EOPNOTSUPP, treating SCHED_EXT as a
+        // known-but-unimplemented class on equal footing with DEADLINE.
+        // Post-batch policy=7 falls through to the shared priority
+        // check's default arm (batch 505 removed the `7` arm).
+        let mut ext = [0u8; 48];
+        ext[0..4].copy_from_slice(&48u32.to_le_bytes());
+        ext[4..8].copy_from_slice(&7u32.to_le_bytes()); // SCHED_EXT
+        let ext_ptr = ext.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: ext_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr SCHED_EXT(=7) not EINVAL (batch 506; was EOPNOTSUPP)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setattr SCHED_EXT (v6.6 absent) -> EINVAL (batch 506): OK"
+        );
 
         // sched_setattr SCHED_OTHER with non-zero priority -> -EINVAL
         // (the policy/priority compatibility check rejects this).

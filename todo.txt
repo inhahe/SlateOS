@@ -46315,3 +46315,81 @@ Summary stamp added: `sched_setscheduler v6.6 valid_policy() set:
 **Build:** clean (`cargo build -p kernel`, 43.6s).
 
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+
+## Batch 506 — Linux ABI fidelity: sched_setattr() SCHED_EXT(=7) returns EINVAL (was EOPNOTSUPP) to match Linux v6.6 (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_sched_setattr`).
+
+**Change:** the policy reject arm that returned -EOPNOTSUPP for
+`policy == SCHED_DEADLINE || policy == SCHED_EXT` was split: only
+SCHED_DEADLINE(6) retains the EOPNOTSUPP path; SCHED_EXT(7) now
+falls through to the shared `sched_priority_check_for_policy`
+helper, hitting its default arm and returning -EINVAL — exactly
+what Linux v6.6 returns.
+
+**Linux v6.6 source** — same as batch 505: `kernel/sched/sched.h`
+defines `valid_policy() = idle_policy() || fair_policy() ||
+rt_policy() || dl_policy()`, none of which name 7.
+`__sched_setscheduler` (called by sched_setattr after the
+sched_copy_attr path) gates:
+
+```c
+if (!valid_policy(policy) &&
+    !(attr->sched_flags & SCHED_FLAG_RESET_ON_FORK))
+    return -EINVAL;
+```
+
+SCHED_EXT was added in Linux 6.12; under v6.6 policy=7 trips this
+gate and returns -EINVAL.
+
+**Divergence (pre-batch):** SCHED_EXT and SCHED_DEADLINE were both
+rejected with -EOPNOTSUPP at the same site, treating them as
+known-but-unimplemented scheduling classes on equal footing.  That
+conflates two categorically different cases under v6.6:
+
+  - **SCHED_DEADLINE(6)** *is* a v6.6-defined class; valid_policy()
+    returns true; our kernel just doesn't back its semantics (no
+    deadline runtime/period/dl_attr handling).  -EOPNOTSUPP is a
+    translator concession that mirrors a kernel built without
+    `CONFIG_SCHED_DEADLINE`.  Not v6.6-faithful in general, but a
+    deliberate translator-side stub — proper fix would require
+    wiring up dl_attr validation and a deadline scheduler class.
+    This batch keeps that concession in place; flipping DEADLINE
+    is a separate question that requires implementation work.
+  - **SCHED_EXT(7)** is *not* a v6.6-defined class at all — added
+    in Linux 6.12 alongside the BPF-driven extensible scheduler.
+    v6.6's valid_policy() returns false and the call returns
+    -EINVAL.  -EOPNOTSUPP misclassified it as "compiled out" when
+    it's actually "doesn't exist on this ABI level".
+
+**Why it matters:** glibc-on-v6.6 feature probes use the errno to
+discriminate between "kernel knows about this class but isn't
+backing it" (-EOPNOTSUPP — try later or fall back) and "kernel
+doesn't know about this class at all" (-EINVAL — give up).
+Reporting -EOPNOTSUPP for SCHED_EXT on a v6.6 ABI lets a probe
+conclude the class is forward-compatible, when in fact a v6.6
+kernel knows nothing about it.  This closes the sister surface to
+batch 505 — both policy-install ABIs (sched_setscheduler and
+sched_setattr) now report SCHED_EXT identically: not present.
+
+**Post-batch behaviour:**
+  - sched_setattr(_, sched_attr{policy=7, ...}, 0) → EINVAL
+    (was EOPNOTSUPP).
+  - sched_setattr(_, sched_attr{policy=6, ...}, 0) → EOPNOTSUPP
+    (unchanged — translator concession for DEADLINE retained).
+  - sched_setattr({policy=0..3, 5}, valid priority/nice) → 0
+    (unchanged).
+  - sched_setattr({policy=4 or ≥8}, …) → EINVAL (unchanged).
+
+**Boot probes added.**
+  1. sched_setattr SCHED_EXT(=7), size=48 → EINVAL (new — flip
+     guard).
+  2. Existing DEADLINE EOPNOTSUPP probe comment updated to call out
+     the translator-concession status.
+
+Summary stamp added: `sched_setattr SCHED_EXT (v6.6 absent) ->
+EINVAL (batch 506): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 50.2s).
+
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

@@ -44081,3 +44081,139 @@ Family stamp (build/serial-test.txt line 560):
 
 **Build:** `cargo build -p kernel` clean, 43.38s.
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 487 — readlink/readlinkat empty-path → ENOENT (2026-06-07)
+
+### Linux source (v6.6, fs/stat.c lines 478-523)
+
+```c
+static int do_readlinkat(int dfd, const char __user *pathname,
+                         char __user *buf, int bufsiz)
+{
+    struct path path;
+    int error;
+    int empty = 0;
+    unsigned int lookup_flags = LOOKUP_EMPTY;
+
+    if (bufsiz <= 0)
+        return -EINVAL;
+retry:
+    error = user_path_at_empty(dfd, pathname, lookup_flags, &path,
+                               &empty);
+    if (!error) {
+        struct inode *inode = d_backing_inode(path.dentry);
+
+        error = empty ? -ENOENT : -EINVAL;
+        if (d_is_symlink(path.dentry) || inode->i_op->readlink) {
+            ...
+        }
+        ...
+    }
+    return error;
+}
+
+SYSCALL_DEFINE4(readlinkat, int, dfd, const char __user *, pathname,
+                char __user *, buf, int, bufsiz)
+{
+    return do_readlinkat(dfd, pathname, buf, bufsiz);
+}
+
+SYSCALL_DEFINE3(readlink, const char __user *, path, char __user *, buf,
+                int, bufsiz)
+{
+    return do_readlinkat(AT_FDCWD, path, buf, bufsiz);
+}
+```
+
+Critical detail: `do_readlinkat` passes `LOOKUP_EMPTY` to
+`user_path_at_empty` (unlike most syscalls).  So getname *accepts*
+the empty path and signals it via `empty=1`.  The post-lookup
+terminal then disambiguates:
+
+```c
+error = empty ? -ENOENT : -EINVAL;
+```
+
+before the d_is_symlink check.  So `readlink("")` returns ENOENT,
+`readlink("not-a-symlink")` returns EINVAL, both regardless of buf.
+
+### Divergence (pre-batch)
+
+| call                                | pre-batch | Linux v6.6 | post-batch |
+|-------------------------------------|-----------|------------|------------|
+| readlink("", buf, 16)               | EINVAL    | ENOENT     | ENOENT     |
+| readlinkat(AT_FDCWD, "", buf, 16)   | EINVAL    | ENOENT     | ENOENT     |
+| readlinkat(badfd, "", buf, 16)      | EINVAL    | EBADF      | EBADF      |
+| readlink("notlink", buf, 16)        | EINVAL    | EINVAL     | EINVAL     |
+| readlink("", buf, 0)                | EINVAL    | EINVAL     | EINVAL     |
+|                                     |           | (bufsiz<=0 |            |
+|                                     |           |  wins)     |            |
+
+### Why it matters
+
+`readlink`/`readlinkat` empty-path ENOENT is depended on by:
+- glibc/musl `readlink(3)` — POSIX-conformant wrappers propagate
+  errno verbatim; ENOENT signals "no such file" cleanly.
+- GNU coreutils `realpath`, `readlink(1)` — distinguishes "not a
+  symlink" (EINVAL) from "no such path" (ENOENT) when emitting
+  diagnostics.
+- CPython `os.readlink("")`, golang `os.Readlink("")` — both raise
+  FileNotFoundError / fs.ErrNotExist on ENOENT, but
+  IsADirectory/EINVAL on EINVAL.  Pre-batch the empty-path probe
+  silently failed with the wrong error class.
+- LTP `syscalls/readlink02`, `readlinkat01` series — assert ENOENT
+  for empty path; pre-batch tests would mis-pass with EINVAL.
+- musl's dynamic linker probes `/proc/self/exe` then occasionally
+  falls back to `readlink("")` shape probes; the wrong errno class
+  pollutes its fallback resolution loop.
+- pthread initializers — some libc forks use `readlink("", NULL, 0)`
+  as a cheap "is the trap shape right" probe and expect EINVAL from
+  bufsiz<=0; the gate ordering must be preserved (bufsiz check
+  before empty discrimination).
+
+### Fix
+
+1. `sys_readlink` (line 12736): rewrote gate ladder to route the
+   path argument through `check_path_str_nonempty` after the
+   `bufsiz <= 0 → EINVAL` gate.  Empty path → ENOENT, non-empty
+   → EINVAL ("not a symlink") matches Linux's
+   `error = empty ? -ENOENT : -EINVAL` terminal exactly.
+2. `sys_readlinkat` (line 12783): same shape, plus dirfd
+   validation for the empty-path branch.  Linux's
+   `user_path_at_empty` resolves dfd ahead of setting the empty=1
+   terminal, so a bad dfd surfaces EBADF first.  In kernel
+   (boot-probe) context where `caller_pid()` is None, the boot
+   fall-through returns EBADF (matches Linux's "can't even check
+   the fd" rejection class).
+3. Updated `check_path_str_nonempty` doc comment to add batch-487
+   consumers and a note on why the LOOKUP_EMPTY-using readlink
+   family still maps cleanly onto the helper's
+   ENOENT-on-empty / Ok-on-nonempty split.
+
+### Probe retrofit
+
+Planted local buffers (`rl_path_ne: [u8;2] = *b"r\0"`,
+`rl_path_e: [u8;1] = [0u8]`) replace raw 0x1000 path sentinels in
+the readlink/readlinkat probe block — the helper now derefs the
+first byte, so raw sentinels would page-fault.  Probes where
+`bufsiz<=0` fires ahead of the path check (the bufsiz-gate-first
+contract) still use 0x1000/0x2000 safely.
+
+Added 4 new probes:
+- `readlink("", buf, 16) -> ENOENT`
+- `readlinkat(AT_FDCWD, "", buf, 16) -> ENOENT`
+- `readlinkat(badfd=0x7ffffffe, "", buf, 16) -> EBADF`
+- `readlink("", buf, 0) -> EINVAL` (gate-order: bufsiz wins)
+
+Final stamp (build/serial-test.txt line 514):
+
+```
+[syscall/linux]   readlink/readlinkat empty-path -> ENOENT
+ (Linux v6.6 fs/stat.c do_readlinkat empty ? -ENOENT : -EINVAL
+ terminal): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 44.81s + 49.19s rebuild.
+**Boot test:** PASS @ 28s (`bash scripts/boot-test.sh`).

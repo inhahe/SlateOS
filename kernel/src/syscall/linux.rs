@@ -12742,24 +12742,25 @@ fn sys_readlink(args: &SyscallArgs) -> SyscallResult {
     if bufsiz_i32 <= 0 {
         return linux_err(errno::EINVAL);
     }
-    // Gate 2 (Linux's `user_path_at_empty(pathname, ...)`): NULL or
-    // unreadable pathname -> EFAULT.  Only the first byte needs to
-    // be readable for the EFAULT-on-bad-pointer match; getname_flags
-    // would then walk to PATH_MAX but our skeleton VFS short-
-    // circuits at the "not a symlink" arm before that matters.
-    let path_ptr = args.arg0;
-    if path_ptr == 0 {
-        return linux_err(errno::EFAULT);
+    // Gate 2/3 (Linux's `user_path_at_empty(pathname, LOOKUP_EMPTY, ...)`
+    // followed by the `error = empty ? -ENOENT : -EINVAL` terminal):
+    //   * NULL or unreadable pathname -> EFAULT (via getname's
+    //     `strncpy_from_user` faulting).
+    //   * Empty pathname -> ENOENT (the LOOKUP_EMPTY path: getname
+    //     succeeds with `empty=1`, and `do_readlinkat`'s terminal
+    //     arm returns `-ENOENT` for that case ahead of the
+    //     d_is_symlink branch — verbatim Linux source quoted in
+    //     this function's doc comment).
+    //   * Non-empty pathname -> EINVAL (the "not a symlink" arm of
+    //     `error = empty ? -ENOENT : -EINVAL`).  vfs_readlink — the
+    //     only function that touches `buf` — is gated on d_is_symlink,
+    //     which is never true on our no-symlink skeleton FS.
+    // Batch 487: route the path through `check_path_str_nonempty`
+    // (batch 481 helper) so the empty-path branch surfaces ENOENT
+    // before the "not a symlink" EINVAL terminal.
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    // Gate 3 (the "not a symlink" arm of do_readlinkat): every
-    // successful path lookup on our FS lands here.  vfs_readlink
-    // — the only function that touches `buf` — is gated on
-    // d_is_symlink, which is never true for us.  Return -EINVAL
-    // without observing `buf`, matching Linux's behaviour on a
-    // file-tree with no symlinks.
     linux_err(errno::EINVAL)
 }
 
@@ -12788,15 +12789,41 @@ fn sys_readlinkat(args: &SyscallArgs) -> SyscallResult {
     if bufsiz_i32 <= 0 {
         return linux_err(errno::EINVAL);
     }
-    // Gate 2: pathname access -> EFAULT.
-    let path_ptr = args.arg1;
-    if path_ptr == 0 {
-        return linux_err(errno::EFAULT);
+    // Gate 2: pathname access — NULL/unreadable -> EFAULT, empty
+    // pathname -> ENOENT (LOOKUP_EMPTY branch in do_readlinkat;
+    // empty=1 → `error = empty ? -ENOENT : -EINVAL` returns
+    // -ENOENT).  Batch 487: shared check_path_str_nonempty helper.
+    //
+    // Linux gate order for the empty-path case:
+    //   getname succeeds (LOOKUP_EMPTY set), then
+    //   user_path_at_empty resolves `dfd` to compute the base path.
+    //   A bad dfd surfaces -EBADF ahead of the empty? -ENOENT
+    //   terminal.  So we validate dfd here for the empty case.
+    match check_path_str_nonempty(args.arg1) {
+        Err(e) if e == errno::ENOENT => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let dirfd = args.arg0 as i32;
+            const AT_FDCWD: i32 = -100;
+            if dirfd != AT_FDCWD {
+                // Boot-context (caller_pid() == None) can't perform
+                // fd lookup; treat as bad fd so the EBADF gate is
+                // observable from the self-test.  Userspace callers
+                // always have a pid context.
+                let pid = match caller_pid() {
+                    Some(p) => p,
+                    None => return linux_err(errno::EBADF),
+                };
+                if pcb::linux_fd_lookup(pid, dirfd).is_none() {
+                    return linux_err(errno::EBADF);
+                }
+            }
+            return linux_err(errno::ENOENT);
+        }
+        Err(e) => return linux_err(e),
+        Ok(()) => {}
     }
-    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    // Gate 3: "not a symlink" terminal -EINVAL; buf never observed.
+    // Non-empty pathname: "not a symlink" terminal -EINVAL; buf
+    // never observed.
     linux_err(errno::EINVAL)
 }
 
@@ -13372,7 +13399,14 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
 /// `sys_fchmodat2` (non-`AT_EMPTY_PATH` branch).  Batch 486 extended
 /// to the path-xattr family via `xattr_validate_path_name` and
 /// `xattr_list_path` (setxattr/lsetxattr/getxattr/lgetxattr/
-/// listxattr/llistxattr/removexattr/lremovexattr).
+/// listxattr/llistxattr/removexattr/lremovexattr).  Batch 487
+/// extended to `sys_readlink` and `sys_readlinkat` — although those
+/// use `LOOKUP_EMPTY` (so getname allows empty), the empty case
+/// still surfaces ENOENT via `do_readlinkat`'s `error = empty ?
+/// -ENOENT : -EINVAL` terminal (fs/stat.c v6.6 line 494), which
+/// lands ahead of the d_is_symlink check; for our no-symlink FS
+/// the helper's ENOENT-on-empty / Ok-on-nonempty split matches
+/// Linux's outcome exactly.
 fn check_path_str_nonempty(ptr: u64) -> Result<(), i32> {
     if ptr == 0 {
         return Err(errno::EFAULT);
@@ -47253,6 +47287,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // ftruncate / symlink / link / utime family — pointer validation
     // plus principled errno.
     {
+        // Batch 487: planted local buffers so the new helper-driven
+        // empty/non-empty discrimination in sys_readlink/sys_readlinkat
+        // can dereference the first byte without page-faulting on raw
+        // sentinels (validate_user_read is a no-op in kernel context;
+        // the helper itself does the dereference).
+        let rl_path_ne: [u8; 2] = *b"r\0";
+        let rl_path_e: [u8; 1] = [0u8];
+        core::hint::black_box(&rl_path_ne);
+        core::hint::black_box(&rl_path_e);
+        let rl_p_ne = rl_path_ne.as_ptr() as u64;
+        let rl_p_e = rl_path_e.as_ptr() as u64;
+
         // readlink(NULL, valid_buf, 16) -> EFAULT.  bufsiz=16>0 passes
         // Linux's first gate, then user_path_at_empty(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 16, arg3: 0,
@@ -47269,14 +47315,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // true on our no-symlink FS.  buf-NULL is therefore
         // unobservable on Linux and the call falls through to the
         // "not a symlink" -EINVAL arm.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 16, arg3: 0,
+        let a = SyscallArgs { arg0: rl_p_ne, arg1: 0, arg2: 16, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::READLINK, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: readlink(path,NULL,16) not EINVAL (batch 478)");
             return Err(KernelError::InternalError);
         }
-        // readlink(_,_,0) -> EINVAL.
+        // readlink(_,_,0) -> EINVAL.  Bufsiz<=0 gate fires ahead of
+        // path inspection, so the path pointer is never dereferenced
+        // here — raw 0x1000/0x2000 is still safe.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::READLINK, &a).value
@@ -47314,7 +47362,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // readlink(path, buf, 16) -> EINVAL ("not a symlink").
         let mut linkbuf = [0u8; 16];
         let a = SyscallArgs {
-            arg0: 0x1000,
+            arg0: rl_p_ne,
             arg1: linkbuf.as_mut_ptr() as u64,
             arg2: 16, arg3: 0, arg4: 0, arg5: 0,
         };
@@ -47323,10 +47371,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: readlink not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // readlinkat(_,path,buf,16) -> EINVAL.
+        // readlinkat(AT_FDCWD,path,buf,16) -> EINVAL.
         let a = SyscallArgs {
-            arg0: 0,
-            arg1: 0x1000,
+            arg0: (-100i32) as u64,
+            arg1: rl_p_ne,
             arg2: linkbuf.as_mut_ptr() as u64,
             arg3: 16, arg4: 0, arg5: 0,
         };
@@ -47344,11 +47392,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: readlinkat(0,NULL,NULL,0) not EINVAL (batch 478)");
             return Err(KernelError::InternalError);
         }
-        // Batch 478: readlinkat(0, VALID_PATH, NULL, 16) -> EINVAL.
+        // Batch 478: readlinkat(AT_FDCWD, VALID_PATH, NULL, 16) -> EINVAL.
         // No buf-NULL gate; falls through to the "not a symlink" arm.
         let a = SyscallArgs {
-            arg0: 0,
-            arg1: 0x1000,
+            arg0: (-100i32) as u64,
+            arg1: rl_p_ne,
             arg2: 0,
             arg3: 16, arg4: 0, arg5: 0,
         };
@@ -47359,6 +47407,64 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   readlink/readlinkat bufsiz<=0 fires before pointer access (Linux v6.6 fs/stat.c: `if (bufsiz <= 0) return -EINVAL`): OK"
+        );
+
+        // Batch 487: empty-path -> ENOENT for readlink/readlinkat.
+        // Linux v6.6 fs/stat.c::do_readlinkat sets `empty=1` when
+        // LOOKUP_EMPTY succeeds on an empty pathname and returns
+        // `-ENOENT` via the `error = empty ? -ENOENT : -EINVAL`
+        // terminal (line 494) ahead of the d_is_symlink check.
+        // readlink("", buf, 16) -> ENOENT.
+        let a = SyscallArgs {
+            arg0: rl_p_e,
+            arg1: linkbuf.as_mut_ptr() as u64,
+            arg2: 16, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::READLINK, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: readlink(\"\",_,16) not ENOENT (batch 487)");
+            return Err(KernelError::InternalError);
+        }
+        // readlinkat(AT_FDCWD, "", buf, 16) -> ENOENT.
+        let a = SyscallArgs {
+            arg0: (-100i32) as u64,
+            arg1: rl_p_e,
+            arg2: linkbuf.as_mut_ptr() as u64,
+            arg3: 16, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::READLINKAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: readlinkat(AT_FDCWD,\"\",_,16) not ENOENT (batch 487)");
+            return Err(KernelError::InternalError);
+        }
+        // readlinkat(garbage_fd, "", buf, 16) -> EBADF.  Linux's
+        // user_path_at_empty resolves dfd ahead of setting the
+        // empty=1 terminal, so a bad dfd surfaces EBADF first.
+        let a = SyscallArgs {
+            arg0: 0x7fff_fffe, // not AT_FDCWD, not an open fd
+            arg1: rl_p_e,
+            arg2: linkbuf.as_mut_ptr() as u64,
+            arg3: 16, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::READLINKAT, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: readlinkat(badfd,\"\",_,16) not EBADF (batch 487)");
+            return Err(KernelError::InternalError);
+        }
+        // bufsiz<=0 still wins over empty-path: readlink("", _, 0)
+        // -> EINVAL (bufsiz gate fires before getname).
+        let a = SyscallArgs {
+            arg0: rl_p_e,
+            arg1: linkbuf.as_mut_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::READLINK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlink(\"\",_,0) not EINVAL (batch 487 gate-order)");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   readlink/readlinkat empty-path -> ENOENT (Linux v6.6 fs/stat.c do_readlinkat empty ? -ENOENT : -EINVAL terminal): OK"
         );
 
         // Batch 483: chmod/chown/lchown/fchownat empty-path -> ENOENT.

@@ -40591,3 +40591,169 @@ Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.
 
      Build: cargo build -p kernel -> Finished `dev` profile in 47.79s.
      Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 23s.
+
+
+464. syscall/linux: validate_sockaddr_in — apply Linux's signed
+     `(int)ulen < 0 || ulen > sizeof(struct sockaddr_storage)` gate
+     before any pointer access, and short-circuit `ulen == 0` to
+     EINVAL (per-protocol surface) instead of EFAULT.  Translator-
+     only fix to `validate_sockaddr_in` and its three call sites
+     (`sys_bind`, `sys_connect`, `sys_sendto`).
+
+     Linux source (net/socket.c::move_addr_to_kernel, v6.x):
+
+         int move_addr_to_kernel(void __user *uaddr, int ulen,
+                                 struct sockaddr_storage *kaddr)
+         {
+             if (ulen < 0 ||
+                 ulen > sizeof(struct sockaddr_storage))
+                 return -EINVAL;        // (1) bound check
+             if (ulen == 0)
+                 return 0;              // (2) success, no copy
+             if (copy_from_user(kaddr, uaddr, ulen))
+                 return -EFAULT;        // (3) pointer access
+             return audit_sockaddr(ulen, kaddr);
+         }
+
+     where `sizeof(struct sockaddr_storage)` == 128 (_K_SS_MAXSIZE
+     in include/linux/socket.h).  The signed-int bound is the FIRST
+     thing checked: `uaddr` is not dereferenced for any
+     out-of-range `ulen`.  And `ulen == 0` returns success without
+     touching `uaddr`, after which the per-protocol bind/connect
+     handler (e.g. `inet_bind`, `unix_bind`) reports `-EINVAL`
+     because the sockaddr is shorter than `sizeof(struct
+     sockaddr_in)` (== 16) or whatever the family requires.
+
+     Pre-batch behaviour:
+
+         fn validate_sockaddr_in(addr_ptr: u64,
+                                 addr_len: u32) -> ... {
+             if addr_ptr == 0 {
+                 return Err(EFAULT);
+             }
+             if addr_len < 2 {
+                 return Err(EINVAL);    // sa_family proxy
+             }
+             validate_user_read(addr_ptr, addr_len as usize)
+                 .map_err(EFAULT-ish)?;
+             Ok(())
+         }
+
+     Take-as-u32 lost the sign on negative `int` args (a common
+     userspace mistake or fuzz input).  `addr_len = -1` (the canonical
+     "I forgot to compute the length" sentinel) arrived as
+     `0xFFFFFFFF`, slipped past `addr_len < 2` (false; the value is
+     enormous), and fell into `validate_user_read(addr, 0xFFFFFFFF)`.
+     That helper is a no-op in our kernel context
+     (`is_kernel_context() == true` short-circuits the page walk),
+     so the gate vanished and the call reached the terminal `EBADF`
+     stub — where Linux would have returned `-EINVAL` from gate (1).
+     The same story for `addr_len > 128`: e.g. `addr_len = 200`
+     handed to `validate_user_read` no-oped out instead of
+     EINVAL-ing.
+
+     Divergence table — userspace probes observed in stock x86_64
+     Linux 6.x vs our pre-batch translator (in kernel-context probes
+     `validate_linux_fd` no-ops, so `bad_fd` and `valid_fd` collapse
+     to the same gate path — the divergence is in the validator):
+
+         | call                          | Linux  | Pre-batch | Now    |
+         |-------------------------------|--------|-----------|--------|
+         | bind(_, valid_addr, -1)       | EINVAL | EBADF (a) | EINVAL |
+         | bind(_, valid_addr, 200)      | EINVAL | EBADF (a) | EINVAL |
+         | bind(_, NULL,       0)        | EINVAL | EFAULT    | EINVAL |
+         | bind(_, valid_addr, 0)        | EINVAL | EINVAL    | EINVAL |
+         | bind(_, valid_addr, 1)        | EINVAL | EINVAL    | EINVAL |
+         | bind(_, valid_addr, 16)       | EBADF  | EBADF     | EBADF  |
+         | bind(_, NULL,       16)       | EFAULT | EFAULT    | EFAULT |
+         | connect(_, ditto)             | (same) | (same)    | (same) |
+         | sendto(_,_,_,_, valid, -1)    | EINVAL | EBADF (a) | EINVAL |
+         | sendto(_,_,_,_, valid, 200)   | EINVAL | EBADF (a) | EINVAL |
+         | sendto(_,_,_,_, valid,  0)    | EINVAL | EINVAL    | EINVAL |
+
+         (a) Pre-batch fell through the no-op validate_user_read to
+             the terminal EBADF stub.
+
+     Why this matters: socket-probe code in glibc, libuv, Boost.Asio,
+     and the various language runtimes (Python, Go, Node, Java)
+     routinely shapes `bind`/`connect`/`sendto` calls with the
+     userspace-supplied length BEFORE any validation.  Common
+     patterns where a negative or over-long `addr_len` arises:
+
+       * `addr_len = sizeof(sa) - offsetof(sa, sa_data)` mis-computed
+         and overflowing — produces a small negative `int`.
+       * `addr_len = strlen(path) + 1` for an `sa_un.sun_path` with a
+         pathologically long path — easily > 128.
+       * Defensive userspace checks that call bind with `addr_len =
+         -1` as a "did the kernel forget to validate?" canary.
+
+     EFAULT on the first two and EBADF on the third tells the caller
+     "your buffer is bad" or "your fd is closed" — both wrong.  The
+     Linux-faithful EINVAL is the documented "your addr_len is
+     out of range" signal that triggers the caller to recompute or
+     fall back to an alternate path (libuv's pipe-fallback path
+     keys off exactly this EINVAL).
+
+     For the `ulen == 0` case: Linux's behaviour is "move_addr_to_kernel
+     returns 0, per-protocol handler then EINVALs because addr_len <
+     sizeof(sockaddr_xx)".  The userspace-visible errno is EINVAL.
+     Pre-batch we returned EFAULT for `(NULL, 0)` because the
+     NULL-ptr gate ran before the length gate — backwards from Linux,
+     which treats `ulen` first and only touches `uaddr` if `ulen > 0`.
+
+     Fix (TRANSLATOR-ONLY, kernel/src/syscall/linux.rs lines
+     22982-23074 and the three call sites):
+
+       * Change `validate_sockaddr_in`'s `addr_len` parameter from
+         `u32` to `i32` (matching Linux's `int ulen` ABI).  Apply
+         gates in Linux's exact order:
+             (1) addr_len < 0 || addr_len > 128  -> EINVAL
+             (2) addr_len == 0                    -> EINVAL
+             (3) addr_ptr == 0                    -> EFAULT
+             (4) validate_user_read(addr_ptr, addr_len)
+             (5) addr_len < 2                     -> EINVAL
+                 (per-protocol surface for ulen=1 with valid ptr)
+       * Update `sys_bind`, `sys_connect`, `sys_sendto` to cast
+         `args.arg2` / `args.arg5` as `i32` instead of `u32`, so
+         the signed bound check sees the real value.  The cast uses
+         `#[allow(clippy::cast_possible_truncation,
+         cast_possible_wrap)]` since the low 32 bits of the u64
+         register are exactly what Linux's `int ulen` ABI consumes.
+       * Native socket layer (when it lands) is untouched — this is
+         strictly the Linux-numbered entrypoint translator.
+       * Doc comment on `validate_sockaddr_in` rewritten with the
+         verbatim Linux source quote and the pre-batch divergence
+         catalogue.
+
+     New self-test probes (kernel/src/syscall/linux.rs ~line 58766,
+     inserted between the batch-435 bind/connect-reorder probe block
+     and the batch-436 sendto/recvfrom-reorder probe block):
+
+       (a) bind(fd=3, valid, -1 cast as u32 0xFFFFFFFF)   -> EINVAL
+           (was terminal EBADF; gate (1) fires).
+       (b) bind(fd=3, valid, 200)                         -> EINVAL
+           (was terminal EBADF; gate (1) fires on > 128).
+       (c) bind(fd=3, NULL,  0)                           -> EINVAL
+           (was EFAULT from upfront NULL gate; now gate (2) fires
+           before pointer access, matching Linux's per-protocol
+           EINVAL surface).
+       (d-f) Same trio for connect.
+       (g) sendto(fd=3, NULL_buf,0,_, valid,-1)            -> EINVAL.
+       (h) sendto(fd=3, NULL_buf,0,_, valid,200)           -> EINVAL.
+       (i) sendto(fd=3, NULL_buf,0,_, valid,  0)           -> EINVAL.
+
+     All nine gated by:
+       [syscall/linux]   bind/connect/sendto addr_len bound checks
+         (Linux move_addr_to_kernel: (int)ulen<0 || ulen>128 ->
+         EINVAL; ulen==0 -> per-protocol EINVAL; all before pointer
+         access): OK
+
+     The pre-existing batch-435 probe stamp
+       [syscall/linux]   bind/connect fd lookup ordered before
+         pointer validation ...: OK
+     and the batch-436 sendto/recvfrom stamp continue to fire
+     unchanged (the FD-vs-pointer reorder is independent of the
+     length-bound fix).
+
+     Build: cargo build -p kernel -> Finished `dev` profile in 39.40s.
+     Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 23s.

@@ -22983,16 +22983,98 @@ fn sys_timer_getoverrun(_args: &SyscallArgs) -> SyscallResult {
 /// known address families.  Returns Ok if the kernel-context check
 /// passes (callers that pass NULL for an optional sockaddr should
 /// guard before calling this).
-fn validate_sockaddr_in(addr_ptr: u64, addr_len: u32) -> Result<(), SyscallResult> {
+///
+/// ## Batch 464 — addr_len bound checks before pointer access
+///
+/// Linux's `net/socket.c::move_addr_to_kernel` is the inner helper
+/// called by `__sys_bind`, `__sys_connect`, and `__sys_sendto` to
+/// pull a sockaddr in from userspace:
+///
+/// ```c
+/// int move_addr_to_kernel(void __user *uaddr, int ulen,
+///                         struct sockaddr_storage *kaddr)
+/// {
+///     if (ulen < 0 || ulen > sizeof(struct sockaddr_storage))
+///         return -EINVAL;       /* _K_SS_MAXSIZE = 128 */
+///     if (ulen == 0)
+///         return 0;             /* success, no copy */
+///     if (copy_from_user(kaddr, uaddr, ulen))
+///         return -EFAULT;
+///     return audit_sockaddr(ulen, kaddr);
+/// }
+/// ```
+///
+/// The very first gate is the signed length bound: `(int)ulen < 0`
+/// or `ulen > 128` → `-EINVAL`, evaluated BEFORE `uaddr` is ever
+/// touched.  Pre-batch our validator took `addr_len: u32`, so:
+///   * A negative `int` (e.g. `addr_len = -1`) reached us as
+///     `0xFFFFFFFF`, slipped past the existing `addr_len < 2 →
+///     EINVAL` gate (false; 0xFFFFFFFF is enormous), and fell into
+///     `validate_user_read(addr, 0xFFFFFFFF)`.  In kernel context
+///     that helper is a no-op so the gate never fired and the call
+///     reached the terminal `EBADF` stub — Linux returns
+///     `-EINVAL`.
+///   * An over-long `ulen` (e.g. `addr_len = 200`) was likewise
+///     handed to `validate_user_read(addr, 200)`, again no-oping
+///     out, where Linux's `ulen > 128 → -EINVAL` would have fired
+///     first.
+///   * `addr_len == 0` with a NULL `addr_ptr` returned `EFAULT`;
+///     Linux's `move_addr_to_kernel` short-circuits to `0` for
+///     `ulen == 0` without touching `uaddr`, and the per-protocol
+///     bind/connect handler then surfaces `-EINVAL` because the
+///     sockaddr is too short.  Same EINVAL surface, different
+///     errno-vs-EFAULT outcome from the validator.
+///
+/// Linux source quote — `net/socket.c::move_addr_to_kernel`, lightly
+/// elided:
+/// > `if (ulen < 0 || ulen > sizeof(struct sockaddr_storage))`
+/// >     `return -EINVAL;`
+/// > `if (ulen == 0)`
+/// >     `return 0;`
+/// > `if (copy_from_user(kaddr, uaddr, ulen))`
+/// >     `return -EFAULT;`
+/// > `return audit_sockaddr(ulen, kaddr);`
+///
+/// Translator-only fix: take `addr_len` as `i32` (matching Linux's
+/// `int ulen` ABI) and apply the bound gates in Linux's exact order.
+/// Native socket code paths are untouched — they're free to use
+/// whatever validation order suits the in-kernel layout.  The
+/// pre-existing `addr_len < 2 → EINVAL` gate is preserved AFTER the
+/// pointer access check (Linux's per-protocol `inet_bind` /
+/// `unix_bind` etc. all reject `addr_len < sizeof(sockaddr_xx)` with
+/// `-EINVAL`; our gate represents that downstream surface compactly
+/// without needing to plumb through to a real socket).
+fn validate_sockaddr_in(addr_ptr: u64, addr_len: i32) -> Result<(), SyscallResult> {
+    // Linux gate 1a/1b: `(int)ulen < 0` or `ulen > 128`.  Evaluated
+    // BEFORE any pointer access — uaddr is not dereferenced for an
+    // out-of-range length.
+    if addr_len < 0 || addr_len > 128 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    // Linux gate 2: `ulen == 0` returns 0 from move_addr_to_kernel
+    // without touching uaddr.  The per-protocol bind/connect handler
+    // then reports -EINVAL because the sockaddr is shorter than
+    // `sizeof(struct sockaddr_in)` (== 16) for AF_INET, etc.  Short-
+    // circuit that EINVAL here so a NULL uaddr with addr_len == 0
+    // surfaces as EINVAL (matching Linux's eventual answer) instead
+    // of EFAULT.
+    if addr_len == 0 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    // Linux gate 3: copy_from_user on a NULL `uaddr` with `ulen > 0`
+    // fails -> -EFAULT.
     if addr_ptr == 0 {
         return Err(linux_err(errno::EFAULT));
     }
-    if addr_len < 2 {
-        // Need at least sa_family (u16).
-        return Err(linux_err(errno::EINVAL));
-    }
     if let Err(e) = crate::mm::user::validate_user_read(addr_ptr, addr_len as usize) {
         return Err(linux_err(linux_errno_for(e)));
+    }
+    // Per-protocol surface: addr_len == 1 with a valid uaddr passes
+    // Linux's move_addr_to_kernel (copies 1 byte into kaddr), then
+    // the per-protocol handler fails because sa_family (u16) can't
+    // be read.  Same EINVAL.
+    if addr_len < 2 {
+        return Err(linux_err(errno::EINVAL));
     }
     Ok(())
 }
@@ -23305,8 +23387,11 @@ fn sys_bind(args: &SyscallArgs) -> SyscallResult {
     // untouched.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    #[allow(clippy::cast_possible_truncation)]
-    let addr_len = args.arg2 as u32;
+    // Batch 464: addr_len is `int` in Linux's __sys_bind ABI.
+    // Casting through i32 preserves the sign so move_addr_to_kernel's
+    // `(int)ulen < 0` gate fires correctly.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let addr_len = args.arg2 as i32;
     // Linux gate 1: sockfd_lookup_light → EBADF.
     if let Err(r) = validate_linux_fd(fd) {
         return r;
@@ -23474,8 +23559,9 @@ fn sys_connect(args: &SyscallArgs) -> SyscallResult {
     // translator-only reorder.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    #[allow(clippy::cast_possible_truncation)]
-    let addr_len = args.arg2 as u32;
+    // Batch 464: see sys_bind.  addr_len is `int` in __sys_connect.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let addr_len = args.arg2 as i32;
     // Linux gate 1: fdget → -EBADF.
     if let Err(r) = validate_linux_fd(fd) {
         return r;
@@ -23637,8 +23723,9 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
     // Linux gate 3: move_addr_to_kernel(addr, addr_len, ...) — only
     // if `addr != NULL`.
     if args.arg4 != 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        let addr_len = args.arg5 as u32;
+        // Batch 464: addr_len is `int` in __sys_sendto.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let addr_len = args.arg5 as i32;
         if let Err(r) = validate_sockaddr_in(args.arg4, addr_len) {
             return r;
         }
@@ -58673,6 +58760,189 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   bind/connect fd lookup ordered before pointer validation (Linux: sockfd_lookup_light / fdget fires before move_addr_to_kernel; bad fd → EBADF regardless of addr/addrlen): OK"
+        );
+    }
+
+    // Batch 464: bind / connect / sendto — addr_len bound checks
+    // (`(int)ulen < 0 || ulen > 128 → EINVAL`) BEFORE pointer
+    // access, matching Linux's `move_addr_to_kernel`
+    // (net/socket.c).  Also: `ulen == 0` returns EINVAL (per-protocol
+    // surface) regardless of pointer NULL-ness, matching Linux's
+    // "move_addr_to_kernel returns 0, per-protocol inet_bind etc.
+    // EINVALs because addr_len < sizeof(sockaddr_xx)" path.
+    //
+    // Pre-batch the validator took `addr_len: u32`, so negative `int`
+    // values arrived as huge u32s (e.g. -1 → 0xFFFFFFFF), slipped
+    // past the `< 2` gate, and fell into `validate_user_read` which
+    // is a no-op in kernel context — meaning the gate never fired
+    // and the call reached the terminal `EBADF` stub where Linux
+    // returns `-EINVAL`.  Same for `addr_len > 128` (e.g. 200).
+    //
+    // Translator-only fix: take addr_len as i32 at the call site
+    // (matching `int ulen`) and apply the bound gates in Linux's
+    // exact order.
+    {
+        let sockaddr_buf = [0u8; 32];
+        let sockaddr_ptr = sockaddr_buf.as_ptr() as u64;
+
+        // bind(fd=3, valid, -1): addr_len < 0 → EINVAL.  Pre-batch
+        // this fell through to terminal EBADF.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: sockaddr_ptr,
+            // Sign-extended -1 in the low 32 bits.
+            arg2: 0xFFFF_FFFFu64,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bind(valid, -1) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::BIND, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // bind(fd=3, valid, 200): addr_len > 128 → EINVAL.  Pre-batch
+        // this fell through to terminal EBADF.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: sockaddr_ptr,
+            arg2: 200,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bind(valid, 200) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::BIND, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // bind(fd=3, NULL, 0): addr_len == 0 → EINVAL.  Linux's
+        // move_addr_to_kernel returns 0 here (no copy), then
+        // per-protocol bind EINVALs because addr_len <
+        // sizeof(sockaddr_in).  Pre-batch we returned EFAULT from
+        // the NULL-ptr gate firing before the len gate.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::BIND, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: bind(NULL, 0) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::BIND, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Same matrix for connect.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: sockaddr_ptr,
+            arg2: 0xFFFF_FFFFu64,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: connect(valid, -1) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::CONNECT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: sockaddr_ptr,
+            arg2: 200,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: connect(valid, 200) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::CONNECT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::CONNECT, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: connect(NULL, 0) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::CONNECT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // sendto carries the same validator for its optional dest_addr.
+        // sendto(fd=3, NULL_buf, 0, _, valid_addr, -1): buf gate
+        // skipped (len=0), fd OK (kctx), addr_len=-1 → EINVAL.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: sockaddr_ptr,
+            arg5: 0xFFFF_FFFFu64,
+        };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendto(_,_,valid,-1) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::SENDTO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: sockaddr_ptr,
+            arg5: 200,
+        };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendto(_,_,valid,200) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::SENDTO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // sendto(fd=3, NULL_buf, 0, _, NULL_addr=0 but addr arg is
+        // already 0): addr arg == 0 skips the validator entirely (the
+        // `if args.arg4 != 0` gate).  Use a positive non-NULL addr
+        // with addr_len=0 to exercise the per-protocol EINVAL surface.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: sockaddr_ptr,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::SENDTO, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendto(_,_,valid,0) post-Batch464 not EINVAL ({})",
+                dispatch_linux(nr::SENDTO, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   bind/connect/sendto addr_len bound checks (Linux move_addr_to_kernel: (int)ulen<0 || ulen>128 → EINVAL; ulen==0 → per-protocol EINVAL; all before pointer access): OK"
         );
     }
 

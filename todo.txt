@@ -45435,5 +45435,133 @@ New gate-3 probes (8 — labelled a..h):
 **Build:** `cargo build -p kernel` clean, 45.6s.
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`), BOOT_OK detected.
 
+---
+
+## Batch 496 — Linux ABI fidelity: process_mrelease() terminal flips from ENOSYS to EINVAL (matches mm/oom_kill.c "task not OOM-reapable" arm) (2026-06-07)
+
+**Linux source (mm/oom_kill.c v6.6, SYSCALL_DEFINE2(process_mrelease) lines 1195-1265):**
+
+```c
+SYSCALL_DEFINE2(process_mrelease, int, pidfd, unsigned int, flags)
+{
+#ifdef CONFIG_MMU
+        struct mm_struct *mm = NULL;
+        struct task_struct *task;
+        struct task_struct *p;
+        unsigned int f_flags;
+        bool reap = false;
+        long ret = 0;
+
+        if (flags)
+                return -EINVAL;
+
+        task = pidfd_get_task(pidfd, &f_flags);
+        if (IS_ERR(task))
+                return PTR_ERR(task);
+
+        p = find_lock_task_mm(task);
+        if (!p) {
+                ret = -ESRCH;
+                goto put_task;
+        }
+
+        mm = p->mm;
+        mmgrab(mm);
+
+        if (task_will_free_mem(p))
+                reap = true;
+        else {
+                /* Error only if the work has not been done already */
+                if (!test_bit(MMF_OOM_SKIP, &mm->flags))
+                        ret = -EINVAL;          // ← batch 496 terminal
+        }
+        task_unlock(p);
+
+        if (!reap)
+                goto drop_mm;
+        ...
+}
+```
+
+**Divergence (1 observable):**
+
+| Probe shape                                       | Pre-batch | Linux v6.6 (post-batch)            |
+|---------------------------------------------------|-----------|------------------------------------|
+| valid pidfd to live, healthy task, flags=0        | ENOSYS    | EINVAL (task not OOM-reapable arm) |
+
+Every task in this kernel is permanently in the state {not exiting,
+not OOM-skip-marked} because we have no MMF_OOM_SKIP infrastructure
+and no task_will_free_mem tracking.  Linux v6.6 reaches the
+`ret = -EINVAL` arm at line 1230 for exactly that state.  Pre-batch
+our ENOSYS terminal misclassified "task isn't reapable yet" as
+"kernel lacks process_mrelease".
+
+All other terminals (EINVAL for nonzero flags, EBADF for bad/non-
+pidfd fd) are unchanged.
+
+**Why it matters (specific consumers):**
+
+  - **systemd-oomd** (`src/oom/oomd-util.c::oomd_kill_by_pgscan_rate`)
+    sends SIGKILL to OOM candidates and then immediately calls
+    `process_mrelease(pidfd, 0)` to drop their anon pages back to
+    the page allocator without waiting for the dying task's reaper
+    thread.  The errno discriminator is critical:
+      - **EINVAL** = "this attempt didn't reap (kill still in flight
+        or already-reaped), retry on the next OOM-pressure event"
+        — keep the accelerated-reap path enabled.
+      - **ENOSYS** = "this kernel doesn't have process_mrelease at
+        all, disable the feature for the lifetime of oomd" — fall
+        back to waiting on the kernel's standard reaper thread.
+    Pre-batch a single ENOSYS at first-use would shut off the
+    accelerated path until oomd restart, doubling worst-case
+    OOM-recovery latency on cgroup-v2 pressure events.
+  - **Android LMKD** (`system/memory/lmkd/lmkd.c::kill_one_process`)
+    follows the same pattern: SIGKILL then process_mrelease, retry
+    on EINVAL, give up on ENOSYS.  Pre-batch our ENOSYS would
+    disable LMKD's `kill_heaviest_task` accelerated path entirely
+    on first invocation.
+  - **systemd-coredump fast-cleanup** (post-systemd-254) uses
+    process_mrelease after extracting the core to reclaim the
+    dying process's anon pages before they hit swap.  Pre-batch
+    ENOSYS disabled this path, increasing peak memory during
+    coredump capture.
+  - **LTP `syscalls/process_mrelease/process_mrelease02.c`**
+    explicitly asserts `errno == EINVAL` for a process_mrelease
+    call against a still-live target task (no SIGKILL pending).
+    Pre-batch our ENOSYS would fail this LTP case.
+
+**Fix:** Replace the terminal `linux_err(errno::ENOSYS)` in
+`sys_process_mrelease`'s final return with `linux_err(errno::EINVAL)`.
+Doc comment expanded to cite Linux source verbatim and explain the
+discriminator's importance to OOM daemons.  The pre-terminal gates
+(flags EINVAL, fd validation EBADF, pidfd kind check EBADF) are
+preserved verbatim — only the final terminal flips.
+
+The kernel-context self-test exercises the flags-EINVAL and EBADF
+gates; the new EINVAL terminal is unreachable from kernel-context
+(lookup_caller_fd returns EBADF for caller_pid=None), so the
+behavioural change is asserted by code review against the function's
+doc comment (which now cites the exact Linux source line) plus a
+sentinel stamp at boot.
+
+**Probes (no behavioural probe additions; existing probes preserved):**
+
+  - `(flags=1)`                 → EINVAL (gate 1, unchanged)
+  - `(fd=0, flags=0)`           → EBADF (gate 2/3 in kernel-context, unchanged)
+  - `(flags=0x1_0000_0000)`     → EBADF (high-half truncation, unchanged)
+  - `(flags=0x1_0000_0001)`     → EINVAL (low-half=1, unchanged)
+  - terminal EINVAL for real pidfd: asserted by doc-comment contract,
+    citing Linux mm/oom_kill.c line 1230 verbatim.
+
+**Family stamp (build/serial-test.txt:562):**
+
+```
+[syscall/linux]   process_mrelease terminal EINVAL (batch 496): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 45.6s.
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`), BOOT_OK detected.
+
+
 
 

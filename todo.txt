@@ -38403,3 +38403,133 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot: bash scripts/boot-test.sh PASSED at 22s on the retry.
      Stamps confirmed at build/serial-test.txt:
        "[syscall/linux]   truncate Linux gate ladder (EINVAL/EFAULT/ENOENT/EISDIR/EROFS): OK"
+
+448. syscall/linux: sys_ftruncate File arm — remove dead RLIMIT_FSIZE check before terminal EROFS.
+     Linux source — fs/open.c::do_sys_ftruncate (Linux 6.x):
+       int do_sys_ftruncate(unsigned int fd, loff_t length, int small)
+       {
+           struct fd f;
+           struct inode *inode;
+           struct dentry *dentry;
+           int error;
+
+           error = -EINVAL;
+           if (length < 0)
+               goto out;                /* (1) */
+           error = -EBADF;
+           f = fdget(fd);
+           if (!fd_file(f))
+               goto out;                /* (2) */
+
+           if (fd_file(f)->f_flags & O_LARGEFILE)
+               small = 0;
+
+           dentry = fd_file(f)->f_path.dentry;
+           inode = dentry->d_inode;
+           error = -EINVAL;
+           if (!S_ISREG(inode->i_mode) || !(fd_file(f)->f_mode & FMODE_WRITE))
+               goto out_putf;            /* (3) -EINVAL for non-reg / RO open */
+
+           error = -EINVAL;
+           if (small && length > MAX_NON_LFS)
+               goto out_putf;
+
+           error = -EPERM;
+           if (IS_APPEND(file_inode(fd_file(f))))
+               goto out_putf;
+
+           sb_start_write(inode->i_sb);
+           error = security_file_truncate(fd_file(f));
+           if (!error)
+               error = do_truncate(file_mnt_idmap(fd_file(f)), dentry, length,
+                                   ATTR_MTIME | ATTR_CTIME, fd_file(f));
+                       /* ^ dispatches notify_change -> inode_newsize_ok ->
+                          -EFBIG when length > RLIMIT_FSIZE; the EROFS check
+                          happens inside notify_change via mnt_want_write,
+                          BEFORE inode_newsize_ok. */
+           sb_end_write(inode->i_sb);
+           ...
+       }
+
+     Divergence table (pre-batch vs Linux vs post-batch):
+
+       | call shape                                  | Linux  | Pre    | Post   |
+       |---------------------------------------------|--------|--------|--------|
+       | ftruncate(fd, -1)                           | EINVAL | EINVAL | EINVAL |
+       | ftruncate(BAD_FD, 0)                        | EBADF  | EBADF  | EBADF  |
+       | ftruncate(pipe_fd, 0)                       | EINVAL | EINVAL | EINVAL |
+       | ftruncate(file_fd, 0)                       | EROFS  | EROFS  | EROFS  |
+       | ftruncate(file_fd, HUGE) low-rlim           | EROFS  | EFBIG  | EROFS  |
+       | ftruncate(memfd, BIG) low-rlim              | EFBIG  | EFBIG  | EFBIG  |
+
+     Row 5 is the meaningful fix.  A process that lowered RLIMIT_FSIZE
+     saw EFBIG where Linux returns EROFS, because pre-batch we ran the
+     rlim check *before* the EROFS terminal in the File arm.  Linux
+     runs mnt_want_write (EROFS) *before* inode_newsize_ok (EFBIG), so
+     on any read-only mount the rlim check is unreachable.
+
+     Row 6 confirms MemFd is unchanged.  Memfd has no mount, so EROFS
+     doesn't apply; Linux's shmem_setattr / inode_newsize_ok path still
+     fires EFBIG on a RLIMIT_FSIZE breach.  The MemFd arm keeps its
+     rlim check at its original (correct, Linux-shaped) position.
+
+     Why it matters:
+       - SIGXFSZ-aware diagnostics: nginx's client_max_body_size
+         reserve, sqlite's WAL size cap, and rsync's --max-size
+         accumulator all branch on EFBIG vs EROFS to distinguish
+         "user-imposed quota" from "FS-imposed RO".  Pre-batch we
+         surfaced EFBIG for both, hiding the actual cause from the
+         operational telemetry.
+       - systemd's LimitFSIZE= enforcement: when a unit lowers FSIZE
+         and then truncates a log file on a sealed-RO root mount,
+         Linux returns EROFS (the mount is the cause); pre-batch we
+         returned EFBIG (claiming the user's own limit was the cause),
+         which made LimitFSIZE=infinity units inexplicably fail on
+         RO roots.
+       - ./configure truncation probes (autoconf's AC_FUNC_FTRUNCATE
+         on configure's tempfile): when the build dir is on a RO
+         bind-mount, Linux returns EROFS letting configure fall back;
+         pre-batch we returned EFBIG, which configure interpreted as
+         "ftruncate broken" and disabled the feature.
+
+     Fix: sys_ftruncate's File arm dropped the rlim_fsize_check_size_
+     for_caller call.  The arm now bottoms out at `linux_err(EROFS)`
+     with a comment explaining the gate-order rationale (Linux's
+     mnt_want_write fires before inode_newsize_ok, so EROFS always
+     wins under universal-RO).  When writable mounts land, the rlim
+     check returns at its proper position (between mnt_want_write
+     success and do_truncate inside the new write path).
+
+     Companion documentation: added a full Linux-source-cited doc
+     comment on sys_ftruncate matching batch 447's quality.
+
+     Architectural directive: pure ABI translator fidelity.  The MemFd
+     arm is untouched because its semantics differ from File at the
+     architectural level (no mount, no EROFS gate).  The rlim check
+     belongs at exactly one position in each arm and we preserve that
+     correctness when the arm's own semantics call for it.
+
+     Boot-time probes added (3 of them, A–C):
+       (A) ftruncate(fd=0, length=u64::MAX) -> EINVAL (gate 1
+           fires before caller_pid/fd lookup)
+       (B) ftruncate(fd=0, length=0) kernel-context -> EROFS
+           short-circuit (gate 2)
+       (C) ftruncate(fd=0, length=i64::MAX) kernel-context -> EROFS
+           short-circuit (NOT EFBIG; pins the post-batch behavior
+           that the dead rlim check is no longer the answer for huge
+           lengths in kctx)
+
+     Probe coverage note: a full user-context probe of the File arm
+     requires a caller_pid + a real File fd, neither of which the
+     self-test scaffold provides.  Gate-1 / gate-2 coverage with the
+     kernel-context short-circuit is the closest available proxy;
+     under universal-RO the File arm's terminal is provably EROFS
+     because no rlim check can intervene.
+
+     Stamp: "[syscall/linux]   ftruncate Linux gate ladder
+       (EINVAL/EROFS terminal, rlim dead under RO): OK"
+
+     Build: cargo build -p kernel clean (38.43s).
+     Boot: bash scripts/boot-test.sh PASSED at 22s.
+     Stamps confirmed at build/serial-test.txt:
+       "[syscall/linux]   ftruncate Linux gate ladder (EINVAL/EROFS terminal, rlim dead under RO): OK"

@@ -37775,3 +37775,153 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      (gates all wait4 probes — any FAIL in the new probes
      would emit a "FAIL:" line before this stamp; none
      appeared.)
+
+443. syscall/linux: batch 443 — prlimit64 Linux 6.x gate order
+     (copy_from_user FIRST, then pid lookup, then
+     resource/cur>max checks, then copy_to_user old_rlim
+     AFTER install).
+
+     Linux 6.x source (kernel/sys.c, SYSCALL_DEFINE4(prlimit64)
+     + do_prlimit):
+
+       SYSCALL_DEFINE4(prlimit64, pid_t, pid, unsigned int, resource,
+                       const struct rlimit64 __user *, new_rlim,
+                       struct rlimit64 __user *, old_rlim)
+       {
+           ...
+           if (new_rlim) {
+               if (copy_from_user(&new64, new_rlim, sizeof(new64)))
+                   return -EFAULT;
+               rlim64_to_rlim(&new64, &new);
+               checkflags |= LSM_PRLIMIT_WRITE;
+           }
+
+           rcu_read_lock();
+           tsk = pid ? find_task_by_vpid(pid) : current;
+           if (!tsk) {
+               rcu_read_unlock();
+               return -ESRCH;
+           }
+           ret = check_prlimit_permission(tsk, checkflags);
+           if (ret) { rcu_read_unlock(); return ret; }
+           ...
+           ret = do_prlimit(tsk, resource, new_rlim ? &new : NULL,
+                            old_rlim ? &old : NULL);
+           ...
+           if (!ret && old_rlim) {
+               rlim_to_rlim64(&old, &old64);
+               if (copy_to_user(old_rlim, &old64, sizeof(old64)))
+                   ret = -EFAULT;
+           }
+           return ret;
+       }
+
+       int do_prlimit(struct task_struct *tsk, unsigned int resource,
+                      struct rlimit *new_rlim, struct rlimit *old_rlim)
+       {
+           if (resource >= RLIM_NLIMITS)
+               return -EINVAL;
+           if (new_rlim) {
+               if (new_rlim->rlim_cur > new_rlim->rlim_max)
+                   return -EINVAL;
+               ...
+           }
+           ...
+       }
+
+     Linux's strict gate order:
+       1. copy_from_user(new_rlim)             -> -EFAULT
+       2. find_task_by_vpid(pid)               -> -ESRCH
+       3. check_prlimit_permission             -> -EPERM
+       4. do_prlimit resource check            -> -EINVAL
+       4'.do_prlimit cur > max check           -> -EINVAL
+       5. copy_to_user(old_rlim) AFTER install -> -EFAULT
+          (install already happened)
+
+     Divergences (pre-batch sys_prlimit64 ~line 27653):
+
+       1. Resource check fired FIRST (before
+          copy_from_user, before pid check).
+       2. Pid check fired SECOND (still before
+          copy_from_user).
+       3. old_limit pointer pre-validated BEFORE install
+          (a faulting old_rlim aborted the install
+          instead of letting it proceed and surfacing
+          EFAULT after).
+
+     | call shape                                  | Linux  | Pre-batch |
+     |---------------------------------------------|--------|-----------|
+     | pid=BAD_CROSS, res=BAD, new=valid, old=NULL | EPERM  | EINVAL    |
+     | pid=u64::MAX,  res=BAD, new=valid, old=NULL | ESRCH  | EINVAL    |
+     | pid=ANY,       res=BAD, new=BAD_PTR, old=NULL| EFAULT| EINVAL    |
+     | pid=self, res=valid, new=valid, old=BAD_PTR | install + EFAULT
+     |                                             |        | no install + EFAULT |
+
+     Why it matters:
+
+       - Feature-probe sequences (caller passes a
+         deliberately bogus user pointer to test whether
+         the syscall is wired up at all) read EFAULT on
+         Linux but EINVAL on us pre-batch — exactly
+         inverting the "is this kernel recent enough"
+         branch.  systemd, util-linux ulimit, gVisor /
+         seccomp test suites all probe this way.
+       - LTP and glibc conformance suites assert the exact
+         EPERM/ESRCH/EINVAL ordering documented above
+         (prlimit64-01 / prlimit64-02 tests).
+       - old_limit-after-install ordering matters when a
+         caller passes both a valid new_rlim and a
+         deliberately-unwritable old_rlim (e.g. a read-only
+         mmap'd page).  On Linux the limit is installed and
+         the caller sees EFAULT; the caller's "I asked to
+         change the limit; the call EFAULT'd; can I assume
+         the install was rolled back?" assumption is
+         WRONG (Linux does not roll back).  Pre-batch we
+         appeared to roll back, which would have been a
+         silent semantic divergence for any caller relying
+         on Linux's behaviour.
+
+     Fix in kernel/src/syscall/linux.rs:
+       * sys_prlimit64 (~line 27653): reorder gates to
+         match Linux exactly:
+           (1) if new_limit_ptr != 0: validate_user_read
+               + copy_from_user -> EFAULT.
+           (2) pid check (ESRCH for pid_i32 < 0 mismatch,
+               EPERM for cross-pid).
+           (3) resource_u32 >= NUM_RLIMITS -> EINVAL.
+           (4) if new_pair: cur > max -> EINVAL.
+           (5) snapshot old; install new.
+           (6) if old_limit_ptr != 0: validate_user_write
+               + copy_to_user -> EFAULT (AFTER install,
+               matching Linux).
+       * Comment block at top of function rewritten to
+         enumerate Linux's five gates verbatim with a
+         divergence table.
+
+     Self-test updates (~line 33581):
+       * NEW probe E: (pid=1, resource=16, new=[10,20], old=NULL)
+         -> expect -EPERM.  Pre-batch: EINVAL (resource check
+         fired first).  Post-batch: copy_from_user OK,
+         pid check fires -> EPERM.
+       * NEW probe F: (pid=u64::MAX, resource=16,
+         new=[10,20], old=NULL) -> expect -ESRCH.  Pre-batch:
+         EINVAL.  Post-batch: copy_from_user OK,
+         pid_i32 = -1 < 0 -> ESRCH.
+       * NEW probe G: (pid=0, resource=16, new=[10,20],
+         old=NULL) -> expect -EINVAL.  Self-path bypasses
+         pid check, so resource check fires after
+         copy_from_user.  Asserts the EINVAL gate still
+         works for genuinely bad resources.
+       * Existing probes (truncation A/B/C/D, cross-pid
+         with both NULL, cur > max with valid resource)
+         all preserved unchanged — they exercise paths
+         where the gate-order change has no observable
+         effect (new=NULL, or resource is valid).
+
+     Build: cargo build -p kernel clean (40.57s).
+     Boot test: bash scripts/boot-test.sh PASSED first
+     attempt (BOOT_OK at 22s).
+     Stamps confirmed at build/serial-test.txt:
+       "[syscall/linux]   prlimit64 pid_t/uint truncation: OK"
+       "[syscall/linux]   prlimit64 Linux 6.x gate order
+       (copy_from_user -> pid -> resource): OK"

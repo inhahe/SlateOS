@@ -27674,50 +27674,70 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
     let new_limit_ptr = args.arg2;
     let old_limit_ptr = args.arg3;
 
-    // Resource validation up front — Linux rejects unknown resources
-    // before touching any user pointer.
-    if resource_u32 >= pcb::NUM_RLIMITS {
-        return linux_err(errno::EINVAL);
-    }
-
-    // Cross-process queries: only allow when targeting self (pid == 0
-    // or pid == caller's PID).  Otherwise EPERM (matches Linux's
-    // behaviour for unprivileged callers without CAP_SYS_RESOURCE).
-    // Negative pids cannot reference any task — Linux's
-    // find_task_by_vpid path returns NULL and the syscall reports
-    // ESRCH.  Pre-truncation we accidentally returned EPERM for
-    // u64::MAX (which compared unequal to the small me_pid); post-
-    // truncation pid_i32 = -1 routes through the explicit ESRCH gate.
-    let me = caller_pid();
-    if pid_i32 != 0 {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let me_i32: i32 = me.unwrap_or(0) as i32;
-        if pid_i32 != me_i32 {
-            if pid_i32 < 0 {
-                return linux_err(errno::ESRCH);
-            }
-            return linux_err(errno::EPERM);
-        }
-    }
-
-    // Pre-validate user pointers.  Each rlimit is 16 bytes.
     const RLIMIT_SIZE: usize = 16;
+
+    // Batch 443 — Linux 6.x kernel/sys.c SYSCALL_DEFINE4(prlimit64)
+    // gate order (verbatim):
+    //
+    //     if (new_rlim) {
+    //         if (copy_from_user(&new64, new_rlim, sizeof(new64)))
+    //             return -EFAULT;
+    //         ...
+    //     }
+    //     rcu_read_lock();
+    //     tsk = pid ? find_task_by_vpid(pid) : current;
+    //     if (!tsk) { rcu_read_unlock(); return -ESRCH; }
+    //     ret = check_prlimit_permission(tsk, checkflags);
+    //     if (ret) { rcu_read_unlock(); return ret; }
+    //     ...
+    //     ret = do_prlimit(tsk, resource, ...);
+    //     ...
+    //     if (!ret && old_rlim) {
+    //         rlim_to_rlim64(&old, &old64);
+    //         if (copy_to_user(old_rlim, &old64, sizeof(old64)))
+    //             ret = -EFAULT;
+    //     }
+    //
+    // And do_prlimit's own opening gates:
+    //     if (resource >= RLIM_NLIMITS) return -EINVAL;
+    //     if (new_rlim) {
+    //         if (new_rlim->rlim_cur > new_rlim->rlim_max)
+    //             return -EINVAL;
+    //         ...
+    //     }
+    //
+    // Five gates in strict order:
+    //   1. copy_from_user(new_rlim)         -> -EFAULT
+    //   2. find_task_by_vpid(pid)           -> -ESRCH
+    //   3. check_prlimit_permission         -> -EPERM
+    //   4. do_prlimit resource check        -> -EINVAL
+    //   4'. do_prlimit cur > max check      -> -EINVAL
+    //   5. copy_to_user(old_rlim) AFTER install -> -EFAULT (install
+    //      already happened)
+    //
+    // Pre-batch we ran the resource check FIRST (before
+    // copy_from_user) and the pid check SECOND, so probes
+    // distinguishing the gates saw the wrong errno:
+    //
+    //   | call shape                                    | Linux  | Pre-batch |
+    //   |-----------------------------------------------|--------|-----------|
+    //   | pid=BAD_CROSS, res=BAD, new=valid, old=NULL   | EPERM  | EINVAL    |
+    //   | pid=u64::MAX,  res=BAD, new=valid, old=NULL   | ESRCH  | EINVAL    |
+    //   | pid=ANY, res=BAD, new=BAD_PTR, old=NULL       | EFAULT | EINVAL    |
+    //
+    // The third row is the most damaging for userspace: a feature-
+    // probe sequence (caller deliberately passes a bogus pointer to
+    // see whether the syscall is wired up at all) reads EFAULT on
+    // Linux but EINVAL on us — exactly inverting the "is this kernel
+    // recent enough" branch.
+
+    // Gate 1: copy_from_user(new_rlim).  Unconditional (only gated
+    // on new_limit_ptr != 0), runs before resource / pid validation.
+    let mut new_pair: Option<(u64, u64)> = None;
     if new_limit_ptr != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(new_limit_ptr, RLIMIT_SIZE) {
             return linux_err(linux_errno_for(e));
         }
-    }
-    if old_limit_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(old_limit_ptr, RLIMIT_SIZE) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-
-    // Read the new limit (if requested) before reading the old one,
-    // so we have the value ready to install once we've snapshotted
-    // the pre-set state for old_limit.
-    let mut new_pair: Option<(u64, u64)> = None;
-    if new_limit_ptr != 0 {
         let mut buf = [0u64; 2];
         // SAFETY: validate_user_read above confirmed the range; the
         // kernel-owned buffer is exactly RLIMIT_SIZE bytes (2 × u64).
@@ -27731,14 +27751,40 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
         }
-        let (cur, max) = (buf[0], buf[1]);
-        // Linux enforces cur ≤ max universally — privileged callers
-        // can raise max, but max must still be ≥ cur or the call is
-        // EINVAL before any privilege check runs.
+        new_pair = Some((buf[0], buf[1]));
+    }
+
+    // Gate 2/3: pid lookup + permission check.  Cross-process queries
+    // only allowed when targeting self (pid == 0 or pid == caller's
+    // PID).  Negative pids cannot reference any task — Linux's
+    // find_task_by_vpid path returns NULL and the syscall reports
+    // ESRCH.  Otherwise EPERM (matches Linux's behaviour for
+    // unprivileged callers without CAP_SYS_RESOURCE).
+    let me = caller_pid();
+    if pid_i32 != 0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let me_i32: i32 = me.unwrap_or(0) as i32;
+        if pid_i32 != me_i32 {
+            if pid_i32 < 0 {
+                return linux_err(errno::ESRCH);
+            }
+            return linux_err(errno::EPERM);
+        }
+    }
+
+    // Gate 4 (inside do_prlimit): resource check.
+    if resource_u32 >= pcb::NUM_RLIMITS {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Gate 4' (inside do_prlimit, after resource check): cur > max
+    // is invalid universally — privileged callers can raise max but
+    // it must still be ≥ cur, or the call is EINVAL before any
+    // privilege check runs.
+    if let Some((cur, max)) = new_pair {
         if cur > max {
             return linux_err(errno::EINVAL);
         }
-        new_pair = Some((cur, max));
     }
 
     // Snapshot the existing (cur, max) so old_limit gets the pre-set
@@ -27770,11 +27816,18 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Write the pre-set snapshot to old_limit_ptr.
+    // Gate 5: copy_to_user(old_rlim).  Linux validates the user
+    // pointer via copy_to_user AFTER the install; a faulting old_rlim
+    // with a successful install leaves the limit changed and reports
+    // EFAULT.  We mirror that ordering — pre-validation here would
+    // make EFAULT block install, which Linux does not.
     if old_limit_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(old_limit_ptr, RLIMIT_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
         let buf: [u64; 2] = [old_cur, old_max];
         // SAFETY: validated as a writable user range of RLIMIT_SIZE
-        // bytes above.
+        // bytes immediately above.
         let r = unsafe {
             crate::mm::user::copy_to_user(
                 buf.as_ptr().cast::<u8>(),
@@ -33527,6 +33580,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   prlimit64 pid_t/uint truncation: OK"
+        );
+
+        // Batch 443 — gate-order probes proving copy_from_user(new_rlim)
+        // runs FIRST, then pid lookup, then resource check.
+        //
+        // Linux 6.x kernel/sys.c SYSCALL_DEFINE4(prlimit64) order:
+        //   1. copy_from_user(new_rlim)  -> EFAULT
+        //   2. find_task_by_vpid(pid)    -> ESRCH
+        //   3. check_prlimit_permission  -> EPERM
+        //   4. do_prlimit resource check -> EINVAL
+        //
+        // Pre-batch we ran the resource check first, so a call with
+        // (resource=BOGUS, pid=BAD, new=valid) returned EINVAL where
+        // Linux returns EPERM/ESRCH (because copy_from_user succeeded
+        // and pid lookup fired before do_prlimit was even called).
+
+        // Probe E — pid=1 (cross), resource=16 (bogus), new=valid.
+        // Linux: copy_from_user OK, find_task(1) finds the task,
+        // permission check (unprivileged caller, different process)
+        // -> EPERM.  In our model "cross-pid" maps directly to EPERM
+        // pre-do_prlimit, matching Linux's effective behaviour for
+        // unprivileged callers.  Pre-batch the resource check fired
+        // first -> EINVAL.
+        let new_lim_e: [u64; 2] = [10, 20];
+        let a = SyscallArgs {
+            arg0: 1, arg1: 16,
+            arg2: new_lim_e.as_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::PRLIMIT64, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 cross-pid+badres+valid_new not EPERM ({})",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe F — pid=u64::MAX (i32 = -1, no task), resource=16
+        // (bogus), new=valid.  Linux: copy_from_user OK, find_task(-1)
+        // returns NULL -> ESRCH.  Pre-batch: resource check fires
+        // first -> EINVAL.
+        let new_lim_f: [u64; 2] = [10, 20];
+        let a = SyscallArgs {
+            arg0: u64::MAX, arg1: 16,
+            arg2: new_lim_f.as_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::PRLIMIT64, &a).value;
+        if v != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 neg-pid+badres+valid_new not ESRCH ({})",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe G — pid=0 (self), resource=16 (bogus), new=valid.
+        // copy_from_user OK, no pid check needed (self), do_prlimit
+        // resource check fires -> EINVAL.  Asserts the resource check
+        // still works AFTER all earlier gates pass.
+        let new_lim_g: [u64; 2] = [10, 20];
+        let a = SyscallArgs {
+            arg0: 0, arg1: 16,
+            arg2: new_lim_g.as_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::PRLIMIT64, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: prlimit64 self+badres+valid_new not EINVAL ({})",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   prlimit64 Linux 6.x gate order \
+             (copy_from_user -> pid -> resource): OK"
         );
 
         // Direct pcb::set_rlimit / get_rlimit coverage on a dummy

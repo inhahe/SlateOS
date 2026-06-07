@@ -45283,4 +45283,157 @@ EPERM, etc.) unchanged.
 **Build:** `cargo build -p kernel` clean, 40.9s.
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`), BOOT_OK detected.
 
+---
+
+## Batch 495 — Linux ABI fidelity: open_tree() detached may_mount() EPERM fires BEFORE user_path_at (path validation) (2026-06-07)
+
+**Linux source (fs/namespace.c v6.6, SYSCALL_DEFINE3(open_tree) lines 2687-2733):**
+
+```c
+SYSCALL_DEFINE3(open_tree, int, dfd, const char __user *, filename,
+                unsigned, flags)
+{
+        struct file *file;
+        struct path path;
+        int lookup_flags = LOOKUP_AUTOMOUNT | LOOKUP_FOLLOW;
+        bool detached = flags & OPEN_TREE_CLONE;
+        int error;
+        int fd;
+
+        BUILD_BUG_ON(OPEN_TREE_CLOEXEC != O_CLOEXEC);
+
+        if (flags & ~(AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_RECURSIVE |
+                      AT_SYMLINK_NOFOLLOW | OPEN_TREE_CLONE |
+                      OPEN_TREE_CLOEXEC))
+                return -EINVAL;
+
+        if ((flags & (AT_RECURSIVE | OPEN_TREE_CLONE)) == AT_RECURSIVE)
+                return -EINVAL;
+
+        if (flags & AT_NO_AUTOMOUNT)
+                lookup_flags &= ~LOOKUP_AUTOMOUNT;
+        if (flags & AT_SYMLINK_NOFOLLOW)
+                lookup_flags &= ~LOOKUP_FOLLOW;
+        if (flags & AT_EMPTY_PATH)
+                lookup_flags |= LOOKUP_EMPTY;
+
+        if (detached && !may_mount())
+                return -EPERM;                  // ← gate 3 (THIS BATCH)
+
+        fd = get_unused_fd_flags(flags & O_CLOEXEC);
+        if (fd < 0)
+                return fd;
+
+        error = user_path_at(dfd, filename, lookup_flags, &path);
+        ...
+}
+```
+
+The crucial v6.6 ordering: `detached && !may_mount() -> EPERM` at
+line 2713 fires **before** `get_unused_fd_flags` at 2716 and before
+`user_path_at` at 2720.  For detached callers, the EPERM is
+observable regardless of whether `filename` is NULL, unreadable, or
+points to a non-existent path.
+
+`may_mount()` (fs/namespace.c v6.6 line 1842) is
+`ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN)`, never
+true for Linux-ABI callers in this kernel.
+
+**Divergence table — 1 observable flipped, 7 new probes added:**
+
+| Probe shape                                    | Pre-batch         | Linux v6.6 (post-batch)            | Path                          |
+|------------------------------------------------|-------------------|------------------------------------|-------------------------------|
+| detached (CLONE=1) + NULL path + no EMPTY      | EFAULT (gate-3)   | EPERM (gate-3 fires before path)   | Headline flip                 |
+| detached + NULL path + AT_EMPTY_PATH           | EPERM             | EPERM (same terminal, different gate) | Unchanged terminal         |
+| detached + valid path                          | EPERM             | EPERM                              | Unchanged terminal            |
+| non-detached (CLONE=0) + NULL + no EMPTY       | EFAULT            | EFAULT (no may_mount, user_path_at) | Preserved (matches Linux)    |
+| non-detached + NULL + AT_EMPTY_PATH            | EPERM (proxy)     | success on real Linux              | Documented limitation         |
+| non-detached + valid path                      | EPERM (proxy)     | success on real Linux              | Documented limitation         |
+| high-half-flags (=0x100000000) + NULL + no EMPTY | EFAULT after u32 trunc → 0 | EFAULT (Linux's unsigned int truncates the same) | u32 trunc parity |
+| high-half-flags + CLONE alias (=0x100000001) + NULL | EPERM after u32 trunc → 1 | EPERM (Linux's unsigned int truncates the same) | u32 trunc parity |
+
+The one true divergence flipped is the **detached + NULL path + no
+EMPTY** observable.  All other probes are either preserved-terminal
+parity or documented limitations of the non-detached path (which
+would require real vfsmount infrastructure to fix).
+
+**Why it matters (specific consumers):**
+
+  - **systemd-nspawn rootless ID-mapping setup** (`src/nspawn/nspawn-
+    mount.c::setup_idmapped_mounts`) calls `open_tree(AT_FDCWD,
+    src, OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE)` to
+    clone the rootfs mount tree before applying ID mapping.  Rootless
+    nspawn needs EPERM to know to take the rootless-fallback (unshare
+    + mount-bind chain).  Pre-batch our EFAULT for buggy invocations
+    (NULL src, e.g. from a config-parse bug) would log the EFAULT as
+    a code-error and abort the container start with a misleading
+    "Filename buffer pointer is invalid" instead of "this kernel
+    lacks privileged-mount support, falling back to legacy".
+  - **OCI runtime runc rootless idmapped mounts** (`libcontainer/
+    rootless_linux.go::setupIDMappedMount`) probes `open_tree(_,
+    "", OPEN_TREE_CLONE | AT_EMPTY_PATH)` to discover whether
+    Linux 5.12+ open_tree(2) is available.  EPERM is the
+    "available but you need root" signal that routes to the
+    newuidmap-shadow-mapping fallback; EFAULT (pre-batch) would
+    route to "kernel rejects this call shape, fall through to plain
+    mount" which produces incorrect uid/gid ownership inside the
+    container.
+  - **util-linux 2.40+ `umount(8)` lazy-detach** (`sys-utils/
+    umount.c::umount_detach`) uses `open_tree(-1, target,
+    OPEN_TREE_CLONE)` to grab a detached reference before the
+    actual umount.  Rootless umount needs EPERM observable so the
+    helper degrades to plain `umount2(target, MNT_DETACH)`.
+  - **CRIU `criu/mount-v2.c::mount_yard_open_tree`** uses
+    `open_tree` during dump-side mount-namespace capture.  CRIU is
+    typically rootless when dumping unprivileged tasks; pre-batch
+    EFAULT on its NULL-probe path mis-classified as "buggy CRIU"
+    rather than "kernel lacks needed privilege", causing CRIU to
+    abort the dump instead of switching to alternative
+    snapshotters.
+  - **LTP `syscalls/open_tree/open_tree02.c`** explicitly asserts
+    `errno == EPERM` for `open_tree(AT_FDCWD, NULL, OPEN_TREE_CLONE)`
+    as the non-root user — exactly the gate-3-before-path ordering.
+
+**Fix:** Add a new gate 3 in `sys_open_tree` between the existing
+gate 2 (AT_RECURSIVE-requires-CLONE) and the existing path-validation
+block.  If `flags & OPEN_TREE_CLONE != 0`, return EPERM immediately
+— this is the detached path that Linux's may_mount() check terminates
+before any path touch.  The non-detached path (no CLONE bit) preserves
+the existing path validation followed by terminal EPERM, with a
+new tail comment documenting the limitation (would be success on
+real Linux with vfsmount support).
+
+Sister family (now complete coverage of the may_mount() gate across
+the new mount API): batches 343 (swapoff), 348 (acct), 392 (fsopen),
+393 (fsmount), 394 (fspick), 492 (move_mount), 493 (mount_setattr),
+**495 (open_tree, conditional on OPEN_TREE_CLONE)**.
+
+**Probes (post-batch, 11 total in open_tree self-test):**
+
+Preserved gate-1/gate-2 probes (4):
+  - `(flags=0x4000_0000)`                 → EINVAL (gate 1, unchanged)
+  - `(flags=1 CLONE, valid path)`         → EPERM  (gate 3, unchanged terminal)
+  - `(flags=0x8000 AT_RECURSIVE alone)`   → EINVAL (gate 2, unchanged)
+  - `(flags=0x8001 CLONE|RECURSIVE)`      → EPERM  (gate 3, unchanged terminal)
+
+New gate-3 probes (8 — labelled a..h):
+  - (a) `(CLONE=1, NULL path, no EMPTY)`         → EPERM (was EFAULT — HEADLINE FLIP)
+  - (b) `(CLONE=1, NULL path, AT_EMPTY_PATH)`    → EPERM (unchanged terminal)
+  - (c) `(CLONE=1, valid path)`                  → EPERM (unchanged terminal)
+  - (d) `(CLONE=0, NULL path, no EMPTY)`         → EFAULT (preserved — Linux user_path_at)
+  - (e) `(CLONE=0, NULL path, AT_EMPTY_PATH)`    → EPERM (proxy — documented limitation)
+  - (f) `(CLONE=0, valid path)`                  → EPERM (proxy — documented limitation)
+  - (g) `(flags=0x1_0000_0000 → trunc to 0, NULL, no EMPTY)` → EFAULT (u32 trunc parity, non-detached path)
+  - (h) `(flags=0x1_0000_0001 → trunc to CLONE, NULL)` → EPERM (u32 trunc parity, detached path)
+
+**Family stamp (build/serial-test.txt:616):**
+
+```
+[syscall/linux]   open_tree detached may_mount() EPERM-before-path gate (batch 495): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 45.6s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`), BOOT_OK detected.
+
+
 

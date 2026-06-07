@@ -20533,14 +20533,61 @@ fn sys_fspick(_args: &SyscallArgs) -> SyscallResult {
 /// detached fd.  flags include OPEN_TREE_CLONE (1), OPEN_TREE_CLOEXEC
 /// (O_CLOEXEC = 0o2_000_000), plus AT_* path-walking bits.
 ///
-/// Linux gate order (fs/namespace.c::SYSCALL_DEFINE3(open_tree)):
-///   1. `flags & ~OPEN_TREE_VALID -> -EINVAL`
-///   2. `(flags & (AT_RECURSIVE | OPEN_TREE_CLONE)) == AT_RECURSIVE`
-///        -> -EINVAL  (AT_RECURSIVE requires OPEN_TREE_CLONE: recursive
-///        mode is only meaningful when cloning a subtree; a plain
-///        non-clone open of an existing mount is inherently a single
-///        node).
-///   3. `user_path_at()` (or LOOKUP_EMPTY with AT_EMPTY_PATH).
+/// Linux gate order (fs/namespace.c::SYSCALL_DEFINE3(open_tree), v6.6
+/// lines 2687-2733):
+///
+/// ```c
+/// SYSCALL_DEFINE3(open_tree, int, dfd, const char __user *, filename,
+///                 unsigned, flags)
+/// {
+///     struct file *file;
+///     struct path path;
+///     int lookup_flags = LOOKUP_AUTOMOUNT | LOOKUP_FOLLOW;
+///     bool detached = flags & OPEN_TREE_CLONE;
+///     ...
+///     if (flags & ~(AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_RECURSIVE |
+///                   AT_SYMLINK_NOFOLLOW | OPEN_TREE_CLONE |
+///                   OPEN_TREE_CLOEXEC))
+///         return -EINVAL;
+///     if ((flags & (AT_RECURSIVE | OPEN_TREE_CLONE)) == AT_RECURSIVE)
+///         return -EINVAL;
+///     if (flags & AT_NO_AUTOMOUNT) lookup_flags &= ~LOOKUP_AUTOMOUNT;
+///     if (flags & AT_SYMLINK_NOFOLLOW) lookup_flags &= ~LOOKUP_FOLLOW;
+///     if (flags & AT_EMPTY_PATH) lookup_flags |= LOOKUP_EMPTY;
+///     if (detached && !may_mount())
+///         return -EPERM;            // ← gate 3 (THIS BATCH)
+///     fd = get_unused_fd_flags(flags & O_CLOEXEC);
+///     if (fd < 0) return fd;
+///     error = user_path_at(dfd, filename, lookup_flags, &path);
+///     ...
+/// }
+/// ```
+///
+/// Crucial observation (batch 495): the `if (detached && !may_mount())
+/// return -EPERM;` at line 2713 fires for the OPEN_TREE_CLONE case
+/// **before** `user_path_at` runs at line 2720.  Detached callers
+/// therefore observe EPERM regardless of path validity — pre-batch
+/// our translator ran the path-NULL/AT_EMPTY_PATH gate ahead of the
+/// EPERM, so a detached call with a NULL filename and no AT_EMPTY_PATH
+/// saw EFAULT where Linux returns EPERM (and an unprivileged user
+/// passing an unmapped string pointer would see EFAULT where Linux
+/// returns EPERM in kernel context where the validation is a no-op).
+///
+/// For the non-detached case (flags & OPEN_TREE_CLONE == 0), Linux
+/// skips the may_mount check entirely and proceeds to user_path_at.
+/// On a real Linux kernel this returns a valid O_PATH-style fd to
+/// the vfsmount; we have no vfsmount infrastructure to back such an
+/// fd, so the path-NULL gate is preserved and the terminal stays
+/// EPERM as a documented proxy for "this kernel has no mount tree
+/// to open".  This non-detached EPERM is a known limitation — see
+/// the comment block at the function tail.
+///
+/// Sister batches that established the may_mount-EPERM-first pattern
+/// for the mount API family: 343 (swapoff), 348 (acct), 392 (fsopen),
+/// 393 (fsmount), 394 (fspick), 492 (move_mount), 493 (mount_setattr).
+/// open_tree differs from those in that the EPERM gate is conditional
+/// on the OPEN_TREE_CLONE bit, not unconditional — so we cannot make
+/// the entire body a terminal EPERM the way those batches did.
 fn sys_open_tree(args: &SyscallArgs) -> SyscallResult {
     const OPEN_TREE_CLONE: u32 = 1;
     const O_CLOEXEC: u32 = 0o2_000_000;
@@ -20567,7 +20614,21 @@ fn sys_open_tree(args: &SyscallArgs) -> SyscallResult {
     if flags & (AT_RECURSIVE | OPEN_TREE_CLONE) == AT_RECURSIVE {
         return linux_err(errno::EINVAL);
     }
-    // Gate 3: path / EMPTY_PATH validation.
+    // Gate 3 (batch 495, Linux fs/namespace.c v6.6 line 2713):
+    // `if (detached && !may_mount()) return -EPERM;`
+    // detached = (flags & OPEN_TREE_CLONE).  may_mount() is
+    // ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN),
+    // never true for Linux-ABI callers in this kernel.  The EPERM
+    // fires before get_unused_fd_flags and before user_path_at, so
+    // detached callers never observe EFAULT/ENOENT on a bad filename.
+    if flags & OPEN_TREE_CLONE != 0 {
+        return linux_err(errno::EPERM);
+    }
+    // Non-detached (flags & OPEN_TREE_CLONE == 0): Linux v6.6 skips
+    // gate 3 entirely and proceeds to user_path_at at line 2720.
+    // Path validation runs here for parity with Linux's
+    // user_path_at -> strncpy_from_user -> EFAULT on NULL without
+    // LOOKUP_EMPTY behaviour.
     if args.arg1 != 0 {
         if let Err(e) = validate_user_str(args.arg1) {
             return linux_err(linux_errno_for(e));
@@ -20575,6 +20636,13 @@ fn sys_open_tree(args: &SyscallArgs) -> SyscallResult {
     } else if flags & AT_EMPTY_PATH == 0 {
         return linux_err(errno::EFAULT);
     }
+    // Known limitation: a non-detached open_tree on a real Linux
+    // kernel returns a valid O_PATH-style fd referring to the
+    // vfsmount at `path`.  This kernel has no vfsmount infrastructure
+    // to back such an fd, so we terminate with EPERM as a proxy.
+    // This is observably wrong for non-detached + valid path on
+    // Linux (which would return success); fixing it requires real
+    // mount-tree support, which is out of scope for this translator.
     linux_err(errno::EPERM)
 }
 
@@ -56288,6 +56356,86 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   open_tree flag-mask > AT_RECURSIVE-requires-CLONE gate order: OK"
+        );
+
+        // Batch 495: Linux v6.6 fs/namespace.c line 2713 runs
+        // `if (detached && !may_mount()) return -EPERM;` BEFORE
+        // user_path_at (path validation), so detached callers (any
+        // call with OPEN_TREE_CLONE = 1 in flags) see EPERM regardless
+        // of path validity.  Pre-batch we ran path validation first,
+        // so a detached call with NULL filename and no AT_EMPTY_PATH
+        // saw EFAULT where Linux returns EPERM.  Non-detached calls
+        // (no OPEN_TREE_CLONE bit) skip the may_mount gate entirely;
+        // path validation runs first and the terminal is EPERM as a
+        // proxy for "no vfsmount infrastructure to open" (documented
+        // limitation; would be success on real Linux).
+        //
+        // Probe (a): detached + NULL path + no AT_EMPTY_PATH -> EPERM.
+        // Pre-batch this was EFAULT because the path-NULL gate fired
+        // before EPERM.  This is the headline divergence.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_tree CLONE+NULL+no-EMPTY not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Probe (b): detached + NULL path + AT_EMPTY_PATH -> EPERM
+        // (unchanged — both pre- and post-batch terminate at EPERM,
+        // but via different code paths).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1 | 0x1000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_tree CLONE+NULL+EMPTY not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Probe (c): detached + valid path -> EPERM (unchanged terminal).
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_tree CLONE+valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Probe (d): non-detached + NULL path + no AT_EMPTY_PATH ->
+        // EFAULT (preserved — Linux's user_path_at returns EFAULT
+        // for NULL filename without LOOKUP_EMPTY).  This branch
+        // does NOT pass through gate 3 EPERM.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: open_tree no-CLONE+NULL+no-EMPTY not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // Probe (e): non-detached + NULL path + AT_EMPTY_PATH ->
+        // EPERM (documented limitation: would be success on Linux
+        // with real vfsmount support).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_tree no-CLONE+NULL+EMPTY not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Probe (f): non-detached + valid path -> EPERM (documented
+        // limitation).
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_tree no-CLONE+valid not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Probe (g): high-half-flags truncation (flags=0x1_0000_0000
+        // with low half = 0): Linux's `unsigned, flags` parameter
+        // truncates to 32 bits, so this aliases flags=0 → non-
+        // detached path.  With NULL filename and no AT_EMPTY_PATH,
+        // we expect EFAULT (gate 6, not EPERM).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: open_tree high-half-flags-trunc no-CLONE+NULL not EFAULT");
+            return Err(KernelError::InternalError);
+        }
+        // Probe (h): high-half-flags truncation aliasing CLONE
+        // (flags=0x1_0000_0001): low half = 1 = OPEN_TREE_CLONE,
+        // so detached path → EPERM at gate 3 regardless of path.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::OPEN_TREE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: open_tree high-half-flags-trunc CLONE+NULL not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   open_tree detached may_mount() EPERM-before-path gate (batch 495): OK"
         );
 
         // Batch 492: Linux v6.6 fs/namespace.c::SYSCALL_DEFINE5(

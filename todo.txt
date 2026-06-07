@@ -42681,3 +42681,158 @@ regression for the settable cases).
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
 Probe stamp observed at `build/serial-test.txt:494`.
 
+
+---
+
+## syscall/linux batch 478 — readlink/readlinkat: bufsiz<=0 fires before pointer access
+
+**Linux source — `fs/stat.c` (v6.6), verbatim.**
+
+    SYSCALL_DEFINE3(readlink, const char __user *, path, char __user *, buf,
+                    int, bufsiz)
+    {
+        return do_readlinkat(AT_FDCWD, path, buf, bufsiz);
+    }
+
+    SYSCALL_DEFINE4(readlinkat, int, dfd, const char __user *, pathname,
+                    char __user *, buf, int, bufsiz)
+    {
+        return do_readlinkat(dfd, pathname, buf, bufsiz);
+    }
+
+    static int do_readlinkat(int dfd, const char __user *pathname,
+                             char __user *buf, int bufsiz)
+    {
+        struct path path;
+        int error;
+        int empty = 0;
+        unsigned int lookup_flags = LOOKUP_EMPTY;
+
+        if (bufsiz <= 0)
+            return -EINVAL;
+
+    retry:
+        error = user_path_at_empty(dfd, pathname, lookup_flags, &path, &empty);
+        if (!error) {
+            struct inode *inode = d_backing_inode(path.dentry);
+
+            error = empty ? -ENOENT : -EINVAL;
+            /*
+             * AFS mountpoints allow readlink(2) but are not symlinks
+             */
+            if (d_is_symlink(path.dentry) || inode->i_op->readlink) {
+                error = security_inode_readlink(path.dentry);
+                if (!error) {
+                    touch_atime(&path);
+                    error = vfs_readlink(path.dentry, buf, bufsiz);
+                }
+            }
+            path_put(&path);
+            if (retry_estale(error, lookup_flags)) {
+                lookup_flags |= LOOKUP_REVAL;
+                goto retry;
+            }
+        }
+        return error;
+    }
+
+Two structural facts to mirror:
+  * `bufsiz <= 0 → -EINVAL` is the **first statement** in
+    `do_readlinkat`, before any user-pointer access — so a NULL
+    `pathname` or NULL `buf` combined with a bad `bufsiz` returns
+    EINVAL, not EFAULT.
+  * `vfs_readlink` (the only function that touches `buf`) runs
+    ONLY when `d_is_symlink(path.dentry)` is true.  On a file-tree
+    with no symlinks — ours — the kernel returns the
+    `error = empty ? -ENOENT : -EINVAL` line **without observing
+    `buf`**.  A separate buf-NULL gate is therefore divergent.
+
+**Pre-batch divergences.**
+
+| call                                  | Linux   | pre-batch |
+|---------------------------------------|---------|-----------|
+| `readlink(NULL, NULL, 0)`             | -EINVAL | -EFAULT   |
+| `readlink(NULL, NULL, -1)`            | -EINVAL | -EFAULT   |
+| `readlink(VALID_PATH, NULL, 16)`      | -EINVAL | -EFAULT   |
+| `readlinkat(0, NULL, NULL, 0)`        | -EINVAL | -EFAULT   |
+| `readlinkat(0, VALID_PATH, NULL, 16)` | -EINVAL | -EFAULT   |
+
+Three independent root causes, all fixed in one batch:
+
+  1. **Wrong typing.**  `bufsiz` was held as `usize`, so a C `int`
+     of `-1` (delivered as `0xFFFF_FFFF_FFFF_FFFF` in r8/rcx)
+     became a huge positive and missed the `bufsiz <= 0` gate.
+  2. **Wrong gate order.**  The pathname/buf NULL check ran
+     BEFORE the bufsiz gate, so `(NULL, NULL, 0)` surfaced as
+     EFAULT instead of the EINVAL Linux's first statement
+     returns.
+  3. **Phantom gate.**  A buf-NULL/validate check was added
+     defensively without modelling Linux's actual call graph.
+     `vfs_readlink` never runs on a no-symlink FS, so `buf` is
+     irrelevant to the syscall's return; the extra gate
+     hijacked the "not a symlink" -EINVAL path with -EFAULT.
+
+**Why it matters.**
+
+`readlink(2)` is the canonical "is this a symlink?" probe.
+libc resolvers, GNU coreutils' `realpath`, busybox's `ls -l`
+decoration path, glibc's `getcwd` fallback, Go's
+`os.Readlink`, and CPython's `os.path.realpath` all distinguish
+between three errnos:
+
+  * `-EINVAL` → "not a symlink, fall through to plain-file
+                handling" or "your bufsiz is bogus, drop the
+                whole probe".
+  * `-EFAULT` → "your buffer pointer was bad" (programmer
+                error, aborts iteration).
+  * `-ENOENT` → "path does not exist" (advances iterator).
+
+Pre-batch our EFAULT-on-NULL-buf path made `realpath`-style
+loops calling `readlink(path, fixed_buf, bufsiz)` with a
+transiently-NULL `fixed_buf` (e.g. before lazy buffer
+allocation) abort their resolution loop on what is — under
+Linux — an EINVAL ("not a symlink, you're done").  And the
+bufsiz-after-NULL gate made `readlink(NULL, ..., 0)` shape
+probes (used by some pthread initialisers to confirm syscall
+trap shapes) see EFAULT where Linux returns EINVAL.
+
+**Fix.**  Translator-only.  In `sys_readlink` and
+`sys_readlinkat`:
+
+  * Type `bufsiz` as `i32` (Linux's `int`) via a narrowing
+    cast from `args.arg2 / arg3` — strips x86_64 high-half
+    register garbage and lets negative bufsiz trip the gate.
+  * Move the `bufsiz <= 0 → -EINVAL` check to be the FIRST
+    statement of each handler, ahead of any user-pointer
+    access.
+  * Drop the buf-NULL/validate gate entirely.  Linux's
+    `vfs_readlink` never runs on our no-symlink FS, so buf is
+    never observed.  Keep the pathname NULL/validate gate
+    (matches Linux's `user_path_at_empty` EFAULT arm).
+  * Doc comments rewritten to quote the Linux source verbatim,
+    enumerate the three pre-batch divergences as a table, and
+    cite the three root causes.
+
+**Probes.**  Existing `readlink(_,NULL,_)` probe flipped from
+asserting EFAULT to asserting EINVAL (matches Linux's "not a
+symlink" arm now that the buf-NULL gate is gone).  Four fresh
+probes added:
+  * `readlink(NULL, NULL, 0) → EINVAL` (bufsiz gate first)
+  * `readlink(NULL, NULL, -1) → EINVAL` (i32 typing catches -1)
+  * `readlinkat(0, NULL, NULL, 0) → EINVAL` (same on the AT
+    variant)
+  * `readlinkat(0, VALID_PATH, NULL, 16) → EINVAL` (no
+    buf-NULL gate, falls through to "not a symlink")
+
+Final stamp:
+
+    [syscall/linux]   readlink/readlinkat bufsiz<=0 fires before pointer access (Linux v6.6 fs/stat.c: `if (bufsiz <= 0) return -EINVAL`): OK
+
+Pre-existing positive probes (`readlink(path, buf, 16) →
+EINVAL`, `readlinkat(_, path, buf, 16) → EINVAL`,
+`readlink(_, _, 0) → EINVAL`) all left in place to guard
+against accidental regression of the working paths.
+
+**Build:** `cargo build -p kernel` clean, 41.29s.
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+Probe stamp observed at `build/serial-test.txt:511`.

@@ -12553,7 +12553,7 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
 // We have no symlinks in our FS so the truthful answer for any path is
 // EINVAL (Linux: "named file is not a symbolic link") — and Linux callers
 // reliably handle EINVAL on readlink as "not a symlink, treat as plain
-// file".  Validate the path pointer first so NULL surfaces as EFAULT.
+// file".  Validate the path pointer so NULL/unreadable surfaces as EFAULT.
 //
 // Special case the `/proc/self/exe` path?  Even ld.so probes it and a
 // truthful ENOENT (path does not exist) is acceptable.  We do not want
@@ -12562,43 +12562,181 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `readlink(path, buf, bufsiz)`.
+///
+/// ## Linux source — `fs/stat.c` (v6.6), verbatim
+///
+/// ```c
+/// SYSCALL_DEFINE3(readlink, const char __user *, path, char __user *, buf,
+///                 int, bufsiz)
+/// {
+///     return do_readlinkat(AT_FDCWD, path, buf, bufsiz);
+/// }
+///
+/// static int do_readlinkat(int dfd, const char __user *pathname,
+///                          char __user *buf, int bufsiz)
+/// {
+///     struct path path;
+///     int error;
+///     int empty = 0;
+///     unsigned int lookup_flags = LOOKUP_EMPTY;
+///
+///     if (bufsiz <= 0)
+///         return -EINVAL;
+///
+/// retry:
+///     error = user_path_at_empty(dfd, pathname, lookup_flags, &path,
+///                                &empty);
+///     if (!error) {
+///         struct inode *inode = d_backing_inode(path.dentry);
+///
+///         error = empty ? -ENOENT : -EINVAL;
+///         /*
+///          * AFS mountpoints allow readlink(2) but are not symlinks
+///          */
+///         if (d_is_symlink(path.dentry) || inode->i_op->readlink) {
+///             error = security_inode_readlink(path.dentry);
+///             if (!error) {
+///                 touch_atime(&path);
+///                 error = vfs_readlink(path.dentry, buf, bufsiz);
+///             }
+///         }
+///         path_put(&path);
+///         if (retry_estale(error, lookup_flags)) {
+///             lookup_flags |= LOOKUP_REVAL;
+///             goto retry;
+///         }
+///     }
+///     return error;
+/// }
+/// ```
+///
+/// ## Gate order (matches Linux exactly)
+///
+///   1. `bufsiz <= 0` → -EINVAL.  Fires FIRST, BEFORE any access to
+///      `pathname` or `buf`.  `bufsiz` is C `int` — the x86_64 ABI
+///      delivers only the low 32 bits, so high-half register garbage
+///      must be truncated away.  A C `int` of `-1` (= bufsiz<=0) is
+///      caught here, not later via "huge usize" misinterpretation.
+///   2. `user_path_at_empty(pathname)` → -EFAULT for NULL or
+///      unreadable `pathname`.  This is where bad path pointers
+///      surface.
+///   3. On successful path lookup the "not a symlink" arm returns
+///      -EINVAL **without ever touching `buf`**.  `vfs_readlink` —
+///      the only function that `copy_to_user`s into `buf` — runs
+///      ONLY for actual symlinks.  Our FS has no symlinks, so we
+///      never reach `vfs_readlink`; the `buf` pointer is therefore
+///      never observed by the kernel and a separate buf-NULL gate
+///      is divergent.
+///
+/// ## Pre-batch divergences fixed by this batch
+///
+/// | call                                        | Linux   | pre-batch |
+/// |---------------------------------------------|---------|-----------|
+/// | `readlink(NULL, NULL, 0)`                   | -EINVAL | -EFAULT   |
+/// | `readlink(NULL, NULL, -1)`                  | -EINVAL | -EFAULT   |
+/// | `readlink(VALID_PATH, NULL, 16)`            | -EINVAL | -EFAULT   |
+/// | `readlinkat(0, NULL, NULL, 0)`              | -EINVAL | -EFAULT   |
+/// | `readlinkat(0, VALID_PATH, NULL, 16)`       | -EINVAL | -EFAULT   |
+///
+/// Root causes:
+///   * `bufsiz` held as `usize` rather than `int`, so negative
+///     values became huge positives and missed the EINVAL gate;
+///     the path/buf NULL check then fired ahead of where Linux's
+///     EINVAL lives.
+///   * The path/buf NULL check ran before the bufsiz gate, so
+///     `readlink(NULL, NULL, 0)` surfaced -EFAULT instead of the
+///     -EINVAL Linux's first statement returns.
+///   * The buf-NULL/validate gate was added defensively without
+///     modelling Linux's actual call graph — `vfs_readlink` never
+///     runs on a no-symlink FS, so buf is irrelevant and must not
+///     gate the syscall.
+///
+/// ## Why it matters
+///
+/// `readlink(2)` is the canonical "is this a symlink?" probe.
+/// libc resolvers, GNU coreutils' `realpath`, busybox's
+/// `ls -l` decoration path, glibc's `getcwd` fallback, golang's
+/// `os.Readlink`, and CPython's `os.path.realpath` all distinguish
+/// between three errnos:
+///   * -EINVAL  → "not a symlink, fall through to plain-file
+///                handling" or "your bufsiz is bogus, drop the
+///                whole probe".
+///   * -EFAULT  → "your buffer pointer was bad" (programmer error,
+///                aborts iteration).
+///   * -ENOENT  → "path does not exist" (advances iterator).
+///
+/// Pre-batch our EFAULT-on-NULL-buf path made callers running
+/// `readlink(path, fixed_buf, bufsiz)` with a transiently-NULL
+/// `fixed_buf` (e.g. before lazy buffer allocation) abort their
+/// resolution loop on what is — under Linux — an EINVAL ("not a
+/// symlink, you're done").  And the bufsiz-after-NULL gate made
+/// `readlink(NULL, ..., 0)` probes (used by some pthread
+/// initialisers to confirm syscall trap shapes) see EFAULT where
+/// Linux returns EINVAL.
 fn sys_readlink(args: &SyscallArgs) -> SyscallResult {
-    let path_ptr = args.arg0;
-    let buf_ptr = args.arg1;
-    let bufsiz = args.arg2 as usize;
-    if path_ptr == 0 || buf_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if bufsiz == 0 {
-        // Linux: bufsiz <= 0 -> EINVAL.
+    // Gate 1 (Linux's `if (bufsiz <= 0) return -EINVAL;`):
+    // bufsiz is C `int`; narrow the x86_64-delivered u64 to i32
+    // first so high-half garbage doesn't survive the comparison.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let bufsiz_i32 = args.arg2 as i32;
+    if bufsiz_i32 <= 0 {
         return linux_err(errno::EINVAL);
+    }
+    // Gate 2 (Linux's `user_path_at_empty(pathname, ...)`): NULL or
+    // unreadable pathname -> EFAULT.  Only the first byte needs to
+    // be readable for the EFAULT-on-bad-pointer match; getname_flags
+    // would then walk to PATH_MAX but our skeleton VFS short-
+    // circuits at the "not a symlink" arm before that matters.
+    let path_ptr = args.arg0;
+    if path_ptr == 0 {
+        return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
         return linux_err(linux_errno_for(e));
     }
-    if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, 1) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Gate 3 (the "not a symlink" arm of do_readlinkat): every
+    // successful path lookup on our FS lands here.  vfs_readlink
+    // — the only function that touches `buf` — is gated on
+    // d_is_symlink, which is never true for us.  Return -EINVAL
+    // without observing `buf`, matching Linux's behaviour on a
+    // file-tree with no symlinks.
     linux_err(errno::EINVAL)
 }
 
 /// `readlinkat(dirfd, path, buf, bufsiz)`.
+///
+/// Linux forwards both `readlink` and `readlinkat` to the same
+/// `do_readlinkat` helper (see [`sys_readlink`] for the verbatim
+/// source and full gate-order rationale).  The only difference is
+/// the position of the `bufsiz` argument:
+///
+/// ```c
+/// SYSCALL_DEFINE4(readlinkat, int, dfd, const char __user *, pathname,
+///                 char __user *, buf, int, bufsiz)
+/// {
+///     return do_readlinkat(dfd, pathname, buf, bufsiz);
+/// }
+/// ```
+///
+/// Same gate sequence: bufsiz-EINVAL → pathname-EFAULT →
+/// not-a-symlink-EINVAL.  Same pre-batch divergences, same fix.
 fn sys_readlinkat(args: &SyscallArgs) -> SyscallResult {
-    let path_ptr = args.arg1;
-    let buf_ptr = args.arg2;
-    let bufsiz = args.arg3 as usize;
-    if path_ptr == 0 || buf_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if bufsiz == 0 {
+    // Gate 1: bufsiz <= 0 -> EINVAL (narrowed to i32 per Linux's
+    // `int` declaration).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let bufsiz_i32 = args.arg3 as i32;
+    if bufsiz_i32 <= 0 {
         return linux_err(errno::EINVAL);
+    }
+    // Gate 2: pathname access -> EFAULT.
+    let path_ptr = args.arg1;
+    if path_ptr == 0 {
+        return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
         return linux_err(linux_errno_for(e));
     }
-    if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, 1) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Gate 3: "not a symlink" terminal -EINVAL; buf never observed.
     linux_err(errno::EINVAL)
 }
 
@@ -46731,7 +46869,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // ftruncate / symlink / link / utime family — pointer validation
     // plus principled errno.
     {
-        // readlink(NULL,_,_) -> EFAULT.
+        // readlink(NULL, valid_buf, 16) -> EFAULT.  bufsiz=16>0 passes
+        // Linux's first gate, then user_path_at_empty(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 16, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::READLINK, &a).value
@@ -46739,12 +46878,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: readlink(NULL,_,_) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // readlink(_,NULL,_) -> EFAULT.
+        // Batch 478: readlink(VALID_PATH, NULL, 16) -> EINVAL ("not
+        // a symlink").  Pre-batch we returned EFAULT on the buf NULL
+        // gate; Linux's vfs_readlink — the only function that
+        // touches buf — runs ONLY when d_is_symlink, which is never
+        // true on our no-symlink FS.  buf-NULL is therefore
+        // unobservable on Linux and the call falls through to the
+        // "not a symlink" -EINVAL arm.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 16, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::READLINK, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: readlink(_,NULL,_) not EFAULT");
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlink(path,NULL,16) not EINVAL (batch 478)");
             return Err(KernelError::InternalError);
         }
         // readlink(_,_,0) -> EINVAL.
@@ -46753,6 +46898,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::READLINK, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: readlink(_,_,0) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 478: readlink(NULL, NULL, 0) -> EINVAL.  bufsiz<=0
+        // gate must fire BEFORE the pathname EFAULT gate.  Pre-batch
+        // path_ptr==0 fired first -> EFAULT; post-batch the bufsiz
+        // gate runs first -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::READLINK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlink(NULL,NULL,0) not EINVAL (batch 478)");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 478: readlink(NULL, NULL, -1) -> EINVAL.  -1 fits in
+        // i32 as a negative; bufsiz<=0 catches it.  Pre-batch we
+        // held bufsiz as usize, so -1 became 0xFFFF_FFFF_FFFF_FFFF
+        // (very large positive) and slipped past the gate; path_ptr
+        // NULL then fired -> EFAULT.  Post-batch the i32-typed gate
+        // catches -1 first -> EINVAL.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0,
+            arg2: 0xFFFF_FFFF_FFFF_FFFF, // i32 view = -1
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::READLINK, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlink(NULL,NULL,-1) not EINVAL (batch 478)");
             return Err(KernelError::InternalError);
         }
         // readlink(path, buf, 16) -> EINVAL ("not a symlink").
@@ -46779,6 +46951,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: readlinkat not EINVAL");
             return Err(KernelError::InternalError);
         }
+        // Batch 478: readlinkat(0, NULL, NULL, 0) -> EINVAL.  Same
+        // bufsiz-gate-first contract as readlink.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::READLINKAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlinkat(0,NULL,NULL,0) not EINVAL (batch 478)");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 478: readlinkat(0, VALID_PATH, NULL, 16) -> EINVAL.
+        // No buf-NULL gate; falls through to the "not a symlink" arm.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 16, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::READLINKAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: readlinkat(0,path,NULL,16) not EINVAL (batch 478)");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   readlink/readlinkat bufsiz<=0 fires before pointer access (Linux v6.6 fs/stat.c: `if (bufsiz <= 0) return -EINVAL`): OK"
+        );
 
         // chmod(NULL,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,

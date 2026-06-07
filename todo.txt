@@ -45938,3 +45938,68 @@ OK` (serial-test.txt).
 **Build:** clean (`cargo build -p kernel`, 49.1s).
 
 **Boot test:** PASS @ 26s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 501 — Linux ABI fidelity: io_uring_setup() IORING_SETUP_VALID_FLAGS tightened from 0xF_FFFF to 0x1_FFFF to match Linux v6.6 (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_io_uring_setup`
+IORING_SETUP_VALID_FLAGS const + 5 new boot probes).
+
+**Divergence.** Pre-batch the mask was `0xF_FFFF` (bits 0..=19), a
+forward-compat buffer for Linux 6.11+ flag additions.  Linux v6.6
+`include/uapi/linux/io_uring.h` lines 140-191 defines flag bits only
+up to `IORING_SETUP_NO_SQARRAY = (1U << 16)`, and
+`io_uring/io_uring.c::io_uring_setup` (lines 4074-4083) rejects
+anything outside the explicit OR of the 17 named bits.
+
+**Verbatim Linux v6.6 source** (`io_uring/io_uring.c` lines 4074-4083,
+`https://raw.githubusercontent.com/torvalds/linux/v6.6/io_uring/io_uring.c`):
+
+```c
+if (p.flags & ~(IORING_SETUP_IOPOLL | IORING_SETUP_SQPOLL |
+                IORING_SETUP_SQ_AFF | IORING_SETUP_CQSIZE |
+                IORING_SETUP_CLAMP | IORING_SETUP_ATTACH_WQ |
+                IORING_SETUP_R_DISABLED | IORING_SETUP_SUBMIT_ALL |
+                IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG |
+                IORING_SETUP_SQE128 | IORING_SETUP_CQE32 |
+                IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
+                IORING_SETUP_NO_MMAP | IORING_SETUP_REGISTERED_FD_ONLY |
+                IORING_SETUP_NO_SQARRAY))
+    return -EINVAL;
+```
+
+The named bits span (1U<<0) .. (1U<<16) — mask = 0x1_FFFF.
+
+**Divergence table.**
+
+| flags | Linux v6.6 | Pre-batch 501 |
+|-------|------------|---------------|
+| 1<<16 (NO_SQARRAY) | -> ENOSYS | -> ENOSYS    | last valid v6.6 bit
+| **1<<17** | **EINVAL** | **-> ENOSYS** | forward-compat buffer
+| **1<<18** | **EINVAL** | **-> ENOSYS** | forward-compat buffer
+| **1<<19** | **EINVAL** | **-> ENOSYS** | forward-compat buffer
+| 1<<20 | EINVAL    | EINVAL        | (above buffer, already rejected)
+
+(`-> ENOSYS` means "passes mask, hits our 'kernel hasn't implemented
+io_uring' terminal".)
+
+**Fix.** Replace `IORING_SETUP_VALID_FLAGS = 0xF_FFFF` with
+`IORING_SETUP_VALID_FLAGS = 0x1_FFFF`.  Pure ABI surface alignment;
+no state changes.
+
+**Boot probes added.** Five-probe cluster covering the boundary:
+
+1. `flags=(1<<16)` (NO_SQARRAY, last v6.6 bit) -> ENOSYS (baseline)
+2. `flags=(1<<17)` -> EINVAL (was ENOSYS)
+3. `flags=(1<<18)` -> EINVAL (was ENOSYS)
+4. `flags=(1<<19)` -> EINVAL (was ENOSYS)
+5. `flags=(1<<20)` -> EINVAL (upper bound preserved)
+   + baseline `flags=0` -> ENOSYS (regression guard)
+
+Summary stamp: `io_uring_setup VALID_FLAGS=0x1_FFFF (v6.6,
+batch 501): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 53.8s).
+
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

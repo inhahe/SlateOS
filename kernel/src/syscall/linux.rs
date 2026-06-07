@@ -14999,9 +14999,33 @@ fn sys_io_uring_setup(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     // Gate 3: flags must be a subset of the kernel's known set.
-    // Linux 6.10 occupies bits 0..=16; we cap at bit 19 (0xF_FFFF) so
-    // 6.11+ flags don't pre-reject here while still flagging trash.
-    const IORING_SETUP_VALID_FLAGS: u32 = 0xF_FFFF;
+    //
+    // ## Batch 501 — tighten mask from 0xF_FFFF to 0x1_FFFF (v6.6 set)
+    //
+    // Linux v6.6 `io_uring/io_uring.c::io_uring_setup` (lines 4074-4083):
+    //   if (p.flags & ~(IORING_SETUP_IOPOLL | IORING_SETUP_SQPOLL |
+    //                   IORING_SETUP_SQ_AFF | IORING_SETUP_CQSIZE |
+    //                   IORING_SETUP_CLAMP | IORING_SETUP_ATTACH_WQ |
+    //                   IORING_SETUP_R_DISABLED | IORING_SETUP_SUBMIT_ALL |
+    //                   IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG |
+    //                   IORING_SETUP_SQE128 | IORING_SETUP_CQE32 |
+    //                   IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
+    //                   IORING_SETUP_NO_MMAP | IORING_SETUP_REGISTERED_FD_ONLY |
+    //                   IORING_SETUP_NO_SQARRAY))
+    //       return -EINVAL;
+    //
+    // `include/uapi/linux/io_uring.h` (lines 140-191): flags occupy
+    // bits 0..=16, with IORING_SETUP_NO_SQARRAY = (1U << 16) as the
+    // highest defined bit.  The v6.6 mask is exactly 0x1_FFFF.
+    //
+    // Pre-batch we cap'd at bit 19 (0xF_FFFF) as a forward-compat
+    // buffer for 6.11+ flags.  Translator-only directive overrides
+    // forward-compat: match v6.6's CURRENT surface.
+    //
+    // Divergence: flags=(1<<17), (1<<18), (1<<19) — pre-batch passed
+    // the lax mask and reached the ENOSYS terminal; Linux v6.6
+    // rejects with EINVAL at this gate.
+    const IORING_SETUP_VALID_FLAGS: u32 = 0x1_FFFF;
     if flags & !IORING_SETUP_VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -50485,6 +50509,88 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         core::hint::black_box(&entries_params);
         serial_println!(
             "[syscall/linux]   io_uring_setup entries u32-truncation (high-half ignored): OK"
+        );
+
+        // Batch 501: io_uring_setup IORING_SETUP_VALID_FLAGS tightened
+        // from 0xF_FFFF (bits 0..=19, forward-compat) to 0x1_FFFF
+        // (bits 0..=16, exact v6.6 set per
+        // include/uapi/linux/io_uring.h lines 140-191 +
+        // io_uring/io_uring.c::io_uring_setup lines 4074-4083).
+        //
+        // (e) flags=(1<<16) = 0x10000 (NO_SQARRAY, highest v6.6 bit) ->
+        //     passes mask, terminal ENOSYS.  Baseline preserved.
+        let mut p501 = [0u8; 120];
+        let p501_ptr = p501.as_mut_ptr() as u64;
+        p501[8..12].copy_from_slice(&(1u32 << 16).to_ne_bytes());
+        core::hint::black_box(&p501);
+        let a = SyscallArgs {
+            arg0: 8, arg1: p501_ptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(flags=NO_SQARRAY=1<<16) not ENOSYS (batch 501)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (f) flags=(1<<17) -> EINVAL post-batch (was ENOSYS: bit 17 was
+        //     under the 0xF_FFFF forward-compat buffer and passed the
+        //     mask).
+        p501[8..12].copy_from_slice(&(1u32 << 17).to_ne_bytes());
+        core::hint::black_box(&p501);
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(flags=1<<17) not EINVAL (batch 501)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (g) flags=(1<<18) -> EINVAL post-batch.
+        p501[8..12].copy_from_slice(&(1u32 << 18).to_ne_bytes());
+        core::hint::black_box(&p501);
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(flags=1<<18) not EINVAL (batch 501)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (h) flags=(1<<19) -> EINVAL post-batch.
+        p501[8..12].copy_from_slice(&(1u32 << 19).to_ne_bytes());
+        core::hint::black_box(&p501);
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(flags=1<<19) not EINVAL (batch 501)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (i) flags=(1<<20) -> EINVAL (was already rejected pre-batch,
+        //     confirms upper bound preserved).
+        p501[8..12].copy_from_slice(&(1u32 << 20).to_ne_bytes());
+        core::hint::black_box(&p501);
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(flags=1<<20) not EINVAL (batch 501 upper)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Reset and verify baseline-zero flags still falls through to
+        // ENOSYS (catches regressions that would zero the mask entirely).
+        p501[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        core::hint::black_box(&p501);
+        if dispatch_linux(nr::IO_URING_SETUP, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_setup(flags=0) not ENOSYS (batch 501 baseline)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        core::hint::black_box(&p501);
+        serial_println!(
+            "[syscall/linux]   io_uring_setup VALID_FLAGS=0x1_FFFF (v6.6, batch 501): OK"
         );
 
         // io_uring_enter — input validation + EBADF (no ring fds exist).

@@ -12419,22 +12419,42 @@ fn validate_user_str(ptr: u64) -> crate::error::KernelResult<()> {
     crate::mm::user::validate_user_read(ptr, 1)
 }
 
-/// `mkdir(path, mode)` — refuse with EROFS after pointer validation.
+/// `mkdir(path, mode)` — Linux gate ladder.
+///
+/// `fs/namei.c::SYSCALL_DEFINE2(mkdir)` dispatches to
+/// `do_mkdirat(AT_FDCWD, getname(pathname), mode)`.  `getname()`
+/// passes `flags=0` (no `LOOKUP_EMPTY`), so empty pathname →
+/// `-ENOENT` per fs/namei.c v6.6 line 196 (`!len &&
+/// !LOOKUP_EMPTY → -ENOENT`).  Pre-batch (480 and earlier) we ran
+/// `validate_user_str` (pointer-only check, no first-byte read)
+/// and returned `EROFS` for both empty and non-empty paths,
+/// squashing the empty-path ENOENT.  Batch 482 lifts the empty
+/// check ahead of the EROFS terminal, mirroring the batch-481
+/// symlink/link fix in the same idiom (`check_path_str_nonempty`).
+///
+/// **Why it matters:** glibc's `mkdir(3)` propagates the errno
+/// verbatim; programs that pass empty paths (build systems
+/// computing prefixes from substring slices, shell loops over
+/// directory names that drop the leading slash, configure scripts
+/// probing whether the FS will accept `mkdir("")` as a sentinel)
+/// report "No such file or directory" on Linux but
+/// "Read-only file system" on our pre-batch translator — the
+/// latter is actively misleading (it suggests the mount is the
+/// problem when in fact the caller's input is malformed).
 fn sys_mkdir(args: &SyscallArgs) -> SyscallResult {
-    match validate_user_str(args.arg0) {
-        Ok(()) => linux_err(errno::EROFS),
-        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
-        Err(e) => linux_err(linux_errno_for(e)),
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
+    linux_err(errno::EROFS)
 }
 
-/// `mkdirat(dirfd, path, mode)` — same as mkdir.
+/// `mkdirat(dirfd, path, mode)` — same Linux contract as `sys_mkdir`,
+/// see that body for empty-path ENOENT rationale (batch 482).
 fn sys_mkdirat(args: &SyscallArgs) -> SyscallResult {
-    match validate_user_str(args.arg1) {
-        Ok(()) => linux_err(errno::EROFS),
-        Err(KernelError::InvalidAddress) if args.arg1 == 0 => linux_err(errno::EFAULT),
-        Err(e) => linux_err(linux_errno_for(e)),
+    if let Err(e) = check_path_str_nonempty(args.arg1) {
+        return linux_err(e);
     }
+    linux_err(errno::EROFS)
 }
 
 /// `rmdir(path)` — refuse with ENOENT after pointer validation.
@@ -46572,6 +46592,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // mkdir / mkdirat / rmdir / unlink / unlinkat / rename family —
     // pointer validation plus principled errno.
     {
+        // Batch 482: mkdir/mkdirat empty-path -> ENOENT.  Plant
+        // kernel-resident buffers so the new check_path_str_nonempty's
+        // first-byte read targets mapped memory (same retrofit batch
+        // 481 did for symlink/link and 447 for truncate).
+        let mk_nonempty: [u8; 2] = *b"d\0";
+        let mk_empty: [u8; 1] = [0u8];
+        core::hint::black_box(&mk_nonempty);
+        core::hint::black_box(&mk_empty);
+        let mk_ptr = mk_nonempty.as_ptr() as u64;
+        let mk_empty_ptr = mk_empty.as_ptr() as u64;
         // mkdir(NULL,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -46580,8 +46610,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mkdir(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // mkdir(0x1000,_) -> EROFS (validate succeeds in kernel context).
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+        // mkdir(empty,_) -> ENOENT (batch 482; new).
+        let a = SyscallArgs { arg0: mk_empty_ptr, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKDIR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mkdir(empty) not ENOENT ({})",
+                dispatch_linux(nr::MKDIR, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mkdir(valid,_) -> EROFS.
+        let a = SyscallArgs { arg0: mk_ptr, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MKDIR, &a).value
             != -i64::from(errno::EROFS) {
@@ -46596,14 +46637,28 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mkdirat(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // mkdirat(_, 0x1000, _) -> EROFS.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+        // mkdirat(_, empty, _) -> ENOENT (batch 482; new).
+        let a = SyscallArgs { arg0: 0, arg1: mk_empty_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKDIRAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mkdirat(empty) not ENOENT ({})",
+                dispatch_linux(nr::MKDIRAT, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mkdirat(_, valid, _) -> EROFS.
+        let a = SyscallArgs { arg0: 0, arg1: mk_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MKDIRAT, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: mkdirat not EROFS");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   mkdir/mkdirat empty-path -> ENOENT (Linux v6.6 fs/namei.c::getname_flags: `!len && !(flags & LOOKUP_EMPTY)` -> -ENOENT, ahead of mkdirat's EROFS terminal): OK"
+        );
         // rmdir(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

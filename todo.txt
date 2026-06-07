@@ -43370,3 +43370,107 @@ at `build/serial-test.txt:515`.
 the first attempt tripped known-issue #1, the intermittent RCU
 self-test hang documented in `known-issues.md`, unrelated to
 this batch).
+
+---
+
+## 482. Linux ABI fidelity batch — mkdir/mkdirat empty-path → ENOENT (2026-06-07)
+
+### Linux v6.6 contract (verbatim, `fs/namei.c`)
+
+```c
+SYSCALL_DEFINE3(mkdirat, int, dfd, const char __user *, pathname, umode_t, mode)
+{
+    return do_mkdirat(dfd, getname(pathname), mode);
+}
+
+SYSCALL_DEFINE2(mkdir, const char __user *, pathname, umode_t, mode)
+{
+    return do_mkdirat(AT_FDCWD, getname(pathname), mode);
+}
+```
+
+Same `getname()` family as the batch-481 symlink/link chain:
+`getname_flags(filename, 0, NULL)` returns `-ENOENT` for an
+empty path because no `LOOKUP_EMPTY` is requested.
+
+### Divergence (pre-batch vs Linux)
+
+| call             | Linux v6.6 | pre-batch | post-batch |
+|------------------|------------|-----------|------------|
+| `mkdir(NULL,_)`  | EFAULT     | EFAULT    | EFAULT     |
+| `mkdir("",_)`    | ENOENT     | EROFS     | ENOENT     |
+| `mkdir(valid,_)` | EROFS      | EROFS     | EROFS      |
+| `mkdirat(_, "")` | ENOENT     | EROFS     | ENOENT     |
+
+### Root cause
+
+Pre-batch `sys_mkdir` / `sys_mkdirat` ran `validate_user_str`
+(pointer-only) and went straight to the EROFS terminal, never
+reading the first byte to distinguish empty from non-empty
+paths.  Same shape as the pre-481 symlink/link stubs.
+
+### Why it matters
+
+`getname()`'s `-ENOENT` for empty input is the diagnostic
+hand-off for "your input is malformed" vs "the FS won't take
+it."  Pre-batch EROFS-for-empty actively misleads:
+
+  - **build systems** computing prefixes from `dirname()` slices
+    that occasionally produce `""` would conclude the build
+    output mount is sealed, when in fact a path-computation bug
+    upstream produced an empty argument.
+  - **shell scripts** doing `mkdir "$prefix/$name"` where
+    `$prefix` and `$name` both happen to be empty saw
+    "Read-only file system" — a confusing, wrong cause attribution.
+  - **glibc/LTP/xfstests** compliance: `LTP mkdir01` and `mkdirat01`
+    assert ENOENT for empty paths.  Pre-batch we'd fail.
+  - **configure-script probes** that test `mkdir("")` as a sentinel
+    for distinguishing "syscall implemented" from "syscall stubbed"
+    saw EROFS where every Linux returns ENOENT.
+
+### Fix
+
+Translator-only.  Reused the `check_path_str_nonempty()` helper
+introduced in batch 481.  `sys_mkdir` and `sys_mkdirat` now
+route their path argument through the helper before the EROFS
+terminal; the helper returns EFAULT for NULL/unmapped, ENOENT
+for empty (first byte == NUL), Ok otherwise.
+
+The previously-considered "do this for rmdir/unlink/rename
+too" alternative is unnecessary: those syscalls already
+terminate in ENOENT, so empty-path ENOENT and valid-path
+ENOENT are observationally identical to the caller — no
+Linux divergence to fix.  mkdir/mkdirat are the only members
+of the family whose EROFS terminal differed from the
+empty-path ENOENT response, so they're the only members that
+needed lifting.
+
+### Probe-buffer retrofit
+
+Same retrofit as batch 481 (and batch 447 before it): planted
+`mk_nonempty = b"d\0"` and `mk_empty = b"\0"` byte arrays;
+passed their `.as_ptr() as u64` to the probes.  The legacy
+`0x1000` sentinel for the EROFS probe is now `mk_ptr`; new
+ENOENT probes use `mk_empty_ptr`.
+
+### Probes
+
+Four pre-existing probes preserved (two retrofitted to buffer
+pointer), two new probes added, one stamp:
+
+  - `mkdir(NULL, _) → EFAULT`        — unchanged.
+  - `mkdir(empty, _) → ENOENT`       — NEW.
+  - `mkdir(valid, _) → EROFS`        — retrofitted.
+  - `mkdirat(_, NULL, _) → EFAULT`   — unchanged.
+  - `mkdirat(_, empty, _) → ENOENT`  — NEW.
+  - `mkdirat(_, valid, _) → EROFS`   — retrofitted.
+
+Final stamp at `build/serial-test.txt:508`:
+
+  `[syscall/linux]   mkdir/mkdirat empty-path -> ENOENT
+   (Linux v6.6 fs/namei.c::getname_flags: \`!len && !(flags &
+   LOOKUP_EMPTY)\` -> -ENOENT, ahead of mkdirat's EROFS
+   terminal): OK`
+
+**Build:** `cargo build -p kernel` clean, 44.14s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

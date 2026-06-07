@@ -1905,30 +1905,35 @@ fn alloc_order_inner(order: usize) -> KernelResult<PhysFrame> {
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
 
     // First attempt — fast path.
-    {
+    //
+    // IRQ-safety: same rationale as `stats()` — softirq/timer-tick paths
+    // can re-enter the allocator on the same CPU.  See TD1 in
+    // known-issues.md.  Each lock-acquire scope is wrapped individually
+    // so IRQs are re-enabled between attempts (so reclaim/compact/OOM
+    // can run normally, including waking other tasks).
+    let first: KernelResult<Option<u64>> = crate::cpu::without_interrupts(|| {
         let mut guard = allocator.lock();
         match guard.alloc_inner(order) {
-            Ok(addr) => {
-                crate::ktrace::record(
-                    crate::ktrace::Category::Mm,
-                    crate::ktrace::event::FRAME_ALLOC,
-                    addr,
-                    order as u64,
-                );
-                // Profiling: detailed alloc event in dedicated ring buffer
-                // (zero-cost when alloc_trace is disabled).
-                super::alloc_trace::record_alloc_block(
-                    (addr / FRAME_SIZE as u64) as u32,
-                    super::frame_owner::Owner::Unknown,
-                    order as u8,
-                );
-                return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
-            }
-            Err(KernelError::OutOfMemory) => {
-                // Fall through to reclamation.
-            }
-            Err(e) => return Err(e),
+            Ok(addr) => Ok(Some(addr)),
+            Err(KernelError::OutOfMemory) => Ok(None),
+            Err(e) => Err(e),
         }
+    });
+    if let Some(addr) = first? {
+        crate::ktrace::record(
+            crate::ktrace::Category::Mm,
+            crate::ktrace::event::FRAME_ALLOC,
+            addr,
+            order as u64,
+        );
+        // Profiling: detailed alloc event in dedicated ring buffer
+        // (zero-cost when alloc_trace is disabled).
+        super::alloc_trace::record_alloc_block(
+            (addr / FRAME_SIZE as u64) as u32,
+            super::frame_owner::Owner::Unknown,
+            order as u8,
+        );
+        return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
     }
     // Allocator lock released before reclamation (lock ordering:
     // SWAP → RECLAIM → page table → frame allocator).
@@ -1955,15 +1960,19 @@ fn alloc_order_inner(order: usize) -> KernelResult<PhysFrame> {
             reclaimed, needed, order
         );
         // Retry allocation after reclamation.
-        let mut guard = allocator.lock();
-        match guard.alloc_inner(order) {
-            Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
-            Err(KernelError::OutOfMemory) => {
-                // Reclaimed pages weren't enough or couldn't be coalesced.
-                // Fall through to OOM handler.
+        let retry: KernelResult<Option<u64>> = crate::cpu::without_interrupts(|| {
+            let mut guard = allocator.lock();
+            match guard.alloc_inner(order) {
+                Ok(addr) => Ok(Some(addr)),
+                Err(KernelError::OutOfMemory) => Ok(None),
+                Err(e) => Err(e),
             }
-            Err(e) => return Err(e),
+        });
+        if let Some(addr) = retry? {
+            return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
         }
+        // Reclaimed pages weren't enough or couldn't be coalesced.
+        // Fall through to OOM handler.
     }
 
     // For high-order allocations, try memory compaction before OOM.
@@ -1976,15 +1985,19 @@ fn alloc_order_inner(order: usize) -> KernelResult<PhysFrame> {
                 "compaction: migrated={} pages, retrying order={}",
                 migrated, order
             );
-            let mut guard = allocator.lock();
-            match guard.alloc_inner(order) {
-                Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
-                Err(KernelError::OutOfMemory) => {
-                    // Compaction didn't produce a contiguous block.
-                    // Fall through to OOM handler.
+            let retry: KernelResult<Option<u64>> = crate::cpu::without_interrupts(|| {
+                let mut guard = allocator.lock();
+                match guard.alloc_inner(order) {
+                    Ok(addr) => Ok(Some(addr)),
+                    Err(KernelError::OutOfMemory) => Ok(None),
+                    Err(e) => Err(e),
                 }
-                Err(e) => return Err(e),
+            });
+            if let Some(addr) = retry? {
+                return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
             }
+            // Compaction didn't produce a contiguous block.
+            // Fall through to OOM handler.
         }
     }
 
@@ -1996,8 +2009,10 @@ fn alloc_order_inner(order: usize) -> KernelResult<PhysFrame> {
     }
 
     // OOM handler freed memory — retry one more time.
-    let mut guard = allocator.lock();
-    let addr = guard.alloc_inner(order)?;
+    let addr = crate::cpu::without_interrupts(|| {
+        let mut guard = allocator.lock();
+        guard.alloc_inner(order)
+    })?;
     PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)
 }
 
@@ -2033,15 +2048,20 @@ fn alloc_order_constrained_inner(order: usize, max_addr: u64) -> KernelResult<Ph
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
 
     // First attempt.
-    {
+    //
+    // IRQ-safety: see `alloc_order_inner` — same rationale.  Each lock
+    // scope is wrapped individually so reclaim/OOM can run with IRQs
+    // enabled between attempts.
+    let first: KernelResult<Option<u64>> = crate::cpu::without_interrupts(|| {
         let mut guard = allocator.lock();
         match guard.alloc_inner_constrained(order, max_addr) {
-            Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
-            Err(KernelError::OutOfMemory) => {
-                // Fall through to reclamation.
-            }
-            Err(e) => return Err(e),
+            Ok(addr) => Ok(Some(addr)),
+            Err(KernelError::OutOfMemory) => Ok(None),
+            Err(e) => Err(e),
         }
+    });
+    if let Some(addr) = first? {
+        return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
     }
 
     // Medium pressure notification for direct reclaim.
@@ -2059,14 +2079,18 @@ fn alloc_order_constrained_inner(order: usize, max_addr: u64) -> KernelResult<Ph
             "direct reclaim (constrained): freed={} pages, needed={}, order={}, max_addr={:#x}",
             reclaimed, needed, order, max_addr
         );
-        let mut guard = allocator.lock();
-        match guard.alloc_inner_constrained(order, max_addr) {
-            Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
-            Err(KernelError::OutOfMemory) => {
-                // Fall through to OOM handler.
+        let retry: KernelResult<Option<u64>> = crate::cpu::without_interrupts(|| {
+            let mut guard = allocator.lock();
+            match guard.alloc_inner_constrained(order, max_addr) {
+                Ok(addr) => Ok(Some(addr)),
+                Err(KernelError::OutOfMemory) => Ok(None),
+                Err(e) => Err(e),
             }
-            Err(e) => return Err(e),
+        });
+        if let Some(addr) = retry? {
+            return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
         }
+        // Fall through to OOM handler.
     }
 
     // Last resort: OOM handler.
@@ -2075,8 +2099,10 @@ fn alloc_order_constrained_inner(order: usize, max_addr: u64) -> KernelResult<Ph
         return Err(KernelError::OutOfMemory);
     }
 
-    let mut guard = allocator.lock();
-    let addr = guard.alloc_inner_constrained(order, max_addr)?;
+    let addr = crate::cpu::without_interrupts(|| {
+        let mut guard = allocator.lock();
+        guard.alloc_inner_constrained(order, max_addr)
+    })?;
     PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)
 }
 
@@ -2259,8 +2285,13 @@ unsafe fn free_order_inner(frame: PhysFrame, order: usize) -> KernelResult<()> {
     );
 
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
-    let mut guard = allocator.lock();
-    guard.free_inner(frame.addr(), order)
+    // IRQ-safety: same rationale as `stats()` — softirq/timer-tick paths
+    // can re-enter the allocator on the same CPU.  See TD1 in
+    // known-issues.md.
+    crate::cpu::without_interrupts(|| {
+        let mut guard = allocator.lock();
+        guard.free_inner(frame.addr(), order)
+    })
 }
 
 /// Check if a physical frame falls within the allocator's managed range.
@@ -2277,9 +2308,12 @@ pub fn is_allocator_owned(frame: PhysFrame) -> bool {
     let Some(allocator) = ALLOCATOR.get() else {
         return false;
     };
-    let guard = allocator.lock();
-    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
-    idx < guard.total_frames
+    // IRQ-safety: see `stats()` and TD1 in known-issues.md.
+    crate::cpu::without_interrupts(|| {
+        let guard = allocator.lock();
+        let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+        idx < guard.total_frames
+    })
 }
 
 /// Get a snapshot of the current allocator statistics.
@@ -2362,47 +2396,51 @@ pub fn validate_free_lists() -> Result<(), (usize, &'static str)> {
     let Some(allocator) = ALLOCATOR.get() else {
         return Ok(());
     };
-    let guard = allocator.lock();
+    // IRQ-safety: see `stats()` and TD1 in known-issues.md.
+    crate::cpu::without_interrupts(|| {
+        let guard = allocator.lock();
 
-    for order in 0..=MAX_ORDER {
-        let expected = guard.free_lists[order].count;
-        // Cap traversal at expected + 1 so a cycle is caught instead of
-        // looping forever.
-        let cap = expected.saturating_add(1);
-        let mut addr = guard.free_lists[order].head;
-        let mut prev = 0u64;
-        let mut seen = 0usize;
+        for order in 0..=MAX_ORDER {
+            let expected = guard.free_lists[order].count;
+            // Cap traversal at expected + 1 so a cycle is caught instead
+            // of looping forever.
+            let cap = expected.saturating_add(1);
+            let mut addr = guard.free_lists[order].head;
+            let mut prev = 0u64;
+            let mut seen = 0usize;
 
-        while addr != 0 {
-            if seen > cap {
-                return Err((order, "cycle or count underflow (traversed past count)"));
+            while addr != 0 {
+                if seen > cap {
+                    return Err((order, "cycle or count underflow (traversed past count)"));
+                }
+                let idx = guard.frame_index(addr);
+                if idx >= guard.total_frames {
+                    return Err((order, "node address out of managed range"));
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                if guard.get_info(idx) != order as u8 {
+                    return Err((order, "node page_info order mismatch"));
+                }
+                let node_ptr = guard.phys_to_virt(addr).cast::<FreeNode>();
+                // SAFETY: addr is a free block on this order's list; the
+                // HHDM mapping covers it and the lock grants exclusive
+                // access.
+                let node = unsafe { &*node_ptr };
+                if node.prev != prev {
+                    return Err((order, "broken prev back-link"));
+                }
+                prev = addr;
+                addr = node.next;
+                seen = seen.saturating_add(1);
             }
-            let idx = guard.frame_index(addr);
-            if idx >= guard.total_frames {
-                return Err((order, "node address out of managed range"));
+
+            if seen != expected {
+                return Err((order, "node count disagrees with FreeList::count"));
             }
-            #[allow(clippy::cast_possible_truncation)]
-            if guard.get_info(idx) != order as u8 {
-                return Err((order, "node page_info order mismatch"));
-            }
-            let node_ptr = guard.phys_to_virt(addr).cast::<FreeNode>();
-            // SAFETY: addr is a free block on this order's list; the HHDM
-            // mapping covers it and the lock grants exclusive access.
-            let node = unsafe { &*node_ptr };
-            if node.prev != prev {
-                return Err((order, "broken prev back-link"));
-            }
-            prev = addr;
-            addr = node.next;
-            seen = seen.saturating_add(1);
         }
 
-        if seen != expected {
-            return Err((order, "node count disagrees with FreeList::count"));
-        }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2422,12 +2460,15 @@ pub fn refcount(frame: PhysFrame) -> u16 {
     let Some(allocator) = ALLOCATOR.get() else {
         return 0;
     };
-    let guard = allocator.lock();
-    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
-    if idx >= guard.page_info_len {
-        return 0;
-    }
-    guard.get_refcount(idx)
+    // IRQ-safety: see `stats()` and TD1 in known-issues.md.
+    crate::cpu::without_interrupts(|| {
+        let guard = allocator.lock();
+        let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+        if idx >= guard.page_info_len {
+            return 0;
+        }
+        guard.get_refcount(idx)
+    })
 }
 
 /// Increment the reference count of a physical frame.
@@ -2444,18 +2485,21 @@ pub fn refcount(frame: PhysFrame) -> u16 {
 #[allow(clippy::cast_possible_truncation)]
 pub unsafe fn ref_inc(frame: PhysFrame) -> KernelResult<()> {
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
-    let mut guard = allocator.lock();
-    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
-    if idx >= guard.page_info_len {
-        return Err(KernelError::InvalidAddress);
-    }
-    let rc = guard.get_refcount(idx);
-    if rc == 0 {
-        // Frame is not allocated — can't increment.
-        return Err(KernelError::InvalidArgument);
-    }
-    guard.set_refcount(idx, rc.saturating_add(1));
-    Ok(())
+    // IRQ-safety: see `stats()` and TD1 in known-issues.md.
+    crate::cpu::without_interrupts(|| {
+        let mut guard = allocator.lock();
+        let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+        if idx >= guard.page_info_len {
+            return Err(KernelError::InvalidAddress);
+        }
+        let rc = guard.get_refcount(idx);
+        if rc == 0 {
+            // Frame is not allocated — can't increment.
+            return Err(KernelError::InvalidArgument);
+        }
+        guard.set_refcount(idx, rc.saturating_add(1));
+        Ok(())
+    })
 }
 
 /// Decrement the reference count of a physical frame without freeing.
@@ -2474,18 +2518,21 @@ pub unsafe fn ref_inc(frame: PhysFrame) -> KernelResult<()> {
 #[allow(clippy::cast_possible_truncation)]
 pub unsafe fn ref_dec(frame: PhysFrame) -> KernelResult<u16> {
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
-    let mut guard = allocator.lock();
-    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
-    if idx >= guard.page_info_len {
-        return Err(KernelError::InvalidAddress);
-    }
-    let rc = guard.get_refcount(idx);
-    if rc == 0 {
-        return Err(KernelError::InvalidArgument);
-    }
-    let new_rc = rc.saturating_sub(1);
-    guard.set_refcount(idx, new_rc);
-    Ok(new_rc)
+    // IRQ-safety: see `stats()` and TD1 in known-issues.md.
+    crate::cpu::without_interrupts(|| {
+        let mut guard = allocator.lock();
+        let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+        if idx >= guard.page_info_len {
+            return Err(KernelError::InvalidAddress);
+        }
+        let rc = guard.get_refcount(idx);
+        if rc == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let new_rc = rc.saturating_sub(1);
+        guard.set_refcount(idx, new_rc);
+        Ok(new_rc)
+    })
 }
 
 // ---------------------------------------------------------------------------

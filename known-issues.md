@@ -207,6 +207,39 @@ showing all four sub-tests OK and `Self-test PASSED`.  Post-fix
 30-run soak: 29/30 pass with zero softirq self-test failures (the
 single failure was in `frag_history` test 6 — see F4 below).
 
+### F5. `frame::ALLOCATOR` lock uniformly IRQ-safe — FIXED 2026-06-07
+
+**Where:** `kernel/src/mm/frame.rs` — all 13 remaining `allocator.lock()`
+acquisition sites outside `pcpu_refill`/`pcpu_drain` (which are
+already called with IRQs off) and `try_stats()` (panic-only).
+
+**Why this was technical debt (was TD1):** F4 made `stats()`
+IRQ-safe but left `alloc_*`, `free_*`, `is_allocator_owned`,
+`refcount`, `ref_inc`, `ref_dec`, and `validate_free_lists` taking
+the lock without wrapping in `without_interrupts`.  No
+currently-registered softirq path took the allocator lock (audited
+2026-06-07), so there was no exploitable deadlock — but the next
+softirq subsystem that touched the allocator (kswapd periodic
+reclaim, RCU-deferred page free, memory-pressure tick) would have
+silently re-opened the same race that F4 closed.
+
+**Fix:** Wrap each acquisition site in
+`crate::cpu::without_interrupts(...)` at the call site, matching
+the F1/F3/F4/workqueue pattern.  The multi-attempt `alloc_order_inner`
+and `alloc_order_constrained_inner` paths use a per-attempt
+without_interrupts so IRQs are re-enabled between attempts (so
+reclaim/compact/OOM can run normally and wake other tasks).  Did
+NOT wrap `pcpu_refill` / `pcpu_drain` — their callers already run
+with IRQs disabled and the function-level comments document this
+invariant.  Used inline wraps rather than a helper because the
+sites have varied shape (KernelResult returns, multi-attempt retry
+loops, value vs Option returns) — a `with_allocator` helper would
+have required `FnOnce(&mut BuddyAllocator) -> R` plumbing at every
+site, which is more code churn than the wraps themselves.
+
+**Verification:** Post-fix 30/30 boot tests pass.  Zero allocator-lock
+hangs observed across this soak.
+
 ### F4. frag_history self-test test 6 hangs in sample() loop — FIXED 2026-06-07
 
 **Where:** `kernel/src/mm/frag_history.rs` — `self_test()` test 6
@@ -248,38 +281,4 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD1. `frame::ALLOCATOR` lock acquisitions are not uniformly IRQ-safe
-
-**Where:** `kernel/src/mm/frame.rs` — 16 sites take `allocator.lock()`
-(grep `allocator.lock` in the file).  Only `stats()` (F4) and the
-panic-handler `try_stats()` are currently IRQ-safe.  The other 14
-sites — `alloc_*`, `free_*`, `is_allocator_owned`, `refcount`,
-`validate_free_lists`, etc. — take the lock without wrapping in
-`without_interrupts`.
-
-**Why this is debt, not an active bug:** A 2026-06-07 audit of every
-softirq sub-handler reachable from `softirq.rs::handle_timer()`
-showed none currently take `ALLOCATOR.lock` (the Explore-traced
-paths: sched wake processing, IPC timer expirations, ktimer→workqueue
-submission, cache writeback, watchdog, kstat, loadavg, irq_storm,
-irqbalance, RCU tick, cpufreq, thermal).  So there is no
-*currently-exploitable* deadlock on alloc/free.
-
-**Why this is still worth fixing:** As soon as any new softirq
-subsystem touches the allocator — kswapd periodic reclaim, RCU-deferred
-page free, memory-pressure-driven reclaim ticks, scrub completion —
-the deadlock window opens silently.  Future-proofing means making
-ALLOCATOR an IRQ-safe lock at the type level, not relying on
-inspecting every caller.
-
-**Proper fix:**
-  1. Define a small helper, e.g.
-     `fn with_allocator<F, R>(f: F) -> Option<R> where F: FnOnce(&mut BuddyAllocator) -> R`,
-     that wraps `ALLOCATOR.get()? . lock()` inside
-     `without_interrupts(...)`.
-  2. Convert all 16 `let mut guard = allocator.lock();` sites to use
-     the helper.
-  3. Spot-check that no site needs to hold the lock across a code
-     path that itself needs IRQs on (none should — the lock is a
-     fast-path buddy-allocator lock).
-  4. Re-run boot test + 30-run soak to confirm no regression.
+_(No outstanding technical debt — TD1 closed as F5 on 2026-06-07.)_

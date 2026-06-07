@@ -43040,3 +43040,146 @@ over-restriction at the ABI boundary).
 **Build:** `cargo build -p kernel` clean, 49.97s.
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
 Probe stamp observed at `build/serial-test.txt:486`.
+
+---
+
+## 480. Linux ABI fidelity batch — `sys_getcwd` ERANGE-vs-EINVAL/EFAULT (2026-06-07)
+
+### Linux v6.6 contract (verbatim, `fs/d_path.c`)
+
+```c
+SYSCALL_DEFINE2(getcwd, char __user *, buf, unsigned long, size)
+{
+    ...
+    len = PATH_MAX - b.len;
+    if (unlikely(len > PATH_MAX))   error = -ENAMETOOLONG;
+    else if (unlikely(len > size))  error = -ERANGE;
+    else if (copy_to_user(buf, b.buf, len))
+                                    error = -EFAULT;
+    else                            error = len;
+    __putname(page);
+    return error;
+}
+```
+
+There is **no early NULL-buf gate and no early size==0 gate.**
+Linux runs ENAMETOOLONG → ERANGE → EFAULT in that fixed order.
+For any non-empty cwd, `len >= 2` (includes the trailing NUL),
+so `len > 0 == size` is true and ERANGE trips **before** any
+`copy_to_user`.  Glibc's `getcwd(3)` man page documents EINVAL
+only for the userspace `(buf == NULL && size == 0)`
+allocate-helper wrapper path — the raw syscall never returns
+EINVAL.
+
+### Divergence (pre-batch translator vs Linux, cwd == "/")
+
+| call              | Linux v6.6 | pre-batch | post-batch |
+|-------------------|------------|-----------|------------|
+| getcwd(NULL, 0)   | ERANGE     | EFAULT    | ERANGE     |
+| getcwd(NULL, 64)  | EFAULT     | EFAULT    | EFAULT     |
+| getcwd(VALID, 0)  | ERANGE     | EINVAL    | ERANGE     |
+| getcwd(VALID, 1)  | ERANGE     | ERANGE    | ERANGE     |
+| getcwd(VALID, 64) | 2          | 2         | 2          |
+
+### Root cause
+
+`sys_getcwd` opened with two non-Linux pre-gates:
+
+```rust
+if buf == 0 { return linux_err(errno::EFAULT); }   // wrong order
+if size == 0 { return linux_err(errno::EINVAL); }  // wrong errno
+```
+
+Both fired before Linux's `len > size` check.  The size==0 path
+was the worse defect: Linux returns ERANGE; we returned EINVAL,
+which glibc treats as "the call is malformed, give up" rather
+than "buffer too small, try again with more."  The NULL-buf
+short-circuit defeated the ERANGE-first contract for
+`getcwd(NULL, 0)`.
+
+### Why it matters
+
+Since glibc 2.27, the userspace `getcwd(3)` allocate-helper has
+a size-discovery path that calls the raw syscall with
+increasing `n`, treating ERANGE as a retry signal and any other
+errno as fatal.  EINVAL therefore breaks:
+
+  - `getcwd(NULL, 0)` from glibc's discovery path — `pwd`,
+    `realpath`, and `os.getcwd()` in CPython.
+  - busybox's `pwd` applet (busybox/coreutils/pwd.c) uses the
+    same probe idiom.
+  - GNU coreutils' `pwd -L` for hardened PATH_MAX-less builds.
+  - systemd's `chase_symlinks_and_open()` discovers the working
+    directory length this way before opening O_PATH descriptors.
+  - Python's `os.getcwd()` ctypes path on musl-based images
+    (Alpine) — musl's wrapper similarly retries on ERANGE.
+
+EINVAL surfacing where ERANGE is expected makes every one of
+those callers report "Invalid argument" rather than completing
+silently — a user-visible regression that's annoying to
+diagnose because the failing path is two layers deep in libc.
+
+### Fix
+
+Translator-only.  Removed both pre-gates and installed Linux's
+gate ladder in order:
+
+  1. `total_len > PATH_MAX → ENAMETOOLONG` (dead today; PCB caps
+     cwd well below PATH_MAX, but kept for future-proofing).
+  2. `size < total_len → ERANGE`.  Runs before any pointer
+     touch, so NULL+size==0 surfaces as ERANGE.
+  3a. Explicit `buf == 0 → EFAULT` rejection (see Errata).
+  3b. `validate_user_write(buf, total_len) → EFAULT` for
+     unmapped / unwritable user buffers.
+  4. `copy_to_user(tmp.as_ptr(), buf, total_len)` with one
+     contiguous source buffer (cwd + NUL) to keep the SMAP
+     window short.
+
+### Errata — kernel-context NULL guard (3a)
+
+On first boot of the batch the new `getcwd(NULL, 64)` probe
+panicked the kernel with
+`ptr::copy_nonoverlapping requires that both pointer arguments
+are aligned and non-null`.  Diagnosis: in kernel test context
+(probes invoked from CPL0 with no real userspace mapping)
+`validate_user_write` performs page/permission audits but does
+not independently reject `buf == 0`, so a NULL pointer slipped
+through to `copy_to_user` and its underlying
+`ptr::copy_nonoverlapping(_, NULL, _)` panicked.
+
+The fix is the explicit gate 3a (`if buf == 0 { return
+EFAULT; }`) inserted between the ERANGE gate and
+`validate_user_write`.  This matches Linux's contract exactly:
+Linux's `copy_to_user(NULL, b.buf, len)` faults at the first
+byte and the exception-table dance translates that to
+`-EFAULT`; we surface the same errno without the kernel-side
+panic.  The divergence table above is preserved.
+
+### Probes
+
+Pre-batch probes preserved (with one expectation flip each
+where Linux contract differs):
+
+  - `getcwd(NULL, 64) → EFAULT`     — flipped from "EFAULT
+    via pre-gate" to "EFAULT via explicit NULL gate (3a)";
+    same observable, different reason.
+  - `getcwd(VALID, 1) → ERANGE`     — unchanged.
+  - `getcwd(VALID, 64) → 2`         — unchanged (success path).
+
+New / flipped probes:
+
+  - `getcwd(NULL, 0) → ERANGE`      — was EFAULT pre-batch;
+    now demonstrates ERANGE-first contract.
+  - `getcwd(VALID, 0) → ERANGE`     — was EINVAL pre-batch;
+    fixes the glibc 2.27 discovery-path breakage above.
+
+Final stamp:
+
+  `[syscall/linux]   getcwd(_, 0) -> ERANGE not EINVAL/EFAULT
+   (Linux v6.6 fs/d_path.c: \`len > size\` trips before any
+   copy_to_user): OK`
+
+at `build/serial-test.txt:683`.
+
+**Build:** `cargo build -p kernel` clean, 44.54s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

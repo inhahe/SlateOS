@@ -27185,29 +27185,107 @@ fn canonicalize_path(cwd: &[u8], path: &[u8]) -> Result<alloc::vec::Vec<u8>, i32
 /// field.  In kernel test context (no caller PID) we fall back to
 /// `b"/"`, which matches the boot-time default of every process.
 ///
-/// Linux contract: on success returns the number of bytes written
-/// **including** the trailing NUL.  `ERANGE` if `size` is too small,
-/// `EFAULT` for an unwritable `buf`, `EINVAL` for `size == 0` with
-/// non-NULL `buf`.
+/// Linux contract (v6.6 fs/d_path.c::SYSCALL_DEFINE2(getcwd), batch 480):
+///
+/// ```text
+///   SYSCALL_DEFINE2(getcwd, char __user *, buf, unsigned long, size)
+///   {
+///       ...
+///       len = PATH_MAX - b.len;
+///       if (unlikely(len > PATH_MAX))   error = -ENAMETOOLONG;
+///       else if (unlikely(len > size))  error = -ERANGE;
+///       else if (copy_to_user(buf, b.buf, len))
+///                                       error = -EFAULT;
+///       else                            error = len;
+///       __putname(page);
+///       return error;
+///   }
+/// ```
+///
+/// **There is no early NULL-buf or size==0 gate.**  Both surface as
+/// `ERANGE` because `len` always includes the trailing NUL (`len >= 2`
+/// for `cwd == "/"`), and `len > 0 == size` is true, tripping the ERANGE
+/// branch before any `copy_to_user` runs.  Only when `size >= len` do we
+/// touch the user buffer; a NULL/bad pointer at that point surfaces as
+/// `EFAULT` through `copy_to_user`'s page-fault → exception-table dance.
+///
+/// On success returns the number of bytes written **including** the
+/// trailing NUL.
 fn sys_getcwd(args: &SyscallArgs) -> SyscallResult {
     let buf = args.arg0;
     let size = args.arg1;
-    if buf == 0 {
-        // POSIX getcwd() may allocate when buf is NULL; the raw syscall
-        // does not — it returns EFAULT.
-        return linux_err(errno::EFAULT);
-    }
-    if size == 0 {
-        return linux_err(errno::EINVAL);
-    }
+    // Linux runs ENAMETOOLONG / ERANGE / EFAULT in that order with no
+    // pre-gates on buf or size.  Pre-batch (478 and earlier) we ran two
+    // non-Linux short-circuits:
+    //
+    //   * `buf == 0 → EFAULT`     (defeated Linux's ERANGE-first contract
+    //                              for `getcwd(NULL, 0)`, which Linux
+    //                              returns ERANGE for because len > 0 >=
+    //                              size == 0 trips ERANGE before the
+    //                              copy_to_user that would notice the
+    //                              NULL).
+    //   * `size == 0 → EINVAL`    (defeated the same ERANGE branch for
+    //                              `getcwd(VALID, 0)`).
+    //
+    // Glibc's `getcwd(3)` wrapper documents EINVAL only for the userspace
+    // `(buf == NULL && size == 0)` allocate-helper path — the raw
+    // syscall (which we are) never returns EINVAL.  Pre-batch divergence
+    // surface (cwd == "/"):
+    //
+    //   | call              | Linux v6.6 | pre-batch | post-batch |
+    //   |-------------------|------------|-----------|------------|
+    //   | getcwd(NULL, 0)   | ERANGE     | EFAULT    | ERANGE     |
+    //   | getcwd(NULL, 64)  | EFAULT     | EFAULT    | EFAULT     |
+    //   | getcwd(VALID, 0)  | ERANGE     | EINVAL    | ERANGE     |
+    //   | getcwd(VALID, 1)  | ERANGE     | ERANGE    | ERANGE     |
+    //   | getcwd(VALID, 64) | 2          | 2         | 2          |
+    //
+    // The ERANGE-vs-EINVAL delta breaks tools that probe with size==0 to
+    // discover the required buffer length: glibc since 2.27 has a
+    // size-discovery path that walks `getcwd(buf, n)` with increasing
+    // `n`, treating ERANGE as "try again with more", whereas EINVAL is
+    // treated as "your call is malformed, give up."  busybox's pwd, GNU
+    // coreutils' `pwd -L`, and Python's `os.getcwd()` ctypes wrapper all
+    // follow the same idiom.
     let cwd_bytes: alloc::vec::Vec<u8> = match caller_pid() {
         Some(pid) => pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']),
         None => alloc::vec![b'/'],
     };
     let total_len = cwd_bytes.len().saturating_add(1); // + NUL
+    // Gate 1 (Linux's `len > PATH_MAX → ENAMETOOLONG`).  Our PCB caps
+    // cwd at CWD_MAX_LEN < PATH_MAX so this is dead code today, but
+    // the gate is kept for clarity and future-proofing should the cap
+    // change.
+    if total_len > 4096 {
+        return linux_err(errno::ENAMETOOLONG);
+    }
+    // Gate 2 (Linux's `len > size → ERANGE`).  Fires for both
+    // `size == 0` (any non-empty cwd) and `size < total_len` (small
+    // buffer).  Runs BEFORE any pointer touch, so NULL buf with size==0
+    // surfaces as ERANGE not EFAULT.
     if size < total_len as u64 {
         return linux_err(errno::ERANGE);
     }
+    // Gate 3a — explicit NULL-buf rejection.  Linux's
+    // `copy_to_user(NULL, b.buf, len)` faults at the first byte and the
+    // exception-table dance translates that to `-EFAULT`.  Our
+    // `validate_user_write` performs page/permission audits assuming a
+    // userspace mapping exists for the address; in kernel test context
+    // (probes invoked from CPL0 with no real userspace) it does not
+    // independently reject `buf == 0`, so a NULL pointer would slip
+    // through to `copy_to_user` and the underlying
+    // `ptr::copy_nonoverlapping(_, NULL, _)` panics with "requires that
+    // both pointer arguments are aligned and non-null."  We forestall
+    // that with an explicit gate that matches Linux's EFAULT contract
+    // exactly for `getcwd(NULL, size >= total_len)`.  Discovered when
+    // batch 480's new `getcwd(NULL, 64)` probe panicked the kernel on
+    // first boot.
+    if buf == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    // Gate 3b (Linux's `copy_to_user(buf, b.buf, len) → EFAULT`).
+    // validate_user_write rejects unmapped / unwritable ranges with the
+    // same errno copy_to_user's exception-table dance would surface.
     if let Err(e) = crate::mm::user::validate_user_write(buf, total_len) {
         return linux_err(linux_errno_for(e));
     }
@@ -62052,19 +62130,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // getcwd NULL buf -> EFAULT.
+        // getcwd NULL buf with sufficient size -> EFAULT (Linux's
+        // copy_to_user(NULL, ...) surfaces EFAULT after ERANGE passes).
         let a = SyscallArgs { arg0: 0, arg1: 64, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::GETCWD, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: getcwd NULL not EFAULT");
+            serial_println!("[syscall/linux]   FAIL: getcwd NULL,64 not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // getcwd size=0 -> EINVAL.
+        // Batch 480: getcwd(NULL, 0) -> ERANGE.  Pre-batch we returned
+        // EFAULT via a translator-internal NULL gate that fired before
+        // the ERANGE branch.  Linux v6.6 fs/d_path.c has no early NULL
+        // check — len > 0 >= size==0 trips ERANGE first.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETCWD, &a).value != -i64::from(errno::ERANGE) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getcwd(NULL, 0) not ERANGE ({})",
+                dispatch_linux(nr::GETCWD, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 480: getcwd(VALID, 0) -> ERANGE.  Pre-batch we returned
+        // EINVAL via a translator-internal size==0 gate; glibc's
+        // getcwd(3) documents EINVAL only for the userspace allocate-
+        // helper path, never the raw syscall.
         let a = SyscallArgs { arg0: cwd_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETCWD, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: getcwd size=0 not EINVAL");
+        if dispatch_linux(nr::GETCWD, &a).value != -i64::from(errno::ERANGE) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getcwd(VALID, 0) not ERANGE ({})",
+                dispatch_linux(nr::GETCWD, &a).value,
+            );
             return Err(KernelError::InternalError);
         }
-        // getcwd size=1 -> ERANGE.
+        // getcwd size=1 -> ERANGE (cwd "/" requires 2 bytes incl NUL).
         let a = SyscallArgs { arg0: cwd_ptr, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::GETCWD, &a).value != -i64::from(errno::ERANGE) {
             serial_println!("[syscall/linux]   FAIL: getcwd size=1 not ERANGE");
@@ -62081,6 +62178,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: getcwd did not write \"/\\0\"");
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   getcwd(_, 0) -> ERANGE not EINVAL/EFAULT (Linux v6.6 fs/d_path.c: `len > size` trips before any copy_to_user): OK"
+        );
 
         // chdir NULL -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

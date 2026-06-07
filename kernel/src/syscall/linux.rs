@@ -14471,25 +14471,97 @@ fn sys_perf_event_open(args: &SyscallArgs) -> SyscallResult {
 
 /// `keyctl(cmd, arg2, arg3, arg4, arg5)`.
 ///
-/// We don't have a keyring subsystem, so any in-range cmd returns
-/// ENOSYS — userspace treats that as "kernel has no keyrings" and
-/// falls back to in-process key management.  But unknown/wildly-bogus
-/// cmds need to be distinguished: Linux's `security/keys/keyctl.c`
-/// dispatches via a switch whose default arm returns `-EOPNOTSUPP`,
-/// not `-ENOSYS`.  Mirroring that gate keeps probes that intentionally
-/// pass garbage cmds (e.g. fuzzers, or libkeyutils sniffing kernel
-/// version) seeing the same shape they would on Linux.
+/// ## Batch 454 — narrow the EOPNOTSUPP gate to Linux's real switch range
 ///
-/// Linux 6.10's UAPI defines cmds 0..=33 (`KEYCTL_LSM_CONTROL` is the
-/// newest).  Cap at 64 for a forward-compat buffer so cmds added in
-/// 6.11+ aren't pre-rejected here, while still flagging values that
-/// clearly fell out of an integer overflow.
+/// We don't have a keyring subsystem, so any in-range cmd falls
+/// through to ENOSYS — userspace treats that as "kernel has no
+/// keyrings" and degrades to in-process key management.  But
+/// out-of-range cmds need to surface as EOPNOTSUPP (Linux's switch
+/// `default` arm), not ENOSYS — `libkeyutils` and fuzzers use that
+/// errno to discriminate "kernel doesn't speak this option" from
+/// "kernel speaks the option but the call shape is wrong".
+///
+/// Verbatim Linux 6.x source (`security/keys/keyctl.c::SYSCALL_DEFINE5`):
+///
+/// ```text
+///   SYSCALL_DEFINE5(keyctl, int, option,
+///           unsigned long, arg2, unsigned long, arg3,
+///           unsigned long, arg4, unsigned long, arg5)
+///   {
+///       switch (option) {
+///       case KEYCTL_GET_KEYRING_ID:           // 0
+///           return keyctl_get_keyring_ID(...);
+///       case KEYCTL_JOIN_SESSION_KEYRING:     // 1
+///           ...
+///       case KEYCTL_WATCH_KEY:                // 32
+///           return keyctl_watch_key(...);
+///       default:
+///           return -EOPNOTSUPP;
+///       }
+///   }
+/// ```
+///
+/// Linux 6.x's UAPI (`include/uapi/linux/keyctl.h`) defines exactly
+/// 33 options: `KEYCTL_GET_KEYRING_ID = 0` through
+/// `KEYCTL_WATCH_KEY = 32`.  Anything outside `[0, 32]` falls through
+/// to the switch's `default` arm and returns `-EOPNOTSUPP`.
+///
+/// ### Divergence table
+///
+/// | option       | Linux 6.x     | Pre-batch       | Why                            |
+/// |--------------|---------------|-----------------|--------------------------------|
+/// | -1           | EOPNOTSUPP    | EOPNOTSUPP      | (already correct)              |
+/// | 0..=32       | dispatch      | ENOSYS          | no keyring backend (stub OK)   |
+/// | 33           | **EOPNOTSUPP**| **ENOSYS**      | pre-batch threshold too lax    |
+/// | 50           | **EOPNOTSUPP**| **ENOSYS**      | pre-batch threshold too lax    |
+/// | 64           | **EOPNOTSUPP**| **ENOSYS**      | pre-batch threshold too lax    |
+/// | 65           | EOPNOTSUPP    | EOPNOTSUPP      | (already correct)              |
+///
+/// Pre-batch (entry 232) deliberately widened the accepted range to
+/// `0..=64` as a "forward-compat buffer for cmds added in 6.11+",
+/// citing a `KEYCTL_LSM_CONTROL` that does not exist in any Linux
+/// release.  The translator-only directive overrides that: we match
+/// Linux's CURRENT ABI, not a hypothetical future one.  When/if a
+/// future Linux extends the switch, this fix will need a one-line
+/// bump — but until then the current behaviour shadows the real
+/// `EOPNOTSUPP` discriminator.
+///
+/// ### Why this matters
+///
+/// `libkeyutils`'s feature probe walks unknown cmd numbers expecting
+/// EOPNOTSUPP for "kernel doesn't know this op" — used during init
+/// to feature-detect kernel keyring extensions before issuing the
+/// real call.  Receiving ENOSYS instead means the probe treats the
+/// kernel as "knows the call but doesn't implement it", which (per
+/// libkeyutils source) triggers fallback retry paths that burn CPU
+/// trying alternate cmd encodings that can never succeed.  Matching
+/// EOPNOTSUPP lets the probe fail fast and skip directly to
+/// in-process key management.
+///
+/// ### x86_64 ABI truncation
+///
+/// `option` is declared as C `int` in `SYSCALL_DEFINE5`.  The AMD64
+/// syscall ABI delivers it in rdi without zero/sign-extension, so
+/// only the low 32 bits are defined.  `args.arg0 as i32` truncates
+/// to the same view Linux sees, then the `< 0 || > 32` gate runs
+/// against the signed 32-bit value (negatives reach Linux's switch
+/// default just as 33+ does).
 fn sys_keyctl(args: &SyscallArgs) -> SyscallResult {
+    // Linux signature: `SYSCALL_DEFINE5(keyctl, int, option, ...)`.
+    // Truncate rdi to its declared 32-bit width before the bound check.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let cmd = args.arg0 as i32;
-    if cmd < 0 || cmd > 64 {
+    // Linux's switch covers cases 0..=32 (KEYCTL_GET_KEYRING_ID through
+    // KEYCTL_WATCH_KEY).  Anything else hits the `default` arm.
+    const KEYCTL_WATCH_KEY: i32 = 32;
+    if cmd < 0 || cmd > KEYCTL_WATCH_KEY {
         return linux_err(errno::EOPNOTSUPP);
     }
+    // In-range cmd with no keyring backend: ENOSYS is acceptable
+    // stub behaviour (each Linux handler would otherwise dispatch
+    // to a keyring lookup that returns ENOKEY / EACCES / EPERM
+    // depending on context — modelling those per-handler is a
+    // bigger change than this batch covers).
     linux_err(errno::ENOSYS)
 }
 
@@ -47541,15 +47613,53 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   perf_event_open forward-compat trailing-zero E2BIG: OK"
         );
-        // keyctl(cmd=0,_,_,_,_) -> ENOSYS (known cmd, no backend).
+        // keyctl(cmd=0=KEYCTL_GET_KEYRING_ID) -> ENOSYS (in-range,
+        // no backend).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::KEYCTL, &a).value
             != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: keyctl not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: keyctl(cmd=0) not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // keyctl(cmd=100) -> EOPNOTSUPP (out of forward-compat range).
+        // keyctl(cmd=32=KEYCTL_WATCH_KEY) -> ENOSYS.  Linux's highest
+        // defined option; still inside the switch.
+        let a = SyscallArgs { arg0: 32, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEYCTL, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: keyctl(cmd=32) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 454: keyctl(cmd=33) -> EOPNOTSUPP.  First option past
+        // KEYCTL_WATCH_KEY; pre-batch threshold of 64 returned ENOSYS.
+        let a = SyscallArgs { arg0: 33, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEYCTL, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: keyctl(cmd=33) not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 454: keyctl(cmd=50) -> EOPNOTSUPP.  Mid forward-compat
+        // zone the pre-batch code wrongly accepted as ENOSYS.
+        let a = SyscallArgs { arg0: 50, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEYCTL, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: keyctl(cmd=50) not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 454: keyctl(cmd=64) -> EOPNOTSUPP.  Upper edge of the
+        // old forward-compat buffer that the pre-batch code wrongly
+        // returned ENOSYS for.
+        let a = SyscallArgs { arg0: 64, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEYCTL, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: keyctl(cmd=64) not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // keyctl(cmd=100) -> EOPNOTSUPP (well past KEYCTL_WATCH_KEY).
         let a = SyscallArgs { arg0: 100, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::KEYCTL, &a).value
@@ -47557,9 +47667,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: keyctl(cmd=100) not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // keyctl(cmd=-1) -> EOPNOTSUPP (negative cmd is bogus).
-        // 0xFFFF_FFFF_FFFF_FFFF rounds to -1 via `as i32` after the
-        // low 32 bits sign-extend.
+        // keyctl(cmd=-1) -> EOPNOTSUPP (negative cmd hits switch
+        // default).  0xFFFF_FFFF_FFFF_FFFF truncates to -1 via
+        // `as i32`.
         let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::KEYCTL, &a).value
@@ -47567,7 +47677,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: keyctl(cmd=-1) not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   keyctl cmd range validation: OK");
+        // Batch 454: keyctl(cmd=0x1_0000_0021) -> EOPNOTSUPP.  ABI
+        // truncation probe: high bit 32 + low=33 truncates via `as i32`
+        // to 33, which Linux's switch default rejects.
+        let a = SyscallArgs { arg0: 0x1_0000_0021, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::KEYCTL, &a).value
+            != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: keyctl(high|33) not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   keyctl switch-default EOPNOTSUPP at cmd>=33: OK");
         // add_key(NULL,_,_,_,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

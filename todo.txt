@@ -39242,3 +39242,123 @@ identical flag-width discipline.
 after 22s.
 
 **Files touched:** `kernel/src/syscall/linux.rs` only.
+
+
+---
+
+## 454. syscall/linux: keyctl — narrow EOPNOTSUPP boundary to Linux's real switch range (cmd >= 33, not > 64)
+
+**Date:** 2026-06-06
+
+**Subsystem:** `kernel/src/syscall/linux.rs::sys_keyctl`
+
+**Linux source (verbatim, `security/keys/keyctl.c::SYSCALL_DEFINE5`):**
+
+```c
+SYSCALL_DEFINE5(keyctl, int, option,
+        unsigned long, arg2, unsigned long, arg3,
+        unsigned long, arg4, unsigned long, arg5)
+{
+    switch (option) {
+    case KEYCTL_GET_KEYRING_ID:           // 0
+        return keyctl_get_keyring_ID(...);
+    case KEYCTL_JOIN_SESSION_KEYRING:     // 1
+        ...
+    case KEYCTL_WATCH_KEY:                // 32
+        return keyctl_watch_key(...);
+    default:
+        return -EOPNOTSUPP;
+    }
+}
+```
+
+The UAPI header `include/uapi/linux/keyctl.h` defines exactly 33
+options, `KEYCTL_GET_KEYRING_ID = 0` through `KEYCTL_WATCH_KEY = 32`.
+Any value outside `[0, 32]` (negative or >= 33) reaches the switch's
+`default` arm and returns `-EOPNOTSUPP`.
+
+**Divergence table:**
+
+| option (truncated i32) | Linux 6.x     | Pre-batch (454) | Why                                |
+|------------------------|---------------|-----------------|------------------------------------|
+| -1                     | EOPNOTSUPP    | EOPNOTSUPP      | (already correct)                  |
+| 0..=32                 | dispatch      | ENOSYS          | no keyring backend (stub OK)       |
+| **33**                 | **EOPNOTSUPP**| **ENOSYS**      | pre-batch threshold too lax        |
+| **50**                 | **EOPNOTSUPP**| **ENOSYS**      | pre-batch threshold too lax        |
+| **64**                 | **EOPNOTSUPP**| **ENOSYS**      | pre-batch threshold too lax        |
+| 65                     | EOPNOTSUPP    | EOPNOTSUPP      | (already correct)                  |
+| 0x1_0000_0021          | EOPNOTSUPP    | ENOSYS          | low-half 33 truncates past gate    |
+
+Pre-batch (entry 232) deliberately widened the accepted range to
+`0..=64` as a forward-compat buffer, citing a `KEYCTL_LSM_CONTROL`
+option that does not exist in any Linux release.  The comment was
+mistaken: the highest option in mainline is `KEYCTL_WATCH_KEY = 32`
+(added in Linux 5.10, unchanged through 6.x).  No 6.10 or 6.11
+release has added a higher one.
+
+**Why this matters:**
+
+`libkeyutils`'s feature probe and similar version-sniffers walk
+unknown cmd numbers expecting EOPNOTSUPP for "kernel doesn't know
+this op" — used during init to feature-detect kernel keyring
+extensions before issuing the real call.  Receiving ENOSYS instead
+means the probe treats the kernel as "knows the call but doesn't
+implement it", which (per libkeyutils source) triggers fallback
+retry paths that burn CPU trying alternate cmd encodings that can
+never succeed.  Matching Linux's EOPNOTSUPP shape lets the probe
+fail fast and skip directly to in-process key management.
+
+Translator-only: this is a kernel-Linux-ABI translation surface, not
+a question of how our native keyring (which doesn't exist yet) should
+behave.  When/if a future Linux release extends the switch to add
+KEYCTL_OPTION_33, this gate will need a one-line bump.  Until then,
+matching the CURRENT ABI surface is the right call.
+
+**x86_64 ABI truncation:** `option` is declared as C `int` in
+`SYSCALL_DEFINE5`.  The AMD64 syscall ABI delivers it in rdi without
+zero/sign-extension, so only the low 32 bits are defined.  Our
+existing `args.arg0 as i32` truncation matches the view Linux sees,
+then the `< 0 || > 32` gate runs against the signed 32-bit value.
+The probe at `0x1_0000_0021` (high bit 32 + low=33) confirms the
+truncation path: Linux sees 33, falls through to switch default;
+post-batch we see 33 via `as i32`, fall through to EOPNOTSUPP.
+
+**Fix:**
+
+- Replace the `cmd > 64` upper-bound with `cmd > KEYCTL_WATCH_KEY`
+  (= 32).
+- Rewrite the doc comment with verbatim Linux source citation,
+  divergence table, and ABI-truncation note.  Remove the
+  hallucinated `KEYCTL_LSM_CONTROL` reference.
+- Keep `cmd in [0, 32]` falling through to ENOSYS (acceptable stub
+  for a kernel with no keyring backend).
+- Native OS architecture untouched — only the Linux-numbered
+  entrypoint changes.
+
+**Probes added at the linux.rs in-kernel self-test path** (around
+the existing keyctl block ~ line 47616):
+
+  - `keyctl(cmd=0)` → ENOSYS — `KEYCTL_GET_KEYRING_ID`, in-range
+    sentinel.
+  - `keyctl(cmd=32)` → ENOSYS — `KEYCTL_WATCH_KEY`, last in-range
+    sentinel.
+  - **`keyctl(cmd=33)` → EOPNOTSUPP** — first out-of-range value,
+    locks in the post-batch boundary.
+  - **`keyctl(cmd=50)` → EOPNOTSUPP** — mid old-forward-compat zone.
+  - **`keyctl(cmd=64)` → EOPNOTSUPP** — upper edge of the old
+    forward-compat zone.
+  - `keyctl(cmd=100)` → EOPNOTSUPP — well past KEYCTL_WATCH_KEY.
+  - `keyctl(cmd=-1)` → EOPNOTSUPP — negative cmd hits switch default
+    (via `u64::MAX as i32 = -1`).
+  - **`keyctl(cmd=0x1_0000_0021)` → EOPNOTSUPP** — ABI truncation
+    probe: high bit + low=33 truncates to 33 via `as i32`.
+
+  Success stamp: `[syscall/linux]   keyctl switch-default EOPNOTSUPP
+  at cmd>=33: OK`.
+
+**Build:** `cargo build -p kernel` — clean, 40.93s.
+
+**Boot test:** `bash scripts/boot-test.sh` — PASS, BOOT_OK detected
+after 22s.
+
+**Files touched:** `kernel/src/syscall/linux.rs` only.

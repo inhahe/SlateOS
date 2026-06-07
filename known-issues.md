@@ -54,6 +54,48 @@ timer-tick callback.
   4. If no shared lock exists, add a finer-grained probe between
      `Destroy: OK` and `Tracked count` to localize the hang.
 
+### 2. Invariant self-test hangs after first check_all (intermittent)
+
+**Where:** `kernel/src/invariant.rs` — `self_test()`, specifically
+between the test 1 `check_all()` call (whose detail lines all print)
+and the test 2 `all_ok()` call.
+
+**Repro:** Run `bash scripts/boot-test.sh`.  Observed once on
+2026-06-07 during the post-RCU-fix soak (`build/soak-hang-run2.txt`,
+2614 lines; last serial line `[invariant]     [PASS] cap_audit_balance:
+OK: 5 events, 1 denials`).  Same boot run did NOT exhibit the
+softirq race (that ran later in boot order).  Frequency unknown.
+
+**Symptoms:** Serial output stops cleanly after the 8th individual
+`[PASS] …` detail line and before the test 2
+`[invariant]   Quick check: OK` line.  `all_ok()` re-invokes
+`check_all()`, so a hang in re-entering one of the per-check
+closures is plausible.  BOOT_OK never emitted; `boot-test.sh` times
+out at 300s.
+
+**Severity:** Low-frequency, single observation, retry-passes.
+
+**Hypothesis:** Same shape as the now-fixed RCU/softirq hangs (see
+Fixed Bugs F1, F3) — a spinlock acquired by one of the invariant
+checks (frame accounting, heap balance, scheduler balance, IPC
+counters, capability audit) that is also touched from a softirq /
+timer-tick callback.  The test 1 call may have completed only
+because the timer tick happened to land in a non-shared window;
+test 2's re-entry hit the bad window.
+
+**Proper fix:**
+  1. Enumerate the closures registered in
+     `kernel/src/invariant.rs` (frame_accounting, heap_balance,
+     frag_range, pressure_range, sched_balance, object_balance,
+     ipc_counters, cap_audit_balance).
+  2. For each, identify which subsystem locks it touches.
+  3. Cross-reference with softirq-context call sites (timer tick,
+     RCU tick, deferred work).
+  4. Wrap any shared-lock acquisition reached from a check closure
+     in `crate::cpu::without_interrupts(...)`, OR wrap the whole
+     `self_test()` body if the suspect is a soft path that can
+     tolerate it.  Prefer the former for production-path locks.
+
 ---
 
 ## Fixed Bugs
@@ -110,6 +152,43 @@ counter to advance twice, tripping the assertion.  Observed once on
 `crate::cpu::without_interrupts(...)`.
 
 **Verification:** 20/20 consecutive boot tests pass after the fix.
+
+### F3. Softirq self-test races APIC timer ISR — FIXED 2026-06-07
+
+**Where:** `kernel/src/softirq.rs` — `self_test()` tests 2, 3, and 4.
+
+**Root cause:** The self-test runs after `[boot] Interrupts enabled —
+preemptive scheduling active`, so the APIC timer ISR fires
+asynchronously throughout the test.  The ISR's path calls
+`process_pending()` on the same CPU, which mutates `TOTAL_RUNS`,
+`TOTAL_HANDLERS`, `IN_SOFTIRQ`, and `PENDING`.  Three races:
+
+  * Test 2 (no-op fast path): an ISR firing between
+    `process_pending()` returning and `TOTAL_RUNS.load()` bumps the
+    counter and trips `runs_after != runs_before`.
+  * Test 3 (dispatch + clear): an ISR firing between `raise()` and
+    the test's own `process_pending()` drains TIMER_SOFTIRQ first;
+    the test's call then runs no handler and trips
+    `handlers_after <= handlers_before`.
+  * Test 4 (re-entry guard): after the test clears
+    `IN_SOFTIRQ[cpu] = false`, an ISR firing before the
+    `still_pending` load runs a real `process_pending()`, consumes
+    TIMER_SOFTIRQ, and trips "bits were consumed despite re-entry
+    guard".  Observed once on 2026-06-07 during the post-RCU-fix
+    soak (build/serial-test.txt at 11:44).
+
+**Fix:** Wrap each of tests 2, 3, and 4 in
+`crate::cpu::without_interrupts(...)`.  In test 4, also sample
+`PENDING` *before* clearing `IN_SOFTIRQ` so the semantic ordering
+("did the guarded call consume bits?") is preserved.  `process_pending`
+internally toggles IF (STI→handlers→CLI); `without_interrupts` saves
+and restores the outer IF state, so the boot path's interrupt state
+post-test is unchanged.  Test 1 already had its own CLI/STI window
+and didn't need changes.
+
+**Verification:** Boot test passes cleanly with `softirq` self-test
+showing all four sub-tests OK and `Self-test PASSED`.  Soak in
+progress to confirm zero recurrence over many runs.
 
 ---
 

@@ -485,80 +485,120 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     }
 
     // Test 2: process_pending with no bits is a no-op.
-    let runs_before = TOTAL_RUNS.load(Ordering::Acquire);
-    // SAFETY: test context, interrupts should be enabled.
-    // process_pending does STI→handlers→CLI internally, so we
-    // re-enable interrupts after the call (we're in boot context,
-    // not an ISR that would do IRETQ to restore RFLAGS).
-    unsafe {
-        process_pending();
-        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
-    }
-    let runs_after = TOTAL_RUNS.load(Ordering::Acquire);
-    if runs_after != runs_before {
+    //
+    // Wrapped in without_interrupts(): if an APIC timer ISR fires in
+    // the window between process_pending() returning and the
+    // TOTAL_RUNS load, the ISR's own process_pending() bumps
+    // TOTAL_RUNS and trips the assertion.  Same race shape as the
+    // test 4 fix below.  process_pending() internally toggles IF, but
+    // without_interrupts() saves and restores the outer IF state, so
+    // the final state on exit matches what the surrounding boot
+    // expects.
+    let test2_ok: Result<(), ()> = crate::cpu::without_interrupts(|| {
+        let runs_before = TOTAL_RUNS.load(Ordering::Acquire);
+        // SAFETY: process_pending() is exercised here precisely to
+        // verify its no-op fast path; the surrounding without_interrupts
+        // suppresses concurrent ISR-driven invocations.
+        unsafe { process_pending(); }
+        let runs_after = TOTAL_RUNS.load(Ordering::Acquire);
+        if runs_after != runs_before { Err(()) } else { Ok(()) }
+    });
+    if test2_ok.is_err() {
         serial_println!("[softirq]   FAIL: process_pending ran with no bits pending");
         return Err(crate::error::KernelError::InternalError);
     }
     serial_println!("[softirq]   No-op fast path: OK");
 
     // Test 3: process_pending processes raised bits.
-    raise(TIMER_SOFTIRQ);
-    let handlers_before = TOTAL_HANDLERS.load(Ordering::Acquire);
-    // SAFETY: See test 2 safety comment.
-    unsafe {
-        process_pending();
-        // process_pending() does STI→handlers→CLI internally.
-        // In boot context (no IRETQ), we must re-enable interrupts
-        // so the rest of the boot doesn't run with IF=0.
-        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
-    }
-    let handlers_after = TOTAL_HANDLERS.load(Ordering::Acquire);
-    if handlers_after <= handlers_before {
-        serial_println!("[softirq]   FAIL: process_pending did not run handler");
-        return Err(crate::error::KernelError::InternalError);
-    }
-    // Verify bits were cleared.
-    let remaining = PENDING.get(cpu).map_or(0, |p| p.load(Ordering::Acquire));
-    if remaining != 0 {
-        serial_println!("[softirq]   FAIL: bits not cleared after processing (remaining {:#x})", remaining);
-        return Err(crate::error::KernelError::InternalError);
+    //
+    // Same race-window protection as test 2.  A spurious APIC timer
+    // ISR landing between the raise() and the process_pending() call
+    // (or between the load of handlers_before and process_pending)
+    // could cause the test's process_pending() to be a no-op (bits
+    // already drained by the ISR), tripping the "did not run handler"
+    // assertion.
+    enum Test3Fail { NoHandler, BitsLeft(u32) }
+    let test3_ok: Result<(), Test3Fail> = crate::cpu::without_interrupts(|| {
+        raise(TIMER_SOFTIRQ);
+        let handlers_before = TOTAL_HANDLERS.load(Ordering::Acquire);
+        // SAFETY: deliberate probe of the dispatch path; outer
+        // without_interrupts ensures no concurrent ISR also calls in.
+        unsafe { process_pending(); }
+        let handlers_after = TOTAL_HANDLERS.load(Ordering::Acquire);
+        if handlers_after <= handlers_before {
+            return Err(Test3Fail::NoHandler);
+        }
+        let remaining = PENDING.get(cpu).map_or(0, |p| p.load(Ordering::Acquire));
+        if remaining != 0 {
+            return Err(Test3Fail::BitsLeft(remaining));
+        }
+        Ok(())
+    });
+    match test3_ok {
+        Err(Test3Fail::NoHandler) => {
+            serial_println!("[softirq]   FAIL: process_pending did not run handler");
+            return Err(crate::error::KernelError::InternalError);
+        }
+        Err(Test3Fail::BitsLeft(r)) => {
+            serial_println!("[softirq]   FAIL: bits not cleared after processing (remaining {:#x})", r);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        Ok(()) => {}
     }
     serial_println!("[softirq]   process_pending dispatches and clears: OK");
 
     // Test 4: re-entry prevention.
     //
     // Manually set IN_SOFTIRQ to simulate re-entry, then verify
-    // process_pending returns immediately.
-    raise(TIMER_SOFTIRQ);
-    if let Some(f) = IN_SOFTIRQ.get(cpu) {
-        f.store(true, Ordering::Release);
-    }
-    let reentry_before = REENTRY_PREVENTED.load(Ordering::Acquire);
-    // SAFETY: See test 2.
-    unsafe {
-        process_pending();
-    }
-    let reentry_after = REENTRY_PREVENTED.load(Ordering::Acquire);
-    // Clean up the flag.
-    if let Some(f) = IN_SOFTIRQ.get(cpu) {
-        f.store(false, Ordering::Release);
-    }
-    if reentry_after <= reentry_before {
-        serial_println!("[softirq]   FAIL: re-entry was not prevented");
-        return Err(crate::error::KernelError::InternalError);
-    }
-    // The bits should still be pending (handler was NOT called).
-    let still_pending = PENDING.get(cpu).map_or(0, |p| p.load(Ordering::Acquire));
-    if still_pending & TIMER_SOFTIRQ == 0 {
-        serial_println!("[softirq]   FAIL: bits were consumed despite re-entry guard");
+    // process_pending returns immediately and leaves PENDING bits
+    // intact.
+    //
+    // This whole test must run with interrupts disabled.  Otherwise
+    // the APIC timer ISR can fire in the window between clearing
+    // IN_SOFTIRQ and reading PENDING, see the guard cleared, run
+    // process_pending() for real, consume TIMER_SOFTIRQ, and trip
+    // the "bits were consumed despite re-entry guard" assertion.
+    // (Observed once on 2026-06-07 during the post-RCU-fix soak.)
+    // The other tests in this function use a similar STI/CLI dance
+    // because they want to exercise the dispatch path; test 4 only
+    // probes the guard, so it can safely stay CLI throughout.
+    let test4_ok: Result<(), &'static str> = crate::cpu::without_interrupts(|| {
+        raise(TIMER_SOFTIRQ);
+        if let Some(f) = IN_SOFTIRQ.get(cpu) {
+            f.store(true, Ordering::Release);
+        }
+        let reentry_before = REENTRY_PREVENTED.load(Ordering::Acquire);
+        // SAFETY: process_pending() is being invoked deliberately to
+        // probe its re-entry guard.  IN_SOFTIRQ is already set, so the
+        // function must short-circuit without dispatching handlers.
+        unsafe {
+            process_pending();
+        }
+        let reentry_after = REENTRY_PREVENTED.load(Ordering::Acquire);
+        // Sample PENDING BEFORE clearing IN_SOFTIRQ.  Even though we
+        // hold interrupts off here, sampling-before-clear keeps the
+        // semantic order honest: "did the guarded call consume bits?"
+        let still_pending = PENDING.get(cpu).map_or(0, |p| p.load(Ordering::Acquire));
+        if let Some(f) = IN_SOFTIRQ.get(cpu) {
+            f.store(false, Ordering::Release);
+        }
+        if reentry_after <= reentry_before {
+            return Err("re-entry was not prevented");
+        }
+        if still_pending & TIMER_SOFTIRQ == 0 {
+            return Err("bits were consumed despite re-entry guard");
+        }
+        // Clean up remaining bits from the test.
+        if let Some(p) = PENDING.get(cpu) {
+            p.store(0, Ordering::Release);
+        }
+        Ok(())
+    });
+    if let Err(msg) = test4_ok {
+        serial_println!("[softirq]   FAIL: {}", msg);
         return Err(crate::error::KernelError::InternalError);
     }
     serial_println!("[softirq]   Re-entry prevention: OK");
-
-    // Clean up remaining bits from re-entry test.
-    if let Some(p) = PENDING.get(cpu) {
-        p.store(0, Ordering::Release);
-    }
 
     serial_println!("[softirq] Self-test PASSED");
     Ok(())

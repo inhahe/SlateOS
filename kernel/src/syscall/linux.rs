@@ -23431,9 +23431,17 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
     let protocol = args.arg2 as u32;
     if protocol != 0 {
         match (domain, sock_type) {
-            // AF_UNIX rejects any non-zero protocol with
-            // -EPROTONOSUPPORT (net/unix/af_unix.c::unix_create).
-            (1, _) => return linux_err(errno::EPROTONOSUPPORT),
+            // AF_UNIX (net/unix/af_unix.c::unix_create):
+            //     if (protocol && protocol != PF_UNIX)
+            //         return -EPROTONOSUPPORT;
+            // PF_UNIX = 1.  So protocol = 1 is accepted (it
+            // duplicates the family — a no-op tautology, but
+            // Linux explicitly permits it).  Batch 471: was
+            // `(1, _) => EPROTONOSUPPORT` (no PF_UNIX exemption),
+            // which over-rejected protocol = 1.
+            (1, _) if protocol != 1 => {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
             // AF_INET / AF_INET6 SOCK_STREAM: only IPPROTO_TCP=6.
             (2 | 10, 1) if protocol != 6 => {
                 return linux_err(errno::EPROTONOSUPPORT);
@@ -23612,7 +23620,13 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     let protocol = args.arg2 as u32;
     if protocol != 0 {
         match (domain, sock_type) {
-            (1, _) => return linux_err(errno::EPROTONOSUPPORT),
+            // Batch 471: AF_UNIX accepts protocol == PF_UNIX = 1
+            // per unix_create: `if (protocol && protocol != PF_UNIX)
+            // return -EPROTONOSUPPORT;`.  Pre-batch we rejected
+            // protocol = 1 too.  Mirrors sys_socket batch 471.
+            (1, _) if protocol != 1 => {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
             (2 | 10, 1) if protocol != 6 => {
                 return linux_err(errno::EPROTONOSUPPORT);
             }
@@ -65008,6 +65022,114 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
 
+        // ---- Batch 471: socket AF_UNIX accepts protocol = PF_UNIX ----
+        // Linux net/unix/af_unix.c::unix_create:
+        //     if (protocol && protocol != PF_UNIX)
+        //         return -EPROTONOSUPPORT;
+        // PF_UNIX = AF_UNIX = 1.  So protocol = 1 is explicitly
+        // permitted (tautological — duplicates the family — but
+        // Linux allows it).  Pre-batch our gate 5 had
+        // `(1, _) => EPROTONOSUPPORT` for any non-zero protocol,
+        // over-rejecting (AF_UNIX, *, 1).
+        //
+        // Sub-probes:
+        //   A. socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)   -> ENOSYS
+        //      (was: EPROTONOSUPPORT; post: accepted, falls
+        //      through to terminal ENOSYS)
+        //   B. socket(AF_UNIX, DGRAM=2, 1)              -> ENOSYS
+        //   C. socket(AF_UNIX, SEQPACKET=5, 1)          -> ENOSYS
+        //   D. Regression: socket(AF_UNIX, STREAM, 0)   -> ENOSYS
+        //      (already accepted; gate 5 skipped for proto=0)
+        //   E. Regression: socket(AF_UNIX, STREAM, 2)   -> EPROTONOSUPPORT
+        //      (non-PF_UNIX non-zero protocol still rejected)
+        //   F. Regression: socket(AF_UNIX, STREAM, -1)  -> EPROTONOSUPPORT
+        //      (negative cast to u32 = 0xFFFFFFFF != 1)
+        {
+            // A: AF_UNIX / STREAM / PF_UNIX=1 — accepted.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 1,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_UNIX / DGRAM / PF_UNIX.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 2, arg2: 1,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_UNIX / SEQPACKET / PF_UNIX.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 5, arg2: 1,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: Regression — AF_UNIX / STREAM / 0.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,0) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: Regression — AF_UNIX / STREAM / 2 — still
+            // EPROTONOSUPPORT (not PF_UNIX, not zero).
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 2,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,2) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: Regression — AF_UNIX / STREAM / -1 (u64::MAX
+            // low 32 = 0xFFFFFFFF, != 1).
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: u64::MAX,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socket AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK"
+            );
+        }
+
         // ---- socketpair per-(family,type,protocol) gating ----
         // Linux's __sys_socketpair calls sock_create twice; the
         // first call walks inet_create / unix_create which apply
@@ -65552,6 +65674,110 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socketpair AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes EOPNOTSUPP): OK"
+            );
+        }
+
+        // ---- Batch 471: socketpair AF_UNIX accepts PF_UNIX ----
+        // Direct mirror of sys_socket batch 471.  unix_create's
+        // `if (protocol && protocol != PF_UNIX) return
+        // -EPROTONOSUPPORT;` is the same gate reached via
+        // sock_create from __sys_socketpair.  For AF_UNIX with
+        // valid (type, sv) the path falls through to the
+        // terminal ENOSYS.
+        //
+        // Sub-probes:
+        //   A. socketpair(AF_UNIX, STREAM, PF_UNIX=1, sv)    -> ENOSYS
+        //      (was: EPROTONOSUPPORT; post: accepted)
+        //   B. socketpair(AF_UNIX, DGRAM, PF_UNIX, sv)       -> ENOSYS
+        //   C. socketpair(AF_UNIX, SEQPACKET, PF_UNIX, sv)   -> ENOSYS
+        //   D. Regression: socketpair(AF_UNIX, STREAM, 0, sv) -> ENOSYS
+        //   E. Regression: socketpair(AF_UNIX, STREAM, 2, sv) -> EPROTONOSUPPORT
+        //   F. Regression: socketpair(AF_UNIX, STREAM, -1, sv) -> EPROTONOSUPPORT
+        {
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+
+            // A: AF_UNIX / STREAM / PF_UNIX.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 1, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_UNIX / DGRAM / PF_UNIX.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 2, arg2: 1, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_UNIX / SEQPACKET / PF_UNIX.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 5, arg2: 1, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: Regression — AF_UNIX / STREAM / 0.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 0, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,0) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: Regression — AF_UNIX / STREAM / 2 — not PF_UNIX.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 2, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,2) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: Regression — AF_UNIX / STREAM / -1.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: u64::MAX, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socketpair AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK"
             );
         }
 

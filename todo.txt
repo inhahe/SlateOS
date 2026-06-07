@@ -41691,3 +41691,116 @@ Probe block stamps:
 
 **Build:** `cargo build -p kernel` clean, 40.07s.
 **Boot test:** PASS @ 23s (`bash scripts/boot-test.sh`).
+
+## Batch 471 — sys_socket + sys_socketpair AF_UNIX accepts PF_UNIX protocol
+
+**Linux 6.x source quote** (net/unix/af_unix.c::unix_create):
+
+    static int unix_create(struct net *net, struct socket *sock,
+                           int protocol, int kern)
+    {
+            if (protocol && protocol != PF_UNIX)
+                    return -EPROTONOSUPPORT;
+
+            sock->state = SS_UNCONNECTED;
+
+            switch (sock->type) {
+            case SOCK_STREAM:
+                    sock->ops = &unix_stream_ops;
+                    break;
+            ...
+            }
+
+            return unix_create1(net, sock, kern, sock->type) ? 0 : -ENOMEM;
+    }
+
+with PF_UNIX = AF_UNIX = 1 (include/linux/socket.h).
+
+The gate is `if (protocol && protocol != PF_UNIX) return -EPROTONOSUPPORT;`
+— not `if (protocol) return -EPROTONOSUPPORT;`.  That subtle
+distinction means PF_UNIX=1 is an accepted alias for "default
+AF_UNIX protocol" alongside 0.  Pre-batch our gate 5 (in both
+sys_socket and sys_socketpair) had `(1, _) => return EPROTONOSUPPORT`
+for any non-zero protocol, over-rejecting protocol=1.
+
+**Divergence table** (both syscalls — same shape):
+
+    Shape                                          pre-batch        Linux 6.x
+    --------------------------------------------   --------------   -----------
+    socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)         EPROTONOSUPPORT  accept
+                                                                    (now ENOSYS
+                                                                     in our stub)
+    socket(AF_UNIX, DGRAM=2, PF_UNIX)              EPROTONOSUPPORT  accept (ENOSYS)
+    socket(AF_UNIX, SEQPACKET=5, PF_UNIX)          EPROTONOSUPPORT  accept (ENOSYS)
+    socket(AF_UNIX, STREAM, 0)                     unchanged        accept (ENOSYS)
+    socket(AF_UNIX, STREAM, 2)                     EPROTONOSUPPORT  unchanged
+                                                                    (non-PF_UNIX
+                                                                     non-zero)
+    socket(AF_UNIX, STREAM, -1 as u32::MAX)        EPROTONOSUPPORT  unchanged
+                                                                    (0xFFFFFFFF
+                                                                     != 1)
+    socketpair(AF_UNIX, *, PF_UNIX, sv)            EPROTONOSUPPORT  accept (ENOSYS)
+                                                                    (same gate
+                                                                     reached via
+                                                                     sock_create)
+
+**Why it matters**
+
+The PF_UNIX=1 protocol pattern is uncommon but not unheard of —
+some older glibc compatibility layers and a handful of
+language-runtime probes pass PF_UNIX explicitly to disambiguate
+"AF_UNIX with the canonical protocol" from "AF_UNIX with
+whatever default is".  More importantly, this is an exact
+ABI fidelity issue: Linux unambiguously says accept, we said
+reject, and there's no runtime reason to be stricter than
+Linux on this surface.
+
+The fix is a one-line guard adjustment in each syscall's gate 5,
+and it composes correctly with batch 469's AF_UNIX regression
+probe (socketpair(AF_UNIX, STREAM, u64::MAX, sv) → EPROTONOSUPPORT):
+0xFFFFFFFF != 1, so the gate still fires for -1.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs`:
+
+  * `sys_socket` gate 5:
+      `(1, _) => return EPROTONOSUPPORT`
+      becomes
+      `(1, _) if protocol != 1 => return EPROTONOSUPPORT`
+    The `protocol != 0` outer guard means protocol = 0 is
+    already accepted; the new `!= 1` arm guard means protocol
+    = 1 is also accepted; any other non-zero protocol still
+    surfaces EPROTONOSUPPORT.
+
+  * `sys_socketpair` gate 3b: identical edit.
+
+Translator-only — no native AF_UNIX code changed.
+
+**Probes added (after the batch 470 AF_NETLINK probe blocks):**
+
+socket (sys_socket):
+
+  A. socket(AF_UNIX=1, STREAM=1, 1=PF_UNIX)   -> ENOSYS
+     (accepted by unix_create; falls to terminal ENOSYS)
+  B. socket(AF_UNIX, DGRAM=2, 1)              -> ENOSYS
+  C. socket(AF_UNIX, SEQPACKET=5, 1)          -> ENOSYS
+  D. Regression: socket(AF_UNIX, STREAM, 0)   -> ENOSYS
+     (already accepted pre-batch; gate skipped for proto=0)
+  E. Regression: socket(AF_UNIX, STREAM, 2)   -> EPROTONOSUPPORT
+     (non-PF_UNIX non-zero protocol still rejected)
+  F. Regression: socket(AF_UNIX, STREAM, -1)  -> EPROTONOSUPPORT
+     (composes with batch 469 sign-cast: 0xFFFFFFFF != 1)
+
+socketpair (sys_socketpair):
+
+  A-F. Same as socket with sv pointer:
+       A-D succeed (ENOSYS), E-F preserved (EPROTONOSUPPORT).
+
+Probe block stamps:
+
+    [syscall/linux]   socket AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK
+    [syscall/linux]   socketpair AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK
+
+**Build:** `cargo build -p kernel` clean, 39.84s.
+**Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).

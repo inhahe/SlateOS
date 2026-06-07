@@ -22952,15 +22952,39 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
 
-    // FLAG_CPU is legal only on EXPEDITED (non-register, non-GLOBAL)
-    // commands per the Linux man-page.
-    let cpu_flag_legal = matches!(
-        cmd,
-        MEMBARRIER_CMD_PRIVATE_EXPEDITED
-            | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
-            | MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
-    );
-    if flags & MEMBARRIER_CMD_FLAG_CPU != 0 && !cpu_flag_legal {
+    // ## Batch 503 — narrow FLAG_CPU acceptance to PRIVATE_EXPEDITED_RSEQ only
+    //
+    // Linux v6.6 `kernel/sched/membarrier.c::SYSCALL_DEFINE3(membarrier)`
+    // validates `flags` via a per-cmd switch (verbatim):
+    //
+    //   switch (cmd) {
+    //   case MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ:
+    //       if (unlikely(flags && flags != MEMBARRIER_CMD_FLAG_CPU))
+    //           return -EINVAL;
+    //       break;
+    //   default:
+    //       if (unlikely(flags))
+    //           return -EINVAL;
+    //   }
+    //
+    // So in v6.6 ONLY `MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ` accepts
+    // `MEMBARRIER_CMD_FLAG_CPU`; every other cmd (including the two
+    // earlier PRIVATE_EXPEDITED variants and the QUERY/GLOBAL family)
+    // falls into the `default` arm which rejects any non-zero flags.
+    //
+    // Pre-batch we allowed FLAG_CPU on PRIVATE_EXPEDITED and
+    // PRIVATE_EXPEDITED_SYNC_CORE as well, citing "per the Linux
+    // man-page" — but the man-page documents the future ABI of those
+    // commands, not v6.6's switch surface.  glibc 2.38+ probes the
+    // flag-acceptance shape per-cmd to decide whether to use the
+    // per-CPU expedited barrier (FLAG_CPU + RSEQ) or fall back to the
+    // broadcast variant; pre-batch a `(PRIVATE_EXPEDITED, FLAG_CPU)`
+    // probe succeeded where Linux v6.6 returns EINVAL, mis-training
+    // the runtime into believing PRIVATE_EXPEDITED supports targeted
+    // delivery.
+    if flags & MEMBARRIER_CMD_FLAG_CPU != 0
+        && cmd != MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ
+    {
         return linux_err(errno::EINVAL);
     }
 
@@ -58909,16 +58933,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: membarrier PRIVATE_EXPEDITED not 0");
             return Err(KernelError::InternalError);
         }
-        // PRIVATE_EXPEDITED with FLAG_CPU=1 -> 0 (legal here).
+        // Batch 503: PRIVATE_EXPEDITED with FLAG_CPU=1 -> EINVAL.
+        // Linux v6.6 kernel/sched/membarrier.c's `default` switch arm
+        // rejects any non-zero flags for non-RSEQ cmds; only
+        // PRIVATE_EXPEDITED_RSEQ accepts FLAG_CPU.  Pre-batch we
+        // returned 0 (over-permissive, mis-shaped glibc 2.38+ probe).
         let a = SyscallArgs { arg0: 8, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: membarrier PRIVATE_EXPEDITED+FLAG_CPU not 0");
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier PRIVATE_EXPEDITED+FLAG_CPU not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // PRIVATE_EXPEDITED_SYNC_CORE (cmd=32) with FLAG_CPU -> 0.
+        // Batch 503: PRIVATE_EXPEDITED_SYNC_CORE (cmd=32) with FLAG_CPU
+        // -> EINVAL.  Same `default` switch arm.
         let a = SyscallArgs { arg0: 32, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: membarrier SYNC_CORE+FLAG_CPU not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Regression guard: PRIVATE_EXPEDITED (cmd=8) with flags=0
+        // still -> 0 (batch 503 only narrowed FLAG_CPU acceptance).
+        let a = SyscallArgs { arg0: 8, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: membarrier SYNC_CORE+FLAG_CPU not 0");
+            serial_println!("[syscall/linux]   FAIL: membarrier PRIVATE_EXPEDITED+flags=0 not 0 (batch-503 regression)");
+            return Err(KernelError::InternalError);
+        }
+        // Regression guard: PRIVATE_EXPEDITED_SYNC_CORE (cmd=32) with
+        // flags=0 still -> 0.
+        let a = SyscallArgs { arg0: 32, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier SYNC_CORE+flags=0 not 0 (batch-503 regression)");
             return Err(KernelError::InternalError);
         }
         // PRIVATE_EXPEDITED_RSEQ (cmd=128) -> 0.
@@ -58927,6 +58970,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: membarrier RSEQ not 0");
             return Err(KernelError::InternalError);
         }
+        // Batch 503: PRIVATE_EXPEDITED_RSEQ (cmd=128) with FLAG_CPU=1
+        // -> 0.  This is the ONE cmd whose v6.6 switch arm carves out
+        // FLAG_CPU as legal (the per-CPU expedited barrier glibc uses
+        // to drain a single CPU's RSEQ critical section).
+        let a = SyscallArgs { arg0: 128, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: membarrier RSEQ+FLAG_CPU not 0 (batch-503 legal carve-out)");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   membarrier FLAG_CPU legal only on PRIVATE_EXPEDITED_RSEQ (v6.6, batch 503): OK"
+        );
         // REGISTER_GLOBAL_EXPEDITED (cmd=4) -> 0.
         let a = SyscallArgs { arg0: 4, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MEMBARRIER, &a).value != 0 {

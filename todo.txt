@@ -46057,3 +46057,73 @@ EINVAL at cmd>=36 (v6.6 cap=BPF_PROG_BIND_MAP): OK` (serial-test.txt).
 **Build:** clean (`cargo build -p kernel`, 45.4s).
 
 **Boot test:** PASS @ 26s (`bash scripts/boot-test.sh`).
+
+## Batch 503 — Linux ABI fidelity: membarrier() FLAG_CPU narrowed to PRIVATE_EXPEDITED_RSEQ only to match Linux v6.6 (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_membarrier`).
+
+**Change:** the per-cmd FLAG_CPU acceptance check changed from
+"legal on PRIVATE_EXPEDITED, PRIVATE_EXPEDITED_SYNC_CORE,
+PRIVATE_EXPEDITED_RSEQ" to "legal on PRIVATE_EXPEDITED_RSEQ only".
+
+**Linux v6.6 source** — `kernel/sched/membarrier.c::SYSCALL_DEFINE3(membarrier)`
+(verbatim head of the function):
+
+```c
+SYSCALL_DEFINE3(membarrier, int, cmd, unsigned int, flags, int, cpu_id)
+{
+    switch (cmd) {
+    case MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ:
+        if (unlikely(flags && flags != MEMBARRIER_CMD_FLAG_CPU))
+            return -EINVAL;
+        break;
+    default:
+        if (unlikely(flags))
+            return -EINVAL;
+    }
+
+    if (!(flags & MEMBARRIER_CMD_FLAG_CPU))
+        cpu_id = -1;
+    ...
+}
+```
+
+Only `MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ` accepts
+`MEMBARRIER_CMD_FLAG_CPU`; every other cmd (QUERY, GLOBAL,
+GLOBAL_EXPEDITED, REGISTER_GLOBAL_EXPEDITED, PRIVATE_EXPEDITED,
+REGISTER_PRIVATE_EXPEDITED, PRIVATE_EXPEDITED_SYNC_CORE,
+REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+REGISTER_PRIVATE_EXPEDITED_RSEQ, GET_REGISTRATIONS) hits the
+`default` arm which rejects any non-zero `flags`.
+
+**Pre-batch behaviour:** translator accepted FLAG_CPU on
+PRIVATE_EXPEDITED, PRIVATE_EXPEDITED_SYNC_CORE, and
+PRIVATE_EXPEDITED_RSEQ — citing "the Linux man-page", which
+documents a forward-looking API surface, not v6.6's switch.
+glibc 2.38+'s membarrier feature-detection walks cmd × flags
+combinations to discover which targeted-delivery shapes the
+kernel supports; pre-batch `(PRIVATE_EXPEDITED, FLAG_CPU)`
+succeeded where Linux v6.6 returns EINVAL, mis-training the
+runtime into believing PRIVATE_EXPEDITED supports targeted
+per-CPU delivery (it doesn't — only RSEQ does).
+
+**Post-batch behaviour:**
+  - cmd=PRIVATE_EXPEDITED (8), flags=FLAG_CPU (1) -> EINVAL (was 0)
+  - cmd=PRIVATE_EXPEDITED_SYNC_CORE (32), flags=FLAG_CPU -> EINVAL (was 0)
+  - cmd=PRIVATE_EXPEDITED_RSEQ (128), flags=FLAG_CPU -> 0 (unchanged)
+  - All other cmd × flags=0 paths: unchanged.
+
+**Boot probes updated.**
+  1. cmd=8 flags=1 -> EINVAL (was checked == 0; flipped)
+  2. cmd=32 flags=1 -> EINVAL (was checked == 0; flipped)
+  3. cmd=8 flags=0 -> 0 (regression guard, added)
+  4. cmd=32 flags=0 -> 0 (regression guard, added)
+  5. cmd=128 flags=1 -> 0 (legal carve-out, added)
+  + cmd=128 flags=0 -> 0 (existing regression guard)
+
+Summary stamp: `membarrier FLAG_CPU legal only on
+PRIVATE_EXPEDITED_RSEQ (v6.6, batch 503): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 46.8s).
+
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).

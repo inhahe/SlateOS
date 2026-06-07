@@ -41114,3 +41114,132 @@ expectation from EINVAL to ESOCKTNOSUPPORT.
 
 **Build:** `cargo build -p kernel` clean, 39.09s.
 **Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 467 — sys_socketpair type-range gate matches Linux SOCK_MAX=11
+
+**Linux 6.x source quote** (net/socket.c — __sys_socketpair
+calls sock_create which calls __sock_create):
+
+    int __sys_socketpair(int family, int type, int protocol,
+                         int __user *usockvec)
+    {
+            ...
+            flags = type & ~SOCK_TYPE_MASK;
+            if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
+                    return -EINVAL;
+            type &= SOCK_TYPE_MASK;
+            ...
+            err = sock_create(family, type, protocol, &sock1);
+            ...  /* sock_create -> __sock_create */
+    }
+
+    static int __sock_create(struct net *net, int family, int type,
+                             int protocol, struct socket **res, int kern)
+    {
+            ...
+            if (family < 0 || family >= NPROTO)
+                    return -EAFNOSUPPORT;
+            if (type < 0 || type >= SOCK_MAX)
+                    return -EINVAL;
+            ...
+    }
+
+with SOCK_MAX = SOCK_PACKET+1 = 11 (include/linux/net.h).
+
+After the outer flag-bit strip and SOCK_TYPE_MASK (0xF), the
+effective sock_type is 0..=15 — only 11..=15 trip the EINVAL
+gate.  Values 0/6/7/8/9/10 PASS and are surfaced by the
+per-family create switch as -ESOCKTNOSUPPORT (unix_create /
+inetsw[] / netlink_create / packet_create — see batch 466 for
+quotes).  The single exception is (AF_PACKET, SOCK_PACKET=10):
+packet_create accepts it, and __sys_socketpair then calls
+sock1->ops->socketpair which is NULL for AF_PACKET, surfacing
+-EOPNOTSUPP from this Linux line:
+
+    /* net/socket.c::__sys_socketpair */
+    err = sock1->ops->socketpair(sock1, sock2);
+    if (unlikely(err < 0)) {
+            ...
+    }
+
+(reached via the `ops->socketpair ? sock1->ops->socketpair(...)
+: -EOPNOTSUPP` shape in older trees, same observable errno).
+
+**Divergence table**
+
+    Shape                                          pre-batch       Linux 6.x
+    --------------------------------------------   ------------    ------------------
+    socketpair(AF_INET=2,  SOCK_DCCP=6,    0, sv)  EINVAL          ESOCKTNOSUPPORT
+    socketpair(AF_INET=2,  SOCK_PACKET=10, 0, sv)  EINVAL          ESOCKTNOSUPPORT
+    socketpair(AF_INET=2,  type=7,         0, sv)  EINVAL          ESOCKTNOSUPPORT
+    socketpair(AF_UNIX=1,  type=0,         0, sv)  EINVAL          ESOCKTNOSUPPORT
+    socketpair(AF_NETLINK, SOCK_DCCP=6,    0, sv)  EINVAL          ESOCKTNOSUPPORT
+    socketpair(AF_PACKET,  SOCK_DCCP=6,    0, sv)  EINVAL          ESOCKTNOSUPPORT
+    socketpair(AF_PACKET,  SOCK_PACKET=10, 0, sv)  EINVAL          EOPNOTSUPP
+                                                                   (packet_create
+                                                                   accepts, then
+                                                                   ops->socketpair
+                                                                   == NULL)
+    socketpair(AF_INET,    type=11,        0, sv)  EINVAL          EINVAL (unchanged)
+
+**Why it matters**
+
+Direct parallel of batch 466's rationale for sys_socket.
+sys_socketpair was the second of the two affected entry points.
+Capability-detection probes (LTP socket01 and friends) that
+distinguish ESOCKTNOSUPPORT from EINVAL on socketpair would
+have seen the wrong errno-class for the same six probe shapes
+the socket() version masked.
+
+The (AF_PACKET, SOCK_PACKET) case is additionally interesting:
+on Linux, socketpair() reaches the ops table and returns
+EOPNOTSUPP (not success — because AF_PACKET doesn't implement
+the socketpair op).  Pre-batch we returned EINVAL.  Post-batch
+we route through to the existing `if domain != 1 { EOPNOTSUPP }`
+gate that already correctly modelled the ops->socketpair NULL
+return for non-AF_UNIX families.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs::sys_socketpair`, gate 2-continued
+(type-range) and gate 3a (per-family socket-type allowlist):
+
+  * Type-range gate widened: `if !(1..=5).contains(&sock_type)`
+    → `if sock_type >= 11`.  Matches Linux's `>= SOCK_MAX`.
+  * Gate 3a allowlist extended to cover the now-passing types
+    {0, 6, 7, 8, 9, 10} per the same per-family create
+    switches enumerated for sys_socket batch 466:
+      - AF_UNIX:    reject {0, 4, 6, 7, 8, 9, 10}.
+      - AF_INET / AF_INET6: reject {0, 4, 6, 7, 8, 9, 10}.
+      - AF_NETLINK: reject everything except {2, 3}.
+      - AF_PACKET:  reject everything except {2, 3, 10}.
+        SOCK_PACKET=10 falls through; existing `domain != 1
+        → EOPNOTSUPP` gate handles the ops->socketpair NULL
+        case.
+
+Translator-only — no native socketpair code changed.
+
+**Probes added (post the existing "socketpair ESOCKT/EPROTO
+gating: OK" block):**
+
+  A. socketpair(AF_INET=2, SOCK_DCCP=6, 0, sv)   -> ESOCKTNOSUPPORT
+  B. socketpair(AF_INET=2, SOCK_PACKET=10, 0, sv) -> ESOCKTNOSUPPORT
+  C. socketpair(AF_INET=2, type=7, 0, sv)         -> ESOCKTNOSUPPORT
+  D. socketpair(AF_UNIX=1, type=0, 0, sv)         -> ESOCKTNOSUPPORT
+  E. socketpair(AF_NETLINK=16, SOCK_DCCP=6, 0, sv) -> ESOCKTNOSUPPORT
+  F. socketpair(AF_PACKET=17, SOCK_DCCP=6, 0, sv) -> ESOCKTNOSUPPORT
+  G. socketpair(AF_PACKET=17, SOCK_PACKET=10, 0, sv) -> EOPNOTSUPP
+     (accepted by family-create, then ops->socketpair NULL
+     short-circuits at the existing gate 3c)
+  H. socketpair(AF_INET=2, type=11, 0, sv)        -> EINVAL
+     (regression: confirms type=11 still hits the loosened
+     >= SOCK_MAX gate at the new boundary)
+
+Probe block stamp:
+
+    [syscall/linux]   socketpair type-range gate widened to Linux SOCK_MAX=11 (was 1..=5); 0/6/7/8/9 surface ESOCKTNOSUPPORT per family-create err-init; SOCK_PACKET on AF_PACKET reaches ops->socketpair NULL → EOPNOTSUPP: OK
+
+**Build:** `cargo build -p kernel` clean, 39.95s.
+**Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).

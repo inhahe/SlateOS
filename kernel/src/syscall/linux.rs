@@ -23410,8 +23410,25 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
         1 | 2 | 10 | 16 | 17 => {}
         _ => return linux_err(errno::EAFNOSUPPORT),
     }
-    // Gate 2 (continued): type range.
-    if !(1..=5).contains(&sock_type) {
+    // Gate 2 (continued): type range — Linux's
+    // net/socket.c::__sock_create has
+    //     `if (type < 0 || type >= SOCK_MAX) return -EINVAL;`
+    // with SOCK_MAX = SOCK_PACKET+1 = 11
+    // (include/linux/net.h).  After SOCK_TYPE_MASK (0xF)
+    // stripping in __sys_socketpair, sock_type is 0..=15
+    // so only 11..=15 trip this gate with EINVAL.  Lower
+    // values (0, 6 = SOCK_DCCP, 7, 8, 9 reserved, 10 =
+    // SOCK_PACKET) pass and are surfaced as
+    // -ESOCKTNOSUPPORT by gate 3a's per-family allowlist
+    // (or, for (AF_PACKET, SOCK_PACKET), accepted by
+    // packet_create and then short-circuited to EOPNOTSUPP
+    // by ops->socketpair == NULL at gate 3c below).
+    //
+    // Batch 467 — pre-batch this gate was
+    // `!(1..=5).contains(...)` returning EINVAL for
+    // {0, 6, 7, 8, 9, 10} as well.  Mirrors batch 466's
+    // identical fix in sys_socket.
+    if sock_type >= 11 {
         return linux_err(errno::EINVAL);
     }
     // Gate 3a: sock_create walks inet_create / unix_create /
@@ -23422,13 +23439,39 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     // ops->socketpair is consulted.  Pre-batch (before 281) we
     // jumped straight to "domain != AF_UNIX -> EOPNOTSUPP",
     // collapsing this discriminator.  Batch 281 covered AF_UNIX
-    // /AF_INET/AF_INET6 + SOCK_RDM; batch 282 widens to
-    // AF_NETLINK/AF_PACKET + STREAM/RDM/SEQPACKET.  Mirrors
-    // sys_socket batch 280+282.
+    // /AF_INET/AF_INET6 + SOCK_RDM; batch 282 widened to
+    // AF_NETLINK/AF_PACKET + STREAM/RDM/SEQPACKET; batch 467
+    // widens further to cover the now-passing types
+    // {0, 6, 7, 8, 9, 10} per Linux's family-create switches:
+    //   AF_UNIX  (1):  reject {0, 4, 6, 7, 8, 9, 10}.
+    //   AF_INET  (2),
+    //   AF_INET6 (10): reject {0, 4, 6, 7, 8, 9, 10}
+    //                  (inetsw[] empty at those indices).
+    //   AF_NETLINK(16): reject everything except {2, 3}.
+    //   AF_PACKET (17): reject everything except {2, 3, 10}.
+    //                  SOCK_PACKET=10 on AF_PACKET is
+    //                  intentionally NOT listed — it falls
+    //                  through and packet_create succeeds;
+    //                  the EOPNOTSUPP from gate 3c then
+    //                  fires (ops->socketpair == NULL).
+    // Mirrors sys_socket batch 466.
     match (domain, sock_type) {
-        (1, 4) => return linux_err(errno::ESOCKTNOSUPPORT),
-        (2 | 10, 4) => return linux_err(errno::ESOCKTNOSUPPORT),
-        (16 | 17, 1 | 4 | 5) => return linux_err(errno::ESOCKTNOSUPPORT),
+        // AF_UNIX accepts {1, 2, 3, 5}; reject the rest.
+        (1, 0 | 4 | 6 | 7 | 8 | 9 | 10) => {
+            return linux_err(errno::ESOCKTNOSUPPORT);
+        }
+        // AF_INET / AF_INET6 accept {1, 2, 3, 5}; reject the rest.
+        (2 | 10, 0 | 4 | 6 | 7 | 8 | 9 | 10) => {
+            return linux_err(errno::ESOCKTNOSUPPORT);
+        }
+        // AF_NETLINK accepts {2, 3}; reject the rest.
+        (16, 0 | 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10) => {
+            return linux_err(errno::ESOCKTNOSUPPORT);
+        }
+        // AF_PACKET accepts {2, 3, 10}; reject the rest.
+        (17, 0 | 1 | 4 | 5 | 6 | 7 | 8 | 9) => {
+            return linux_err(errno::ESOCKTNOSUPPORT);
+        }
         _ => {}
     }
     // Gate 3b: per-(family, type) protocol whitelist ->
@@ -64633,6 +64676,152 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socketpair ESOCKT/EPROTO gating: OK"
+            );
+        }
+
+        // ---- socketpair type-range gate widening (batch 467) ----
+        // Mirrors sys_socket batch 466: Linux's
+        // __sock_create rejects only `type >= SOCK_MAX=11`
+        // with EINVAL.  After SOCK_TYPE_MASK (0xF) stripping
+        // only values 11..=15 trip the gate; lower values
+        // 0/6/7/8/9/10 pass and are surfaced as
+        // ESOCKTNOSUPPORT by family-create (or, for
+        // (AF_PACKET, SOCK_PACKET), accepted by
+        // packet_create and then EOPNOTSUPP from
+        // ops->socketpair == NULL).
+        //
+        // Pre-batch our `!(1..=5)` gate returned EINVAL for
+        // all of {0, 6, 7, 8, 9, 10}, collapsing the
+        // ESOCKTNOSUPPORT discriminator and incorrectly
+        // rejecting (AF_PACKET, SOCK_PACKET) which Linux
+        // accepts (and then surfaces EOPNOTSUPP for).
+        //
+        // Discriminator octet (kernel-context):
+        //   A. socketpair(AF_INET=2, SOCK_DCCP=6, 0, sv)
+        //      pre: EINVAL ; post: ESOCKTNOSUPPORT
+        //   B. socketpair(AF_INET=2, SOCK_PACKET=10, 0, sv)
+        //      pre: EINVAL ; post: ESOCKTNOSUPPORT
+        //   C. socketpair(AF_INET=2, 7, 0, sv)
+        //      pre: EINVAL ; post: ESOCKTNOSUPPORT
+        //   D. socketpair(AF_UNIX=1, 0, 0, sv)
+        //      pre: EINVAL ; post: ESOCKTNOSUPPORT
+        //   E. socketpair(AF_NETLINK=16, SOCK_DCCP=6, 0, sv)
+        //      pre: EINVAL ; post: ESOCKTNOSUPPORT
+        //   F. socketpair(AF_PACKET=17, SOCK_DCCP=6, 0, sv)
+        //      pre: EINVAL ; post: ESOCKTNOSUPPORT
+        //   G. socketpair(AF_PACKET=17, SOCK_PACKET=10, 0, sv)
+        //      pre: EINVAL ; post: EOPNOTSUPP
+        //      (accepted by family-create, then
+        //      ops->socketpair == NULL → EOPNOTSUPP)
+        //   H. socketpair(AF_INET=2, 11, 0, sv)
+        //      Regression: type=11 still EINVAL (loosened
+        //      `>= SOCK_MAX` gate at the new boundary).
+        //      pre: EINVAL ; post: EINVAL (unchanged)
+        {
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+
+            // A: AF_INET / SOCK_DCCP
+            let a = SyscallArgs {
+                arg0: 2, arg1: 6, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,DCCP) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_INET / SOCK_PACKET
+            let a = SyscallArgs {
+                arg0: 2, arg1: 10, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,SOCK_PACKET) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_INET / type=7 (reserved)
+            let a = SyscallArgs {
+                arg0: 2, arg1: 7, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,7) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_UNIX / type=0
+            let a = SyscallArgs {
+                arg0: 1, arg1: 0, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,0) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: AF_NETLINK / SOCK_DCCP
+            let a = SyscallArgs {
+                arg0: 16, arg1: 6, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DCCP) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: AF_PACKET / SOCK_DCCP
+            let a = SyscallArgs {
+                arg0: 17, arg1: 6, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_PACKET,DCCP) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: AF_PACKET / SOCK_PACKET — packet_create
+            // accepts, then ops->socketpair == NULL →
+            // EOPNOTSUPP.
+            let a = SyscallArgs {
+                arg0: 17, arg1: 10, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_PACKET,SOCK_PACKET) not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: AF_INET / type=11 (>= SOCK_MAX) — EINVAL.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 11, arg2: 0, arg3: sv_p, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EINVAL)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,11) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socketpair type-range gate widened to Linux SOCK_MAX=11 (was 1..=5); 0/6/7/8/9 surface ESOCKTNOSUPPORT per family-create err-init; SOCK_PACKET on AF_PACKET reaches ops->socketpair NULL → EOPNOTSUPP: OK"
             );
         }
 

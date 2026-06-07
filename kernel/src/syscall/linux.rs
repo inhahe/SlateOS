@@ -3968,13 +3968,77 @@ fn open_kernel_path_install(path: &str, flags: u32) -> SyscallResult {
 /// fd numbers there.  `flags` is interpreted as the Linux `O_*` set
 /// (`O_CLOEXEC` and `O_NONBLOCK`).  Returns 0 on success.
 fn pipe_common(pipefd_ptr: u64, flags: u32) -> SyscallResult {
-    if pipefd_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    // pipe2 rejects unknown flag bits (Linux returns -EINVAL).
+    // Batch 476 — flag-mask check precedes fildes pointer access.
+    //
+    // Linux's fs/pipe.c::do_pipe2 (and the SYSCALL_DEFINE2(pipe2)
+    // wrapper that calls it) invoke __do_pipe_flags BEFORE any
+    // reference to the user fildes pointer:
+    //
+    //     static int do_pipe2(int __user *fildes, int flags)
+    //     {
+    //         struct file *files[2];
+    //         int fd[2];
+    //         int error;
+    //
+    //         error = __do_pipe_flags(fd, files, flags);    // gate 1
+    //         if (!error) {
+    //             if (unlikely(copy_to_user(fildes, fd,     // gate 2
+    //                                       sizeof(fd)))) {
+    //                 ...
+    //                 error = -EFAULT;
+    //             } else {
+    //                 fd_install(fd[0], files[0]);
+    //                 fd_install(fd[1], files[1]);
+    //             }
+    //         }
+    //         return error;
+    //     }
+    //
+    //     static int __do_pipe_flags(int *fd, struct file **files,
+    //                                int flags)
+    //     {
+    //         int error;
+    //         int i, j;
+    //
+    //         if (flags & ~(O_CLOEXEC | O_NONBLOCK |        // gate 1a
+    //                       O_DIRECT | O_NOTIFICATION_PIPE))
+    //             return -EINVAL;
+    //         ...
+    //     }
+    //
+    // The fildes pointer is touched only by copy_to_user inside the
+    // `if (!error)` branch, which runs only after the flag check
+    // passes.  So `pipe2(NULL, BAD_FLAGS)` returns -EINVAL on Linux,
+    // not -EFAULT — userspace probes that test malformed-flag
+    // rejection with a NULL output buffer (glibc's pipe2 wrapper
+    // tests, LTP's pipe2/pipe202) use this ordering as a
+    // discriminator between "kernel rejected my flags" (EINVAL) and
+    // "kernel rejected my output buffer" (EFAULT).  Pre-batch our
+    // NULL pointer short-circuit fired first, collapsing the EINVAL
+    // arm into EFAULT.
+    //
+    // Translator-only reorder: flag check moves above the NULL
+    // pointer check.  The remaining EFAULT path (NULL or invalid
+    // pipefd_ptr) is reached only when the flag mask passes, which
+    // matches Linux's "create pipe THEN copy_to_user" sequence
+    // without the actual pipe-creation/rollback cost (since we
+    // validate the user write up front before allocating handles).
+    //
+    // Note on accepted-flags subset: Linux accepts O_DIRECT
+    // (packet mode) and conditionally O_NOTIFICATION_PIPE
+    // (CONFIG_WATCH_QUEUE).  We don't implement packet-mode pipes,
+    // so accepting O_DIRECT here would silently downgrade behaviour
+    // (caller expects boundary-preserving reads, gets stream
+    // semantics).  Rejecting with EINVAL is the truthful answer
+    // until we land packet-mode support.  The notification-pipe
+    // watch_queue is also out of scope.  This is documented in
+    // todo.txt batch 476 entry.
     let known = oflags::O_CLOEXEC | oflags::O_NONBLOCK;
     if flags & !known != 0 {
         return linux_err(errno::EINVAL);
+    }
+    if pipefd_ptr == 0 {
+        return linux_err(errno::EFAULT);
     }
 
     let pid = match caller_pid() {
@@ -31415,6 +31479,89 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   FAIL: pipe2(1, 0x1) → {} (expected -EINVAL)", r.value
         );
         return Err(KernelError::InternalError);
+    }
+
+    // ---- pipe2 flag-mask precedes fildes pointer access ----
+    // Batch 476 — Linux's do_pipe2 calls __do_pipe_flags BEFORE
+    // touching the user fildes pointer.  __do_pipe_flags's first
+    // statement is `if (flags & ~(O_CLOEXEC | O_NONBLOCK |
+    // O_DIRECT | O_NOTIFICATION_PIPE)) return -EINVAL;` — so a
+    // NULL fildes paired with malformed flags returns -EINVAL,
+    // not -EFAULT.  Pre-batch our `if pipefd_ptr == 0` early
+    // return hijacked EINVAL with EFAULT.
+    //
+    // Discriminator quintet (kernel-context):
+    //   A. pipe2(NULL, 0xFFFFFFFF)
+    //      pre: EFAULT ; post: EINVAL
+    //   B. pipe2(NULL, 0x80000000)
+    //      pre: EFAULT ; post: EINVAL (single-bit isolation)
+    //   C. pipe2(NULL, O_DIRECT=0x4000)
+    //      pre: EFAULT ; post: EINVAL (Linux accepts O_DIRECT
+    //      but we don't yet implement packet-mode pipes; the
+    //      flag stays in our rejection mask for now).
+    //   D. Regression: pipe2(NULL, O_CLOEXEC) -> EFAULT
+    //      (flag check passes, NULL fildes -> EFAULT — gate 2
+    //      surfaces as before).
+    //   E. Regression: pipe2(NULL, 0) -> EFAULT  (already
+    //      tested by 7b1 but include for gate-order coverage).
+    {
+        // A: bad-flag mask, NULL fildes.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0xFFFFFFFF, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pipe2(NULL, 0xFFFFFFFF) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // B: single-bit bad flag (high bit), NULL fildes.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x80000000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pipe2(NULL, 0x80000000) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // C: O_DIRECT (0x4000) — Linux accepts, we reject.  NULL
+        // fildes; the EINVAL still fires because our gate 1a mask
+        // doesn't include O_DIRECT (documented translator
+        // limitation).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pipe2(NULL, O_DIRECT) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // D: O_CLOEXEC (0o2_000_000 = 0x80000), NULL fildes —
+        // valid flag passes gate 1a; NULL gate 1b surfaces EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0o2_000_000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pipe2(NULL, O_CLOEXEC) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // E: zero flags, NULL fildes — both gates fire correctly.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: pipe2(NULL, 0) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   pipe2 flag-mask check precedes fildes pointer access (Linux __do_pipe_flags: EINVAL before copy_to_user): OK"
+        );
     }
 
     // (7c) openat dirfd resolution (batch 40).

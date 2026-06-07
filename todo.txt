@@ -42437,3 +42437,143 @@ Probe block stamps:
 Probe stamps observed at `build/serial-test.txt:719` (socket) and
 `:727` (socketpair).
 
+================================================================
+Batch 476 — pipe / pipe2: flag-mask check must precede fildes
+pointer access (was EFAULT for NULL fildes + bad flags; Linux:
+EINVAL).
+================================================================
+
+**Linux divergence.**  Linux's fs/pipe.c sequences:
+
+    SYSCALL_DEFINE2(pipe2, int __user *, fildes, int, flags)
+    {
+        return do_pipe2(fildes, flags);
+    }
+
+    static int do_pipe2(int __user *fildes, int flags)
+    {
+        struct file *files[2];
+        int fd[2];
+        int error;
+
+        error = __do_pipe_flags(fd, files, flags);    /* gate 1 */
+        if (!error) {
+            if (unlikely(copy_to_user(fildes, fd,     /* gate 2 */
+                                      sizeof(fd)))) {
+                fput(files[0]);
+                fput(files[1]);
+                put_unused_fd(fd[0]);
+                put_unused_fd(fd[1]);
+                error = -EFAULT;
+            } else {
+                fd_install(fd[0], files[0]);
+                fd_install(fd[1], files[1]);
+            }
+        }
+        return error;
+    }
+
+    static int __do_pipe_flags(int *fd, struct file **files,
+                               int flags)
+    {
+        int error;
+        int i, j;
+
+        if (flags & ~(O_CLOEXEC | O_NONBLOCK |        /* gate 1a */
+                      O_DIRECT | O_NOTIFICATION_PIPE))
+            return -EINVAL;
+        ...
+    }
+
+The fildes pointer is touched ONLY inside the `if (!error)` branch
+by copy_to_user, which runs only after __do_pipe_flags returns
+success.  Therefore `pipe2(NULL, BAD_FLAGS)` returns -EINVAL, not
+-EFAULT.
+
+Pre-batch our pipe_common had:
+
+    if pipefd_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    let known = oflags::O_CLOEXEC | oflags::O_NONBLOCK;
+    if flags & !known != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+i.e. the NULL pointer short-circuit fired BEFORE the flag check,
+collapsing the EINVAL discriminator into EFAULT.
+
+**Divergence table:**
+
+  Shape                              Pre-batch  Linux    Post-batch
+  ---------------------------------  ---------  -------  ----------
+  pipe2(NULL, 0xFFFFFFFF)            EFAULT     EINVAL   EINVAL
+  pipe2(NULL, 0x80000000)            EFAULT     EINVAL   EINVAL
+  pipe2(NULL, O_DIRECT=0x4000)       EFAULT     OK*      EINVAL**
+  pipe2(NULL, O_CLOEXEC)             EFAULT     EFAULT   EFAULT
+  pipe2(NULL, 0)                     EFAULT     EFAULT   EFAULT
+  pipe2(bad_ptr, 0xFFFF)             EINVAL     EINVAL   EINVAL
+  pipe2(bad_ptr, 0)                  EFAULT     EFAULT   EFAULT
+
+  (*)  Linux accepts O_DIRECT (packet-mode pipe).
+  (**) We do not implement packet-mode pipes, so accepting
+       O_DIRECT would silently downgrade semantics
+       (boundary-preserving reads becoming stream reads).  We
+       keep O_DIRECT in the rejection mask until packet-mode
+       support lands.  Documented limitation, not a regression.
+
+**Why it matters.**  glibc's pipe2 wrapper tests and LTP's
+pipe2/pipe202 use the EINVAL vs EFAULT split to localize whether
+the kernel rejected the flag bits or the output buffer.  An
+EINVAL-first kernel lets userspace probe feature support by
+sending malformed flags with NULL fildes and reading the errno —
+no pipe creation needed.  An EFAULT-first kernel forces the prober
+to supply a valid buffer just to learn which flags are recognized.
+
+**Fix (translator-only).**  Swap the two early-exit checks in
+pipe_common so the flag mask runs first:
+
+    let known = oflags::O_CLOEXEC | oflags::O_NONBLOCK;
+    if flags & !known != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    if pipefd_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+
+Remaining gates (caller_pid lookup -> EBADF; validate_user_write
+-> EFAULT; pipe creation; install) unchanged.  Translator-only;
+native pipe path is untouched.
+
+**Probes added (sys_linux self-test).**
+
+A. pipe2(NULL, 0xFFFFFFFF)        -> EINVAL  (NEW)
+B. pipe2(NULL, 0x80000000)        -> EINVAL  (NEW, single-bit
+                                              isolation)
+C. pipe2(NULL, O_DIRECT=0x4000)   -> EINVAL  (NEW, translator
+                                              rejection — Linux
+                                              accepts; documented
+                                              limitation)
+D. pipe2(NULL, O_CLOEXEC)         -> EFAULT  (regression: valid
+                                              flag, NULL ptr)
+E. pipe2(NULL, 0)                 -> EFAULT  (regression: already
+                                              covered by 7b1 but
+                                              included for gate-
+                                              order completeness)
+
+Probe block stamp:
+
+    [syscall/linux]   pipe2 flag-mask check precedes fildes pointer access (Linux __do_pipe_flags: EINVAL before copy_to_user): OK
+
+**Build:** `cargo build -p kernel` clean, 40.83s.
+**Boot test:** PASS @ 23s (`bash scripts/boot-test.sh`).
+Probe stamp observed at `build/serial-test.txt:428`.
+
+**Limitation noted.**  Linux's pipe2 accepts O_DIRECT (packet-mode
+pipes, fs/pipe.c) and conditionally O_NOTIFICATION_PIPE
+(CONFIG_WATCH_QUEUE).  Our translator rejects both with EINVAL.
+Accepting O_DIRECT without implementing packet-mode would
+silently change pipe semantics; that's a worse divergence than
+the EINVAL we currently return.  Future batch: implement packet
+mode (per-write atomic 4KiB chunks) then widen the flag mask.
+

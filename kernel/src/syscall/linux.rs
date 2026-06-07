@@ -9006,10 +9006,12 @@ fn sys_sched_getscheduler(args: &SyscallArgs) -> SyscallResult {
 /// scheduling policy.
 ///
 /// Linux semantics that we honor:
-///   - `policy` must be one of {0,1,2,3,5,6,7}; 4 was historically
+///   - `policy` must be one of {0,1,2,3,5,6}; 4 was historically
 ///     reserved for SCHED_ISO and is rejected with EINVAL even
 ///     on modern Linux.  Our previous stub allowed 0..=7 which would
 ///     accept the reserved value; this revision tightens the check.
+///     Batch 505 further removes 7 (SCHED_EXT, added in Linux 6.12)
+///     to match v6.6's `valid_policy()` surface exactly.
 ///   - `sched_param` is a user pointer that must read at least `int
 ///     sched_priority` (4 bytes).  NULL or an unreadable pointer
 ///     returns EFAULT (or whatever `linux_errno_for` derives from the
@@ -9101,10 +9103,41 @@ fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
     // `policy_i32` is already validated >= 0 by gate 1, so the
     // sign-loss cast to u32 is safe; we keep policy_u32 in scope for
     // gates 6/7 and the per-PCB store below.
+    //
+    // ## Batch 505 — drop SCHED_EXT (=7) acceptance to match v6.6
+    //
+    // Linux v6.6 `kernel/sched/sched.h` defines `valid_policy()` as the
+    // OR of `idle_policy(policy) || fair_policy(policy) ||
+    // rt_policy(policy) || dl_policy(policy)`:
+    //
+    //   static inline int fair_policy(int policy)
+    //   { return policy == SCHED_NORMAL || policy == SCHED_BATCH; }
+    //   static inline int rt_policy(int policy)
+    //   { return policy == SCHED_FIFO || policy == SCHED_RR; }
+    //   static inline int dl_policy(int policy)
+    //   { return policy == SCHED_DEADLINE; }
+    //   static inline int idle_policy(int policy)
+    //   { return policy == SCHED_IDLE; }
+    //   static inline int valid_policy(int policy)
+    //   { return idle_policy(policy) || fair_policy(policy) ||
+    //            rt_policy(policy) || dl_policy(policy); }
+    //
+    // `include/uapi/linux/sched.h` (v6.6): SCHED_NORMAL=0, SCHED_FIFO=1,
+    // SCHED_RR=2, SCHED_BATCH=3, SCHED_IDLE=5, SCHED_DEADLINE=6.  There
+    // is no SCHED_EXT in v6.6 (added in Linux 6.12 as policy=7), so
+    // `valid_policy(7)` returns false and `__sched_setscheduler`'s
+    // `if (!valid_policy(policy) && ...) return -EINVAL;` fires.
+    //
+    // Pre-batch we accepted policy=7 as a one-policy forward-compat
+    // buffer (mirroring the same now-removed buffer in
+    // sched_get_priority_{max,min}, see batch 504).  The translator-only
+    // fidelity directive overrides that — match v6.6's CURRENT
+    // valid_policy() surface so glibc-on-v6.6 probes that walk policy
+    // values can correctly conclude SCHED_EXT is unavailable.
     #[allow(clippy::cast_sign_loss)]
     let policy_u32 = policy_i32 as u32;
     match policy_u32 {
-        0 | 1 | 2 | 3 | 5 | 6 | 7 => {}
+        0 | 1 | 2 | 3 | 5 | 6 => {}
         _ => return linux_err(errno::EINVAL),
     }
 
@@ -9165,6 +9198,13 @@ fn read_user_sched_priority(param_ptr: u64) -> Result<i32, i32> {
 ///     must be exactly 0.  (DEADLINE uses the dl_attr struct via
 ///     sched_setattr instead, not sched_param.)
 ///   - Anything outside those windows -> EINVAL.
+///
+/// Batch 505: policy=7 (SCHED_EXT, added in Linux 6.12) removed from
+/// the zero-priority arm.  v6.6's `valid_policy()` rejects it, so the
+/// upstream caller (`sys_sched_setscheduler` gate 5) fires first; this
+/// is defence-in-depth in case any future caller routes through here
+/// without the gate-5 check.  `sys_sched_setattr` separately rejects
+/// SCHED_EXT with EOPNOTSUPP ahead of this call.
 fn sched_priority_check_for_policy(policy: u64, sched_prio: i32) -> Result<(), i32> {
     match policy {
         1 | 2 => {
@@ -9172,7 +9212,7 @@ fn sched_priority_check_for_policy(policy: u64, sched_prio: i32) -> Result<(), i
                 return Err(errno::EINVAL);
             }
         }
-        0 | 3 | 5 | 6 | 7 => {
+        0 | 3 | 5 | 6 => {
             if sched_prio != 0 {
                 return Err(errno::EINVAL);
             }
@@ -44123,9 +44163,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let sched_param_zero_ptr = sched_param_zero.as_ptr() as u64;
 
         // sched_setscheduler(0, 8, valid_param) -> EINVAL via gate 5
-        // (policy not in {0,1,2,3,5,6,7}).  Pre-batch the policy gate
-        // fired ahead of the param fetch; we now reach it via a valid
-        // param so the test still proves policy=8 is rejected.
+        // (policy not in {0,1,2,3,5,6}; batch 505 removed 7 from the
+        // accept set).  Pre-batch the policy gate fired ahead of the
+        // param fetch; we now reach it via a valid param so the test
+        // still proves policy=8 is rejected.
         let a = SyscallArgs { arg0: 0, arg1: 8, arg2: sched_param_zero_ptr,
             arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
@@ -44147,6 +44188,40 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 505: sched_setscheduler(0, 7, valid_param) -> EINVAL.
+        // Policy 7 (SCHED_EXT) was added in Linux 6.12; v6.6's
+        // valid_policy() does not name it, so __sched_setscheduler
+        // returns -EINVAL.  Pre-batch we accepted policy=7 (returning
+        // Ok(0)); this guard locks in the v6.6 rejection.
+        let a = SyscallArgs { arg0: 0, arg1: 7, arg2: sched_param_zero_ptr,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setscheduler(SCHED_EXT=7, valid) not EINVAL (batch 505; was 0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 505 regression guards: policy=0 (NORMAL), 3 (BATCH),
+        // 5 (IDLE), 6 (DEADLINE) with priority=0 still succeed — these
+        // are the four valid_policy() arms in v6.6 that route through
+        // the zero-priority bucket.  (FIFO/RR are exercised elsewhere
+        // with prio=1 and the RTPRIO discriminator.)
+        for &policy in &[0u64, 3, 5, 6] {
+            let a = SyscallArgs { arg0: 0, arg1: policy,
+                arg2: sched_param_zero_ptr, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_setscheduler(policy={}, prio=0) expected 0 (batch 505 regression), got {}",
+                    policy,
+                    dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setscheduler v6.6 valid_policy() set: {{0,1,2,3,5,6}} (batch 505): OK"
+        );
         // sched_setscheduler(0, 0, NULL) -> EINVAL.  Linux's
         // do_sched_setscheduler entry rejects NULL param with EINVAL
         // ahead of copy_from_user, so this is EINVAL, not EFAULT.

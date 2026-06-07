@@ -46224,3 +46224,94 @@ intermittent RCU self-test hang under single-CPU QEMU
 (`known-issues.md` issue #1 — hangs mid-RCU after a
 "Quiescent state" emission, no kernel progress, BOOT_OK never
 emitted); retry PASS @ 25s (`bash scripts/boot-test.sh`).
+
+## Batch 505 — Linux ABI fidelity: sched_setscheduler() drops SCHED_EXT (policy=7) acceptance to match Linux v6.6 (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs`
+(`sys_sched_setscheduler` gate 5; `sched_priority_check_for_policy`
+defence-in-depth arm).
+
+**Change:** the policy-validity switch in gate 5 of
+`sys_sched_setscheduler` changed from accepting `0 | 1 | 2 | 3 |
+5 | 6 | 7` to accepting `0 | 1 | 2 | 3 | 5 | 6`; the matching
+zero-priority arm in `sched_priority_check_for_policy` removed
+the `7` case symmetrically.  This continues the batch 504 pattern
+(`sched_get_priority_{max,min}`) of dropping the
+forward-compat SCHED_EXT slot to match v6.6's exact ABI surface.
+
+**Linux v6.6 source** — `kernel/sched/sched.h` defines
+`valid_policy()` as the OR of four single-policy predicates:
+
+```c
+static inline int fair_policy(int policy)
+{ return policy == SCHED_NORMAL || policy == SCHED_BATCH; }
+static inline int rt_policy(int policy)
+{ return policy == SCHED_FIFO || policy == SCHED_RR; }
+static inline int dl_policy(int policy)
+{ return policy == SCHED_DEADLINE; }
+static inline int idle_policy(int policy)
+{ return policy == SCHED_IDLE; }
+static inline int valid_policy(int policy)
+{ return idle_policy(policy) || fair_policy(policy) ||
+         rt_policy(policy) || dl_policy(policy); }
+```
+
+…and `__sched_setscheduler` in `kernel/sched/syscalls.c` gates on
+it:
+
+```c
+if (!valid_policy(policy) &&
+    !(attr->sched_flags & SCHED_FLAG_RESET_ON_FORK))
+    return -EINVAL;
+```
+
+`include/uapi/linux/sched.h` (v6.6) defines the SCHED_* set as
+NORMAL=0, FIFO=1, RR=2, BATCH=3, IDLE=5, DEADLINE=6.  There is no
+SCHED_EXT in v6.6 — added in Linux 6.12 as policy=7 alongside the
+BPF-driven extensible scheduler — so `valid_policy(7)` returns
+false and `__sched_setscheduler(policy=7)` returns -EINVAL.
+
+**Divergence (pre-batch):** the translator's gate-5 match arm
+accepted policy=7 in the do-nothing bucket and the per-PCB
+`set_sched_policy(7)` call wrote SCHED_EXT into the PCB.  Under
+v6.6 the same call returns -EINVAL ahead of the per-task store.
+A glibc-on-v6.6 probe walking policy IDs to determine which
+scheduling classes the kernel implements would have been
+mis-trained into believing SCHED_EXT is available, and later
+`sched_setscheduler(_, 7, _)` calls (or library code that
+defensively re-installs the class) would silently succeed where
+v6.6 returns -EINVAL.
+
+**Why it matters:** `sched_setscheduler` is the policy-install
+half of the same ABI surface as `sched_get_priority_{max,min}`
+(batch 504).  An ABI consumer that uses one to probe support and
+the other to install the policy must see consistent answers; the
+v6.6 answer for SCHED_EXT is "not supported" on both, and pre-batch
+505 we matched on probe (after batch 504) but not on install.
+Batch 505 closes the gap.
+
+**Post-batch behaviour:**
+  - `sched_setscheduler(pid, 7, valid_param)` → EINVAL (was 0).
+  - `sched_setscheduler(pid, 0|3|5|6, valid_param)` → 0 (unchanged
+    — these are the four valid_policy() arms that route through
+    the zero-priority bucket).
+  - `sched_setscheduler(pid, 1|2, prio∈[1,99])` → 0 (unchanged).
+  - `sched_setscheduler(pid, 4|8|≥4 except 5,6, valid_param)` →
+    EINVAL (unchanged).
+  - `sched_priority_check_for_policy(7, _)` → EINVAL (was Ok if
+    prio==0; defence-in-depth, gate 5 fires first).
+
+**Boot probes added.**
+  1. `sched_setscheduler(0, 7, valid_zero_param)` → EINVAL (was 0;
+     flipped).
+  2. Regression guards: policy ∈ {0, 3, 5, 6} with prio=0 still
+     return 0 (loop guard).
+  3. Comment on existing policy=8 probe updated: accept set is
+     now `{0,1,2,3,5,6}` not `{0,1,2,3,5,6,7}`.
+
+Summary stamp added: `sched_setscheduler v6.6 valid_policy() set:
+{0,1,2,3,5,6} (batch 505): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 43.6s).
+
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).

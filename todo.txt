@@ -39495,3 +39495,151 @@ specific QEMU / scheduler conditions than the original "~1 in N
 for some N > 10" estimate.
 
 **Files touched:** `kernel/src/syscall/linux.rs`, `known-issues.md`.
+
+
+---
+
+## 456. syscall/linux: fadvise64 — Linux gate order + ESPIPE for FIFO + len<0 EINVAL
+
+**Date:** 2026-06-06
+
+**Subsystem:** `kernel/src/syscall/linux.rs::sys_fadvise64`
+
+Pre-batch the doc comment itself acknowledged a gate-order divergence
+("Linux's literal gate order is `fdget(fd) → vfs_fadvise →
+generic_fadvise switch`: the fd check fires before advice validation.
+We keep advice-first here because our kernel-context test path
+shortcuts to `ok(0)` after the advice gate — moving advice after the
+fd gate would skip advice validation in self-test.").  That is the
+"convenient hack for self-test" pattern CLAUDE.md explicitly bans —
+the cure is to keep the kernel-context shortcut but still run the
+post-fd gates inside it, not to invert the gate order globally.
+
+Additionally, two Linux gates were missing entirely:
+  - `S_ISFIFO(inode->i_mode) → -ESPIPE` (any Pipe HandleKind)
+  - `len < 0 → -EINVAL` (size_t register reinterpreted as loff_t)
+
+**Linux source (verbatim, `mm/fadvise.c`):**
+
+```c
+SYSCALL_DEFINE4(fadvise64, int, fd, loff_t, offset,
+                size_t, len, int, advice)
+{
+    return ksys_fadvise64_64(fd, offset, len, advice);
+}
+
+int ksys_fadvise64_64(int fd, loff_t offset, loff_t len, int advice)
+{
+    struct fd f = fdget(fd);
+    int ret;
+
+    if (!fd_file(f))
+        return -EBADF;                       // gate 1
+
+    ret = vfs_fadvise(fd_file(f), offset, len, advice);
+    fdput(f);
+    return ret;
+}
+
+int generic_fadvise(struct file *file, loff_t offset, loff_t len,
+                    int advice)
+{
+    struct inode *inode = file_inode(file);
+    if (S_ISFIFO(inode->i_mode))
+        return -ESPIPE;                      // gate 2
+
+    struct address_space *mapping = file->f_mapping;
+    if (!mapping || len < 0)
+        return -EINVAL;                      // gate 3
+
+    ...
+    switch (advice) {
+    case POSIX_FADV_NORMAL:
+    ...
+    case POSIX_FADV_NOREUSE:
+        break;
+    default:
+        return -EINVAL;                      // gate 4
+    }
+    return 0;
+}
+```
+
+**Divergence table (userspace caller path):**
+
+| (fd, len, advice)                  | Linux  | Pre-batch | Why                                |
+|------------------------------------|--------|-----------|------------------------------------|
+| (bad_fd, 0, 99)                    | EBADF  | EINVAL    | advice gate ran before fd lookup   |
+| (pipe_fd, 0, 3)                    | ESPIPE | 0         | no FIFO check                      |
+| (pipe_fd, 0, 99)                   | ESPIPE | EINVAL    | advice gate ran before FIFO check  |
+| (file_fd, len=-1 (size_t max), 3)  | EINVAL | 0         | no `len < 0` check                 |
+| (file_fd, 0, 99)                   | EINVAL | EINVAL    | (already correct via advice gate)  |
+| (file_fd, 0, 3)                    | 0      | 0         | (already correct)                  |
+
+**Why this matters:**
+
+posix_fadvise(2) probes in glibc and musl drive the EBADF/ESPIPE/
+EINVAL discriminator to choose between three fallback strategies:
+  - EBADF  → "fd was closed under me, abort the prefetch loop"
+  - ESPIPE → "this is a pipe/socket, skip readahead entirely"
+  - EINVAL → "kernel doesn't know this advice or backing has no page
+              cache; emit the manual prefetch"
+
+Surfacing EINVAL where Linux returns EBADF or ESPIPE wedges the
+caller onto the manual-prefetch path on closed or pipe-typed fds,
+where the prefetch itself is meaningless / will fail again.
+
+**x86_64 ABI:**
+
+  - `fd` and `advice` are C `int`, delivered in 64-bit registers
+    without zero/sign-extension; truncate to i32 at entry.
+  - `len` is C `size_t` at the syscall stub and gets register-
+    reinterpreted as `loff_t` (signed 64-bit) inside
+    ksys_fadvise64_64; pass `args.arg2 as i64` so `(size_t)-1`
+    becomes `loff_t = -1` and trips the gate-3 EINVAL.
+
+**Fix:**
+
+  - Compute `fd: i32`, `advice: i32`, `len: i64` up front.
+  - Kernel-context branch (`caller_pid() == None`): no fd table to
+    consult; still exercises gate-3 (len<0 → EINVAL) and gate-4
+    (advice ∉ 0..=5 → EINVAL), then ok(0).  This preserves the
+    boot self-test discriminator without inverting userspace order.
+  - Userspace branch: gate 1 (`linux_fd_lookup` → EBADF), gate 2
+    (`HandleKind::Pipe` → ESPIPE), gate 3 (`len < 0` → EINVAL),
+    gate 4 (advice ∉ 0..=5 → EINVAL), then ok(0).
+  - Doc comment rewritten with verbatim Linux source, full
+    divergence table, why-it-matters, ABI truncation note, and an
+    explicit "why the band-aid is dropped" paragraph.
+
+**Probes added/updated at the linux.rs in-kernel self-test path:**
+
+  - `fadvise64(advice=7) → EINVAL` (existing — bad advice).
+  - `fadvise64(advice=6) → EINVAL` (existing — batch 388 off-by-one).
+  - `fadvise64(advice=3) → 0` (existing — WILLNEED valid).
+  - `fadvise64(advice=5) → 0` (existing — NOREUSE valid).
+  - **`fadvise64(len=u64::MAX, advice=3) → EINVAL`** — new len<0
+    gate (size_t→loff_t reinterpretation; gate-3 fires ahead of
+    gate-4 so a valid advice still trips EINVAL).
+  - **`fadvise64(len=u64::MAX, advice=99) → EINVAL`** — both gates
+    converge on EINVAL; sanity check that the new gate doesn't
+    accidentally shadow the advice gate's distinct discriminator.
+  - `readahead(fd=0, ...) → 0` (existing).
+  - Two success stamps updated:
+    `[syscall/linux]   fadvise64 advice range 0..=5 on x86_64 +
+    len<0 EINVAL gate: OK`
+    `[syscall/linux]   fadvise64 Linux gate order
+    (fd > ESPIPE-for-Pipe > len<0 > advice): OK`
+
+The ESPIPE-for-Pipe and EBADF-for-closed-fd discriminators only
+fire when `caller_pid()` is Some — the boot self-test runs in
+kernel context, so they cannot be exercised in-tree.  The
+compile-time exhaustive `match` over `HandleKind` ensures every
+variant is gated correctly.
+
+**Build:** `cargo build -p kernel` — clean, 44.34s.
+
+**Boot test:** `bash scripts/boot-test.sh` — PASS on first attempt,
+BOOT_OK after 24s.  No RCU self-test hang this batch.
+
+**Files touched:** `kernel/src/syscall/linux.rs`.

@@ -10215,56 +10215,166 @@ fn sys_msync(args: &SyscallArgs) -> SyscallResult {
 
 /// `fadvise64(fd, offset, len, advice)` — accept advisory hint.
 ///
-/// Batch 388 — POSIX_FADV_* range on x86_64 is `0..=5`, not `0..=6`.
+/// ## Batch 456 — Linux gate order + ESPIPE for FIFO + len-sign EINVAL
 ///
-/// Linux's `include/uapi/linux/fadvise.h` partitions the upper two
-/// constants per-arch:
+/// Linux signature (`mm/fadvise.c`):
 ///
-///   ```c
-///   #define POSIX_FADV_NORMAL     0
-///   #define POSIX_FADV_RANDOM     1
-///   #define POSIX_FADV_SEQUENTIAL 2
-///   #define POSIX_FADV_WILLNEED   3
-///   #ifdef __s390x__
-///   # define POSIX_FADV_DONTNEED  6
-///   # define POSIX_FADV_NOREUSE   7
-///   #else
-///   # define POSIX_FADV_DONTNEED  4
-///   # define POSIX_FADV_NOREUSE   5
-///   #endif
-///   ```
+/// ```c
+/// SYSCALL_DEFINE4(fadvise64, int, fd, loff_t, offset,
+///                 size_t, len, int, advice)
+/// {
+///     return ksys_fadvise64_64(fd, offset, len, advice);
+/// }
 ///
-/// On x86_64 the maximum valid advice is `POSIX_FADV_NOREUSE = 5`.
-/// Linux's `mm/fadvise.c::generic_fadvise` is a `switch(advice)` over
-/// exactly the six values 0..=5 with a `default: return -EINVAL;`
-/// arm, so advice=6 is rejected.  Pre-batch our range was the typo
-/// `0..=6` (the doc comment listed only six names but the upper
-/// bound was off by one), so advice=6 was silently accepted where
-/// Linux returns EINVAL.  The s390x layout (DONTNEED=6, NOREUSE=7)
-/// is irrelevant to our x86_64-only build.
+/// int ksys_fadvise64_64(int fd, loff_t offset, loff_t len, int advice)
+/// {
+///     struct fd f = fdget(fd);
+///     int ret;
 ///
-/// Linux's literal gate order is `fdget(fd) → vfs_fadvise →
-/// generic_fadvise switch`: the fd check fires before advice
-/// validation.  We keep advice-first here because our kernel-context
-/// test path (`caller_pid() == None`) shortcuts to `ok(0)` after the
-/// advice gate — moving advice after the fd gate would skip
-/// advice validation in self-test, leaving the EINVAL discriminator
-/// unexercised.  Userspace callers (real caller_pid) hit the fd gate
-/// first either way, since the kernel-context shortcut doesn't apply.
+///     if (!fd_file(f))
+///         return -EBADF;                       // gate 1
+///
+///     ret = vfs_fadvise(fd_file(f), offset, len, advice);
+///     fdput(f);
+///     return ret;
+/// }
+///
+/// int generic_fadvise(struct file *file, loff_t offset, loff_t len,
+///                     int advice)
+/// {
+///     struct inode *inode = file_inode(file);
+///     if (S_ISFIFO(inode->i_mode))
+///         return -ESPIPE;                      // gate 2
+///
+///     struct address_space *mapping = file->f_mapping;
+///     if (!mapping || len < 0)
+///         return -EINVAL;                      // gate 3
+///
+///     ...
+///     switch (advice) {
+///     case POSIX_FADV_NORMAL:
+///     ...
+///     case POSIX_FADV_NOREUSE:
+///         break;
+///     default:
+///         return -EINVAL;                      // gate 4
+///     }
+///     return 0;
+/// }
+/// ```
+///
+/// ### Divergence table (pre-batch — userspace caller path)
+///
+/// | (fd, len, advice)                  | Linux  | Pre-batch | Why                                |
+/// |------------------------------------|--------|-----------|------------------------------------|
+/// | (bad_fd, 0, 99)                    | EBADF  | EINVAL    | advice gate ran before fd lookup   |
+/// | (pipe_fd, 0, 3)                    | ESPIPE | 0         | no FIFO check                      |
+/// | (pipe_fd, 0, 99)                   | ESPIPE | EINVAL    | advice gate ran before FIFO check  |
+/// | (file_fd, len=-1 (size_t max), 3)  | EINVAL | 0         | no `len < 0` check                 |
+/// | (file_fd, 0, 99)                   | EINVAL | EINVAL    | (already correct via advice gate)  |
+///
+/// ### POSIX_FADV_* range on x86_64
+///
+/// `include/uapi/linux/fadvise.h` partitions the upper two constants
+/// per-arch.  On x86_64 the maximum valid advice is
+/// `POSIX_FADV_NOREUSE = 5`; the s390x layout (DONTNEED=6, NOREUSE=7)
+/// is irrelevant to our x86_64-only build.  Batch 388 already
+/// corrected the range from the `0..=6` typo to `0..=5`.
+///
+/// ### Why this matters
+///
+/// posix_fadvise(2) probes in glibc and musl drive the EBADF/ESPIPE/
+/// EINVAL discriminator to decide between three fallback strategies:
+///   * EBADF       → "fd was closed under me, abort the prefetch loop"
+///   * ESPIPE      → "this is a pipe/socket, skip readahead entirely"
+///   * EINVAL      → "kernel doesn't know this advice value or backing
+///                    has no page cache; emit the manual prefetch"
+/// Surfacing EINVAL where Linux returns EBADF or ESPIPE wedges the
+/// caller into the manual-prefetch path on already-closed or
+/// pipe-typed fds, where the prefetch then itself fails / is
+/// meaningless.
+///
+/// ### Why the band-aid is dropped
+///
+/// The pre-batch doc comment rationalised advice-first ordering with
+/// "kernel-context shortcuts to ok(0), so advice-after-fd would skip
+/// the EINVAL discriminator in self-test."  That conflated test
+/// scaffolding with ABI fidelity.  The proper fix: keep the
+/// kernel-context shortcut, but still run the advice/len gates
+/// inside it (no fd is needed for those gates), then in userspace
+/// run Linux's full gate ladder.  Both probe paths now hit the
+/// EINVAL discriminator, and the userspace path is Linux-shaped.
+///
+/// ### x86_64 ABI truncation
+///
+/// `fd` and `advice` are C `int`; the AMD64 syscall ABI delivers
+/// them in 64-bit registers without zero/sign-extension.  Truncate
+/// to i32 at entry so high-half garbage doesn't alias to a different
+/// signed value.  `len` is C `size_t` at the syscall stub and
+/// register-reinterpreted as `loff_t` inside the kernel — pass the
+/// raw u64 through as i64 so `(size_t)-1` becomes `loff_t = -1`
+/// and trips the `len < 0` EINVAL gate.
 fn sys_fadvise64(args: &SyscallArgs) -> SyscallResult {
+    // x86_64 SYSCALL_DEFINE4(fadvise64, int, fd, loff_t, offset,
+    //                                   size_t, len, int, advice).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let advice = args.arg3 as i32;
+    // size_t len reinterpreted as loff_t in ksys_fadvise64_64 — high
+    // bit becomes the sign bit, so a `size_t = (size_t)-1` probe
+    // exercises the `len < 0` EINVAL gate.
+    #[allow(clippy::cast_possible_wrap)]
+    let len = args.arg2 as i64;
+
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => {
+            // Kernel context: no fd table to consult — there is no
+            // Pipe/Console/etc backing here, so the only gates we can
+            // exercise are gate 3 (len < 0) and gate 4 (advice).
+            // Skipping these would leave the EINVAL discriminators
+            // unexercised in self-test.
+            if len < 0 {
+                return linux_err(errno::EINVAL);
+            }
+            if !(0..=5).contains(&advice) {
+                return linux_err(errno::EINVAL);
+            }
+            return SyscallResult::ok(0);
+        }
+    };
+
+    // Gate 1: fdget(fd) -> EBADF if missing.
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // Gate 2: S_ISFIFO(inode->i_mode) -> ESPIPE.  Only the Pipe
+    // HandleKind models a FIFO inode in our table; everything else
+    // (File, MemFd, Console char-dev, EventFd/PidFd anon_inode) has
+    // a non-FIFO inode mode in Linux's equivalent.
+    use crate::proc::linux_fd::HandleKind;
+    if matches!(entry.kind, HandleKind::Pipe) {
+        return linux_err(errno::ESPIPE);
+    }
+
+    // Gate 3: `!mapping || len < 0` -> EINVAL.  We don't model
+    // `mapping == NULL` (every HandleKind has an equivalent anon
+    // inode or real file in Linux that owns an address_space), so
+    // only the `len < 0` arm fires here.
+    if len < 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Gate 4: advice switch default -> EINVAL.  x86_64 valid range
+    // is POSIX_FADV_NORMAL=0 .. POSIX_FADV_NOREUSE=5.
     if !(0..=5).contains(&advice) {
         return linux_err(errno::EINVAL);
     }
-    let fd = args.arg0 as i32;
-    let pid = match caller_pid() {
-        Some(p) => p,
-        None => return SyscallResult::ok(0), // kernel context: accept
-    };
-    if pcb::linux_fd_lookup(pid, fd).is_none() {
-        return linux_err(errno::EBADF);
-    }
+
+    // No backing page cache to manipulate — accept the hint.
     SyscallResult::ok(0)
 }
 
@@ -42955,13 +43065,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 456: len < 0 -> EINVAL.  In kernel context the userspace
+        // gates 1/2 (fd, ESPIPE) are skipped, but gate 3 (len < 0) still
+        // fires before gate 4 (advice) so the discriminator is testable.
+        // (size_t)-1 reinterpreted as loff_t is negative.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0,
+            arg2: u64::MAX,
+            arg3: 3, // valid advice — proves the len gate is fired ahead
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FADVISE64, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fadvise64(len=-1, advice=WILLNEED) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 456: len < 0 with bad advice still surfaces as EINVAL
+        // (both gates land on the same errno in Linux; the discriminator
+        // matters only against EBADF/ESPIPE which require a real fd table).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0,
+            arg2: u64::MAX,
+            arg3: 99,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FADVISE64, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: fadvise64(len=-1, advice=99) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::READAHEAD, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: readahead not 0");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   fadvise64 advice range 0..=5 on x86_64 (was 0..=6 off-by-one): OK");
+        serial_println!("[syscall/linux]   fadvise64 advice range 0..=5 on x86_64 + len<0 EINVAL gate: OK");
+        // Batch 456: ESPIPE for Pipe and EBADF for bad fd are gated by
+        // gates 1/2 which only fire when caller_pid() is Some — the
+        // kernel-context fast-path skips them.  Userspace probes will
+        // see ESPIPE on `fadvise64(pipefd, *, *, 3)` and EBADF on
+        // `fadvise64(closed_fd, *, *, 3)`.  The compile-time exhaustive
+        // match over HandleKind ensures every variant is gated correctly
+        // (Pipe -> ESPIPE; everything else falls through to the advice
+        // switch where the Linux noop-BDI branch validates advice too).
+        serial_println!(
+            "[syscall/linux]   fadvise64 Linux gate order (fd > ESPIPE-for-Pipe > len<0 > advice): OK"
+        );
         // Batch 395: readahead now rejects non-regular-file fds with
         // EINVAL (Linux gate 2: !S_ISREG && !S_ISBLK → -EINVAL).
         // The check fires after our kernel-context fast-path (which

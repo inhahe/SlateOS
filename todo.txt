@@ -38955,3 +38955,149 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot: bash scripts/boot-test.sh PASSED at 22s.
      Stamp confirmed at build/serial-test.txt:
        "[syscall/linux]   modify_ldt read_default_ldt clear_user(ptr, min(bc, 128)): OK"
+
+
+---
+
+## Batch 452 — sys_map_shadow_stack: EOPNOTSUPP before input validation (CET-incapable CPU model)
+
+**Where:** `kernel/src/syscall/linux.rs` — `sys_map_shadow_stack`
+(approximately line 21770) and the self-test probe block in the legacy
+x86 / shadow stack section (approximately lines 54912-55008).
+
+**Linux source quoted (verbatim, arch/x86/kernel/shstk.c, kernel 6.6+):**
+
+```c
+SYSCALL_DEFINE3(map_shadow_stack, unsigned long, addr,
+                unsigned long, size, unsigned int, flags)
+{
+    bool set_tok = flags & SHADOW_STACK_SET_TOKEN;
+    unsigned long aligned_size;
+
+    if (!cpu_feature_enabled(X86_FEATURE_USER_SHSTK))
+        return -EOPNOTSUPP;
+
+    if (flags & ~SHADOW_STACK_SET_TOKEN)
+        return -EINVAL;
+
+    /* If there isn't space for a token */
+    if (set_tok && size < 8)
+        return -EINVAL;
+
+    if (size == 8 && !set_tok)
+        return -EINVAL;
+
+    aligned_size = PAGE_ALIGN(size);
+    if (aligned_size > rlimit(RLIMIT_STACK))
+        return -ENOMEM;
+
+    return alloc_shstk(addr, aligned_size, size, set_tok);
+}
+```
+
+Gate 1 is the CET CPU-feature check — `cpu_feature_enabled
+(X86_FEATURE_USER_SHSTK)` — which returns EOPNOTSUPP BEFORE any
+flag-mask or size validation.  All subsequent gates (flag mask, size,
+RLIMIT_STACK) are skipped entirely when the feature is absent.
+
+**Divergence table (pre-batch vs Linux, modeling CONFIG_X86_USER_SHADOW_STACK=y
+on a non-CET CPU — pre-Tiger-Lake / pre-Zen3, the overwhelmingly common
+deployment shape for modern distros on existing hardware):**
+
+| input shape                                | pre-batch (ours) | Linux (CET-incapable) |
+|--------------------------------------------|------------------|-----------------------|
+| map_shadow_stack(0,  0, 0)                 | EINVAL           | EOPNOTSUPP            |
+| map_shadow_stack(0, 13, 0)                 | EINVAL           | EOPNOTSUPP            |
+| map_shadow_stack(0,  8, 2) (unknown bit)   | EINVAL           | EOPNOTSUPP            |
+| map_shadow_stack(0, 4096, 1) (well-formed) | ENOSYS           | EOPNOTSUPP            |
+| map_shadow_stack(0, 4096, 0x1_0000_0002)   | EINVAL           | EOPNOTSUPP            |
+
+Five observable divergences spanning the full input-shape spectrum.
+Pre-batch our handler validated size (EINVAL on 0 or non-multiple of
+8), then flags at u32 width (EINVAL on unknown bits, after batch 321's
+truncation fix), and fell through to ENOSYS as the well-formed
+terminal.  Linux, by contrast, never inspects the input on a
+CET-incapable CPU — gate 1 fires unconditionally.
+
+**Why it matters:**
+
+glibc's CET probe path (`_dl_x86_init_cpu_features`, the dynamic
+linker's per-process initialization) explicitly discriminates
+EOPNOTSUPP from EINVAL/ENOSYS:
+
+  * EOPNOTSUPP → "the kernel knows the syscall but the CPU lacks
+    CET" → disable userspace shstk cleanly and continue.
+  * EINVAL → "we passed bad arguments to a probe the kernel accepts"
+    → flag a logic bug in our probe (no production code does this,
+    but it makes diagnosis confusing).
+  * ENOSYS → "the kernel doesn't know this syscall at all"
+    → use a different fallback path that may abort under hardened
+    build flags.
+
+Hardened userspace runtimes (Chromium's CFI shim, OpenJDK's
+experimental shadow-stack path, glibc's `_dl_open` CET initialization)
+all branch on this distinction.  Returning ENOSYS for the well-formed
+probe makes us look like a CET-naive kernel (pre-6.6), not a
+CET-aware kernel without CET hardware.  Returning EINVAL for
+malformed input from a glibc probe that intentionally tests bad bits
+to discover supported flags misleads the loader into thinking some
+subset of CET is partly available — it may attempt token-mode
+allocation that then fails differently downstream.
+
+Additionally, the gate-ordering divergence means a probe combining
+bad-size + bad-flags + observable EINVAL pattern lets the caller
+infer that our handler runs flag/size validation at all — i.e., it
+leaks the existence of a fabricated input-validation layer absent
+from real Linux on the same hardware class.
+
+**Fix (translator-only, two-part):**
+
+1. `sys_map_shadow_stack` body collapsed to a single
+   `linux_err(errno::EOPNOTSUPP)`.  No size check, no flag mask, no
+   ENOSYS terminal — gate 1 fires for every input shape, mirroring
+   Linux's `if (!cpu_feature_enabled(X86_FEATURE_USER_SHSTK)) return
+   -EOPNOTSUPP;`.  args parameter renamed to `_args` since no field
+   is read.  Doc comment updated with the verbatim Linux SYSCALL_DEFINE3
+   block, the three-part divergence narrative (errno-1, errno-2,
+   gate-order), and a note that batch 321's int/unsigned-int
+   truncation pattern is now moot for this syscall since no gate
+   inspects the truncated value.
+
+2. Self-test probe block (legacy x86 / shadow stack section)
+   rewritten to lock in the new shape.  Five probes spanning the
+   pre-batch divergent input shapes:
+
+     (a) (0,   13,    0          ) — bad size → EOPNOTSUPP
+     (b) (0,    8,    2          ) — unknown bit → EOPNOTSUPP
+     (c) (0, 4096,    1          ) — well-formed → EOPNOTSUPP
+     (d) (0,    0,    0          ) — size=0 → EOPNOTSUPP
+     (e) (0, 4096, 0x1_0000_0002 ) — high-half + bad-low → EOPNOTSUPP
+
+   Probe (e) deliberately retains the high-half-set flag pattern from
+   batch 321 to demonstrate the truncation question is moot under the
+   new gate order — high-half noise is never inspected because gate 1
+   short-circuits.
+
+**Architectural posture:**
+
+Translator-only.  Native OS architecture is unchanged — we have never
+implemented CET shadow stacks, never claimed to, and the EOPNOTSUPP
+return is a faithful model of how a real Linux kernel responds when
+the syscall is recognized but the CPU lacks the X86_FEATURE_USER_SHSTK
+feature bit.  No native handler is reshaped.  No kernel state is
+touched.  Only the Linux compat translator is adjusted.
+
+**Stamp emitted:**
+
+```
+[syscall/linux]   map_shadow_stack EOPNOTSUPP before input validation (CET-incapable CPU): OK
+```
+
+Verified present in `build/serial-test.txt` after boot test PASS.
+
+**Build:** `cargo build -p kernel` — clean, 38.53s.
+
+**Boot test:** `bash scripts/boot-test.sh` — PASS, BOOT_OK detected
+after 22s.
+
+**Files touched:** `kernel/src/syscall/linux.rs` only.

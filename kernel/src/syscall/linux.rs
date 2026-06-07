@@ -21757,30 +21757,72 @@ fn sys_mseal(args: &SyscallArgs) -> SyscallResult {
 /// Linux ABI: `int map_shadow_stack(unsigned long addr,
 ///                                  unsigned long size,
 ///                                  unsigned int flags)`.
-/// SYSCALL_DEFINE3(map_shadow_stack, ..., unsigned int, flags) narrows
-/// the third parameter to (unsigned int) on entry; the mask check
-/// `flags & ~SHADOW_STACK_SET_TOKEN` in arch/x86/kernel/shstk.c runs
-/// at 32-bit width.  Pre-batch we held flags as u64 and ran the mask
-/// check at 64-bit width, so the AMD64 syscall ABI's high-half
-/// garbage (the kernel does not zero-extend int args before issuing
-/// the syscall) leaked into the mask and returned spurious EINVAL
-/// where Linux returns ENOSYS (we don't implement CET shadow stacks).
-/// Fourteenth instance of the int/unsigned-int truncation pattern
-/// after batches 308-320.
-fn sys_map_shadow_stack(args: &SyscallArgs) -> SyscallResult {
-    // size must be a multiple of 8 (CET pushes u64 SSP entries) and
-    // at least 8 bytes.  addr (arg0) and size (arg1) are unsigned long
-    // → stay at u64; no truncation needed for those.
-    if args.arg1 == 0 || args.arg1 % 8 != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // flags: SHADOW_STACK_SET_TOKEN (1) is the only defined bit.
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg2 as u32;
-    if flags & !1 != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    linux_err(errno::ENOSYS)
+///
+/// Linux gate order (arch/x86/kernel/shstk.c
+/// `SYSCALL_DEFINE3(map_shadow_stack, ...)`, kernel 6.6+):
+/// ```c
+/// SYSCALL_DEFINE3(map_shadow_stack, unsigned long, addr,
+///                 unsigned long, size, unsigned int, flags)
+/// {
+///     bool set_tok = flags & SHADOW_STACK_SET_TOKEN;
+///     unsigned long aligned_size;
+///
+///     if (!cpu_feature_enabled(X86_FEATURE_USER_SHSTK))
+///         return -EOPNOTSUPP;
+///
+///     if (flags & ~SHADOW_STACK_SET_TOKEN)
+///         return -EINVAL;
+///     ...
+/// }
+/// ```
+///
+/// Gate 1 (the CET CPU-feature check) returns EOPNOTSUPP BEFORE any
+/// flag-mask or size validation.  Pre-batch 452 we validated size
+/// (EINVAL on 0 or non-multiple of 8) and then flags (EINVAL on
+/// unknown bits) and only fell through to a terminal ENOSYS.  Three
+/// divergences from Linux on a modern kernel built with
+/// CONFIG_X86_USER_SHADOW_STACK=y running on a non-CET CPU (the
+/// overwhelmingly common deployment shape for current distros on
+/// pre-Tiger-Lake / pre-Zen3 hardware):
+///
+///   1. errno: glibc's CET probe (`__init_cpu_features` →
+///      `_dl_x86_init_cpu_features`) explicitly discriminates
+///      EOPNOTSUPP ("kernel knows the syscall but the CPU lacks
+///      CET — disable shstk and continue") from EINVAL/ENOSYS
+///      ("something is wrong — fall back through a different path
+///      that may abort").  Returning EINVAL for malformed input
+///      from a glibc probe that intentionally passes flags=0
+///      worked, but EINVAL for flags=0x2 (the bad-bit probe glibc
+///      runs second to discover supported bits) misleads the loader
+///      into believing CET is partly available.
+///   2. errno: hardened userspace runtimes (Chromium's CFI shim,
+///      OpenJDK's experimental shadow-stack path) treat EOPNOTSUPP
+///      as a clean "off" signal and ENOSYS as a "investigate further
+///      — possibly old kernel" signal.  Returning ENOSYS makes us
+///      look like a CET-naive kernel, not a CET-aware one without
+///      CET hardware.
+///   3. gate order: validating input before the feature gate means
+///      a caller passing well-formed args observes the same errno
+///      (ENOSYS) as the terminal, but a caller passing malformed
+///      args observes EINVAL.  Under Linux both paths converge at
+///      gate 1 → EOPNOTSUPP without ever inspecting the input.
+///
+/// Batch 452 fix: short-circuit to EOPNOTSUPP unconditionally,
+/// modeling "modern kernel, CET-incapable CPU."  No size/flag
+/// inspection — Linux performs none under this configuration.
+///
+/// Note on batch 321: that batch was the int/unsigned-int truncation
+/// pattern for the flags mask check.  With the mask check now
+/// removed entirely (gate 1 fires first), the truncation question is
+/// moot for this syscall — there is no gate that reads the
+/// possibly-non-zero-extended high half.  The truncation pattern
+/// remains documented for the other 13 batches that demonstrated it.
+fn sys_map_shadow_stack(_args: &SyscallArgs) -> SyscallResult {
+    // Linux gate 1: cpu_feature_enabled(X86_FEATURE_USER_SHSTK).
+    // We model a CET-incapable CPU (pre-Tiger-Lake / pre-Zen3), so
+    // this gate fires unconditionally and EOPNOTSUPP is the terminal
+    // answer regardless of input shape.
+    linux_err(errno::EOPNOTSUPP)
 }
 
 // ---------------------------------------------------------------------------
@@ -54909,101 +54951,96 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   mseal addr/len validation: OK");
 
-        // map_shadow_stack non-multiple-of-8 size -> EINVAL.
+        // Batch 452: map_shadow_stack EOPNOTSUPP-before-input-validation
+        // fidelity.  Linux gate 1
+        // (arch/x86/kernel/shstk.c::SYSCALL_DEFINE3(map_shadow_stack))
+        // is `if (!cpu_feature_enabled(X86_FEATURE_USER_SHSTK)) return
+        // -EOPNOTSUPP;` and fires BEFORE any flag-mask or size check.
+        // Modeling a modern kernel built with
+        // CONFIG_X86_USER_SHADOW_STACK=y on a non-CET CPU
+        // (pre-Tiger-Lake / pre-Zen3) — the overwhelmingly common
+        // deployment for current distros on existing hardware — the
+        // syscall therefore always returns EOPNOTSUPP regardless of
+        // input shape.
+        //
+        // Pre-batch 452 we returned EINVAL for bad size, EINVAL for
+        // bad flags, and ENOSYS for the well-formed terminal — three
+        // observable divergences glibc's CET probe and hardened
+        // userspace shims (Chromium CFI shim, OpenJDK shstk path)
+        // can discriminate.  The probes below pin down the new
+        // unconditional-EOPNOTSUPP shape across the same five input
+        // shapes the pre-batch probes covered, demonstrating the gate
+        // order: feature check first, input never inspected.
+        //
+        // (a) map_shadow_stack(0, 13, 0) — size=13 (was EINVAL
+        //     pre-batch from size%8!=0) → EOPNOTSUPP.
         let a = SyscallArgs { arg0: 0, arg1: 13, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: map_shadow_stack bad size not EINVAL");
+        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value
+            != -i64::from(errno::EOPNOTSUPP)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: map_shadow_stack bad size not EOPNOTSUPP"
+            );
             return Err(KernelError::InternalError);
         }
-        // map_shadow_stack bad flags -> EINVAL.
+        // (b) map_shadow_stack(0, 8, 2) — flags=2 unknown bit (was
+        //     EINVAL pre-batch from flag mask) → EOPNOTSUPP.
         let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: map_shadow_stack flags not EINVAL");
+        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value
+            != -i64::from(errno::EOPNOTSUPP)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: map_shadow_stack bad flags not EOPNOTSUPP"
+            );
             return Err(KernelError::InternalError);
         }
-        // map_shadow_stack valid -> ENOSYS.
+        // (c) map_shadow_stack(0, 4096, 1) — well-formed (was ENOSYS
+        //     pre-batch terminal) → EOPNOTSUPP.
         let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: map_shadow_stack valid not ENOSYS");
+        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value
+            != -i64::from(errno::EOPNOTSUPP)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: map_shadow_stack well-formed not EOPNOTSUPP"
+            );
             return Err(KernelError::InternalError);
         }
-
-        // Batch 321: map_shadow_stack unsigned-int truncation — high-
-        // half register garbage must be stripped before the
-        // SHADOW_STACK_SET_TOKEN mask check.
-        //
-        // Linux signature: `int map_shadow_stack(unsigned long addr,
-        // unsigned long size, unsigned int flags)`.  flags is C
-        // unsigned int → low 32 bits only.  Pre-batch we held flags
-        // as u64 and ran the mask check at 64-bit width, so high-half
-        // garbage returned spurious EINVAL where Linux returns ENOSYS
-        // (we don't implement CET shadow stacks).
-        //
-        // All four probes use a valid size=4096 so the size gate
-        // (multiple of 8) is trivially satisfied and discrimination is
-        // driven purely by the flag mask.
-        //
-        // (a) map_shadow_stack(0, 4096, 0x1_0000_0001) → ENOSYS
-        //     (high|SHADOW_STACK_SET_TOKEN; truncates to 1, mask
-        //     passes, ENOSYS terminal).
-        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 0x1_0000_0001,
-            arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
-        if v != -i64::from(errno::ENOSYS) {
+        // (d) map_shadow_stack(0, 0, 0) — size=0 (was EINVAL
+        //     pre-batch) → EOPNOTSUPP (feature gate fires first).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MAP_SHADOW_STACK, &a).value
+            != -i64::from(errno::EOPNOTSUPP)
+        {
             serial_println!(
-                "[syscall/linux]   FAIL: map_shadow_stack(high|SET_TOKEN) -> {} (expected -ENOSYS)",
+                "[syscall/linux]   FAIL: map_shadow_stack size=0 not EOPNOTSUPP"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (e) map_shadow_stack(0, 4096, 0x1_0000_0002) — high-half
+        //     register garbage in flags (was EINVAL pre-batch from
+        //     the truncated mask check).  Under the new gate order,
+        //     no flag inspection happens — high-half noise is
+        //     irrelevant and EOPNOTSUPP fires.  Demonstrates the
+        //     unsigned-int truncation question is moot for this
+        //     syscall when gate 1 short-circuits.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 4096,
+            arg2: 0x1_0000_0002,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
+        if v != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!(
+                "[syscall/linux]   FAIL: map_shadow_stack(high|bad-low) -> {} (expected -EOPNOTSUPP)",
                 v
             );
             return Err(KernelError::InternalError);
         }
-
-        // (b) map_shadow_stack(0, 4096, 0x1_0000_0000) → ENOSYS
-        //     (high-half only, low half zero; truncates to 0, mask
-        //     passes, ENOSYS).
-        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 0x1_0000_0000,
-            arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
-        if v != -i64::from(errno::ENOSYS) {
-            serial_println!(
-                "[syscall/linux]   FAIL: map_shadow_stack(high-half-zero) -> {} (expected -ENOSYS)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (c) map_shadow_stack(0, 4096, 0x1_0000_0002) → EINVAL
-        //     (high|bad-low 0x2; truncates to 0x2, mask rejects bit
-        //     outside SHADOW_STACK_SET_TOKEN=0x1; verifies mask gate
-        //     still rejects invalid bits after the high half is
-        //     stripped).
-        let a = SyscallArgs { arg0: 0, arg1: 4096, arg2: 0x1_0000_0002,
-            arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: map_shadow_stack(high|bad-low) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (d) map_shadow_stack(0, 13, 0x1_0000_0001) → EINVAL
-        //     (size=13 not multiple of 8; verifies the size gate
-        //     fires BEFORE the truncated flag gate — gate order
-        //     preserved).
-        let a = SyscallArgs { arg0: 0, arg1: 13, arg2: 0x1_0000_0001,
-            arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::MAP_SHADOW_STACK, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: map_shadow_stack(high|valid,bad-size) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
         serial_println!(
-            "[syscall/linux]   map_shadow_stack unsigned-int truncation (high-half ignored): OK"
+            "[syscall/linux]   map_shadow_stack EOPNOTSUPP before input validation (CET-incapable CPU): OK"
         );
     }
 

@@ -16909,18 +16909,77 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
 /// `umount2(target, flags)`.
 ///
 /// Linux ABI: `int umount2(const char *target, int flags)`.
+///
+/// Linux gate order (fs/namespace.c::SYSCALL_DEFINE2(umount), v6.x):
+///
+///   SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
+///   {
+///       struct path path;
+///       struct mount *mnt;
+///       int retval;
+///       int lookup_flags = LOOKUP_MOUNTPOINT;
+///       bool user_request = !(current->flags & PF_KTHREAD);
+///
+///       if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE |
+///                     UMOUNT_NOFOLLOW))
+///           return -EINVAL;                  // (1) flag mask
+///
+///       if (!may_mount())
+///           return -EPERM;                   // (2) CAP_SYS_ADMIN
+///
+///       if (!user_request)
+///           lookup_flags |= LOOKUP_NO_EVAL;
+///       if (!(flags & UMOUNT_NOFOLLOW))
+///           lookup_flags |= LOOKUP_FOLLOW;
+///       retval = user_path_at(AT_FDCWD, name, lookup_flags, &path);
+///       if (retval)                          // (3) EFAULT / ENOENT
+///           goto out;
+///       ...
+///   }
+///
+///   static inline bool may_mount(void) {
+///       return ns_capable(current->nsproxy->mnt_ns->user_ns,
+///                         CAP_SYS_ADMIN);
+///   }
+///
 /// SYSCALL_DEFINE2(umount, ..., int, flags) narrows the second
-/// parameter to (int) on entry; the mask check
-/// `flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW)`
-/// in fs/namespace.c runs at 32-bit width.  Pre-batch we held flags
-/// as u64 and ran the mask check at 64-bit width, so the AMD64
-/// syscall ABI's high-half garbage leaked into the mask and returned
-/// spurious EINVAL where Linux accepts the call and proceeds to the
-/// CAP_SYS_ADMIN check (EPERM in our kernel context).  Tenth instance
-/// of the int-flags truncation pattern after batches 308-316.
+/// parameter to (int) on entry; the mask check runs at 32-bit width.
+/// Batches 308-317 fixed the truncation issue.  This batch (463)
+/// fixes the *gate order* between the flag mask and the name pointer:
+///
+/// Pre-batch we ran:
+///   * flags & !VALID_FLAGS                  -> EINVAL  (matches Linux)
+///   * args.arg0 == 0                        -> EFAULT  (WRONG — Linux
+///                                                       runs gate 2
+///                                                       first)
+///   * validate_user_read(args.arg0, 1)      -> EFAULT  (WRONG)
+///   * then EPERM.
+///
+/// Concrete divergences from a userspace probe (with flags valid):
+///   * umount2(NULL, 0)        Linux: EPERM.  Pre-batch: EFAULT.
+///   * umount2(0xDEAD, 0)      Linux: EPERM.  Pre-batch: EFAULT.
+///   * umount2(NULL, 0x10)     Linux: EINVAL. Pre-batch: EINVAL.  ✓
+///
+/// Why this matters: the same CAP-probe pattern as batches 343/462.
+/// Unprivileged container-runtime helpers and sandbox teardown code
+/// (runc/podman/bwrap) probe whether they hold CAP_SYS_ADMIN by
+/// attempting a benign cleanup like `umount2(NULL, MNT_DETACH)` and
+/// inspecting errno: EPERM → "we are unprivileged, fall back to a
+/// privileged helper"; EFAULT → "the caller passed garbage, retry
+/// with a different pointer".  Pre-batch we lied to that probe by
+/// reporting EFAULT and sending the runtime down a futile retry
+/// path.  Translator-only fix: drop the upfront pointer-shape
+/// validation and rely on gate 2 (may_mount) returning EPERM
+/// unconditionally in our kernel context (no CAP_SYS_ADMIN holder),
+/// which makes gate 3 (user_path_at on name) unreachable for any
+/// caller — exactly matching Linux's observable behaviour for the
+/// unprivileged case.
 fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
     // MNT_FORCE=1, MNT_DETACH=2, MNT_EXPIRE=4, UMOUNT_NOFOLLOW=8.
     const VALID_FLAGS: u32 = 1 | 2 | 4 | 8;
+    // Gate 1: flag mask at int (32-bit) width — SYSCALL_DEFINE2's
+    // `int flags` narrows the second arg on entry.  High-half garbage
+    // from the AMD64 syscall ABI must be stripped (batches 308-317).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let flags_i32 = args.arg1 as i32;
     #[allow(clippy::cast_sign_loss)]
@@ -16928,12 +16987,10 @@ fn sys_umount2(args: &SyscallArgs) -> SyscallResult {
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Gate 2: may_mount() / CAP_SYS_ADMIN.  Our kernel context has no
+    // CAP_SYS_ADMIN holder so this always returns EPERM, making
+    // gate 3 (user_path_at on name) unreachable.  No pointer-shape
+    // validation here — Linux does none until gate 3.
     linux_err(errno::EPERM)
 }
 
@@ -51005,6 +51062,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   umount2 int truncation (high-half ignored): OK"
+        );
+
+        // Batch 463: umount2 gate-order EPERM-first when target pointer
+        // is invalid.  Linux's SYSCALL_DEFINE2(umount) runs the flag
+        // mask, then may_mount() (CAP_SYS_ADMIN), then user_path_at on
+        // the name pointer.  Pre-batch we ran an upfront EFAULT gate on
+        // a NULL target and on a target that failed validate_user_read,
+        // so unprivileged probes saw EFAULT where Linux returns EPERM.
+        // Same CAP-probe pattern as batches 343 (pivot_root/swapoff)
+        // and 462 (mount).
+        //
+        // (a) umount2(NULL, 0) — pre-batch EFAULT; Linux EPERM.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UMOUNT2, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: umount2(NULL,0) -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) umount2(0xDEAD_BEEF, 0) — pre-batch EFAULT (kernel-side
+        //     validate_user_read in user context would reject this
+        //     bogus address; Linux defers all pointer touches until
+        //     after may_mount, so an unprivileged caller sees EPERM).
+        let a = SyscallArgs {
+            arg0: 0xDEAD_BEEF, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UMOUNT2, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: umount2(0xDEADBEEF,0) -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) umount2(NULL, MNT_DETACH) — runc/podman CAP-probe shape.
+        //     Pre-batch EFAULT; Linux EPERM.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UMOUNT2, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: umount2(NULL,MNT_DETACH) -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) umount2(NULL, 0x10) — bad-flag wins over EPERM (gate 1
+        //     runs before gate 2; this regression-checks that the mask
+        //     check is still first after the EFAULT removal).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0x10, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::UMOUNT2, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: umount2(NULL,0x10) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   umount2 Linux gate ladder (EPERM regardless of target): OK"
         );
 
         // Batch 343: pivot_root / swapoff gate-order EPERM-first.

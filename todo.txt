@@ -40471,3 +40471,123 @@ Self-test probes — appended in the existing mount/umount2 block
 
 Build: cargo build -p kernel -> Finished `dev` profile in 39.88s.
 Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.
+
+---
+
+463. syscall/linux: sys_umount2 — defer name-pointer touch behind
+     may_mount() so unprivileged CAP-probes see EPERM, not EFAULT
+     (commit pending).
+
+     Linux source (fs/namespace.c::SYSCALL_DEFINE2(umount), v6.x):
+
+         SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
+         {
+             struct path path;
+             struct mount *mnt;
+             int retval;
+             int lookup_flags = LOOKUP_MOUNTPOINT;
+             bool user_request = !(current->flags & PF_KTHREAD);
+
+             if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE |
+                           UMOUNT_NOFOLLOW))
+                 return -EINVAL;                  // (1) flag mask
+
+             if (!may_mount())
+                 return -EPERM;                   // (2) CAP_SYS_ADMIN
+
+             if (!user_request)
+                 lookup_flags |= LOOKUP_NO_EVAL;
+             if (!(flags & UMOUNT_NOFOLLOW))
+                 lookup_flags |= LOOKUP_FOLLOW;
+             retval = user_path_at(AT_FDCWD, name,
+                                   lookup_flags, &path);
+             if (retval)                          // (3) EFAULT/ENOENT
+                 goto out;
+             ...
+         }
+
+         static inline bool may_mount(void) {
+             return ns_capable(current->nsproxy->mnt_ns->user_ns,
+                               CAP_SYS_ADMIN);
+         }
+
+     Linux's gate order is (1) flag mask → (2) may_mount → (3)
+     user_path_at(name).  The name pointer is not touched until
+     after the CAP gate, so an unprivileged caller passing a NULL
+     or invalid `name` sees EPERM (the CAP failure) rather than
+     EFAULT (the pointer failure).
+
+     Pre-batch behaviour:
+       * flag mask & !VALID_FLAGS         -> EINVAL  (correct)
+       * args.arg0 == 0                   -> EFAULT  (WRONG)
+       * validate_user_read(args.arg0, 1) -> EFAULT  (WRONG)
+       * then EPERM.
+
+     Divergence table:
+
+         | call                       | Linux  | Pre-batch | Now    |
+         |---------------------------|--------|-----------|--------|
+         | umount2(NULL, 0)          | EPERM  | EFAULT    | EPERM  |
+         | umount2(0xDEAD, 0)        | EPERM  | EFAULT    | EPERM  |
+         | umount2(NULL, MNT_DETACH) | EPERM  | EFAULT    | EPERM  |
+         | umount2(NULL, 0x10)       | EINVAL | EINVAL    | EINVAL |
+         | umount2(valid, 0)         | EPERM  | EPERM     | EPERM  |
+         | umount2(_, high|valid)    | EPERM  | EPERM (a) | EPERM  |
+
+         (a) batches 308-317 already fixed the AMD64 high-half
+             truncation of `int flags`; that fix is preserved.
+
+     Why this matters: container-runtime helpers (runc, podman,
+     bwrap) and sandbox-teardown code commonly probe whether they
+     hold CAP_SYS_ADMIN by attempting a benign cleanup such as
+     `umount2(NULL, MNT_DETACH)` (or a stale path the runtime
+     knows is no longer mounted) and inspecting errno:
+
+       * EPERM  → "we are unprivileged; fall back to the
+                   privileged setuid helper or abort the operation."
+       * EFAULT → "the caller passed a bad pointer; retry with a
+                   different one."
+
+     Pre-batch we lied to that probe by reporting EFAULT and
+     sending the runtime down a futile retry path that would
+     eventually fail anyway, but with a misleading error chain.
+     The same CAP-probe pattern was fixed for pivot_root and
+     swapoff in batch 343 and for mount in batch 462; this is the
+     fourth and last of the namespace.c mount-family syscalls
+     where the EFAULT-before-EPERM divergence existed.
+
+     Fix (TRANSLATOR-ONLY, kernel/src/syscall/linux.rs ~line 16921):
+     Drop the `arg0 == 0` and `validate_user_read(arg0, 1)` gates
+     from sys_umount2 and rely on may_mount() returning EPERM
+     unconditionally in our kernel context.  The flag-mask gate
+     (gate 1) is preserved with the int-width truncation from
+     batches 308-317.  Gate 3 (user_path_at) is unreachable for
+     any caller in our kernel context because there is no
+     CAP_SYS_ADMIN holder — exactly matching Linux's observable
+     behaviour for the unprivileged case (which is the only case
+     our kernel exposes today).  Doc comment expanded with the
+     verbatim Linux source quote and the divergence table.
+
+     New self-test probes (kernel/src/syscall/linux.rs ~line 51068,
+     inserted between the existing umount2 int-truncation probes
+     and the batch-343 pivot_root probes):
+
+       (a) umount2(NULL, 0)                  pre EFAULT, now EPERM.
+       (b) umount2(0xDEAD_BEEF, 0)           pre EFAULT, now EPERM.
+       (c) umount2(NULL, MNT_DETACH)         pre EFAULT, now EPERM
+           — runc/podman CAP-probe shape.
+       (d) umount2(NULL, 0x10)               regression: EINVAL
+           still wins over EPERM (gate 1 runs before gate 2 after
+           the EFAULT removal).
+
+     All four gated by:
+       [syscall/linux]   umount2 Linux gate ladder
+         (EPERM regardless of target): OK
+
+     The pre-existing int-truncation probes (batch 317) remain
+     unchanged and continue to fire:
+       [syscall/linux]   umount2 int truncation
+         (high-half ignored): OK
+
+     Build: cargo build -p kernel -> Finished `dev` profile in 47.79s.
+     Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 23s.

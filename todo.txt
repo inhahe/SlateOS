@@ -42577,3 +42577,107 @@ silently change pipe semantics; that's a worse divergence than
 the EINVAL we currently return.  Future batch: implement packet
 mode (per-write atomic 4KiB chunks) then widen the flag mask.
 
+---
+
+## Batch 477 — `sys_clock_settime` folds `!kc->clock_set` into the `!kc` EINVAL gate
+
+**Linux source (kernel/time/posix-timers.c v6.6, verbatim):**
+
+    SYSCALL_DEFINE2(clock_settime, const clockid_t, which_clock,
+                    const struct __kernel_timespec __user *, tp)
+    {
+        const struct k_clock *kc = clockid_to_kclock(which_clock);
+        struct timespec64 new_tp;
+
+        if (!kc || !kc->clock_set)
+            return -EINVAL;
+
+        if (get_timespec64(&new_tp, tp))
+            return -EFAULT;
+
+        return kc->clock_set(which_clock, &new_tp);
+    }
+
+The very first gate folds BOTH "unknown clockid" and "known
+clockid without a `.clock_set` entry" into a single `-EINVAL`.
+There is NO `-EOPNOTSUPP` arm in `clock_settime`.  This is
+structurally different from `clock_adjtime`, whose body splits
+the two:
+
+    if (!kc)
+        return -EINVAL;
+    if (!kc->clock_adj)
+        return -EOPNOTSUPP;
+
+Pre-batch we mistakenly reused the `clock_adjtime`-style split
+for `clock_settime` — see the (now corrected) doc comment that
+read "step 2: if (!kc->clock_set) return -EOPNOTSUPP;" — which
+diverges from Linux on every reader-only clockid.
+
+**Divergence table (pre-batch -> Linux):**
+
+| clockid                          | pre-batch errno | Linux errno |
+|----------------------------------|-----------------|-------------|
+| CLOCK_MONOTONIC=1, ts_ok         | -EOPNOTSUPP     | -EINVAL     |
+| CLOCK_MONOTONIC=1, NULL          | -EOPNOTSUPP     | -EINVAL     |
+| CLOCK_MONOTONIC=1, bad_nsec      | -EOPNOTSUPP     | -EINVAL     |
+| THREAD_CPUTIME_ID=3, ts_ok       | -EOPNOTSUPP     | -EINVAL     |
+| CLOCK_MONOTONIC_RAW=4, ts_ok     | -EOPNOTSUPP     | -EINVAL     |
+| CLOCK_REALTIME_COARSE=5, ts_ok   | -EOPNOTSUPP     | -EINVAL     |
+| CLOCK_MONOTONIC_COARSE=6, ts_ok  | -EOPNOTSUPP     | -EINVAL     |
+| CLOCK_BOOTTIME=7, NULL           | -EOPNOTSUPP     | -EINVAL     |
+| CLOCK_REALTIME_ALARM=8, ts_ok    | -EOPNOTSUPP     | -EINVAL     |
+| CLOCK_BOOTTIME_ALARM=9, ts_ok    | -EOPNOTSUPP     | -EINVAL     |
+
+For comparison, the clocks WITH `.clock_set` still go on past
+the gate and surface the cap check:
+
+| clockid                          | pre-batch errno | Linux errno |
+|----------------------------------|-----------------|-------------|
+| CLOCK_REALTIME=0, ts_ok          | -EPERM          | -EPERM      |
+| CLOCK_PROCESS_CPUTIME_ID=2, ts_ok| -EPERM          | -EPERM      |
+| CLOCK_TAI=11, ts_ok              | -EPERM          | -EPERM      |
+
+**Why it matters.**  chrony, systemd-timedated, and glibc's
+`clock_settime` wrapper probe for support by trying
+`clock_settime(CLOCK_MONOTONIC, ...)` and treating `-EINVAL` as
+"this clock is not settable" but `-EOPNOTSUPP` as "this clock
+type isn't recognised by the kernel at all" — the latter
+routes through a different fallback (skip the syscall entirely
+and use `settimeofday`).  Returning `-EOPNOTSUPP` where Linux
+returns `-EINVAL` takes those probes down the wrong code path.
+
+The errno fold also matters as an ABI-fidelity signal: when
+a future Linux kernel grows a new reader-only clockid, our
+translator's behavior should continue to match Linux's
+"single-EINVAL" stance rather than promote a fresh
+`-EOPNOTSUPP` outlier.
+
+**Fix.**  Translator-only.  In `sys_clock_settime`, change the
+reader-only-clock arm from `linux_err(errno::EOPNOTSUPP)` to
+`linux_err(errno::EINVAL)`.  The matching set
+`matches!(clockid_i32, 1 | 3..=9)` is unchanged — those are still
+exactly the clocks whose `.clock_set` field is NULL in Linux's
+`posix_clocks[]` table.  Doc comment rewritten to quote the
+Linux source verbatim and explain why both the unknown-clockid
+and the no-`.clock_set` cases collapse into a single `-EINVAL`.
+
+**Probes.**  Existing CLOCK_MONOTONIC / CLOCK_BOOTTIME /
+CLOCK_MONOTONIC+bad_ts probes (which previously asserted
+EOPNOTSUPP) updated to assert EINVAL.  Six fresh probes added
+to cover every remaining clockid whose `.clock_set` is NULL in
+Linux: THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
+REALTIME_COARSE(5), MONOTONIC_COARSE(6), REALTIME_ALARM(8),
+BOOTTIME_ALARM(9).  Final stamp:
+
+    [syscall/linux]   clock_settime !kc->clock_set folds into EINVAL (Linux v6.6 posix-timers.c: `if (!kc || !kc->clock_set) return -EINVAL`): OK
+
+Existing PROCESS_CPUTIME_ID(2)-style coverage extended with a
+positive probe verifying `.clock_set != NULL` clocks still
+fall through to the EPERM cap-check arm (no accidental EINVAL
+regression for the settable cases).
+
+**Build:** `cargo build -p kernel` clean, 43.07s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+Probe stamp observed at `build/serial-test.txt:494`.
+

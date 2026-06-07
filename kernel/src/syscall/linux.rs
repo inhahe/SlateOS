@@ -10926,18 +10926,60 @@ fn sys_fstatfs(args: &SyscallArgs) -> SyscallResult {
 /// `clock_settime(clk_id, timespec*)` — refuse with EPERM after Linux
 /// gate ordering.
 fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
-    // Linux's `SYSCALL_DEFINE2(clock_settime)` (kernel/time/posix-timers.c):
-    //   1. `kc = clockid_to_kclock(which_clock); if (!kc) return -EINVAL;`
-    //   2. `if (!kc->clock_set) return -EOPNOTSUPP;`
-    //   3. `if (get_timespec64(...)) return -EFAULT;`
-    //   4. `kc->clock_set(...)` — for REALTIME this is
-    //      `posix_clock_realtime_set` -> `do_sys_settimeofday64`:
-    //        a. `timespec64_valid_settod(tv)` -> EINVAL on bad shape.
-    //        b. `security_settime64(...)` -> capability check (EPERM).
-    // Pre-batch we skipped (4a), so a probe passing
-    // `(clockid=REALTIME, tp={tv_nsec=2e9})` saw -EPERM where Linux
-    // returns -EINVAL.  Batch 205 adds the timespec64_valid gate ahead
-    // of the EPERM.
+    // Linux's `SYSCALL_DEFINE2(clock_settime)` (kernel/time/posix-timers.c
+    // v6.6) — quoted verbatim:
+    //
+    //   SYSCALL_DEFINE2(clock_settime, const clockid_t, which_clock,
+    //                   const struct __kernel_timespec __user *, tp)
+    //   {
+    //       const struct k_clock *kc = clockid_to_kclock(which_clock);
+    //       struct timespec64 new_tp;
+    //
+    //       if (!kc || !kc->clock_set)
+    //           return -EINVAL;
+    //
+    //       if (get_timespec64(&new_tp, tp))
+    //           return -EFAULT;
+    //
+    //       return kc->clock_set(which_clock, &new_tp);
+    //   }
+    //
+    // The first gate folds BOTH "unknown clockid" and "known clockid
+    // without a .clock_set entry" into a single `-EINVAL` return.
+    // There is no `-EOPNOTSUPP` arm — `clock_settime` is structurally
+    // different from `clock_adjtime` (which uses the dedicated
+    // `if (!kc->clock_adj) return -EOPNOTSUPP;`).
+    //
+    // Subsequent steps (after `-EINVAL` is dodged):
+    //   * `get_timespec64` — NULL/unmapped `tp` -> -EFAULT.
+    //   * `kc->clock_set(...)` — for REALTIME this is
+    //     `posix_clock_realtime_set` -> `do_sys_settimeofday64`:
+    //       a. `timespec64_valid_settod(tv)` -> -EINVAL on bad shape.
+    //       b. `security_settime64(...)` -> CAP_SYS_TIME check (-EPERM).
+    //
+    // Batch 477 — divergence fix.  Pre-batch we returned -EOPNOTSUPP
+    // for the .clock_set==NULL clocks (MONOTONIC, THREAD_CPUTIME_ID,
+    // MONOTONIC_RAW, REALTIME_COARSE, MONOTONIC_COARSE, BOOTTIME,
+    // REALTIME_ALARM, BOOTTIME_ALARM).  Linux returns -EINVAL.
+    // Divergence table (pre-batch -> Linux):
+    //   clock_settime(CLOCK_MONOTONIC=1, ts_ok)   -EOPNOTSUPP -> -EINVAL
+    //   clock_settime(CLOCK_BOOTTIME=7, NULL)     -EOPNOTSUPP -> -EINVAL
+    //   clock_settime(CLOCK_MONOTONIC=1, bad_ts)  -EOPNOTSUPP -> -EINVAL
+    //   clock_settime(CLOCK_REALTIME_COARSE=5, _) -EOPNOTSUPP -> -EINVAL
+    //   clock_settime(CLOCK_MONOTONIC_COARSE=6,_) -EOPNOTSUPP -> -EINVAL
+    //   clock_settime(THREAD_CPUTIME_ID=3, _)     -EOPNOTSUPP -> -EINVAL
+    //   clock_settime(CLOCK_MONOTONIC_RAW=4, _)   -EOPNOTSUPP -> -EINVAL
+    //   clock_settime(CLOCK_REALTIME_ALARM=8, _)  -EOPNOTSUPP -> -EINVAL
+    //   clock_settime(CLOCK_BOOTTIME_ALARM=9, _)  -EOPNOTSUPP -> -EINVAL
+    //
+    // Why it matters: chrony / systemd-timedated / glibc's
+    // clock_settime wrapper probe for support by trying
+    // `clock_settime(CLOCK_MONOTONIC, ...)` and treating -EINVAL as
+    // "this clock is not settable" but -EOPNOTSUPP as "this clock
+    // type isn't recognised by the kernel at all" — the latter
+    // routes through a different fallback (skip the syscall entirely
+    // and use settimeofday).  Returning -EOPNOTSUPP where Linux
+    // returns -EINVAL takes those probes down a wrong code path.
     let clockid = args.arg0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid_i32 = clockid as i32;
@@ -10949,8 +10991,10 @@ fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     //   REALTIME_COARSE(5), MONOTONIC_COARSE(6), BOOTTIME(7),
     //   REALTIME_ALARM(8), BOOTTIME_ALARM(9).
     // Clocks with .clock_set: REALTIME(0), PROCESS_CPUTIME_ID(2), TAI(11).
+    // Linux folds these into the same -EINVAL as the unknown-clockid
+    // case (single `if (!kc || !kc->clock_set)` gate).
     if matches!(clockid_i32, 1 | 3..=9) {
-        return linux_err(errno::EOPNOTSUPP);
+        return linux_err(errno::EINVAL);
     }
     let tp = args.arg1;
     if tp == 0 {
@@ -44635,36 +44679,114 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // clock_settime(CLOCK_MONOTONIC=1, ts_ok) -> EOPNOTSUPP
+        // Batch 477 — Linux folds "kc exists but kc->clock_set == NULL"
+        // into the same -EINVAL gate as "unknown clockid".  Quoted from
+        // kernel/time/posix-timers.c v6.6:
+        //   if (!kc || !kc->clock_set) return -EINVAL;
+        // Pre-batch we returned -EOPNOTSUPP for these clocks.
+        // clock_settime(CLOCK_MONOTONIC=1, ts_ok) -> EINVAL
         // (no .clock_set in Linux's clock_monotonic table entry).
         let a = SyscallArgs { arg0: 1, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
-            != -i64::from(errno::EOPNOTSUPP) {
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: clock_settime MONOTONIC not EOPNOTSUPP"
+                "[syscall/linux]   FAIL: clock_settime MONOTONIC not EINVAL"
             );
             return Err(KernelError::InternalError);
         }
-        // clock_settime(CLOCK_BOOTTIME=7, NULL) -> EOPNOTSUPP
-        // (EOPNOTSUPP gate beats NULL ptr EFAULT).
+        // clock_settime(CLOCK_BOOTTIME=7, NULL) -> EINVAL
+        // (EINVAL gate beats NULL ptr EFAULT).
         let a = SyscallArgs { arg0: 7, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
-            != -i64::from(errno::EOPNOTSUPP) {
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: clock_settime BOOTTIME not EOPNOTSUPP"
+                "[syscall/linux]   FAIL: clock_settime BOOTTIME not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(THREAD_CPUTIME_ID=3, ts_ok) -> EINVAL
+        let a = SyscallArgs { arg0: 3, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime THREAD_CPUTIME_ID not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_MONOTONIC_RAW=4, ts_ok) -> EINVAL
+        let a = SyscallArgs { arg0: 4, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime MONOTONIC_RAW not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_REALTIME_COARSE=5, ts_ok) -> EINVAL
+        let a = SyscallArgs { arg0: 5, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime REALTIME_COARSE not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_MONOTONIC_COARSE=6, ts_ok) -> EINVAL
+        let a = SyscallArgs { arg0: 6, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime MONOTONIC_COARSE not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_REALTIME_ALARM=8, ts_ok) -> EINVAL
+        let a = SyscallArgs { arg0: 8, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime REALTIME_ALARM not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_BOOTTIME_ALARM=9, ts_ok) -> EINVAL
+        let a = SyscallArgs { arg0: 9, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime BOOTTIME_ALARM not EINVAL"
             );
             return Err(KernelError::InternalError);
         }
         // clock_settime(CLOCK_TAI=11, ts_ok) -> EPERM (TAI has .clock_set
-        // in Linux, so falls through past EOPNOTSUPP gate).
+        // in Linux, so falls through past EINVAL gate to the CAP check).
         let a = SyscallArgs { arg0: 11, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
             != -i64::from(errno::EPERM) {
             serial_println!(
                 "[syscall/linux]   FAIL: clock_settime TAI not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // clock_settime(CLOCK_PROCESS_CPUTIME_ID=2, ts_ok) -> falls past
+        // EINVAL gate; PROCESS_CPUTIME_ID has .clock_set in Linux's
+        // posix_clocks[] entry that ultimately fails with EPERM in our
+        // model (no CAP_SYS_TIME).  Probe verifies the gate path.
+        let a = SyscallArgs { arg0: 2, arg1: cts_ok_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_SETTIME, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_settime PROCESS_CPUTIME_ID not EPERM"
             );
             return Err(KernelError::InternalError);
         }
@@ -44709,23 +44831,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        //   * EOPNOTSUPP gate STILL beats timespec64_valid (Linux's
-        //     order: clockid -> !clock_set -> EFAULT -> validity).
-        //     clockid=MONOTONIC (1) with junk ts -> EOPNOTSUPP, not
-        //     EINVAL.
+        //   * Batch 477 — folded EINVAL gate STILL beats timespec64_valid
+        //     (Linux's order: clockid|!clock_set -> EFAULT -> validity).
+        //     clockid=MONOTONIC (1) with junk ts -> EINVAL via the
+        //     folded `!kc || !kc->clock_set` gate, not via tv_nsec
+        //     validity (which would also be EINVAL but for a
+        //     different reason — same errno, different gate).
         let a = SyscallArgs {
             arg0: 1, arg1: (&raw const cts_bad_nsec) as u64,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::CLOCK_SETTIME, &a).value
-            != -i64::from(errno::EOPNOTSUPP) {
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: clock_settime MONOTONIC+bad ts not EOPNOTSUPP"
+                "[syscall/linux]   FAIL: clock_settime MONOTONIC+bad ts not EINVAL"
             );
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   clock_settime clockid/EOPNOTSUPP/timespec64_valid: OK"
+            "[syscall/linux]   clock_settime !kc->clock_set folds into EINVAL (Linux v6.6 posix-timers.c: `if (!kc || !kc->clock_set) return -EINVAL`): OK"
         );
         // clock_getres — Linux gates on clockid first; we then return
         // 1ns for any valid clockid. NULL res ptr is OK (no write).

@@ -22007,7 +22007,10 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
 /// Linux's `sched_getattr` writes a `struct sched_attr` of `size` bytes
 /// where the first `min(size, sizeof(kernel struct))` bytes come from
 /// the kernel's representation and any trailing bytes are zero-filled.
-/// `attr.size` is set to the user-requested `size` before the copy.
+/// `attr.size` is set to `min(usize, sizeof(kattr))` — the kernel's
+/// honest reply about how many bytes the kernel actually understands —
+/// NOT the raw user-requested size.  See batch 508 for the v6.6
+/// citation.
 ///
 /// Our `struct sched_attr` mirrors the v0 layout (48 bytes):
 ///   * u32 size
@@ -22104,8 +22107,42 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     // of Rust's default struct alignment.
     #[allow(clippy::cast_possible_truncation)]
     let user_size = size as u32;
+    // ## Batch 508 — write min(usize, sizeof(kattr)) as attr.size, not
+    // the raw user-requested size.
+    //
+    // Linux v6.6 `kernel/sched/syscalls.c::SYSCALL_DEFINE4(sched_getattr)`
+    // assembles its reply via
+    //
+    //   struct sched_attr kattr = { };
+    //   ...
+    //   kattr.size = min(usize, sizeof(kattr));
+    //   kattr.sched_policy = p->policy;
+    //   ...
+    //   retval = sched_attr_copy_to_user(uattr, &kattr, usize);
+    //
+    // i.e. the size field reflects what the *kernel* knows about (its
+    // own struct sizeof), capped by what the user asked for.  Pre-batch
+    // we echoed the raw user-requested size verbatim — if the caller
+    // passed usize=4096, attr.size came back as 4096, claiming the
+    // kernel filled in 4096 bytes of meaningful data when only the
+    // first 48 bytes were populated and the rest were zero-padding.
+    //
+    // A glibc probe that uses attr.size to discover the kernel-known
+    // sched_attr size would have been mis-trained: it would conclude
+    // the kernel knows about arbitrarily-large sched_attr extensions
+    // when we actually model only the v0 48-byte layout.  After this
+    // batch attr.size is `min(user_size, 48)`, an honest reply about
+    // the translator's known fields.
+    //
+    // Note: real v6.6 reports sizeof(struct sched_attr) = 56 (util_min
+    // and util_max bring the kernel-known size to 56).  Our translator
+    // reports 48 because we don't yet model util_clamp — a known
+    // information divergence vs strict v6.6 (we honestly don't model
+    // the extension), distinct from the lie we're correcting here.
+    const SCHED_ATTR_KSIZE_U32: u32 = 48;
+    let returned_size = core::cmp::min(user_size, SCHED_ATTR_KSIZE_U32);
     let mut buf = [0u8; 48];
-    buf[0..4].copy_from_slice(&user_size.to_le_bytes());
+    buf[0..4].copy_from_slice(&returned_size.to_le_bytes());
     buf[4..8].copy_from_slice(&policy.to_le_bytes());
     // sched_flags @ 8..16 = 0 (already zero).
     // sched_nice @ 16..20 = 0.
@@ -57951,8 +57988,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // attr.size field should reflect the truncated u32 size, not
-        // the raw u64 (Linux writes user_size = (unsigned int)size).
+        // attr.size field should reflect min(truncated u32 size,
+        // sizeof(kattr)) — for usize=0x30 (=48) and our v0 KSIZE=48,
+        // min(48, 48) = 48 = 0x30, so this guard is unchanged by batch
+        // 508.  (See batch 508 for the v6.6 `kattr.size = min(usize,
+        // sizeof(kattr))` rule; the new probes below exercise it for
+        // usize > KSIZE.)
         let trunc_size = u32::from_le_bytes([
             sga_size_buf[0], sga_size_buf[1], sga_size_buf[2], sga_size_buf[3],
         ]);
@@ -57963,6 +58004,70 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 508: sched_getattr writes attr.size = min(usize,
+        // sizeof(kattr)).  Pre-batch we echoed the raw user-requested
+        // size, so usize=4096 produced attr.size=4096 (claiming the
+        // kernel filled in 4 KiB of meaningful data when only 48 bytes
+        // are populated).  v6.6: attr.size = min(usize, sizeof(kattr))
+        // — an honest reply about what the kernel knows.  Our SCHED_
+        // ATTR_KSIZE for sched_getattr's reply is 48 (v0 layout).
+        //
+        // Case A: usize=4096 (maximum Linux PAGE_SIZE) → attr.size=48.
+        let mut sga_max_buf = [0u8; 4096];
+        let sga_max_ptr = sga_max_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sga_max_ptr,
+            arg2: 4096,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr(usize=4096) not ok(0) (batch 508)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let sz_4096 = u32::from_le_bytes([
+            sga_max_buf[0], sga_max_buf[1], sga_max_buf[2], sga_max_buf[3],
+        ]);
+        if sz_4096 != 48 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr(usize=4096) attr.size {} (expected 48; batch 508, was 4096)",
+                sz_4096,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case B: usize=100 (between KSIZE and PAGE_SIZE) → attr.size=48.
+        let mut sga_100_buf = [0u8; 100];
+        let sga_100_ptr = sga_100_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: sga_100_ptr,
+            arg2: 100,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr(usize=100) not ok(0) (batch 508)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let sz_100 = u32::from_le_bytes([
+            sga_100_buf[0], sga_100_buf[1], sga_100_buf[2], sga_100_buf[3],
+        ]);
+        if sz_100 != 48 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_getattr(usize=100) attr.size {} (expected 48; batch 508, was 100)",
+                sz_100,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case C regression guard: usize=48 → attr.size=48 (no change).
+        // Already verified by the v0 probe above (line ~57832); not
+        // duplicated here.
+        serial_println!(
+            "[syscall/linux]   sched_getattr attr.size = min(usize, KSIZE) (batch 508): OK"
+        );
 
         // Probe E — sched_getattr pid truncates to 0.  Pre-batch the
         // <0 gate passed (pid_i32=0), then args.arg0 raw != 0 →

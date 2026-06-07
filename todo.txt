@@ -46482,3 +46482,86 @@ Summary stamp added: `sched_setattr sched_flags mask ~(ALL|SUGOV)
 **Build:** clean (`cargo build -p kernel`, 45.0s).
 
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+## Batch 508 — Linux ABI fidelity: sched_getattr() writes attr.size = min(usize, sizeof(kattr)) instead of echoing the raw user-requested size (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_sched_getattr`).
+
+**Change:** the `attr.size` field returned to userspace is now
+`min(user_size, SCHED_ATTR_KSIZE)` (= 48 for our v0 layout)
+instead of the raw user-requested size.  This mirrors Linux v6.6's
+`kattr.size = min(usize, sizeof(kattr))` exactly within the
+translator's modeled-field scope.
+
+**Linux v6.6 source** — `kernel/sched/syscalls.c::SYSCALL_DEFINE4(sched_getattr)`:
+
+```c
+SYSCALL_DEFINE4(sched_getattr, pid_t, pid,
+                struct sched_attr __user *, uattr,
+                unsigned int, usize, unsigned int, flags)
+{
+    struct sched_attr kattr = { };
+    ...
+    kattr.size = min(usize, sizeof(kattr));
+    kattr.sched_policy = p->policy;
+    ...
+    retval = sched_attr_copy_to_user(uattr, &kattr, usize);
+}
+```
+
+That `kattr.size = min(usize, sizeof(kattr))` is the canonical
+reply: the size field reflects what the *kernel* understands
+(its own struct sizeof), capped by what the user asked for.
+
+**Divergence (pre-batch):** the translator computed
+`let user_size = size as u32;` and wrote `user_size` verbatim into
+`attr.size` for any user-supplied size in `[48, 4096]`.  Probes:
+
+  - usize=48     → attr.size=48   (matches v6.6 by coincidence)
+  - usize=100    → attr.size=100  (v6.6: 48 — our kernel-known sz)
+  - usize=4096   → attr.size=4096 (v6.6: 48 — same)
+
+i.e. usize=4096 produced attr.size=4096, claiming the kernel
+filled in 4 KiB of meaningful data when only the first 48 bytes
+were populated and the rest were zero-padding.
+
+**Why it matters:** glibc-on-v6.6 feature probes use `attr.size`
+to discover the kernel-known sched_attr size — the answer tells
+the runtime which sched_attr extensions (util_clamp, KEEP_*,
+DL_OVERRUN) the kernel models.  Pre-batch a probe that passed
+usize=4096 would have concluded the kernel knows about an
+arbitrarily-large extended sched_attr (4 KiB of fields!), when in
+reality our translator models only the v0 48-byte layout.  After
+the fix the probe sees attr.size=48 — an honest reply about what
+the translator knows.
+
+**Post-batch behaviour:**
+  - sched_getattr(_, attr, usize=48, 0) → attr.size=48 (unchanged
+    — `min(48, 48) = 48`).
+  - sched_getattr(_, attr, usize=100, 0) → attr.size=48 (was 100).
+  - sched_getattr(_, attr, usize=4096, 0) → attr.size=48 (was 4096).
+  - All other fields (policy, priority, ...) unchanged.
+
+**Information divergence vs strict v6.6 (deliberate, documented):**
+real v6.6 reports sizeof(struct sched_attr) = 56 (util_min and
+util_max bring the kernel-known size to 56).  Our translator
+reports 48 because we don't yet model util_clamp.  This is a
+distinct divergence — we honestly don't model the extension —
+from the size-echoing lie this batch corrects.  Bumping
+SCHED_ATTR_KSIZE to 56 with util_clamp parsing is a separate
+batch (likely 509 or later).
+
+**Boot probes added.**
+  1. usize=4096 → attr.size=48 (was 4096; flipped).
+  2. usize=100  → attr.size=48 (was 100; flipped).
+  3. Existing usize=48 probe unchanged — `min(48, 48) = 48`.
+  4. Existing size-truncation probe (probe D, usize=0x1_0000_0030 →
+     truncated 0x30) — comment updated to call out the v6.6 rule
+     and note this case is unchanged by the min().
+
+Summary stamp added: `sched_getattr attr.size = min(usize, KSIZE)
+(batch 508): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 58.0s).
+
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).

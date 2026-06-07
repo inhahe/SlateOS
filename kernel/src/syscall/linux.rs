@@ -13464,7 +13464,12 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
 /// flags=0 (LOOKUP_EMPTY never set), `sys_futimesat` likewise, and
 /// `sys_utimensat`'s non-`AT_EMPTY_PATH` branch — all four route
 /// empty paths to ENOENT via getname (fs/utimes.c v6.6
-/// do_utimes_path → user_path_at).
+/// do_utimes_path → user_path_at).  Batch 490 extended to
+/// `sys_quotactl`: `quotactl_block(special, cmd)` (fs/quota/quota.c
+/// v6.6) opens with `getname(special) → lookup_bdev` before any
+/// capability check, so empty/missing-device paths surface ENOENT
+/// ahead of EPERM (matching util-linux's `quota`/`quotacheck` and
+/// LTP's `quotactl0*` probes' expectations on a no-FS kernel).
 fn check_path_str_nonempty(ptr: u64) -> Result<(), i32> {
     if ptr == 0 {
         return Err(errno::EFAULT);
@@ -17048,11 +17053,48 @@ fn sys_quotactl(args: &SyscallArgs) -> SyscallResult {
         }
         return linux_err(errno::ENODEV);
     }
-    // special is a path pointer (when non-NULL); validate readability.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-        return linux_err(linux_errno_for(e));
+    // Batch 490: Linux's `quotactl_block(special, cmds)` runs BEFORE
+    // any capability check.  Its v6.6 fs/quota/quota.c body is:
+    //
+    //   struct filename *tmp = getname(special);
+    //   if (IS_ERR(tmp))
+    //       return ERR_CAST(tmp);
+    //   error = lookup_bdev(tmp->name, &dev);
+    //   putname(tmp);
+    //   if (error)
+    //       return ERR_PTR(error);
+    //
+    // `getname()` on an empty string returns `-ENOENT` (see fs/namei.c
+    // v6.6 line 196: `if (unlikely(!len && !(flags & LOOKUP_EMPTY)))`)
+    // — the Q_QUOTAON addr resolution is the only LOOKUP_EMPTY-bearing
+    // caller, and `special` is never one of those.  `lookup_bdev()` on
+    // a kernel with no block device returns `-ENOENT` once the path
+    // walk fails.  Only AFTER quotactl_block succeeds does
+    // `do_quotactl → check_quotactl_permission` enter the CAP check.
+    //
+    // Pre-batch we returned EPERM at the bottom, conflating "no such
+    // block device" (Linux's first error on our no-FS kernel) with
+    // "unprivileged" (a later check that real Linux only reaches once
+    // a real device is found).  A util-linux `quota`/`quotacheck` /
+    // libquota probe walking commands against /dev/sda1 saw EPERM and
+    // concluded the kernel knows quotas but rejects the caller; the
+    // correct answer on a no-FS kernel is ENOENT ("no such device").
+    //
+    // userspace impact: util-linux's `quota`, `quotacheck`, and
+    // `setquota`; the LTP `quotactl0*` suite; quota-aware fs
+    // management daemons (systemd-tmpfiles' quota probes,
+    // accountsservice, libuser); and any glibc-using tool calling
+    // `quotactl(2)` directly to discover quota support.  All of
+    // these need ENOENT to distinguish "device missing" from
+    // "permission denied" so they can degrade gracefully.
+    //
+    // Fix: catch empty `special` (mirroring getname → ENOENT), then
+    // unconditionally return ENOENT (mirroring lookup_bdev's no-FS
+    // failure).  NULL is already handled above at args.arg1 == 0.
+    if let Err(e) = check_path_str_nonempty(args.arg1) {
+        return linux_err(e);
     }
-    linux_err(errno::EPERM)
+    linux_err(errno::ENOENT)
 }
 
 /// `quotactl_fd(fd, cmd, id, addr)`.
@@ -52556,23 +52598,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: quotactl(Q_SETQUOTA,NULL) not ENODEV");
             return Err(KernelError::InternalError);
         }
-        // Q_GETQUOTA with non-NULL special -> EPERM (special-non-NULL
-        // path skips the !special branch and falls through to the
-        // terminal CAP check).  Use a stack buffer as the special
-        // pointer (kernel-context validate_user_read bypasses NULL
-        // checks, so any valid pointer satisfies the read gate).
+        // Batch 490: Q_GETQUOTA with non-NULL special -> ENOENT, not
+        // EPERM.  Linux's quotactl_block runs getname → lookup_bdev
+        // BEFORE the cap check inside do_quotactl, and lookup_bdev on
+        // a no-FS kernel fails with ENOENT.  Use a stack buffer as
+        // the special pointer (kernel-context check_path_str_nonempty
+        // dereferences the first byte to detect empty, so it must
+        // point at a real readable byte).
         let q_special_buf = b"/dev/sda1\0";
         let q_special_ptr = q_special_buf.as_ptr() as u64;
         let a = SyscallArgs {
             arg0: 0x8000_0700, arg1: q_special_ptr,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0,
         };
-        if dispatch_linux(nr::QUOTACTL, &a).value != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: quotactl(Q_GETQUOTA,/dev/sda1) not EPERM");
+        if dispatch_linux(nr::QUOTACTL, &a).value != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_GETQUOTA,/dev/sda1) not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 490: Q_GETQUOTA with empty special -> ENOENT
+        // (getname on empty path returns -ENOENT in fs/namei.c v6.6).
+        // Plant an empty C string so check_path_str_nonempty's first-
+        // byte dereference reads a real zero.
+        let q_empty_buf: [u8; 1] = *b"\0";
+        core::hint::black_box(&q_empty_buf);
+        let a = SyscallArgs {
+            arg0: 0x8000_0700, arg1: q_empty_buf.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::QUOTACTL, &a).value != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: quotactl(Q_GETQUOTA,\"\") not ENOENT");
             return Err(KernelError::InternalError);
         }
         serial_println!(
             "[syscall/linux]   quotactl !special branch (Q_SYNC=0, else ENODEV): OK"
+        );
+        serial_println!(
+            "[syscall/linux]   quotactl non-NULL special -> ENOENT (batch 490): OK"
         );
         // quotactl_fd(fd=0, cmd=Q_SYNC<<8|USRQUOTA) -> EPERM (valid
         // cmd, terminal CAP check).  Pre-batch this test passed

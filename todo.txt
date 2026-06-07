@@ -40757,3 +40757,191 @@ Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.
 
      Build: cargo build -p kernel -> Finished `dev` profile in 39.40s.
      Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 23s.
+
+
+465. syscall/linux: validate_sockaddr_out — honour Linux's
+     `if (upeer_sockaddr / addr) { move_addr_to_user(...) }` skip
+     for accept / accept4 / recvfrom; NULL sockaddr means "no peer
+     reporting" (no errno), and NULL addrlen with a non-NULL
+     sockaddr is EFAULT (Linux's `get_user(len, ulen)` fault), not
+     EINVAL.
+
+     Linux source (net/socket.c::do_accept, v6.x):
+
+         static struct file *do_accept(struct file *file, ...,
+             struct sockaddr __user *upeer_sockaddr,
+             int __user *upeer_addrlen, int flags)
+         {
+             ...
+             if (upeer_sockaddr) {
+                 len = ops->accept(...);
+                 if (len < 0)
+                     goto out;
+                 err = move_addr_to_user(&address, len,
+                                         upeer_sockaddr,
+                                         upeer_addrlen);
+                 ...
+             }
+             ...
+         }
+
+     Linux source (net/socket.c::__sys_recvfrom, v6.x):
+
+         int __sys_recvfrom(int fd, void __user *ubuf, size_t size,
+                            unsigned int flags,
+                            struct sockaddr __user *addr,
+                            int __user *addr_len)
+         {
+             ...
+             if (addr != NULL) {
+                 err2 = move_addr_to_user(&address, msg.msg_namelen,
+                                          addr, addr_len);
+                 ...
+             }
+             ...
+         }
+
+     Linux source (net/socket.c::move_addr_to_user, v6.x):
+
+         static int move_addr_to_user(struct sockaddr_storage *kaddr,
+             int klen, void __user *uaddr, int __user *ulen)
+         {
+             ...
+             err = get_user(len, ulen);     // EFAULT on NULL ulen
+             if (err) return err;
+             if (len > klen) len = klen;
+             if (len < 0) return -EINVAL;
+             if (len) {
+                 ...
+                 if (copy_to_user(uaddr, kaddr, len))
+                     return -EFAULT;
+             }
+             err = put_user(klen, ulen);
+             return err;
+         }
+
+     The `addr_ptr == NULL` short-circuit is the LEGAL "I don't care
+     about the peer address" call shape for accept / accept4 /
+     recvfrom.  Linux skips the entire move_addr_to_user block in
+     that case — `addrlen_ptr` is never read, no errno is raised,
+     the syscall proceeds and returns success (or the connection's
+     newfd, etc.) without touching either pointer.
+
+     Inside the block (when `addr_ptr != NULL`), the very first
+     action is `get_user(len, ulen)`, which faults on a NULL
+     `ulen` with -EFAULT — NOT -EINVAL.
+
+     `__sys_getsockname` and `__sys_getpeername` do NOT use this
+     skip — `move_addr_to_user` is called unconditionally.  Those
+     two callers therefore keep their explicit
+     `args.arg1 == 0 || args.arg2 == 0 → EFAULT` pre-check
+     (matching Linux's get_user / copy_to_user EFAULT on NULL),
+     and invoke validate_sockaddr_out only after both pointers
+     are confirmed non-NULL.
+
+     Pre-batch behaviour:
+
+         fn validate_sockaddr_out(addr_ptr: u64,
+                                  addrlen_ptr: u64) -> ... {
+             if addr_ptr == 0 && addrlen_ptr == 0 {
+                 return Ok(());                  // OK (both-NULL)
+             }
+             if addr_ptr == 0 || addrlen_ptr == 0 {
+                 return Err(EINVAL);             // BOTH half-NULL
+             }
+             // access checks...
+         }
+
+     The single `addr_ptr == 0 || addrlen_ptr == 0 → EINVAL` line
+     collapsed two semantically different cases:
+       * `(NULL_sa, valid_ulen)`  — Linux: success (skip block).
+                                    Pre-batch: EINVAL.  Userspace
+                                    probes that pass NULL_sa as a
+                                    deliberate "ignore peer" signal
+                                    (libuv's accept polling loop is
+                                    one) saw spurious EINVALs.
+       * `(valid_sa, NULL_ulen)`  — Linux: EFAULT (get_user on
+                                    NULL).  Pre-batch: EINVAL.
+                                    glibc's recvfrom wrapper and
+                                    Boost.Asio's async-accept code
+                                    branch on EFAULT-vs-EINVAL to
+                                    distinguish "your ulen
+                                    pointer is bad, retry with a
+                                    real one" from "your call shape
+                                    is wrong, reconfigure"; pre-
+                                    batch we made them
+                                    indistinguishable.
+
+     Divergence table — userspace probes observed in stock x86_64
+     Linux 6.x vs our pre-batch translator (rows for the three
+     skip-enabled syscalls; getsockname/getpeername are unchanged
+     because they have an explicit pre-check):
+
+         | call                                    | Linux  | Pre-batch | Now    |
+         |-----------------------------------------|--------|-----------|--------|
+         | accept(_,  NULL, NULL)                  | EBADF  | EBADF     | EBADF  |
+         | accept(_,  NULL, valid)                 | EBADF  | EINVAL    | EBADF  |
+         | accept(_,  valid, NULL)                 | EFAULT | EINVAL    | EFAULT |
+         | accept(_,  valid, valid)                | EBADF  | EBADF     | EBADF  |
+         | accept4(_, NULL,  valid, NONBLOCK)      | EBADF  | EINVAL    | EBADF  |
+         | accept4(_, valid, NULL,  NONBLOCK)      | EFAULT | EINVAL    | EFAULT |
+         | recvfrom(_,_,_,_, NULL,  valid)         | EBADF  | EINVAL    | EBADF  |
+         | recvfrom(_,_,_,_, valid, NULL)          | EFAULT | EINVAL    | EFAULT |
+         | getsockname(_, NULL, valid)             | EFAULT | EFAULT    | EFAULT |
+         | getpeername(_, valid, NULL)             | EFAULT | EFAULT    | EFAULT |
+
+     Why it matters: many networking libraries use NULL sa as the
+     idiomatic "I don't need the peer address right now" signal —
+     it's the common shape for high-throughput servers that
+     don't audit every connection's peer.  The pre-batch EINVAL
+     made those calls look malformed.  And callers that
+     defensively probe with NULL ulen (a fuzz pattern, but also a
+     legitimate "did I forget to allocate a length" canary) saw
+     EINVAL where Linux would surface the more diagnostic EFAULT,
+     misleading them into reconfiguring their call shape instead
+     of fixing the pointer.
+
+     Fix (TRANSLATOR-ONLY, kernel/src/syscall/linux.rs ~lines
+     23082-23167):
+
+       * Rewrite validate_sockaddr_out's gate ladder:
+             (1) addr_ptr == 0  -> Ok (skip block; ulen untouched)
+             (2) addrlen_ptr == 0 -> EFAULT (get_user on NULL ulen)
+             (3) addrlen_ptr access checks (read + write, 4 bytes)
+             (4) addr_ptr write access check (>= 2 bytes for
+                 sa_family)
+       * Doc comment expanded with Linux source quotes for
+         do_accept, __sys_recvfrom, and move_addr_to_user, plus the
+         note that getsockname/getpeername do NOT participate in
+         the skip and rely on their explicit EFAULT guards.
+       * Native socket layer unaffected — translator-only.
+
+     Probe updates (kernel/src/syscall/linux.rs):
+
+       * Existing entry-261 probe "accept partial out -> EINVAL"
+         (line ~57253) updated to expect EFAULT.
+       * Batch-434 probes for accept/accept4 half-NULL cases
+         (lines ~58589, ~58598, ~58647) updated to expect the new
+         (EFAULT or EBADF) errnos.
+       * Batch-436 probe for recvfrom(valid_sa, NULL_ulen)
+         (line ~59050) updated to expect EFAULT.
+
+     New self-test probe block (kernel/src/syscall/linux.rs
+     ~line 58755, inserted between the batch-434 accept/accept4
+     reorder block and the batch-464 addr_len bound block).
+     Covers seven sub-probes — accept(NULL,valid), accept(valid,
+     NULL), accept4(NULL,valid,NB), accept4(valid,NULL,NB),
+     recvfrom(_,_,NULL,valid), recvfrom(_,_,valid,NULL), and a
+     getsockname(NULL,valid) regression check (must still be
+     EFAULT despite the validate_sockaddr_out semantics change,
+     because the explicit pre-guard fires first).  All seven gated
+     by:
+
+       [syscall/linux]   accept/accept4/recvfrom sockaddr-out
+         skip on NULL addr (Linux do_accept / __sys_recvfrom:
+         `if (addr) move_addr_to_user`; NULL_sa skips ulen
+         access, valid_sa + NULL_ulen -> EFAULT not EINVAL;
+         getsockname/getpeername unaffected — no skip): OK
+
+     Build: cargo build -p kernel -> Finished `dev` profile in 39.45s.
+     Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.

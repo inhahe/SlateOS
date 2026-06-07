@@ -23080,14 +23080,86 @@ fn validate_sockaddr_in(addr_ptr: u64, addr_len: i32) -> Result<(), SyscallResul
 }
 
 /// Validate an output sockaddr+addrlen pair (used by accept /
-/// getsockname / getpeername / recvfrom).  Both pointers are optional
-/// individually but if one is non-NULL the other must be too.
+/// accept4 / recvfrom — the syscalls whose sockaddr-out is OPTIONAL
+/// via the `upeer_sockaddr == NULL` skip).
+///
+/// ## Batch 465 — `addr == NULL` means SKIP, not "half-NULL EINVAL"
+///
+/// Linux's `do_accept` (called by `__sys_accept` / `__sys_accept4`)
+/// and `__sys_recvfrom` (net/socket.c) gate move_addr_to_user
+/// behind `if (upeer_sockaddr / addr) { ... }`:
+///
+/// ```c
+/// // do_accept
+/// if (upeer_sockaddr) {
+///     len = ops->accept(...);
+///     if (len < 0) goto out;
+///     err = move_addr_to_user(&address, len,
+///                             upeer_sockaddr, upeer_addrlen);
+///     ...
+/// }
+///
+/// // __sys_recvfrom
+/// if (addr != NULL) {
+///     err2 = move_addr_to_user(&address, msg.msg_namelen,
+///                              addr, addr_len);
+///     ...
+/// }
+/// ```
+///
+/// The `addr_ptr == NULL` branch SHORT-CIRCUITS the entire block —
+/// `addrlen_ptr` is never touched, no errno is raised.  Once inside
+/// the block, `move_addr_to_user` does `get_user(len, ulen)` first,
+/// which faults with `-EFAULT` when `ulen` is NULL.
+///
+/// So the userspace-observable matrix for accept / accept4 / recvfrom
+/// is:
+///
+///     | (addr_ptr,    addrlen_ptr) | Linux  | Pre-batch | Now    |
+///     |----------------------------|--------|-----------|--------|
+///     | (NULL,        NULL)        | Ok     | Ok        | Ok     |
+///     | (NULL,        valid)       | Ok (a) | EINVAL    | Ok     |
+///     | (valid,       NULL)        | EFAULT | EINVAL    | EFAULT |
+///     | (valid,       valid)       | Ok     | Ok        | Ok     |
+///
+///     (a) The valid `addrlen_ptr` is never read; Linux doesn't see
+///         it.
+///
+/// Pre-batch we collapsed both "half-NULL" cases to -EINVAL,
+/// hijacking Linux's -EFAULT for `(valid_sa, NULL_ulen)` and
+/// Linux's success for `(NULL_sa, valid_ulen)`.  Userspace probes
+/// (libuv's accept polling loop, glibc's recvfrom helpers,
+/// Boost.Asio) rely on the EFAULT-vs-success distinction to choose
+/// between "your ulen pointer is bad, retry with one" and "address
+/// reporting was disabled, continue".
+///
+/// Architectural note: TRANSLATOR-ONLY.  The native accept/recvfrom
+/// paths (when they land) can fault in whatever order they like —
+/// this helper exists solely so the Linux-numbered entrypoint
+/// reports the errno Linux would.
+///
+/// ## Note on getsockname / getpeername
+///
+/// `__sys_getsockname` / `__sys_getpeername` do NOT have the
+/// `if (upeer_sockaddr)` skip — `move_addr_to_user` is called
+/// unconditionally with both pointers.  Those callers therefore
+/// keep their explicit `args.arg1 == 0 || args.arg2 == 0 → EFAULT`
+/// pre-check (a NULL on either pointer surfaces as EFAULT from
+/// Linux's `get_user(len, ulen)` or `copy_to_user(addr, kaddr,
+/// len)`), and only invoke this helper when both pointers are
+/// non-NULL.
 fn validate_sockaddr_out(addr_ptr: u64, addrlen_ptr: u64) -> Result<(), SyscallResult> {
-    if addr_ptr == 0 && addrlen_ptr == 0 {
+    // Linux's `if (upeer_sockaddr)` / `if (addr != NULL)` skip:
+    // when the sockaddr pointer is NULL, the whole move_addr_to_user
+    // block is bypassed and `addrlen_ptr` is never touched.
+    if addr_ptr == 0 {
         return Ok(());
     }
-    if addr_ptr == 0 || addrlen_ptr == 0 {
-        return Err(linux_err(errno::EINVAL));
+    // Inside the block, move_addr_to_user's first action is
+    // `get_user(len, ulen)`.  A NULL `addrlen_ptr` surfaces as
+    // -EFAULT here, not -EINVAL.
+    if addrlen_ptr == 0 {
+        return Err(linux_err(errno::EFAULT));
     }
     // addrlen is socklen_t, 4 bytes; it's read-modify-write so validate
     // for both read and write.
@@ -57249,10 +57321,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // accept addr without addrlen -> EINVAL.
+        // accept addr without addrlen -> EFAULT.  Batch 465: Linux's
+        // do_accept enters the move_addr_to_user block iff addr_ptr
+        // is non-NULL; inside, get_user(len, NULL) faults with
+        // EFAULT, not EINVAL.
         let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: accept partial out not EINVAL");
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!("[syscall/linux]   FAIL: accept(valid,NULL) not EFAULT (Batch 465)");
             return Err(KernelError::InternalError);
         }
         // accept NULL/NULL -> EBADF (valid: ignore peer).
@@ -58565,8 +58640,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // not regress the existing kernel-ctx flow:
     //   * NULL/NULL still surfaces as final EBADF (legal "ignore
     //     peer" call shape — both pointers optional but symmetric).
-    //   * half-NULL still surfaces as EINVAL from
-    //     validate_sockaddr_out.
+    //   * (valid_sa, NULL_ulen) surfaces as EFAULT (Batch 465 —
+    //     Linux's move_addr_to_user calls get_user(len, NULL) which
+    //     faults).
+    //   * (NULL_sa, valid_ulen) surfaces as the terminal EBADF
+    //     (Batch 465 — Linux skips the move block entirely when
+    //     addr_ptr == NULL, ulen pointer is never read).
     //   * accept4's flags gate still fires before everything else.
     {
         let sockaddr_buf = [0u8; 32];
@@ -58584,21 +58663,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // accept(fd=3, valid, NULL): fd gate passes → half-NULL
-        // surfaces as EINVAL from validate_sockaddr_out.
+        // accept(fd=3, valid, NULL): fd gate passes → enter move
+        // block (addr non-NULL) → get_user(len, NULL) → EFAULT.
+        // (Batch 465 — Linux's move_addr_to_user EFAULTs on NULL
+        // ulen pointer, not EINVAL.)
         let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EFAULT) {
             serial_println!(
-                "[syscall/linux]   FAIL: accept(valid,NULL) post-reorder not EINVAL ({})",
+                "[syscall/linux]   FAIL: accept(valid,NULL) post-reorder not EFAULT ({})",
                 dispatch_linux(nr::ACCEPT, &a).value
             );
             return Err(KernelError::InternalError);
         }
-        // accept(fd=3, NULL, valid): same — half-NULL → EINVAL.
+        // accept(fd=3, NULL, valid): addr is NULL → Linux's
+        // do_accept skips the move_addr_to_user block entirely,
+        // valid ulen is never touched.  Falls through to the
+        // terminal EBADF.  (Batch 465 — was EINVAL pre-batch.)
         let a = SyscallArgs { arg0: 3, arg1: 0, arg2: socklen_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EBADF) {
             serial_println!(
-                "[syscall/linux]   FAIL: accept(NULL,valid) post-reorder not EINVAL ({})",
+                "[syscall/linux]   FAIL: accept(NULL,valid) post-reorder not EBADF ({})",
                 dispatch_linux(nr::ACCEPT, &a).value
             );
             return Err(KernelError::InternalError);
@@ -58643,11 +58727,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // accept4(fd=3, valid, NULL, NONBLOCK): half-NULL → EINVAL.
+        // accept4(fd=3, valid, NULL, NONBLOCK): addr non-NULL →
+        // enter move block → get_user(len, NULL) → EFAULT.
+        // (Batch 465.)
         let a = SyscallArgs { arg0: 3, arg1: sockaddr_ptr, arg2: 0, arg3: 0o4000, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EFAULT) {
             serial_println!(
-                "[syscall/linux]   FAIL: accept4(valid,NULL,NONBLOCK) post-reorder not EINVAL ({})",
+                "[syscall/linux]   FAIL: accept4(valid,NULL,NONBLOCK) post-reorder not EFAULT ({})",
                 dispatch_linux(nr::ACCEPT4, &a).value
             );
             return Err(KernelError::InternalError);
@@ -58665,6 +58751,153 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   accept/accept4 fd lookup ordered before pointer validation (Linux: do_accept's fdget fires before move_addr_to_user; accept4 flags gate stays first; bad fd → EBADF regardless of pointer validity): OK"
+        );
+    }
+
+    // Batch 465: validate_sockaddr_out — accept / accept4 / recvfrom
+    // honour Linux's `if (upeer_sockaddr / addr) { move_addr_to_user
+    // }` skip.  When the sockaddr pointer is NULL the entire move
+    // block is bypassed and `ulen` is never read; when sockaddr is
+    // non-NULL but ulen is NULL, `get_user(len, ulen)` faults with
+    // -EFAULT.  Pre-batch we collapsed BOTH half-NULL cases to
+    // -EINVAL, hijacking the Linux EFAULT (for valid_sa + NULL_ulen)
+    // and the Linux success path (for NULL_sa + valid_ulen).
+    //
+    // getsockname / getpeername are NOT covered by this skip
+    // (move_addr_to_user is called unconditionally), so their
+    // explicit `arg1 == 0 || arg2 == 0 → EFAULT` guards continue
+    // to fire before validate_sockaddr_out — those callers behave
+    // exactly as before.
+    {
+        let sockaddr_buf = [0u8; 32];
+        let sockaddr_ptr = sockaddr_buf.as_ptr() as u64;
+        let socklen_buf = [16u8, 0, 0, 0];
+        let socklen_ptr = socklen_buf.as_ptr() as u64;
+        let iobuf = [0u8; 32];
+        let iobuf_ptr = iobuf.as_ptr() as u64;
+
+        // accept(fd=3, NULL, valid): addr NULL → skip → terminal EBADF.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: 0,
+            arg2: socklen_ptr,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept(NULL,valid) post-Batch465 not EBADF ({})",
+                dispatch_linux(nr::ACCEPT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept(fd=3, valid, NULL): addr non-NULL → enter block →
+        // get_user(len, NULL) → EFAULT.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: sockaddr_ptr,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::ACCEPT, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept(valid,NULL) post-Batch465 not EFAULT ({})",
+                dispatch_linux(nr::ACCEPT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // accept4 mirrors accept's behaviour — flags=NONBLOCK so
+        // the flags gate doesn't intercept.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: 0,
+            arg2: socklen_ptr,
+            arg3: 0o4000,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept4(NULL,valid,NONBLOCK) post-Batch465 not EBADF ({})",
+                dispatch_linux(nr::ACCEPT4, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: sockaddr_ptr,
+            arg2: 0,
+            arg3: 0o4000,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::ACCEPT4, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: accept4(valid,NULL,NONBLOCK) post-Batch465 not EFAULT ({})",
+                dispatch_linux(nr::ACCEPT4, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvfrom(fd=3, valid_buf, 16, _, NULL_sa, valid_ulen):
+        // addr NULL → skip → buf-validated, fd OK (kctx),
+        // terminal EBADF.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: iobuf_ptr,
+            arg2: 16,
+            arg3: 0,
+            arg4: 0,
+            arg5: socklen_ptr,
+        };
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvfrom(_,_,NULL,valid) post-Batch465 not EBADF ({})",
+                dispatch_linux(nr::RECVFROM, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // recvfrom(fd=3, valid_buf, 16, _, valid_sa, NULL_ulen):
+        // addr non-NULL → get_user(len, NULL) → EFAULT.
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: iobuf_ptr,
+            arg2: 16,
+            arg3: 0,
+            arg4: sockaddr_ptr,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: recvfrom(_,_,valid,NULL) post-Batch465 not EFAULT ({})",
+                dispatch_linux(nr::RECVFROM, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // getsockname/getpeername regression: their explicit NULL
+        // guard MUST still catch (NULL, valid) as EFAULT (Linux's
+        // move_addr_to_user is unconditional for these two, no
+        // skip).
+        let a = SyscallArgs {
+            arg0: 3,
+            arg1: 0,
+            arg2: socklen_ptr,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::GETSOCKNAME, &a).value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getsockname(NULL,valid) post-Batch465 not EFAULT ({})",
+                dispatch_linux(nr::GETSOCKNAME, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   accept/accept4/recvfrom sockaddr-out skip on NULL addr (Linux do_accept / __sys_recvfrom: `if (addr) move_addr_to_user`; NULL_sa skips ulen access, valid_sa + NULL_ulen → EFAULT not EINVAL; getsockname/getpeername unaffected — no skip): OK"
         );
     }
 
@@ -59046,11 +59279,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // recvfrom(fd=3, valid, 16, _, valid, NULL): half-NULL → EINVAL.
+        // recvfrom(fd=3, valid, 16, _, valid, NULL): addr non-NULL,
+        // ulen NULL → Linux's move_addr_to_user EFAULTs on
+        // get_user(len, NULL).  (Batch 465 — was EINVAL pre-batch.)
         let a = SyscallArgs { arg0: 3, arg1: buf_ptr, arg2: 16, arg3: 0, arg4: sockaddr_ptr, arg5: 0 };
-        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::RECVFROM, &a).value != -i64::from(errno::EFAULT) {
             serial_println!(
-                "[syscall/linux]   FAIL: recvfrom(valid,16,valid,NULL) post-reorder not EINVAL ({})",
+                "[syscall/linux]   FAIL: recvfrom(valid,16,valid,NULL) post-reorder not EFAULT ({})",
                 dispatch_linux(nr::RECVFROM, &a).value
             );
             return Err(KernelError::InternalError);

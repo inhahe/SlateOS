@@ -47308,3 +47308,138 @@ Summary stamp:
 Build: clean (`cargo build -p kernel`, 46.3s).
 
 Boot test: PASS @ 24s (`bash scripts/boot-test.sh`).
+
+
+================================================================
+Batch 516 — sys_clock_adjtime / sys_adjtimex: ntp_validate_timex
+            ADJ_ADJTIME + ADJ_OFFSET_SINGLESHOT + ADJ_OFFSET_SS_READ
+            gate fidelity
+================================================================
+
+Divergence: both `sys_clock_adjtime` and `sys_adjtimex`
+(kernel/src/syscall/linux.rs) collapsed every `modes != 0` request
+to `linux_err(errno::EPERM)`.  Linux v6.6's
+`kernel/time/ntp.c::ntp_validate_timex` runs a multi-arm gate
+ladder ahead of the CAP_SYS_TIME check that distinguishes
+malformed-modes (-EINVAL), write-singleshot (-EPERM), and
+read-singleshot (TIME_ERROR success) shapes.
+
+Linux v6.6 source (verbatim, `kernel/time/ntp.c::ntp_validate_timex`):
+
+    static inline int ntp_validate_timex(struct __kernel_timex *txc)
+    {
+        if (txc->modes & ADJ_ADJTIME) {
+            /* singleshot must not be used with any other mode bits */
+            if (!(txc->modes & ADJ_OFFSET_SINGLESHOT))
+                return -EINVAL;
+            if (!(txc->modes & ADJ_OFFSET_READONLY) &&
+                !capable(CAP_SYS_TIME))
+                return -EPERM;
+        } else {
+            /* In order to modify anything, you gotta be super-user! */
+            if (txc->modes && !capable(CAP_SYS_TIME))
+                return -EPERM;
+            ...
+        }
+        ...
+    }
+
+Kernel-private constants (`include/uapi/linux/time.h`, __KERNEL__):
+
+    #define ADJ_ADJTIME             0x8000
+    #define ADJ_OFFSET_SINGLESHOT   0x0001
+    #define ADJ_OFFSET_READONLY     0x2000
+
+Userspace bundles them as `ADJ_OFFSET_SINGLESHOT = 0x8001`
+(ADJ_ADJTIME|0x0001) and `ADJ_OFFSET_SS_READ = 0xa001`
+(ADJ_ADJTIME|READONLY|0x0001) — both call into the same gate.
+
+Why this matters: chrony's `chronyc tracking` (modes=0) is fine,
+but `chronyc waitsync` and ntpd's adjtime fallback both probe
+ADJ_OFFSET_SS_READ to discover whether a singleshot adjustment is
+queued before falling back to `adjtimex(modes=0)`.  Util-linux
+`adjtimex --readonly`, busybox's `adjtimex -p`, and glibc's
+legacy `adjtime(3)` (which calls `adjtimex(ADJ_OFFSET_SS_READ)`
+first to read the current singleshot before computing the new
+offset) all distinguish EPERM ("you can't even read this") from
+EINVAL ("malformed modes word") from success ("here's the
+current offset; 0 means no adjustment pending").  Pre-batch all
+three saw EPERM and treated singleshot-aware time discipline as
+unavailable.
+
+Pre-batch divergence table:
+
+  | modes      | meaning                       | Linux       | Pre   |
+  |------------|-------------------------------|-------------|-------|
+  | 0x0000     | read-only timex query         | TIME_ERROR  | OK    |
+  | 0x8000     | ADJ_ADJTIME alone             | -EINVAL     | EPERM |
+  | 0xa000     | ADJ_ADJTIME|READONLY          | -EINVAL     | EPERM |
+  | 0x8001     | ADJ_OFFSET_SINGLESHOT (write) | -EPERM      | OK    |
+  | 0xa001     | ADJ_OFFSET_SS_READ            | TIME_ERROR  | EPERM |
+  | 0x0001..7fff (non-ADJTIME write) | varies     | -EPERM      | OK    |
+
+(The 0xa001 row is the most damaging userspace-impact-wise:
+chrony's probe sees EPERM and concludes singleshot adjustment is
+unavailable, then falls back to settimeofday which we also
+gate behind CAP_SYS_TIME — leaving chrony with no way to set the
+clock at all.)
+
+Fix (sys_clock_adjtime, sys_adjtimex): translator-only.  Replace
+the unconditional `modes != 0 -> EPERM` gate with the Linux-shaped
+arm tree:
+
+    if (modes & ADJ_ADJTIME) != 0 {
+        if (modes & ADJ_OFFSET_SINGLESHOT) == 0 {
+            return -EINVAL;
+        }
+        if (modes & ADJ_OFFSET_READONLY) == 0 {
+            return -EPERM;  // write singleshot, need CAP_SYS_TIME
+        }
+        // ADJ_OFFSET_SS_READ falls through to the read fill below.
+    } else if modes != 0 {
+        return -EPERM;  // non-ADJTIME modification, need CAP_SYS_TIME
+    }
+    // ...validate write + adjtimex_fill_read.
+
+No native time-state changes — we still don't track singleshot
+adjustments, so the SS_READ path returns the same all-zero
+adjustment snapshot adjtimex_fill_read already produces
+(TIME_ERROR with offset=0 is the truthful "no singleshot
+adjustment pending" answer for a clock that's never been
+NTP-disciplined).  Same gate-order-before-CAP pattern as batch
+514 (settimeofday tz_dsttime gate ahead of CAP_SYS_TIME).
+
+Boot probes added (extending the existing adjtimex / clock_adjtime
+test scaffolding):
+
+  1. `clock_adjtime(CLOCK_REALTIME, modes=ADJ_ADJTIME=0x8000)` ->
+     -EINVAL.  Confirms the singleshot-bit-missing EINVAL fires
+     ahead of any CAP gate.
+  2. `clock_adjtime(CLOCK_REALTIME, modes=0xa000)` -> -EINVAL.
+     Discriminator: even with READONLY set, the missing SINGLESHOT
+     bit still triggers EINVAL.  A pre-batch translator that
+     looked only at READONLY would have surfaced TIME_ERROR here.
+  3. `clock_adjtime(CLOCK_REALTIME, modes=ADJ_OFFSET_SINGLESHOT=
+     0x8001)` -> -EPERM.  Confirms the write singleshot path
+     still demands CAP_SYS_TIME (no behavior change).
+  4. `clock_adjtime(CLOCK_REALTIME, modes=ADJ_OFFSET_SS_READ=
+     0xa001)` -> TIME_ERROR (5).  This is the chrony/ntpd
+     discovery probe — the value 5 carries the STA_UNSYNC|STA_NANO
+     status from adjtimex_fill_read.
+  5. `adjtimex(modes=0x8000)` -> -EINVAL.  Same gate via the
+     legacy entry; proves both syscall numbers route through the
+     ntp_validate_timex shape.
+  6. `adjtimex(modes=0xa001)` -> TIME_ERROR (5).  Same.
+
+Pre-existing probes preserved (modes=0 -> TIME_ERROR for both
+adjtimex and clock_adjtime; modes=1 -> EPERM for both; bad
+clockid -> EINVAL; NULL tx -> EFAULT; EOPNOTSUPP clocks; etc.).
+
+Summary stamp:
+  `clock_adjtime/adjtimex ntp_validate_timex ADJTIME+SINGLESHOT+SS_READ
+   gate (v6.6 kernel/time/ntp.c::ntp_validate_timex): OK`
+  (visible in `build/serial-test.txt`).
+
+Build: clean (`cargo build -p kernel`, 51.4s).
+
+Boot test: PASS @ 24s (`bash scripts/boot-test.sh`).

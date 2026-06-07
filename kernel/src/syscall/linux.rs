@@ -11613,8 +11613,95 @@ fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EOPNOTSUPP);
     }
 
-    if modes != 0 {
-        // Any adjustment requires CAP_SYS_TIME; we never grant it.
+    // ## Batch 516 — ntp_validate_timex gate fidelity
+    //
+    // Linux v6.6 `kernel/time/ntp.c::ntp_validate_timex` (verbatim, the
+    // first gate ladder do_clock_adjtime → kc->clock_adj → do_adjtimex
+    // hits):
+    //
+    //   static inline int ntp_validate_timex(struct __kernel_timex *txc)
+    //   {
+    //       if (txc->modes & ADJ_ADJTIME) {
+    //           /* singleshot must not be used with any other mode bits */
+    //           if (!(txc->modes & ADJ_OFFSET_SINGLESHOT))
+    //               return -EINVAL;
+    //           if (!(txc->modes & ADJ_OFFSET_READONLY) &&
+    //               !capable(CAP_SYS_TIME))
+    //               return -EPERM;
+    //       } else {
+    //           /* In order to modify anything, you gotta be super-user! */
+    //           if (txc->modes && !capable(CAP_SYS_TIME))
+    //               return -EPERM;
+    //           ...
+    //       }
+    //       ...
+    //   }
+    //
+    // Kernel-private constants (include/uapi/linux/time.h, __KERNEL__ side):
+    //
+    //   #define ADJ_ADJTIME             0x8000   /* switch between adjtime/adjtimex */
+    //   #define ADJ_OFFSET_SINGLESHOT   0x0001   /* old-fashioned adjtime */
+    //   #define ADJ_OFFSET_READONLY     0x2000   /* read-only adjtime */
+    //
+    // Userspace bundles these as `ADJ_OFFSET_SINGLESHOT = 0x8001`
+    // (ADJ_ADJTIME|0x0001) and `ADJ_OFFSET_SS_READ = 0xa001`
+    // (ADJ_ADJTIME|READONLY|0x0001) — both call into the same
+    // kernel-side gate.
+    //
+    // Pre-batch we collapsed every `modes != 0` to -EPERM, which leaks
+    // two distinct discriminators relative to Linux:
+    //
+    //   * modes = 0x8000 (ADJ_ADJTIME alone)
+    //       Linux: -EINVAL  (singleshot bit missing).
+    //       Pre:   -EPERM
+    //   * modes = 0xa000 (ADJ_ADJTIME|READONLY without SINGLESHOT)
+    //       Linux: -EINVAL  (still no singleshot bit).
+    //       Pre:   -EPERM
+    //   * modes = 0xa001 (ADJ_OFFSET_SS_READ — read singleshot offset)
+    //       Linux:  TIME_ERROR (5) and writes a read-only timex snapshot.
+    //               READONLY bit clears the CAP_SYS_TIME requirement.
+    //       Pre:   -EPERM
+    //   * modes = 0x8001 (ADJ_OFFSET_SINGLESHOT — write singleshot)
+    //       Linux: -EPERM  (no CAP_SYS_TIME). Pre: -EPERM ✓
+    //   * modes = 0x0001..=0x7fff (non-ADJTIME write)
+    //       Linux: -EPERM. Pre: -EPERM ✓
+    //
+    // Userspace impact: chrony's `chronyc tracking` (modes=0) is fine,
+    // but `chronyc waitsync` and `ntpd`'s adjtime fallback both probe
+    // ADJ_OFFSET_SS_READ to discover whether a singleshot adjustment
+    // is queued before falling back to `adjtimex(modes=0)`.  Util-linux
+    // `adjtimex --readonly`, busybox's `adjtimex -p`, and glibc's
+    // legacy `adjtime(3)` (which calls `adjtimex(ADJ_OFFSET_SS_READ)`
+    // first to read the current singleshot before computing the new
+    // offset) all distinguish EPERM ("you can't even read this") from
+    // EINVAL ("malformed modes word") from success ("here's the
+    // current offset; 0 means no adjustment pending").  Pre-batch all
+    // three saw EPERM and treated singleshot-aware time discipline as
+    // unavailable.
+    //
+    // Architectural directive: translator-only.  No native time-state
+    // changes (we still don't track singleshot adjustments, so the
+    // SS_READ path returns the same all-zero adjustment snapshot
+    // adjtimex_fill_read already produces — TIME_ERROR with offset=0
+    // is the truthful "no singleshot adjustment pending" answer for
+    // our clock that's never been NTP-disciplined).  Same gate-order-
+    // before-CAP pattern as batch 514 (settimeofday tz_dsttime gate
+    // ahead of CAP_SYS_TIME).
+    const ADJ_ADJTIME: u32 = 0x8000;
+    const ADJ_OFFSET_SINGLESHOT: u32 = 0x0001;
+    const ADJ_OFFSET_READONLY: u32 = 0x2000;
+    if (modes & ADJ_ADJTIME) != 0 {
+        if (modes & ADJ_OFFSET_SINGLESHOT) == 0 {
+            return linux_err(errno::EINVAL);
+        }
+        if (modes & ADJ_OFFSET_READONLY) == 0 {
+            // Write singleshot adjustment requires CAP_SYS_TIME.
+            return linux_err(errno::EPERM);
+        }
+        // ADJ_OFFSET_SS_READ falls through to the read fill below.
+    } else if modes != 0 {
+        // Any non-ADJTIME modes word requests modification of the
+        // running clock and requires CAP_SYS_TIME.
         return linux_err(errno::EPERM);
     }
     if let Err(e) = crate::mm::user::validate_user_write(tx, TIMEX_STRUCT_SIZE) {
@@ -11645,7 +11732,24 @@ fn sys_adjtimex(args: &SyscallArgs) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
     let modes = u32::from_le_bytes(modes_buf);
-    if modes != 0 {
+    // Batch 516 — mirror sys_clock_adjtime's ntp_validate_timex gate
+    // structure.  ADJ_ADJTIME without ADJ_OFFSET_SINGLESHOT is
+    // malformed (-EINVAL); ADJ_OFFSET_SS_READ (ADJ_ADJTIME|SINGLESHOT|
+    // READONLY) is a read that doesn't need CAP_SYS_TIME; all other
+    // non-zero modes are writes that demand CAP_SYS_TIME we never
+    // grant (-EPERM).  See sys_clock_adjtime for the full Linux v6.6
+    // citation and divergence rationale.
+    const ADJ_ADJTIME: u32 = 0x8000;
+    const ADJ_OFFSET_SINGLESHOT: u32 = 0x0001;
+    const ADJ_OFFSET_READONLY: u32 = 0x2000;
+    if (modes & ADJ_ADJTIME) != 0 {
+        if (modes & ADJ_OFFSET_SINGLESHOT) == 0 {
+            return linux_err(errno::EINVAL);
+        }
+        if (modes & ADJ_OFFSET_READONLY) == 0 {
+            return linux_err(errno::EPERM);
+        }
+    } else if modes != 0 {
         return linux_err(errno::EPERM);
     }
     adjtimex_fill_read(tx)
@@ -47410,6 +47514,106 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 516 — ntp_validate_timex gate fidelity.
+        // modes = ADJ_ADJTIME alone (0x8000): singleshot bit missing
+        // -> Linux EINVAL ahead of the EPERM gate.
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        tx_buf[0..4].copy_from_slice(&0x8000u32.to_le_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime modes=ADJ_ADJTIME expected EINVAL, got {}",
+                dispatch_linux(nr::CLOCK_ADJTIME, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modes = ADJ_ADJTIME|READONLY (0xa000): SINGLESHOT still
+        // missing -> EINVAL.  Discriminates "READONLY clears CAP" from
+        // "SINGLESHOT bit required regardless".
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        tx_buf[0..4].copy_from_slice(&0xa000u32.to_le_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime modes=ADJ_ADJTIME|READONLY expected EINVAL, got {}",
+                dispatch_linux(nr::CLOCK_ADJTIME, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modes = ADJ_OFFSET_SINGLESHOT (0x8001): write singleshot
+        // adjustment -> EPERM (no CAP_SYS_TIME).  Discriminates the
+        // SINGLESHOT-OK path from the READONLY-clears-CAP arm.
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        tx_buf[0..4].copy_from_slice(&0x8001u32.to_le_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime modes=ADJ_OFFSET_SINGLESHOT expected EPERM, got {}",
+                dispatch_linux(nr::CLOCK_ADJTIME, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // modes = ADJ_OFFSET_SS_READ (0xa001 = ADJ_ADJTIME|READONLY|
+        // SINGLESHOT): read singleshot offset, no CAP_SYS_TIME needed
+        // -> TIME_ERROR (5) and writes a timex snapshot.  This is the
+        // key chrony/ntpd discovery probe.
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        tx_buf[0..4].copy_from_slice(&0xa001u32.to_le_bytes());
+        let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CLOCK_ADJTIME, &a).value != 5 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_adjtime modes=ADJ_OFFSET_SS_READ expected TIME_ERROR(5), got {}",
+                dispatch_linux(nr::CLOCK_ADJTIME, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Same battery via the legacy adjtimex entry — proves both
+        // entries route through the new ntp_validate_timex gate.
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        tx_buf[0..4].copy_from_slice(&0x8000u32.to_le_bytes());
+        let a = SyscallArgs { arg0: tx_ptr, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADJTIMEX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: adjtimex modes=ADJ_ADJTIME expected EINVAL, got {}",
+                dispatch_linux(nr::ADJTIMEX, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        for b in &mut tx_buf {
+            *b = 0;
+        }
+        tx_buf[0..4].copy_from_slice(&0xa001u32.to_le_bytes());
+        let a = SyscallArgs { arg0: tx_ptr, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::ADJTIMEX, &a).value != 5 {
+            serial_println!(
+                "[syscall/linux]   FAIL: adjtimex modes=ADJ_OFFSET_SS_READ expected TIME_ERROR(5), got {}",
+                dispatch_linux(nr::ADJTIMEX, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   clock_adjtime/adjtimex ntp_validate_timex ADJTIME+SINGLESHOT+SS_READ gate (v6.6 kernel/time/ntp.c::ntp_validate_timex): OK"
+        );
         serial_println!(
             "[syscall/linux]   clock_adjtime copy-first/EOPNOTSUPP gating: OK"
         );

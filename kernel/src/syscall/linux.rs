@@ -4538,18 +4538,132 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let advice = args.arg2 as i32;
 
-    // Documented Linux MADV_* values.  Anything in 0..=25 is a known
-    // advisory hint; HWPOISON / SOFT_OFFLINE are privileged on Linux.
-    // See `include/uapi/asm-generic/mman-common.h`.
-    const MADV_HWPOISON: i32 = 100;
-    const MADV_SOFT_OFFLINE: i32 = 101;
-    const MADV_KNOWN_MAX: i32 = 25; // MADV_COLLAPSE
+    // Documented Linux MADV_* values per
+    // `include/uapi/asm-generic/mman-common.h` and the
+    // architecture-specific MADV_HWPOISON / MADV_SOFT_OFFLINE.
+    // HWPOISON / SOFT_OFFLINE are privileged on Linux.
+    const MADV_NORMAL: i32           = 0;
+    const MADV_RANDOM: i32           = 1;
+    const MADV_SEQUENTIAL: i32       = 2;
+    const MADV_WILLNEED: i32         = 3;
+    const MADV_DONTNEED: i32         = 4;
+    // Note: values 5, 6, 7 are NOT defined in Linux v6.6 — they fall
+    // through madvise_behavior_valid's switch default to -EINVAL.
+    const MADV_FREE: i32             = 8;
+    const MADV_REMOVE: i32           = 9;
+    const MADV_DONTFORK: i32         = 10;
+    const MADV_DOFORK: i32           = 11;
+    const MADV_MERGEABLE: i32        = 12;
+    const MADV_UNMERGEABLE: i32      = 13;
+    const MADV_HUGEPAGE: i32         = 14;
+    const MADV_NOHUGEPAGE: i32       = 15;
+    const MADV_DONTDUMP: i32         = 16;
+    const MADV_DODUMP: i32           = 17;
+    const MADV_WIPEONFORK: i32       = 18;
+    const MADV_KEEPONFORK: i32       = 19;
+    const MADV_COLD: i32             = 20;
+    const MADV_PAGEOUT: i32          = 21;
+    const MADV_POPULATE_READ: i32    = 22;
+    const MADV_POPULATE_WRITE: i32   = 23;
+    const MADV_DONTNEED_LOCKED: i32  = 24;
+    const MADV_COLLAPSE: i32         = 25;
+    const MADV_HWPOISON: i32         = 100;
+    const MADV_SOFT_OFFLINE: i32     = 101;
 
     // Gate 1: madvise_behavior_valid — unknown advice short-circuits
     // ahead of any address/length validation.
+    //
+    // ## Linux source — `mm/madvise.c::madvise_behavior_valid`
+    //
+    // ```c
+    // static bool madvise_behavior_valid(int behavior)
+    // {
+    //     switch (behavior) {
+    //     case MADV_DOFORK:
+    //     case MADV_DONTFORK:
+    //     case MADV_NORMAL:
+    //     case MADV_SEQUENTIAL:
+    //     case MADV_RANDOM:
+    //     case MADV_REMOVE:
+    //     case MADV_WILLNEED:
+    //     case MADV_DONTNEED:
+    //     case MADV_DONTNEED_LOCKED:
+    //     case MADV_FREE:
+    //     case MADV_COLD:
+    //     case MADV_PAGEOUT:
+    //     case MADV_POPULATE_READ:
+    //     case MADV_POPULATE_WRITE:
+    // #ifdef CONFIG_KSM
+    //     case MADV_MERGEABLE:
+    //     case MADV_UNMERGEABLE:
+    // #endif
+    // #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+    //     case MADV_HUGEPAGE:
+    //     case MADV_NOHUGEPAGE:
+    //     case MADV_COLLAPSE:
+    // #endif
+    //     case MADV_DONTDUMP:
+    //     case MADV_DODUMP:
+    //     case MADV_WIPEONFORK:
+    //     case MADV_KEEPONFORK:
+    // #ifdef CONFIG_MEMORY_FAILURE
+    //     case MADV_SOFT_OFFLINE:
+    //     case MADV_HWPOISON:
+    // #endif
+    //         return true;
+    //
+    //     default:
+    //         return false;
+    //     }
+    // }
+    // ```
+    //
+    // ## Batch 513 divergence — value-range vs. enumerated check
+    //
+    // Pre-batch we matched `0..=MADV_KNOWN_MAX | HWPOISON |
+    // SOFT_OFFLINE` (a contiguous range 0..=25 plus the two
+    // privileged values).  Linux v6.6's switch enumerates each
+    // valid value individually; gaps in the numbering — values
+    // 5, 6, 7 between MADV_DONTNEED (4) and MADV_FREE (8) — are
+    // NOT in the case list and fall through to `default: return
+    // false`, producing -EINVAL at the do_madvise gate.
+    //
+    // Pre-batch divergence:
+    //   * `madvise(addr, len, 5)` → us: 0 (or ENOMEM for kernel
+    //                                    addr).  Linux: EINVAL.
+    //   * `madvise(addr, len, 6)` → us: 0.  Linux: EINVAL.
+    //   * `madvise(addr, len, 7)` → us: 0.  Linux: EINVAL.
+    //
+    // Why it matters: glibc's `tcmalloc` and jemalloc's mmap
+    // helpers probe madvise support with `madvise(NULL, 0, N)`
+    // (the NULL+0 idiom returns 0 on valid advice, EINVAL on
+    // invalid — a one-syscall feature detector).  Treating 5, 6,
+    // 7 as valid teaches the allocator that the kernel supports
+    // three nonexistent hints, after which a real call using one
+    // of them is silently dropped on Linux but counted as a
+    // successful hint here, producing inconsistent
+    // residency/working-set decisions across the two kernels.
+    // strace also pretty-prints `5` as `0x5 /* MADV_??? */`,
+    // making the divergence visible in syscall traces.
+    //
+    // Fix: replace the contiguous range with an explicit
+    // `matches!` enumeration mirroring v6.6's switch.  All three
+    // conditional groups (KSM, TRANSPARENT_HUGEPAGE,
+    // MEMORY_FAILURE) are treated as compiled-in since that's
+    // the universal distro config.
     let behavior_known = matches!(
         advice,
-        0..=MADV_KNOWN_MAX | MADV_HWPOISON | MADV_SOFT_OFFLINE,
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED
+        | MADV_DONTNEED | MADV_FREE | MADV_REMOVE
+        | MADV_DONTFORK | MADV_DOFORK
+        | MADV_MERGEABLE | MADV_UNMERGEABLE
+        | MADV_HUGEPAGE | MADV_NOHUGEPAGE
+        | MADV_DONTDUMP | MADV_DODUMP
+        | MADV_WIPEONFORK | MADV_KEEPONFORK
+        | MADV_COLD | MADV_PAGEOUT
+        | MADV_POPULATE_READ | MADV_POPULATE_WRITE
+        | MADV_DONTNEED_LOCKED | MADV_COLLAPSE
+        | MADV_HWPOISON | MADV_SOFT_OFFLINE,
     );
     if !behavior_known {
         return linux_err(errno::EINVAL);
@@ -35676,6 +35790,51 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: madvise unknown advice");
             return Err(KernelError::InternalError);
         }
+
+        // Batch 513: Linux v6.6's madvise_behavior_valid is an
+        // enumerated switch, not a 0..=25 range.  Values 5, 6, 7
+        // are NOT in the case list and must produce EINVAL.
+        // Pre-batch we accepted them silently via the contiguous
+        // range match.  The NULL+len=0 idiom (the canonical glibc
+        // / jemalloc feature-detect shape) makes the divergence
+        // observable without needing a valid VMA: madvise's gate
+        // 1 fires before gate 5 (len==0 → 0).
+        for advice in [5u64, 6, 7] {
+            let a = SyscallArgs { arg0: 0, arg1: 0,
+                arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::MADVISE, &a).value;
+            if v != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: madvise(advice={}) -> {} (want EINVAL, v6.6 madvise_behavior_valid switch default)",
+                    advice, v,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Positive-discriminator probes: advice values directly
+        // adjacent to the 5/6/7 gap (4 = MADV_DONTNEED, 8 =
+        // MADV_FREE) AND the other newly-explicit values not
+        // previously exercised by the existing probe loop
+        // (10 DONTFORK, 11 DOFORK, 18 WIPEONFORK, 19 KEEPONFORK,
+        // 22 POPULATE_READ, 23 POPULATE_WRITE, 24
+        // DONTNEED_LOCKED) must still succeed with NULL+len=0.
+        // Locks in that the enumerated-switch rewrite didn't
+        // accidentally drop a previously-accepted value.
+        for advice in [4u64, 8, 10, 11, 18, 19, 22, 23, 24] {
+            let a = SyscallArgs { arg0: 0, arg1: 0,
+                arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::MADVISE, &a).value;
+            if v != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: madvise(advice={}, NULL, 0) -> {} (want 0; positive discriminator after switch rewrite)",
+                    advice, v,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   madvise_behavior_valid enumerated switch — advice {{5,6,7}} reject as EINVAL (v6.6 mm/madvise.c::madvise_behavior_valid default: return false): OK"
+        );
 
         // Misaligned addr with nonzero len: EINVAL.
         let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000,

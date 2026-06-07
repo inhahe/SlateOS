@@ -46971,3 +46971,119 @@ Summary stamp added:
 **Build:** clean (`cargo build -p kernel`, 52.3s).
 
 **Boot test:** PASS @ 27s (`bash scripts/boot-test.sh`).
+
+================================================================
+Batch 513 — madvise: enumerated switch rejects advice values {5,6,7} as EINVAL (v6.6)
+================================================================
+
+**Where:** `kernel/src/syscall/linux.rs::sys_madvise`, the
+behavior_valid gate (gate 1).
+
+**Divergence found:** Pre-batch we accepted any advice value in
+the contiguous range `0..=25` (MADV_KNOWN_MAX = MADV_COLLAPSE)
+plus 100 (MADV_HWPOISON) / 101 (MADV_SOFT_OFFLINE):
+
+    const MADV_KNOWN_MAX: i32 = 25; // MADV_COLLAPSE
+    let behavior_known = matches!(
+        advice,
+        0..=MADV_KNOWN_MAX | MADV_HWPOISON | MADV_SOFT_OFFLINE,
+    );
+
+Linux v6.6's `mm/madvise.c::madvise_behavior_valid` is an
+enumerated `switch` over each defined behavior; gaps in the
+MADV_* numbering (values 5, 6, 7 between MADV_DONTNEED=4 and
+MADV_FREE=8) fall through to `default: return false`, producing
+-EINVAL at `do_madvise`'s first gate.  Verbatim:
+
+    static bool madvise_behavior_valid(int behavior)
+    {
+        switch (behavior) {
+        case MADV_DOFORK:
+        case MADV_DONTFORK:
+        case MADV_NORMAL:
+        case MADV_SEQUENTIAL:
+        case MADV_RANDOM:
+        case MADV_REMOVE:
+        case MADV_WILLNEED:
+        case MADV_DONTNEED:
+        case MADV_DONTNEED_LOCKED:
+        case MADV_FREE:
+        case MADV_COLD:
+        case MADV_PAGEOUT:
+        case MADV_POPULATE_READ:
+        case MADV_POPULATE_WRITE:
+    #ifdef CONFIG_KSM
+        case MADV_MERGEABLE:
+        case MADV_UNMERGEABLE:
+    #endif
+    #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+        case MADV_HUGEPAGE:
+        case MADV_NOHUGEPAGE:
+        case MADV_COLLAPSE:
+    #endif
+        case MADV_DONTDUMP:
+        case MADV_DODUMP:
+        case MADV_WIPEONFORK:
+        case MADV_KEEPONFORK:
+    #ifdef CONFIG_MEMORY_FAILURE
+        case MADV_SOFT_OFFLINE:
+        case MADV_HWPOISON:
+    #endif
+            return true;
+
+        default:
+            return false;
+        }
+    }
+
+Defined values 0–25 only include: 0, 1, 2, 3, 4, 8, 9, 10, 11,
+12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25.  Plus
+HWPOISON (100) and SOFT_OFFLINE (101).  Values 5, 6, 7 are
+unassigned in `include/uapi/asm-generic/mman-common.h`.
+
+**Why it matters:** the canonical glibc / jemalloc / tcmalloc
+feature-detect idiom is `madvise(NULL, 0, N)` — Linux's gate
+order runs `madvise_behavior_valid` FIRST (before the
+`len == 0 → 0` short-circuit at gate 5), so this is a
+one-syscall yes/no probe for advice support.  Pre-batch we
+returned 0 (success) for advice 5, 6, 7 because the range
+match passed and the len=0 short-circuit fired; allocators
+concluded the kernel supports three nonexistent hints.  A later
+real call using one of them is silently dropped on Linux but
+counted as a successful hint here, producing inconsistent
+residency / working-set decisions across the two kernels.
+strace also pretty-prints unknown values as `0x5 /* MADV_??? */`,
+making the divergence visible in user traces.
+
+**Fix (translator-only):** replaced the range match with an
+explicit `matches!` enumeration mirroring v6.6's switch.  All
+three conditional groups (`CONFIG_KSM`, `CONFIG_TRANSPARENT_HUGEPAGE`,
+`CONFIG_MEMORY_FAILURE`) are treated as compiled-in since that's
+the universal distro configuration.  Per-value constants
+`MADV_NORMAL`..`MADV_SOFT_OFFLINE` were extracted so the match
+arm reads as the same list of names a kernel reader sees in
+mm/madvise.c.
+
+**Boot probes added** (folded into the existing madvise probe
+block after the "advice = 26" sentinel):
+
+  1. `madvise(NULL, 0, advice)` for each advice ∈ {5, 6, 7}
+     asserts EINVAL.  NULL+0 is the glibc/jemalloc feature-detect
+     shape; gate 1 fires before gate 5 (len==0) so the divergence
+     is observable without needing a valid VMA.
+  2. Positive-discriminator: `madvise(NULL, 0, advice)` for
+     advice ∈ {4 DONTNEED, 8 FREE, 10 DONTFORK, 11 DOFORK,
+     18 WIPEONFORK, 19 KEEPONFORK, 22 POPULATE_READ,
+     23 POPULATE_WRITE, 24 DONTNEED_LOCKED} must still return 0.
+     Locks in that the enumerated-switch rewrite didn't
+     accidentally drop a previously-accepted value.  Existing
+     probe loop already covers 0, 1, 2, 3, 4, 8, 25 with a
+     valid VMA; this adds the newly-explicit gaps (10/11/18/19/22/23/24).
+
+Summary stamp added:
+  `madvise_behavior_valid enumerated switch — advice {5,6,7} reject as EINVAL (v6.6 mm/madvise.c::madvise_behavior_valid default: return false): OK`
+  (visible in `build/serial-test.txt`).
+
+**Build:** clean (`cargo build -p kernel`, 50.8s).
+
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).

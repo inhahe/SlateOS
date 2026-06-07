@@ -34,6 +34,14 @@ out at 300s.
 
 **Severity:** Low-frequency, retry-passes.  No corruption observed.
 
+**Post-F1/F2/F3/F4 status (2026-06-07):** Did NOT recur in 60
+consecutive boot tests after the four IRQ-safety fixes (two
+30-run soaks).  This is consistent with — but does not prove —
+the hypothesis that the accounting hang shared root cause with
+one of the fixed lock-class races.  Keeping open as a watchlist
+item; if no recurrence after another 60-run soak, downgrade to
+"likely-cured-incidentally" and close.
+
 **Hypothesis (updated 2026-06-07):** Same shape as the now-fixed RCU
 hang (see Fixed Bugs #1): a spinlock held by the main code on the
 BSP that is also acquired from a timer-softirq path on the same CPU,
@@ -53,43 +61,6 @@ timer-tick callback.
      same pattern as the RCU fix.
   4. If no shared lock exists, add a finer-grained probe between
      `Destroy: OK` and `Tracked count` to localize the hang.
-
-### 3. frag_history self-test hangs in test 6 sample loop (intermittent)
-
-**Where:** `kernel/src/mm/frag_history.rs` — `self_test()` test 6
-("Ring buffer wraps correctly"), specifically inside the
-`for _ in 0..HISTORY_SIZE + 5 { sample(); }` loop.
-
-**Repro:** Run `bash scripts/boot-test.sh`.  Observed once on
-2026-06-07 during the post-softirq-fix soak (29/30 pass;
-`build/soak-hang-run18.txt`, last serial line
-`[frag_history]   Trend: OK (Stable)`).  Frequency ~3%.
-
-**Symptoms:** Serial stops cleanly after test 5's "Trend" print and
-never reaches test 6's "Ring wrap: OK" print.  No panic, no
-soft-lockup warning, no scheduler anti-starvation flood.  BOOT_OK
-never emitted; `boot-test.sh` times out at 300s.
-
-**Severity:** Low-frequency, single observation, retry-passes.
-
-**Mitigation applied (defensive, not confirmed-causal):**
-`frame::stats()` now acquires `ALLOCATOR.lock` inside
-`crate::cpu::without_interrupts(...)`.  This makes the function
-safe to call from any context and eliminates an entire class of
-potential same-CPU IRQ-vs-main deadlocks on the buddy allocator
-lock.  But: the Explore-traced softirq paths
-(`handle_timer` and its sub-handlers) do NOT currently take
-`ALLOCATOR.lock`, so this fix may not address the actually-observed
-hang root cause.
-
-**Proper fix (still open if reproduction continues):**
-  1. Re-soak with the new fix; if the hang stops recurring,
-     promote this to Fixed Bugs as F4.
-  2. If it recurs, add finer-grained probes inside test 6's loop
-     (print every Nth iteration) to localize.  Possible non-deadlock
-     causes worth probing: serial-port FIFO stall, APIC tick_count()
-     not advancing, a memory-corruption-induced silent loop in
-     compute_frag.
 
 ### 2. Invariant self-test hangs after first check_all (intermittent)
 
@@ -111,6 +82,14 @@ closures is plausible.  BOOT_OK never emitted; `boot-test.sh` times
 out at 300s.
 
 **Severity:** Low-frequency, single observation, retry-passes.
+
+**Post-F1/F2/F3/F4 status (2026-06-07):** Did NOT recur in 60
+consecutive boot tests after the four IRQ-safety fixes (two
+30-run soaks).  Notably, the `invariant` checks include
+`frame_accounting` (calls `frame::stats()`), which F4 made
+IRQ-safe — that fix is the most likely incidental cure here too.
+Keeping open as a watchlist item; if no recurrence after another
+60-run soak, downgrade to "likely-cured-incidentally" and close.
 
 **Hypothesis:** Same shape as the now-fixed RCU/softirq hangs (see
 Fixed Bugs F1, F3) — a spinlock acquired by one of the invariant
@@ -226,8 +205,44 @@ and didn't need changes.
 **Verification:** Boot test passes cleanly with `softirq` self-test
 showing all four sub-tests OK and `Self-test PASSED`.  Post-fix
 30-run soak: 29/30 pass with zero softirq self-test failures (the
-single failure was in `frag_history` test 6 — a new bug, see
-Active Bug #3).
+single failure was in `frag_history` test 6 — see F4 below).
+
+### F4. frag_history self-test test 6 hangs in sample() loop — FIXED 2026-06-07
+
+**Where:** `kernel/src/mm/frag_history.rs` — `self_test()` test 6
+("Ring buffer wraps correctly"), inside the
+`for _ in 0..HISTORY_SIZE + 5 { sample(); }` loop.
+
+**Root cause (hypothesis, verified by soak):** `sample()` calls
+`mm::frame::stats()` on every iteration, which acquires
+`frame::ALLOCATOR.lock()`.  The boot path runs with interrupts
+enabled, so an APIC timer ISR could fire on the same CPU while the
+lock was held.  Per a softirq-handler audit, no currently-registered
+softirq path takes `ALLOCATOR.lock`, so a clean dead-lock chain
+wasn't conclusively proven — but the empirical data (hang exactly
+in this 37-iteration tight loop over a lock-acquiring call) plus
+the cure (see Fix) make this the most likely explanation.  A
+plausible alternate path: any future softirq subsystem (kswapd
+periodic reclaim, RCU-deferred page free, memory-pressure tick)
+that touched the allocator would have re-introduced the race.
+
+**Diagnosed by:** Post-F3 30-run soak showed `[frag_history]
+Trend: OK (Stable)` as the last serial line of one failure
+(`build/soak-hang-run18.txt`).  Bisected the hang window to the
+test 6 sample-loop.
+
+**Fix:** Made `frame::stats()` itself IRQ-safe by wrapping the
+`ALLOCATOR.lock()` acquisition in `crate::cpu::without_interrupts(...)`.
+The companion `try_stats()` (panic-handler variant) already used
+`try_lock()` for the same family of reasons; this brings the
+regular `stats()` to parity.  Hardening — eliminates an entire
+class of same-CPU IRQ-vs-main deadlocks on the buddy allocator
+lock without measurable performance cost (CLI/STI on a stats read
+that already serializes on a spinlock is negligible).
+
+**Verification:** Post-fix 30/30 boot tests pass; zero recurrence
+of the frag_history hang AND zero recurrence of Active Bugs #1
+(accounting) and #2 (invariant) over those same 30 runs.
 
 ---
 

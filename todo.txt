@@ -41804,3 +41804,171 @@ Probe block stamps:
 
 **Build:** `cargo build -p kernel` clean, 39.84s.
 **Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).
+
+## Batch 472 — sys_socket + sys_socketpair AF_INET adds IPPROTO_ICMP, AF_INET6 adds IPPROTO_ICMPV6 to SOCK_DGRAM accept
+
+**Linux 6.x source quote** (net/ipv4/af_inet.c — inetsw_array):
+
+    static struct inet_protosw inetsw_array[] =
+    {
+            {
+                    .type =       SOCK_STREAM,
+                    .protocol =   IPPROTO_TCP,
+                    ...
+            },
+            {
+                    .type =       SOCK_DGRAM,
+                    .protocol =   IPPROTO_UDP,
+                    .prot =       &udp_prot,
+                    ...
+            },
+            {
+                    .type =       SOCK_DGRAM,
+                    .protocol =   IPPROTO_ICMP,
+                    .prot =       &ping_prot,
+                    ...
+            },
+            {
+                    .type =       SOCK_DGRAM,
+                    .protocol =   IPPROTO_UDPLITE,
+                    .prot =       &udplite_prot,
+                    ...
+            },
+            ...
+    };
+
+**Linux 6.x source quote** (net/ipv6/af_inet6.c — inetsw6_array):
+
+    static struct inet_protosw inetsw_array[] = {
+            {
+                    .type =        SOCK_STREAM,
+                    .protocol =    IPPROTO_TCP,
+                    ...
+            },
+            {
+                    .type =        SOCK_DGRAM,
+                    .protocol =    IPPROTO_UDP,
+                    ...
+            },
+            {
+                    .type =        SOCK_DGRAM,
+                    .protocol =    IPPROTO_UDPLITE,
+                    ...
+            },
+            {
+                    .type =        SOCK_DGRAM,
+                    .protocol =    IPPROTO_ICMPV6,
+                    .prot =        &ping_v6_prot,
+                    ...
+            },
+            ...
+    };
+
+with IPPROTO_ICMP = 1, IPPROTO_ICMPV6 = 58, IPPROTO_UDP = 17,
+IPPROTO_UDPLITE = 136 (include/uapi/linux/in.h).
+
+IPPROTO_ICMP and IPPROTO_ICMPV6 are the "ping sockets"
+(CONFIG_NET_RAW_PING) entries that allow unprivileged ICMP
+echo (the prot's `init` is ping_init_sock, which itself
+checks ping_group_range, but the inet_create list walk
+succeeds independently — the GID check is post-acceptance,
+not part of the protocol-whitelist gate).
+
+**Divergence table**
+
+    Shape                                          pre-batch        Linux 6.x
+    --------------------------------------------   --------------   -----------
+    socket(AF_INET=2, DGRAM=2, ICMP=1)             EPROTONOSUPPORT  accept (ENOSYS)
+                                                                    (inetsw[SOCK_DGRAM]
+                                                                     ping_prot
+                                                                     entry)
+    socket(AF_INET6=10, DGRAM=2, ICMPV6=58)        EPROTONOSUPPORT  accept (ENOSYS)
+                                                                    (inet6sw
+                                                                     [SOCK_DGRAM]
+                                                                     ping_v6_prot
+                                                                     entry)
+    socket(AF_INET, DGRAM, ICMPV6=58)              EPROTONOSUPPORT  unchanged
+                                                                    (ICMPV6 not
+                                                                     in inetsw
+                                                                     [SOCK_DGRAM]
+                                                                     for AF_INET)
+    socket(AF_INET6, DGRAM, ICMP=1)                EPROTONOSUPPORT  unchanged
+                                                                    (ICMP not
+                                                                     in inet6sw
+                                                                     [SOCK_DGRAM]
+                                                                     for AF_INET6)
+    socket(AF_INET, DGRAM, UDP=17)                 ENOSYS           unchanged
+    socket(AF_INET, DGRAM, UDPLITE=136)            ENOSYS           unchanged
+    socket(AF_INET, DGRAM, 99)                     EPROTONOSUPPORT  unchanged
+
+    socketpair(AF_INET, DGRAM, ICMP, sv)           EPROTONOSUPPORT  EOPNOTSUPP
+                                                                    (accepted by
+                                                                     gate 3b,
+                                                                     then gate
+                                                                     3c domain
+                                                                     != 1)
+    socketpair(AF_INET6, DGRAM, ICMPV6, sv)        EPROTONOSUPPORT  EOPNOTSUPP
+
+**Why it matters**
+
+ICMP-echo capability detection in userspace (busybox ping,
+iputils ping, audit feature probes) walks a fall-back order:
+try DGRAM+ICMP first (no privileges needed if ping_group_range
+matches the caller's GID), fall back to RAW+ICMP if not.  Step
+1 distinguishes "kernel supports unprivileged ping sockets"
+from "kernel doesn't".  Our pre-batch EPROTONOSUPPORT made
+step 1 always fail, forcing every detection to fall back to
+RAW+ICMP — a layering error that misrepresents kernel
+capabilities.
+
+The IPv6 variant matters for `ping -6` and the same probe
+chain on IPv6 stacks.
+
+Additionally, the AF_INET/AF_INET6 differentiation is itself
+significant: ICMP=1 on AF_INET6 must remain EPROTONOSUPPORT
+(it's an IPv4 protocol number; inet6sw doesn't have an entry
+for it), and ICMPV6=58 on AF_INET must remain EPROTONOSUPPORT
+(IPv6 protocol number; inetsw doesn't have an entry for it).
+Pre-batch our `(2 | 10, 2)` lumped them; post-batch we split
+into `(2, 2)` and `(10, 2)` arms with family-specific
+whitelists, preserving the cross-family rejection.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs`:
+
+  * `sys_socket` gate 5:
+      old: `(2 | 10, 2) if protocol != 17 && protocol != 136 => ...`
+      new: split into
+        `(2, 2) if protocol != 17 && protocol != 136 && protocol != 1 => ...`
+        `(10, 2) if protocol != 17 && protocol != 136 && protocol != 58 => ...`
+
+  * `sys_socketpair` gate 3b: identical split.
+
+Translator-only — no native socket code changed.
+
+**Probes added (after the batch 471 PF_UNIX probe blocks):**
+
+socket (sys_socket):
+
+  A. socket(AF_INET=2, DGRAM=2, ICMP=1)         -> ENOSYS  (accept)
+  B. socket(AF_INET6=10, DGRAM=2, ICMPV6=58)    -> ENOSYS  (accept)
+  C. Regression: socket(AF_INET, DGRAM, UDP=17) -> ENOSYS
+  D. Regression: socket(AF_INET, DGRAM, UDPLITE=136) -> ENOSYS
+  E. Cross-family: socket(AF_INET, DGRAM, ICMPV6=58) -> EPROTONOSUPPORT
+  F. Cross-family: socket(AF_INET6, DGRAM, ICMP=1)   -> EPROTONOSUPPORT
+  G. Regression: socket(AF_INET, DGRAM, 99) -> EPROTONOSUPPORT
+  H. Regression: socket(AF_INET6, DGRAM, UDPLITE=136) -> ENOSYS
+
+socketpair (sys_socketpair):
+
+  A-D and H. EOPNOTSUPP (gate 3b accepts, gate 3c domain != 1 fires).
+  E, F, G. EPROTONOSUPPORT (gate 3b rejects before gate 3c).
+
+Probe block stamps:
+
+    [syscall/linux]   socket AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries): OK
+    [syscall/linux]   socketpair AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries; precedes EOPNOTSUPP): OK
+
+**Build:** `cargo build -p kernel` clean, 43.63s.
+**Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).

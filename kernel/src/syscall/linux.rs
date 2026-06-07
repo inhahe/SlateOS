@@ -23446,9 +23446,31 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
             (2 | 10, 1) if protocol != 6 => {
                 return linux_err(errno::EPROTONOSUPPORT);
             }
-            // AF_INET / AF_INET6 SOCK_DGRAM: IPPROTO_UDP=17 or
-            // IPPROTO_UDPLITE=136.
-            (2 | 10, 2) if protocol != 17 && protocol != 136 => {
+            // AF_INET SOCK_DGRAM (batch 472):
+            //   inetsw[SOCK_DGRAM] in net/ipv4/af_inet.c lists
+            //     { IPPROTO_UDP=17, IPPROTO_ICMP=1 (ping_prot),
+            //       IPPROTO_UDPLITE=136 }.
+            //   IPPROTO_ICMP=1 maps to Linux's "ping sockets"
+            //   (CONFIG_NET_RAW_PING).  Pre-batch we rejected
+            //   it with EPROTONOSUPPORT, but Linux's inet_create
+            //   list walk finds the matching inetsw entry and
+            //   accepts (subject to a ping_group_range GID check
+            //   which is enforced separately — the inetsw match
+            //   itself succeeds).
+            (2, 2) if protocol != 17 && protocol != 136
+                  && protocol != 1 =>
+            {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
+            // AF_INET6 SOCK_DGRAM (batch 472):
+            //   inet6sw[SOCK_DGRAM] in net/ipv6/af_inet6.c lists
+            //     { IPPROTO_UDP=17, IPPROTO_UDPLITE=136,
+            //       IPPROTO_ICMPV6=58 (ping_v6_prot) }.
+            //   IPPROTO_ICMPV6=58 is the IPv6 analogue of
+            //   IPPROTO_ICMP for ping sockets.
+            (10, 2) if protocol != 17 && protocol != 136
+                   && protocol != 58 =>
+            {
                 return linux_err(errno::EPROTONOSUPPORT);
             }
             // SOCK_RAW (3) and everything else: accept and let ENOSYS
@@ -23630,7 +23652,20 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
             (2 | 10, 1) if protocol != 6 => {
                 return linux_err(errno::EPROTONOSUPPORT);
             }
-            (2 | 10, 2) if protocol != 17 && protocol != 136 => {
+            // Batch 472: AF_INET SOCK_DGRAM also accepts
+            // IPPROTO_ICMP=1 (ping_prot in inetsw[SOCK_DGRAM]).
+            // Mirrors sys_socket batch 472.
+            (2, 2) if protocol != 17 && protocol != 136
+                  && protocol != 1 =>
+            {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
+            // Batch 472: AF_INET6 SOCK_DGRAM also accepts
+            // IPPROTO_ICMPV6=58 (ping_v6_prot in
+            // inet6sw[SOCK_DGRAM]).
+            (10, 2) if protocol != 17 && protocol != 136
+                   && protocol != 58 =>
+            {
                 return linux_err(errno::EPROTONOSUPPORT);
             }
             _ => {}
@@ -65130,6 +65165,145 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
 
+        // ---- Batch 472: socket AF_INET/AF_INET6 SOCK_DGRAM ----
+        // ----            ping-protocol acceptance         ----
+        // Linux inetsw[SOCK_DGRAM] and inet6sw[SOCK_DGRAM] each
+        // contain three entries (net/ipv4/af_inet.c,
+        // net/ipv6/af_inet6.c):
+        //   AF_INET:  { UDP=17, ICMP=1 (ping_prot), UDPLITE=136 }
+        //   AF_INET6: { UDP=17, UDPLITE=136, ICMPV6=58 (ping_v6_prot) }
+        // IPPROTO_ICMP=1 / IPPROTO_ICMPV6=58 are the "ping
+        // sockets" entries (CONFIG_NET_RAW_PING).  inet_create's
+        // list walk finds the match and accepts; the
+        // ping_group_range GID check is enforced separately
+        // inside ping_init_sock (NOT in inet_create).  So the
+        // inetsw[] match itself succeeds — pre-batch we rejected
+        // with EPROTONOSUPPORT which mischaracterised the layer.
+        //
+        // Sub-probes:
+        //   A. socket(AF_INET=2, DGRAM=2, ICMP=1)       -> ENOSYS
+        //   B. socket(AF_INET6=10, DGRAM=2, ICMPV6=58)  -> ENOSYS
+        //   C. Regression: socket(AF_INET, DGRAM, UDP=17) -> ENOSYS
+        //   D. Regression: socket(AF_INET, DGRAM, UDPLITE=136) -> ENOSYS
+        //   E. Cross-family: socket(AF_INET, DGRAM, ICMPV6=58) -> EPROTONOSUPPORT
+        //      (ICMPV6 is not in inetsw[SOCK_DGRAM] for AF_INET)
+        //   F. Cross-family: socket(AF_INET6, DGRAM, ICMP=1)   -> EPROTONOSUPPORT
+        //      (ICMP is not in inet6sw[SOCK_DGRAM] for AF_INET6)
+        //   G. Regression: socket(AF_INET, DGRAM, 99) -> EPROTONOSUPPORT
+        //      (still rejects unrelated protocols)
+        //   H. Regression: socket(AF_INET6, DGRAM, UDPLITE=136) -> ENOSYS
+        {
+            // A: AF_INET / DGRAM / ICMP=1 — accepted post-batch.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 1,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,ICMP) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_INET6 / DGRAM / ICMPV6=58.
+            let a = SyscallArgs {
+                arg0: 10, arg1: 2, arg2: 58,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,ICMPV6) not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: Regression — AF_INET / DGRAM / UDP=17.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 17,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: Regression — AF_INET / DGRAM / UDPLITE=136.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 136,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDPLITE) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: Cross-family — AF_INET / DGRAM / ICMPV6=58
+            // (not in inetsw[SOCK_DGRAM] for AF_INET).
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 58,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,ICMPV6) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: Cross-family — AF_INET6 / DGRAM / ICMP=1
+            // (not in inet6sw[SOCK_DGRAM] for AF_INET6).
+            let a = SyscallArgs {
+                arg0: 10, arg1: 2, arg2: 1,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,ICMP) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: Regression — AF_INET / DGRAM / 99.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 99,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,99) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: Regression — AF_INET6 / DGRAM / UDPLITE=136.
+            let a = SyscallArgs {
+                arg0: 10, arg1: 2, arg2: 136,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,UDPLITE) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socket AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries): OK"
+            );
+        }
+
         // ---- socketpair per-(family,type,protocol) gating ----
         // Linux's __sys_socketpair calls sock_create twice; the
         // first call walks inet_create / unix_create which apply
@@ -65778,6 +65952,137 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socketpair AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK"
+            );
+        }
+
+        // ---- Batch 472: socketpair AF_INET/AF_INET6 SOCK_DGRAM ----
+        // ----            ping-protocol acceptance              ----
+        // Direct mirror of sys_socket batch 472.  For
+        // socketpair, AF_INET/AF_INET6 with an accepted protocol
+        // falls through past the EPROTONOSUPPORT gate, then hits
+        // gate 3c (domain != 1) → EOPNOTSUPP.  So acceptance
+        // tests check for EOPNOTSUPP (was: EPROTONOSUPPORT).
+        //
+        // Sub-probes:
+        //   A. socketpair(AF_INET, DGRAM, ICMP=1, sv)       -> EOPNOTSUPP
+        //   B. socketpair(AF_INET6, DGRAM, ICMPV6=58, sv)   -> EOPNOTSUPP
+        //   C. Regression: socketpair(AF_INET, DGRAM, UDP, sv) -> EOPNOTSUPP
+        //   D. Regression: socketpair(AF_INET, DGRAM, UDPLITE, sv) -> EOPNOTSUPP
+        //   E. Cross-family: socketpair(AF_INET, DGRAM, ICMPV6, sv) -> EPROTONOSUPPORT
+        //   F. Cross-family: socketpair(AF_INET6, DGRAM, ICMP, sv) -> EPROTONOSUPPORT
+        //   G. Regression: socketpair(AF_INET, DGRAM, 99, sv) -> EPROTONOSUPPORT
+        //   H. Regression: socketpair(AF_INET6, DGRAM, UDPLITE, sv) -> EOPNOTSUPP
+        {
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+
+            // A: AF_INET / DGRAM / ICMP=1.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 1, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,ICMP) not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_INET6 / DGRAM / ICMPV6=58.
+            let a = SyscallArgs {
+                arg0: 10, arg1: 2, arg2: 58, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,ICMPV6) not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: Regression — AF_INET / DGRAM / UDP=17.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 17, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,UDP) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: Regression — AF_INET / DGRAM / UDPLITE.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 136, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,UDPLITE) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: Cross-family — AF_INET / DGRAM / ICMPV6=58.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 58, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,ICMPV6) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: Cross-family — AF_INET6 / DGRAM / ICMP=1.
+            let a = SyscallArgs {
+                arg0: 10, arg1: 2, arg2: 1, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,ICMP) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: Regression — AF_INET / DGRAM / 99.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 2, arg2: 99, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,99) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: Regression — AF_INET6 / DGRAM / UDPLITE.
+            let a = SyscallArgs {
+                arg0: 10, arg1: 2, arg2: 136, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,UDPLITE) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socketpair AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries; precedes EOPNOTSUPP): OK"
             );
         }
 

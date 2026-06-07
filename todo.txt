@@ -44217,3 +44217,147 @@ Final stamp (build/serial-test.txt line 514):
 
 **Build:** `cargo build -p kernel` clean, 44.81s + 49.19s rebuild.
 **Boot test:** PASS @ 28s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 488 — stat family statbuf-EFAULT too eager (2026-06-07)
+
+### Linux source (v6.6, fs/stat.c)
+
+```c
+SYSCALL_DEFINE2(stat, const char __user *, filename,
+                struct __old_kernel_stat __user *, statbuf)
+{
+    struct kstat stat;
+    int error;
+
+    error = vfs_stat(filename, &stat);
+    if (error)
+        return error;                  // statbuf never touched
+
+    return cp_old_stat(&stat, statbuf);
+}
+
+int vfs_fstatat(int dfd, const char __user *filename,
+                struct kstat *stat, int flags)
+{
+    ...
+    name = getname_flags(filename,
+                getname_statx_lookup_flags(statx_flags), NULL);
+    ret = vfs_statx(dfd, name, statx_flags, stat, STATX_BASIC_STATS);
+    putname(name);
+    return ret;
+}
+
+static int vfs_statx(int dfd, struct filename *filename, int flags,
+                     struct kstat *stat, u32 request_mask)
+{
+    ...
+retry:
+    error = filename_lookup(dfd, filename, lookup_flags, &path, NULL);
+    if (error)
+        goto out;
+    ...
+out:
+    return error;
+}
+```
+
+statbuf is touched only in `cp_old_stat` (and `cp_new_stat`/`cp_statx`)
+AFTER `vfs_stat` returns success.  On our skeleton FS no files
+exist, so `filename_lookup` always returns `-ENOENT` and the
+statbuf is never copied.
+
+### Divergence (pre-batch)
+
+| call                                       | pre-batch | Linux v6.6 | post-batch |
+|--------------------------------------------|-----------|------------|------------|
+| stat("validpath", NULL)                    | EFAULT    | ENOENT     | ENOENT     |
+| lstat("validpath", NULL)                   | EFAULT    | ENOENT     | ENOENT     |
+| newfstatat(AT_FDCWD, "validpath", NULL, 0) | EFAULT    | ENOENT     | ENOENT     |
+| statx(_, "validpath", 0, 0, NULL)          | EFAULT    | ENOENT     | ENOENT     |
+| newfstatat(_, _, NULL, AT_EMPTY_PATH)      | EFAULT    | EFAULT     | EFAULT     |
+| statx(_, _, AT_EMPTY_PATH, _, NULL)        | EFAULT    | EFAULT     | EFAULT     |
+
+The AT_EMPTY_PATH branches still EFAULT because vfs_fstat does
+fill statbuf (it succeeds at the fd-lookup or fast-path level).
+
+### Why it matters
+
+Linux's order-of-failure is the canonical contract for the stat
+family.  Userspace probes (especially configure scripts, shell
+loops, libc fork-detection sequences, build systems' "does this
+header exist" idioms) often pass a NULL statbuf intentionally to
+distinguish "does path exist?" from "do I have somewhere to put
+the result?" — they want the path-existence answer (ENOENT) over
+the buffer-validity answer (EFAULT) because ENOENT is the cheaper
+recovery class.  Pre-batch our eager EFAULT collapsed these two
+probes to the wrong answer.
+
+Specific consumers:
+- glibc's `stat(3)`/`__xstat` wrappers — when the buffer is a
+  late-allocated structure (e.g. inside dlopen's library walker),
+  a transiently-NULL statbuf returns EFAULT instead of the
+  expected ENOENT for missing libraries.
+- musl's libc-internal `__readlink`/`stat` retry loops — distinguish
+  ENOENT (skip path) from EFAULT (abort).
+- CPython's `os.stat("")`, golang's `os.Stat("")` — POSIX
+  conformance tests for these wrappers assert ENOENT.
+- LTP `syscalls/stat01`-`stat05`, `lstat01`-`lstat04`,
+  `fstatat01`-`fstatat02`, `statx01`-`statx06` — multiple tests
+  use the "valid path + bad buffer" idiom and assert the kernel's
+  failure ordering.
+- coreutils `stat(1)` — when piped into a script that drops the
+  output, the underlying syscall still passes the user's intended
+  buffer but the calling context can hit the path-first error
+  class; the kernel must surface it.
+- inotify/fsnotify userspace clients — perform "does this path
+  exist?" probes via stat with NULL output buffers as a cheap
+  liveness check.
+
+### Fix
+
+1. `stat_path_impl` (line 12031): dropped the eager
+   `statbuf_ptr == 0 -> EFAULT` gate.  Path-pointer validation
+   stays (NULL/unreadable path → EFAULT via getname's
+   `strncpy_from_user`).  Renamed param to `_statbuf_ptr` to
+   suppress the unused warning while keeping the signature stable
+   for `sys_stat`/`sys_lstat` callers.  Verbose doc comment with
+   Linux source quote and the order-of-failure rationale.
+
+2. `sys_newfstatat` (line 12101): split the statbuf gate.  The
+   AT_EMPTY_PATH branch (which actually copies into statbuf via
+   `sys_fstat` route) keeps the EFAULT-on-NULL gate.  The non-empty
+   path branch drops it (path resolution always fails first on
+   our FS).
+
+3. `sys_statx` (line 12289): same split.  AT_EMPTY_PATH branch
+   keeps the EFAULT gate (statxbuf is written by `fill_statx_for_fd`
+   + `copy_to_user`).  Non-empty branch drops it (filename_lookup
+   ENOENT terminal lands ahead of `cp_statx`).
+
+### Probe retrofit
+
+- Updated probe at line ~46656 (statx NULL statxbuf):
+  expectation changed from `EFAULT` → `ENOENT` for the non-empty
+  path branch; added a paired probe verifying the AT_EMPTY_PATH
+  branch still EFAULTs on NULL statxbuf.
+- Added 4 new probes after the newfstatat-bad-flag test:
+  * `stat(valid_path, NULL_statbuf)` → ENOENT
+  * `lstat(valid_path, NULL_statbuf)` → ENOENT
+  * `newfstatat(AT_FDCWD, valid_path, NULL_statbuf, 0)` → ENOENT
+  * `newfstatat(_, empty_path, NULL_statbuf, AT_EMPTY_PATH)` → EFAULT
+- Pre-existing flags-int-truncation test (b) at ~46737 still
+  produces EFAULT because path=NULL fires before the (now-deferred)
+  statxbuf gate; that probe is unchanged.
+
+Family stamp (build/serial-test.txt line 506):
+
+```
+[syscall/linux]   stat/lstat/newfstatat statbuf unobservable on
+ no-file FS (Linux v6.6 fs/stat.c: cp_old_stat/cp_new_stat after
+ vfs_stat success): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 44.69s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

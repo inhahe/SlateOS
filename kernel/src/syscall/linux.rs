@@ -12028,16 +12028,44 @@ fn fill_stat_for_fd(
 }
 
 /// Shared path-based stat back-end (used by stat, lstat).
-fn stat_path_impl(path_ptr: u64, statbuf_ptr: u64) -> SyscallResult {
-    if path_ptr == 0 || statbuf_ptr == 0 {
+fn stat_path_impl(path_ptr: u64, _statbuf_ptr: u64) -> SyscallResult {
+    // Linux v6.6 fs/stat.c::SYSCALL_DEFINE2(stat) and
+    // SYSCALL_DEFINE2(lstat) call vfs_stat()/vfs_lstat() which run
+    // getname() then filename_lookup() BEFORE the statbuf is ever
+    // touched (cp_old_stat/cp_new_stat is unreachable on a path
+    // resolution error):
+    //
+    //     SYSCALL_DEFINE2(stat, ..., struct __old_kernel_stat __user *, statbuf)
+    //     {
+    //         struct kstat stat;
+    //         int error;
+    //         error = vfs_stat(filename, &stat);
+    //         if (error)
+    //             return error;                       // statbuf untouched
+    //         return cp_old_stat(&stat, statbuf);
+    //     }
+    //
+    // On our skeleton FS no files exist, so every successful
+    // getname surfaces -ENOENT from filename_lookup before the
+    // statbuf copy.  An eager `statbuf == 0 -> EFAULT` gate is
+    // therefore unobservable in Linux semantics — pre-batch we
+    // returned EFAULT for `stat("validpath", NULL)` where Linux
+    // returns ENOENT.  Batch 488: drop the eager statbuf gate.
+    //
+    // Same rationale as batch 478's readlink/readlinkat buf-NULL
+    // removal: a defensively-added pointer gate that fires ahead
+    // of where the kernel actually accesses the pointer.
+    if path_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
         return linux_err(linux_errno_for(e));
     }
-    if let Err(e) = crate::mm::user::validate_user_write(statbuf_ptr, STAT_SIZE) {
-        return linux_err(linux_errno_for(e));
-    }
+    // No-file FS: every readable-pathname call -> ENOENT (matches
+    // Linux's filename_lookup failure on a non-existent path; also
+    // matches Linux's getname `!len && !LOOKUP_EMPTY -> -ENOENT`
+    // for empty path, since the !LOOKUP_EMPTY plain stat/lstat
+    // gate makes both cases collapse onto the same errno).
     linux_err(errno::ENOENT)
 }
 
@@ -12112,12 +12140,13 @@ fn sys_newfstatat(args: &SyscallArgs) -> SyscallResult {
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    if statbuf == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(statbuf, STAT_SIZE) {
-        return linux_err(linux_errno_for(e));
-    }
+
+    // Batch 488: statbuf is only touched inside cp_new_stat (or
+    // vfs_fstat in the AT_EMPTY_PATH fast-path) AFTER successful
+    // path resolution / fd lookup.  Defer the statbuf validity
+    // gate into each branch — the non-empty-path branch never
+    // observes statbuf on our no-file skeleton FS (filename_lookup
+    // -> ENOENT first), so an eager EFAULT there is divergent.
 
     // AT_EMPTY_PATH with empty path means "stat dirfd itself".
     if flags & AT_EMPTY_PATH != 0 {
@@ -12130,6 +12159,14 @@ fn sys_newfstatat(args: &SyscallArgs) -> SyscallResult {
             // validate bypass means we could read garbage); just treat
             // as fd-only stat in that case.
         }
+        // fstat-of-dirfd does touch statbuf — validate it here
+        // (this is where Linux's vfs_fstat -> cp_new_stat sees it).
+        if statbuf == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(statbuf, STAT_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
         // Route to fstat logic.
         let fstat_args = SyscallArgs {
             arg0: dirfd as u64,
@@ -12139,7 +12176,10 @@ fn sys_newfstatat(args: &SyscallArgs) -> SyscallResult {
         return sys_fstat(&fstat_args);
     }
 
-    // Otherwise it's a path lookup we cannot satisfy.
+    // Otherwise it's a path lookup we cannot satisfy.  Linux:
+    // getname(filename, lookup_flags) runs first, then
+    // filename_lookup; on our no-file FS the latter returns ENOENT
+    // and the statbuf copy never happens.  Skip the statbuf gate.
     if path == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -12352,15 +12392,26 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    if statxbuf == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(statxbuf, STATX_SIZE) {
-        return linux_err(linux_errno_for(e));
-    }
+
+    // Batch 488: defer the statxbuf gate.  Linux's do_statx
+    // (fs/stat.c v6.6 line ~595) runs vfs_fstatat() — which calls
+    // getname/filename_lookup — BEFORE cp_statx ever touches the
+    // user buffer.  On our no-file skeleton FS the non-empty-path
+    // branch always lands on -ENOENT from filename_lookup, so the
+    // statxbuf is unobservable there and an eager EFAULT-on-NULL
+    // gate is divergent.  Validate statxbuf only in the
+    // AT_EMPTY_PATH+fstat branch, where the buffer is actually
+    // written.
 
     // AT_EMPTY_PATH lets the caller stat the dirfd itself.
     if flags & AT_EMPTY_PATH != 0 {
+        // statxbuf is observed by cp_statx after vfs_fstat success.
+        if statxbuf == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(statxbuf, STATX_SIZE) {
+            return linux_err(linux_errno_for(e));
+        }
         let entry = match caller_pid() {
             Some(pid) => match pcb::linux_fd_lookup(pid, dirfd) {
                 Some(e) => e,
@@ -12387,7 +12438,9 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
 
-    // Path lookup: cannot find any file.
+    // Path lookup: cannot find any file.  Linux's filename_lookup
+    // returns -ENOENT ahead of cp_statx on our no-file FS, so the
+    // statxbuf pointer is irrelevant here — skip its gate.
     if path == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -46521,6 +46574,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Batch 488: stat/lstat/newfstatat statbuf is unobservable
+        // when path resolution fails first.  Linux v6.6
+        // fs/stat.c::SYSCALL_DEFINE2(stat) runs vfs_stat ahead of
+        // cp_old_stat, so on our no-file FS where every
+        // filename_lookup returns -ENOENT the statbuf pointer is
+        // never touched.  Pre-batch we returned EFAULT on
+        // stat("validpath", NULL); now we return ENOENT to mirror
+        // Linux's order-of-failure.
+        // stat(valid_path, NULL_statbuf) -> ENOENT (statbuf
+        // unobservable on no-file FS).
+        let a = SyscallArgs {
+            arg0: 0x1000,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::STAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: stat(path,NULL) not ENOENT (batch 488)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // lstat: same contract.
+        if dispatch_linux(nr::LSTAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: lstat(path,NULL) not ENOENT (batch 488)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // newfstatat(AT_FDCWD, valid_path, NULL_statbuf, 0) -> ENOENT.
+        // Non-AT_EMPTY_PATH branch; statbuf is unobservable.
+        let a = SyscallArgs {
+            arg0: (-100i32) as u64,
+            arg1: 0x1000,
+            arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::NEWFSTATAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: newfstatat(_,path,NULL,0) not ENOENT (batch 488)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // newfstatat with AT_EMPTY_PATH + NULL statbuf -> EFAULT.
+        // (Empty-path branch DOES touch statbuf via vfs_fstat ->
+        // cp_new_stat, so the EFAULT gate is reachable.)
+        let a = SyscallArgs {
+            arg0: 0,           // dirfd=0 (Console synthesis in boot ctx)
+            arg1: 0,           // empty path (NULL treated as empty in AT_EMPTY_PATH branch)
+            arg2: 0,           // statbuf=NULL
+            arg3: 0x1000,      // AT_EMPTY_PATH
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::NEWFSTATAT, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: newfstatat(AT_EMPTY_PATH,_,NULL,_) not EFAULT (batch 488)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   stat/lstat/newfstatat statbuf unobservable on no-file FS (Linux v6.6 fs/stat.c: cp_old_stat/cp_new_stat after vfs_stat success): OK"
+        );
     }
 
     // statx — input validation and AT_EMPTY_PATH success.
@@ -46600,13 +46719,32 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // NULL statxbuf -> EFAULT.
+        // Batch 488: statx statxbuf is unobservable on the
+        // non-AT_EMPTY_PATH branch — Linux's vfs_fstatat ->
+        // filename_lookup returns -ENOENT ahead of cp_statx on our
+        // no-file FS.  Pre-batch we eagerly EFAULT'd; post-batch
+        // we ENOENT the path-lookup branch.  The AT_EMPTY_PATH
+        // branch still EFAULTs on NULL statxbuf (covered below).
+        // statx(_, valid_path, 0, 0, NULL) -> ENOENT.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::STATX, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: statx(_,path,0,0,NULL) not ENOENT (batch 488)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // statx with AT_EMPTY_PATH + NULL statxbuf -> EFAULT
+        // (vfs_fstat does fill the buffer here, so the gate stays).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0x1000, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::STATX, &a).value
             != -i64::from(errno::EFAULT) {
             serial_println!(
-                "[syscall/linux]   FAIL: statx(NULL out) not EFAULT"
+                "[syscall/linux]   FAIL: statx(AT_EMPTY_PATH,_,_,_,NULL) not EFAULT (batch 488)"
             );
             return Err(KernelError::InternalError);
         }

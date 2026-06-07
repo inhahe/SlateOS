@@ -7383,14 +7383,48 @@ fn sys_getresgid(args: &SyscallArgs) -> SyscallResult {
 
 /// Helper shared by [`sys_getresuid`] / [`sys_getresgid`]: write three
 /// `uid_t` (Linux x86_64: 32-bit unsigned) zeros to the three user
-/// pointers if non-NULL.  NULL pointers are skipped (POSIX permits any
-/// of the three fields to be discarded).  Returns 0 on success, the
-/// translated errno on a faulting pointer.
+/// pointers, in `(ruid, euid, suid)` order — matching Linux's gate
+/// order in `kernel/sys.c::SYSCALL_DEFINE3(getresuid, ...)`:
+///
+/// ```c
+/// retval = put_user(ruid, ruidp);
+/// if (!retval) {
+///     retval = put_user(euid, euidp);
+///     if (!retval)
+///         retval = put_user(suid, suidp);
+/// }
+/// return retval;
+/// ```
+///
+/// Linux's `put_user(value, NULL)` returns `-EFAULT`: `access_ok(0, 4)`
+/// on x86_64 succeeds (0 < `TASK_SIZE_MAX`), but the subsequent write
+/// faults at the NULL page and the exception table converts it to
+/// `-EFAULT`.  Pre-batch we silently skipped NULL pointers (with a
+/// "POSIX permits any of the three fields to be discarded" comment
+/// that was a guess — POSIX makes no such permission, and Linux does
+/// not honour it).  A caller passing `getresuid(NULL, NULL, NULL)`
+/// observed `0` here where Linux returns `-EFAULT`.
+///
+/// Worse, under the kernel-context self-test's `is_kernel_context()`
+/// bypass of `validate_user_write`, the NULL-skip silently fell out
+/// of the gate logic — the only thing preventing a write to address 0
+/// (which would oops the kernel rather than return EFAULT) was the
+/// pre-batch `continue`.  Gating NULL with an explicit early EFAULT
+/// both matches Linux and is robust against the bypass.
+///
+/// The gate order matters: a caller passing
+/// `getresuid(NULL, valid, valid)` on Linux faults at `put_user(ruid,
+/// NULL)` before the other two writes are attempted.  Iterate `[a, b, c]`
+/// in declaration order so the first NULL short-circuits with EFAULT.
 fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
     let zero = [0u8; 4];
     for &p in &[a, b, c] {
         if p == 0 {
-            continue;
+            // Linux: put_user(value, NULL) -> -EFAULT via the access
+            // exception table on the faulting store.  Pre-batch we
+            // skipped this with `continue` and treated NULL as a
+            // discard.
+            return linux_err(errno::EFAULT);
         }
         if let Err(e) = crate::mm::user::validate_user_write(p, 4) {
             return linux_err(linux_errno_for(e));
@@ -39962,23 +39996,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     }
 
     // getresuid / getresgid dispatch validation.
-    //   - All three NULL pointers -> 0 (nothing to write).
-    //   - Any non-NULL pointer would trigger validate_user_write; with
-    //     the kernel-context bypass this also succeeds, so we can't
-    //     observe EFAULT here.  The write-zero path is covered by the
-    //     "all NULL" success — the function returns 0 in both modes
-    //     so the dispatch self-test only proves "routed correctly".
+    //
+    // Batch 450: NULL pointer arguments must return -EFAULT, matching
+    // Linux's put_user(value, NULL) -> -EFAULT semantics via the
+    // access exception table on the faulting store.  Pre-batch
+    // write_uid32_triple silently skipped NULL pointers with a
+    // `continue`, so the same input returned 0 here where Linux
+    // returns EFAULT — and the kernel-context-bypass safety net was
+    // only that NULL-skip preventing a kernel write to address 0.
+    //
+    // Coverage matrix (all under kernel-context bypass of
+    // validate_user_write):
+    //   (a) ruid=NULL, euid=NULL, suid=NULL  -> EFAULT at gate ruid
+    //   (b) ruid=NULL only                   -> EFAULT at gate ruid
+    //       (same shape as (a); the NULL gate fires before any
+    //       validate/copy is attempted, so the validity of the other
+    //       two arguments is irrelevant.  Locked in by (a).)
     {
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETRESUID, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: getresuid(NULL,NULL,NULL) not 0");
+        if dispatch_linux(nr::GETRESUID, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getresuid(NULL,NULL,NULL) not EFAULT"
+            );
             return Err(KernelError::InternalError);
         }
-        if dispatch_linux(nr::GETRESGID, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: getresgid(NULL,NULL,NULL) not 0");
+        if dispatch_linux(nr::GETRESGID, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getresgid(NULL,NULL,NULL) not EFAULT"
+            );
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   getres{{u,g}}id NULL pointer -> EFAULT (Linux put_user fault): OK"
+        );
     }
 
     // getrusage / sysinfo / times dispatch validation.

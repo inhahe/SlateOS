@@ -38669,3 +38669,128 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot: bash scripts/boot-test.sh PASSED at 23s.
      Stamps confirmed at build/serial-test.txt:
        "[syscall/linux]   mlock PAGE_ALIGN(len+offset_in_page) / wrap-to-zero / end<start: OK"
+
+450. syscall/linux: getresuid / getresgid — NULL pointer must return
+     EFAULT (Linux put_user fault), not silently skip.
+
+     Linux source (kernel/sys.c):
+       SYSCALL_DEFINE3(getresuid, uid_t __user *, ruidp,
+                                  uid_t __user *, euidp,
+                                  uid_t __user *, suidp)
+       {
+           const struct cred *cred = current_cred();
+           uid_t ruid, euid, suid;
+           long retval;
+
+           ruid = from_kuid_munged(cred->user_ns, cred->uid);
+           euid = from_kuid_munged(cred->user_ns, cred->euid);
+           suid = from_kuid_munged(cred->user_ns, cred->suid);
+
+           retval = put_user(ruid, ruidp);
+           if (!retval) {
+               retval = put_user(euid, euidp);
+               if (!retval)
+                   retval = put_user(suid, suidp);
+           }
+           return retval;
+       }
+
+     On x86_64 put_user(value, NULL) goes:
+       access_ok(0, sizeof(uid_t)) → true (0 < TASK_SIZE_MAX), then
+       __put_user issues a store to virtual address 0, the NULL page
+       has no mapping, the fault handler walks the exception table
+       and returns -EFAULT.
+     Result: getresuid(NULL, ...) on Linux returns -EFAULT at the
+     first NULL pointer encountered (ruid first, then euid, then
+     suid).
+
+     Divergence table (caller input -> Linux result -> pre-batch result):
+
+       input                                   Linux    pre-batch
+       ─────                                   ─────    ─────────
+       getresuid(NULL, NULL, NULL)             EFAULT   0
+       getresgid(NULL, NULL, NULL)             EFAULT   0
+       getresuid(NULL, valid, valid)           EFAULT   skips
+                                               at       ruid,
+                                               ruid     writes
+                                                        others,
+                                                        returns 0
+       getresuid(valid, NULL, valid)           writes   skips
+                                               ruid     euid,
+                                               then     writes
+                                               EFAULT   suid,
+                                               at euid  returns 0
+
+     Pre-batch sys_getresuid / sys_getresgid both delegated to
+     write_uid32_triple, which contained:
+
+         for &p in &[a, b, c] {
+             if p == 0 { continue; }
+             ...
+         }
+
+     The `continue` silently discarded the field, claiming "POSIX
+     permits any of the three fields to be discarded" — but POSIX
+     makes no such permission, and Linux does not honour it.  The
+     existing self-test probe at the dispatch-validation block
+     actually locked in the WRONG behavior (asserted ==0 for
+     getresuid(NULL,NULL,NULL)), while the neighbor probes for
+     getrusage(NULL) and sysinfo(NULL) correctly asserted -EFAULT.
+
+     Worse, under the kernel-context self-test's is_kernel_context()
+     bypass of validate_user_write, the NULL-skip was the only thing
+     preventing a kernel write to virtual address 0 (which would
+     oops the kernel rather than return EFAULT).  Gating NULL with
+     an explicit early EFAULT both matches Linux and is robust
+     against the bypass.
+
+     Why it matters: glibc's getresuid(3) wrapper does not allow
+     NULL — the man page documents undefined behavior for NULL —
+     but musl's wrapper passes through whatever userspace gives.
+     Real callers (e.g. setpriv in util-linux, the seccomp probe
+     `if (syscall(SYS_getresuid, NULL, NULL, NULL) == -1 && errno
+     == EFAULT) { ... }` pattern that probes for syscall existence
+     vs uid model) depend on EFAULT-on-NULL to discriminate "this
+     kernel implements getresuid" from "syscall returned silently
+     successful with no uids visible".  Pre-batch we broke the
+     second probe shape by returning 0 unconditionally.
+
+     Fix (kernel/src/syscall/linux.rs, write_uid32_triple around
+     line 7389):
+
+         for &p in &[a, b, c] {
+             if p == 0 {
+                 // Linux: put_user(value, NULL) -> -EFAULT via the
+                 // access exception table on the faulting store.
+                 return linux_err(errno::EFAULT);
+             }
+             ...
+         }
+
+     Gate order preserved: `[a, b, c]` is iterated in (ruid, euid,
+     suid) order — the same put_user chain Linux uses — so the
+     first NULL encountered returns EFAULT and the others are not
+     touched.  Matches Linux exactly.
+
+     Boot-time probes updated (the existing dispatch-validation
+     probe at line 39971 was REVERSED to expect EFAULT instead of
+     0; it had been locking in the pre-batch divergence):
+
+       (A) getresuid(NULL, NULL, NULL) -> EFAULT
+           (was: pre-batch 0 — silent NULL-skip)
+       (B) getresgid(NULL, NULL, NULL) -> EFAULT
+           (was: pre-batch 0 — silent NULL-skip)
+
+     Note: probes for (ruid=NULL, euid=valid, suid=valid) and
+     analogous middle/last NULL positions are subsumed by (A) —
+     the NULL gate fires before any validate/copy is attempted, so
+     the validity of the other two arguments is irrelevant to the
+     return value.  Documented in the probe comment.
+
+     Stamp: "[syscall/linux]   getres{u,g}id NULL pointer ->
+       EFAULT (Linux put_user fault): OK"
+
+     Build: cargo build -p kernel clean (38.96s).
+     Boot: bash scripts/boot-test.sh PASSED at 22s.
+     Stamps confirmed at build/serial-test.txt:
+       "[syscall/linux]   getres{u,g}id NULL pointer -> EFAULT (Linux put_user fault): OK"

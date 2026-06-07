@@ -43655,3 +43655,149 @@ reach the new `check_path_str_nonempty` helper.
 
 **Build:** `cargo build -p kernel` clean, 1m 45s.
 **Boot test:** PASS @ 41s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 484 — sys_fchmodat: drop flags-mask gate + add empty-path → ENOENT (2026-06-07)
+
+Translator-only Linux ABI fidelity fix.  Revises batch 311's premise
+and continues the empty-path → ENOENT sweep into the last
+remaining `validate_user_str → EROFS` consumer.
+
+### Linux source — `fs/open.c::SYSCALL_DEFINE3(fchmodat)` (v6.6)
+
+```c
+SYSCALL_DEFINE3(fchmodat, int, dfd, const char __user *, filename,
+                umode_t, mode)
+{
+    return do_fchmodat(dfd, filename, mode, 0);
+}
+```
+
+The legacy `fchmodat` (syscall #268) is a **3-arg** kernel syscall.
+It forwards `do_fchmodat(..., 0)` — `arg3` from R10 is uninterpreted
+caller-garbage.  POSIX-level flag handling (`AT_SYMLINK_NOFOLLOW`)
+was glibc-side emulation pre-6.6.  Native flag support arrived via
+`fchmodat2` (syscall #452, SYSCALL_DEFINE4) in Linux 6.6 — handled
+by our separate `sys_fchmodat2` entry point.
+
+### Divergence (pre-batch translator vs Linux)
+
+| call                                          | Linux v6.6 | pre-batch | post-batch |
+|-----------------------------------------------|------------|-----------|------------|
+| `fchmodat(_, NULL, _, 0)`                     | EFAULT     | EFAULT    | EFAULT     |
+| `fchmodat(_, "", _, 0)`                       | ENOENT     | EROFS     | ENOENT     |
+| `fchmodat(_, valid, _, 0)`                    | EROFS      | EROFS     | EROFS      |
+| `fchmodat(_, valid, _, 0x800_0000)`           | EROFS      | EINVAL    | EROFS      |
+| `fchmodat(_, valid, _, 0x1_0000_0010)`        | EROFS      | EINVAL    | EROFS      |
+| `fchmodat(_, valid, _, 0x100)` (NOFOLLOW)     | EROFS      | EROFS     | EROFS      |
+| `fchmodat(_, valid, _, 0x1_0000_0100)`        | EROFS      | EROFS     | EROFS      |
+
+### Root cause — and revision of batch 311
+
+Pre-batch we held `sys_fchmodat` as a 4-arg syscall with a flags
+mask:
+
+```rust
+const VALID_FLAGS: u32 = 0x100 | 0x1000;
+if flags & !VALID_FLAGS != 0 { return EINVAL; }
+match validate_user_str(args.arg1) {
+    Ok(()) => linux_err(errno::EROFS),
+    ...
+}
+```
+
+That premise was wrong on two counts:
+
+1. **Linux's legacy fchmodat doesn't take flags.** SYSCALL_DEFINE3
+   forces `flags=0` inside the kernel.  Any value in R10 is ignored
+   and the call proceeds to `do_fchmodat → ...` → EROFS in our stub.
+2. **Empty-path → ENOENT was missing.**  Linux's `do_fchmodat`
+   calls `getname(filename)`, which routes through `getname_flags(_,
+   0, NULL)` and returns `-ENOENT` for a zero-length user-string.
+
+Batch 311 added int-truncation probes (a)-(d) that asserted the
+flags-mask gate behaved correctly under 32-bit truncation.  Those
+probes tested a divergence we should never have shipped — the
+gate itself was the bug.
+
+### Why it matters
+
+Real consumers that pass uninterpreted garbage in R10 and expect
+Linux's EROFS-or-success answer:
+
+- **glibc fchmodat()** (sysdeps/unix/sysv/linux/fchmodat.c) — passes
+  3 args to the syscall.  R10 holds whatever was last in the
+  register, often a non-zero address from earlier libc calls.
+  Pre-batch, an unlucky glibc-emitted garbage value tripped our
+  EINVAL gate and produced a spurious "Invalid argument" where
+  Linux gives "Read-only file system".
+- **Glibc's pre-6.6 AT_SYMLINK_NOFOLLOW emulation path** (open with
+  O_PATH then fchmodat) inherits the same garbage-R10 hazard.
+- **LTP fchmodat01**: covers flag-value coverage.  Pre-batch failures
+  in unrelated test cases — anything stamping non-zero into R10
+  before invoking fchmodat — would falsely flag a kernel regression.
+- **busybox/coreutils chmod** under emulation harness — same R10
+  hazard.
+
+The EROFS-vs-EINVAL distinction also drives install-script logic
+that treats EROFS as "remount RW and retry" but EINVAL as "bug,
+abort".  Spuriously reporting EINVAL breaks distro installers.
+
+The empty-path → ENOENT contract matters for the same coreutils/
+busybox/LTP/glibc surface as batches 481-483.
+
+### Fix
+
+Rewrote `sys_fchmodat` (line 12842):
+
+```rust
+fn sys_fchmodat(args: &SyscallArgs) -> SyscallResult {
+    // Linux SYSCALL_DEFINE3 ignores arg3.  Don't mask, don't validate.
+    if let Err(e) = check_path_str_nonempty(args.arg1) {
+        return linux_err(e);
+    }
+    linux_err(errno::EROFS)
+}
+```
+
+Updated `check_path_str_nonempty`'s doc comment to list `sys_fchmodat`
+as the batch-484 consumer alongside the batch-481/482/483 consumers.
+
+Note: `sys_fchmodat2` (syscall #452) is **not** modified in this
+batch — it remains the 4-arg flavor with its own (still over-broad)
+flags mask.  A follow-up batch should tighten its mask to
+`AT_SYMLINK_NOFOLLOW` only (Linux v6.6 `fs/open.c::
+SYSCALL_DEFINE4(fchmodat2)` accepts only that bit, not
+`AT_EMPTY_PATH`).
+
+### Probe retrofit
+
+Deleted the batch-311 fchmodat int-truncation probes (a)-(d) at
+lines ~47326-47418.  They tested a flags-mask gate that no longer
+exists — removing the gate makes those probes trivially true (any
+garbage in arg3 yields EROFS).
+
+Replaced with:
+
+- `fchmodat(_, path, _, 0) -> EROFS` (retrofitted to `cm_ne` planted
+  buffer from batch 483).
+- `fchmodat(_, "", _, 0) -> ENOENT` (new, exercises check_path_str_nonempty).
+- `fchmodat(_, path, _, GARBAGE) -> EROFS` for a representative sweep
+  of bit patterns (0x1_0000_0100, 0x1_0000_1100, 0x1_0000_0000,
+  0x1_0000_0010, 0x800_0000) — verifies arg3 is uninterpreted.
+
+Final stamp (line 514 of build/serial-test.txt):
+
+```
+[syscall/linux]   fchmodat ignores arg3 (Linux v6.6 fs/open.c
+ SYSCALL_DEFINE3(fchmodat) `return do_fchmodat(dfd, filename, mode,
+ 0)`): OK
+```
+
+The pre-existing `chmod/chown/lchown/fchownat empty-path -> ENOENT`
+stamp at line 516 continues to assert the batch-483 invariant
+unchanged.
+
+**Build:** `cargo build -p kernel` clean, 1m 13s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

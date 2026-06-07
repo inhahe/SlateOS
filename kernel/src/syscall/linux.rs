@@ -9769,11 +9769,55 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Build the mask in kernel memory.  Cap at a reasonable upper
-    // bound (1024 bits == 128 bytes) — anything larger is silly and
-    // glibc never asks for more than 128.
+    // bound (1024 bits == 128 bytes) for buffer safety — anything
+    // larger is silly and glibc never asks for more than 128.
     const MAX_MASK: usize = 128;
     let mut buf = [0u8; MAX_MASK];
-    let write_bytes = cpusetsize.min(MAX_MASK);
+    // ## Batch 510 — return min(len, cpumask_size()) to match v6.6
+    //
+    // Linux v6.6 `kernel/sched/syscalls.c::SYSCALL_DEFINE3(sched_getaffinity)`
+    // (verbatim):
+    //
+    //     ret = sched_getaffinity(pid, mask);
+    //     if (ret == 0) {
+    //         unsigned int retlen = min(len, cpumask_size());
+    //
+    //         if (copy_to_user(user_mask_ptr, cpumask_bits(mask), retlen))
+    //             ret = -EFAULT;
+    //         else
+    //             ret = retlen;
+    //     }
+    //
+    // where `cpumask_size()` (verbatim, `include/linux/cpumask.h`) is
+    //
+    //     static inline unsigned int cpumask_size(void)
+    //     {
+    //         return BITS_TO_LONGS(nr_cpu_ids) * sizeof(long);
+    //     }
+    //
+    // i.e. the number of bytes needed to hold `nr_cpu_ids` bits, rounded
+    // up to a whole `unsigned long` (8 bytes on x86_64).
+    //
+    // Pre-batch we clamped at `MAX_MASK = 128`, so a glibc call passing
+    // `len = 128` (the default `cpu_set_t`) saw retlen = 128 — i.e. 128
+    // bytes written and 128 returned.  Linux on the same machine would
+    // have returned `cpumask_size()` (8 bytes on our typical 1-CPU
+    // QEMU UMA boot) and written only those 8.  glibc's
+    // `pthread_getaffinity_np` probe path (and the
+    // `taskset --cpu-list 0`-style userspace tooling that parses the
+    // return value as "how wide is the kernel's cpumask?") would
+    // mis-classify the kernel as supporting 1024 CPUs rather than the
+    // 1 (or N) actually present.
+    //
+    // Fix: compute `cpumask_size` from `smp::cpu_count()` and clamp the
+    // return to `min(cpusetsize, cpumask_size)`.  The buffer remains
+    // MAX_MASK-sized; we just write and report fewer bytes.
+    //
+    // Translator-only stance preserved: no scheduler state change.  We
+    // just expose the v6.6 retlen semantics via our existing cpu_count
+    // input.
+    let cpumask_size = ((n_cpus + 63) / 64) * 8;
+    let write_bytes = cpusetsize.min(cpumask_size);
     // Set bits 0..n_cpus.
     for cpu in 0..n_cpus {
         let byte_off = cpu / 8;
@@ -9786,13 +9830,13 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
         }
     }
     // SAFETY: validate_user_write above confirmed `cpusetsize` writable
-    // bytes; we copy min(cpusetsize, MAX_MASK) bytes.
+    // bytes; we copy min(cpusetsize, cpumask_size) ≤ cpusetsize bytes.
     let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), mask_ptr, write_bytes) };
     if let Err(e) = r {
         return linux_err(linux_errno_for(e));
     }
 
-    // Linux returns the number of bytes written.
+    // Linux returns the number of bytes written (== retlen).
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(write_bytes as i64)
 }
@@ -45444,6 +45488,86 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   sched_{{get,set}}affinity pid_t/uint truncation: OK"
         );
+
+        // Batch 510: sched_getaffinity return value should equal
+        // min(len, cpumask_size()).  cpumask_size() in v6.6 is
+        // BITS_TO_LONGS(nr_cpu_ids) * sizeof(long), i.e. the number of
+        // bytes needed to hold every CPU bit, rounded up to a whole
+        // unsigned long.  For our smp::cpu_count() target the value is
+        // ((n_cpus + 63) / 64) * 8 bytes.
+        //
+        // Pre-batch we clamped at MAX_MASK = 128, so a glibc-style
+        // call passing len=128 saw retlen=128.  v6.6 on a 1-CPU UMA
+        // system returns 8.
+        //
+        // Probe shapes:
+        //   * len = 128 (default cpu_set_t): expect cpumask_size, NOT 128.
+        //   * len = 1024 (huge): expect cpumask_size.
+        //   * len = cpumask_size: expect cpumask_size (lower bound — unchanged).
+        //   * len = 16 with cpumask_size <= 8: expect 8.
+        {
+            let n_cpus = crate::smp::cpu_count().max(1);
+            let cpumask_size = ((n_cpus + 63) / 64) * 8;
+
+            // len = 128 (default cpu_set_t) should return cpumask_size.
+            let mut large = [0u8; 128];
+            let a = SyscallArgs { arg0: 0, arg1: 128,
+                arg2: large.as_mut_ptr() as u64,
+                arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::SCHED_GETAFFINITY, &a).value;
+            if v != cpumask_size as i64 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getaffinity(len=128) want {}, got {}",
+                    cpumask_size, v
+                );
+                return Err(KernelError::InternalError);
+            }
+            // len = 1024 (huge, multiple of 8): same answer.
+            let mut huge = [0u8; 1024];
+            let a = SyscallArgs { arg0: 0, arg1: 1024,
+                arg2: huge.as_mut_ptr() as u64,
+                arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::SCHED_GETAFFINITY, &a).value;
+            if v != cpumask_size as i64 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getaffinity(len=1024) want {}, got {}",
+                    cpumask_size, v
+                );
+                return Err(KernelError::InternalError);
+            }
+            // len = cpumask_size (lower bound): return cpumask_size.
+            // This is unchanged from pre-batch (8 < 128), so it serves
+            // as a regression sentinel rather than a new probe — but
+            // we still assert it explicitly.
+            let a = SyscallArgs { arg0: 0, arg1: cpumask_size as u64,
+                arg2: huge.as_mut_ptr() as u64,
+                arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::SCHED_GETAFFINITY, &a).value;
+            if v != cpumask_size as i64 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getaffinity(len=cpumask_size={}) want {}, got {}",
+                    cpumask_size, cpumask_size, v
+                );
+                return Err(KernelError::InternalError);
+            }
+            // len = 16: expect cpumask_size when cpumask_size <= 16
+            // (true for n_cpus ≤ 128); else 16.
+            let expected_16 = (16usize).min(cpumask_size);
+            let a = SyscallArgs { arg0: 0, arg1: 16,
+                arg2: huge.as_mut_ptr() as u64,
+                arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::SCHED_GETAFFINITY, &a).value;
+            if v != expected_16 as i64 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_getaffinity(len=16) want min(16,{})={}, got {}",
+                    cpumask_size, expected_16, v
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   sched_getaffinity retlen = min(len, cpumask_size()) (v6.6): OK"
+            );
+        }
     }
 
     // Filesystem sync-family validation (batch 50).

@@ -46669,3 +46669,78 @@ Summary stamp added:
 **Build:** clean (`cargo build -p kernel`, 58.0s).
 
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+
+================================================================
+Batch 510 — sched_getaffinity: return min(len, cpumask_size()) (v6.6)
+================================================================
+
+**Where:** `kernel/src/syscall/linux.rs::sys_sched_getaffinity`.
+
+**Divergence found:** Pre-batch the translator clamped the returned
+byte count at `MAX_MASK = 128`:
+
+    let write_bytes = cpusetsize.min(MAX_MASK);
+    ...
+    SyscallResult::ok(write_bytes as i64)
+
+Linux v6.6 instead clamps at `cpumask_size()`, which depends on
+`nr_cpu_ids`.  From `kernel/sched/syscalls.c::SYSCALL_DEFINE3(sched_getaffinity)`
+(verbatim):
+
+    ret = sched_getaffinity(pid, mask);
+    if (ret == 0) {
+        unsigned int retlen = min(len, cpumask_size());
+
+        if (copy_to_user(user_mask_ptr, cpumask_bits(mask), retlen))
+            ret = -EFAULT;
+        else
+            ret = retlen;
+    }
+
+And `cpumask_size()` from `include/linux/cpumask.h` (verbatim):
+
+    static inline unsigned int cpumask_size(void)
+    {
+        return BITS_TO_LONGS(nr_cpu_ids) * sizeof(long);
+    }
+
+So on our typical 1-CPU UMA QEMU boot, v6.6 returns 8 (one whole
+unsigned long is enough to hold the single CPU bit).  We were
+returning whatever `len` the caller passed, up to 128.
+
+**Why it matters:** glibc's `pthread_getaffinity_np` and the
+`taskset --cpu-list 0` style userspace tools parse the returned
+byte count as "this is how wide the kernel's internal cpumask is."
+Returning 128 on a 1-CPU machine tells userspace there are room
+for 1024 CPU bits, which contradicts other introspection paths
+(/proc/cpuinfo, sysconf(_SC_NPROCESSORS_ONLN), the affinity-bit
+content itself).  Some libraries assume `retlen` is the canonical
+"how many bits to walk" and end up scanning 1024 bits of zero
+where Linux would have told them to walk just 64.
+
+**Fix (translator-only):** Compute the v6.6 `cpumask_size()` from
+`smp::cpu_count()`:
+
+    let cpumask_size = ((n_cpus + 63) / 64) * 8;
+    let write_bytes = cpusetsize.min(cpumask_size);
+
+The 128-byte buffer remains as a safety ceiling on writes; we just
+report and write `min(cpusetsize, cpumask_size)` bytes.  No scheduler
+state changed.
+
+**Boot probes added** (after the existing batch 291 pid_t/uint
+truncation block):
+  1. len = 128 (default cpu_set_t)        → expect cpumask_size, NOT 128.
+  2. len = 1024 (huge)                    → expect cpumask_size.
+  3. len = cpumask_size (lower bound)     → expect cpumask_size
+     (regression sentinel; would also have passed pre-batch since
+     cpumask_size = 8 < 128, but locks in the v6.6 contract).
+  4. len = 16                             → expect min(16, cpumask_size).
+
+Summary stamp added:
+  `sched_getaffinity retlen = min(len, cpumask_size()) (v6.6): OK`
+  (visible in `build/serial-test.txt`).
+
+**Build:** clean (`cargo build -p kernel`, 43.0s).
+
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).

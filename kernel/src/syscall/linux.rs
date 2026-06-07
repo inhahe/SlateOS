@@ -23246,6 +23246,52 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
     if sock_type >= 11 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 3.5 (batch 468): AF_INET / AF_INET6 protocol
+    // range check.  Linux's net/ipv4/af_inet.c::inet_create
+    // and net/ipv6/af_inet6.c::inet6_create both open with
+    //     if (protocol < 0 || protocol >= IPPROTO_MAX)
+    //         return -EINVAL;
+    // with IPPROTO_MAX = 256 historically (Linux pre-MPTCP)
+    // — the boundary at which the protocol number space is
+    // considered well-formed before the inetsw[] walk.  This
+    // gate fires AHEAD of the ESOCKTNOSUPPORT list-walk
+    // err-init (gate 4) and AHEAD of the EPROTONOSUPPORT
+    // list-match miss (gate 5) inside the same inet_create
+    // function — so an in-range type with an out-of-range
+    // protocol surfaces EINVAL, not the family-type
+    // discriminator.  Examples Linux distinguishes:
+    //   socket(AF_INET, SOCK_STREAM, -1)   -> EINVAL
+    //                                         (not EPROTONOSUPPORT)
+    //   socket(AF_INET, SOCK_STREAM, 256)  -> EINVAL
+    //   socket(AF_INET, SOCK_RAW, -1)      -> EINVAL
+    //                                         (not silent accept)
+    //   socket(AF_INET, SOCK_RDM, 256)     -> EINVAL
+    //                                         (not ESOCKTNOSUPPORT)
+    // Pre-batch we cast args.arg2 as u32 so -1 became
+    // 0xFFFFFFFF and slipped into the per-type whitelist
+    // returning EPROTONOSUPPORT (STREAM/DGRAM) or ENOSYS
+    // (SOCK_RAW falling through).  Family-restricted: AF_UNIX
+    // / AF_NETLINK / AF_PACKET don't have this gate (their
+    // protocol fields have different semantics — PF_UNIX
+    // discriminator, MAX_LINKS, ethertype respectively).
+    //
+    // Note on IPPROTO_MAX = 256: current Linux 6.x with
+    // CONFIG_MPTCP defines IPPROTO_MAX = 263 (after
+    // IPPROTO_MPTCP=262 added).  We use the historical 256
+    // boundary, which is the strict subset — anything we
+    // reject, current Linux either also rejects or accepts
+    // into a fallback path we don't model.  Userspace
+    // capability probes for protocol numbers >= 256 should
+    // remain rare enough that the conservative boundary is
+    // acceptable; document the IPPROTO_MPTCP-window
+    // divergence in the batch entry.
+    if matches!(domain, 2 | 10) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let proto_signed = args.arg2 as i32;
+        if !(0..256).contains(&proto_signed) {
+            return linux_err(errno::EINVAL);
+        }
+    }
     // Gate 4: family-specific socket-type allowlist ->
     // -ESOCKTNOSUPPORT.
     //
@@ -64579,6 +64625,161 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socket type-range gate widened to Linux SOCK_MAX=11 (was 1..=5); 0/6/7/8/9 surface ESOCKTNOSUPPORT per family-create err-init; SOCK_PACKET on AF_PACKET accepted: OK"
+            );
+        }
+
+        // ---- socket AF_INET/AF_INET6 IPPROTO_MAX gate (batch 468) ----
+        // Linux's net/ipv4/af_inet.c::inet_create and
+        // net/ipv6/af_inet6.c::inet6_create both open with
+        //     if (protocol < 0 || protocol >= IPPROTO_MAX)
+        //         return -EINVAL;
+        // with IPPROTO_MAX = 256 (historical, pre-MPTCP).
+        // This fires INSIDE inet_create AHEAD of both the
+        // ESOCKTNOSUPPORT err-init and the EPROTONOSUPPORT
+        // list-match, so an in-range type with an out-of-
+        // range protocol surfaces EINVAL, not the family-
+        // type discriminator.
+        //
+        // Pre-batch our code cast args.arg2 as u32, so:
+        //   protocol=-1 -> 0xFFFFFFFF -> per-type whitelist
+        //                  EPROTONOSUPPORT (STREAM/DGRAM) or
+        //                  ENOSYS (RAW falls through)
+        //   protocol=256+ -> never EINVAL; same routing
+        //
+        // The new gate restricts AF_INET/AF_INET6 protocols
+        // to 0..256.  Other families (AF_UNIX, AF_NETLINK,
+        // AF_PACKET) unchanged — they have different
+        // protocol semantics.
+        //
+        // Discriminator octet (kernel-context):
+        //   A. socket(AF_INET=2, STREAM=1, -1)
+        //      pre: EPROTONOSUPPORT ; post: EINVAL
+        //   B. socket(AF_INET=2, STREAM=1, 256)
+        //      pre: EPROTONOSUPPORT ; post: EINVAL
+        //   C. socket(AF_INET6=10, DGRAM=2, 256)
+        //      pre: EPROTONOSUPPORT ; post: EINVAL
+        //   D. socket(AF_INET=2, SOCK_RAW=3, 256)
+        //      pre: ENOSYS ; post: EINVAL
+        //   E. socket(AF_INET=2, SOCK_RAW=3, -1)
+        //      pre: ENOSYS ; post: EINVAL
+        //   F. socket(AF_INET=2, SOCK_RDM=4, 256)
+        //      pre: ESOCKTNOSUPPORT ; post: EINVAL
+        //      (confirms IPPROTO_MAX precedes
+        //      ESOCKTNOSUPPORT err-init in inet_create —
+        //      see Linux source quote above)
+        //   G. socket(AF_INET=2, STREAM=1, 6)
+        //      Regression: valid TCP protocol still accepted.
+        //      pre: ENOSYS ; post: ENOSYS (unchanged)
+        //   H. socket(AF_UNIX=1, STREAM=1, -1)
+        //      Regression: AF_UNIX unaffected by the new
+        //      gate; unix_create's
+        //      `protocol && protocol != PF_UNIX`
+        //      surfaces EPROTONOSUPPORT for non-zero.
+        //      pre: EPROTONOSUPPORT ; post: EPROTONOSUPPORT
+        {
+            // A: AF_INET / STREAM / -1
+            let a = SyscallArgs {
+                arg0: 2,
+                arg1: 1,
+                arg2: u64::from(u32::MAX),
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,-1) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_INET / STREAM / 256
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 256, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,256) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_INET6 / DGRAM / 256
+            let a = SyscallArgs {
+                arg0: 10, arg1: 2, arg2: 256, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,256) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_INET / SOCK_RAW / 256
+            let a = SyscallArgs {
+                arg0: 2, arg1: 3, arg2: 256, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,RAW,256) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: AF_INET / SOCK_RAW / -1
+            let a = SyscallArgs {
+                arg0: 2,
+                arg1: 3,
+                arg2: u64::from(u32::MAX),
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,RAW,-1) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: AF_INET / SOCK_RDM / 256 — IPPROTO_MAX
+            // precedes ESOCKTNOSUPPORT in inet_create.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 4, arg2: 256, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,RDM,256) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: regression — AF_INET / STREAM / TCP=6
+            // still accepted.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 6, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: regression — AF_UNIX unaffected by the new
+            // gate; non-zero protocol still
+            // EPROTONOSUPPORT from unix_create.
+            let a = SyscallArgs {
+                arg0: 1,
+                arg1: 1,
+                arg2: u64::from(u32::MAX),
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socket AF_INET/AF_INET6 protocol range 0..IPPROTO_MAX=256 (Linux inet_create/inet6_create open gate; precedes ESOCKTNOSUPPORT err-init and EPROTONOSUPPORT list-match): OK"
             );
         }
 

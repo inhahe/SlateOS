@@ -41243,3 +41243,148 @@ Probe block stamp:
 
 **Build:** `cargo build -p kernel` clean, 39.95s.
 **Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).
+
+## Batch 468 — sys_socket AF_INET/AF_INET6 protocol IPPROTO_MAX gate
+
+**Linux 6.x source quote** (net/ipv4/af_inet.c::inet_create
+and net/ipv6/af_inet6.c::inet6_create — both open identically):
+
+    static int inet_create(struct net *net, struct socket *sock,
+                           int protocol, int kern)
+    {
+            struct sock *sk;
+            struct inet_protosw *answer;
+            ...
+
+            if (protocol < 0 || protocol >= IPPROTO_MAX)
+                    return -EINVAL;
+
+            sock->state = SS_UNCONNECTED;
+
+            /* Look for the requested type/protocol pair. */
+    lookup_protocol:
+            err = -ESOCKTNOSUPPORT;
+            rcu_read_lock();
+            list_for_each_entry_rcu(answer, &inetsw[sock->type], list) {
+                    ...
+
+with IPPROTO_MAX = 256 in include/uapi/linux/in.h historically
+(pre-MPTCP).  Linux 6.x with MPTCP=262 raises IPPROTO_MAX to
+263 in some builds; we use 256 as the conservative
+spec-stable boundary that matches every published in.h before
+MPTCP landed and that still rejects every protocol we do not
+yet implement.
+
+The gate fires BEFORE the inetsw[] list walk that would
+surface ESOCKTNOSUPPORT (no protoswitch for the requested
+(type, protocol) pair) or EPROTONOSUPPORT (one exists but
+err-init fired).  So `protocol < 0` and `protocol >= 256`
+must be EINVAL, not EPROTONOSUPPORT and not ENOSYS.
+
+**Divergence table**
+
+    Shape                                          pre-batch       Linux 6.x
+    --------------------------------------------   ------------    ------------------
+    socket(AF_INET=2,  STREAM=1, protocol=-1)      EPROTONOSUPPORT EINVAL
+                                                   (or ENOSYS:     (inet_create open
+                                                   args.arg2 as    gate before
+                                                   u32 → 0xFFFF... inetsw lookup)
+                                                   → list miss)
+    socket(AF_INET=2,  STREAM=1, protocol=256)    EPROTONOSUPPORT EINVAL
+    socket(AF_INET6=10,DGRAM=2,  protocol=256)    EPROTONOSUPPORT EINVAL
+    socket(AF_INET=2,  SOCK_RAW=3, protocol=256)  EPROTONOSUPPORT EINVAL
+    socket(AF_INET=2,  SOCK_RAW=3, protocol=-1)   EPROTONOSUPPORT EINVAL
+    socket(AF_INET=2,  SOCK_RDM=4, protocol=256)  ESOCKTNOSUPPORT EINVAL
+                                                   (batch 466 err   (open gate
+                                                   -init for type=4) precedes
+                                                                    err-init)
+    socket(AF_INET=2,  STREAM=1, TCP=6)            ENOSYS          unchanged
+                                                                   (still in
+                                                                    valid range,
+                                                                    falls to
+                                                                    native dispatch)
+    socket(AF_UNIX=1,  STREAM=1, protocol=-1)     EPROTONOSUPPORT unchanged
+                                                                   (AF_UNIX not
+                                                                    in gate)
+
+The ordering "Gate 3.5 EINVAL precedes Gate 4 ESOCKTNOSUPPORT"
+is essential to faithful reproduction.  Batch 466 made
+socket(AF_INET, SOCK_RDM=4, *) return ESOCKTNOSUPPORT; with
+batch 468, socket(AF_INET, SOCK_RDM=4, 256) instead returns
+EINVAL because the protocol-range gate now fires first — the
+exact order Linux uses (inet_create opens with the range check
+before doing anything else).
+
+**Why it matters**
+
+Network capability probes that pass a protocol of -1 (a common
+"unspecified protocol" sentinel) or that fuzz protocol values
+across u32 ranges would see the wrong errno class.  -1 in
+particular is interesting: pre-batch we did `args.arg2 as u32`
+which converted -1 to 0xFFFFFFFF, which then sailed past every
+positive-value check and ended up either at the inetsw lookup
+or at the native syscall stub returning ENOSYS or a generic
+EPROTONOSUPPORT.  Linux unambiguously says EINVAL.
+
+LTP socket02 and net/* selftests have a long history of
+explicitly checking for EINVAL on out-of-range protocols on
+AF_INET/AF_INET6.  A capability-detection probe that switches
+behaviour on EINVAL vs EPROTONOSUPPORT would have read our
+return as "this kernel accepts arbitrary protocols at the
+range level and only filters by lookup," which is a
+mischaracterisation of Linux semantics.
+
+The sign-cast aspect also matters defensively: Linux's
+protocol arg is `int`, and the x86_64 syscall ABI places ints
+in the low 32 bits of a 64-bit register.  Our wrapper sign-
+extension of `args.arg2 as i32` preserves negative values, so
+-1 stays -1 and the `protocol < 0` half of the Linux check
+applies.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs::sys_socket`, new Gate 3.5
+inserted between Gate 3 (SOCK_MAX type range, batch 466) and
+Gate 4 (per-family ESOCKTNOSUPPORT allowlist):
+
+  * Family-restricted match (domain == 2 || domain == 10).
+  * `let proto_signed = args.arg2 as i32;` — the sign-
+    preserving cast that matches Linux's `int protocol`.
+  * `if !(0..256).contains(&proto_signed)
+       { return linux_err(errno::EINVAL); }`.
+  * Other families (AF_UNIX=1, AF_NETLINK=16, AF_PACKET=17)
+    are NOT in this gate — they have their own protocol
+    range checks (MAX_LINKS=32 for netlink, AF_PACKET's own
+    eth_protocol range) which are tracked as separate
+    batches.
+
+Translator-only — no native socket code changed.
+
+**Probes added (post the existing "socket type-range gate
+widened" block):**
+
+  A. socket(AF_INET=2, STREAM=1, -1 as u32::MAX)  -> EINVAL
+     (the sign-preservation test)
+  B. socket(AF_INET=2, STREAM=1, 256)             -> EINVAL
+  C. socket(AF_INET6=10, DGRAM=2, 256)            -> EINVAL
+  D. socket(AF_INET=2, SOCK_RAW=3, 256)           -> EINVAL
+  E. socket(AF_INET=2, SOCK_RAW=3, -1)            -> EINVAL
+  F. socket(AF_INET=2, SOCK_RDM=4, 256)           -> EINVAL
+     (confirms IPPROTO_MAX gate precedes ESOCKTNOSUPPORT —
+     pre-batch-468 the type=4 ESOCKTNOSUPPORT from batch 466
+     would have fired; post-batch the range check fires
+     first)
+  G. Regression: socket(AF_INET, STREAM, TCP=6)   -> ENOSYS
+     (TCP=6 in valid range, still falls to native dispatch
+     stub that returns ENOSYS — confirms the gate doesn't
+     over-reject)
+  H. Regression: socket(AF_UNIX=1, STREAM=1, -1)  -> EPROTONOSUPPORT
+     (AF_UNIX not in IPPROTO_MAX gate; preserves the
+     batch-pre-468 errno for non-AF_INET/AF_INET6 families)
+
+Probe block stamp:
+
+    [syscall/linux]   socket AF_INET/AF_INET6 protocol range 0..IPPROTO_MAX=256 (Linux inet_create/inet6_create open gate; precedes ESOCKTNOSUPPORT err-init and EPROTONOSUPPORT list-match): OK
+
+**Build:** `cargo build -p kernel` clean, 40.12s.
+**Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).

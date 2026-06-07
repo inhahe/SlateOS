@@ -15101,6 +15101,65 @@ fn sys_io_uring_enter(args: &SyscallArgs) -> SyscallResult {
 /// Same rationale as `io_uring_enter`: validate inputs so callers see
 /// Linux-shaped errnos, then return EBADF on the fd (no io_uring rings
 /// can exist).
+///
+/// ## Batch 498 — drop pre-fd `arg`/`nr_args` gates to match Linux's
+/// fdget-first gate order
+///
+/// Verbatim Linux v6.6 source (`io_uring/io_uring.c::SYSCALL_DEFINE4`
+/// at line 4567):
+///
+/// ```text
+///   SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
+///                   void __user *, arg, unsigned int, nr_args)
+///   {
+///       struct io_ring_ctx *ctx;
+///       long ret = -EBADF;
+///       struct fd f;
+///       bool use_registered_ring;
+///
+///       use_registered_ring = !!(opcode & IORING_REGISTER_USE_REGISTERED_RING);
+///       opcode &= ~IORING_REGISTER_USE_REGISTERED_RING;
+///
+///       if (opcode >= IORING_REGISTER_LAST)
+///           return -EINVAL;
+///
+///       if (use_registered_ring) {
+///           struct io_uring_task *tctx = current->io_uring;
+///           if (unlikely(!tctx || fd >= IO_RINGFD_REG_MAX))
+///               return -EINVAL;
+///           ...
+///       } else {
+///           f = fdget(fd);
+///           if (unlikely(!f.file))
+///               return -EBADF;
+///           ret = -EOPNOTSUPP;
+///           if (!io_is_uring_fops(f.file))
+///               goto out_fput;
+///       }
+///       ...
+///       ret = __io_uring_register(ctx, opcode, arg, nr_args);
+///       ...
+///   }
+/// ```
+///
+/// `arg`/`nr_args` are NOT inspected at the top-level — they're handed
+/// off to `__io_uring_register` (per-opcode handler) which only runs
+/// AFTER fdget+io_is_uring_fops succeeds.  Pre-batch we ran two
+/// pointer-shape gates on `(nr_args, arg)` BEFORE the fd lookup,
+/// surfacing `EFAULT` on `(nr_args>0, arg==NULL)` where Linux returns
+/// `EBADF` because fdget fails for the bogus fd well before the per-
+/// opcode handler runs.  Divergence table:
+///
+/// | (fd, opcode, arg, nr_args)     | Linux v6.6 | Pre-batch (497) |
+/// |--------------------------------|------------|-----------------|
+/// | (99, 0, NULL, 4)               | EBADF      | EFAULT          |
+/// | (99, 0, NULL, 0x1_0000_0001)   | EBADF      | EFAULT          |
+/// | (99, 0, NULL, 0)               | EBADF      | EBADF           |
+///
+/// Translator-only fix: drop both pre-fd gates.  In kernel context our
+/// `validate_linux_fd` short-circuits (no caller PCB), so the terminal
+/// `EBADF` is what every probe sees once the opcode check passes —
+/// matching Linux's "fdget fails on bogus fd" terminal.
 fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
     // Linux 6.10 has opcodes 0..=31 (REGISTER_PBUF_RING=22, etc.) plus
     // bit 31 (`IORING_REGISTER_USE_REGISTERED_RING = 1u32 << 31`) which
@@ -15115,30 +15174,16 @@ fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
     if opcode > 31 {
         return linux_err(errno::EINVAL);
     }
-    // Linux declares `unsigned int nr_args`; the x86_64 syscall ABI
-    // delivers it in r10 without zero-extension, so only the low 32
-    // bits are defined.  Pre-batch we held `args.arg3` as raw u64,
-    // so a probe like nr_args=0x1_0000_0000 (high-only, low=0)
-    // entered the pointer-check branch where Linux's truncated
-    // nr_args=0 skips it and falls through to the fd-validation
-    // EBADF.  Truncate to u32 before any comparison to match.
-    #[allow(clippy::cast_possible_truncation)]
-    let nr_args = args.arg3 as u32;
-    // arg pointer must be readable when nr_args > 0.  We can't gate by
-    // opcode (the per-opcode struct sizes vary), so use a minimum of 1
-    // byte to surface EFAULT on bogus pointers; opcode-specific size
-    // checks are deferred to the (future) real implementation.
-    if nr_args > 0 && args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // nr_args==0 with arg!=NULL: Linux ignores arg in that case, no
-    // pointer check needed.  nr_args>0 with arg==NULL: Linux returns
-    // EFAULT for most opcodes — match that.
-    if nr_args > 0 && args.arg2 == 0 {
-        return linux_err(errno::EFAULT);
-    }
+    // Batch 498: Linux v6.6 io_uring/io_uring.c::SYSCALL_DEFINE4
+    // (line 4567) inspects `arg`/`nr_args` ONLY inside
+    // `__io_uring_register`, which runs strictly AFTER `fdget(fd)` and
+    // the `io_is_uring_fops` check.  The previous pre-fd gates here
+    // surfaced EFAULT on `(nr_args>0, arg==NULL)` where Linux returns
+    // EBADF (fdget fails on a bogus fd).  Drop them so the gate order
+    // matches: opcode → fdget(EBADF) → per-opcode dispatch.  Kernel-
+    // context callers (no caller PCB) hit the terminal EBADF below,
+    // which is what Linux returns for fd=99 (closed) in every probe
+    // tier.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
@@ -50485,17 +50530,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_uring_register(REGISTERED_RING) not EBADF");
             return Err(KernelError::InternalError);
         }
-        // (j) nr_args > 0 with NULL arg -> EFAULT.
+        // (j) Batch 498: nr_args > 0 with NULL arg -> EBADF (matches
+        // Linux v6.6 io_uring/io_uring.c::SYSCALL_DEFINE4 fdget-first
+        // gate order — `arg`/`nr_args` inspection lives inside
+        // `__io_uring_register` AFTER fdget fails on the bogus fd=0).
+        // Pre-batch we returned EFAULT here from a translator-side
+        // early NULL-pointer gate that Linux doesn't have.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 4,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IO_URING_REGISTER, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: io_uring_register(nr>0,NULL) not EFAULT");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: io_uring_register(nr>0,NULL) not EBADF (batch 498)");
             return Err(KernelError::InternalError);
         }
+        serial_println!("[syscall/linux]   io_uring_register(nr>0,NULL) EBADF (batch 498): OK");
         // (Same kernel-context caveat as above: bogus non-NULL arg
-        // pointer cannot be tested here — only the explicit NULL
-        // EFAULT check fires inside the kernel.)
+        // pointer cannot be tested here — the per-opcode arg validation
+        // lives inside __io_uring_register, which we don't reach.)
         serial_println!("[syscall/linux]   io_uring_enter/register validation: OK");
 
         // io_uring_enter flags is C `u32` in the Linux prototype, delivered
@@ -50589,17 +50640,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // (l) nr_args=0x1_0000_0001 (high|1), arg=NULL -> low u32=1,
-        //     pointer block fires with NULL arg -> EFAULT preserved.
+        // (l) Batch 498: nr_args=0x1_0000_0001 (high|1), arg=NULL -> low
+        //     u32=1.  Pre-batch the translator-side pointer block fired
+        //     with NULL arg -> EFAULT, hiding the Linux v6.6 fdget-first
+        //     order.  With batch 498 the gates run as opcode -> fdget
+        //     (EBADF on bogus fd=0) -> per-opcode dispatch (which never
+        //     runs in our stub).  The terminal now matches Linux: EBADF.
         let a = SyscallArgs {
             arg0: 0, arg1: 0, arg2: 0,
             arg3: 0x1_0000_0001,
             arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::IO_URING_REGISTER, &a).value
-            != -i64::from(errno::EFAULT) {
+            != -i64::from(errno::EBADF) {
             serial_println!(
-                "[syscall/linux]   FAIL: io_uring_register(nr_args=0x1_0000_0001) not EFAULT"
+                "[syscall/linux]   FAIL: io_uring_register(nr_args=0x1_0000_0001) not EBADF (batch 498)"
             );
             return Err(KernelError::InternalError);
         }
@@ -50631,6 +50686,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   io_uring_register nr_args u32-truncation (high-half ignored): OK"
+        );
+
+        // Batch 498: confirm Linux v6.6 io_uring/io_uring.c:4567
+        // SYSCALL_DEFINE4(io_uring_register) fdget-first gate order
+        // is honoured for the full (arg, nr_args) Cartesian product
+        // probes use to feature-detect.  All four below should reach
+        // the terminal EBADF (fdget on the bogus fd=99 fails before
+        // __io_uring_register ever inspects arg/nr_args).
+        //
+        // Pre-batch 498 the (NULL, nr_args>0) cells returned EFAULT
+        // from a translator-side early gate that Linux doesn't have.
+        // (p) bogus fd, opcode in range, arg=NULL, nr_args=8 -> EBADF.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 0, arg2: 0, arg3: 8,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(fd=99,op=0,arg=NULL,nr=8) not EBADF (batch 498)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (q) bogus fd, opcode=REGISTER_BUFFERS_UPDATE (16), arg=NULL,
+        //     nr_args=1 -> EBADF.  Pre-batch this was EFAULT because
+        //     nr_args>0 && arg==NULL fired the early gate; Linux v6.6
+        //     reaches fdget and returns EBADF.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 16, arg2: 0, arg3: 1,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(fd=99,op=16,arg=NULL,nr=1) not EBADF (batch 498)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (r) bogus fd, opcode=REGISTER_FILES_UPDATE (6), arg=NULL,
+        //     nr_args=0 -> EBADF (baseline preserved, no behaviour
+        //     change for the nr_args==0 path that was always EBADF).
+        let a = SyscallArgs {
+            arg0: 99, arg1: 6, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(fd=99,op=6,arg=NULL,nr=0) baseline not EBADF (batch 498)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (s) Opcode-still-out-of-range gate fires ahead of fd lookup
+        //     in Linux too — confirm we still rank opcode>=LAST as
+        //     EINVAL before the fdget step.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 200, arg2: 0, arg3: 4,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(opcode=200) not EINVAL (batch 498)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   io_uring_register fdget-first gate order (Linux v6.6): OK"
         );
     }
 

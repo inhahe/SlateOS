@@ -45708,3 +45708,109 @@ Summary stamp: `seccomp FILTER flag interlocks (batch 497): OK`
 
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`), BOOT_OK detected.
 
+
+---
+
+## Batch 498 — Linux ABI fidelity: io_uring_register() drop pre-fd `arg`/`nr_args` gates to match Linux v6.6's fdget-first gate order (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_io_uring_register` and 3 boot-probe blocks).
+
+**Divergence.** Pre-batch the translator ran two pointer-shape gates
+on `(nr_args, arg)` BEFORE the fd lookup:
+
+```rust
+if nr_args > 0 && args.arg2 != 0 { validate_user_read(args.arg2, 1)?; }
+if nr_args > 0 && args.arg2 == 0 { return EFAULT; }     // ← early gate
+let fd = args.arg0 as i32;
+validate_linux_fd(fd)?;
+linux_err(errno::EBADF)                                 // ← terminal
+```
+
+The early NULL-arg EFAULT gate surfaced EFAULT on
+`(opcode in range, fd=99 bogus, arg=NULL, nr_args>0)` where Linux v6.6
+returns EBADF: `fdget(fd)` fails on the bogus fd long before
+`__io_uring_register` ever inspects `arg`/`nr_args`.
+
+**Verbatim Linux v6.6 source** (`io_uring/io_uring.c::SYSCALL_DEFINE4`
+at line 4567,
+`https://raw.githubusercontent.com/torvalds/linux/v6.6/io_uring/io_uring.c`):
+
+```c
+SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
+                void __user *, arg, unsigned int, nr_args)
+{
+    struct io_ring_ctx *ctx;
+    long ret = -EBADF;
+    struct fd f;
+    bool use_registered_ring;
+
+    use_registered_ring = !!(opcode & IORING_REGISTER_USE_REGISTERED_RING);
+    opcode &= ~IORING_REGISTER_USE_REGISTERED_RING;
+
+    if (opcode >= IORING_REGISTER_LAST)
+        return -EINVAL;
+
+    if (use_registered_ring) {
+        struct io_uring_task *tctx = current->io_uring;
+        if (unlikely(!tctx || fd >= IO_RINGFD_REG_MAX))
+            return -EINVAL;
+        ...
+    } else {
+        f = fdget(fd);
+        if (unlikely(!f.file))
+            return -EBADF;
+        ret = -EOPNOTSUPP;
+        if (!io_is_uring_fops(f.file))
+            goto out_fput;
+    }
+    ...
+    ret = __io_uring_register(ctx, opcode, arg, nr_args);   // arg, nr_args
+    ...                                                     // inspected
+}                                                            // ONLY here
+```
+
+Linux's gate order: (1) mask USE_REGISTERED_RING; (2) opcode ≥ LAST →
+EINVAL; (3) fdget → EBADF; (4) io_is_uring_fops → EOPNOTSUPP;
+(5) `__io_uring_register` per-opcode dispatch — the FIRST place
+`arg`/`nr_args` are inspected.
+
+**Divergence table.** Probes that demonstrate the EFAULT-vs-EBADF
+flip:
+
+| (fd, opcode, arg, nr_args)     | Linux v6.6 | Pre-batch 498 |
+|--------------------------------|------------|---------------|
+| (99, 0, NULL, 8)               | EBADF      | EFAULT        |
+| (99, 16, NULL, 1)              | EBADF      | EFAULT        |
+| (99, 6, NULL, 0)               | EBADF      | EBADF (same)  |
+| (99, 200, *, *)                | EINVAL     | EINVAL (same) |
+
+The `nr_args==0` and out-of-range-opcode cells were already correct;
+only the `nr_args>0 && arg==NULL` cells flipped.
+
+**Fix.** Drop the two pre-fd gates from `sys_io_uring_register` so
+the gate order matches: opcode-range → fd-validation → terminal
+EBADF.  In kernel-context callers (no caller PCB) `validate_linux_fd`
+short-circuits to Ok and the terminal EBADF is what every probe
+sees once the opcode check passes — matching Linux's "fdget fails on
+bogus fd" terminal.  No state changes; pure translator gate-order
+realignment.
+
+**Boot probes added.** Three existing probes (j, l, and the
+truncation-tier l) were updated from expecting EFAULT to expecting
+EBADF.  A new four-probe cluster at the tail of the io_uring section
+walks the Linux gate ladder:
+
+1. `io_uring_register(fd=99, op=0, arg=NULL, nr_args=8)` → EBADF
+2. `io_uring_register(fd=99, op=16, arg=NULL, nr_args=1)` → EBADF
+3. `io_uring_register(fd=99, op=6, arg=NULL, nr_args=0)` → EBADF
+4. `io_uring_register(fd=99, op=200, *, *)` → EINVAL
+   (opcode-range gate still runs ahead of fdget).
+
+Summary stamps:
+- `io_uring_register(nr>0,NULL) EBADF (batch 498): OK`
+- `io_uring_register fdget-first gate order (Linux v6.6): OK`
+
+**Build:** clean (`cargo build -p kernel`, 47.3s).
+
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`), BOOT_OK
+detected.  Both batch-498 stamps emitted to serial-test.txt.

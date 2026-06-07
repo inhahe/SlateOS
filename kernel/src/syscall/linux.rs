@@ -23467,6 +23467,57 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
     // reject, Linux also rejects with the same errno.
     #[allow(clippy::cast_possible_truncation)]
     let protocol = args.arg2 as u32;
+    // Gate 5 pre-check (batch 475): AF_INET / AF_INET6 SOCK_RAW
+    // with protocol == 0 hits the dead branch of inet_create's
+    // list-walk and surfaces -EPROTONOSUPPORT.
+    //
+    // Linux's net/ipv4/af_inet.c::inet_create has exactly one
+    // entry in inetsw[SOCK_RAW]:
+    //     { .type = SOCK_RAW, .protocol = IPPROTO_IP, .prot =
+    //       &raw_prot, .ops = &inet_sockraw_ops, ... }
+    // with IPPROTO_IP = 0 used as a "match anything non-zero
+    // user protocol" wild card.  The list-walk algorithm is:
+    //     list_for_each_entry_rcu(answer, &inetsw[type], list) {
+    //         err = 0;
+    //         if (protocol == answer->protocol) {
+    //             if (protocol != IPPROTO_IP)
+    //                 break;                          /* exact match */
+    //         } else {
+    //             if (IPPROTO_IP == protocol) {       /* user wild */
+    //                 protocol = answer->protocol;
+    //                 break;
+    //             }
+    //             if (IPPROTO_IP == answer->protocol) /* entry wild */
+    //                 break;
+    //         }
+    //         err = -EPROTONOSUPPORT;
+    //     }
+    // For SOCK_RAW + user protocol = 0 = IPPROTO_IP:
+    //   * protocol (0) == answer->protocol (0): TRUE
+    //   * protocol (0) != IPPROTO_IP (0):       FALSE → don't break
+    //   * fall through, err = -EPROTONOSUPPORT
+    //   * loop exits (no more entries) → return -EPROTONOSUPPORT
+    // For SOCK_RAW + user protocol = nonzero N (e.g. 1, 6, 99):
+    //   * protocol (N) == answer->protocol (0): FALSE
+    //   * IPPROTO_IP (0) == protocol (N):       FALSE
+    //   * IPPROTO_IP (0) == answer->protocol (0): TRUE → break
+    //   * err = 0, lookup succeeds (CAP_NET_RAW check follows)
+    // So SOCK_RAW + 0 is the ONLY shape on AF_INET/AF_INET6 where
+    // the lookup itself fails with EPROTONOSUPPORT for protocol = 0.
+    //
+    // inet6sw[SOCK_RAW] in net/ipv6/af_inet6.c has the same
+    // shape — IPPROTO_IP wild-card entry — and the same shape
+    // of failure for protocol = 0.
+    //
+    // Family-restricted: AF_UNIX SOCK_RAW (type 3 aliased to
+    // DGRAM in unix_create) doesn't run this list-walk;
+    // AF_NETLINK rejects SOCK_RAW only via the {DGRAM, RAW} type
+    // gate (gate 4 already passes SOCK_RAW=3 since it's in
+    // netlink's allowlist); AF_PACKET accepts SOCK_RAW with the
+    // protocol-as-ethertype semantics.
+    if matches!((domain, sock_type), (2 | 10, 3)) && protocol == 0 {
+        return linux_err(errno::EPROTONOSUPPORT);
+    }
     if protocol != 0 {
         match (domain, sock_type) {
             // AF_UNIX handled upstream by gate 3.6 (batch 474) which
@@ -23685,6 +23736,17 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     // 279.
     #[allow(clippy::cast_possible_truncation)]
     let protocol = args.arg2 as u32;
+    // Gate 3b pre-check (batch 475): AF_INET / AF_INET6 SOCK_RAW
+    // with protocol == 0 hits the dead branch of inet_create's
+    // list-walk inside sock_create (called by __sys_socketpair
+    // BEFORE ops->socketpair is even consulted).  Direct mirror
+    // of sys_socket batch 475.  Without this gate, our gate 3c
+    // (domain != 1 → EOPNOTSUPP) hijacks the EPROTONOSUPPORT that
+    // Linux returns from sock_create itself.  See sys_socket batch
+    // 475 for the full inetsw[SOCK_RAW] list-walk derivation.
+    if matches!((domain, sock_type), (2 | 10, 3)) && protocol == 0 {
+        return linux_err(errno::EPROTONOSUPPORT);
+    }
     if protocol != 0 {
         match (domain, sock_type) {
             // AF_UNIX handled upstream by gate 2-continued (batch
@@ -65494,6 +65556,125 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
 
+        // ---- socket AF_INET/AF_INET6 SOCK_RAW + protocol=0 ----
+        // Batch 475 — the inetsw[SOCK_RAW] / inet6sw[SOCK_RAW]
+        // tables each contain a single entry with .protocol =
+        // IPPROTO_IP = 0, used as a "match any user-supplied
+        // non-zero protocol" wild card.  When the user passes
+        // protocol = 0 = IPPROTO_IP, the inet_create list-walk
+        // algorithm hits the `protocol == answer->protocol`
+        // branch but the `protocol != IPPROTO_IP` guard prevents
+        // the break, so err falls through to -EPROTONOSUPPORT.
+        // Pre-batch our code accepted via the gate 5 fallthrough
+        // (`_ => {}`) and returned ENOSYS.
+        //
+        // Discriminator sextet (kernel-context):
+        //   A. socket(AF_INET=2, SOCK_RAW=3, 0)
+        //      pre: ENOSYS ; post: EPROTONOSUPPORT
+        //   B. socket(AF_INET6=10, SOCK_RAW=3, 0)
+        //      pre: ENOSYS ; post: EPROTONOSUPPORT
+        //   C. Regression: socket(AF_INET, SOCK_RAW, IPPROTO_TCP=6)
+        //      Lookup OK (IPPROTO_IP wild-card match), accepted.
+        //      ENOSYS (real Linux would CAP_NET_RAW-check next).
+        //   D. Regression: socket(AF_INET, SOCK_RAW, 99) -> ENOSYS
+        //      (already tested by batch 279 probe G; here for
+        //      gate-order coverage).
+        //   E. Regression: socket(AF_INET, SOCK_STREAM=1, 0) -> ENOSYS
+        //      (defaults to TCP via inet_create wild-card match
+        //      where user wild meets non-wild entry).
+        //   F. Cross-family: socket(AF_UNIX=1, SOCK_RAW=3, 0)
+        //      pre/post: ENOSYS.  AF_UNIX SOCK_RAW is aliased to
+        //      DGRAM inside unix_create, doesn't run inet_create.
+        {
+            // A: AF_INET / SOCK_RAW / protocol = 0.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 3, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,RAW,0) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_INET6 / SOCK_RAW / protocol = 0.
+            let a = SyscallArgs {
+                arg0: 10, arg1: 3, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET6,RAW,0) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: Regression — AF_INET / SOCK_RAW / IPPROTO_TCP=6.
+            // Wild-card match (IPPROTO_IP == answer->protocol)
+            // succeeds; CAP_NET_RAW check we don't model.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 3, arg2: 6,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,RAW,TCP) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: Regression — AF_INET / SOCK_RAW / 99.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 3, arg2: 99,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,RAW,99) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: Regression — AF_INET / SOCK_STREAM / 0.  User
+            // wild meets non-wild TCP entry; protocol defaults to
+            // 6, lookup succeeds.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,STREAM,0) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: Cross-family — AF_UNIX / SOCK_RAW / 0.  AF_UNIX
+            // doesn't use inetsw; SOCK_RAW is aliased to DGRAM in
+            // unix_create.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 3, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,RAW,0) cross-family regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socket AF_INET/AF_INET6 SOCK_RAW protocol=0 fails inet_create wild-card list-walk (Linux: EPROTONOSUPPORT; was ENOSYS): OK"
+            );
+        }
+
         // ---- socketpair per-(family,type,protocol) gating ----
         // Linux's __sys_socketpair calls sock_create twice; the
         // first call walks inet_create / unix_create which apply
@@ -66407,6 +66588,129 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socketpair AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK"
+            );
+        }
+
+        // ---- socketpair AF_INET/AF_INET6 SOCK_RAW + protocol=0 ----
+        // Batch 475 — direct mirror of sys_socket batch 475.  Linux's
+        // __sys_socketpair calls sock_create BEFORE consulting
+        // ops->socketpair.  sock_create dispatches to inet_create /
+        // inet6_create for AF_INET / AF_INET6, where the inetsw[
+        // SOCK_RAW] / inet6sw[SOCK_RAW] list-walk hits the
+        // IPPROTO_IP=0 wild-card entry with user protocol==0 and
+        // falls through to -EPROTONOSUPPORT (see sys_socket batch 475
+        // for the full algorithm derivation).  This fires BEFORE our
+        // gate 3c (domain != 1 → EOPNOTSUPP) shortcut, which pre-batch
+        // hijacked the EPROTONOSUPPORT.
+        //
+        // Discriminator sextet (kernel-context):
+        //   A. socketpair(AF_INET=2, SOCK_RAW=3, 0, sv)
+        //      pre: EOPNOTSUPP ; post: EPROTONOSUPPORT
+        //   B. socketpair(AF_INET6=10, SOCK_RAW=3, 0, sv)
+        //      pre: EOPNOTSUPP ; post: EPROTONOSUPPORT
+        //   C. Regression: socketpair(AF_INET, SOCK_RAW, IPPROTO_TCP=6, sv)
+        //      Wild-card list-walk succeeds (IPPROTO_IP == answer
+        //      ->protocol matches non-IPPROTO_IP user proto); falls
+        //      through to gate 3c EOPNOTSUPP.
+        //   D. Regression: socketpair(AF_INET, SOCK_RAW, 99, sv)
+        //      Same as C — EOPNOTSUPP via gate 3c.
+        //   E. Regression: socketpair(AF_INET, SOCK_STREAM=1, 0, sv)
+        //      inet_create wild-card resolves to TCP; falls through
+        //      to gate 3c EOPNOTSUPP.
+        //   F. Cross-family: socketpair(AF_UNIX=1, SOCK_RAW=3, 0, sv)
+        //      AF_UNIX SOCK_RAW is aliased to DGRAM in unix_create;
+        //      doesn't run inet_create.  Reaches gate 4 / terminal
+        //      ENOSYS in our translator.
+        {
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+
+            // A: AF_INET / SOCK_RAW / protocol = 0 / sv.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 3, arg2: 0, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,0,sv) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_INET6 / SOCK_RAW / protocol = 0 / sv.
+            let a = SyscallArgs {
+                arg0: 10, arg1: 3, arg2: 0, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET6,RAW,0,sv) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: Regression — AF_INET / SOCK_RAW / IPPROTO_TCP=6 / sv.
+            // Wild-card list-walk succeeds in sock_create; then
+            // ops->socketpair == NULL → EOPNOTSUPP via gate 3c.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 3, arg2: 6, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,TCP,sv) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: Regression — AF_INET / SOCK_RAW / 99 / sv.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 3, arg2: 99, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,99,sv) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: Regression — AF_INET / SOCK_STREAM / 0 / sv.
+            // Wild-card → TCP, sock_create OK; gate 3c EOPNOTSUPP.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 1, arg2: 0, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,0,sv) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: Cross-family — AF_UNIX / SOCK_RAW / 0 / sv.  AF_UNIX
+            // doesn't use inetsw; SOCK_RAW aliased to DGRAM in
+            // unix_create.  Reaches terminal ENOSYS.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 3, arg2: 0, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,RAW,0,sv) cross-family regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socketpair AF_INET/AF_INET6 SOCK_RAW protocol=0 fails sock_create inet_create wild-card list-walk (Linux: EPROTONOSUPPORT; was EOPNOTSUPP): OK"
             );
         }
 

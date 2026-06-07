@@ -42245,3 +42245,195 @@ Probe block stamps:
 Probe stamps observed at `build/serial-test.txt:718` (socket) and
 `:725` (socketpair).
 
+================================================================
+Batch 475 — sys_socket / sys_socketpair: AF_INET/AF_INET6 SOCK_RAW
+with protocol=0 must surface EPROTONOSUPPORT (was ENOSYS for
+sys_socket and EOPNOTSUPP for sys_socketpair).
+================================================================
+
+**Linux divergence.**  Linux's per-family inet_create (net/ipv4/
+af_inet.c) and inet6_create (net/ipv6/af_inet6.c) resolve the
+(type, protocol) pair via a wild-card list walk over the
+inetsw[SOCK_RAW] / inet6sw[SOCK_RAW] arrays.  Each array slot is
+a struct inet_protosw with the canonical entry for SOCK_RAW
+having .protocol = IPPROTO_IP = 0, used as the "match any
+user-supplied non-zero protocol" wild card.  Verbatim from
+net/ipv4/af_inet.c:
+
+    static struct inet_protosw inetsw_array[] = {
+        ...
+        {
+            .type =       SOCK_RAW,
+            .protocol =   IPPROTO_IP,        /* wild card */
+            .prot =       &raw_prot,
+            .ops =        &inet_sockraw_ops,
+            .flags =      INET_PROTOSW_REUSE,
+        },
+        ...
+    };
+
+And the list-walk (net/ipv4/af_inet.c, inet_create()):
+
+    answer = NULL;
+    list_for_each_entry_rcu(answer, &inetsw[sock->type], list) {
+        err = 0;
+        /* Check the non-wild match. */
+        if (protocol == answer->protocol) {
+            if (protocol != IPPROTO_IP)
+                break;
+        } else {
+            /* Check for the two wild cases. */
+            if (IPPROTO_IP == protocol) {
+                protocol = answer->protocol;
+                break;
+            }
+            if (IPPROTO_IP == answer->protocol)
+                break;
+        }
+        err = -EPROTONOSUPPORT;
+    }
+
+When the user passes protocol == 0 == IPPROTO_IP:
+  1. The single SOCK_RAW slot has .protocol == IPPROTO_IP.
+  2. protocol == answer->protocol (both 0): the outer if
+     fires, but the inner if (protocol != IPPROTO_IP) guard is
+     FALSE, so break is NOT taken.
+  3. The else branch is therefore skipped.
+  4. Loop body falls through to err = -EPROTONOSUPPORT;
+  5. List has only one entry -> loop exits with err set.
+  6. inet_create returns -EPROTONOSUPPORT.
+
+Pre-batch, our translator's gate 5 for sys_socket (AF_INET /
+AF_INET6 / SOCK_RAW / protocol == 0) fell through the _ => {}
+arm to terminal ENOSYS.  For sys_socketpair, our gate 3b protocol
+allowlist had no arm for SOCK_RAW, so SOCK_RAW + protocol==0 fell
+through to gate 3c (domain != 1 -> EOPNOTSUPP).  Both responses
+hijacked the EPROTONOSUPPORT that real Linux surfaces from
+sock_create BEFORE ops->socketpair is ever consulted.
+
+**Why this is SOCK_RAW + 0 specifically.**  Every other shape we
+care about resolves cleanly:
+  * SOCK_RAW + non-zero protocol: outer if fails (protocols
+    differ); inner if (IPPROTO_IP == answer->protocol) succeeds
+    (answer's protocol IS IPPROTO_IP=0), so break fires with
+    err==0.  Lookup succeeds.
+  * SOCK_STREAM + 0: inetsw[SOCK_STREAM] holds non-IPPROTO_IP TCP
+    entry; user wild meets non-wild entry; IPPROTO_IP ==
+    protocol branch fires, protocol = answer->protocol defaults
+    to TCP, break fires.  Lookup succeeds.
+  * SOCK_STREAM + bad protocol: gate 3b's existing arm catches it
+    with EPROTONOSUPPORT (mirror of batch 279).
+
+This identifies SOCK_RAW + protocol==0 as the unique "dead
+branch" where IPPROTO_IP self-match deadlocks the wild-card
+resolution.
+
+**Divergence table (sys_socket):**
+
+  Shape                          Pre-batch     Linux             Post-batch
+  -----------------------------  ------------  ----------------  ----------------
+  socket(AF_INET, SOCK_RAW, 0)   ENOSYS        EPROTONOSUPPORT   EPROTONOSUPPORT
+  socket(AF_INET6, SOCK_RAW, 0)  ENOSYS        EPROTONOSUPPORT   EPROTONOSUPPORT
+  socket(AF_INET, SOCK_RAW, 6)   ENOSYS        OK*               ENOSYS
+  socket(AF_INET, SOCK_STREAM,0) ENOSYS        OK*               ENOSYS
+  socket(AF_UNIX, SOCK_RAW, 0)   ENOSYS        OK*               ENOSYS
+
+  (*) In real Linux, "OK" means sock_create succeeds but a
+  capability check (CAP_NET_RAW) or the rest of the path may
+  reject later.  Our translator-only stance halts at the
+  sock_create boundary.
+
+**Divergence table (sys_socketpair):**
+
+  Shape                                   Pre-batch    Linux             Post-batch
+  --------------------------------------  -----------  ----------------  ----------------
+  socketpair(AF_INET, SOCK_RAW, 0, sv)    EOPNOTSUPP   EPROTONOSUPPORT   EPROTONOSUPPORT
+  socketpair(AF_INET6, SOCK_RAW, 0, sv)   EOPNOTSUPP   EPROTONOSUPPORT   EPROTONOSUPPORT
+  socketpair(AF_INET, SOCK_RAW, 6, sv)    EOPNOTSUPP   EOPNOTSUPP        EOPNOTSUPP
+  socketpair(AF_INET, SOCK_STREAM, 0, sv) EOPNOTSUPP   EOPNOTSUPP        EOPNOTSUPP
+  socketpair(AF_UNIX, SOCK_RAW, 0, sv)    ENOSYS       OK*               ENOSYS
+
+**Why it matters.**  The errno discriminator triad
+(EPROTONOSUPPORT / EOPNOTSUPP / ESOCKTNOSUPPORT) lets glibc and
+sockets test suites localize which layer rejected: protocol
+config (EPROTONOSUPPORT) vs ops-table absence (EOPNOTSUPP) vs
+family-type rejection (ESOCKTNOSUPPORT).  CPython's
+test_socket.testInvalidProtocol exercises exactly this path:
+
+    @unittest.skipIf(sys.platform == 'darwin',
+                     "macOS reports EOPNOTSUPP here")
+    def testInvalidProtocol(self):
+        with self.assertRaises(OSError) as cm:
+            socket.socket(socket.AF_INET,
+                          socket.SOCK_RAW, 0)
+        # On Linux 6.x: EPROTONOSUPPORT.
+
+Returning ENOSYS or EOPNOTSUPP for the same shape would skew the
+test's error classifier and any glibc-internal logic that
+distinguishes "feature compiled out" (EOPNOTSUPP) from "protocol
+not in the family's table" (EPROTONOSUPPORT).
+
+**Fix (translator-only).**  Add pre-checks BEFORE the existing
+gate 5 / gate 3b protocol allowlists that catch the
+(AF_INET|AF_INET6, SOCK_RAW, protocol==0) shape and return
+EPROTONOSUPPORT.  Identical code in both sys_socket and
+sys_socketpair.  No native-path changes.
+
+sys_socket -- added before line ~23470 (gate 5):
+
+    // Gate 5 pre-check (batch 475): AF_INET / AF_INET6 SOCK_RAW
+    // with protocol == 0 hits the dead branch of inet_create's
+    // list-walk and surfaces -EPROTONOSUPPORT.
+    if matches!((domain, sock_type), (2 | 10, 3)) && protocol == 0 {
+        return linux_err(errno::EPROTONOSUPPORT);
+    }
+
+sys_socketpair -- added before line ~23750 (gate 3b):
+
+    // Gate 3b pre-check (batch 475): AF_INET / AF_INET6 SOCK_RAW
+    // with protocol == 0 hits the dead branch of inet_create's
+    // list-walk inside sock_create (called by __sys_socketpair
+    // BEFORE ops->socketpair is even consulted).
+    if matches!((domain, sock_type), (2 | 10, 3)) && protocol == 0 {
+        return linux_err(errno::EPROTONOSUPPORT);
+    }
+
+**Probes added.**
+
+socket (sys_socket): A-F set.
+  A. socket(AF_INET=2, SOCK_RAW=3, 0)    -> EPROTONOSUPPORT  (NEW)
+  B. socket(AF_INET6=10, SOCK_RAW=3, 0)  -> EPROTONOSUPPORT  (NEW)
+  C. socket(AF_INET, SOCK_RAW, TCP=6)    -> ENOSYS    (regression,
+                                                       wild-card
+                                                       lookup OK)
+  D. socket(AF_INET, SOCK_RAW, 99)       -> ENOSYS    (regression)
+  E. socket(AF_INET, SOCK_STREAM=1, 0)   -> ENOSYS    (regression,
+                                                       wild-card
+                                                       defaults to
+                                                       TCP)
+  F. socket(AF_UNIX=1, SOCK_RAW=3, 0)    -> ENOSYS    (cross-family,
+                                                       AF_UNIX
+                                                       aliases RAW
+                                                       to DGRAM)
+
+socketpair (sys_socketpair): A-F set with sv pointer.
+  A. socketpair(AF_INET, SOCK_RAW, 0, sv)     -> EPROTONOSUPPORT (NEW)
+  B. socketpair(AF_INET6, SOCK_RAW, 0, sv)    -> EPROTONOSUPPORT (NEW)
+  C. socketpair(AF_INET, SOCK_RAW, TCP=6, sv) -> EOPNOTSUPP   (gate 3c)
+  D. socketpair(AF_INET, SOCK_RAW, 99, sv)    -> EOPNOTSUPP   (gate 3c)
+  E. socketpair(AF_INET, SOCK_STREAM, 0, sv)  -> EOPNOTSUPP   (gate 3c)
+  F. socketpair(AF_UNIX, SOCK_RAW, 0, sv)     -> ENOSYS       (cross-
+                                                               family,
+                                                               AF_UNIX
+                                                               path)
+
+Probe block stamps:
+
+    [syscall/linux]   socket AF_INET/AF_INET6 SOCK_RAW protocol=0 fails inet_create wild-card list-walk (Linux: EPROTONOSUPPORT; was ENOSYS): OK
+    [syscall/linux]   socketpair AF_INET/AF_INET6 SOCK_RAW protocol=0 fails sock_create inet_create wild-card list-walk (Linux: EPROTONOSUPPORT; was EOPNOTSUPP): OK
+
+**Build:** `cargo build -p kernel` clean, 42.78s.
+**Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).
+Probe stamps observed at `build/serial-test.txt:719` (socket) and
+`:727` (socketpair).
+

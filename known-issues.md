@@ -22,8 +22,18 @@ work that should be done now."
 **Repro:** Run `bash scripts/boot-test.sh` repeatedly.  Observed once
 on 2026-06-06 during batch 394 boot test (`build/serial-test.txt`
 truncated at line 1627, mid-RCU self-test).  Retry passed cleanly at
-26s.  Frequency appears low (~1 in N for some N>10 — not yet
-characterized).
+26s.  Frequency initially appeared low (~1 in N for some N>10 — not
+yet characterized).
+
+**2026-06-06 frequency revision (batch 455 boot test):** Observed
+2 consecutive hangs in 3 attempts on the same QEMU invocation
+parameters during batch 455 boot test.  Both stalled after
+`[rcu]   Callback registration: OK` with no further serial output
+within the 300s timeout.  Third attempt passed at 23s.  This is
+substantially more frequent than the original estimate; the bug may
+be highly sensitive to host scheduler / QEMU timing such that some
+windows reproduce it 60%+ of the time while others almost never
+hit it.  Worth prioritizing a real fix rather than relying on retry.
 
 **Symptoms:** Serial output stops mid-RCU test; no further milestones.
 QEMU appears alive but kernel makes no further progress.  BOOT_OK

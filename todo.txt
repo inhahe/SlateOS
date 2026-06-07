@@ -39362,3 +39362,136 @@ the existing keyctl block ~ line 47616):
 after 22s.
 
 **Files touched:** `kernel/src/syscall/linux.rs` only.
+
+
+---
+
+## 455. syscall/linux: bpf — narrow EINVAL gate to Linux's real switch range (cmd >= 37, not > 64)
+
+**Date:** 2026-06-06
+
+**Subsystem:** `kernel/src/syscall/linux.rs::sys_bpf`
+
+Sister fix to batch 454 (keyctl).  Same forward-compat-buffer
+divergence pattern: pre-batch we accepted cmd values up to 64,
+returning ENOSYS for 37..=64 where Linux's switch `default` arm
+returns EINVAL.
+
+**Linux source (verbatim, `kernel/bpf/syscall.c::__sys_bpf`):**
+
+```c
+static int __sys_bpf(int cmd, bpfptr_t uattr, unsigned int size)
+{
+    union bpf_attr attr;
+    int err;
+    ...
+    err = bpf_check_uarg_tail_zero(uattr, sizeof(attr), size);
+    if (err) return err;
+    size = min_t(u32, size, sizeof(attr));
+    memset(&attr, 0, sizeof(attr));
+    if (copy_from_bpfptr(&attr, uattr, size) != 0)
+        return -EFAULT;
+    err = security_bpf(cmd, &attr, size);
+    if (err < 0) return err;
+    switch (cmd) {
+    case BPF_MAP_CREATE:        // 0
+        err = map_create(&attr); break;
+    ...
+    case BPF_TOKEN_CREATE:      // 36
+        err = token_create(&attr); break;
+    default:
+        err = -EINVAL;
+        break;
+    }
+    return err;
+}
+```
+
+`include/uapi/linux/bpf.h` defines 37 commands, `BPF_MAP_CREATE = 0`
+through `BPF_TOKEN_CREATE = 36` (`__MAX_BPF_CMD = 37`).  Anything
+outside `[0, 36]` reaches the switch's `default` arm and returns
+`-EINVAL`.
+
+**Divergence table:**
+
+| cmd (truncated i32) | Linux 6.x  | Pre-batch (455) | Why                                |
+|---------------------|------------|-----------------|------------------------------------|
+| -1                  | EINVAL     | EINVAL          | (already correct)                  |
+| 0..=36              | dispatch   | ENOSYS          | no BPF backend (stub OK)           |
+| **37**              | **EINVAL** | **ENOSYS**      | pre-batch threshold too lax        |
+| **50**              | **EINVAL** | **ENOSYS**      | pre-batch threshold too lax        |
+| **64**              | **EINVAL** | **ENOSYS**      | pre-batch threshold too lax        |
+| 65                  | EINVAL     | EINVAL          | (already correct)                  |
+| 0x1_0000_0025       | EINVAL     | ENOSYS          | low-half 37 truncates past gate    |
+
+Pre-batch (entry 232) widened the accepted range to `0..=64` as
+"forward-compat buffer for cmds added in 6.11+".  Translator-only
+directive overrides that: we match Linux's CURRENT ABI, not future.
+
+**Why this matters:**
+
+libbpf's feature probe walks unknown cmd numbers expecting EINVAL
+for "kernel switch default" — used during init to feature-detect
+kernel BPF extensions before issuing the real call.  ENOSYS routes
+into the "kernel doesn't implement bpf at all" fallback rather
+than the per-extension probe path; libbpf treats them differently
+and the post-batch EINVAL surfaces the correct discriminator.
+
+**x86_64 ABI truncation:** `cmd` is declared as C `int` in
+`SYSCALL_DEFINE3`.  The AMD64 syscall ABI delivers it in rdi
+without zero/sign-extension, so only the low 32 bits are defined.
+`args.arg0 as i32` truncates to the view Linux sees.
+
+**Fix:**
+
+- Replace the `cmd > 64` upper-bound with
+  `cmd > BPF_TOKEN_CREATE` (= 36).
+- Rewrite the doc comment with verbatim Linux source citation,
+  divergence table, and ABI-truncation note.
+- Keep `cmd in [0, 36]` falling through to ENOSYS (acceptable stub
+  for a kernel with no BPF backend).
+- Native OS architecture untouched — only the Linux-numbered
+  entrypoint changes.
+
+**Probes added/updated at the linux.rs in-kernel self-test path:**
+
+  - `bpf(cmd=0, NULL, 0)` → ENOSYS — size=0 no-op (existing).
+  - `bpf(cmd=0, NULL, 8)` → EFAULT — size>0 NULL ptr (existing).
+  - `bpf(cmd=0, attr, 8)` → ENOSYS — in-range stub (existing).
+  - **`bpf(cmd=36, attr, 8)` → ENOSYS** — `BPF_TOKEN_CREATE`,
+    last in-range sentinel.
+  - **`bpf(cmd=37, attr, 8)` → EINVAL** — first out-of-range value,
+    locks in the post-batch boundary.
+  - **`bpf(cmd=50, attr, 8)` → EINVAL** — mid old forward-compat zone.
+  - **`bpf(cmd=64, attr, 8)` → EINVAL** — upper edge of old buffer.
+  - `bpf(cmd=100, attr, 8)` → EINVAL (existing; well past TOKEN_CREATE).
+  - `bpf(cmd=0, attr, 8192)` → E2BIG — size > PAGE_SIZE (existing).
+  - `bpf(cmd=100, NULL, 8192)` → E2BIG — size fires first (existing).
+  - `bpf(cmd=100, NULL, 0)` → EINVAL — size=0 skips NULL check,
+    then cmd-range fires (existing).
+  - **`bpf(cmd=0x1_0000_0025, attr, 8)` → EINVAL** — ABI truncation
+    probe: high bit 32 + low=37 truncates via `as i32` to 37.
+
+  Success stamp updated: `[syscall/linux]   bpf size-first /
+  NULL-iff-size>0 / switch-default EINVAL at cmd>=37: OK`.
+
+**Build:** `cargo build -p kernel` — clean, 39.34s.
+
+**Boot test:** `bash scripts/boot-test.sh` — PASS on third attempt,
+BOOT_OK after 23s.  First two attempts hit the documented
+intermittent RCU self-test boot hang (known-issues.md entry 1) —
+both stalled after `[rcu]   Callback registration: OK` with no
+further serial output.  The new bpf probes printed their success
+stamp BEFORE the RCU self-test (line 280 of serial-test.txt on the
+failed attempts), confirming the batch 455 changes themselves are
+fine; the hang is the pre-existing RCU bug now showing higher
+frequency than entry 1 estimated (2-in-3 this batch, vs entry 1's
+"1 in N for some N > 10").
+
+**Known-issues.md update:** entry 1 frequency revised — observed
+2 consecutive hangs in 3 attempts during batch 455 boot test,
+suggesting the bug may be substantially more frequent under
+specific QEMU / scheduler conditions than the original "~1 in N
+for some N > 10" estimate.
+
+**Files touched:** `kernel/src/syscall/linux.rs`, `known-issues.md`.

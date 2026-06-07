@@ -14256,37 +14256,105 @@ fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `bpf(cmd, attr, size)`.
+///
+/// ## Batch 455 — narrow the EINVAL gate to Linux's real switch range
+///
+/// Sister fix to batch 454 (keyctl): the previous forward-compat
+/// buffer accepted cmd values up to 64, returning ENOSYS for the
+/// 37..=64 range where Linux's switch `default` arm returns EINVAL.
+/// The translator-only directive overrides the "what if Linux adds
+/// new cmds" argument: we match Linux's CURRENT ABI surface, and
+/// a future cmd addition will need a one-line bump.
+///
+/// Verbatim Linux 6.x source (`kernel/bpf/syscall.c::__sys_bpf`):
+///
+/// ```text
+///   static int __sys_bpf(int cmd, bpfptr_t uattr, unsigned int size)
+///   {
+///       union bpf_attr attr;
+///       int err;
+///       ...
+///       err = bpf_check_uarg_tail_zero(uattr, sizeof(attr), size);
+///       if (err) return err;
+///       size = min_t(u32, size, sizeof(attr));
+///       memset(&attr, 0, sizeof(attr));
+///       if (copy_from_bpfptr(&attr, uattr, size) != 0)
+///           return -EFAULT;
+///       err = security_bpf(cmd, &attr, size);
+///       if (err < 0) return err;
+///       switch (cmd) {
+///       case BPF_MAP_CREATE:        // 0
+///           err = map_create(&attr); break;
+///       ...
+///       case BPF_TOKEN_CREATE:      // 36
+///           err = token_create(&attr); break;
+///       default:
+///           err = -EINVAL;
+///           break;
+///       }
+///       return err;
+///   }
+/// ```
+///
+/// `include/uapi/linux/bpf.h` defines 37 commands,
+/// `BPF_MAP_CREATE = 0` through `BPF_TOKEN_CREATE = 36`
+/// (`__MAX_BPF_CMD = 37` is the sentinel).  Anything outside `[0, 36]`
+/// reaches the switch's `default` arm and returns `-EINVAL`.
+///
+/// ### Linux gate order
+///
+///   1. `bpf_check_uarg_tail_zero(uattr, sizeof(bpf_attr), size)`:
+///        - `size > PAGE_SIZE`           -> `-E2BIG`
+///        - `size <= sizeof(attr)`       -> `0`  (no buffer touch)
+///        - `size > sizeof(attr)`: scan trailing bytes for zero
+///          (`EFAULT` / `E2BIG`)
+///   2. `size = min(size, sizeof(attr))`
+///   3. `memset(&attr, 0); copy_from_bpfptr(&attr, uattr, size)`
+///      -> `-EFAULT`.  Note: copy with `size=0` is a no-op success,
+///      so `NULL` is FINE when `size=0`.
+///   4. `switch (cmd) ... default -> -EINVAL`
+///
+/// ### Divergence table
+///
+/// | cmd          | Linux 6.x  | Pre-batch (455) | Why                                |
+/// |--------------|------------|-----------------|------------------------------------|
+/// | -1           | EINVAL     | EINVAL          | (already correct)                  |
+/// | 0..=36       | dispatch   | ENOSYS          | no BPF backend (stub OK)           |
+/// | **37**       | **EINVAL** | **ENOSYS**      | pre-batch threshold too lax        |
+/// | **50**       | **EINVAL** | **ENOSYS**      | pre-batch threshold too lax        |
+/// | **64**       | **EINVAL** | **ENOSYS**      | pre-batch threshold too lax        |
+/// | 65           | EINVAL     | EINVAL          | (already correct)                  |
+///
+/// ### Why this matters
+///
+/// libbpf's feature-probe walks unknown cmd numbers expecting EINVAL
+/// for "kernel switch default" — used during init to feature-detect
+/// kernel BPF extensions before issuing the real call.  ENOSYS
+/// triggers a different fallback path (assumes "kernel doesn't
+/// implement this option at all" rather than "kernel rejects this
+/// specific cmd"); the EINVAL shape is what libbpf compares against
+/// to decide which extension generation the kernel speaks.
+///
+/// ### x86_64 ABI truncation
+///
+/// `cmd` is declared as C `int` in `SYSCALL_DEFINE3`.  The AMD64
+/// syscall ABI delivers it in rdi without zero/sign-extension, so
+/// only the low 32 bits are defined.  `args.arg0 as i32` truncates
+/// to the view Linux sees; the `< 0 || > 36` gate runs against the
+/// signed 32-bit value.
+///
+/// ### Pre-batch divergences fixed in earlier rounds (kept)
+///
+///   * `size == 0` was rejected with EINVAL upfront, but Linux
+///     treats `size=0` as a valid no-op copy.  Drop the gate.
+///   * `cmd > 64` was rejected BEFORE the size check, so
+///     `(cmd=garbage, size=huge)` saw EINVAL where Linux returns
+///     E2BIG.  Size fires first.
+///   * `arg1 == NULL` was rejected with EFAULT even when `size == 0`,
+///     so `bpf(cmd, NULL, 0)` saw EFAULT where Linux's
+///     `copy_from_bpfptr` happily copies zero bytes.  Skip the NULL
+///     check when `size == 0`.
 fn sys_bpf(args: &SyscallArgs) -> SyscallResult {
-    // Linux gate order in kernel/bpf/syscall.c::__sys_bpf:
-    //
-    //   1. bpf_check_uarg_tail_zero(uattr, sizeof(bpf_attr), size):
-    //        - size > PAGE_SIZE              -> -E2BIG
-    //        - size <= sizeof(attr)          -> 0  (no buffer touch)
-    //        - size > sizeof(attr): scan trailing bytes for zero
-    //          (EFAULT / E2BIG)
-    //   2. size = min(size, sizeof(attr))
-    //   3. memset(&attr, 0); copy_from_bpfptr(&attr, uattr, size)
-    //      -> -EFAULT.  Note: copy with size=0 is a no-op success,
-    //      so NULL is FINE when size=0.
-    //   4. switch (cmd) ... default -> -EINVAL
-    //
-    // Linux 6.10 defines BPF_MAP_CREATE=0..BPF_TOKEN_CREATE=36 in
-    // include/uapi/linux/bpf.h.  Cap at 64 for a forward-compat buffer
-    // so future cmds added in 6.11+ aren't pre-rejected, but wildly
-    // bogus values surface EINVAL rather than ENOSYS.
-    //
-    // Pre-batch divergences fixed here:
-    //   * size == 0 was rejected with EINVAL upfront, but Linux
-    //     treats size=0 as a valid no-op copy (and the per-cmd
-    //     handler decides whether the resulting all-zero bpf_attr
-    //     is acceptable).  Drop the unconditional gate.
-    //   * cmd > 64 was rejected BEFORE the size check, so a probe
-    //     with (cmd=garbage, size=huge) saw EINVAL where Linux
-    //     returns E2BIG.  Reorder so size fires first.
-    //   * arg1==NULL was rejected with EFAULT even when size==0,
-    //     so a probe doing bpf(cmd, NULL, 0) saw EFAULT where
-    //     Linux's copy_from_bpfptr happily copies zero bytes.
-    //     Skip the NULL check when size==0.
     let size = args.arg2 as usize;
     const LINUX_PAGE_SIZE: usize = 4096;
     if size > LINUX_PAGE_SIZE {
@@ -14300,12 +14368,22 @@ fn sys_bpf(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
+    // Linux signature: `SYSCALL_DEFINE3(bpf, int, cmd, ...)`.
+    // Truncate rdi to its declared 32-bit width before the bound check.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let cmd = args.arg0 as i32;
-    if cmd < 0 || cmd > 64 {
+    // Linux's switch covers cases 0..=36 (BPF_MAP_CREATE through
+    // BPF_TOKEN_CREATE).  Anything else hits the `default` arm.
+    const BPF_TOKEN_CREATE: i32 = 36;
+    if cmd < 0 || cmd > BPF_TOKEN_CREATE {
         // Matches Linux's switch-default -> -EINVAL for unknown cmds.
         return linux_err(errno::EINVAL);
     }
+    // In-range cmd with no BPF backend: ENOSYS is acceptable stub
+    // behaviour (each Linux handler would otherwise dispatch to a
+    // map/prog/link operation that returns EPERM without CAP_BPF /
+    // CAP_SYS_ADMIN; modelling each per-cmd answer is a bigger
+    // change than this batch covers).
     linux_err(errno::ENOSYS)
 }
 
@@ -47409,7 +47487,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: bpf not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // bpf(cmd=100, attr, 8) -> EINVAL (cmd > forward-compat cap of 64).
+        // bpf(cmd=100, attr, 8) -> EINVAL (cmd well past BPF_TOKEN_CREATE).
         let a = SyscallArgs {
             arg0: 100,
             arg1: attr.as_ptr() as u64,
@@ -47418,6 +47496,67 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::BPF, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: bpf(cmd=100) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 455: bpf(cmd=36=BPF_TOKEN_CREATE, attr, 8) -> ENOSYS.
+        // Linux's highest defined cmd; still inside the switch.
+        let a = SyscallArgs {
+            arg0: 36,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!("[syscall/linux]   FAIL: bpf(cmd=36) not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 455: bpf(cmd=37, attr, 8) -> EINVAL.  First cmd past
+        // BPF_TOKEN_CREATE; pre-batch threshold of 64 returned ENOSYS.
+        let a = SyscallArgs {
+            arg0: 37,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: bpf(cmd=37) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 455: bpf(cmd=50, attr, 8) -> EINVAL.  Mid the old
+        // forward-compat zone the pre-batch code accepted as ENOSYS.
+        let a = SyscallArgs {
+            arg0: 50,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: bpf(cmd=50) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 455: bpf(cmd=64, attr, 8) -> EINVAL.  Upper edge of
+        // the old forward-compat zone.
+        let a = SyscallArgs {
+            arg0: 64,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: bpf(cmd=64) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 455: bpf(cmd=0x1_0000_0025, attr, 8) -> EINVAL.  ABI
+        // truncation probe: high bit 32 + low=37 truncates via `as i32`
+        // to 37, which Linux's switch default rejects.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0025,
+            arg1: attr.as_ptr() as u64,
+            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::BPF, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: bpf(high|37) not EINVAL");
             return Err(KernelError::InternalError);
         }
         // bpf(0, attr, 8192) -> E2BIG (size > PAGE_SIZE).
@@ -47460,7 +47599,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   bpf size-first / NULL-iff-size>0 / cmd-range: OK"
+            "[syscall/linux]   bpf size-first / NULL-iff-size>0 / switch-default EINVAL at cmd>=37: OK"
         );
         // perf_event_open(NULL, flags=0) -> EFAULT (flag mask passes,
         // then NULL faults during get_user-equivalent header read).

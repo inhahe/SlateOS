@@ -45814,3 +45814,62 @@ Summary stamps:
 
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`), BOOT_OK
 detected.  Both batch-498 stamps emitted to serial-test.txt.
+
+---
+
+## Batch 499 — Linux ABI fidelity: io_uring_register() opcode cap tightened from 31 to IORING_REGISTER_LAST=26 to match Linux v6.6 (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_io_uring_register` cap
+constant + 4 new boot probes).
+
+**Divergence.** Pre-batch the opcode cap was `opcode > 31`, leaving a
+forward-compat buffer for future Linux releases.  Linux v6.6
+`include/uapi/linux/io_uring.h` defines:
+
+```c
+IORING_REGISTER_FILE_ALLOC_RANGE = 25,
+IORING_REGISTER_LAST,             /* = 26 (next enum value) */
+IORING_REGISTER_USE_REGISTERED_RING = 1U << 31,
+```
+
+and `io_uring/io_uring.c::SYSCALL_DEFINE4` line 4578 enforces:
+
+```c
+opcode &= ~IORING_REGISTER_USE_REGISTERED_RING;
+if (opcode >= IORING_REGISTER_LAST)
+    return -EINVAL;
+```
+
+The translator-only directive overrides the forward-compat argument:
+we match Linux's CURRENT v6.6 ABI surface; a future opcode addition
+needs a one-line bump.  Divergence table:
+
+| opcode | Linux v6.6 | Pre-batch 499 |
+|--------|------------|---------------|
+| 25     | -> EBADF   | -> EBADF      | FILE_ALLOC_RANGE (last valid)
+| **26** | **EINVAL** | **-> EBADF**  | LAST sentinel
+| **27..=31** | **EINVAL** | **-> EBADF** | reserved enum gap
+| 32+    | EINVAL     | EINVAL        | (was already rejected)
+
+(`-> EBADF` means "passes opcode cap, fdget fails on bogus fd".)
+
+**Fix.** Replace `opcode > 31` with `opcode >= IORING_REGISTER_LAST`
+where `IORING_REGISTER_LAST = 26` is a named const matching the v6.6
+enum literal.  No state changes; pure ABI surface alignment.
+
+**Boot probes added.** Four-probe cluster covering the boundary:
+
+1. `opcode=25` (FILE_ALLOC_RANGE) -> EBADF (passes cap)
+2. `opcode=26` (LAST sentinel) -> EINVAL
+3. `opcode=31` (highest value pre-batch let through) -> EINVAL
+4. `opcode=(1<<31)|26` (USE_REGISTERED_RING set, base=LAST after
+   unmask) -> EINVAL — confirms the cap fires AFTER the USE_REG_RING
+   bit-clearing, matching Linux's `opcode &= ~...; if (opcode >= LAST)`
+   sequencing.
+
+Summary stamp: `io_uring_register opcode cap = IORING_REGISTER_LAST=26
+(batch 499): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 44.7s).
+
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).

@@ -15161,17 +15161,40 @@ fn sys_io_uring_enter(args: &SyscallArgs) -> SyscallResult {
 /// `EBADF` is what every probe sees once the opcode check passes —
 /// matching Linux's "fdget fails on bogus fd" terminal.
 fn sys_io_uring_register(args: &SyscallArgs) -> SyscallResult {
-    // Linux 6.10 has opcodes 0..=31 (REGISTER_PBUF_RING=22, etc.) plus
-    // bit 31 (`IORING_REGISTER_USE_REGISTERED_RING = 1u32 << 31`) which
-    // OR's onto the opcode to indicate `fd` refers to a registered-ring
-    // index instead of a raw fd.  The opcode "id" itself is bits 0..=29
-    // — we cap at 31 to leave a small forward-compat buffer without
-    // accepting wildly-bogus values.
+    // Linux v6.6 `include/uapi/linux/io_uring.h` defines the opcode
+    // enum ending in:
+    //   IORING_REGISTER_FILE_ALLOC_RANGE = 25,
+    //   IORING_REGISTER_LAST,            // = 26 (next enum value)
+    //   IORING_REGISTER_USE_REGISTERED_RING = 1U << 31,
+    // and `io_uring/io_uring.c::SYSCALL_DEFINE4` (line 4578) rejects
+    //   `if (opcode >= IORING_REGISTER_LAST) return -EINVAL;`
+    // — i.e. opcodes 26..=(1<<31)-1 are EINVAL.
+    //
+    // ## Batch 499 — tighten opcode cap from 31 to 26 to match v6.6
+    //
+    // Pre-batch we capped at `opcode > 31` as a forward-compat buffer
+    // (newer Linux releases keep extending the enum).  The translator-
+    // only directive overrides that: we match Linux's CURRENT v6.6
+    // ABI surface, and any future opcode addition needs a one-line
+    // bump.  Divergence table:
+    //
+    // | opcode | Linux v6.6 | Pre-batch 499 |
+    // |--------|------------|---------------|
+    // |  25    | -> EBADF   | -> EBADF      | (FILE_ALLOC_RANGE, last valid)
+    // |  26    | EINVAL     | -> EBADF      | (LAST sentinel)
+    // |  27-31 | EINVAL     | -> EBADF      |
+    // |  32    | EINVAL     | EINVAL        | (was already rejected)
+    // | 64,200 | EINVAL     | EINVAL        | (was already rejected)
+    //
+    // (`-> EBADF` means "passes the opcode cap, then fdget fails on
+    // a bogus fd".)  Boot probes for opcodes 26 and 31 now stamp
+    // EINVAL where they previously stamped EBADF.
     const IORING_REGISTER_USE_REGISTERED_RING: u32 = 1u32 << 31;
+    const IORING_REGISTER_LAST: u32 = 26;
     #[allow(clippy::cast_possible_truncation)]
     let raw_op = args.arg1 as u32;
     let opcode = raw_op & !IORING_REGISTER_USE_REGISTERED_RING;
-    if opcode > 31 {
+    if opcode >= IORING_REGISTER_LAST {
         return linux_err(errno::EINVAL);
     }
     // Batch 498: Linux v6.6 io_uring/io_uring.c::SYSCALL_DEFINE4
@@ -50754,6 +50777,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   io_uring_register fdget-first gate order (Linux v6.6): OK"
+        );
+
+        // Batch 499: opcode cap tightened from 31 to IORING_REGISTER_LAST=26
+        // to match Linux v6.6 include/uapi/linux/io_uring.h.  Pre-batch
+        // opcodes 26..=31 fell through the cap (cap was `>31`) and
+        // surfaced EBADF from the fd step; Linux returns EINVAL at the
+        // opcode-range gate before fdget.
+        //
+        // (t) opcode=25 (FILE_ALLOC_RANGE, last valid in v6.6) -> falls
+        //     through cap, fdget fails -> EBADF.  Baseline preserved.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 25, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(opcode=25=FILE_ALLOC_RANGE) not EBADF (batch 499)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (u) opcode=26 (LAST sentinel) -> EINVAL (was EBADF pre-batch).
+        let a = SyscallArgs {
+            arg0: 99, arg1: 26, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(opcode=26=LAST) not EINVAL (batch 499)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (v) opcode=31 (highest value that pre-batch let through the
+        //     `>31` cap) -> EINVAL post-batch.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 31, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(opcode=31) not EINVAL (batch 499)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (w) opcode=(1<<31)|26 — USE_REGISTERED_RING bit masked off,
+        //     base op=26 which is LAST -> EINVAL (was EBADF pre-batch).
+        //     Demonstrates the cap fires after the USE_REGISTERED_RING
+        //     unmask, matching Linux v6.6's
+        //     `opcode &= ~IORING_REGISTER_USE_REGISTERED_RING; if
+        //     (opcode >= IORING_REGISTER_LAST) return -EINVAL;`
+        //     sequencing.
+        let a = SyscallArgs {
+            arg0: 99, arg1: (1u64 << 31) | 26, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_REGISTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_register(opcode=USE_REG_RING|26) not EINVAL (batch 499)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   io_uring_register opcode cap = IORING_REGISTER_LAST=26 (batch 499): OK"
         );
     }
 

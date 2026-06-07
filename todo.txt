@@ -43947,3 +43947,137 @@ Final stamp (line 699 of build/serial-test.txt):
 
 **Build:** `cargo build -p kernel` clean, 45.23s.
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 486 — xattr path-family empty-path → ENOENT (2026-06-07)
+
+### Linux source (v6.6, fs/xattr.c)
+
+`setxattr` (and the entire path-family: lsetxattr, getxattr, lgetxattr,
+listxattr, llistxattr, removexattr, lremovexattr) reaches its xattr
+work only after `user_path_at()` succeeds.  `user_path_at()` calls
+`getname_flags(name, ...)` which, at fs/namei.c:191-200, returns
+`-ENOENT` for an empty pathname (no `LOOKUP_EMPTY` for setxattr et al):
+
+```c
+// fs/namei.c v6.6
+result = __getname();
+if (unlikely(!result))
+    return ERR_PTR(-ENOMEM);
+
+kname = (char *)result->iname;
+result->name = kname;
+len = strncpy_from_user(kname, filename, EMBEDDED_NAME_MAX);
+if (unlikely(len < 0)) { retval = len; goto error; }
+if (unlikely(!len)) {
+    if (!(flags & LOOKUP_EMPTY)) { retval = -ENOENT; goto error; }
+}
+```
+
+setxattr is implemented as (fs/xattr.c v6.6 ~line 661):
+
+```c
+static int path_setxattr(const char __user *pathname,
+                         const char __user *name, const void __user *value,
+                         size_t size, int flags, unsigned int lookup_flags)
+{
+    struct path path;
+    int error;
+retry:
+    error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
+    if (error)  // ← empty pathname returns ENOENT here
+        return error;
+    ...
+}
+```
+
+So `setxattr("", name, ...)` returns `-ENOENT` *before* any
+flag/name validation, *before* the EOPNOTSUPP terminal we emit.
+Same shape for lsetxattr/getxattr/lgetxattr/listxattr/llistxattr/
+removexattr/lremovexattr.
+
+### Divergence (pre-batch)
+
+| call                 | pre-batch (empty path) | Linux v6.6 | post-batch |
+|----------------------|------------------------|------------|------------|
+| setxattr             | EOPNOTSUPP             | ENOENT     | ENOENT     |
+| lsetxattr            | EOPNOTSUPP             | ENOENT     | ENOENT     |
+| getxattr             | EOPNOTSUPP             | ENOENT     | ENOENT     |
+| lgetxattr            | EOPNOTSUPP             | ENOENT     | ENOENT     |
+| listxattr            | 0                      | ENOENT     | ENOENT     |
+| llistxattr           | 0                      | ENOENT     | ENOENT     |
+| removexattr          | EOPNOTSUPP             | ENOENT     | ENOENT     |
+| lremovexattr         | EOPNOTSUPP             | ENOENT     | ENOENT     |
+
+### Why it matters
+
+The empty-path → ENOENT contract is depended on by:
+- glibc/musl `setxattr(3)`/`getxattr(3)` wrappers — propagate raw
+  errno to callers; ENOENT is the canonical "no such pathname" signal.
+- coreutils — `cp -a`, `mv --preserve=xattr` skip xattr migration
+  when source pathname resolution returns ENOENT (a quietly missing
+  source is not an error).
+- attr(1) toolkit (`setfattr`, `getfattr`) — distinguishes ENOENT
+  (path gone) from EOPNOTSUPP (fs doesn't support xattrs) when
+  emitting diagnostics.
+- LTP `syscalls/setxattr*`, `getxattr*`, `removexattr*` series —
+  multiple tests pass empty path and assert ENOENT.
+- dpkg/rpm restoration scripts — when reapplying xattrs from a
+  manifest, a vanished file should yield ENOENT so the script can
+  log "file removed, skipping" rather than aborting on EOPNOTSUPP.
+- systemd-tmpfiles — uses xattr ops on configured paths; ENOENT
+  for empty/missing is the recoverable case.
+- audit subsystem — xattr-targeting rules use the errno to decide
+  whether to flag a violation; ENOENT is benign.
+
+### Fix
+
+1. Modified `xattr_validate_path_name` (line 16613) to route the
+   path argument through `check_path_str_nonempty` (batch 481
+   helper) *before* the name-pointer checks.  This surfaces ENOENT
+   on empty path with verbatim Linux ordering (path validation
+   before name validation, since `user_path_at` runs ahead of any
+   xattr-specific gate).
+2. Modified `xattr_list_path` (line 16743) the same way — the
+   list-family has no name argument, so only the path goes through
+   the helper.
+3. Updated `check_path_str_nonempty`'s doc comment to add the
+   xattr family (setxattr, lsetxattr, getxattr, lgetxattr,
+   listxattr, llistxattr, removexattr, lremovexattr) as batch-486
+   consumers.
+
+No syscall handler body required modification — both helpers are
+already chained at the head of every path-xattr handler.
+
+### Probe retrofit
+
+Replaced raw 0x1000 path sentinels in the xattr probe block with a
+planted local buffer pattern (matches batches 481/483/485):
+
+```rust
+let xattr_path_ne: [u8; 2] = *b"x\0";
+let xattr_path_e: [u8; 1] = [0u8];
+core::hint::black_box(&xattr_path_ne);
+core::hint::black_box(&xattr_path_e);
+let xa_p_ne = xattr_path_ne.as_ptr() as u64;
+let xa_p_e = xattr_path_e.as_ptr() as u64;
+```
+
+The raw 0x1000 sentinels would page-fault now that
+`check_path_str_nonempty` actually dereferences the first byte
+(rather than merely calling `validate_user_read`, which is a no-op
+in kernel context).  All existing non-empty probes were retargeted
+to `xa_p_ne`.  Added 8 new empty-path probes (one per path-family
+call) all asserting `-ENOENT`.
+
+Family stamp (build/serial-test.txt line 560):
+
+```
+[syscall/linux]   xattr path-family empty-path -> ENOENT (Linux v6.6
+ fs/xattr.c::user_path_at -> getname empty -> -ENOENT before xattr
+ gates): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 43.38s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

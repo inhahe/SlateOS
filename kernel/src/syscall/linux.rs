@@ -13369,7 +13369,10 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
 /// `sys_mkdirat`.  Batch 483 extended to `sys_chmod`, `sys_chown`,
 /// `sys_lchown`, and `sys_fchownat` (non-`AT_EMPTY_PATH` branch).
 /// Batch 484 extended to `sys_fchmodat`.  Batch 485 extended to
-/// `sys_fchmodat2` (non-`AT_EMPTY_PATH` branch).
+/// `sys_fchmodat2` (non-`AT_EMPTY_PATH` branch).  Batch 486 extended
+/// to the path-xattr family via `xattr_validate_path_name` and
+/// `xattr_list_path` (setxattr/lsetxattr/getxattr/lgetxattr/
+/// listxattr/llistxattr/removexattr/lremovexattr).
 fn check_path_str_nonempty(ptr: u64) -> Result<(), i32> {
     if ptr == 0 {
         return Err(errno::EFAULT);
@@ -16610,12 +16613,21 @@ fn sys_process_mrelease(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// Helper: validate path + name pointers for path-based xattr ops.
+///
+/// Path empty-path → ENOENT (batch 486): Linux's `fs/xattr.c::path_*`
+/// (setxattr/getxattr/listxattr/removexattr) all start with
+/// `user_path_at(AT_FDCWD, pathname, lookup_flags, &path)` whose
+/// `getname()` returns -ENOENT for a zero-length user-string before
+/// any xattr-specific gates fire (flags/size/EOPNOTSUPP/ENODATA).
+/// Routes through `check_path_str_nonempty` to surface ENOENT for
+/// empty paths, EFAULT for NULL, then validates the name pointer
+/// stub-style.
 fn xattr_validate_path_name(path: u64, name: u64) -> Result<(), SyscallResult> {
-    if path == 0 || name == 0 {
-        return Err(linux_err(errno::EFAULT));
+    if let Err(e) = check_path_str_nonempty(path) {
+        return Err(linux_err(e));
     }
-    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
-        return Err(linux_err(linux_errno_for(e)));
+    if name == 0 {
+        return Err(linux_err(errno::EFAULT));
     }
     if let Err(e) = crate::mm::user::validate_user_read(name, 1) {
         return Err(linux_err(linux_errno_for(e)));
@@ -16741,11 +16753,12 @@ fn sys_fgetxattr(args: &SyscallArgs) -> SyscallResult {
 }
 
 fn xattr_list_path(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
+    // Batch 486: Linux's listxattr/llistxattr route through
+    // user_path_at → getname → empty-path -> -ENOENT before any
+    // xattr-specific behaviour (which would otherwise return 0 for
+    // an FS-with-no-xattrs).
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
     let size = args.arg2 as usize;
     if args.arg1 != 0 && size > 0 {
@@ -51800,6 +51813,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // xattr / quota / module / namespace / mount / swap / reboot /
     // syslog — input validation plus principled errno.
     {
+        // Batch 486: path-xattr family routes the path arg through
+        // check_path_str_nonempty (added by batch 481 helper, extended
+        // here) to surface ENOENT for empty paths before any xattr-
+        // specific gate.  Plant kernel-resident path buffers; legacy
+        // 0x1000 sentinel would page-fault inside the helper.  Name
+        // pointer keeps raw 0x2000 sentinel since xattr_validate_path_name
+        // only stub-validates it.
+        let xattr_path_ne: [u8; 2] = *b"x\0";
+        let xattr_path_e: [u8; 1] = [0u8];
+        core::hint::black_box(&xattr_path_ne);
+        core::hint::black_box(&xattr_path_e);
+        let xa_p_ne = xattr_path_ne.as_ptr() as u64;
+        let xa_p_e = xattr_path_e.as_ptr() as u64;
+
         // setxattr(NULL,_,_,_,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -51808,8 +51835,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: setxattr(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // setxattr("", _, _, _, _) -> ENOENT (Linux user_path_at empty).
+        let a = SyscallArgs { arg0: xa_p_e, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETXATTR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: setxattr(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
         // setxattr(path,name,_,_,_) -> EOPNOTSUPP.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETXATTR, &a).value
             != -i64::from(errno::EOPNOTSUPP) {
@@ -51819,7 +51854,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // setxattr with bad flags (bit outside XATTR_CREATE|REPLACE)
         // -> EINVAL.  Pre-batch returned EOPNOTSUPP from the
         // terminal because no flags gate existed.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 4, arg5: 0 };
         if dispatch_linux(nr::SETXATTR, &a).value
             != -i64::from(errno::EINVAL) {
@@ -51832,7 +51867,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // legal at this layer; both bits are in the mask.  Falls
         // through to terminal EOPNOTSUPP.  (vfs_setxattr enforces
         // mutual exclusion later as EEXIST/ENODATA on a real FS.)
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 3, arg5: 0 };
         if dispatch_linux(nr::SETXATTR, &a).value
             != -i64::from(errno::EOPNOTSUPP) {
@@ -51842,7 +51877,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // setxattr with size > XATTR_SIZE_MAX (65536) -> E2BIG.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 70_000,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 70_000,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETXATTR, &a).value
             != -i64::from(errno::E2BIG) {
@@ -51852,7 +51887,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // setxattr with size = 65537 (one past max) -> E2BIG.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 65537,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 65537,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETXATTR, &a).value
             != -i64::from(errno::E2BIG) {
@@ -51863,7 +51898,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         // setxattr with size = 65536 (at the boundary) -> EOPNOTSUPP
         // (boundary inclusive; not E2BIG).
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 65536,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 65536,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETXATTR, &a).value
             != -i64::from(errno::EOPNOTSUPP) {
@@ -51894,7 +51929,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // lsetxattr also shares xattr_set_path -> bad flags -> EINVAL.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0x100, arg5: 0 };
         if dispatch_linux(nr::LSETXATTR, &a).value
             != -i64::from(errno::EINVAL) {
@@ -51903,32 +51938,91 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // lsetxattr("", _, ...) -> ENOENT (shares path gate).
+        let a = SyscallArgs { arg0: xa_p_e, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LSETXATTR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: lsetxattr(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
             "[syscall/linux]   xattr set flags/E2BIG gating: OK"
         );
         // getxattr(path,name,_,_) -> ENODATA.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::GETXATTR, &a).value
             != -i64::from(errno::ENODATA) {
             serial_println!("[syscall/linux]   FAIL: getxattr not ENODATA");
             return Err(KernelError::InternalError);
         }
+        // getxattr("",_,_,_) -> ENOENT.
+        let a = SyscallArgs { arg0: xa_p_e, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETXATTR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: getxattr(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // lgetxattr("",_,_,_) -> ENOENT.
+        let a = SyscallArgs { arg0: xa_p_e, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LGETXATTR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: lgetxattr(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
         // listxattr(path, NULL, 0) -> 0 (empty list).
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LISTXATTR, &a).value != 0 {
             serial_println!("[syscall/linux]   FAIL: listxattr not 0");
             return Err(KernelError::InternalError);
         }
+        // listxattr("", NULL, 0) -> ENOENT.
+        let a = SyscallArgs { arg0: xa_p_e, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LISTXATTR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: listxattr(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // llistxattr("", NULL, 0) -> ENOENT.
+        let a = SyscallArgs { arg0: xa_p_e, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LLISTXATTR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: llistxattr(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
         // removexattr -> EOPNOTSUPP.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: xa_p_ne, arg1: 0x2000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::REMOVEXATTR, &a).value
             != -i64::from(errno::EOPNOTSUPP) {
             serial_println!("[syscall/linux]   FAIL: removexattr not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        // removexattr("", _) -> ENOENT.
+        let a = SyscallArgs { arg0: xa_p_e, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::REMOVEXATTR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: removexattr(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // lremovexattr("", _) -> ENOENT.
+        let a = SyscallArgs { arg0: xa_p_e, arg1: 0x2000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LREMOVEXATTR, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: lremovexattr(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   xattr path-family empty-path -> ENOENT (Linux v6.6 fs/xattr.c::user_path_at -> getname empty -> -ENOENT before xattr gates): OK"
+        );
         // fgetxattr(NULL name) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

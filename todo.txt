@@ -44361,3 +44361,159 @@ Family stamp (build/serial-test.txt line 506):
 
 **Build:** `cargo build -p kernel` clean, 44.69s.
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 489 — utime family: empty-path → ENOENT, plus utimensat AT_EMPTY_PATH flag mask fix (2026-06-07)
+
+**Linux source (verbatim, v6.6 fs/utimes.c do_utimes_path):**
+
+```c
+static int do_utimes_path(int dfd, const char __user *filename,
+        struct timespec64 *times, int flags)
+{
+    struct path path;
+    int lookup_flags = 0, error;
+
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+        return -EINVAL;
+
+    if (!(flags & AT_SYMLINK_NOFOLLOW))
+        lookup_flags |= LOOKUP_FOLLOW;
+    if (flags & AT_EMPTY_PATH)
+        lookup_flags |= LOOKUP_EMPTY;
+
+retry:
+    error = user_path_at(dfd, filename, lookup_flags, &path);
+    ...
+}
+
+long do_utimes(int dfd, const char __user *filename,
+        struct timespec64 *times, int flags)
+{
+    if (filename == NULL && dfd != AT_FDCWD)
+        return do_utimes_fd(dfd, times, flags);
+    return do_utimes_path(dfd, filename, times, flags);
+}
+```
+
+`sys_utimes` (32-bit timeval) and `sys_utime` (utimbuf) both forward
+to `do_utimes(AT_FDCWD, filename, times, 0)` — flags hard-coded to
+0, so `LOOKUP_EMPTY` is never set, so getname's empty-path branch
+(fs/namei.c v6.6 line 196: `!len && !(flags & LOOKUP_EMPTY)` →
+`-ENOENT`) surfaces ENOENT for empty pathnames.  `sys_utimensat`'s
+caller-provided `flags` accept `AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH`;
+when `AT_EMPTY_PATH` is NOT set, the same ENOENT surfaces.  Same
+getname-without-LOOKUP_EMPTY mechanism as batches 481-487.
+
+**Translator divergence (pre-batch):**
+
+| Probe | Linux | Translator (pre) | Translator (post) |
+|---|---|---|---|
+| `utimes("", NULL)` | ENOENT | EROFS | ENOENT |
+| `utime("", NULL)` | ENOENT | EROFS | ENOENT |
+| `utimensat(AT_FDCWD, "", NULL, 0)` | ENOENT | EROFS | ENOENT |
+| `utimensat(_, "", NULL, AT_EMPTY_PATH)` | EROFS (FS) | EINVAL (mask) | EROFS |
+| `futimesat(AT_FDCWD, "", NULL)` | ENOENT (Linux) | ENOSYS | ENOENT |
+
+`AT_EMPTY_PATH=0x1000` was missing from `sys_utimensat`'s
+`VALID_FLAGS` mask (pre-batch only allowed `AT_SYMLINK_NOFOLLOW`),
+so callers passing the kernel-documented combo saw spurious EINVAL
+before reaching the path/FS gates.  Linux explicitly accepts
+`AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH` per do_utimes_path's mask check
+above.
+
+**Why it matters:**
+- GNU coreutils `touch -t YYYYMMDDhhmm` and `touch -d <date>` use
+  utimensat (via glibc's `__utimensat`/`utimes` wrappers).  An empty
+  argv path (e.g. `touch ''`) on Linux surfaces "touch: cannot touch
+  '': No such file or directory" because the kernel returns ENOENT;
+  pre-batch our translator returned EROFS, mis-attributing the
+  user's input error to a filesystem property.
+- glibc's `utime(3)` and `utimes(3)` POSIX wrappers (sysdeps/unix/
+  sysv/linux/utime.c, utimes.c) pass the user pathname through
+  unchanged.  The empty-path ENOENT contract is part of the POSIX
+  errno semantics LSB-conformance suites (LSB-VSX-PCTS) probe.
+- LTP `utimes/utimes01`, `utime/utime01`, and `utimensat/utimensat01`
+  explicitly verify ENOENT for the empty-string pathname case; LTP's
+  `utimensat02` verifies that `AT_EMPTY_PATH` is honoured (operates
+  on the dirfd) rather than rejected with EINVAL.
+- `systemd-tmpfiles` and `dpkg` (during `unpack`/`reassemble` of
+  conffiles) call `utimensat` to restore timestamps; the
+  AT_EMPTY_PATH mask divergence would have surfaced as EINVAL noise
+  in journal logs from any internal helper that re-derived
+  `AT_EMPTY_PATH` use from `O_PATH`-resolved fds.
+- Build systems (`make`, `ninja`, `cmake`) call `utime`/`utimes` to
+  preserve mtime when staging files; the empty-string ENOENT
+  contract is what they probe to detect "no path provided" vs. "FS
+  refused write."  cargo's `--frozen`/`--locked` lock-file mtime
+  preservation hits this path on Linux.
+
+**Fix (translator only):**
+
+1. **`sys_utimes` (line 13728)** — replaced the post-Gate-2 path
+   block (`if arg0 == 0 { EFAULT } if validate_user_read != Ok {
+   ... }`) with a single `check_path_str_nonempty(args.arg0)` call.
+   The helper subsumes NULL→EFAULT and adds empty→ENOENT.  Gate
+   ordering preserved: timeval copy / usec validation still runs
+   first (per Linux's explicit pre-do_utimes usec check), then the
+   path discriminator.
+2. **`sys_utime` (line 13772)** — same refactor.  Path check now
+   runs first (per Linux: do_utimes resolves the path; utimbuf is
+   only consulted inside vfs_utimes).  Pre-batch we did
+   `NULL→EFAULT` then `validate_user_read(path)` then
+   `validate_user_read(utimbuf, 16)`; post-batch we do
+   `check_path_str_nonempty(path)` then `validate_user_read(utimbuf,
+   16)`, matching the do_utimes order.
+3. **`sys_utimensat` (line 13624)** — two changes:
+   (a) Extended `VALID_FLAGS` mask to include `AT_EMPTY_PATH`
+       (matches `flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)`
+       in do_utimes_path).
+   (b) In the non-NULL pathname branch, split on
+       `flags & AT_EMPTY_PATH`: if set, just `validate_user_read`
+       (LOOKUP_EMPTY honoured, empty allowed); if clear, route
+       through `check_path_str_nonempty` (empty → ENOENT).  Gate
+       order preserved: timespec copy + OMIT-OMIT shortcut + flag
+       mask + path check + nsec_valid + EROFS terminal.
+4. **`sys_futimesat` (line 29940)** — replaced the
+   `NULL→EFAULT`+`validate_user_str` block with
+   `check_path_str_nonempty(path)`.  Terminal remains ENOSYS
+   (intentional fallback for glibc utimensat redirect — preserved
+   from earlier batch).
+5. **`check_path_str_nonempty` doc** — extended with the utime
+   family entry (batch 489 consumers).
+6. **Updated `sys_utimensat` doc** — Gate-3 description now cites
+   `do_utimes_path` (not just `do_utimes`) and the full mask
+   `AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH`, plus the empty-path
+   ENOENT semantic.
+
+**Probes added** (after the existing utime tv_usec gating block):
+
+- `utimes(path=planted-buf "t\0", NULL)` → EROFS (planted-buffer
+  retrofit of the pre-batch `0x1000` sentinel probe that would now
+  page-fault under check_path_str_nonempty's first-byte dereference).
+- `utime(path=planted-buf "u\0", NULL)` → EROFS (same retrofit).
+- `utimes("", NULL)` → ENOENT (empty-path discriminator).
+- `utime("", NULL)` → ENOENT.
+- `utimensat(AT_FDCWD, "", NULL, 0)` → ENOENT (LOOKUP_EMPTY not set).
+- `utimensat(AT_FDCWD, "", NULL, AT_EMPTY_PATH)` → EROFS (flag now
+  in VALID_FLAGS mask; LOOKUP_EMPTY honoured).
+- `futimesat(AT_FDCWD, "", NULL)` → ENOENT.
+
+Existing utimensat probes unaffected: the bad-flag probe at line
+48207 uses `arg3 = 0x800_0000` (bit 27, still outside the extended
+mask); the OMIT-shortcut probe with `arg1 = 0x1000` short-circuits at
+gate 2 before the path check; the bad-nsec probes use `arg1 = 0` (NULL,
+skips check); the NOW-NOW acceptance probe uses `arg1 = 0`; the int-
+truncation probes use `arg1 = 0`.  Existing futimesat probes at line
+68411-68488 use a real planted `path_buf = b"/tmp/x\0"` or
+`arg1 = 0` — both safe.
+
+**Family stamp (build/serial-test.txt):**
+
+```
+[syscall/linux]   utime family empty-path -> ENOENT (batch 489): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 1m01s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

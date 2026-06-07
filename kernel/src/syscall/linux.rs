@@ -13459,7 +13459,12 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
 /// -ENOENT : -EINVAL` terminal (fs/stat.c v6.6 line 494), which
 /// lands ahead of the d_is_symlink check; for our no-symlink FS
 /// the helper's ENOENT-on-empty / Ok-on-nonempty split matches
-/// Linux's outcome exactly.
+/// Linux's outcome exactly.  Batch 489 extended to the utime
+/// family: `sys_utimes` and `sys_utime` invoke `do_utimes` with
+/// flags=0 (LOOKUP_EMPTY never set), `sys_futimesat` likewise, and
+/// `sys_utimensat`'s non-`AT_EMPTY_PATH` branch — all four route
+/// empty paths to ENOENT via getname (fs/utimes.c v6.6
+/// do_utimes_path → user_path_at).
 fn check_path_str_nonempty(ptr: u64) -> Result<(), i32> {
     if ptr == 0 {
         return Err(errno::EFAULT);
@@ -13611,7 +13616,12 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
 ///   2. If both tv_nsec == UTIME_OMIT: return 0 **without** entering
 ///      `do_utimes` (no path resolution, no flags check, no fs
 ///      hit).  Documented as "we must not even check the path".
-///   3. `do_utimes()`: `flags & ~AT_SYMLINK_NOFOLLOW` -> -EINVAL.
+///   3. `do_utimes_path()`: `flags & ~(AT_SYMLINK_NOFOLLOW |
+///      AT_EMPTY_PATH)` -> -EINVAL (fs/utimes.c v6.6).  Then if
+///      `AT_EMPTY_PATH` not set, the path goes through `getname()`
+///      without LOOKUP_EMPTY; an empty non-NULL pathname surfaces
+///      -ENOENT (fs/namei.c v6.6 line 196 — same mechanism as the
+///      symlink / link / readlink / utimes family).
 ///   4. Path resolution → `vfs_utimes()`: `nsec_valid()` for each
 ///      entry (accepts UTIME_NOW, UTIME_OMIT, or [0, NSEC_PER_SEC))
 ///      -> -EINVAL.
@@ -13637,6 +13647,7 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
     // times must still return 0).  Ninth instance of the *at int-flags
     // truncation pattern after batches 308-315.
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
     const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW;
     // UAPI <linux/stat.h>: ((1<<30)-1) and ((1<<30)-2).
     const UTIME_NOW: i64 = 0x3fff_ffff;
@@ -13674,18 +13685,45 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
     } else {
         None
     };
-    // Gate 3: do_utimes flag check (32-bit width after int narrowing).
+    // Gate 3: do_utimes_path flag check (32-bit width after int
+    // narrowing).  Linux accepts AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH
+    // (fs/utimes.c v6.6 do_utimes_path: `if (flags &
+    // ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;`).
+    // Pre-batch (489 and earlier) we omitted AT_EMPTY_PATH from
+    // VALID_FLAGS, so callers passing AT_EMPTY_PATH (the kernel-
+    // documented way to utimes a magic-link target referenced by
+    // dirfd with empty pathname) saw spurious EINVAL.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let flags_i32 = args.arg3 as i32;
     #[allow(clippy::cast_sign_loss)]
     let flags = flags_i32 as u32;
-    if flags & !VALID_FLAGS != 0 {
+    if flags & !(VALID_FLAGS | AT_EMPTY_PATH) != 0 {
         return linux_err(errno::EINVAL);
     }
-    // path may legitimately be NULL: operate on dirfd directly.
+    // Gate 4: path may legitimately be NULL (do_utimes routes NULL
+    // filename to do_utimes_fd).  Non-NULL paths go through getname
+    // in user_path_at — empty path surfaces -ENOENT unless
+    // LOOKUP_EMPTY is set (which do_utimes_path enables only when
+    // AT_EMPTY_PATH is in flags).  Pre-batch we only checked NULL
+    // and validated read of the first byte, so empty non-NULL paths
+    // without AT_EMPTY_PATH fell through to EROFS, masking Linux's
+    // input-shape ENOENT diagnostic.  Batch 489.
     if args.arg1 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-            return linux_err(linux_errno_for(e));
+        if flags & AT_EMPTY_PATH != 0 {
+            // LOOKUP_EMPTY honoured: empty allowed; just validate
+            // readability so callers passing an unreadable pointer
+            // still see EFAULT (matches user_path_at's
+            // strncpy_from_user → EFAULT path).
+            if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+                return linux_err(linux_errno_for(e));
+            }
+        } else {
+            // No LOOKUP_EMPTY: empty path → ENOENT via getname's
+            // `!len && !(flags & LOOKUP_EMPTY)` branch (fs/namei.c
+            // v6.6 line 196).
+            if let Err(e) = check_path_str_nonempty(args.arg1) {
+                return linux_err(e);
+            }
         }
     }
     // Gate 4: vfs_utimes nsec_valid (accepts UTIME_NOW, UTIME_OMIT,
@@ -13755,13 +13793,15 @@ fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::EINVAL);
         }
     }
-    // Gate 3: do_utimes path resolution.  NULL filename surfaces
-    // EFAULT in user_path_at_empty.
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
+    // Gate 3: do_utimes path resolution via getname (no LOOKUP_EMPTY:
+    // sys_utimes calls do_utimes with flags=0, so AT_EMPTY_PATH /
+    // LOOKUP_EMPTY are never honoured).  NULL → EFAULT, empty → ENOENT
+    // via fs/namei.c v6.6 getname_flags line 196 (`!len && !(flags &
+    // LOOKUP_EMPTY)` → -ENOENT).  Pre-batch we accepted empty non-NULL
+    // and fell through to EROFS, masking the input-shape diagnostic.
+    // Batch 489.
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
     // Gate 4: mnt_want_write -> EROFS (terminal).
     linux_err(errno::EROFS)
@@ -13769,18 +13809,27 @@ fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
 
 /// `utime(path, buf)` — `struct utimbuf { time_t actime; time_t modtime; }`
 /// = 16 bytes.
+///
+/// Linux dispatches via `do_utimes(AT_FDCWD, filename, times, 0)` in
+/// `fs/utimes.c::SYSCALL_DEFINE2(utime32, ...)` / `utime`.  Flag 0
+/// means LOOKUP_EMPTY is not set, so the same `getname_flags` empty
+/// path → -ENOENT path applies (fs/namei.c v6.6 line 196).  Pre-
+/// batch (489 and earlier) accepted empty non-NULL filename and fell
+/// through to EROFS.  Batch 489 routes the path through
+/// `check_path_str_nonempty` so the input-shape diagnostic is
+/// preserved before the read-only-FS terminal.
 fn sys_utime(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 {
-        return linux_err(errno::EFAULT);
+    // Gate 1: path resolution via getname (no LOOKUP_EMPTY).
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
+    // Gate 2: utimbuf validation when non-NULL.
     if args.arg1 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 16) {
             return linux_err(linux_errno_for(e));
         }
     }
+    // Gate 3: mnt_want_write -> EROFS (terminal).
     linux_err(errno::EROFS)
 }
 
@@ -29956,12 +30005,15 @@ fn sys_futimesat(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::EINVAL);
         }
     }
-    // Gate 3: do_utimes path resolution.
-    if path == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = validate_user_str(path) {
-        return linux_err(linux_errno_for(e));
+    // Gate 3: do_utimes path resolution via getname (no LOOKUP_EMPTY:
+    // sys_futimesat calls do_utimes with flags=0).  NULL → EFAULT,
+    // empty → ENOENT (fs/namei.c v6.6 line 196).  Batch 489 extends
+    // this discrimination to the futimesat path; pre-batch we
+    // accepted empty non-NULL and fell through to ENOSYS, hiding the
+    // input-shape diagnostic from callers probing argument validity
+    // before the glibc fallback path kicked in.
+    if let Err(e) = check_path_str_nonempty(path) {
+        return linux_err(e);
     }
     // Terminal: ENOSYS so glibc falls back to utimensat (intentional
     // diverge from Linux's EROFS — see doc comment).
@@ -48387,9 +48439,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: utimes(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // utimes(path, NULL) -> EROFS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // utimes(path, NULL) -> EROFS.  Batch 489 routes empty paths
+        // through check_path_str_nonempty which dereferences the
+        // first byte; pre-batch this probe used the raw 0x1000
+        // sentinel which page-faults under the kernel-context
+        // bypass.  Plant a real non-empty buffer so the empty-path
+        // discriminator passes and the EROFS terminal still
+        // surfaces.
+        let ut_p_ne: [u8; 2] = *b"t\0";
+        core::hint::black_box(&ut_p_ne);
+        let a = SyscallArgs { arg0: ut_p_ne.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::UTIMES, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: utimes not EROFS");
@@ -48465,14 +48525,111 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: utime(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // utime(path, NULL) -> EROFS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // utime(path, NULL) -> EROFS.  Same planted-buffer reasoning
+        // as utimes above (batch 489 dereferences the first byte).
+        let utm_p_ne: [u8; 2] = *b"u\0";
+        core::hint::black_box(&utm_p_ne);
+        let a = SyscallArgs { arg0: utm_p_ne.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::UTIME, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: utime not EROFS");
             return Err(KernelError::InternalError);
         }
+
+        // ------------------------------------------------------------
+        // Batch 489: empty-path → ENOENT for the utime family.
+        //
+        // Linux dispatches all four (utimes, utime, utimensat
+        // non-AT_EMPTY_PATH, futimesat) through getname() without
+        // LOOKUP_EMPTY (fs/utimes.c v6.6 do_utimes_path:
+        // `lookup_flags |= LOOKUP_EMPTY` only when flags &
+        // AT_EMPTY_PATH).  Empty non-NULL pathname → -ENOENT via
+        // fs/namei.c v6.6 getname_flags line 196 (`!len && !(flags
+        // & LOOKUP_EMPTY)`).  Pre-batch we accepted empty paths
+        // and fell through to EROFS / ENOSYS, masking the input-
+        // shape diagnostic the kernel offers to discriminate
+        // "your input is shaped wrong" from "the filesystem won't
+        // accept this."
+        // ------------------------------------------------------------
+        let ut_path_e: [u8; 1] = [0u8];
+        core::hint::black_box(&ut_path_e);
+
+        // utimes("", NULL) -> ENOENT (was EROFS pre-batch).
+        let a = SyscallArgs {
+            arg0: ut_path_e.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::UTIMES, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: utimes(\"\",NULL) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // utime("", NULL) -> ENOENT (was EROFS pre-batch).
+        let a = SyscallArgs {
+            arg0: ut_path_e.as_ptr() as u64, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::UTIME, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: utime(\"\",NULL) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // utimensat(AT_FDCWD, "", NULL, 0) -> ENOENT (was EROFS
+        // pre-batch).  flags=0 means LOOKUP_EMPTY not set.
+        let a = SyscallArgs {
+            arg0: 0, arg1: ut_path_e.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::UTIMENSAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: utimensat(_,\"\",NULL,0) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // utimensat(_, "", NULL, AT_EMPTY_PATH) -> EROFS (LOOKUP_EMPTY
+        // honoured: empty path allowed; flag now in VALID_FLAGS per
+        // do_utimes_path's mask).  Pre-batch this returned spurious
+        // EINVAL because AT_EMPTY_PATH was rejected by the flag mask.
+        const AT_EMPTY_PATH: u64 = 0x1000;
+        let a = SyscallArgs {
+            arg0: 0, arg1: ut_path_e.as_ptr() as u64,
+            arg2: 0, arg3: AT_EMPTY_PATH, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::UTIMENSAT, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: utimensat(_,\"\",NULL,AT_EMPTY_PATH) not EROFS"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // futimesat(AT_FDCWD, "", NULL) -> ENOENT (was ENOSYS
+        // pre-batch — the do_utimes-style empty-path discriminator
+        // surfaces before the intentional ENOSYS fallback terminal).
+        let a = SyscallArgs {
+            arg0: 0, arg1: ut_path_e.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::FUTIMESAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: futimesat(_,\"\",NULL) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   utime family empty-path -> ENOENT (batch 489): OK"
+        );
     }
 
     // signalfd / timerfd / inotify / fanotify — input validation and

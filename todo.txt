@@ -45565,3 +45565,146 @@ sentinel stamp at boot.
 
 
 
+
+## Batch 497 — Linux ABI fidelity: seccomp() SET_MODE_FILTER TSYNC+NEW_LISTENER (no TSYNC_ESRCH) and WAIT_KILLABLE_RECV-without-NEW_LISTENER flag-interlock EINVAL gates (2026-06-07)
+
+**Target:** `kernel/src/syscall/linux.rs::sys_seccomp` — `op == 1` (SECCOMP_SET_MODE_FILTER) arm.
+
+**Linux v6.6 source** (verbatim — `kernel/seccomp.c::seccomp_set_mode_filter`,
+lines 1901-1932 of
+https://raw.githubusercontent.com/torvalds/linux/v6.6/kernel/seccomp.c):
+
+```c
+static long seccomp_set_mode_filter(unsigned int flags,
+                    const char __user *filter)
+{
+    const unsigned long seccomp_mode = SECCOMP_MODE_FILTER;
+    struct seccomp_filter *prepared = NULL;
+    long ret = -EINVAL;
+    int listener = -1;
+    struct file *listener_f = NULL;
+
+    /* Validate flags. */
+    if (flags & ~SECCOMP_FILTER_FLAG_MASK)
+        return -EINVAL;
+
+    /*
+     * In the successful case, NEW_LISTENER returns the new listener fd.
+     * But in the failure case, TSYNC returns the thread that died. If you
+     * combine these two flags, there's no way to tell whether something
+     * succeeded or failed. So, let's disallow this combination if the user
+     * has not explicitly requested no errors from TSYNC.
+     */
+    if ((flags & SECCOMP_FILTER_FLAG_TSYNC) &&
+        (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) &&
+        ((flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH) == 0))
+        return -EINVAL;
+
+    /*
+     * The SECCOMP_FILTER_FLAG_WAIT_KILLABLE_SENT flag doesn't make sense
+     * without the SECCOMP_FILTER_FLAG_NEW_LISTENER flag.
+     */
+    if ((flags & SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) &&
+        ((flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) == 0))
+        return -EINVAL;
+
+    /* Prepare the new filter before holding any locks. */
+    prepared = seccomp_prepare_user_filter(filter);
+    ...
+}
+```
+
+Flag bit values (uapi/linux/seccomp.h v6.6):
+  SECCOMP_FILTER_FLAG_TSYNC               = 1 << 0 = 0x01
+  SECCOMP_FILTER_FLAG_LOG                 = 1 << 1 = 0x02
+  SECCOMP_FILTER_FLAG_SPEC_ALLOW          = 1 << 2 = 0x04
+  SECCOMP_FILTER_FLAG_NEW_LISTENER        = 1 << 3 = 0x08
+  SECCOMP_FILTER_FLAG_TSYNC_ESRCH         = 1 << 4 = 0x10
+  SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV  = 1 << 5 = 0x20
+
+**Divergence (pre-batch):** sys_seccomp's SET_MODE_FILTER arm validated only
+the FLAG_MASK (0x3f) and then checked uargs for NULL/readability before
+returning the terminal ENOSYS.  The two interlock gates Linux runs between
+FLAG_MASK and the user-filter copy were missing entirely.  Concrete shapes:
+
+| Input flags                     | Linux v6.6 | Pre-batch (uargs=valid) | Pre-batch (uargs=NULL) |
+|---------------------------------|------------|--------------------------|------------------------|
+| TSYNC|NEW_LISTENER (0x09)       | EINVAL     | ENOSYS                   | EFAULT                 |
+| TSYNC|NEW_LISTENER|TSYNC_ESRCH (0x19) | ENOSYS* | ENOSYS                   | EFAULT                 |
+| WAIT_KILLABLE_RECV (0x20)       | EINVAL     | ENOSYS                   | EFAULT                 |
+| WAIT_KILLABLE_RECV|NEW_LISTENER (0x28) | ENOSYS* | ENOSYS              | EFAULT                 |
+
+(* ENOSYS terminal because this kernel has no seccomp backend; on a real
+Linux these would proceed to the CAP_SYS_ADMIN / no_new_privs gate and
+return EACCES.  The ENOSYS path is libseccomp's accepted "no backend, give
+up" discriminator.)
+
+**userspace impact:** libseccomp ≥2.5 walks flag combinations during
+init to discover which interlocks the running kernel enforces.  Pre-batch
+the ENOSYS for the TSYNC+NEW_LISTENER and WAIT_KILLABLE_RECV-alone
+shapes was indistinguishable from "kernel has no seccomp at all," so
+libseccomp gave up and reported the kernel as un-sandboxable.  Same
+problem hits systemd's `Seccomp=` setting plumbing, Chromium's renderer
+sandbox bootstrap (uses TSYNC + NEW_LISTENER as a probe), Firefox content
+process sandbox, Docker / containerd / runc seccomp profile validators,
+kubelet's seccomp-policy preflight, the Linux Test Project's
+`seccomp_bpf.c` (kselftest), and audit-daemon's filter-builder — all
+expect EINVAL to mean "your flag shape is malformed, fix it and retry"
+versus ENOSYS meaning "no seccomp, fall back to unsandboxed."  Returning
+the EINVAL discriminator lets sandbox builders retry with corrected
+flags instead of disabling sandboxing entirely.
+
+**Fix:** Translator-only — add the two interlock gates between the
+FLAG_MASK check and the `uargs == 0` test.  Constants defined inline
+so the change is self-contained; no kernel state added.
+
+```rust
+const SECCOMP_FILTER_FLAG_TSYNC: u64 = 1 << 0;
+const SECCOMP_FILTER_FLAG_NEW_LISTENER: u64 = 1 << 3;
+const SECCOMP_FILTER_FLAG_TSYNC_ESRCH: u64 = 1 << 4;
+const SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV: u64 = 1 << 5;
+if (flags & SECCOMP_FILTER_FLAG_TSYNC) != 0
+    && (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
+    && (flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH) == 0
+{
+    return linux_err(errno::EINVAL);
+}
+if (flags & SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) != 0
+    && (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) == 0
+{
+    return linux_err(errno::EINVAL);
+}
+```
+
+Terminal ENOSYS for well-formed flag shapes is unchanged: this kernel
+has no seccomp filter machinery, which Linux's eventual gate after the
+filter copy would also surface (as EACCES on a real seccomp build) —
+ENOSYS is the existing "no backend" answer libseccomp accepts.
+
+**Architectural directive:** No kernel state changes.  This batch is
+pure translator-side errno-shape fidelity — the two gates depend only
+on the `flags` argument, exactly as Linux does it.
+
+**Probes added (boot self-test, kernel/src/syscall/linux.rs ~line 57746):**
+
+1. `seccomp(1, 0x3f, valid_uargs)` → ENOSYS (existing — 0x3f includes
+   both TSYNC_ESRCH and NEW_LISTENER, so both new gates pass; unchanged).
+2. `seccomp(1, 0x09=TSYNC|NEW_LISTENER, valid_uargs)` → EINVAL **(new)**.
+3. `seccomp(1, 0x09, NULL)` → EINVAL **(new)** — confirms gate fires
+   ahead of uargs touch (pre-batch returned EFAULT here).
+4. `seccomp(1, 0x19=TSYNC|NEW_LISTENER|TSYNC_ESRCH, valid_uargs)` →
+   ENOSYS **(new)** — TSYNC_ESRCH excuses gate 1, no WAIT_KILLABLE_RECV
+   so gate 2 doesn't fire, reaches terminal.
+5. `seccomp(1, 0x20=WAIT_KILLABLE_RECV, valid_uargs)` → EINVAL **(new)**.
+6. `seccomp(1, 0x20, NULL)` → EINVAL **(new)** — confirms gate-2 fires
+   ahead of uargs touch.
+7. `seccomp(1, 0x28=WAIT_KILLABLE_RECV|NEW_LISTENER, valid_uargs)` →
+   ENOSYS **(new)** — NEW_LISTENER excuses gate 2.
+
+Summary stamp: `seccomp FILTER flag interlocks (batch 497): OK`
+(serial-test.txt line 635).
+
+**Build:** clean (`cargo build -p kernel`, 54.5s).
+
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`), BOOT_OK detected.
+

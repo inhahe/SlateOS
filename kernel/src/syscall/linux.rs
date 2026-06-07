@@ -22488,6 +22488,108 @@ fn sys_seccomp(args: &SyscallArgs) -> SyscallResult {
             if flags & !SECCOMP_FILTER_FLAG_MASK != 0 {
                 return linux_err(errno::EINVAL);
             }
+            // Batch 497: Linux v6.6 kernel/seccomp.c::seccomp_set_mode_filter
+            // (lines 1901-1932) imposes TWO flag-interlock gates between the
+            // FLAG_MASK check and the seccomp_prepare_user_filter() copy:
+            //
+            //   /*
+            //    * In the successful case, NEW_LISTENER returns the new
+            //    * listener fd.  But in the failure case, TSYNC returns
+            //    * the thread that died. If you combine these two flags,
+            //    * there's no way to tell whether something succeeded or
+            //    * failed. So, let's disallow this combination if the
+            //    * user has not explicitly requested no errors from TSYNC.
+            //    */
+            //   if ((flags & SECCOMP_FILTER_FLAG_TSYNC) &&
+            //       (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) &&
+            //       ((flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH) == 0))
+            //       return -EINVAL;
+            //
+            //   /*
+            //    * The SECCOMP_FILTER_FLAG_WAIT_KILLABLE_SENT flag doesn't
+            //    * make sense without the SECCOMP_FILTER_FLAG_NEW_LISTENER
+            //    * flag.
+            //    */
+            //   if ((flags & SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) &&
+            //       ((flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) == 0))
+            //       return -EINVAL;
+            //
+            // Constants (kernel/seccomp.c / uapi/linux/seccomp.h v6.6):
+            //   SECCOMP_FILTER_FLAG_TSYNC               = 1 << 0 = 0x01
+            //   SECCOMP_FILTER_FLAG_LOG                 = 1 << 1 = 0x02
+            //   SECCOMP_FILTER_FLAG_SPEC_ALLOW          = 1 << 2 = 0x04
+            //   SECCOMP_FILTER_FLAG_NEW_LISTENER        = 1 << 3 = 0x08
+            //   SECCOMP_FILTER_FLAG_TSYNC_ESRCH         = 1 << 4 = 0x10
+            //   SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV  = 1 << 5 = 0x20
+            //
+            // Pre-batch we accepted any (valid-mask) flag combination and
+            // fell through to the `uargs == 0 -> EFAULT` / valid-uargs
+            // ENOSYS arms, so:
+            //
+            //   * seccomp(1, TSYNC|NEW_LISTENER, valid_uargs)
+            //       Linux: EINVAL (gate 1: TSYNC+NEW_LISTENER, no TSYNC_ESRCH)
+            //       Pre:   ENOSYS (valid_uargs passes prefix-read; terminal)
+            //   * seccomp(1, TSYNC|NEW_LISTENER, NULL)
+            //       Linux: EINVAL (gate 1 fires before uargs touch)
+            //       Pre:   EFAULT
+            //   * seccomp(1, WAIT_KILLABLE_RECV, valid_uargs)
+            //       Linux: EINVAL (gate 2: WAIT_KILLABLE_RECV without
+            //                      NEW_LISTENER)
+            //       Pre:   ENOSYS
+            //   * seccomp(1, WAIT_KILLABLE_RECV, NULL)
+            //       Linux: EINVAL (gate 2 fires before uargs touch)
+            //       Pre:   EFAULT
+            //   * seccomp(1, TSYNC|NEW_LISTENER|TSYNC_ESRCH, valid_uargs)
+            //       Linux/post-batch: passes both interlocks (TSYNC_ESRCH
+            //                         excuses gate 1), reaches copy/CAP path.
+            //       Pre/post:         ENOSYS (terminal).  Matches.
+            //   * seccomp(1, WAIT_KILLABLE_RECV|NEW_LISTENER, valid_uargs)
+            //       Linux/post-batch: passes both interlocks (NEW_LISTENER
+            //                         excuses gate 2), reaches copy/CAP path.
+            //       Pre/post:         ENOSYS.  Matches.
+            //
+            // userspace impact: libseccomp (≥2.5) walks flag combinations
+            // during initialisation to discover which interlocks the kernel
+            // enforces — pre-batch the ENOSYS for the TSYNC+NEW_LISTENER and
+            // WAIT_KILLABLE_RECV-alone shapes made it conclude "this kernel
+            // doesn't have seccomp at all" instead of "this kernel rejects
+            // these specific combinations as malformed."  systemd's
+            // sandboxing layer, Chromium's renderer sandbox, Firefox's
+            // content-process sandbox, Docker / containerd / runc seccomp
+            // profile validators, kubelet's seccomp-policy preflight, the
+            // Linux Test Project's seccomp_bpf.c (kselftests), and audit
+            // -daemon's filter-builder all rely on the EINVAL discriminator
+            // to distinguish "your filter shape is malformed, fix it" from
+            // ENOSYS ("kernel has no seccomp, give up entirely").  Returning
+            // EINVAL lets the sandbox builder retry with corrected flags
+            // instead of falling back to an unsandboxed run.
+            //
+            // Architectural directive: translator-only fix.  Reproduce
+            // Linux's two interlock gates ahead of the uargs/NULL-pointer
+            // touch so the same errno discriminator surfaces regardless
+            // of where the caller's filter pointer happens to live.  This
+            // kernel has no seccomp backend, so the terminal answer for
+            // well-formed flag shapes remains ENOSYS — Linux's eventual
+            // CAP_SYS_ADMIN / no_new_privs gate would have surfaced as
+            // EACCES on a real kernel without those preconditions, but
+            // probing for that errno requires a working seccomp
+            // implementation; ENOSYS is the honest "no backend" answer
+            // libseccomp accepts as the give-up path.
+            const SECCOMP_FILTER_FLAG_TSYNC: u64 = 1 << 0;
+            const SECCOMP_FILTER_FLAG_NEW_LISTENER: u64 = 1 << 3;
+            const SECCOMP_FILTER_FLAG_TSYNC_ESRCH: u64 = 1 << 4;
+            const SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV: u64 = 1 << 5;
+            if (flags & SECCOMP_FILTER_FLAG_TSYNC) != 0
+                && (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
+                && (flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH) == 0
+            {
+                return linux_err(errno::EINVAL);
+            }
+            if (flags & SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV) != 0
+                && (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) == 0
+            {
+                return linux_err(errno::EINVAL);
+            }
             if uargs == 0 {
                 return linux_err(errno::EFAULT);
             }
@@ -57737,11 +57839,91 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // seccomp FILTER (1) with all valid flag bits (0x3f) -> ENOSYS.
+        // 0x3f includes TSYNC_ESRCH and NEW_LISTENER, so the batch-497
+        // TSYNC+NEW_LISTENER+!TSYNC_ESRCH gate is excused; 0x3f also
+        // includes NEW_LISTENER, so the batch-497 WAIT_KILLABLE_RECV+
+        // !NEW_LISTENER gate is excused.  Falls through to terminal.
         let a = SyscallArgs { arg0: 1, arg1: 0x3f, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::ENOSYS) {
             serial_println!("[syscall/linux]   FAIL: seccomp FILTER valid flags not ENOSYS");
             return Err(KernelError::InternalError);
         }
+        // Batch 497: seccomp FILTER (1) with TSYNC|NEW_LISTENER (0x01|0x08
+        // = 0x09) and TSYNC_ESRCH unset -> EINVAL.  Linux v6.6
+        // kernel/seccomp.c::seccomp_set_mode_filter line 1921-1925 gate:
+        // disallowed because TSYNC's failure path returns the dying
+        // thread's pid while NEW_LISTENER's success path returns the
+        // listener fd, an ambiguous discriminator that's resolved only
+        // by also setting TSYNC_ESRCH.  Pre-batch: ENOSYS (no gate).
+        let a = SyscallArgs { arg0: 1, arg1: 0x09, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: seccomp FILTER TSYNC|NEW_LISTENER no ESRCH -> {} (want EINVAL)",
+                dispatch_linux(nr::SECCOMP, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 497: same gate but uargs=NULL — Linux's gate fires
+        // ahead of the uargs touch so the answer is still EINVAL,
+        // NOT EFAULT (pre-batch we returned EFAULT here because the
+        // uargs==0 check fired ahead of the missing interlock).
+        let a = SyscallArgs { arg0: 1, arg1: 0x09, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: seccomp FILTER TSYNC|NEW_LISTENER NULL uargs -> {} (want EINVAL)",
+                dispatch_linux(nr::SECCOMP, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 497: TSYNC|NEW_LISTENER|TSYNC_ESRCH (0x01|0x08|0x10 =
+        // 0x19) — the TSYNC_ESRCH bit excuses gate 1; gate 2 doesn't
+        // fire (WAIT_KILLABLE_RECV clear).  Falls through to the
+        // valid-uargs ENOSYS terminal.  Confirms TSYNC_ESRCH is the
+        // explicit opt-in for the TSYNC+NEW_LISTENER combination.
+        let a = SyscallArgs { arg0: 1, arg1: 0x19, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: seccomp FILTER TSYNC|NEW_LISTENER|TSYNC_ESRCH -> {} (want ENOSYS)",
+                dispatch_linux(nr::SECCOMP, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 497: WAIT_KILLABLE_RECV alone (0x20) — Linux v6.6 line
+        // 1930-1932 gate: WAIT_KILLABLE_RECV requires NEW_LISTENER as
+        // the wait can only happen through a listener fd.  Pre-batch:
+        // ENOSYS (no gate).
+        let a = SyscallArgs { arg0: 1, arg1: 0x20, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: seccomp FILTER WAIT_KILLABLE_RECV alone -> {} (want EINVAL)",
+                dispatch_linux(nr::SECCOMP, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 497: WAIT_KILLABLE_RECV with NULL uargs — Linux's
+        // gate fires before the uargs touch, so EINVAL, not EFAULT.
+        let a = SyscallArgs { arg0: 1, arg1: 0x20, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: seccomp FILTER WAIT_KILLABLE_RECV NULL uargs -> {} (want EINVAL)",
+                dispatch_linux(nr::SECCOMP, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 497: WAIT_KILLABLE_RECV|NEW_LISTENER (0x20|0x08 = 0x28)
+        // — gate 1 doesn't fire (TSYNC clear); gate 2 is excused
+        // because NEW_LISTENER is set.  Falls through to ENOSYS.
+        let a = SyscallArgs { arg0: 1, arg1: 0x28, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: seccomp FILTER WAIT_KILLABLE_RECV|NEW_LISTENER -> {} (want ENOSYS)",
+                dispatch_linux(nr::SECCOMP, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   seccomp FILTER flag interlocks (batch 497): OK"
+        );
         // seccomp GET_ACTION_AVAIL (2) with flags!=0 -> EINVAL.
         let a = SyscallArgs { arg0: 2, arg1: 1, arg2: buf_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SECCOMP, &a).value != -i64::from(errno::EINVAL) {

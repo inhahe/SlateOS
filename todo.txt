@@ -47443,3 +47443,58 @@ Summary stamp:
 Build: clean (`cargo build -p kernel`, 51.4s).
 
 Boot test: PASS @ 24s (`bash scripts/boot-test.sh`).
+
+================================================================
+Batch 517 — REVERTED (false positive; no-op net change)
+================================================================
+
+Originally claimed `sys_signalfd4` should collapse the sizemask
+and copy_from_user gates into a single combined-OR EINVAL per
+Linux v6.6 fs/signalfd.c.  Authoritative re-check of the v6.6
+source via `raw.githubusercontent.com/torvalds/linux/v6.6/fs/
+signalfd.c` shows Linux actually uses TWO SEPARATE gates:
+
+    SYSCALL_DEFINE4(signalfd4, int, ufd, sigset_t __user *, user_mask,
+            size_t, sizemask, int, flags)
+    {
+        sigset_t mask;
+
+        if (sizemask != sizeof(sigset_t))
+            return -EINVAL;
+        if (copy_from_user(&mask, user_mask, sizeof(mask)))
+            return -EFAULT;
+        return do_signalfd4(ufd, &mask, flags);
+    }
+
+    SYSCALL_DEFINE3(signalfd, int, ufd, sigset_t __user *, user_mask,
+            size_t, sizemask)
+    {
+        sigset_t mask;
+
+        if (sizemask != sizeof(sigset_t))
+            return -EINVAL;
+        if (copy_from_user(&mask, user_mask, sizeof(mask)))
+            return -EFAULT;
+        return do_signalfd4(ufd, &mask, 0);
+    }
+
+i.e. sizemask check is EINVAL and copy_from_user check is
+EFAULT — exactly the pre-batch-517 (batch 256) shape we already
+had.  The "combined-OR" form (`if (a || b) return -EINVAL;`)
+appears in OTHER syscalls but I incorrectly carried that
+pattern into signalfd4 from working memory rather than fetching
+the actual v6.6 source.
+
+Batch 517 reverted in commit c571b757.  The revert restores the
+correct EINVAL/EFAULT split for both signalfd and signalfd4 and
+the original Discriminator A probe (sizemask=8, NULL, bad flag
+-> EFAULT) which matches Linux's behavior.
+
+Lesson: when citing Linux source verbatim, fetch the actual
+file (raw.githubusercontent.com / kernel.org / git clone)
+rather than relying on memory or plausible-sounding paraphrase.
+Batches 515 and 516 still stand — they were verified against
+the actual timerfd.c / ntp.c bodies.
+
+Build (post-revert): clean.
+Boot test (post-revert): PASS @ 24s.

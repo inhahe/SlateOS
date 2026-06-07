@@ -46127,3 +46127,100 @@ PRIVATE_EXPEDITED_RSEQ (v6.6, batch 503): OK` (serial-test.txt).
 **Build:** clean (`cargo build -p kernel`, 46.8s).
 
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+
+## Batch 504 — Linux ABI fidelity: sched_get_priority_{max,min} drop SCHED_EXT (policy=7) acceptance to match Linux v6.6 (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs`
+(`sys_sched_get_priority_max`, `sys_sched_get_priority_min`).
+
+**Change:** policy=7 (SCHED_EXT) removed from the accept-with-0
+match arm in both functions; it now falls through to `-EINVAL`,
+matching the v6.6 switch surface exactly.
+
+**Linux v6.6 source** — `kernel/sched/core.c` lines 9039-9056
+(`SYSCALL_DEFINE1(sched_get_priority_max, int, policy)`):
+
+```c
+SYSCALL_DEFINE1(sched_get_priority_max, int, policy)
+{
+    int ret = -EINVAL;
+    switch (policy) {
+    case SCHED_FIFO:
+    case SCHED_RR:
+        ret = MAX_RT_PRIO-1;
+        break;
+    case SCHED_DEADLINE:
+    case SCHED_NORMAL:
+    case SCHED_BATCH:
+    case SCHED_IDLE:
+        ret = 0;
+        break;
+    }
+    return ret;
+}
+```
+
+…and the mirror at lines 9066-9082
+(`SYSCALL_DEFINE1(sched_get_priority_min, int, policy)`)
+covers the same six policies, returning 1 for FIFO/RR and 0
+for DEADLINE/NORMAL/BATCH/IDLE.
+
+`include/uapi/linux/sched.h` (v6.6) — the policy set:
+
+```c
+#define SCHED_NORMAL        0
+#define SCHED_FIFO          1
+#define SCHED_RR            2
+#define SCHED_BATCH         3
+/* SCHED_ISO: reserved but not implemented yet */
+#define SCHED_IDLE          5
+#define SCHED_DEADLINE      6
+```
+
+There is no `SCHED_EXT` in v6.6 — it was added in Linux 6.12
+as policy=7 alongside the BPF-driven extensible scheduler.
+
+**Divergence (pre-batch):** the translator's match arms accepted
+`0 | 3 | 5 | 6 | 7` for the zero-return bucket, treating
+SCHED_EXT as a known policy returning min/max=0.  This left a
+one-policy forward-compat buffer that the translator-only
+fidelity directive overrides: under v6.6 the kernel's switch
+does not name SCHED_EXT, so policy=7 hits the (default)
+`int ret = -EINVAL` initialiser and returns `-EINVAL`.  Our
+pre-batch behaviour returned `0` instead.
+
+**Why it matters:** glibc-on-v6.6 feature probes for scheduler
+policies walk policy values and inspect the return code to
+discover which classes the running kernel implements.
+Pre-batch (policy=7 → 0) would mis-train such probes into
+thinking SCHED_EXT is available, causing later
+`sched_setscheduler(SCHED_EXT, …)` calls to take an SCHED_EXT
+code path on a kernel where the policy doesn't exist.  Matching
+v6.6's `-EINVAL` lets the probes correctly conclude SCHED_EXT
+is unsupported on this ABI level.
+
+**Post-batch behaviour:**
+  - policy=7 (SCHED_EXT) → EINVAL (was 0).
+  - policy=0,3,5,6 (NORMAL/BATCH/IDLE/DEADLINE) → 0 (unchanged).
+  - policy=1,2 (FIFO/RR) → max=99 / min=1 (unchanged).
+  - policy=4 (SCHED_ISO, reserved-but-unimplemented in v6.6) →
+    EINVAL (regression guard added — Linux's switch has no ISO
+    case either).
+
+**Boot probes updated.**
+  1. policy=7 → max=EINVAL, min=EINVAL (was 0; flipped).
+  2. policy=3,5,6 → max=0, min=0 (added regression guards for
+     the v6.6 zero-return bucket).
+  3. policy=4 (SCHED_ISO) → EINVAL (added guard — v6.6's switch
+     omits SCHED_ISO too).
+
+Summary stamp updated: `sched_get_priority_{max,min} int
+truncation + v6.6 policy set (batch 504): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 55.9s).
+
+**Boot test:** first attempt timed out at 300s due to known
+intermittent RCU self-test hang under single-CPU QEMU
+(`known-issues.md` issue #1 — hangs mid-RCU after a
+"Quiescent state" emission, no kernel progress, BOOT_OK never
+emitted); retry PASS @ 25s (`bash scripts/boot-test.sh`).

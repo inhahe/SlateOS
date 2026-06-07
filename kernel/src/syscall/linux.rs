@@ -9384,9 +9384,38 @@ fn sys_sched_get_priority_max(args: &SyscallArgs) -> SyscallResult {
     // to 1 (SCHED_FIFO) and returns 99.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let policy = args.arg0 as i32;
+    // ## Batch 504 — drop SCHED_EXT (=7) acceptance to match v6.6
+    //
+    // Linux v6.6 `kernel/sched/core.c` lines 9039-9056 (verbatim):
+    //
+    //   SYSCALL_DEFINE1(sched_get_priority_max, int, policy)
+    //   {
+    //       int ret = -EINVAL;
+    //       switch (policy) {
+    //       case SCHED_FIFO:
+    //       case SCHED_RR:
+    //           ret = MAX_RT_PRIO-1;
+    //           break;
+    //       case SCHED_DEADLINE:
+    //       case SCHED_NORMAL:
+    //       case SCHED_BATCH:
+    //       case SCHED_IDLE:
+    //           ret = 0;
+    //           break;
+    //       }
+    //       return ret;
+    //   }
+    //
+    // v6.6's `include/uapi/linux/sched.h` defines SCHED_NORMAL=0,
+    // SCHED_FIFO=1, SCHED_RR=2, SCHED_BATCH=3, SCHED_IDLE=5,
+    // SCHED_DEADLINE=6 — there is no SCHED_EXT (added in Linux 6.12
+    // as policy=7).  Pre-batch we accepted 7 to leave a one-policy
+    // forward-compat buffer; the translator-only directive overrides
+    // that — match v6.6's CURRENT switch surface.  policy=7 now
+    // reaches the switch's missing case and returns -EINVAL.
     match policy {
-        1 | 2 => SyscallResult::ok(99),                 // FIFO / RR
-        0 | 3 | 5 | 6 | 7 => SyscallResult::ok(0),      // OTHER / BATCH / IDLE / DEADLINE / EXT
+        1 | 2 => SyscallResult::ok(99),             // FIFO / RR
+        0 | 3 | 5 | 6 => SyscallResult::ok(0),       // OTHER / BATCH / IDLE / DEADLINE
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -9403,9 +9432,16 @@ fn sys_sched_get_priority_min(args: &SyscallArgs) -> SyscallResult {
     // function's comment for the divergence Linux mirrors.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let policy = args.arg0 as i32;
+    // ## Batch 504 — drop SCHED_EXT (=7) acceptance to match v6.6
+    //
+    // Linux v6.6 `kernel/sched/core.c` lines 9066-9082 (verbatim) cover
+    // the same v6.6 policy set (NORMAL=0, FIFO=1, RR=2, BATCH=3, IDLE=5,
+    // DEADLINE=6) — SCHED_EXT=7 was added in Linux 6.12 and is absent
+    // from v6.6's switch.  See sys_sched_get_priority_max for the full
+    // verbatim Linux source and rationale.
     match policy {
         1 | 2 => SyscallResult::ok(1),
-        0 | 3 | 5 | 6 | 7 => SyscallResult::ok(0),
+        0 | 3 | 5 | 6 => SyscallResult::ok(0),
         _ => linux_err(errno::EINVAL),
     }
 }
@@ -44019,8 +44055,64 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 504: policy=7 (SCHED_EXT, added in Linux 6.12) is NOT
+        // in v6.6's switch — verified verbatim from kernel/sched/core.c
+        // lines 9039-9056 and 9066-9082.  Pre-batch we accepted it as a
+        // forward-compat buffer (returned 0); v6.6's switch falls
+        // through to `ret = -EINVAL`.  Probe both max and min.
+        let a = SyscallArgs { arg0: 7, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_max(SCHED_EXT=7) not EINVAL (batch 504; was 0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MIN, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_min(SCHED_EXT=7) not EINVAL (batch 504; was 0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 504 regression guards: each v6.6-valid policy still
+        // returns the right value.  SCHED_DEADLINE (6) max=0/min=0;
+        // SCHED_BATCH (3) max=0/min=0; SCHED_IDLE (5) max=0/min=0.
+        // Pre-batch each already returned 0, but bundling them here
+        // protects against accidental future removal alongside 7.
+        for &p in &[3i64, 5, 6] {
+            #[allow(clippy::cast_sign_loss)]
+            let a = SyscallArgs { arg0: p as u64, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_get_priority_max({}) not 0 (batch 504 regression)",
+                    p,
+                );
+                return Err(KernelError::InternalError);
+            }
+            if dispatch_linux(nr::SCHED_GET_PRIORITY_MIN, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sched_get_priority_min({}) not 0 (batch 504 regression)",
+                    p,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Policy 4 (deprecated SCHED_ISO) was never in the switch —
+        // regression guard for both probes.
+        let a = SyscallArgs { arg0: 4, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SCHED_GET_PRIORITY_MAX, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_get_priority_max(SCHED_ISO=4) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall/linux]   sched_get_priority_{{max,min}} int truncation: OK"
+            "[syscall/linux]   sched_get_priority_{{max,min}} int truncation + v6.6 policy set (batch 504): OK"
         );
         // Batch 254: sched_setscheduler now matches Linux's gate
         // order — outer policy<0 > param NULL/pid<0 > copy_from_user

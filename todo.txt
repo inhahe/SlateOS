@@ -47192,3 +47192,119 @@ batch 514 interaction.
 Build: clean (`cargo build -p kernel`, 52.2s).
 
 Boot test: PASS @ 24s (`bash scripts/boot-test.sh`).
+
+
+================================================================
+Batch 515 — sys_timerfd_create: CAP_WAKE_ALARM EPERM gate for
+            CLOCK_REALTIME_ALARM / CLOCK_BOOTTIME_ALARM
+================================================================
+
+Divergence: `sys_timerfd_create` (kernel/src/syscall/linux.rs)
+accepted CLOCK_REALTIME_ALARM (8) and CLOCK_BOOTTIME_ALARM (9) as
+valid clockids in the EINVAL gate but then fell through to the
+terminal `linux_err(errno::ENOSYS)`.  Linux v6.6 mandates an
+EPERM gate driven by CAP_WAKE_ALARM that fires for those two
+clockids ahead of any backend setup, distinct from the EINVAL
+rejection of unknown clockids and from the ENOSYS-shaped reply
+we use for "supported clockid, no backend".
+
+Linux v6.6 source (verbatim, `fs/timerfd.c::SYSCALL_DEFINE2(timerfd_create)`):
+
+    SYSCALL_DEFINE2(timerfd_create, int, clockid, int, flags)
+    {
+        int ufd;
+        struct timerfd_ctx *ctx;
+
+        /* Check the TFD_* constants for consistency.  */
+        BUILD_BUG_ON(TFD_CLOEXEC != O_CLOEXEC);
+        BUILD_BUG_ON(TFD_NONBLOCK != O_NONBLOCK);
+
+        if ((flags & ~TFD_CREATE_FLAGS) ||
+            (clockid != CLOCK_MONOTONIC &&
+             clockid != CLOCK_REALTIME &&
+             clockid != CLOCK_REALTIME_ALARM &&
+             clockid != CLOCK_BOOTTIME &&
+             clockid != CLOCK_BOOTTIME_ALARM))
+            return -EINVAL;
+
+        if ((clockid == CLOCK_REALTIME_ALARM ||
+             clockid == CLOCK_BOOTTIME_ALARM) &&
+            !capable(CAP_WAKE_ALARM))
+            return -EPERM;
+        ...
+    }
+
+Why this matters: CLOCK_REALTIME_ALARM and CLOCK_BOOTTIME_ALARM
+are the "wakeup" clock variants — the kernel must arm a real
+hardware alarm (RTC or platform power-management timer) that
+resumes the machine from suspend at expiration.  Linux gates them
+behind CAP_WAKE_ALARM because waking the system has power-policy
+implications: a malicious cron-like daemon could otherwise drain
+the battery by scheduling repeated resumes.
+
+Pre-batch concrete divergences (probes that hit the wrong errno):
+
+  * timerfd_create(CLOCK_REALTIME_ALARM, 0)   Linux: EPERM   Pre: ENOSYS
+  * timerfd_create(CLOCK_BOOTTIME_ALARM, 0)   Linux: EPERM   Pre: ENOSYS
+  * timerfd_create(CLOCK_REALTIME_ALARM,
+                   bad flag)                  Linux: EINVAL  Pre: EINVAL ✓
+                                              (combined flag-OR gate
+                                              fires before CAP gate)
+  * timerfd_create(CLOCK_MONOTONIC, 0)        Linux: success Pre: ENOSYS
+                                              Post: ENOSYS (truthful —
+                                              we have no timerfd
+                                              backend; only the alarm
+                                              branch changes)
+
+Userspace impact: glibc's `__timerfd_create` is a thin syscall
+wrapper, but `__pthread_clockid_to_timerfd_clock` (used by
+`pthread_cond_clockwait` / `pthread_mutex_clocklock` on
+CLOCK_REALTIME_ALARM contexts) probes the alarm-clock branch.
+systemd-logind's wake-from-suspend scheduling
+(`logind-session.c::manager_setup_wakeup`), Android's
+`AlarmManagerService` JNI bridge, ChromeOS power-d's wake-alarm
+helper, and util-linux `rtcwake -m freeze`'s timerfd fallback all
+distinguish EPERM ("ask for CAP_WAKE_ALARM, then retry") from
+ENOSYS ("kernel has no timerfd; pick a different strategy
+entirely").  Pre-batch they all degraded silently to non-wakeable
+timers, missing wake events the user had explicitly scheduled.
+
+Fix (sys_timerfd_create): translator-only.  After the existing
+EINVAL gate for clockid+flags, insert a `matches!(clockid, 8 | 9)`
+check that returns `linux_err(errno::EPERM)` ahead of the
+terminal ENOSYS.  No native-side change — no Linux-ABI caller in
+this kernel can hold CAP_WAKE_ALARM, so EPERM is the truthful,
+Linux-shaped answer for alarm clockids regardless of whether a
+timerfd backend ever lands.  Same CAP-precedes-ENOSYS pattern as
+batches 343 (swapon), 396 (landlock_add_rule EOPNOTSUPP), and
+491 (fanotify_init EPERM).
+
+Boot probes added (extending the existing timerfd_create block):
+
+  1. `timerfd_create(CLOCK_REALTIME_ALARM=8, 0)` → asserts -EPERM.
+  2. `timerfd_create(CLOCK_BOOTTIME_ALARM=9, 0)` → asserts -EPERM.
+     Confirms both alarm clockids hit the new gate, not just one
+     (a misplaced `matches!` with only `8` would silently miss 9).
+  3. Discriminator: `timerfd_create(CLOCK_REALTIME_ALARM,
+     0x8000_0000)` → asserts -EINVAL.  Confirms the combined
+     flag-OR EINVAL still wins over the CAP gate — Linux's
+     bracketing `(flags & ~TFD_CREATE_FLAGS) || (bad clockid)`
+     fires before the CAP_WAKE_ALARM check, and a translator that
+     re-ordered the gates would surface EPERM here instead.
+
+Pre-existing probes preserved:
+  * `timerfd_create(99, 0)` → EINVAL (unknown clockid).
+  * `timerfd_create(CLOCK_MONOTONIC, bad flag)` → EINVAL.
+  * `timerfd_create(CLOCK_MONOTONIC, 0)` → ENOSYS.  CLOCK_MONOTONIC=1
+    isn't an alarm clock, so the terminal ENOSYS still surfaces;
+    the batch only changes the answer for clockids 8 and 9.
+
+Summary stamp:
+  `timerfd_create CLOCK_*_ALARM EPERM ahead of ENOSYS (v6.6
+   fs/timerfd.c::SYSCALL_DEFINE2(timerfd_create): CAP_WAKE_ALARM
+   gate): OK`
+  (visible in `build/serial-test.txt`).
+
+Build: clean (`cargo build -p kernel`, 46.3s).
+
+Boot test: PASS @ 24s (`bash scripts/boot-test.sh`).

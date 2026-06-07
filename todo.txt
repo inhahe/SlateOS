@@ -37925,3 +37925,116 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        "[syscall/linux]   prlimit64 pid_t/uint truncation: OK"
        "[syscall/linux]   prlimit64 Linux 6.x gate order
        (copy_from_user -> pid -> resource): OK"
+
+444. syscall/linux: batch 444 — get/setpriority Linux 6.x
+     ESRCH for PRIO_PGRP / PRIO_USER with negative who.
+
+     Linux 6.x source (kernel/sys.c,
+     SYSCALL_DEFINE2(getpriority) + SYSCALL_DEFINE3(setpriority)):
+
+       /* getpriority */
+       long retval = -ESRCH;
+       ...
+       switch (which) {
+       case PRIO_PROCESS:
+           if (who) p = find_task_by_vpid(who);
+           else      p = current;
+           if (p) niceval = ...; if (niceval > retval) retval = niceval;
+           break;
+       case PRIO_PGRP:
+           if (who) pgrp = find_vpid(who);
+           else     pgrp = task_pgrp(current);
+           do_each_pid_thread(pgrp, PIDTYPE_PGID, p) {
+               niceval = ...; if (niceval > retval) retval = niceval;
+           } while_each_pid_thread(...);
+           break;
+       case PRIO_USER:
+           uid = make_kuid(cred->user_ns, who);
+           user = cred->user;
+           if (!who) uid = cred->uid;
+           else if (!uid_valid(uid))
+               goto out_unlock;
+           ...
+       }
+       ...
+
+       /* setpriority — same structure; error initialised to -ESRCH */
+
+     Linux's behaviour for negative who:
+       - PRIO_PGRP: find_vpid(neg) returns NULL ->
+         do_each_pid_thread iterates zero times ->
+         retval (getpriority) / error (setpriority) stays -ESRCH ->
+         returns -ESRCH.
+       - PRIO_USER: make_kuid(neg) returns INVALID_UID ->
+         the `else if (!uid_valid(uid)) goto out_unlock;` arm fires ->
+         returns -ESRCH.
+
+     Pre-batch sys_getpriority / sys_setpriority (~lines 7836 /
+     7919) only gated `who < 0` for PRIO_PROCESS (which == 0).
+     For PRIO_PGRP (which == 1) and PRIO_USER (which == 2) with
+     `who < 0`, both functions silently fell through to
+     caller_pid() and reported (or installed) the caller's nice
+     instead.
+
+     | call shape                            | Linux | Pre-batch |
+     |---------------------------------------|-------|-----------|
+     | getpriority(PRIO_PGRP, -1)            | ESRCH | 20        |
+     | getpriority(PRIO_USER, -1)            | ESRCH | 20        |
+     | setpriority(PRIO_PGRP, -1, 5)         | ESRCH | 0         |
+     | setpriority(PRIO_USER, -1, 5)         | ESRCH | 0         |
+
+     Why it matters:
+
+       - `renice -g -1` and `renice -u -1` shape calls (and the
+         glibc/musl wrappers behind them) check for ESRCH to
+         report "no such process group / user".  Our pre-batch
+         silent-success made the tools claim victory where Linux
+         reports a real error.
+       - LTP getpriority-04 / setpriority-04 tests assert ESRCH
+         for invalid pgid / uid arguments; they would have failed
+         on us pre-batch.
+       - Conformance: this is the simplest invalid-id error path
+         the syscall has, and matching it costs nothing.
+
+     Scope note (still a divergence, deferred):
+       For `who > 0` with PRIO_PGRP or PRIO_USER, Linux returns
+       -ESRCH if the pgid / uid is not found.  We don't model
+       process groups or per-uid nice, so we have no way to tell
+       "not found" from "valid-but-equivalent-to-caller".
+       Current strategy: silently accept and report the caller's
+       nice (regression-guarded by a positive probe in this batch
+       so the behaviour doesn't drift).  Proper fix requires
+       implementing pgrp / uid tracking; until then the
+       negative-who case is the strict Linux-fidelity portion
+       fixable today.
+
+     Fix in kernel/src/syscall/linux.rs:
+       * sys_getpriority (~line 7836): added
+           if (which == 1 || which == 2) && who < 0 {
+               return linux_err(errno::ESRCH);
+           }
+         immediately after the existing PRIO_PROCESS who<0 gate.
+       * sys_setpriority (~line 7919): same gate, immediately
+         after the existing PRIO_PROCESS who<0 gate, before the
+         nice clamp.
+       * Doc comments rewritten to cite Linux's source verbatim
+         and explain the `who > 0` deferred divergence.
+
+     Self-test additions (~line 39860):
+       * NEW probe: getpriority(PRIO_PGRP, -1) -> expect -ESRCH.
+       * NEW probe: getpriority(PRIO_USER, -1) -> expect -ESRCH.
+       * NEW probe: setpriority(PRIO_PGRP, -1, 5) -> expect -ESRCH.
+       * NEW probe: setpriority(PRIO_USER, -1, 5) -> expect -ESRCH.
+       * NEW regression-guard probe: getpriority(PRIO_PGRP, 7)
+         -> expect 20 (caller's default nice, no pgrp model);
+         pins the documented `who > 0` divergence so it doesn't
+         accidentally drift.
+
+     Build: cargo build -p kernel clean (40.87s).
+     Boot test: bash scripts/boot-test.sh PASSED first attempt
+     (BOOT_OK at 22s).
+     Stamps confirmed at build/serial-test.txt:
+       "[syscall/linux]   get/setpriority int truncation: OK"
+       "[syscall/linux]   get/setpriority PRIO_PGRP/USER neg-who
+       ESRCH: OK"
+

@@ -7869,10 +7869,48 @@ fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::ESRCH);
         }
     }
+    // Batch 444 — Linux fidelity for PRIO_PGRP / PRIO_USER with a
+    // negative `who`.  In kernel/sys.c::SYSCALL_DEFINE2(getpriority):
+    //
+    //   case PRIO_PGRP:
+    //       if (who)
+    //           pgrp = find_vpid(who);   // find_vpid takes pid_t
+    //       else
+    //           pgrp = task_pgrp(current);
+    //       do_each_pid_thread(pgrp, PIDTYPE_PGID, p) { ... }
+    //       ...
+    //   case PRIO_USER:
+    //       uid = make_kuid(cred->user_ns, who);
+    //       ...
+    //       else if (!uid_valid(uid))
+    //           goto out_unlock;
+    //
+    // `retval` is initialised to `-ESRCH`.  For PRIO_PGRP with a
+    // negative `who`, `find_vpid(neg)` returns NULL, the
+    // do_each_pid_thread loop iterates zero times, retval stays
+    // -ESRCH.  For PRIO_USER with a negative `who`, make_kuid yields
+    // INVALID_UID, the gate jumps to out_unlock, retval stays
+    // -ESRCH.  Pre-batch we silently fell through to the
+    // caller_pid() fallback and reported the caller's nice as
+    // 20 - nice, hiding the invalid-id error.  Programs probing
+    // unknown pgids/uids (`renice -g -1` shape; conformance suites)
+    // saw "20" / "0" where Linux returns -ESRCH.
+    //
+    // For `who > 0` with PRIO_PGRP / PRIO_USER, we still don't model
+    // pgrps or per-uid nice, so we accept silently and report the
+    // caller's nice.  Linux returns -ESRCH if the pgid/uid is
+    // unknown, but absent a tracking model we'd have to either
+    // unconditionally ESRCH every non-self pgid/uid (which would
+    // break legitimate callers that have no way to know the id is
+    // valid here) or accept (current).  Documented in todo.txt as
+    // a remaining gap; the negative-who case is the strict
+    // Linux-fidelity portion fixable today.
+    if (which == 1 || which == 2) && who < 0 {
+        return linux_err(errno::ESRCH);
+    }
     // Resolve target pid: which==0 with who==0 means caller; with
-    // who!=0 means the named process.  PRIO_PGRP / PRIO_USER are
-    // accepted (we don't model groups / per-uid nice yet) and
-    // report the caller's nice.
+    // who!=0 means the named process.  PRIO_PGRP / PRIO_USER with
+    // who > 0 fall through to caller's nice (no pgrp/uid model).
     let target_pid: Option<u64> = if which == 0 && who != 0 {
         #[allow(clippy::cast_sign_loss)]
         Some(who as u64)
@@ -7945,6 +7983,18 @@ fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
         if pcb::state(who_pid).is_none() {
             return linux_err(errno::ESRCH);
         }
+    }
+    // Batch 444 — Linux fidelity for PRIO_PGRP / PRIO_USER with
+    // negative `who`.  setpriority's PRIO_PGRP loop initialises
+    // `error = -ESRCH`; with find_vpid(neg) returning NULL, no
+    // set_one_prio iteration runs, error stays -ESRCH.  PRIO_USER
+    // with negative who fails uid_valid -> jumps to out_unlock with
+    // error == -ESRCH.  Pre-batch we silently accepted (returned 0)
+    // and didn't install (no pgrp/uid model).  See sys_getpriority
+    // for the matching divergence and rationale for keeping the
+    // who > 0 case as silent caller-fallback.
+    if (which == 1 || which == 2) && who < 0 {
+        return linux_err(errno::ESRCH);
     }
 
     // Linux silently saturates out-of-range nice values rather than
@@ -39860,6 +39910,76 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   get/setpriority int truncation: OK"
+        );
+
+        // Batch 444 — PRIO_PGRP / PRIO_USER with negative who → ESRCH.
+        // Linux's find_vpid(neg) returns NULL (PRIO_PGRP) and
+        // make_kuid(neg) returns INVALID_UID (PRIO_USER), both routing
+        // to the -ESRCH return.  Pre-batch we silently returned 20
+        // (default nice) for getpriority and 0 for setpriority.
+        //
+        // Use `(-1i64) as u64` for the negative pid_t literal so the
+        // low 32 bits truncate back to -1.
+        #[allow(clippy::cast_sign_loss)]
+        let neg1: u64 = (-1i64) as u64;
+        // getpriority(PRIO_PGRP, -1) → ESRCH.
+        let a = SyscallArgs { arg0: 1, arg1: neg1, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPRIORITY, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(PRIO_PGRP, -1) not ESRCH ({})",
+                dispatch_linux(nr::GETPRIORITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // getpriority(PRIO_USER, -1) → ESRCH.
+        let a = SyscallArgs { arg0: 2, arg1: neg1, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPRIORITY, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(PRIO_USER, -1) not ESRCH ({})",
+                dispatch_linux(nr::GETPRIORITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setpriority(PRIO_PGRP, -1, 5) → ESRCH.
+        let a = SyscallArgs { arg0: 1, arg1: neg1, arg2: 5,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETPRIORITY, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpriority(PRIO_PGRP, -1, 5) not ESRCH ({})",
+                dispatch_linux(nr::SETPRIORITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // setpriority(PRIO_USER, -1, 5) → ESRCH.
+        let a = SyscallArgs { arg0: 2, arg1: neg1, arg2: 5,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETPRIORITY, &a).value
+            != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpriority(PRIO_USER, -1, 5) not ESRCH ({})",
+                dispatch_linux(nr::SETPRIORITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Regression guard — positive (unknown) who for PRIO_PGRP /
+        // PRIO_USER still accepted silently (no pgrp/uid model).
+        // Documented divergence preserved.
+        let a = SyscallArgs { arg0: 1, arg1: 7, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETPRIORITY, &a).value != 20 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getpriority(PRIO_PGRP, 7) not 20 ({})",
+                dispatch_linux(nr::GETPRIORITY, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   get/setpriority PRIO_PGRP/USER neg-who ESRCH: OK"
         );
 
         // rlimit_nice_check_with decision table.  Exercises the

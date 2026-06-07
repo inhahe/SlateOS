@@ -23292,6 +23292,44 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::EINVAL);
         }
     }
+    // Gate 3.6 (batch 474): AF_UNIX protocol check fires BEFORE
+    // the per-family type allowlist (gate 4 below).  Linux's
+    // net/unix/af_unix.c::unix_create opens with:
+    //     if (protocol && protocol != PF_UNIX)
+    //             return -EPROTONOSUPPORT;
+    //     ...
+    //     switch (sock->type) { ... default: return -ESOCKTNOSUPPORT; }
+    // so a bad protocol is reported as EPROTONOSUPPORT even when
+    // the type is also invalid (the protocol check runs first).
+    // Pre-batch our gate 4 fired first for invalid types on
+    // AF_UNIX, producing ESOCKTNOSUPPORT where Linux returns
+    // EPROTONOSUPPORT.
+    //
+    // Example divergence:
+    //   socket(AF_UNIX, SOCK_RDM=4, 99)
+    //     Linux:  unix_create -> EPROTONOSUPPORT
+    //     pre:    gate 4 (1, 4 in invalid set) -> ESOCKTNOSUPPORT
+    //     post:   gate 3.6 -> EPROTONOSUPPORT
+    //
+    // The gate 3.6 / gate 4 sequence now mirrors unix_create's
+    // protocol-check-then-type-switch shape exactly.  Family-
+    // restricted to AF_UNIX = 1 — AF_INET / AF_INET6 use IPPROTO_MAX
+    // (gate 3.5) and inet_create's list walk (gates 4 + 5);
+    // AF_NETLINK and AF_PACKET use their own protocol semantics
+    // (gates 4.5 / family-specific gate 5 arms).
+    //
+    // Using u32 cast: Linux's `protocol && protocol != PF_UNIX`
+    // is value-equivalent under either signed or unsigned
+    // interpretation for the (0, 1, anything-else) split — -1
+    // remains rejected, 0 and 1 remain accepted.  We use u32 here
+    // to match the local `protocol` variable used later by gate 5.
+    if domain == 1 {
+        #[allow(clippy::cast_possible_truncation)]
+        let proto_unsigned = args.arg2 as u32;
+        if proto_unsigned != 0 && proto_unsigned != 1 {
+            return linux_err(errno::EPROTONOSUPPORT);
+        }
+    }
     // Gate 4: family-specific socket-type allowlist ->
     // -ESOCKTNOSUPPORT.
     //
@@ -23431,17 +23469,11 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
     let protocol = args.arg2 as u32;
     if protocol != 0 {
         match (domain, sock_type) {
-            // AF_UNIX (net/unix/af_unix.c::unix_create):
-            //     if (protocol && protocol != PF_UNIX)
-            //         return -EPROTONOSUPPORT;
-            // PF_UNIX = 1.  So protocol = 1 is accepted (it
-            // duplicates the family — a no-op tautology, but
-            // Linux explicitly permits it).  Batch 471: was
-            // `(1, _) => EPROTONOSUPPORT` (no PF_UNIX exemption),
-            // which over-rejected protocol = 1.
-            (1, _) if protocol != 1 => {
-                return linux_err(errno::EPROTONOSUPPORT);
-            }
+            // AF_UNIX handled upstream by gate 3.6 (batch 474) which
+            // fires BEFORE the gate 4 type allowlist to match Linux's
+            // unix_create order (protocol check, then type switch).
+            // No (1, _) arm needed here.
+            //
             // AF_INET / AF_INET6 SOCK_STREAM: only IPPROTO_TCP=6.
             (2 | 10, 1) if protocol != 6 => {
                 return linux_err(errno::EPROTONOSUPPORT);
@@ -23567,6 +23599,19 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::EINVAL);
         }
     }
+    // Gate 2-continued (batch 474): AF_UNIX protocol check fires
+    // BEFORE the gate 3a per-family type allowlist.  Direct mirror
+    // of sys_socket batch 474.  Linux's unix_create runs the
+    // protocol check before the type switch, so a bad protocol
+    // with an invalid type surfaces EPROTONOSUPPORT, not
+    // ESOCKTNOSUPPORT.  Family-restricted to AF_UNIX = 1.
+    if domain == 1 {
+        #[allow(clippy::cast_possible_truncation)]
+        let proto_unsigned = args.arg2 as u32;
+        if proto_unsigned != 0 && proto_unsigned != 1 {
+            return linux_err(errno::EPROTONOSUPPORT);
+        }
+    }
     // Gate 3a: sock_create walks inet_create / unix_create /
     // netlink_create / packet_create which apply the same
     // per-family socket-type allowlist as in sys_socket gate 4.
@@ -23642,13 +23687,10 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
     let protocol = args.arg2 as u32;
     if protocol != 0 {
         match (domain, sock_type) {
-            // Batch 471: AF_UNIX accepts protocol == PF_UNIX = 1
-            // per unix_create: `if (protocol && protocol != PF_UNIX)
-            // return -EPROTONOSUPPORT;`.  Pre-batch we rejected
-            // protocol = 1 too.  Mirrors sys_socket batch 471.
-            (1, _) if protocol != 1 => {
-                return linux_err(errno::EPROTONOSUPPORT);
-            }
+            // AF_UNIX handled upstream by gate 2-continued (batch
+            // 474) which fires BEFORE the gate 3a type allowlist
+            // to match Linux's unix_create order.  No (1, _) arm
+            // needed here.
             (2 | 10, 1) if protocol != 6 => {
                 return linux_err(errno::EPROTONOSUPPORT);
             }
@@ -65318,6 +65360,140 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
 
+        // ---- socket AF_UNIX protocol-check-before-type-check ----
+        // Batch 474.  Linux's unix_create runs the protocol check
+        // (EPROTONOSUPPORT if `protocol && protocol != PF_UNIX`)
+        // BEFORE the switch-on-type that surfaces ESOCKTNOSUPPORT
+        // for unsupported types.  Pre-batch our code ran the type
+        // allowlist first, so AF_UNIX with an invalid type AND a
+        // bad protocol surfaced ESOCKTNOSUPPORT where Linux returns
+        // EPROTONOSUPPORT.  Probes A-C demonstrate the new
+        // gate-3.6-fires-first behaviour; D-F confirm that when
+        // protocol is acceptable the type gate still fires as
+        // before; G is a cross-family regression confirming the
+        // change is family-restricted to AF_UNIX.
+        {
+            // A: AF_UNIX / SOCK_RDM=4 / protocol=99 — invalid type
+            // AND invalid protocol: gate 3.6 fires first.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 4, arg2: 99,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_UNIX / SOCK_DCCP=6 / protocol=99 — same shape
+            // with a different invalid type.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 6, arg2: 99,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,DCCP,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_UNIX / SOCK_PACKET=10 / protocol=-1 — negative
+            // protocol via u64::MAX low-32 = 0xFFFFFFFF, != 0 && != 1.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 10, arg2: u64::MAX,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,PACKET,-1) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_UNIX / SOCK_RDM / protocol=0 — protocol OK,
+            // type allowlist fires.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 4, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,0) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: AF_UNIX / SOCK_RDM / protocol=PF_UNIX=1 — protocol
+            // accepted (`protocol == PF_UNIX`), type allowlist
+            // fires.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 4, arg2: 1,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,PF_UNIX) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: AF_UNIX / SOCK_DCCP / protocol=PF_UNIX — same
+            // pattern with a different invalid type.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 6, arg2: 1,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,DCCP,PF_UNIX) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: Cross-family regression — AF_INET / SOCK_RDM / 99.
+            // Gate 3.6 is AF_UNIX-restricted; AF_INET still hits
+            // the type allowlist (gate 4) → ESOCKTNOSUPPORT
+            // because inet_create's inetsw[SOCK_RDM] is empty.
+            let a = SyscallArgs {
+                arg0: 2, arg1: 4, arg2: 99,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_INET,RDM,99) cross-family regression not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: AF_UNIX / SOCK_STREAM=1 / protocol=99 — already
+            // EPROTONOSUPPORT pre-batch via gate 5; confirms the
+            // valid-type path still rejects bad protocols.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 99,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,99) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socket AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK"
+            );
+        }
+
         // ---- socketpair per-(family,type,protocol) gating ----
         // Linux's __sys_socketpair calls sock_create twice; the
         // first call walks inet_create / unix_create which apply
@@ -66097,6 +66273,140 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socketpair AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries; precedes EOPNOTSUPP): OK"
+            );
+        }
+
+        // ---- socketpair AF_UNIX protocol-check-before-type ----
+        // Batch 474 — mirror of socket(AF_UNIX) protocol-precedes-
+        // type ordering.  Linux's sock_create invokes the family-
+        // create function (unix_create here) before ever consulting
+        // ops->socketpair, so the protocol check inside unix_create
+        // surfaces EPROTONOSUPPORT for AF_UNIX with bad protocol
+        // regardless of whether the type is valid.
+        //
+        // Note: AF_UNIX is the only family whose ops->socketpair is
+        // implemented in Linux, so for valid AF_UNIX (type, protocol)
+        // we reach the terminal ENOSYS; for invalid types we get
+        // ESOCKTNOSUPPORT; for invalid protocols we now get
+        // EPROTONOSUPPORT (rather than ESOCKTNOSUPPORT) even when
+        // type is also invalid.
+        {
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+
+            // A: AF_UNIX / SOCK_RDM=4 / protocol=99 / sv.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 4, arg2: 99, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,99,sv) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_UNIX / SOCK_DCCP=6 / protocol=99 / sv.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 6, arg2: 99, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,DCCP,99,sv) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_UNIX / SOCK_PACKET=10 / protocol=-1 / sv.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 10, arg2: u64::MAX, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,PACKET,-1,sv) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_UNIX / SOCK_RDM / 0 / sv — protocol OK, type
+            // allowlist fires.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 4, arg2: 0, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,0,sv) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: AF_UNIX / SOCK_RDM / 1=PF_UNIX / sv — protocol OK
+            // via PF_UNIX exemption, type allowlist fires.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 4, arg2: 1, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,PF_UNIX,sv) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: AF_UNIX / SOCK_DCCP / 1=PF_UNIX / sv — same
+            // pattern with a different invalid type.
+            let a = SyscallArgs {
+                arg0: 1, arg1: 6, arg2: 1, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,DCCP,PF_UNIX,sv) not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: Cross-family regression — AF_INET / SOCK_RDM / 99 /
+            // sv → ESOCKTNOSUPPORT (gate 3a, AF_INET-restricted
+            // gate 2-continued doesn't fire because it's AF_UNIX-only).
+            let a = SyscallArgs {
+                arg0: 2, arg1: 4, arg2: 99, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_INET,RDM,99,sv) cross-family regression not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: AF_UNIX / SOCK_STREAM=1 / 99 / sv — regression
+            // (already EPROTONOSUPPORT pre-batch via gate 3b).
+            let a = SyscallArgs {
+                arg0: 1, arg1: 1, arg2: 99, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,99,sv) regression not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socketpair AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK"
             );
         }
 

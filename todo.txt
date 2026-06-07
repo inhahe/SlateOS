@@ -42093,3 +42093,155 @@ probes at lines 57625/58981/58991, all OK).  Logged in
 `known-issues.md` as Bug #2 "Accounting self-test occasionally
 hangs at boot (intermittent)".
 
+## Batch 474 — sys_socket + sys_socketpair AF_UNIX protocol check precedes type allowlist
+
+**Linux 6.x source quote** (`net/unix/af_unix.c::unix_create`):
+
+    static int unix_create(struct net *net, struct socket *sock,
+                           int protocol, int kern)
+    {
+            if (protocol && protocol != PF_UNIX)
+                    return -EPROTONOSUPPORT;     /* gate A */
+
+            sock->state = SS_UNCONNECTED;
+
+            switch (sock->type) {
+            case SOCK_STREAM:
+                    sock->ops = &unix_stream_ops;
+                    break;
+            case SOCK_RAW:
+                    /* Note about SOCK_RAW. */
+                    sock->type = SOCK_DGRAM;
+                    fallthrough;
+            case SOCK_DGRAM:
+                    sock->ops = &unix_dgram_ops;
+                    break;
+            case SOCK_SEQPACKET:
+                    sock->ops = &unix_seqpacket_ops;
+                    break;
+            default:
+                    return -ESOCKTNOSUPPORT;     /* gate B */
+            }
+
+            return unix_create1(...) ? 0 : -ENOMEM;
+    }
+
+PF_UNIX = 1 (include/uapi/linux/socket.h via AF_UNIX = 1).
+
+Gate A (EPROTONOSUPPORT) runs BEFORE gate B (ESOCKTNOSUPPORT in
+the switch default).  So an AF_UNIX call with BOTH an invalid
+type AND an invalid protocol reports EPROTONOSUPPORT, not
+ESOCKTNOSUPPORT — the protocol error gets to surface first.
+
+**Divergence table**
+
+    Shape                                          pre-batch         Linux 6.x
+    --------------------------------------------   --------------    --------------
+    socket(AF_UNIX=1, SOCK_RDM=4, 99)              ESOCKTNOSUPPORT   EPROTONOSUPPORT
+    socket(AF_UNIX, SOCK_DCCP=6, 99)               ESOCKTNOSUPPORT   EPROTONOSUPPORT
+    socket(AF_UNIX, SOCK_PACKET=10, -1)            ESOCKTNOSUPPORT   EPROTONOSUPPORT
+    socket(AF_UNIX, SOCK_RDM, 0)                   ESOCKTNOSUPPORT   unchanged
+                                                                      (protocol OK,
+                                                                       gate B fires)
+    socket(AF_UNIX, SOCK_RDM, 1=PF_UNIX)           ESOCKTNOSUPPORT   unchanged
+                                                                      (protocol OK
+                                                                       via PF_UNIX
+                                                                       exemption)
+    socket(AF_UNIX, SOCK_STREAM=1, 99)             EPROTONOSUPPORT   unchanged
+                                                                      (gate A still
+                                                                       fires; valid
+                                                                       type doesn't
+                                                                       hit gate B)
+    socket(AF_INET=2, SOCK_RDM=4, 99)              ESOCKTNOSUPPORT   unchanged
+                                                                      (gate AF_UNIX-
+                                                                       restricted;
+                                                                       AF_INET path
+                                                                       unchanged)
+
+    socketpair(AF_UNIX, SOCK_RDM, 99, sv)          ESOCKTNOSUPPORT   EPROTONOSUPPORT
+    socketpair(AF_UNIX, SOCK_DCCP, 99, sv)         ESOCKTNOSUPPORT   EPROTONOSUPPORT
+    socketpair(AF_UNIX, SOCK_PACKET, -1, sv)       ESOCKTNOSUPPORT   EPROTONOSUPPORT
+
+**Why it matters**
+
+userspace probes that test AF_UNIX support discriminate three
+distinct kernel-side conditions via errno:
+
+  * EPROTONOSUPPORT → "kernel knows AF_UNIX but doesn't accept
+    this protocol number"
+  * ESOCKTNOSUPPORT → "kernel knows AF_UNIX and the protocol
+    is OK, but doesn't implement this socket type within it"
+  * EAFNOSUPPORT    → "kernel doesn't know AF_UNIX at all"
+
+The most common shape that triggers the gate-order divergence is
+a feature probe that varies BOTH type and protocol simultaneously:
+e.g. a futex-shim probe that walks `(SOCK_DCCP, 99)` to test
+"does this kernel reject by type-first or proto-first?" expects
+the Linux-canonical proto-first order.  Pre-batch our type-first
+order looked like a Linux 2.4-era kernel (before the unix_create
+guard layering was tightened); modern userspace assumes 2.6+.
+
+Notably, libuv's pipe-socket fallback chain probes
+`socket(AF_UNIX, type, 0)` with type stepping through 1, 2, 5
+(STREAM, DGRAM, SEQPACKET) and falls back on EPROTONOSUPPORT but
+NOT on ESOCKTNOSUPPORT — so the errno class change matters for
+which path libuv takes when both error conditions fire at once.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs`:
+
+  * `sys_socket`: new gate 3.6 added after gate 3.5 (IPPROTO_MAX
+    for AF_INET/AF_INET6) and before gate 4 (per-family type
+    allowlist):
+
+        if domain == 1 {
+            #[allow(clippy::cast_possible_truncation)]
+            let proto_unsigned = args.arg2 as u32;
+            if proto_unsigned != 0 && proto_unsigned != 1 {
+                return linux_err(errno::EPROTONOSUPPORT);
+            }
+        }
+
+    Family-restricted to AF_UNIX = 1.
+
+  * `sys_socket`: gate 5's `(1, _) if protocol != 1 =>
+    EPROTONOSUPPORT` arm removed (now redundant; gate 3.6
+    catches the same shape upstream and additionally catches
+    the type-invalid case that gate 4 was hijacking).
+
+  * `sys_socketpair`: identical gate 2-continued (AF_UNIX
+    protocol check) added in the matching position; gate 3b's
+    `(1, _) if protocol != 1` arm removed.
+
+Translator-only — no native socket code touched.
+
+**Probes added (after the batch 472 ICMP/ICMPV6 probe blocks):**
+
+socket (sys_socket):
+
+  A. socket(AF_UNIX=1, SOCK_RDM=4, 99)        -> EPROTONOSUPPORT
+  B. socket(AF_UNIX, SOCK_DCCP=6, 99)         -> EPROTONOSUPPORT
+  C. socket(AF_UNIX, SOCK_PACKET=10, -1)      -> EPROTONOSUPPORT
+  D. socket(AF_UNIX, SOCK_RDM, 0)             -> ESOCKTNOSUPPORT
+  E. socket(AF_UNIX, SOCK_RDM, 1=PF_UNIX)     -> ESOCKTNOSUPPORT
+  F. socket(AF_UNIX, SOCK_DCCP, 1=PF_UNIX)    -> ESOCKTNOSUPPORT
+  G. socket(AF_INET=2, SOCK_RDM, 99)          -> ESOCKTNOSUPPORT
+                                                 (cross-family
+                                                  regression)
+  H. socket(AF_UNIX, SOCK_STREAM=1, 99)       -> EPROTONOSUPPORT
+                                                 (valid-type
+                                                  regression)
+
+socketpair (sys_socketpair): identical A-H with sv pointer.
+
+Probe block stamps:
+
+    [syscall/linux]   socket AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK
+    [syscall/linux]   socketpair AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK
+
+**Build:** `cargo build -p kernel` clean, 42.75s.
+**Boot test:** PASS @ 23s (`bash scripts/boot-test.sh`).
+Probe stamps observed at `build/serial-test.txt:718` (socket) and
+`:725` (socketpair).
+

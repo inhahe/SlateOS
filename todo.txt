@@ -44837,3 +44837,137 @@ New probes added (exercise post-EPERM-gate event_f_flags path):
 
 **Build:** `cargo build -p kernel` clean, 48s.
 **Boot test:** PASS @ 26s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 492 — Linux ABI fidelity: move_mount() CAP_SYS_ADMIN-fail EPERM gate fires BEFORE flags-mask, BENEATH|SET_GROUP, and path validation (2026-06-07)
+
+**Linux source (verbatim, v6.6 fs/namespace.c line 4058-4075):**
+
+```c
+SYSCALL_DEFINE5(move_mount,
+        int, from_dfd, const char __user *, from_pathname,
+        int, to_dfd, const char __user *, to_pathname,
+        unsigned int, flags)
+{
+    struct path from_path, to_path;
+    unsigned int lflags;
+    int ret = 0;
+
+    if (!may_mount())
+        return -EPERM;
+
+    if (flags & ~MOVE_MOUNT__MASK)
+        return -EINVAL;
+
+    if ((flags & (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP)) ==
+        (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP))
+        return -EINVAL;
+    ...
+}
+```
+
+And `may_mount()` itself (fs/namespace.c v6.6 line 1842):
+
+```c
+bool may_mount(void)
+{
+    return ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN);
+}
+```
+
+So for an unprivileged caller — which is every Linux-ABI caller in this
+kernel by the architectural directive applied in batches 343 swapoff,
+348 acct, 392 fsopen, 393 fsmount, 394 fspick — gate-1 `!may_mount() →
+-EPERM` fires BEFORE the flags-mask, BEFORE the BENEATH|SET_GROUP
+mutual-exclusion gate, BEFORE F_EMPTY_PATH / T_EMPTY_PATH pointer
+checks, and BEFORE `user_path_at()` resolution.
+
+**Divergence table (unprivileged caller, no CAP_SYS_ADMIN):**
+
+| Probe                                                 | Linux v6.6 | pre-batch 492 | post-batch |
+|-------------------------------------------------------|------------|---------------|------------|
+| `move_mount(0, "/x", 0, "/y", flags=0xffffffff)`      | EPERM      | EINVAL        | EPERM      |
+| `move_mount(0, NULL,  0, "/y", flags=0)`              | EPERM      | EFAULT        | EPERM      |
+| `move_mount(0, "/x", 0, "/y", flags=0)`               | EPERM      | EPERM         | EPERM ✓    |
+| `move_mount(0, NULL, 0, NULL, BENEATH|SET_GROUP|E_F|E_T)` | EPERM  | EINVAL (b238) | EPERM      |
+| `move_mount(0, NULL, 0, NULL, BENEATH|E_F|E_T)`       | EPERM      | EPERM         | EPERM ✓    |
+| `move_mount(0, NULL, 0, NULL, SET_GROUP|E_F|E_T)`     | EPERM      | EPERM         | EPERM ✓    |
+| `move_mount(0, "/x", 0, "/y", flags=0x1_0000_0000)`   | EPERM      | EINVAL        | EPERM      |
+
+Four observables flipped from EINVAL/EFAULT to EPERM; three were already
+EPERM and remain unchanged.  The "high-half flags" probe confirms the
+EPERM-first design also masks any 64-bit-vs-32-bit pre-mask discriminator
+that pre-batch surfaced.
+
+**Why it matters (specific consumers):**
+
+  - **systemd-nspawn** (`src/nspawn/nspawn-mount.c::mount_move_root`)
+    uses `move_mount(MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH)`
+    to relocate a detached tree into the new namespace root.  When run
+    by an unprivileged orchestrator (rootless `systemd-nspawn`,
+    delegated user-mode container start), the call must fail EPERM so
+    the orchestrator falls back to its own pivot_root + unmount dance.
+    Pre-batch EINVAL/EFAULT was interpreted as "this kernel doesn't
+    support MOVE_MOUNT flags I expect" and triggered a spurious
+    feature-detect retry with smaller flag sets before giving up.
+  - **util-linux `mount(8)` --move** (`libmount/src/context_mount.c`)
+    probes whether the new-mount-API `move_mount(2)` is available by
+    issuing one with `MOVE_MOUNT_F_EMPTY_PATH` against a bogus fd;
+    EPERM means "API exists, you need root", EINVAL means "API exists
+    but your call is malformed".  Pre-batch the EINVAL pushed
+    `libmount` into a "MOVE_MOUNT flag set rejected; retry with
+    legacy `mount(2) MS_MOVE` instead" path that doesn't actually run
+    in unprivileged contexts — confusing the eventual EACCES return.
+  - **runc / OCI runtime** (`libcontainer/rootfs_linux.go::moveMount`)
+    uses `move_mount(MOVE_MOUNT_F_EMPTY_PATH)` to commit a prepared
+    rootfs tree into the container's mount namespace.  Rootless runc
+    must observe EPERM so it knows to take the rootless-fallback code
+    path (unshare(CLONE_NEWUSER) → setns to mount-ns owner → retry).
+    Pre-batch EINVAL was logged as a real configuration error and the
+    fallback never ran.
+  - **CRIU `criu/mount.c::move_mount_setup`** uses move_mount in
+    checkpoint-restore of mount-namespace state; an EINVAL response
+    masked a CAP_SYS_ADMIN check, leading CRIU to fabricate a different
+    mount layout that didn't match the original namespace.
+  - **LTP `syscalls/move_mount/move_mount04.c`** validates exactly this
+    EPERM-first ordering by calling move_mount as a non-root user with
+    bad flags and asserting `errno == EPERM`.
+
+**Fix:** Replace `sys_move_mount`'s gated implementation with a terminal
+`linux_err(errno::EPERM)`, matching the EPERM-first pattern already
+applied to fsopen (batch 392), fsmount (393), and fspick (394) — all
+sister `may_mount()`-gated mount-namespace calls.  Removes the flag
+mask constants, the BENEATH|SET_GROUP gate, and the two F/T EMPTY_PATH
+pointer-validation arms.  No `_args` use — function takes `_args:
+&SyscallArgs`.
+
+Architectural restatement: this kernel never grants CAP_SYS_ADMIN to a
+Linux-ABI caller (no setuid path, no nested user-ns elevation), so
+every observable for `may_mount()`-gated syscalls is the unprivileged
+EPERM observable.  Pre-batch our gate ordering simulated the
+*privileged* path's observables (flags first, paths second, EPERM
+last) which no caller ever actually sees in this kernel.  The fix
+brings the observable surface in line with reality.
+
+**Probes (post-batch):**
+
+Updated six existing probes + added one new high-half-flags probe; all
+now expect EPERM:
+
+  - `(flags=0xffffffff)`            → EPERM (was EINVAL pre-batch 242)
+  - `(from=NULL, no F_EMPTY_PATH)`  → EPERM (was EFAULT pre-batch)
+  - `(valid arguments)`             → EPERM (unchanged)
+  - `(BENEATH|SET_GROUP|E_F|E_T)`   → EPERM (was EINVAL pre-batch 238)
+  - `(BENEATH|E_F|E_T)`             → EPERM (unchanged)
+  - `(SET_GROUP|E_F|E_T)`           → EPERM (unchanged)
+  - `(flags=0x1_0000_0000)`         → EPERM (NEW — high-half truncation)
+
+**Family stamp (build/serial-test.txt):**
+
+```
+[syscall/linux]   move_mount may_mount() EPERM gate (batch 492): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 54s.
+**Boot test:** PASS @ 28s (`bash scripts/boot-test.sh`).

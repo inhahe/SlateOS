@@ -20567,73 +20567,62 @@ fn sys_open_tree(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `move_mount(from_dirfd, from_path*, to_dirfd, to_path*, flags)`.
-fn sys_move_mount(args: &SyscallArgs) -> SyscallResult {
-    const MOVE_MOUNT_F_SYMLINKS: u32 = 0x1;
-    const MOVE_MOUNT_F_AUTOMOUNTS: u32 = 0x2;
-    const MOVE_MOUNT_F_EMPTY_PATH: u32 = 0x4;
-    const MOVE_MOUNT_T_SYMLINKS: u32 = 0x10;
-    const MOVE_MOUNT_T_AUTOMOUNTS: u32 = 0x20;
-    const MOVE_MOUNT_T_EMPTY_PATH: u32 = 0x40;
-    const MOVE_MOUNT_SET_GROUP: u32 = 0x100;
-    const MOVE_MOUNT_BENEATH: u32 = 0x200;
-    const MOVE_MOUNT_MASK: u32 = MOVE_MOUNT_F_SYMLINKS
-        | MOVE_MOUNT_F_AUTOMOUNTS
-        | MOVE_MOUNT_F_EMPTY_PATH
-        | MOVE_MOUNT_T_SYMLINKS
-        | MOVE_MOUNT_T_AUTOMOUNTS
-        | MOVE_MOUNT_T_EMPTY_PATH
-        | MOVE_MOUNT_SET_GROUP
-        | MOVE_MOUNT_BENEATH;
-    // Linux gate order (fs/namespace.c::SYSCALL_DEFINE5(move_mount)):
-    //
-    //   1. may_mount() (CAP_SYS_ADMIN-in-mnt-ns)       -> -EPERM
-    //   2. flags & ~MOVE_MOUNT__MASK                   -> -EINVAL
-    //   3. (flags & (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP))
-    //         == (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP)
-    //                                                  -> -EINVAL
-    //   4. user_path_at(from_dfd, from_pathname, lflags, &from_path)
-    //                                                  -> -EFAULT/-ENOENT/...
-    //
-    // Pre-batch we honoured the flag-mask check (step 2) but lacked
-    // the BENEATH+SET_GROUP mutual-exclusion gate (step 3).  Linux
-    // documents this combination as nonsensical — moving a mount
-    // *beneath* a target while simultaneously requesting that the
-    // *propagation group* of the source be set on the target has
-    // no defined semantics — and rejects it with -EINVAL before any
-    // path validation runs.  A probe passing
-    // (flags = BENEATH | SET_GROUP | F_EMPTY_PATH | T_EMPTY_PATH,
-    //  paths = NULL, NULL) saw our terminal -EPERM where Linux
-    // returns -EINVAL.
-    //
-    // We do not implement step 1 (may_mount() CAP_SYS_ADMIN check
-    // first): the privileged path returns -EPERM as our terminal,
-    // and our kernel-context tests run without a credentials view.
-    // The CAP_SYS_ADMIN ordering manifests only for an unprivileged
-    // caller with a real mnt_ns, which our test env cannot model.
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg4 as u32;
-    if flags & !MOVE_MOUNT_MASK != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if (flags & (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP))
-        == (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP)
-    {
-        return linux_err(errno::EINVAL);
-    }
-    if args.arg1 != 0 {
-        if let Err(e) = validate_user_str(args.arg1) {
-            return linux_err(linux_errno_for(e));
-        }
-    } else if flags & MOVE_MOUNT_F_EMPTY_PATH == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if args.arg3 != 0 {
-        if let Err(e) = validate_user_str(args.arg3) {
-            return linux_err(linux_errno_for(e));
-        }
-    } else if flags & MOVE_MOUNT_T_EMPTY_PATH == 0 {
-        return linux_err(errno::EFAULT);
-    }
+///
+/// Linux gate order (fs/namespace.c::SYSCALL_DEFINE5(move_mount), v6.6
+/// line 4067):
+///
+/// ```c
+/// SYSCALL_DEFINE5(move_mount,
+///     int, from_dfd, const char __user *, from_pathname,
+///     int, to_dfd, const char __user *, to_pathname,
+///     unsigned int, flags)
+/// {
+///     ...
+///     if (!may_mount())
+///         return -EPERM;
+///
+///     if (flags & ~MOVE_MOUNT__MASK)
+///         return -EINVAL;
+///
+///     if ((flags & (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP)) ==
+///         (MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP))
+///         return -EINVAL;
+///     ...
+/// }
+/// ```
+///
+/// `may_mount()` is `ns_capable(current->nsproxy->mnt_ns->user_ns,
+/// CAP_SYS_ADMIN)` (fs/namespace.c v6.6 line 1842).  Linux's
+/// gate-1 EPERM fires BEFORE the flags mask, BEFORE the
+/// BENEATH|SET_GROUP mutual-exclusion check, and BEFORE any path
+/// validation.
+///
+/// Batch 492: pre-batch we ran flag-mask → EINVAL, then BENEATH|
+/// SET_GROUP → EINVAL, then path / EMPTY_PATH gates → EFAULT, then
+/// terminal EPERM.  That inverted Linux's gate-1 CAP_SYS_ADMIN
+/// check, so an unprivileged caller probing with `(flags=0xffffffff,
+/// paths=valid)` saw EINVAL where Linux returns EPERM, and a NULL
+/// from-path probe saw EFAULT where Linux returns EPERM.
+///
+/// We never grant CAP_SYS_ADMIN to Linux-ABI callers (consistent with
+/// the architectural directive applied in batches 343 swapoff, 348
+/// acct, 392 fsopen, 393 fsmount, 394 fspick — all sister mount-
+/// adjacent CAP_SYS_ADMIN-gated calls), so the gate-1 EPERM is
+/// terminal — no flag, pointer, or BENEATH|SET_GROUP touch.
+///
+/// Why it matters: mount-orchestration tools (systemd-nspawn's
+/// rootfs-relocate path, util-linux `mount --move`, the OCI runtime
+/// `runc` pivot-root prep, CRIU's mount-restore code) probe
+/// `move_mount` capability via known-bad arguments and route on
+/// errno: EPERM → "needs root, bail out cleanly with diagnostic",
+/// EINVAL → "your flags / paths are malformed, this is a bug in
+/// our caller code".  Pre-batch our EINVAL/EFAULT would mis-route
+/// the diagnosis: tools would log "move_mount flags malformed"
+/// or "move_mount path bad" when the real situation is "this is
+/// an unprivileged process and the call is forbidden by policy."
+fn sys_move_mount(_args: &SyscallArgs) -> SyscallResult {
+    // Gate 1 (Linux's literal first check): may_mount() → EPERM.
+    // Terminal — no flag, pointer, or BENEATH|SET_GROUP touch.
     linux_err(errno::EPERM)
 }
 
@@ -56341,36 +56330,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   open_tree flag-mask > AT_RECURSIVE-requires-CLONE gate order: OK"
         );
 
-        // move_mount bad flags -> EINVAL.
+        // Batch 492: Linux v6.6 fs/namespace.c::SYSCALL_DEFINE5(
+        // move_mount) line 4067 runs `if (!may_mount()) return -EPERM;`
+        // BEFORE the flags-mask check, BEFORE the BENEATH|SET_GROUP
+        // mutual-exclusion gate, and BEFORE any path validation.  We
+        // never grant CAP_SYS_ADMIN to Linux-ABI callers, so the
+        // gate-1 EPERM is terminal — flags, paths, and the BENEATH+
+        // SET_GROUP combination are all unreachable from the
+        // unprivileged-caller's observable.  All six probes below
+        // therefore expect EPERM where pre-batch (242, 238, 244)
+        // some expected EINVAL / EFAULT.
+        //
+        // (1) bad flags + valid paths -> EPERM (was EINVAL pre-batch).
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: path_ptr, arg4: 0xffff_ffff, arg5: 0 };
-        if dispatch_linux(nr::MOVE_MOUNT, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: move_mount bad flags not EINVAL");
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: move_mount bad flags not EPERM (batch 492)");
             return Err(KernelError::InternalError);
         }
-        // move_mount NULL from-path without EMPTY_PATH -> EFAULT.
+        // (2) NULL from-path without EMPTY_PATH -> EPERM (was EFAULT
+        // pre-batch).  Confirms the EPERM-first gate masks ALL pointer
+        // touches, including the F_EMPTY_PATH-conditioned NULL check.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: path_ptr, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MOVE_MOUNT, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: move_mount NULL from not EFAULT");
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: move_mount NULL from not EPERM (batch 492)");
             return Err(KernelError::InternalError);
         }
-        // move_mount valid -> EPERM.
+        // (3) Valid arguments -> EPERM (terminal, unchanged from
+        // pre-batch — Linux returns the same here).
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: path_ptr, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MOVE_MOUNT, &a).value != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: move_mount valid not EPERM");
             return Err(KernelError::InternalError);
         }
-        // Batch 238: Linux gates MOVE_MOUNT_BENEATH | MOVE_MOUNT_SET_GROUP
-        // as -EINVAL ahead of any path validation.  The two flags
-        // together are semantically meaningless (move-beneath +
-        // set-propagation-group has no defined behaviour) and Linux
-        // refuses the call before user_path_at runs.
-        //
-        // Probe: (flags = BENEATH | SET_GROUP | F_EMPTY_PATH |
-        //                 T_EMPTY_PATH, paths = NULL, NULL).
-        // Pre-batch we passed the flag-mask check, the EMPTY_PATH
-        // bits suppressed both -EFAULT path gates, and the terminal
-        // returned -EPERM.  Post-batch the mutual-exclusion gate
-        // fires and we return -EINVAL.
+        // (4) BENEATH|SET_GROUP|EMPTY_PATHs -> EPERM (was EINVAL
+        // pre-batch 238).  The mutual-exclusion gate is unreachable
+        // for unprivileged callers because gate-1 EPERM fires first.
         let a = SyscallArgs {
             arg0: 0,
             arg1: 0,
@@ -56380,17 +56374,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg5: 0,
         };
         if dispatch_linux(nr::MOVE_MOUNT, &a).value
-            != -i64::from(errno::EINVAL) {
+            != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: move_mount BENEATH|SET_GROUP not EINVAL"
+                "[syscall/linux]   FAIL: move_mount BENEATH|SET_GROUP not EPERM (batch 492)"
             );
             return Err(KernelError::InternalError);
         }
-        // Sibling probe: BENEATH alone (without SET_GROUP) is a legal
-        // flag combination — the mutual-exclusion gate must NOT fire,
-        // and with EMPTY_PATH set on both sides the path gates also
-        // skip, so we reach the terminal -EPERM.  Confirms the gate
-        // is keyed on BOTH bits and not just BENEATH.
+        // (5) BENEATH alone -> EPERM (unchanged: a legal flag combo
+        // whose terminal was already EPERM).
         let a = SyscallArgs {
             arg0: 0,
             arg1: 0,
@@ -56406,8 +56397,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Sibling probe: SET_GROUP alone (without BENEATH) is also
-        // legal; same EPERM terminal as plain valid call.
+        // (6) SET_GROUP alone -> EPERM (unchanged).
         let a = SyscallArgs {
             arg0: 0,
             arg1: 0,
@@ -56423,8 +56413,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // (7) Batch 492: garbage high-half flags (0x1_0000_0000) are
+        // truncated by the AMD64 u32-arg convention before the
+        // unprivileged caller ever reaches a flag-mask check.  Linux's
+        // gate-1 EPERM fires first regardless; confirms our translator
+        // matches the truncation-then-EPERM observable rather than
+        // surfacing EINVAL from a 64-bit pre-mask comparison.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: path_ptr,
+            arg2: 0,
+            arg3: path_ptr,
+            arg4: 0x1_0000_0000,
+            arg5: 0,
+        };
+        if dispatch_linux(nr::MOVE_MOUNT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_mount high-half flags not EPERM (batch 492)"
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall/linux]   move_mount BENEATH|SET_GROUP mutual exclusion EINVAL: OK"
+            "[syscall/linux]   move_mount may_mount() EPERM gate (batch 492): OK"
         );
     }
 

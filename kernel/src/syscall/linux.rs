@@ -23959,13 +23959,25 @@ fn sys_modify_ldt(args: &SyscallArgs) -> SyscallResult {
             // clear_user.  bytecount==0 -> success(0).  Bad ptr
             // with bytecount > 0 -> EFAULT.
             //
-            // We validate the user buffer for shape fidelity and
-            // claim success without actually writing the zero
-            // bytes; the default LDT on x86_64 is irrelevant in
-            // 64-bit mode (callers see "we cleared it" — which is
-            // a true statement: it was never set in the first
-            // place).  This is the established translator pattern
-            // for "no backing state, shape-compliant terminal."
+            // Linux verbatim (arch/x86/kernel/ldt.c::read_default_ldt):
+            //
+            //     unsigned long size = 128;   /* x86_64 */
+            //     if (bytecount > size) bytecount = size;
+            //     if (clear_user(ptr, bytecount)) return -EFAULT;
+            //     return bytecount;
+            //
+            // Pre-batch we validated the buffer for shape fidelity
+            // and returned the byte count WITHOUT actually writing
+            // the zero bytes — leaving the caller's pre-call payload
+            // intact.  A probe that fills the buffer with a 0xFF
+            // sentinel and inspects post-call observes stale data
+            // and concludes the kernel ignored the call (or that the
+            // LDT contained 0xFF bytes, which is impossible).  Mirror
+            // Linux's clear_user with a stack-allocated zero buffer
+            // sized at DEFAULT_LDT_SIZE; copy_to_user with SMAP-safe
+            // stac/clac then writes the zeros into the caller's
+            // address range.  Returns -EFAULT on any partial-clear
+            // failure (matching `if (clear_user(...)) return -EFAULT`).
             const DEFAULT_LDT_SIZE: u64 = 128;
             let bc = args.arg2.min(DEFAULT_LDT_SIZE);
             if bc > 0 {
@@ -23977,6 +23989,25 @@ fn sys_modify_ldt(args: &SyscallArgs) -> SyscallResult {
                 if let Err(e) =
                     crate::mm::user::validate_user_write(args.arg1, bc_usize)
                 {
+                    return linux_err(linux_errno_for(e));
+                }
+                // clear_user equivalent: write `bc_usize` zero bytes
+                // into the caller's buffer.  `DEFAULT_LDT_SIZE` is
+                // the maximum we'll ever need (caps at 128).
+                let zero = [0u8; DEFAULT_LDT_SIZE as usize];
+                // SAFETY: validate_user_write above confirmed bc_usize
+                // bytes are writable in the caller's address space;
+                // zero is a kernel-stack buffer of exactly
+                // DEFAULT_LDT_SIZE bytes (>= bc_usize since bc <=
+                // DEFAULT_LDT_SIZE).
+                let r = unsafe {
+                    crate::mm::user::copy_to_user(
+                        zero.as_ptr(),
+                        args.arg1,
+                        bc_usize,
+                    )
+                };
+                if let Err(e) = r {
                     return linux_err(linux_errno_for(e));
                 }
             }
@@ -57358,6 +57389,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         let user_desc_buf = [0u8; 16];
         let user_desc_ptr = user_desc_buf.as_ptr() as u64;
+        // Batch 451: read_default_ldt fidelity buffer.  Must be at
+        // least DEFAULT_LDT_SIZE (128) bytes since modify_ldt(func=2)
+        // now writes the zero bytes Linux's clear_user() does.  We
+        // pre-fill with 0xFF sentinel so a post-call inspection can
+        // verify the clear actually happened — pre-batch the byte
+        // count was returned without touching the buffer.
+        let mut default_ldt_buf = [0xFFu8; 128];
+        let default_ldt_ptr = default_ldt_buf.as_mut_ptr() as u64;
         let kexec_seg_buf = [0u8; 64];
         let kexec_seg_ptr = kexec_seg_buf.as_ptr() as u64;
         let mnt_outbuf = [0u8; 128];
@@ -57466,7 +57505,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         // modify_ldt(func=2, &buf, bytecount=64) -> 64 (clear 64
         // bytes, returns count).  Pre-batch returned ENOSYS.
-        let a = SyscallArgs { arg0: 2, arg1: user_desc_ptr, arg2: 64, arg3: 0, arg4: 0, arg5: 0 };
+        // Batch 451: switch from user_desc_ptr (16B) to
+        // default_ldt_ptr (128B) since the impl now actually writes
+        // the zero bytes — Linux's clear_user(ptr, 64) writes 64
+        // bytes; the old 16-byte buffer would overflow the kernel
+        // stack adjacent to the array.
+        let a = SyscallArgs { arg0: 2, arg1: default_ldt_ptr, arg2: 64, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MODIFY_LDT, &a).value != 64 {
             serial_println!(
                 "[syscall/linux]   FAIL: modify_ldt(func=2,bc=64) not 64 ({})",
@@ -57474,13 +57518,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Batch 451 fidelity probe: verify modify_ldt(func=2)
+        // actually zeroed the buffer.  Pre-batch we returned the
+        // byte count without writing; the 0xFF sentinel survives.
+        // Linux's read_default_ldt calls clear_user(ptr, bytecount)
+        // — those 64 bytes must be 0x00 post-call, and bytes
+        // beyond bytecount must retain the 0xFF sentinel.
+        // SAFETY: we own default_ldt_buf on the kernel stack and
+        // dispatch_linux above has returned; no concurrent
+        // access can race here.
+        let cleared_prefix = default_ldt_buf[0..64].iter().all(|&b| b == 0);
+        let untouched_suffix = default_ldt_buf[64..128].iter().all(|&b| b == 0xFF);
+        if !cleared_prefix {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=2,bc=64) did not clear caller buffer"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if !untouched_suffix {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=2,bc=64) wrote past bytecount"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Re-arm the sentinel for the next probe.
+        for b in default_ldt_buf.iter_mut() {
+            *b = 0xFF;
+        }
         // modify_ldt(func=2, &buf, bytecount=200) -> 128 (capped at
         // DEFAULT_LDT_SIZE).
-        let a = SyscallArgs { arg0: 2, arg1: user_desc_ptr, arg2: 200, arg3: 0, arg4: 0, arg5: 0 };
+        let a = SyscallArgs { arg0: 2, arg1: default_ldt_ptr, arg2: 200, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MODIFY_LDT, &a).value != 128 {
             serial_println!(
                 "[syscall/linux]   FAIL: modify_ldt(func=2,bc=200) not 128 ({})",
                 dispatch_linux(nr::MODIFY_LDT, &a).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 451 fidelity probe: bytecount=200 caps at 128 — all
+        // 128 bytes must be cleared.
+        if !default_ldt_buf.iter().all(|&b| b == 0) {
+            serial_println!(
+                "[syscall/linux]   FAIL: modify_ldt(func=2,bc=200) did not clear full 128B at cap"
             );
             return Err(KernelError::InternalError);
         }
@@ -57491,7 +57570,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   modify_ldt full switch (ENOSYS default, bc==16 write gate, read_ldt no-LDT fast path, read_default_ldt count): OK"
+            "[syscall/linux]   modify_ldt read_default_ldt clear_user(ptr, min(bc, 128)): OK"
         );
 
         // iopl bad level (> 3) -> EINVAL.

@@ -38794,3 +38794,164 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot: bash scripts/boot-test.sh PASSED at 22s.
      Stamps confirmed at build/serial-test.txt:
        "[syscall/linux]   getres{u,g}id NULL pointer -> EFAULT (Linux put_user fault): OK"
+
+451. syscall/linux: modify_ldt(func=2) read_default_ldt must actually
+     clear_user(ptr, min(bytecount, 128)) — pre-batch returned the
+     byte count without writing the zero bytes.
+
+     Linux source (arch/x86/kernel/ldt.c::read_default_ldt):
+       static int read_default_ldt(void __user *ptr, unsigned long bytecount)
+       {
+           /* CHECKME: Can we use _one_ random number ? */
+       #ifdef CONFIG_X86_32
+           unsigned long size = 5 * sizeof(struct desc_struct);
+       #else
+           unsigned long size = 128;
+       #endif
+           if (size > bytecount)
+               size = bytecount;
+           if (clear_user(ptr, size))
+               return -EFAULT;
+           return size;
+       }
+
+     Note that `size = min(128, bytecount)` (the conditional reads as
+     "if size > bytecount, lower size to bytecount" — a clamp DOWN to
+     the caller's bytecount, never UP).  clear_user(ptr, size) writes
+     `size` zero bytes into the caller's buffer; the return value is
+     the number of bytes that could not be cleared (non-zero ->
+     -EFAULT).
+
+     Pre-batch the func=2 arm of sys_modify_ldt computed
+     `bc = args.arg2.min(128)`, validated the user buffer was
+     writable, and returned `bc` — WITHOUT writing the zero bytes.
+     A caller who passed in a buffer pre-filled with non-zero data
+     would see their data preserved, contradicting Linux's
+     documented "clears the default LDT region" semantics.  The
+     justification comment claimed "the default LDT on x86_64 is
+     irrelevant in 64-bit mode (callers see we cleared it — which
+     is a true statement: it was never set in the first place)" but
+     this conflates two things: the LDT *content* (irrelevant on
+     x86_64 native, true) versus the *user buffer mutation* (which
+     IS observable to the caller regardless of LDT relevance).
+
+     Divergence table (caller input -> Linux result -> pre-batch result):
+
+       input (buf pre-filled with 0xFF sentinel)
+       ─────                                       Linux       pre-batch
+                                                   ─────       ─────────
+       modify_ldt(2, buf, 64)                      ret=64,     ret=64,
+                                                   buf[0..64]  buf[0..64]
+                                                   = 0x00,     = 0xFF
+                                                   buf[64..]   (unchanged)
+                                                   = 0xFF
+       modify_ldt(2, buf, 200)                     ret=128,    ret=128,
+                                                   buf[0..128] buf[0..128]
+                                                   = 0x00      = 0xFF
+                                                   (capped     (unchanged)
+                                                   at 128)
+       modify_ldt(2, buf, 0)                       ret=0,      ret=0,
+                                                   buf         buf
+                                                   unchanged   unchanged
+       modify_ldt(2, NULL, 10)                     EFAULT      EFAULT
+                                                   (clear_user (explicit
+                                                   on NULL     NULL gate)
+                                                   faults)
+       modify_ldt(2, NULL, 0)                      ret=0       ret=0
+                                                   (size=0,    (bc==0
+                                                   clear_user  skips
+                                                   no-op)      block)
+
+     Why it matters: glibc's 32-bit-compat shim, Wine's 32-bit-on-
+     x86_64 wrapper, and a handful of legacy CRT runtimes use
+     modify_ldt(2, buf, 128) at startup to obtain a clean reference
+     snapshot of the default LDT for comparing against any
+     per-process LDT they install later.  The buffer is allocated
+     in their static area, often pre-initialised with garbage or
+     a sentinel pattern.  Pre-batch we silently left the sentinel
+     in place — a caller comparing the post-call buffer against
+     the all-zero "default LDT" baseline (which is what Linux
+     produces) would see a mismatch and conclude that some other
+     process had already installed a custom LDT, triggering
+     defensive teardown logic that does not need to run.
+
+     Additionally: a security-hardened userspace runtime might
+     write a marker into the buffer pre-call and verify the
+     marker is gone post-call as a proof the syscall actually
+     did what it claimed.  Pre-batch we would have failed that
+     check.
+
+     Fix (kernel/src/syscall/linux.rs, sys_modify_ldt func=2 arm
+     around line 23957):
+
+         2 => {
+             const DEFAULT_LDT_SIZE: u64 = 128;
+             let bc = args.arg2.min(DEFAULT_LDT_SIZE);
+             if bc > 0 {
+                 if args.arg1 == 0 {
+                     return linux_err(errno::EFAULT);
+                 }
+                 let bc_usize = bc as usize;
+                 if let Err(e) = crate::mm::user::validate_user_write(
+                     args.arg1, bc_usize)
+                 {
+                     return linux_err(linux_errno_for(e));
+                 }
+                 // clear_user equivalent: write `bc_usize` zero
+                 // bytes into the caller's buffer.
+                 let zero = [0u8; DEFAULT_LDT_SIZE as usize];
+                 // SAFETY: validate_user_write above confirmed
+                 // bc_usize bytes are writable in the caller's
+                 // address space; zero is a kernel-stack buffer
+                 // of exactly DEFAULT_LDT_SIZE bytes (>= bc_usize).
+                 let r = unsafe {
+                     crate::mm::user::copy_to_user(
+                         zero.as_ptr(), args.arg1, bc_usize)
+                 };
+                 if let Err(e) = r {
+                     return linux_err(linux_errno_for(e));
+                 }
+             }
+             SyscallResult::ok(bc as i64)
+         }
+
+     Gate order preserved: bc==0 short-circuits before any pointer
+     touch (Linux's clear_user(_, 0) is a no-op success), NULL ptr
+     with bc>0 returns EFAULT before validate_user_write runs (matches
+     Linux clear_user faulting on the first store), then the write.
+
+     Boot-time probes (rewritten — pre-batch probes were using the
+     16-byte user_desc_buf for func=2 calls with bytecount=64 and
+     bytecount=200, which would now stack-corrupt as soon as the
+     impl began actually writing).  A dedicated 128-byte sentinel
+     buffer was added next to user_desc_buf:
+
+       let mut default_ldt_buf = [0xFFu8; 128];
+       let default_ldt_ptr = default_ldt_buf.as_mut_ptr() as u64;
+
+     (A) modify_ldt(2, default_ldt_ptr, 64) -> ret==64 AND
+         default_ldt_buf[0..64] == [0x00; 64] AND
+         default_ldt_buf[64..128] == [0xFF; 64]
+         (verifies exact bytecount clear, no over-write past
+         the count)
+     (B) modify_ldt(2, default_ldt_ptr, 200) -> ret==128 AND
+         default_ldt_buf[0..128] == [0x00; 128]
+         (verifies 200 clamps to 128 and clears all 128 bytes)
+     (C) modify_ldt(2, NULL, 10) -> EFAULT
+         (preserved from pre-batch; NULL ptr with bc>0)
+
+     The bc==0 paths (modify_ldt(2, NULL, 0) and modify_ldt(2,
+     ptr, 0)) were already covered in the existing func=2,bc=0
+     probe and pass unchanged.  Re-arming the sentinel between
+     probes (A) and (B) verifies probe (A) did not accidentally
+     succeed by virtue of buffer leftover state from a prior
+     test.
+
+     Stamp (updated to reflect the new gate semantics):
+       "[syscall/linux]   modify_ldt read_default_ldt
+        clear_user(ptr, min(bc, 128)): OK"
+
+     Build: cargo build -p kernel clean (52.49s).
+     Boot: bash scripts/boot-test.sh PASSED at 22s.
+     Stamp confirmed at build/serial-test.txt:
+       "[syscall/linux]   modify_ldt read_default_ldt clear_user(ptr, min(bc, 128)): OK"

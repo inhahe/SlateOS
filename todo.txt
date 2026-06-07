@@ -45873,3 +45873,68 @@ Summary stamp: `io_uring_register opcode cap = IORING_REGISTER_LAST=26
 **Build:** clean (`cargo build -p kernel`, 44.7s).
 
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 500 — Linux ABI fidelity: io_uring_enter() VALID_FLAGS tightened from 0x7F to 0x1F to match Linux v6.6 (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_io_uring_enter`
+VALID_FLAGS const + 5 new boot probes).
+
+**Divergence.** Pre-batch `VALID_FLAGS = 0x7F` accepted Linux 6.10's
+`IORING_ENTER_ABS_TIMER` (0x20) and `IORING_ENTER_EXT_ARG_REG` (0x40)
+as a forward-compat buffer.  Linux v6.6 defines only five flag bits
+and rejects everything else with EINVAL.
+
+**Verbatim Linux v6.6 source.**
+
+`include/uapi/linux/io_uring.h` lines 464-468:
+```c
+#define IORING_ENTER_GETEVENTS         (1U << 0)  /* 0x01 */
+#define IORING_ENTER_SQ_WAKEUP         (1U << 1)  /* 0x02 */
+#define IORING_ENTER_SQ_WAIT           (1U << 2)  /* 0x04 */
+#define IORING_ENTER_EXT_ARG           (1U << 3)  /* 0x08 */
+#define IORING_ENTER_REGISTERED_RING   (1U << 4)  /* 0x10 */
+```
+
+`io_uring/io_uring.c::SYSCALL_DEFINE6` lines 3609-3612:
+```c
+if (unlikely(flags & ~(IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP |
+                       IORING_ENTER_SQ_WAIT | IORING_ENTER_EXT_ARG |
+                       IORING_ENTER_REGISTERED_RING)))
+    return -EINVAL;
+```
+
+— i.e. the v6.6 mask is exactly 0x1F.
+
+**Divergence table.**
+
+| flags | Linux v6.6 | Pre-batch 500 |
+|-------|------------|---------------|
+| 0x1F  | -> EBADF   | -> EBADF      | (full v6.6 mask passes)
+| **0x20** | **EINVAL** | **-> EBADF** | (ABS_TIMER, Linux 6.10+)
+| **0x40** | **EINVAL** | **-> EBADF** | (EXT_ARG_REG, Linux 6.10+)
+| **0x60** | **EINVAL** | **-> EBADF** | (both 6.10+ bits)
+| 0x80  | EINVAL     | EINVAL        | (was already rejected)
+
+(`-> EBADF` means "passes flags mask, fdget fails on bogus fd".)
+
+**Fix.** Replace `VALID_FLAGS = 0x7F` with `VALID_FLAGS = 0x1F`.  Pure
+ABI surface alignment; no state changes.
+
+**Boot probes added.** Five-probe cluster covering the boundary:
+
+1. `flags=0x1F` (full v6.6 mask) -> EBADF (baseline)
+2. `flags=0x20` (ABS_TIMER, 6.10+) -> EINVAL (was EBADF)
+3. `flags=0x40` (EXT_ARG_REG, 6.10+) -> EINVAL (was EBADF)
+4. `flags=0x60` (combo) -> EINVAL (was EBADF)
+5. `flags=0x10` (REGISTERED_RING, v6.6) -> EBADF|EINVAL (relaxed
+   because our stub doesn't model tctx; either is consistent with
+   "no rings exist")
+
+Summary stamp: `io_uring_enter VALID_FLAGS=0x1F (v6.6, batch 500):
+OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 49.1s).
+
+**Boot test:** PASS @ 26s (`bash scripts/boot-test.sh`).

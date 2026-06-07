@@ -15046,12 +15046,38 @@ fn sys_io_uring_setup(args: &SyscallArgs) -> SyscallResult {
 /// valid fd is EBADF — same pattern as the socket family.  This mirrors
 /// what Linux gives a caller who passes a non-io_uring fd today.
 fn sys_io_uring_enter(args: &SyscallArgs) -> SyscallResult {
-    // Linux 6.10: IORING_ENTER_GETEVENTS=0x01, SQ_WAKEUP=0x02,
-    // SQ_WAIT=0x04, EXT_ARG=0x08, REGISTERED_RING=0x10,
-    // ABS_TIMER=0x20, EXT_ARG_REG=0x40.  Higher bits are unused.
+    // ## Batch 500 — VALID_FLAGS tightened from 0x7F to 0x1F (v6.6 set)
+    //
+    // Linux v6.6 `include/uapi/linux/io_uring.h` (lines 464-468) defines:
+    //   IORING_ENTER_GETEVENTS         = (1U << 0)  // 0x01
+    //   IORING_ENTER_SQ_WAKEUP         = (1U << 1)  // 0x02
+    //   IORING_ENTER_SQ_WAIT           = (1U << 2)  // 0x04
+    //   IORING_ENTER_EXT_ARG           = (1U << 3)  // 0x08
+    //   IORING_ENTER_REGISTERED_RING   = (1U << 4)  // 0x10
+    //
+    // and `io_uring/io_uring.c::SYSCALL_DEFINE6` (line 3609-3612):
+    //   if (unlikely(flags & ~(IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP |
+    //                          IORING_ENTER_SQ_WAIT | IORING_ENTER_EXT_ARG |
+    //                          IORING_ENTER_REGISTERED_RING)))
+    //       return -EINVAL;
+    //
+    // Pre-batch our VALID_FLAGS was 0x7F — including Linux 6.10's
+    // IORING_ENTER_ABS_TIMER (0x20) and EXT_ARG_REG (0x40) as a
+    // forward-compat buffer.  Translator-only directive overrides
+    // forward-compat: match v6.6's CURRENT surface.  Divergence:
+    //
+    // | flags | Linux v6.6 | Pre-batch 500 |
+    // |-------|------------|---------------|
+    // | 0x1F  | -> EBADF   | -> EBADF      | (full v6.6 mask passes)
+    // | 0x20  | EINVAL     | -> EBADF      | (ABS_TIMER, Linux 6.10+)
+    // | 0x40  | EINVAL     | -> EBADF      | (EXT_ARG_REG, Linux 6.10+)
+    // | 0x80  | EINVAL     | EINVAL        | (already rejected)
+    //
+    // (`-> EBADF` means "passes flags mask, fdget fails on bogus fd".)
     const IORING_ENTER_GETEVENTS: u32 = 0x01;
     const IORING_ENTER_EXT_ARG: u32 = 0x08;
-    const VALID_FLAGS: u32 = 0x7F;
+    // v6.6 mask: GETEVENTS | SQ_WAKEUP | SQ_WAIT | EXT_ARG | REGISTERED_RING.
+    const VALID_FLAGS: u32 = 0x1F;
     // Linux signature: SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd,
     // u32, to_submit, u32, min_complete, u32, flags, ...).  The AMD64
     // syscall ABI does not zero-extend `u32` args before issuing
@@ -50637,6 +50663,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   io_uring_enter flags u32-truncation (high-half ignored): OK"
+        );
+
+        // Batch 500: io_uring_enter VALID_FLAGS tightened from 0x7F to
+        // 0x1F to match Linux v6.6.  Pre-batch we accepted Linux 6.10's
+        // ABS_TIMER (0x20) and EXT_ARG_REG (0x40) as a forward-compat
+        // buffer; v6.6 rejects them with EINVAL.
+        //
+        // (x) flags=0x1F (full v6.6 mask, valid) -> falls through to
+        //     fdget; bogus fd=99 -> EBADF.  Baseline preserved.
+        //     Note: 0x1F includes EXT_ARG (0x08) without GETEVENTS
+        //     (0x01)?  Actually 0x1F = 0x01|0x02|0x04|0x08|0x10, so
+        //     GETEVENTS IS set — the "EXT_ARG without GETEVENTS"
+        //     EINVAL gate doesn't fire.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 0, arg2: 0,
+            arg3: 0x1F,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0x1F=v6.6 mask) not EBADF (batch 500)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (y) flags=0x20 (ABS_TIMER, Linux 6.10+) -> EINVAL post-batch
+        //     (was EBADF: passed through the lax 0x7F mask and reached
+        //     fdget).
+        let a = SyscallArgs {
+            arg0: 99, arg1: 0, arg2: 0,
+            arg3: 0x20,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0x20=ABS_TIMER) not EINVAL (batch 500)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (z) flags=0x40 (EXT_ARG_REG, Linux 6.10+) -> EINVAL post-batch
+        //     (was EBADF).
+        let a = SyscallArgs {
+            arg0: 99, arg1: 0, arg2: 0,
+            arg3: 0x40,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0x40=EXT_ARG_REG) not EINVAL (batch 500)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (aa) flags=0x60 (ABS_TIMER|EXT_ARG_REG) -> EINVAL.  Catches
+        //      a regression where someone might think only one of the
+        //      two needs tightening.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 0, arg2: 0,
+            arg3: 0x60,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::IO_URING_ENTER, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0x60) not EINVAL (batch 500)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (bb) flags=0x10 (REGISTERED_RING alone, valid in v6.6) ->
+        //      Linux takes the registered-ring branch.  In our stub no
+        //      tctx exists; the registered-ring branch with !tctx
+        //      returns EINVAL.  Our impl doesn't model the
+        //      registered-ring branch (no tctx), so it falls through
+        //      to fdget-style EBADF.  Either is consistent with the
+        //      v6.6 "no rings exist" answer; document but don't enforce
+        //      strict EINVAL-vs-EBADF here because the divergence is
+        //      "kernel hasn't implemented the feature" rather than
+        //      a translator bug.  Just confirm it doesn't surface a
+        //      stale 0x7F-mask success.
+        let a = SyscallArgs {
+            arg0: 99, arg1: 0, arg2: 0,
+            arg3: 0x10,
+            arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::IO_URING_ENTER, &a).value;
+        if v != -i64::from(errno::EBADF) && v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_uring_enter(flags=0x10=REGISTERED_RING) not EBADF|EINVAL (batch 500), got {}",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   io_uring_enter VALID_FLAGS=0x1F (v6.6, batch 500): OK"
         );
 
         // io_uring_register nr_args is C `unsigned int` in the Linux

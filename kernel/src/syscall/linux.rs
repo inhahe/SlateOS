@@ -15398,23 +15398,58 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
 
 /// `memfd_secret(flags)`.
 ///
-/// Linux ABI: `int memfd_secret(unsigned int flags)`.
-/// SYSCALL_DEFINE1(memfd_secret, unsigned int, flags) narrows the sole
-/// parameter to (unsigned int) on entry; the mask check
-/// `flags & ~FD_CLOEXEC` in mm/secretmem.c runs at 32-bit width.
-/// Pre-batch we held flags as u64 and ran the mask check at 64-bit
-/// width, so the AMD64 syscall ABI's high-half garbage (the kernel
-/// does not zero-extend int args before issuing the syscall) leaked
-/// into the mask and returned spurious EINVAL where Linux returns
-/// ENOSYS (we don't implement secretmem).  Eleventh instance of the
-/// int/unsigned-int truncation pattern after batches 308-317.
-fn sys_memfd_secret(args: &SyscallArgs) -> SyscallResult {
-    const VALID_FLAGS: u32 = 0o2_000_000; // O_CLOEXEC
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg0 as u32;
-    if flags & !VALID_FLAGS != 0 {
-        return linux_err(errno::EINVAL);
-    }
+/// Linux source — `mm/secretmem.c::SYSCALL_DEFINE1(memfd_secret, ...)`
+/// (verbatim, with file-creation tail elided):
+///
+/// ```c
+/// SYSCALL_DEFINE1(memfd_secret, unsigned int, flags)
+/// {
+///     struct file *file;
+///     int fd, err;
+///
+///     /* make sure local flags do not confict with global fcntl.h */
+///     BUILD_BUG_ON(MFD_CLOEXEC & O_CLOEXEC);
+///
+///     if (!secretmem_enable)
+///         return -ENOSYS;
+///
+///     if (flags & ~(FD_CLOEXEC | MFD_CLOEXEC))
+///         return -EINVAL;
+///     ...
+/// }
+/// ```
+///
+/// The literal first gate is `if (!secretmem_enable) return -ENOSYS`.
+/// `secretmem_enable` defaults to `false` and is only flipped to
+/// `true` when the user passes `secretmem.enable=1` on the kernel
+/// command line *and* `can_set_direct_map()` returns true.  Every
+/// stock Linux install therefore returns ENOSYS regardless of flags
+/// — the EINVAL gate is unreachable in the default configuration.
+///
+/// We do not implement secretmem, so the same blanket ENOSYS holds.
+///
+/// Pre-batch divergence: the EINVAL flag gate ran BEFORE ENOSYS, and
+/// its mask (`O_CLOEXEC` only) omitted FD_CLOEXEC (=1) which Linux
+/// also accepts.  Two observable shapes:
+///
+/// | input                                | pre-batch | Linux  |
+/// |--------------------------------------|-----------|--------|
+/// | `memfd_secret(FD_CLOEXEC=1)`         | EINVAL    | ENOSYS |
+/// | `memfd_secret(0xFFFFFFFF)`           | EINVAL    | ENOSYS |
+/// | `memfd_secret(O_CLOEXEC=0o2000000)`  | ENOSYS    | ENOSYS |
+///
+/// Translator-only fix: collapse to unconditional ENOSYS, mirroring
+/// the literal first gate of Linux's SYSCALL_DEFINE1.  No arg touch
+/// (matches `sys_ni_syscall` shape when CONFIG_SECRETMEM=n).  Native
+/// OS architecture (no secretmem backend) is unchanged.
+///
+/// Note: the int-truncation rationale that motivated batch 318
+/// (high-half garbage leaking into the mask) is now moot — the mask
+/// is gone, so high bits can no longer affect the result.  We keep
+/// the batch 318 probes below as ABI documentation: they verify that
+/// passing high-half-set u64 values still produces the unconditional
+/// ENOSYS, which is the correct Linux shape.
+fn sys_memfd_secret(_args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
@@ -49059,18 +49094,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Batch 318: memfd_secret unsigned-int truncation — high-half
-        // register garbage must be stripped before the flags mask check.
+        // Batch 460: memfd_secret unconditional ENOSYS — the literal
+        // first gate of Linux's SYSCALL_DEFINE1 is
+        //   if (!secretmem_enable) return -ENOSYS;
+        // and `secretmem_enable` is `false` on every stock install
+        // (only set via the `secretmem.enable=1` kernel boot param
+        // when `can_set_direct_map()` is true).  The EINVAL flag gate
+        // is therefore unreachable in practice, so memfd_secret with
+        // ANY flag combination (including the ones Linux's mask
+        // would reject) must return ENOSYS.
         //
-        // Linux signature: `int memfd_secret(unsigned int flags)`.
-        // flags is C unsigned int → low 32 bits only.  Pre-batch we
-        // held flags as u64 and ran the mask check at 64-bit width, so
-        // high-half garbage returned spurious EINVAL where Linux
-        // returns ENOSYS (we don't implement secretmem).
+        // Pre-batch 460 ran the EINVAL mask check before ENOSYS and
+        // used a too-narrow mask (O_CLOEXEC only — FD_CLOEXEC was
+        // wrongly rejected).
         //
-        // (a) memfd_secret(0x1_0008_0000) → ENOSYS
-        //     (high|O_CLOEXEC; truncates to 0o2_000_000 = 0x8_0000,
-        //     mask passes, ENOSYS terminal).
+        // (a) memfd_secret(0x1_0008_0000) → ENOSYS (high|MFD_CLOEXEC).
+        //     Pre-batch returned ENOSYS too (high half truncates to
+        //     MFD_CLOEXEC after batch 318); kept as a regression guard.
         let a = SyscallArgs {
             arg0: 0x1_0008_0000, arg1: 0, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0,
@@ -49078,15 +49118,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
         if v != -i64::from(errno::ENOSYS) {
             serial_println!(
-                "[syscall/linux]   FAIL: memfd_secret(high|O_CLOEXEC) -> {} (expected -ENOSYS)",
+                "[syscall/linux]   FAIL: memfd_secret(high|MFD_CLOEXEC) -> {} (expected -ENOSYS)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
-        // (b) memfd_secret(0x1_0000_0000) → ENOSYS
-        //     (high-half only, low half zero; truncates to 0, mask
-        //     passes, ENOSYS terminal).
+        // (b) memfd_secret(0x1_0000_0000) → ENOSYS (high-half only,
+        //     low zero).  Unchanged from pre-batch.
         let a = SyscallArgs {
             arg0: 0x1_0000_0000, arg1: 0, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0,
@@ -49100,27 +49139,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (c) memfd_secret(0x1_0000_0001) → EINVAL
-        //     (high|bad-low 0x1; truncates to 0x1, mask rejects bit
-        //     outside O_CLOEXEC; verifies mask gate still rejects
-        //     invalid bits after the high half is stripped).
+        // (c) memfd_secret(0x1_0000_0001) → ENOSYS (FD_CLOEXEC=1).
+        //     KEY BATCH 460 DIVERGENCE: pre-batch returned EINVAL
+        //     because its mask (O_CLOEXEC only) rejected FD_CLOEXEC.
+        //     Linux returns ENOSYS regardless — secretmem_enable
+        //     gate fires first AND FD_CLOEXEC is in Linux's accepted
+        //     mask anyway.
         let a = SyscallArgs {
             arg0: 0x1_0000_0001, arg1: 0, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0,
         };
         let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
-        if v != -i64::from(errno::EINVAL) {
+        if v != -i64::from(errno::ENOSYS) {
             serial_println!(
-                "[syscall/linux]   FAIL: memfd_secret(high|bad-low) -> {} (expected -EINVAL)",
+                "[syscall/linux]   FAIL: memfd_secret(high|FD_CLOEXEC) -> {} (expected -ENOSYS; pre-batch returned EINVAL)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
-        // (d) memfd_secret(0x0008_0000) → ENOSYS
-        //     (plain O_CLOEXEC with no high half; truncates to itself,
-        //     mask passes, ENOSYS terminal — control case to ensure
-        //     the valid flag still flows past the mask post-batch).
+        // (d) memfd_secret(0x0008_0000) → ENOSYS (plain MFD_CLOEXEC).
         let a = SyscallArgs {
             arg0: 0x0008_0000, arg1: 0, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0,
@@ -49128,14 +49166,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
         if v != -i64::from(errno::ENOSYS) {
             serial_println!(
-                "[syscall/linux]   FAIL: memfd_secret(O_CLOEXEC) -> {} (expected -ENOSYS)",
+                "[syscall/linux]   FAIL: memfd_secret(MFD_CLOEXEC) -> {} (expected -ENOSYS)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (e) memfd_secret(0xFFFF_FFFF) → ENOSYS (all flag bits set,
+        //     including ones outside Linux's mask).  KEY BATCH 460
+        //     DIVERGENCE: pre-batch returned EINVAL.  Linux returns
+        //     ENOSYS because secretmem_enable gate fires first.
+        let a = SyscallArgs {
+            arg0: 0xFFFF_FFFF, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_secret(0xFFFFFFFF) -> {} (expected -ENOSYS; pre-batch returned EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (f) memfd_secret(FD_CLOEXEC=1) → ENOSYS without high half.
+        //     Direct probe of the FD_CLOEXEC pre-batch divergence.
+        let a = SyscallArgs {
+            arg0: 1, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMFD_SECRET, &a).value;
+        if v != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: memfd_secret(FD_CLOEXEC) -> {} (expected -ENOSYS; pre-batch returned EINVAL)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
         serial_println!(
-            "[syscall/linux]   memfd_secret unsigned-int truncation (high-half ignored): OK"
+            "[syscall/linux]   memfd_secret unconditional ENOSYS (secretmem_enable gate first): OK"
         );
 
         // pidfd_open(pid <= 0) -> EINVAL.

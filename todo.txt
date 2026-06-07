@@ -40159,3 +40159,112 @@ Self-test probes (kernel/src/syscall/linux.rs, around line ~48352):
 Build: cargo build -p kernel  -> Finished `dev` profile in 39.03s.
 Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.
 
+
+
+------------------------------------------------------------
+Batch 460 (2026-06-06): sys_memfd_secret unconditional ENOSYS
+(secretmem_enable gate fires before EINVAL mask).
+------------------------------------------------------------
+
+Linux source (verbatim, `mm/secretmem.c`):
+
+    SYSCALL_DEFINE1(memfd_secret, unsigned int, flags)
+    {
+        struct file *file;
+        int fd, err;
+
+        /* make sure local flags do not confict with global fcntl.h */
+        BUILD_BUG_ON(MFD_CLOEXEC & O_CLOEXEC);
+
+        if (!secretmem_enable)
+            return -ENOSYS;
+
+        if (flags & ~(FD_CLOEXEC | MFD_CLOEXEC))
+            return -EINVAL;
+        ...
+    }
+
+Per-gate divergence table (pre-batch -> Linux):
+
+| input                                | pre-batch | Linux  |
+|--------------------------------------|-----------|--------|
+| memfd_secret(0)                      | ENOSYS    | ENOSYS |  (control)
+| memfd_secret(MFD_CLOEXEC=0o2000000)  | ENOSYS    | ENOSYS |  (control)
+| memfd_secret(FD_CLOEXEC=1)           | EINVAL    | ENOSYS |  *
+| memfd_secret(0xFFFFFFFF)             | EINVAL    | ENOSYS |  *
+| memfd_secret(0x1_0000_0001)          | EINVAL    | ENOSYS |  *
+
+* Two compounding pre-batch bugs:
+    1. The EINVAL flag gate ran BEFORE the ENOSYS gate.  Linux's
+       SYSCALL_DEFINE1 has the literal first check `if
+       (!secretmem_enable) return -ENOSYS;`, then EINVAL.
+    2. The pre-batch mask was O_CLOEXEC (0o2000000) only.  Linux's
+       mask is `FD_CLOEXEC | MFD_CLOEXEC` — FD_CLOEXEC (=1) was
+       wrongly rejected.
+
+Why this matters:
+
+  * `secretmem_enable` is `false` by default on every stock Linux
+    install.  It only flips to `true` when the user passes
+    `secretmem.enable=1` on the kernel command line AND
+    `can_set_direct_map()` returns true.  Every default-configured
+    Linux therefore returns ENOSYS regardless of flags.  Any binary
+    probing memfd_secret would conclude "this kernel does not
+    support secretmem" and fall back to anonymous memfd — pre-batch
+    forced it through the EINVAL path instead, confusing probes
+    that distinguish "feature absent" (ENOSYS) from "bad call"
+    (EINVAL).
+
+  * glibc 2.36+ exposes `memfd_secret()`.  Userspace wrapper code
+    that uses errno to decide "should I retry with different
+    flags?" vs "should I give up?" would loop forever (or fail
+    immediately) on the wrong errno.
+
+Translator-only stance: no secretmem backend exists or is planned
+(secretmem is a Linux-specific feature that depends on direct-map
+manipulation; our microkernel architecture uses capabilities and
+sealed memfd handles instead).  This batch only changes the errno
+returned by an already-stub syscall — no native architecture
+changes.
+
+Fix description (kernel/src/syscall/linux.rs):
+
+  1. sys_memfd_secret (around line ~15411) collapsed from
+        const VALID_FLAGS: u32 = 0o2_000_000;
+        let flags = args.arg0 as u32;
+        if flags & !VALID_FLAGS != 0 { return EINVAL; }
+        linux_err(errno::ENOSYS)
+     to
+        fn sys_memfd_secret(_args: &SyscallArgs) -> SyscallResult {
+            linux_err(errno::ENOSYS)
+        }
+     Underscore prefix on `_args` to suppress unused-variable
+     warning (matches sys_ni_syscall shape).
+
+  2. Doc comment rewritten with verbatim Linux source citation,
+     per-input divergence table, and rationale explaining why
+     EINVAL is unreachable in practice on real Linux.
+
+Self-test probes (kernel/src/syscall/linux.rs, around line ~49062):
+
+  Batch 318 probe block reworked.  Pre-existing 4 probes (a)-(d)
+  retained as regression guards; probe (c) flipped from expecting
+  EINVAL to expecting ENOSYS; new probes (e) and (f) added to
+  exercise the all-bits-set and FD_CLOEXEC-without-high-half
+  divergences directly.
+
+  Probes in order:
+    [1] memfd_secret(0)                  -> ENOSYS (unchanged)
+    [a] memfd_secret(high|MFD_CLOEXEC)   -> ENOSYS (unchanged)
+    [b] memfd_secret(high|0)             -> ENOSYS (unchanged)
+    [c] memfd_secret(high|FD_CLOEXEC=1)  -> ENOSYS (NEW; was EINVAL)
+    [d] memfd_secret(MFD_CLOEXEC)        -> ENOSYS (unchanged)
+    [e] memfd_secret(0xFFFFFFFF)         -> ENOSYS (NEW probe; was EINVAL pre-batch)
+    [f] memfd_secret(FD_CLOEXEC=1)       -> ENOSYS (NEW probe; was EINVAL pre-batch)
+
+  Success stamp:
+    "[syscall/linux]   memfd_secret unconditional ENOSYS (secretmem_enable gate first): OK"
+
+Build: cargo build -p kernel -> Finished `dev` profile in 39.62s.
+Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 23s.
+

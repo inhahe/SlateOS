@@ -26502,19 +26502,101 @@ fn sys_flock(args: &SyscallArgs) -> SyscallResult {
 ///
 /// glibc switched to `getdents64` exclusively in 2.x, so legacy
 /// `getdents` is essentially a museum piece — only kept for ABI
-/// compatibility with very old static binaries.  Returning ENOSYS is
-/// the conventional answer for a kernel that has only ever implemented
-/// getdents64.
+/// compatibility with very old static binaries.  We don't implement
+/// the legacy encoding (the dirent3 record layout differs from
+/// `linux_dirent64`); ENOSYS is the terminal answer once Linux's
+/// gate ladder has been exhausted.
+///
+/// Linux source (fs/readdir.c — verbatim):
+///
+/// ```c
+/// SYSCALL_DEFINE3(getdents, unsigned int, fd,
+///         struct linux_dirent __user *, dirent, unsigned int, count)
+/// {
+///     struct fd f;
+///     struct getdents_callback buf = {
+///         .ctx.actor = filldir,
+///         .count = count,
+///         .current_dir = dirent
+///     };
+///     int error;
+///
+///     f = fdget_pos(fd);
+///     if (!fd_file(f))
+///         return -EBADF;
+///
+///     error = iterate_dir(fd_file(f), &buf.ctx);
+///     ...
+/// }
+/// ```
+///
+/// `fdget_pos()` returns NULL → -EBADF *before* any other validation
+/// runs.  `iterate_dir()` then dispatches into the inode's `readdir`
+/// op which checks `S_ISDIR(inode->i_mode)` and returns -ENOTDIR if
+/// the fd is a regular file.  `filldir()` is the per-entry callback;
+/// its first action is `if (reclen > buf->count) buf->error = -EINVAL;`
+/// — so a non-empty directory with `count == 0` yields -EINVAL, but
+/// an empty directory with `count == 0` yields 0 (filldir is never
+/// invoked).  Only after that does `unsafe_put_user()` touch `dirent`
+/// and surface -EFAULT for bad buffers.
+///
+/// Divergence table (translator-only fix, batch 461):
+///
+/// | Input                              | Pre-batch | Linux  | Fix       |
+/// |------------------------------------|-----------|--------|-----------|
+/// | unknown fd, count==0               | 0         | -EBADF | reorder   |
+/// | unknown fd, count==256, dirp ok    | -ENOSYS   | -EBADF | reorder   |
+/// | unknown fd, dirp bad               | -EFAULT   | -EBADF | reorder   |
+/// | count high bits set (e.g. 1u64<<32)| varied    | trunc  | u32 cast  |
+///
+/// Pre-batch we honored a `count == 0` short-circuit that ran *before*
+/// fd validation.  Linux always runs `fdget_pos` first, so an unknown
+/// fd with count==0 must return -EBADF, not 0.  Similarly the
+/// user-buffer validation ran ahead of fd lookup, surfacing -EFAULT
+/// where Linux returns -EBADF.  Both reorderings are translator-only:
+/// no new behaviour is added beyond fixing the gate-order observable
+/// to a probing caller.  `count` is also now truncated to `u32` so
+/// callers passing high-half garbage match Linux's `unsigned int`
+/// declared width.
 fn sys_getdents(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let dirp = args.arg1;
-    let count = args.arg2;
+    // Linux declares `unsigned int count` — truncate high bits.
+    #[allow(clippy::cast_possible_truncation)]
+    let count = args.arg2 as u32;
+    // Gate 1: `fdget_pos(fd)` — unknown fd is -EBADF before anything else.
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    if count == 0 {
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    // Gate 2: `iterate_dir()` ENOTDIR — kind-check first (Console / Pipe).
+    if entry.kind != HandleKind::File {
+        return linux_err(errno::ENOTDIR);
+    }
+    let handle = entry.raw_handle;
+    // Gate 2 (cont): `read_dir_at()` surfaces NotADirectory for File-kind
+    // handles backing a regular file.  Peek a single entry so we can
+    // also distinguish empty (count==0 → 0) from non-empty
+    // (count==0 → -EINVAL) per filldir's `reclen > buf->count` check.
+    let (_start, entries) = match crate::fs::handle::read_dir_at(handle, 1) {
+        Ok(v) => v,
+        Err(KernelError::NotADirectory) => return linux_err(errno::ENOTDIR),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    if entries.is_empty() {
+        // Empty directory: iterate_dir returns 0 with no filldir call.
         return SyscallResult::ok(0);
     }
+    // Gate 3: non-empty dir + count==0 → filldir's reclen>count → -EINVAL.
+    if count == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // u32 always fits in usize on x86_64 — the try_from below cannot fail,
+    // but kept for defence-in-depth on future targets.
     let len = match usize::try_from(count) {
         Ok(v) => v,
         Err(_) => return linux_err(errno::EINVAL),
@@ -26522,6 +26604,8 @@ fn sys_getdents(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(dirp, len) {
         return linux_err(linux_errno_for(e));
     }
+    // Terminal: legacy dirent3 encoding is not implemented.  Userspace
+    // should use getdents64; this is the documented translator stance.
     linux_err(errno::ENOSYS)
 }
 
@@ -26548,21 +26632,34 @@ fn sys_getdents(args: &SyscallArgs) -> SyscallResult {
 /// directory cursor immediately after this entry, suitable for
 /// `lseek(dirfd, d_off, SEEK_SET)` semantics if/when we add that.
 fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
+    // Linux source (fs/readdir.c) gate order, batch 461:
+    //
+    //   SYSCALL_DEFINE3(getdents64, unsigned int, fd,
+    //           struct linux_dirent64 __user *, dirent,
+    //           unsigned int, count) {
+    //       struct fd f = fdget_pos(fd);
+    //       if (!fd_file(f)) return -EBADF;
+    //       error = iterate_dir(fd_file(f), &buf.ctx);   // ENOTDIR inside
+    //       ...
+    //   }
+    //
+    // Pre-batch we ran a `count == 0` short-circuit and the
+    // user-buffer validation *before* the fd lookup, so:
+    //   * unknown fd + count==0      → 0      (Linux: -EBADF)
+    //   * unknown fd + bad dirp      → -EFAULT (Linux: -EBADF)
+    //   * count high bits set        → silent (Linux: truncates `unsigned int`)
+    //   * non-empty dir + count==0   → 0      (Linux: -EINVAL via filldir)
+    // Reorder so fd-lookup comes first (matches `fdget_pos`), then the
+    // directory peek (matches `iterate_dir`), then per-entry validation
+    // (matches `filldir`).  All translator-only — no new I/O semantics.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let dirp = args.arg1;
-    let count = args.arg2;
+    // Linux declares `unsigned int count` — truncate high bits to match.
+    #[allow(clippy::cast_possible_truncation)]
+    let count = args.arg2 as u32;
     if let Err(r) = validate_linux_fd(fd) {
         return r;
-    }
-    if count == 0 {
-        return SyscallResult::ok(0);
-    }
-    let buf_cap = match usize::try_from(count) {
-        Ok(v) => v,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
-    if let Err(e) = crate::mm::user::validate_user_write(dirp, buf_cap) {
-        return linux_err(linux_errno_for(e));
     }
 
     // Resolve fd → kernel handle.  Must be a File-kind fd (directories
@@ -26586,8 +26683,21 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return linux_err(linux_errno_for(e)),
     };
     if entries.is_empty() {
-        // Exhausted directory.
+        // Exhausted directory: iterate_dir returns 0 with no filldir call,
+        // regardless of count.  Matches Linux.
         return SyscallResult::ok(0);
+    }
+    // Non-empty dir + count==0: filldir's first action is
+    // `if (reclen > buf->count) buf->error = -EINVAL;` — propagate.
+    if count == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let buf_cap = match usize::try_from(count) {
+        Ok(v) => v,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    if let Err(e) = crate::mm::user::validate_user_write(dirp, buf_cap) {
+        return linux_err(linux_errno_for(e));
     }
 
     // Encode records into a kernel-side scratch buffer of exactly the
@@ -60490,23 +60600,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let _ = crate::fs::Vfs::remove(flock_path);
         }
 
-        // getdents count=0 -> 0.
+        // Batch 461: Linux gate order — fdget_pos returns -EBADF before
+        // any user-buffer or count handling.  Pre-batch a count==0
+        // short-circuit ran ahead of fd-lookup, so unknown fd+count=0
+        // returned 0 where Linux returns -EBADF.  All four legacy-getdents
+        // probes below must surface EBADF in kernel-context (no fd table).
         let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETDENTS, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: getdents count=0 not 0");
+        if dispatch_linux(nr::GETDENTS, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getdents count=0 unknown fd not EBADF");
             return Err(KernelError::InternalError);
         }
-        // getdents valid -> ENOSYS.
         let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 256, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETDENTS, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: getdents valid not ENOSYS");
+        if dispatch_linux(nr::GETDENTS, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getdents valid not EBADF");
             return Err(KernelError::InternalError);
         }
+        // Negative fd: validate_linux_fd is a kernel-context no-op, but
+        // lookup_caller_fd still surfaces EBADF — the same Linux answer.
+        let a = SyscallArgs { arg0: u64::from(u32::MAX), arg1: dir_ptr, arg2: 256, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETDENTS, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getdents fd=-1 not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        // High-half garbage in count must be truncated to the declared
+        // `unsigned int` width — count=0x1_0000_0000 → low 32 = 0, but
+        // EBADF still wins (fd-lookup runs before count handling).
+        let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETDENTS, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getdents count truncate not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   getdents Linux gate ladder (EBADF before count/buf): OK"
+        );
 
-        // getdents64 count=0 -> 0.
+        // Batch 461: same reorder for getdents64.  Pre-batch count==0 with
+        // unknown fd returned 0; Linux's fdget_pos always wins first.
         let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::GETDENTS64, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: getdents64 count=0 not 0");
+        if dispatch_linux(nr::GETDENTS64, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getdents64 count=0 unknown fd not EBADF");
             return Err(KernelError::InternalError);
         }
         // getdents64 valid (kernel context: no fd table) -> EBADF.
@@ -60517,6 +60649,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: getdents64 valid not EBADF");
             return Err(KernelError::InternalError);
         }
+        let a = SyscallArgs { arg0: u64::from(u32::MAX), arg1: dir_ptr, arg2: 256, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETDENTS64, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getdents64 fd=-1 not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: dir_ptr, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::GETDENTS64, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: getdents64 count truncate not EBADF");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   getdents64 Linux gate ladder (EBADF before count/buf): OK"
+        );
 
         // Encoder shape sanity: synth_inode is deterministic and non-zero.
         let ino_a = synth_inode("/tmp", "foo");

@@ -40268,3 +40268,112 @@ Self-test probes (kernel/src/syscall/linux.rs, around line ~49062):
 Build: cargo build -p kernel -> Finished `dev` profile in 39.62s.
 Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 23s.
 
+
+461. syscall/linux — getdents / getdents64 Linux gate order (fd-lookup
+     before count/buf), `unsigned int` count truncation (batch 461,
+     2026-06-06).
+
+Target: `kernel/src/syscall/linux.rs::sys_getdents` (line ~26508) and
+`kernel/src/syscall/linux.rs::sys_getdents64` (line ~26634).
+
+Linux source — verbatim from fs/readdir.c:
+
+    SYSCALL_DEFINE3(getdents, unsigned int, fd,
+            struct linux_dirent __user *, dirent, unsigned int, count)
+    {
+        struct fd f;
+        struct getdents_callback buf = {
+            .ctx.actor = filldir,
+            .count = count,
+            .current_dir = dirent
+        };
+        int error;
+
+        f = fdget_pos(fd);
+        if (!fd_file(f))
+            return -EBADF;
+
+        error = iterate_dir(fd_file(f), &buf.ctx);
+        ...
+    }
+
+    static bool filldir(struct dir_context *ctx, const char *name, int namlen,
+                        loff_t offset, u64 ino, unsigned int d_type)
+    {
+        ...
+        if (reclen > buf->count) {
+            buf->error = -EINVAL;
+            return false;
+        }
+        ...
+        unsafe_put_user(d_off, &lastdirent->d_off, efault);
+        ...
+    }
+
+(Same shape for `SYSCALL_DEFINE3(getdents64, ...)` in the immediate
+neighbour.)
+
+Divergence table — what callers observe in stock x86_64 Linux 6.x
+versus what our pre-batch translator returned:
+
+    Input                              | Pre-batch | Linux  | Fix
+    -----------------------------------|-----------|--------|----------
+    getdents:   unknown fd, count=0    | 0         | -EBADF | reorder
+    getdents:   unknown fd, dirp ok,
+                count=256              | -ENOSYS   | -EBADF | reorder
+    getdents:   unknown fd, dirp NULL  | -EFAULT   | -EBADF | reorder
+    getdents:   count = 1u64<<32       | -ENOSYS   | -EBADF | u32 cast
+    getdents64: unknown fd, count=0    | 0         | -EBADF | reorder
+    getdents64: unknown fd, dirp bad   | -EFAULT   | -EBADF | reorder
+    getdents64: count = 1u64<<32       | (varied)  | trunc  | u32 cast
+    getdents/-64: non-empty dir,
+                  count=0              | 0         | -EINVAL| reorder
+
+Why it matters: a Linux probe that opens a non-directory by mistake,
+or that passes an unknown fd, expects -EBADF as the canonical "wrong
+fd" answer.  Our pre-batch order returned 0 (looked like an empty
+directory) for count=0, masking the bug from the caller.  Worse, an
+unknown fd with a deliberately-bogus buffer pointer returned -EFAULT,
+implying the *buffer* was the problem when really the fd was.  Both
+mislead libc's `readdir(3)` family — glibc's readdir uses
+getdents64 directly and treats EBADF as "this stream is dead" but
+0 as "end of iteration", so the pre-batch 0-on-bad-fd behaviour
+caused libc to silently terminate iteration where Linux would have
+returned a hard error.  The `unsigned int count` truncation matters
+to callers that load `count` from a `size_t` and pass the full
+64-bit value — Linux truncates per the SYSCALL_DEFINE3 declared
+width, but we did not, so high-half garbage in count could divert
+flow (a sufficiently-large count failed the usize cast on 32-bit
+targets, though on x86_64 the divergence was harder to trigger).
+
+Fix (translator-only — no I/O semantics change):
+
+  * Reorder both syscalls to follow Linux's gate ladder verbatim:
+        1. validate_linux_fd → EBADF
+        2. lookup_caller_fd → EBADF
+        3. entry.kind != File → ENOTDIR
+        4. read_dir_at(handle, N) peek → ENOTDIR on NotADirectory
+        5. peek empty → ok(0)               (matches iterate_dir 0 case)
+        6. count==0 with non-empty dir → EINVAL  (filldir reclen>count)
+        7. usize cast → EINVAL              (defence in depth)
+        8. validate_user_write → EFAULT     (mirrors unsafe_put_user)
+        9. terminal: getdents → ENOSYS (legacy encoding not impl);
+                     getdents64 → encode entries into user buffer.
+  * Truncate `args.arg2` to `u32` to match `unsigned int count` per
+    the SYSCALL_DEFINE3 declared-width contract.
+  * Rewrite the doc comments on both functions with the verbatim
+    Linux source citation, the divergence table, and a brief note
+    on the translator-only stance for the legacy variant.
+
+Self-test probes — appended in the existing getdents / getdents64
+block (line ~60493) and gated by new success stamps:
+
+  * `[syscall/linux]   getdents Linux gate ladder (EBADF before count/buf): OK`
+    Covers four probes — fd=3+count=0, fd=3+count=256+dirp ok,
+    fd=-1+count=256, fd=3+count=0x1_0000_0000.  All must surface
+    EBADF in kernel context.
+  * `[syscall/linux]   getdents64 Linux gate ladder (EBADF before count/buf): OK`
+    Covers the matching four probes for getdents64.
+
+Build: cargo build -p kernel -> Finished `dev` profile in 49.16s.
+Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 24s.

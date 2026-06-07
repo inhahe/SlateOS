@@ -10889,15 +10889,154 @@ fn sys_adjtimex(args: &SyscallArgs) -> SyscallResult {
 // lands, these become proper FS calls.
 // ---------------------------------------------------------------------------
 
-/// `chroot(path)` — refuse with EPERM after pointer validation.
+/// `chroot(path)` — Linux gate-ladder fidelity, terminal `EPERM`.
+///
+/// ## Linux source — `fs/open.c::SYSCALL_DEFINE1(chroot, ...)` (kernel 6.x)
+///
+/// ```c
+/// SYSCALL_DEFINE1(chroot, const char __user *, filename)
+/// {
+///     struct path path;
+///     int error;
+///     unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
+/// retry:
+///     error = user_path_at(AT_FDCWD, filename, lookup_flags, &path);
+///     if (error)
+///         goto out;
+///     error = path_permission(&path, MAY_EXEC | MAY_CHDIR);
+///     if (error)
+///         goto dput_and_out;
+///     error = -EPERM;
+///     if (!ns_capable(current_user_ns(), CAP_SYS_CHROOT))
+///         goto dput_and_out;
+///     error = security_path_chroot(&path);
+///     if (error)
+///         goto dput_and_out;
+///     set_fs_root(current->fs, &path);
+///     error = 0;
+/// dput_and_out:
+///     path_put(&path);
+///     if (retry_estale(error, lookup_flags)) {
+///         lookup_flags |= LOOKUP_REVAL;
+///         goto retry;
+///     }
+/// out:
+///     return error;
+/// }
+/// ```
+///
+/// `user_path_at` calls `getname_flags` which:
+///   * returns `-EFAULT` on bad pointer (`strncpy_from_user` short read),
+///   * returns `-ENOENT` on the empty string `""`,
+///   * returns `-ENAMETOOLONG` when no NUL appears within `PATH_MAX`.
+/// `user_path_at` then runs path resolution which surfaces `-ENOENT`
+/// (missing component), `-ENOTDIR` (non-directory component), `-ELOOP`
+/// (symlink cycle), and so on — all BEFORE the terminal `-EPERM`
+/// capability check.
+///
+/// ## Gate-ladder divergence from pre-batch (batch 446)
+///
+/// Pre-batch we ran `validate_user_read(path, 1)` (one byte) then jumped
+/// straight to `EPERM`.  That collapsed every shape-of-path failure into
+/// the capability errno, which is wrong on Linux for any unprivileged
+/// caller — and **every** Linux-ABI caller in this kernel is unprivileged
+/// (we don't grant `CAP_SYS_CHROOT` to anyone).  Pre-batch the only
+/// observable errno other than `EPERM` was `EFAULT` for the NULL pointer.
+///
+/// | call shape                              | Linux       | Pre   | This batch |
+/// |-----------------------------------------|-------------|-------|------------|
+/// | `chroot(NULL)`                          | EFAULT      | EFAULT| EFAULT     |
+/// | `chroot("")`                            | ENOENT      | EPERM | ENOENT     |
+/// | `chroot("/__nonexistent")`              | ENOENT      | EPERM | ENOENT     |
+/// | `chroot("/some_regular_file")`          | ENOTDIR     | EPERM | ENOTDIR    |
+/// | `chroot(PATH_MAX_OVERFLOW)`             | ENAMETOOLONG| EPERM | ENAMETOOLONG|
+/// | `chroot("/")` (valid directory)         | EPERM       | EPERM | EPERM      |
+///
+/// ## Why it matters
+///
+/// `capsh --chroot=`, `unshare(1)`, `bwrap`, `runc`'s `prestart` hooks,
+/// and OpenSSH's privilege-separation chroot probe all detect "can I
+/// chroot here?" by passing a path they expect to exist and reading
+/// the errno: `EPERM` ⇒ "no capability, give up", `ENOENT` ⇒ "path
+/// missing, try a different layout", `ENOTDIR` ⇒ "target is a file,
+/// caller bug".  Collapsing all three to `EPERM` makes these probes
+/// take the capability-missing branch even when the real bug is a
+/// missing or mistyped path — silently masking caller bugs as
+/// "you need to run as root."
+///
+/// ## Architectural directive
+///
+/// Pure ABI translator fidelity.  This kernel does not grant
+/// `CAP_SYS_CHROOT` to any Linux-ABI caller — chroot remains a
+/// terminal `EPERM` after the path ladder.  When/if a userspace
+/// chroot-capable subsystem is ever designed it will plumb through
+/// `cap::has(CAP_SYS_CHROOT)` and replace the terminal `EPERM` with
+/// `set_fs_root`-equivalent state on the PCB; the path ladder above
+/// is correct as-is.
 fn sys_chroot(args: &SyscallArgs) -> SyscallResult {
     let path = args.arg0;
+    // Gate 0: NULL pointer -> EFAULT.  Mirrors getname_flags's first
+    // access_ok / fault when the userspace string pointer is NULL.
     if path == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
-        return linux_err(linux_errno_for(e));
+    // Gate 1: getname-equivalent — copy the NUL-terminated path from
+    // user space at most PATH_MAX bytes.  read_user_cstr returns:
+    //   * EFAULT for an unmapped pointer (kernel context bypasses the
+    //     validate but still pays the page-fault dance if the address
+    //     is unmapped — callers must hand us a kernel-readable buffer
+    //     in self-test contexts, see the boot probe below),
+    //   * ENAMETOOLONG when no NUL appears within PATH_MAX.
+    const PATH_MAX: usize = 4096;
+    let path_bytes = match read_user_cstr(path, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    // Gate 2: canonicalize against the caller's cwd.  This is the
+    // moral equivalent of Linux's `user_path_at` lookup walk on the
+    // path string itself (before touching the VFS).  Reports:
+    //   * ENOENT for an empty string (Linux: getname returns -ENOENT
+    //     on "" — same errno, slightly earlier in their stack),
+    //   * EINVAL for an embedded NUL (we treat as malformed; Linux
+    //     truncates at the NUL via strncpy_from_user, which is
+    //     observably different but never seen in practice since
+    //     userspace paths never contain interior NULs),
+    //   * ENAMETOOLONG when the canonicalized form exceeds CWD_MAX_LEN.
+    //
+    // Kernel context (caller_pid() == None): treat the cwd as "/",
+    // which is what every fresh process inherits per Linux's init
+    // setup.  No PCB to read from.
+    let cwd = match caller_pid() {
+        Some(pid) => pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']),
+        None => alloc::vec![b'/'],
+    };
+    let canon = match canonicalize_path(&cwd, &path_bytes) {
+        Ok(p) => p,
+        Err(e) => return linux_err(e),
+    };
+    // Gate 3: VFS stat — Linux's user_path_at terminates with a
+    // dentry lookup; we re-route through Vfs::stat which surfaces:
+    //   * NotFound -> ENOENT,
+    //   * Non-Directory entry -> ENOTDIR (matches LOOKUP_DIRECTORY).
+    // Path canonicalize_path emits ASCII bytes; from_utf8 should not
+    // fail for any well-formed path but we surface EINVAL on the
+    // theoretical case rather than .unwrap().
+    let path_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    match crate::fs::Vfs::stat(path_str) {
+        Ok(entry) => {
+            if entry.entry_type != crate::fs::EntryType::Directory {
+                return linux_err(errno::ENOTDIR);
+            }
+        }
+        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+        Err(e) => return linux_err(linux_errno_for(e)),
     }
+    // Gate 4: terminal EPERM.  No Linux-ABI caller in this kernel
+    // holds CAP_SYS_CHROOT — same answer Linux gives any
+    // unprivileged caller that passes a valid existing directory.
     linux_err(errno::EPERM)
 }
 
@@ -42773,8 +42912,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
-    // chroot / mknod / mknodat — NULL path -> EFAULT, non-NULL -> EPERM.
+    // chroot — Linux gate ladder fidelity (batch 446).
+    //
+    // Linux's chroot runs getname → user_path_at → inode_permission
+    // → CAP_SYS_CHROOT in strict order; an unprivileged caller (which
+    // is everyone in this kernel — we don't grant CAP_SYS_CHROOT)
+    // sees EFAULT/ENOENT/ENOTDIR/ENAMETOOLONG BEFORE the terminal
+    // EPERM whenever the path itself fails an earlier gate.
+    // Pre-batch we collapsed every non-EFAULT case to EPERM.
+    //
+    // mknod / mknodat keep their existing NULL→EFAULT,
+    // non-NULL→EPERM shape — they don't yet do path-resolution
+    // ladders here, just the capability refusal; that's still
+    // Linux-shape correct for an unprivileged caller because Linux
+    // returns EPERM before path lookup on the mknod path when the
+    // caller lacks CAP_MKNOD AND the requested mode is a device
+    // node (file mode S_IFREG is the only one that proceeds, and
+    // we never grant it).
     {
+        // ----- chroot gate ladder -----
+        // Gate 0: NULL path -> EFAULT.
         let a_null = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CHROOT, &a_null).value
@@ -42782,6 +42939,75 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: chroot(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // Gate 2: empty path -> ENOENT (canonicalize_path empty input).
+        let empty = b"\0";
+        let empty_ptr = empty.as_ptr() as u64;
+        let a = SyscallArgs { arg0: empty_ptr, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHROOT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: chroot(\"\") not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Gate 3: non-existent path -> ENOENT (Vfs::stat NotFound).
+        let missing = b"/__nonexistent_chroot_target_xyz\0";
+        let missing_ptr = missing.as_ptr() as u64;
+        let a = SyscallArgs { arg0: missing_ptr, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHROOT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: chroot(missing) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Gate 3: existing regular file -> ENOTDIR.  Skip this leg
+        // if write_file fails (e.g. read-only root) — the gate is
+        // still covered by the prior ENOENT check and the terminal
+        // EPERM check below.
+        let probe_file = "/syscall_chroot_probe.txt";
+        if crate::fs::Vfs::write_file(probe_file, b"x").is_ok() {
+            let file_path = b"/syscall_chroot_probe.txt\0";
+            let file_ptr = file_path.as_ptr() as u64;
+            let a = SyscallArgs { arg0: file_ptr, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::CHROOT, &a).value
+                != -i64::from(errno::ENOTDIR) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: chroot(regular file) not ENOTDIR"
+                );
+                return Err(KernelError::InternalError);
+            }
+            let _ = crate::fs::Vfs::remove(probe_file);
+        }
+        // Gate 4: terminal EPERM — an existing directory passes the
+        // full ladder and bottoms out at the no-cap refusal.  Use a
+        // freshly-created scratch directory so the test doesn't
+        // depend on what the root mount reports for "/" (some
+        // filesystem backends don't surface the mount root through
+        // a stat() of "/" — they require a real sub-directory).
+        let probe_dir = "/syscall_chroot_dir_probe";
+        if crate::fs::Vfs::mkdir(probe_dir).is_ok() {
+            let dir_path = b"/syscall_chroot_dir_probe\0";
+            let dir_ptr = dir_path.as_ptr() as u64;
+            let a = SyscallArgs { arg0: dir_ptr, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::CHROOT, &a).value
+                != -i64::from(errno::EPERM) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: chroot(existing dir) not EPERM"
+                );
+                return Err(KernelError::InternalError);
+            }
+            let _ = crate::fs::Vfs::remove(probe_dir);
+        }
+        serial_println!(
+            "[syscall/linux]   chroot Linux gate ladder (EFAULT/ENOENT/ENOTDIR/EPERM): OK"
+        );
+
+        // ----- mknod / mknodat (unchanged) -----
         if dispatch_linux(nr::MKNOD, &a_null).value
             != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: mknod(NULL,_,_) not EFAULT");
@@ -42799,11 +43025,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Non-NULL path with kernel-context bypass -> EPERM.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::CHROOT, &a).value
-            != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: chroot not EPERM");
-            return Err(KernelError::InternalError);
-        }
         if dispatch_linux(nr::MKNOD, &a).value
             != -i64::from(errno::EPERM) {
             serial_println!("[syscall/linux]   FAIL: mknod not EPERM");

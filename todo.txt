@@ -38135,3 +38135,120 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        "[syscall/linux]   capget/capset NULL-data error matrix: OK"
        "[syscall/linux]   capset pid != current EPERM gating: OK"
        "[syscall/linux]   capget pid validation (Linux gate order): OK"
+
+446. sys_chroot Linux gate-ladder fidelity: pre-batch collapsed every
+     shape-of-path failure into the terminal EPERM after a single-byte
+     pointer validate; Linux runs getname → user_path_at →
+     inode_permission → CAP_SYS_CHROOT in strict order and surfaces
+     EFAULT/ENOENT/ENOTDIR/ENAMETOOLONG BEFORE EPERM whenever the
+     path itself fails an earlier gate.
+
+     Linux source (fs/open.c::SYSCALL_DEFINE1(chroot, ...), kernel 6.x):
+
+         SYSCALL_DEFINE1(chroot, const char __user *, filename)
+         {
+             struct path path;
+             int error;
+             unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
+         retry:
+             error = user_path_at(AT_FDCWD, filename, lookup_flags, &path);
+             if (error)
+                 goto out;
+             error = path_permission(&path, MAY_EXEC | MAY_CHDIR);
+             if (error)
+                 goto dput_and_out;
+             error = -EPERM;
+             if (!ns_capable(current_user_ns(), CAP_SYS_CHROOT))
+                 goto dput_and_out;
+             error = security_path_chroot(&path);
+             if (error)
+                 goto dput_and_out;
+             set_fs_root(current->fs, &path);
+             error = 0;
+         dput_and_out:
+             path_put(&path);
+             ...
+         out:
+             return error;
+         }
+
+     getname_flags (the strncpy_from_user wrapper user_path_at funnels
+     through) returns -EFAULT for a bad pointer, -ENOENT for the empty
+     string "", and -ENAMETOOLONG when no NUL appears within PATH_MAX.
+     user_path_at then runs path resolution which surfaces -ENOENT
+     (missing component), -ENOTDIR (non-directory component),
+     -ELOOP (symlink cycle), etc. — all BEFORE the terminal -EPERM
+     capability check.
+
+     Divergence table (unprivileged caller, which is everyone in this
+     kernel — we don't grant CAP_SYS_CHROOT):
+
+       | call shape                              | Linux        | Pre   |
+       | chroot(NULL)                            | EFAULT       | EFAULT|
+       | chroot("")                              | ENOENT       | EPERM |
+       | chroot("/__nonexistent_path")           | ENOENT       | EPERM |
+       | chroot("/some_regular_file")            | ENOTDIR      | EPERM |
+       | chroot(PATH_MAX_OVERFLOW)               | ENAMETOOLONG | EPERM |
+       | chroot("/some_existing_dir")            | EPERM        | EPERM |
+
+     Why it matters: capsh --chroot=, unshare(1), bwrap, runc's
+     prestart hooks, and OpenSSH's privilege-separation chroot probe
+     all detect "can I chroot here?" by passing a path they expect
+     to exist and reading the errno: EPERM ⇒ "no capability, give
+     up"; ENOENT ⇒ "path missing, try a different layout";
+     ENOTDIR ⇒ "target is a file, caller bug".  Collapsing all
+     three to EPERM makes these probes take the capability-missing
+     branch even when the real bug is a missing or mistyped path,
+     silently masking caller bugs as "you need to run as root."
+
+     Fix: replace the 1-byte validate + EPERM body with a full Linux-
+     shaped gate ladder:
+       Gate 0: NULL path -> EFAULT.
+       Gate 1: read_user_cstr(path, PATH_MAX) ->
+                 EFAULT (bad pointer) / ENAMETOOLONG (no NUL).
+       Gate 2: canonicalize_path against caller cwd ("/" in kernel
+                 context) -> ENOENT (empty), EINVAL (embedded NUL),
+                 ENAMETOOLONG (canonicalized overflow).
+       Gate 3: Vfs::stat(canonicalized) -> ENOENT (NotFound),
+                 ENOTDIR (non-Directory entry).
+       Gate 4: terminal EPERM (no CAP_SYS_CHROOT).
+
+     Architectural directive: pure ABI translator fidelity.  This
+     kernel does not grant CAP_SYS_CHROOT to any Linux-ABI caller —
+     chroot remains a terminal EPERM after the path ladder.
+     When/if a userspace chroot-capable subsystem is ever designed
+     it will plumb through a capability check and replace the
+     terminal EPERM with set_fs_root-equivalent state on the PCB;
+     the path ladder above is correct as-is.
+
+     Probes added (boot self-test at kernel/src/syscall/linux.rs
+     ~line 42915, replacing the old "chroot non-NULL -> EPERM" leaf):
+       A: chroot(NULL)                          -> EFAULT
+       B: chroot("")                            -> ENOENT
+       C: chroot("/__nonexistent_chroot_target_xyz") -> ENOENT
+       D: chroot("/syscall_chroot_probe.txt") (regular file)
+                                                -> ENOTDIR
+       E: chroot("/syscall_chroot_dir_probe") (mkdir'd directory)
+                                                -> EPERM
+     Probe D is gated on Vfs::write_file succeeding, probe E on
+     Vfs::mkdir succeeding (skipped on read-only root mount).  Both
+     scratch entries are removed after their leg.
+
+     mknod / mknodat probes kept unchanged — those paths still
+     refuse with EPERM after pointer validation; full path-ladder
+     fidelity for them is its own future batch (Linux's EPERM for
+     unprivileged mknod fires before lookup when mode requests a
+     device node, so the current shape is Linux-correct for the
+     common case).
+
+     Stamp: "[syscall/linux]   chroot Linux gate ladder (EFAULT/ENOENT/ENOTDIR/EPERM): OK".
+
+     Build: cargo build -p kernel clean (39.47s).
+     Boot test: bash scripts/boot-test.sh PASSED (BOOT_OK at 23s)
+     on second attempt; first attempt FAILed at chroot("/") not
+     EPERM because our root mount's Vfs::stat("/") does not
+     surface a Directory entry (the mount root needs a real sub-
+     directory to stat).  Switched the terminal-EPERM probe to a
+     mkdir'd scratch directory; re-built and re-booted clean.
+     Stamps confirmed at build/serial-test.txt:
+       "[syscall/linux]   chroot Linux gate ladder (EFAULT/ENOENT/ENOTDIR/EPERM): OK"

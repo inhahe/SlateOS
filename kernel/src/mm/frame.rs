@@ -2285,23 +2285,36 @@ pub fn is_allocator_owned(frame: PhysFrame) -> bool {
 /// Get a snapshot of the current allocator statistics.
 ///
 /// Returns `None` if the allocator has not been initialized.
+///
+/// IRQ-safety: the ALLOCATOR spinlock is also acquired by
+/// `alloc_*` / `free_*` paths that can run from interrupt-driven
+/// contexts (kswapd, RCU callbacks invoking deferred frees, periodic
+/// timer-tick subsystems that query memory stats).  If a caller holds
+/// the lock when a same-CPU interrupt triggers one of those paths,
+/// the inner acquisition deadlocks against the outer.  Wrap the
+/// critical section in `without_interrupts(...)` to ensure that
+/// while we hold ALLOCATOR no IRQ can fire on this CPU.  See the
+/// frag_history self-test hang in known-issues.md (observed
+/// 2026-06-07 during the post-F1/F2/F3 soak, build/soak-hang-run18.txt).
 #[must_use]
 #[allow(clippy::indexing_slicing)]
 pub fn stats() -> Option<FrameAllocStats> {
-    let allocator = ALLOCATOR.get()?;
-    let guard = allocator.lock();
+    crate::cpu::without_interrupts(|| {
+        let allocator = ALLOCATOR.get()?;
+        let guard = allocator.lock();
 
-    let mut order_counts = [0usize; MAX_ORDER + 1];
-    for (i, count) in order_counts.iter_mut().enumerate() {
-        // i is always in 0..=MAX_ORDER (the array length matches).
-        *count = guard.free_lists[i].count;
-    }
+        let mut order_counts = [0usize; MAX_ORDER + 1];
+        for (i, count) in order_counts.iter_mut().enumerate() {
+            // i is always in 0..=MAX_ORDER (the array length matches).
+            *count = guard.free_lists[i].count;
+        }
 
-    Some(FrameAllocStats {
-        total_frames: guard.total_frames,
-        free_frames: guard.free_frames,
-        free_bytes: guard.free_frames.saturating_mul(FRAME_SIZE),
-        order_counts,
+        Some(FrameAllocStats {
+            total_frames: guard.total_frames,
+            free_frames: guard.free_frames,
+            free_bytes: guard.free_frames.saturating_mul(FRAME_SIZE),
+            order_counts,
+        })
     })
 }
 

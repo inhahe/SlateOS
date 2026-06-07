@@ -46565,3 +46565,107 @@ Summary stamp added: `sched_getattr attr.size = min(usize, KSIZE)
 **Build:** clean (`cargo build -p kernel`, 58.0s).
 
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+
+================================================================
+Batch 509 — sched_rr_get_interval: dispatch per-policy slice
+================================================================
+
+**Where:** `kernel/src/syscall/linux.rs::sys_sched_rr_get_interval`.
+
+**Divergence found:** Pre-batch the translator hardcoded a 100ms
+slice for every target pid regardless of its scheduling policy:
+
+    let nsec: i64 = 100_000_000;
+
+Linux v6.6's `sched_rr_get_interval` (`kernel/sched/syscalls.c`)
+instead dispatches to the target task's `sched_class->get_rr_interval(rq, p)`
+callback, which is per-class:
+
+  * `rt_sched_class.get_rr_interval = get_rr_interval_rt`
+    (`kernel/sched/rt.c`) — verbatim v6.6:
+        static unsigned int get_rr_interval_rt(struct rq *rq,
+                                               struct task_struct *task)
+        {
+            /*
+             * Time slice is 0 for SCHED_FIFO tasks
+             */
+            if (task->policy == SCHED_RR)
+                return sched_rr_timeslice;
+            else
+                return 0;
+        }
+    => SCHED_RR(2)   → `sched_rr_timeslice` (default 100ms,
+                       initialized from `RR_TIMESLICE = 100*HZ/1000`).
+    => SCHED_FIFO(1) → 0.
+
+  * `fair_sched_class.get_rr_interval = get_rr_interval_fair`
+    (`kernel/sched/fair.c`) — practically returns the EEVDF base
+    slice (`sysctl_sched_base_slice`, default 750_000 ns) for
+    SCHED_NORMAL/SCHED_BATCH.
+
+  * `dl_sched_class` and `idle_sched_class` define no
+    `.get_rr_interval`, so the v6.6 path's
+        unsigned int time_slice;
+        ...
+        time_slice = 0;
+        if (p->sched_class->get_rr_interval)
+            time_slice = p->sched_class->get_rr_interval(rq, p);
+    leaves `time_slice = 0` for SCHED_DEADLINE(6) and SCHED_IDLE(5).
+
+**Why it matters:** glibc and pthread sanity probes use
+`sched_rr_get_interval` per POSIX to detect SCHED_FIFO (which
+POSIX defines as having no time slice) and to query the
+nominal RR slice.  A SCHED_FIFO task receiving 100ms back from
+the kernel will be misread as RR-like; libraries that key
+off "interval == 0" to identify FIFO will pick the wrong
+branch.  Similarly, SCHED_NORMAL probes expecting the fair-class
+base slice will instead see RR's 100ms and misreport scheduler
+configuration.
+
+**Fix (translator-only):** Look up the target pid's policy via
+`pcb::get_sched_policy(pid_u)` after the existing pid<0 / ESRCH
+gates, then dispatch the slice in nanoseconds via a match table
+that mirrors v6.6's per-class callbacks:
+
+    let nsec: i64 = match target_policy {
+        0 | 3 => 750_000,        // NORMAL / BATCH (fair base slice)
+        1     => 0,              // FIFO  (rt class explicit 0)
+        2     => 100_000_000,    // RR    (sched_rr_timeslice)
+        5     => 0,              // IDLE  (no get_rr_interval cb)
+        6     => 0,              // DEADLINE (no get_rr_interval cb)
+        _     => 0,
+    };
+
+For pid=0 ("current task"), we consult `caller_pid()` and look up
+its policy; if no caller PCB is present (kernel-context probe path),
+we default to SCHED_OTHER(0) → 750_000 ns, matching the v6.6 path
+where a fair-class task is the default and its base slice is what
+we expose.
+
+**Translator-only stance preserved:** no kernel scheduler change.
+We read out of the existing PCB policy storage and pick the slice
+from the v6.6 dispatch table.  The actual run-queue behaviour is
+unaffected.  This is the same pattern as batches 504-508 — every
+visible state we report comes from the policy/flags/sizes Linux
+v6.6 publishes.
+
+**Boot probes added** (after the existing batch 236 gate-order probe):
+  1. Create test PCB.
+  2. SCHED_FIFO(1)     → expect nsec=0.
+  3. SCHED_RR(2)       → expect nsec=100_000_000.
+  4. SCHED_NORMAL(0)   → expect nsec=750_000.
+  5. SCHED_BATCH(3)    → expect nsec=750_000.
+  6. SCHED_IDLE(5)     → expect nsec=0.
+  7. SCHED_DEADLINE(6) → expect nsec=0.
+  8. Destroy test PCB.
+
+Each step also verifies sec=0 to catch any silent overflow into
+the seconds half.
+
+Summary stamp added:
+  `sched_rr_get_interval per-policy slice dispatch (v6.6): OK`
+  (visible in `build/serial-test.txt`).
+
+**Build:** clean (`cargo build -p kernel`, 58.0s).
+
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).

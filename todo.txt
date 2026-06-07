@@ -39643,3 +39643,181 @@ variant is gated correctly.
 BOOT_OK after 24s.  No RCU self-test hang this batch.
 
 **Files touched:** `kernel/src/syscall/linux.rs`.
+
+
+==============================================================================
+Batch 457 — sys_mknod / sys_mknodat Linux gate ladder fidelity
+==============================================================================
+
+Subject: kernel/src/syscall/linux.rs `sys_mknod` and `sys_mknodat`
+collapsed every non-EFAULT case to terminal `EPERM`.  Linux runs a
+specific gate ladder before reaching the `CAP_MKNOD` refusal, and
+distinguishes empty / too-long paths, invalid mode bits (S_IFLNK,
+unknown), and the S_IFDIR special case — userspace probes (LTP
+`mknod*`, busybox-mkfifo) depend on this ordering.
+
+------------------------------------------------------------------------------
+Linux source (verbatim, fs/namei.c, kernel 6.x)
+------------------------------------------------------------------------------
+
+  static int may_mknod(umode_t mode)
+  {
+      switch (mode & S_IFMT) {
+      case S_IFREG:
+      case S_IFCHR:
+      case S_IFBLK:
+      case S_IFIFO:
+      case S_IFSOCK:
+      case 0: /* zero mode translates to S_IFREG */
+          return 0;
+      case S_IFDIR:
+          return -EPERM;
+      default:
+          return -EINVAL;
+      }
+  }
+
+  static int do_mknodat(int dfd, struct filename *name, umode_t mode,
+          unsigned int dev)
+  {
+      ...
+      error = may_mknod(mode);
+      if (error)
+          goto out1;
+  retry:
+      dentry = filename_create(dfd, name, &path, lookup_flags);
+      ...
+      switch (mode & S_IFMT) {
+      case 0: case S_IFREG:
+          error = vfs_create(...);
+          break;
+      case S_IFCHR: case S_IFBLK:
+          error = vfs_mknod(...);
+          break;
+      case S_IFIFO: case S_IFSOCK:
+          error = vfs_mknod(...);
+          break;
+      }
+      ...
+  }
+
+  SYSCALL_DEFINE3(mknod, const char __user *, filename, umode_t, mode,
+          unsigned, dev)
+  {
+      return do_mknodat(AT_FDCWD, getname(filename), mode,
+                        new_encode_dev(dev));
+  }
+
+`getname()` itself classifies the path pointer: bad pointer -> -EFAULT,
+empty string -> -ENOENT (filename_lookup of ""), too long -> -ENAMETOOLONG.
+
+------------------------------------------------------------------------------
+Divergence (pre-batch vs Linux vs post-batch)
+------------------------------------------------------------------------------
+
+  Probe                                | Linux        | Pre-batch | Post-batch
+  -------------------------------------|--------------|-----------|------------
+  mknod(NULL, S_IFREG, 0)              | EFAULT       | EFAULT    | EFAULT
+  mknod("", S_IFREG, 0)                | ENOENT       | EPERM     | ENOENT
+  mknod(<4097-byte no-NUL>, S_IFREG,0) | ENAMETOOLONG | EPERM     | ENAMETOOLONG
+  mknod("/x", S_IFDIR, 0)              | EPERM*       | EPERM     | EPERM*
+  mknod("/x", S_IFLNK, 0)              | EINVAL       | EPERM     | EINVAL
+  mknod("/x", 0o170000, 0)             | EINVAL       | EPERM     | EINVAL
+  mknod("/x", 0xDEADBEEF<<32|S_IFLNK,0)| EINVAL       | EPERM     | EINVAL
+  mknod("/x", S_IFREG, 0)              | EPERM        | EPERM     | EPERM
+  mknodat(_, NULL, S_IFREG, 0)         | EFAULT       | EFAULT    | EFAULT
+  mknodat(_, "", S_IFREG, 0)           | ENOENT       | EPERM     | ENOENT
+  mknodat(_, "/x", S_IFLNK, 0)         | EINVAL       | EPERM     | EINVAL
+  mknodat(_, "/x", S_IFREG, 0)         | EPERM        | EPERM     | EPERM
+
+  * Linux's may_mknod returns -EPERM for S_IFDIR specifically — the
+    gate point differs from our default EPERM but the terminal value
+    matches.  The probe still distinguishes EPERM-at-gate-2 from
+    EINVAL-at-gate-2 (S_IFLNK / junk).
+
+------------------------------------------------------------------------------
+Why it matters
+------------------------------------------------------------------------------
+
+LTP `mknod*` test suites and a handful of small userspace tools probe
+the gate ordering specifically: they pass a syntactically-invalid mode
+(S_IFLNK, or junk in the S_IFMT bits) and expect `EINVAL`, not the
+terminal `EPERM`.  A program that wants to differentiate "this kernel
+lacks CAP_MKNOD for me" (EPERM) from "this kernel doesn't recognise
+this mode" (EINVAL) cannot do so against the pre-batch implementation.
+Similarly, busybox `mkfifo` reports a different diagnostic for ENOENT
+vs EPERM and was emitting "Permission denied" for `mkfifo ""`.
+
+`SYSCALL_DEFINE3(mknod, …, umode_t, mode, …)` truncates the mode arg
+to `unsigned short` (u16) at the syscall boundary on x86_64.  Tests
+that pass high bits in the 64-bit register expect them to be ignored.
+
+------------------------------------------------------------------------------
+Translator-only fix
+------------------------------------------------------------------------------
+
+Native architecture is unchanged.  The native VFS still has no
+`CAP_MKNOD`-bearing caller, so the terminal answer for any well-formed
+input is still `EPERM`.  The fix re-classifies the pre-EPERM space.
+
+Code change at kernel/src/syscall/linux.rs:
+
+  - New shared helper `sys_mknod_common(path, mode_raw)`.
+  - `sys_mknod` and `sys_mknodat` become two-line dispatchers.
+  - Helper runs:
+      Gate 1a: path == 0 -> EFAULT
+      Gate 1b: read_user_cstr(path, PATH_MAX=4096)
+               - bad pointer mid-scan -> EFAULT
+               - empty -> ENOENT (Linux getname semantics)
+               - no-NUL in window -> ENAMETOOLONG
+      Gate 2:  mode_raw truncated to u16 (umode_t ABI), then
+               S_IFMT switch:
+               - 0 | S_IFREG | S_IFCHR | S_IFBLK | S_IFIFO | S_IFSOCK
+                 -> fall through to terminal
+               - S_IFDIR -> EPERM (may_mknod special case)
+               - other -> EINVAL
+      Gate 4:  terminal EPERM (no CAP_MKNOD granted to anyone).
+
+The umode_t truncation is explicit: `(mode_raw as u16) as u32` so
+high bits in the 64-bit register are discarded the same way Linux's
+`SYSCALL_DEFINE3` discards them.
+
+The umbrella comment block (kernel/src/syscall/linux.rs near line 11117)
+was updated to reflect that batch 446 brought chroot up to Linux gate
+fidelity and batch 457 brings mknod / mknodat up to Linux gate fidelity;
+the old "validate inputs first then refuse with EPERM" wording was
+stale.
+
+------------------------------------------------------------------------------
+Boot-time probes added (kernel/src/syscall/linux.rs self-test path)
+------------------------------------------------------------------------------
+
+  1. mknod(NULL, _, _) -> EFAULT                (existing — kept)
+  2. mknodat(_, NULL, _, _) -> EFAULT           (existing — kept)
+  3. mknod("", S_IFREG, 0) -> ENOENT            (NEW)
+  4. mknodat(_, "", S_IFREG, 0) -> ENOENT       (NEW)
+  5. mknod(LONG_PATH[4097 'a'], S_IFREG, 0) -> ENAMETOOLONG (NEW)
+  6. mknod("/probe", S_IFLNK, 0) -> EINVAL      (NEW)
+  7. mknod("/probe", 0o170000, 0) -> EINVAL     (NEW, junk-S_IFMT)
+  8. mknodat(_, "/probe", S_IFLNK, 0) -> EINVAL (NEW)
+  9. mknod("/probe", S_IFDIR, 0) -> EPERM       (NEW, distinguishes
+                                                  may_mknod EPERM-gate)
+ 10. mknod("/probe", 0xDEADBEEF00000000|S_IFLNK, 0) -> EINVAL  (NEW,
+                                                  umode_t truncation)
+ 11. mknod("/probe", S_IFREG, 0) -> EPERM       (replaces old "not
+                                                  EPERM" check with a
+                                                  well-formed path)
+ 12. mknodat(_, "/probe", S_IFREG, 0) -> EPERM  (replaces old probe)
+
+Stamp emitted at end:
+  [syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM): OK
+
+------------------------------------------------------------------------------
+Build / boot results
+------------------------------------------------------------------------------
+
+cargo build -p kernel : clean, 0 warnings, 0 errors.
+bash scripts/boot-test.sh : BOOT_OK after 23s, no regressions, stamp
+  "mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM):
+  OK" present.
+

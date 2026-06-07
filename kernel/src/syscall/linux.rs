@@ -11118,12 +11118,16 @@ fn sys_adjtimex(args: &SyscallArgs) -> SyscallResult {
 // chroot / mknod / mknodat — privileged operations we do not yet support
 //
 // All three require capabilities we don't grant any userspace task today
-// (Linux: CAP_SYS_CHROOT, CAP_MKNOD).  Validate inputs first so callers
-// passing garbage still observe EFAULT, then refuse with EPERM.
+// (Linux: CAP_SYS_CHROOT, CAP_MKNOD).  We run Linux's full pre-capability
+// gate ladder so callers observe EFAULT/ENOENT/ENAMETOOLONG/EINVAL/etc.
+// at the same gate points Linux does, with terminal `EPERM` as the
+// truthful answer (we are not advertising the relevant capability).
 //
-// EPERM is the truthful answer: we are not advertising a capability, so
-// the operation cannot proceed.  When a real chroot / device-node story
-// lands, these become proper FS calls.
+// Batch 446 brought chroot up to Linux gate fidelity.
+// Batch 457 brought mknod / mknodat up to Linux gate fidelity.
+//
+// When a real chroot / device-node story lands, these become proper
+// FS calls; the gate-classification scaffolding stays useful.
 // ---------------------------------------------------------------------------
 
 /// `chroot(path)` — Linux gate-ladder fidelity, terminal `EPERM`.
@@ -11277,29 +11281,198 @@ fn sys_chroot(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EPERM)
 }
 
-/// `mknod(path, mode, dev)` — refuse with EPERM after pointer validation.
+/// `mknod(path, mode, dev)` / `mknodat(dirfd, path, mode, dev)` — Linux
+/// gate-ladder fidelity, terminal `EPERM`.
+///
+/// ## Linux source — `fs/namei.c::do_mknodat` (kernel 6.x)
+///
+/// ```c
+/// static int do_mknodat(int dfd, struct filename *name, umode_t mode,
+///         unsigned int dev)
+/// {
+///     struct user_namespace *mnt_userns;
+///     struct dentry *dentry;
+///     struct path path;
+///     int error;
+///     unsigned int lookup_flags = 0;
+///
+///     error = may_mknod(mode);
+///     if (error)
+///         goto out1;
+/// retry:
+///     dentry = filename_create(dfd, name, &path, lookup_flags);
+///     ...
+///     if (!IS_POSIXACL(path.dentry->d_inode))
+///         mode &= ~current_umask();
+///     error = security_path_mknod(&path, dentry, mode, dev);
+///     if (error)
+///         goto out2;
+///     mnt_userns = mnt_user_ns(path.mnt);
+///     switch (mode & S_IFMT) {
+///     case 0: case S_IFREG:
+///         error = vfs_create(mnt_userns, path.dentry->d_inode,
+///                            dentry, mode, true);
+///         ...
+///         break;
+///     case S_IFCHR: case S_IFBLK:
+///         error = vfs_mknod(mnt_userns, path.dentry->d_inode, dentry,
+///                           mode, new_decode_dev(dev));
+///         break;
+///     case S_IFIFO: case S_IFSOCK:
+///         error = vfs_mknod(mnt_userns, path.dentry->d_inode, dentry,
+///                           mode, 0);
+///         break;
+///     }
+/// ...
+/// }
+///
+/// static int may_mknod(umode_t mode)
+/// {
+///     switch (mode & S_IFMT) {
+///     case S_IFREG:
+///     case S_IFCHR:
+///     case S_IFBLK:
+///     case S_IFIFO:
+///     case S_IFSOCK:
+///     case 0: /* zero mode translates to S_IFREG */
+///         return 0;
+///     case S_IFDIR:
+///         return -EPERM;
+///     default:
+///         return -EINVAL;
+///     }
+/// }
+/// ```
+///
+/// And the actual capability check (inside `vfs_mknod` for S_IFCHR/S_IFBLK
+/// and equivalent for S_IFREG via `vfs_create` → `inode_permission`):
+///
+/// ```c
+///     if (!capable(CAP_MKNOD))
+///         return -EPERM;
+/// ```
+///
+/// ## Linux gate order (relevant subset)
+///
+/// 1. `getname(filename)` — copy user path; returns `-EFAULT` for bad
+///    pointer, `-ENOENT` for empty string, `-ENAMETOOLONG` for too long.
+/// 2. `may_mknod(mode)` — `EPERM` for `S_IFDIR`, `EINVAL` for any other
+///    non-{0,S_IFREG,S_IFCHR,S_IFBLK,S_IFIFO,S_IFSOCK} (e.g. `S_IFLNK`).
+/// 3. `filename_create` — `ENOENT`/`ENOTDIR`/`EEXIST`/... from path
+///    resolution.
+/// 4. `CAP_MKNOD` check inside vfs — terminal `EPERM` for an unprivileged
+///    caller passing a well-formed mode and an existing parent directory.
+///
+/// ## Divergence (pre-batch → post-batch)
+///
+/// | Probe                              | Linux       | Pre-batch | Post-batch |
+/// |------------------------------------|-------------|-----------|------------|
+/// | `mknod(NULL, S_IFREG, 0)`          | `EFAULT`    | `EFAULT`  | `EFAULT`   |
+/// | `mknod("", S_IFREG, 0)`            | `ENOENT`    | `EPERM`   | `ENOENT`   |
+/// | `mknod(<no-NUL 4097B>, S_IFREG, 0)`| `ENAMETOO…` | `EPERM`   | `ENAMETOO…`|
+/// | `mknod("/x", S_IFDIR, 0)`          | `EPERM`*    | `EPERM`   | `EPERM`    |
+/// | `mknod("/x", S_IFLNK, 0)`          | `EINVAL`    | `EPERM`   | `EINVAL`   |
+/// | `mknod("/x", 0xF000-junk, 0)`      | `EINVAL`    | `EPERM`   | `EINVAL`   |
+/// | `mknod("/x", S_IFREG, 0)`          | `EPERM`     | `EPERM`   | `EPERM`    |
+///
+/// *Linux's `may_mknod` returns `EPERM` for `S_IFDIR`; we agree on that
+/// terminal value — it just arrives via the mode-switch, not the
+/// `CAP_MKNOD` check.
+///
+/// ## Why it matters
+///
+/// Userspace `mknod(1)` / `mkfifo(3)` and a number of test harnesses
+/// (LTP `mknod*`, busybox-mkfifo) probe the gate ordering specifically:
+/// they pass a syntactically-invalid mode and expect `EINVAL`, not the
+/// terminal `EPERM`.  A program that wants to know "is this kernel old
+/// enough to lack `S_IFSOCK` support?" expects `EINVAL` for unrecognised
+/// mode bits and `EPERM` for capability denial — collapsing both to
+/// `EPERM` makes the kernel look like it has CAP_MKNOD missing but
+/// otherwise functional, which fools the probe.
+///
+/// ## Architectural directive
+///
+/// This is a translator-only fix: the *answers* (terminal `EPERM`) remain
+/// truthful for a kernel that does not yet implement `CAP_MKNOD`-bearing
+/// callers.  The native VFS and capability model are untouched.  Linux
+/// orders its gates this way; we mirror it.
+///
+/// ## ABI truncation
+///
+/// `umode_t` is `unsigned short` (16-bit) on x86_64 Linux, and the
+/// `SYSCALL_DEFINE3(mknod, …, umode_t, mode, …)` macro emits a
+/// `(u16)mode` truncation before `do_mknodat` runs.  We replicate the
+/// truncation explicitly via `args.arg1 as u16` so that high bits in the
+/// 64-bit register are discarded the same way Linux discards them.
 fn sys_mknod(args: &SyscallArgs) -> SyscallResult {
-    let path = args.arg0;
-    if path == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    linux_err(errno::EPERM)
+    sys_mknod_common(args.arg0, args.arg1)
 }
 
-/// `mknodat(dirfd, path, mode, dev)` — refuse with EPERM after validation.
+/// `mknodat(dirfd, path, mode, dev)` — same ladder as `mknod`, with the
+/// `dirfd` slot ignored until we implement `*at` resolution.  Linux
+/// validates `dirfd` only when the path is relative; for our terminal-
+/// `EPERM` model it isn't observable.
 fn sys_mknodat(args: &SyscallArgs) -> SyscallResult {
-    // arg0 is dirfd; we do not yet support *at lookups so we don't
-    // validate it past the path-pointer check.
-    let path = args.arg1;
+    // arg0 = dirfd, arg1 = path, arg2 = mode, arg3 = dev.
+    sys_mknod_common(args.arg1, args.arg2)
+}
+
+/// Shared `mknod` / `mknodat` body: getname → `may_mknod` → terminal
+/// `EPERM`.  We don't grant `CAP_MKNOD` to any caller, so paths that
+/// pass the mode switch all bottom out at `EPERM`.
+fn sys_mknod_common(path: u64, mode_raw: u64) -> SyscallResult {
+    // S_IF* constants mirrored locally — `umode_t` is 16-bit on x86_64
+    // Linux, but the bit fields are the same as our module-level u32
+    // constants.  We compare against the full 17-bit S_IFMT mask.
+    const PATH_MAX: usize = 4096;
+    const S_IFMT_BITS: u32 = 0o170000;
+    const S_IFSOCK_BITS: u32 = 0o140000;
+    const S_IFREG_BITS: u32 = 0o100000;
+    const S_IFBLK_BITS: u32 = 0o060000;
+    const S_IFDIR_BITS: u32 = 0o040000;
+    const S_IFCHR_BITS: u32 = 0o020000;
+    const S_IFIFO_BITS: u32 = 0o010000;
+
+    // Gate 1a: NULL path -> EFAULT.  read_user_cstr also returns EFAULT
+    // for NULL, but doing it explicitly mirrors Linux's getname() entry
+    // and keeps the kernel-context shortcut path well-defined.
     if path == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
-        return linux_err(linux_errno_for(e));
+    // Gate 1b: getname() — bad-pointer/empty/too-long classification.
+    let path_bytes = match read_user_cstr(path, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    // Linux's getname() returns ENOENT for an empty string at the
+    // user_path_at step (filename_lookup → -ENOENT for `""`).
+    if path_bytes.is_empty() {
+        return linux_err(errno::ENOENT);
     }
+
+    // Gate 2: may_mknod(mode) — Linux truncates to umode_t (u16) first.
+    #[allow(clippy::cast_possible_truncation)]
+    let mode = (mode_raw as u16) as u32;
+    match mode & S_IFMT_BITS {
+        0 | S_IFREG_BITS | S_IFCHR_BITS | S_IFBLK_BITS
+            | S_IFIFO_BITS | S_IFSOCK_BITS => {
+            // Falls through to the terminal CAP_MKNOD refusal below.
+        }
+        S_IFDIR_BITS => {
+            // Linux: `may_mknod` returns -EPERM for S_IFDIR.  Terminal
+            // value matches our default, but the gate point differs.
+            return linux_err(errno::EPERM);
+        }
+        _ => {
+            // S_IFLNK and any other unknown bits → EINVAL.
+            return linux_err(errno::EINVAL);
+        }
+    }
+
+    // Gate 4: terminal EPERM.  No caller in this kernel holds CAP_MKNOD;
+    // Linux returns -EPERM at the vfs_mknod / vfs_create CAP check after
+    // path resolution succeeds.  We short-circuit because we have nothing
+    // to resolve against, and EPERM is the truthful answer.
     linux_err(errno::EPERM)
 }
 
@@ -43806,14 +43979,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // EPERM whenever the path itself fails an earlier gate.
     // Pre-batch we collapsed every non-EFAULT case to EPERM.
     //
-    // mknod / mknodat keep their existing NULL→EFAULT,
-    // non-NULL→EPERM shape — they don't yet do path-resolution
-    // ladders here, just the capability refusal; that's still
-    // Linux-shape correct for an unprivileged caller because Linux
-    // returns EPERM before path lookup on the mknod path when the
-    // caller lacks CAP_MKNOD AND the requested mode is a device
-    // node (file mode S_IFREG is the only one that proceeds, and
-    // we never grant it).
+    // mknod / mknodat — Linux gate ladder fidelity (batch 457).
+    //
+    // Linux runs getname → may_mknod(mode S_IFMT switch) →
+    // filename_create → CAP_MKNOD in strict order, so an unprivileged
+    // caller passing an empty / too-long path sees ENOENT /
+    // ENAMETOOLONG before the terminal EPERM, and a caller passing
+    // an unknown mode (S_IFLNK or junk) sees EINVAL.  Pre-batch we
+    // collapsed every non-EFAULT case to EPERM.
     {
         // ----- chroot gate ladder -----
         // Gate 0: NULL path -> EFAULT.
@@ -43892,7 +44065,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   chroot Linux gate ladder (EFAULT/ENOENT/ENOTDIR/EPERM): OK"
         );
 
-        // ----- mknod / mknodat (unchanged) -----
+        // ----- mknod / mknodat Linux gate ladder -----
+        // S_IF* bits mirrored from <linux/stat.h>:
+        //   S_IFREG = 0o100000, S_IFCHR  = 0o020000,
+        //   S_IFBLK = 0o060000, S_IFIFO  = 0o010000,
+        //   S_IFSOCK = 0o140000, S_IFDIR = 0o040000, S_IFLNK = 0o120000.
+
+        // Gate 0: NULL path -> EFAULT.
         if dispatch_linux(nr::MKNOD, &a_null).value
             != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: mknod(NULL,_,_) not EFAULT");
@@ -43907,21 +44086,134 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Non-NULL path with kernel-context bypass -> EPERM.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+
+        // Gate 1a: empty path -> ENOENT (Linux getname returns -ENOENT
+        // for "").
+        let empty = b"\0";
+        let empty_ptr = empty.as_ptr() as u64;
+        let a = SyscallArgs { arg0: empty_ptr, arg1: 0o100000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNOD, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknod(\"\", S_IFREG, 0) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: empty_ptr, arg2: 0o100000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNODAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknodat(_, \"\", S_IFREG, 0) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Gate 1b: ENAMETOOLONG — a non-NUL byte at the PATH_MAX
+        // window boundary.  read_user_cstr scans up to max_len and
+        // returns ENAMETOOLONG if it doesn't hit NUL.  Build the
+        // probe as a stack-allocated array of 4097 non-zero bytes
+        // (4096 = PATH_MAX; the 4097th is the no-NUL sentinel).
+        {
+            static LONG_PATH: [u8; 4097] = [b'a'; 4097];
+            let long_ptr = LONG_PATH.as_ptr() as u64;
+            let a = SyscallArgs { arg0: long_ptr, arg1: 0o100000, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::MKNOD, &a).value
+                != -i64::from(errno::ENAMETOOLONG) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mknod(LONG_PATH, S_IFREG, 0) not ENAMETOOLONG"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Gate 2: may_mknod EINVAL — S_IFLNK and unknown bits.
+        let dummy = b"/syscall_mknod_probe\0";
+        let dummy_ptr = dummy.as_ptr() as u64;
+        // S_IFLNK = 0o120000 — Linux's may_mknod rejects with EINVAL.
+        let a = SyscallArgs { arg0: dummy_ptr, arg1: 0o120000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNOD, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknod(S_IFLNK) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Junk type bits (S_IFMT = 0o170000) — 0o170000 itself is an
+        // unused encoding in S_IFMT switch.
+        let a = SyscallArgs { arg0: dummy_ptr, arg1: 0o170000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNOD, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknod(junk-S_IFMT) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // mknodat variant of the S_IFLNK probe.
+        let a = SyscallArgs { arg0: 0, arg1: dummy_ptr, arg2: 0o120000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNODAT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknodat(S_IFLNK) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Gate 2 (S_IFDIR): Linux's may_mknod returns EPERM for
+        // S_IFDIR specifically.  Terminal value matches the no-cap
+        // refusal, but the gate is distinguishable from EINVAL.
+        let a = SyscallArgs { arg0: dummy_ptr, arg1: 0o040000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MKNOD, &a).value
             != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: mknod not EPERM");
+            serial_println!(
+                "[syscall/linux]   FAIL: mknod(S_IFDIR) not EPERM"
+            );
             return Err(KernelError::InternalError);
         }
-        let a_mknodat = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0,
+
+        // umode_t truncation: pass a u64 with high bits set; Linux
+        // truncates to u16, so 0xDEAD_BEEF_0000_0000 | S_IFLNK still
+        // reads as S_IFLNK and yields EINVAL.
+        let mode_high: u64 = 0xDEAD_BEEF_0000_0000 | 0o120000;
+        let a = SyscallArgs { arg0: dummy_ptr, arg1: mode_high, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MKNODAT, &a_mknodat).value
-            != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: mknodat not EPERM");
+        if dispatch_linux(nr::MKNOD, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknod(umode_t-trunc) not EINVAL"
+            );
             return Err(KernelError::InternalError);
         }
+
+        // Gate 4: terminal EPERM — well-formed path + valid mode
+        // (S_IFREG) bottoms out at the no-CAP_MKNOD refusal.
+        let a = SyscallArgs { arg0: dummy_ptr, arg1: 0o100000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNOD, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknod(S_IFREG) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: dummy_ptr, arg2: 0o100000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MKNODAT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mknodat(S_IFREG) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM): OK"
+        );
     }
 
     // truncate — Linux gate ladder fidelity (batch 447).

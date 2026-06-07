@@ -23357,6 +23357,37 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
         }
         _ => {}
     }
+    // Gate 4.5 (batch 470): AF_NETLINK protocol range check.
+    // Linux's net/netlink/af_netlink.c::netlink_create runs
+    // (after the SOCK_RAW/SOCK_DGRAM type check, which our
+    // gate 4 handles):
+    //     if (protocol < 0 || protocol >= MAX_LINKS)
+    //             return -EPROTONOSUPPORT;
+    // with MAX_LINKS = 32 from include/uapi/linux/netlink.h.
+    // This is structurally identical to batch 468's IPPROTO_MAX
+    // gate for AF_INET/AF_INET6 but uses EPROTONOSUPPORT
+    // (not EINVAL — netlink's range check uses a different
+    // errno from inet_create's, because netlink treats the
+    // protocol field as a "netlink family number" rather than
+    // an IP protocol number).
+    //
+    // Pre-batch our gate 5 only handled AF_UNIX/AF_INET/
+    // AF_INET6 protocol whitelisting; AF_NETLINK with
+    // protocol=-1 (cast to u32 = 0xFFFFFFFF) fell through and
+    // hit the terminal ENOSYS at the end of sys_socket, hiding
+    // Linux's EPROTONOSUPPORT discriminator that userspace
+    // probes (libnl, audit feature probes) rely on.
+    //
+    // Sign-preserving `as i32` cast matches Linux's int
+    // protocol and the x86_64 ABI's low-32-bit int placement,
+    // so -1 stays -1 and the `protocol < 0` half fires.
+    if domain == 16 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let proto_signed = args.arg2 as i32;
+        if !(0..32).contains(&proto_signed) {
+            return linux_err(errno::EPROTONOSUPPORT);
+        }
+    }
     // Gate 5: per-(family, type) protocol whitelist -> -EPROTONOSUPPORT.
     //
     // Linux's net/ipv4/af_inet.c::inet_create walks the inetsw list for
@@ -23548,6 +23579,24 @@ fn sys_socketpair(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::ESOCKTNOSUPPORT);
         }
         _ => {}
+    }
+    // Gate 3a.5 (batch 470): AF_NETLINK protocol range check.
+    // Direct mirror of sys_socket batch 470 in sys_socketpair.
+    // Linux netlink_create runs (after the type allowlist):
+    //     if (protocol < 0 || protocol >= MAX_LINKS)
+    //             return -EPROTONOSUPPORT;
+    // with MAX_LINKS = 32.  Fires BEFORE __sys_socketpair
+    // touches ops->socketpair, and before our gate 3c domain
+    // != 1 EOPNOTSUPP shortcut.  Pre-batch -1 / >=32 protocols
+    // on AF_NETLINK fell through to gate 3c (EOPNOTSUPP);
+    // Linux distinguishes "netlink family number out of range"
+    // (EPROTONOSUPPORT) from "no ops->socketpair" (EOPNOTSUPP).
+    if domain == 16 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let proto_signed = args.arg2 as i32;
+        if !(0..32).contains(&proto_signed) {
+            return linux_err(errno::EPROTONOSUPPORT);
+        }
     }
     // Gate 3b: per-(family, type) protocol whitelist ->
     // -EPROTONOSUPPORT, applied INSIDE sock_create's family-create
@@ -64812,6 +64861,153 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
 
+        // ---- Batch 470: socket AF_NETLINK protocol MAX_LINKS=32 ----
+        // Linux net/netlink/af_netlink.c::netlink_create:
+        //   if (sock->type != SOCK_RAW && sock->type != SOCK_DGRAM)
+        //       return -ESOCKTNOSUPPORT;
+        //   if (protocol < 0 || protocol >= MAX_LINKS)
+        //       return -EPROTONOSUPPORT;
+        // with MAX_LINKS = 32 (include/uapi/linux/netlink.h).
+        //
+        // Pre-batch our gate 5 only handled AF_UNIX/AF_INET/
+        // AF_INET6 protocol whitelisting; AF_NETLINK protocols
+        // outside [0, 32) — including -1 cast to 0xFFFFFFFF —
+        // fell through to ENOSYS.  Linux returns
+        // EPROTONOSUPPORT (NOT EINVAL — netlink treats the
+        // protocol field as a netlink family number).
+        //
+        // Sub-probes (after gate 4 ESOCKTNOSUPPORT for type
+        // != {2, 3}, since type=DGRAM=2 / RAW=3 are required
+        // to reach netlink_create's protocol check):
+        //   A. socket(AF_NETLINK, DGRAM=2, -1)   -> EPROTONOSUPPORT
+        //   B. socket(AF_NETLINK, RAW=3, -1)     -> EPROTONOSUPPORT
+        //   C. socket(AF_NETLINK, DGRAM, 32)     -> EPROTONOSUPPORT
+        //   D. socket(AF_NETLINK, RAW, 99)       -> EPROTONOSUPPORT
+        //   E. Regression: socket(AF_NETLINK, DGRAM, 0=NETLINK_ROUTE)
+        //      -> ENOSYS (in-range protocol; falls through)
+        //   F. Regression: socket(AF_NETLINK, DGRAM, 31)
+        //      -> ENOSYS (high boundary in-range)
+        //   G. Gate-ordering proof: socket(AF_NETLINK, STREAM=1, -1)
+        //      -> ESOCKTNOSUPPORT (gate 4 type check fires
+        //      BEFORE gate 4.5 MAX_LINKS — matches Linux's
+        //      netlink_create-checks-type-first ordering)
+        //   H. Gate-ordering proof: socket(AF_NETLINK, STREAM=1, 99)
+        //      -> ESOCKTNOSUPPORT (same as G — type wins)
+        {
+            // A: AF_NETLINK / DGRAM / -1 (u64::MAX low 32 = -1).
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: u64::MAX,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,-1) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_NETLINK / RAW / -1.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 3, arg2: u64::MAX,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,RAW,-1) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_NETLINK / DGRAM / 32.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: 32,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,32) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_NETLINK / RAW / 99.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 3, arg2: 99,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,RAW,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: Regression — AF_NETLINK / DGRAM / 0
+            // (NETLINK_ROUTE) — in range, falls to ENOSYS.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,0) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: Regression — AF_NETLINK / DGRAM / 31
+            // (high boundary in-range).
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: 31,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ENOSYS)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,31) regression not ENOSYS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: Gate-ordering proof — AF_NETLINK / STREAM=1
+            // / -1.  Gate 4 ESOCKTNOSUPPORT fires before
+            // gate 4.5 MAX_LINKS — matches netlink_create
+            // type-check-first ordering.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 1, arg2: u64::MAX,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM,-1) gate-order not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: Gate-ordering — AF_NETLINK / STREAM / 99.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 1, arg2: 99,
+                arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKET, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM,99) gate-order not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socket AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes ENOSYS terminal): OK"
+            );
+        }
+
         // ---- socketpair per-(family,type,protocol) gating ----
         // Linux's __sys_socketpair calls sock_create twice; the
         // first call walks inet_create / unix_create which apply
@@ -65212,6 +65408,150 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   socketpair AF_INET/AF_INET6 protocol range 0..IPPROTO_MAX=256 (Linux inet_create/inet6_create open gate; precedes ESOCKTNOSUPPORT, EPROTONOSUPPORT, and EOPNOTSUPP): OK"
+            );
+        }
+
+        // ---- Batch 470: socketpair AF_NETLINK protocol MAX_LINKS=32 ----
+        // Direct mirror of sys_socket batch 470 in
+        // sys_socketpair.  netlink_create's MAX_LINKS check
+        // fires BEFORE __sys_socketpair touches ops->socketpair
+        // (which would produce EOPNOTSUPP — netlink has no
+        // socketpair op).  So out-of-range protocols surface
+        // EPROTONOSUPPORT, not EOPNOTSUPP.
+        //
+        // Sub-probes (after batch 467's ESOCKTNOSUPPORT type
+        // gate, since type=DGRAM/RAW is required to reach
+        // the MAX_LINKS check):
+        //   A. socketpair(AF_NETLINK, DGRAM, -1, sv)   -> EPROTONOSUPPORT
+        //   B. socketpair(AF_NETLINK, RAW, -1, sv)     -> EPROTONOSUPPORT
+        //   C. socketpair(AF_NETLINK, DGRAM, 32, sv)   -> EPROTONOSUPPORT
+        //   D. socketpair(AF_NETLINK, RAW, 99, sv)     -> EPROTONOSUPPORT
+        //   E. Regression: socketpair(AF_NETLINK, DGRAM, 0, sv)
+        //      -> EOPNOTSUPP (in range; falls to gate 3c
+        //      domain != 1)
+        //   F. Regression: socketpair(AF_NETLINK, DGRAM, 31, sv)
+        //      -> EOPNOTSUPP (boundary in-range)
+        //   G. Gate-ordering: socketpair(AF_NETLINK, STREAM, -1, sv)
+        //      -> ESOCKTNOSUPPORT (gate 3a type allowlist
+        //      fires before gate 3a.5 MAX_LINKS — matches
+        //      netlink_create type-check-first ordering)
+        //   H. Gate-ordering: socketpair(AF_NETLINK, STREAM, 99, sv)
+        //      -> ESOCKTNOSUPPORT
+        {
+            let sv_buf = [0u8; 8];
+            let sv_p = (&raw const sv_buf[0]) as u64;
+            core::hint::black_box(&sv_buf);
+
+            // A: AF_NETLINK / DGRAM / -1.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: u64::MAX, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,-1) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // B: AF_NETLINK / RAW / -1.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 3, arg2: u64::MAX, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,RAW,-1) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // C: AF_NETLINK / DGRAM / 32.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: 32, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,32) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // D: AF_NETLINK / RAW / 99.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 3, arg2: 99, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EPROTONOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,RAW,99) not EPROTONOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // E: Regression — AF_NETLINK / DGRAM / 0
+            // (NETLINK_ROUTE). In-range falls to gate 3c
+            // (domain != 1) → EOPNOTSUPP.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: 0, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,0) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // F: Regression — AF_NETLINK / DGRAM / 31.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 2, arg2: 31, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::EOPNOTSUPP)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,31) regression not EOPNOTSUPP"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // G: Gate-ordering — AF_NETLINK / STREAM / -1.
+            // Gate 3a ESOCKTNOSUPPORT fires before gate 3a.5
+            // MAX_LINKS — netlink_create type-check-first.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 1, arg2: u64::MAX, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM,-1) gate-order not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // H: Gate-ordering — AF_NETLINK / STREAM / 99.
+            let a = SyscallArgs {
+                arg0: 16, arg1: 1, arg2: 99, arg3: sv_p,
+                arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::SOCKETPAIR, &a).value
+                != -i64::from(errno::ESOCKTNOSUPPORT)
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM,99) gate-order not ESOCKTNOSUPPORT"
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   socketpair AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes EOPNOTSUPP): OK"
             );
         }
 

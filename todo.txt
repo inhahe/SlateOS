@@ -41525,3 +41525,169 @@ Probe block stamp:
 
 **Build:** `cargo build -p kernel` clean, 40.96s.
 **Boot test:** PASS @ 23s (`bash scripts/boot-test.sh`).
+
+## Batch 470 — sys_socket + sys_socketpair AF_NETLINK protocol MAX_LINKS gate
+
+**Linux 6.x source quote** (net/netlink/af_netlink.c::netlink_create):
+
+    static int netlink_create(struct net *net, struct socket *sock,
+                              int protocol, int kern)
+    {
+            struct module *module = NULL;
+            struct mutex *cb_mutex;
+            struct netlink_sock *nlk;
+            int (*bind)(struct net *net, int group);
+            void (*unbind)(struct sock *sk);
+            int err = 0;
+
+            sock->state = SS_UNCONNECTED;
+
+            if (sock->type != SOCK_RAW && sock->type != SOCK_DGRAM)
+                    return -ESOCKTNOSUPPORT;
+
+            if (protocol < 0 || protocol >= MAX_LINKS)
+                    return -EPROTONOSUPPORT;
+            protocol = array_index_nospec(protocol, MAX_LINKS);
+            ...
+
+with MAX_LINKS = 32 (include/uapi/linux/netlink.h).
+
+Two-step gate structure: type check FIRST (returns
+ESOCKTNOSUPPORT for type != SOCK_RAW=3 && type != SOCK_DGRAM=2),
+THEN protocol range check (returns EPROTONOSUPPORT for
+protocol out of [0, MAX_LINKS)).  Errno class is
+EPROTONOSUPPORT, NOT EINVAL — netlink treats the protocol
+field as a "netlink family number" (NETLINK_ROUTE=0,
+NETLINK_FIREWALL=3, NETLINK_GENERIC=16, etc.), and an
+out-of-range family number is the canonical EPROTONOSUPPORT
+shape, unlike inet_create's IPPROTO_MAX which uses EINVAL.
+
+**Divergence table** (sys_socket):
+
+    Shape                                          pre-batch       Linux 6.x
+    --------------------------------------------   ------------    ------------------
+    socket(AF_NETLINK=16, DGRAM=2, -1)             ENOSYS          EPROTONOSUPPORT
+                                                   (gate 5
+                                                    doesn't
+                                                    handle
+                                                    AF_NETLINK;
+                                                    falls to
+                                                    terminal
+                                                    ENOSYS)
+    socket(AF_NETLINK, RAW=3, -1)                  ENOSYS          EPROTONOSUPPORT
+    socket(AF_NETLINK, DGRAM, 32)                  ENOSYS          EPROTONOSUPPORT
+    socket(AF_NETLINK, RAW, 99)                    ENOSYS          EPROTONOSUPPORT
+    socket(AF_NETLINK, DGRAM, 0=NETLINK_ROUTE)     ENOSYS          unchanged
+                                                                   (in range,
+                                                                    falls to
+                                                                    terminal
+                                                                    ENOSYS)
+    socket(AF_NETLINK, STREAM=1, -1)               ESOCKTNOSUPPORT unchanged
+                                                                   (batch 466
+                                                                    gate 4 fires
+                                                                    first —
+                                                                    matches
+                                                                    netlink_create
+                                                                    type-check-
+                                                                    first
+                                                                    ordering)
+
+**Divergence table** (sys_socketpair):
+
+    Shape                                            pre-batch       Linux 6.x
+    ----------------------------------------------   ------------    ------------------
+    socketpair(AF_NETLINK=16, DGRAM=2, -1, sv)       EOPNOTSUPP      EPROTONOSUPPORT
+                                                     (gate 3c
+                                                      domain != 1
+                                                      fires)
+    socketpair(AF_NETLINK, RAW=3, -1, sv)            EOPNOTSUPP      EPROTONOSUPPORT
+    socketpair(AF_NETLINK, DGRAM, 32, sv)            EOPNOTSUPP      EPROTONOSUPPORT
+    socketpair(AF_NETLINK, RAW, 99, sv)              EOPNOTSUPP      EPROTONOSUPPORT
+    socketpair(AF_NETLINK, DGRAM, 0, sv)             EOPNOTSUPP      unchanged
+                                                                     (in range,
+                                                                      falls to
+                                                                      gate 3c
+                                                                      EOPNOTSUPP
+                                                                      from
+                                                                      ops->socketpair
+                                                                      == NULL)
+    socketpair(AF_NETLINK, STREAM=1, -1, sv)         ESOCKTNOSUPPORT unchanged
+                                                                     (batch 467
+                                                                      gate 3a
+                                                                      fires
+                                                                      first)
+
+**Why it matters**
+
+libnl and audit-feature probes use EPROTONOSUPPORT to detect
+"this netlink family number isn't supported on this kernel",
+which is a different signal from EOPNOTSUPP ("this op isn't
+supported on this socket") and ESOCKTNOSUPPORT ("this socket
+type isn't supported in this family").  The three errnos form
+a discriminator triad that capability-detection layers rely
+on; collapsing all out-of-range AF_NETLINK protocols into
+ENOSYS / EOPNOTSUPP mischaracterises the probe verdict.
+
+The -1 sentinel value in particular is significant — userspace
+sometimes passes -1 to mean "any/default" or as an "unspecified
+protocol" guard.  Pre-batch our `args.arg2 as u32` cast turned
+-1 into 0xFFFFFFFF which sailed past every gate.  Sign-
+preserving `as i32` and checking against 0..32 closes the gap.
+
+The two-step gate structure (type then protocol) is also
+ordering-sensitive: gate 4/3a's ESOCKTNOSUPPORT for
+non-DGRAM/non-RAW types fires BEFORE the MAX_LINKS check,
+matching netlink_create's explicit order.  Tests G and H in
+each probe block prove this ordering by passing
+(AF_NETLINK, STREAM=1, -1) and (AF_NETLINK, STREAM, 99) and
+verifying ESOCKTNOSUPPORT, not EPROTONOSUPPORT.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs`:
+
+  * `sys_socket`: new Gate 4.5 inserted between Gate 4
+    (ESOCKTNOSUPPORT family allowlist, batch 466) and Gate 5
+    (EPROTONOSUPPORT per-(family, type) whitelist).
+    Family-restricted (domain == 16).
+    Sign-preserving `args.arg2 as i32` against 0..32.
+    On miss returns EPROTONOSUPPORT.
+
+  * `sys_socketpair`: new Gate 3a.5 inserted between Gate 3a
+    (ESOCKTNOSUPPORT family allowlist, batch 467) and Gate 3b
+    (EPROTONOSUPPORT per-(family, type) whitelist).  Same shape.
+
+Translator-only — no native netlink code changed.
+
+**Probes added (after the batches 468/469 IPPROTO_MAX probe
+blocks):**
+
+socket (sys_socket):
+
+  A. socket(AF_NETLINK=16, DGRAM=2, u64::MAX)    -> EPROTONOSUPPORT
+     (sign cast: low 32 = 0xFFFFFFFF -> i32 = -1)
+  B. socket(AF_NETLINK, RAW=3, u64::MAX)         -> EPROTONOSUPPORT
+  C. socket(AF_NETLINK, DGRAM, 32)               -> EPROTONOSUPPORT
+  D. socket(AF_NETLINK, RAW, 99)                 -> EPROTONOSUPPORT
+  E. Regression: socket(AF_NETLINK, DGRAM, 0)    -> ENOSYS
+     (NETLINK_ROUTE; in-range protocol)
+  F. Regression: socket(AF_NETLINK, DGRAM, 31)   -> ENOSYS
+     (high boundary in range)
+  G. Gate-ordering: socket(AF_NETLINK, STREAM=1, u64::MAX) -> ESOCKTNOSUPPORT
+  H. Gate-ordering: socket(AF_NETLINK, STREAM, 99) -> ESOCKTNOSUPPORT
+
+socketpair (sys_socketpair):
+
+  A-D. Same as socket A-D, with sv pointer; result EPROTONOSUPPORT.
+  E. Regression: socketpair(AF_NETLINK, DGRAM, 0, sv) -> EOPNOTSUPP
+     (in-range; falls to gate 3c domain != 1)
+  F. Regression: socketpair(AF_NETLINK, DGRAM, 31, sv) -> EOPNOTSUPP
+  G,H. Gate-ordering with STREAM type; result ESOCKTNOSUPPORT.
+
+Probe block stamps:
+
+    [syscall/linux]   socket AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes ENOSYS terminal): OK
+    [syscall/linux]   socketpair AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes EOPNOTSUPP): OK
+
+**Build:** `cargo build -p kernel` clean, 40.07s.
+**Boot test:** PASS @ 23s (`bash scripts/boot-test.sh`).

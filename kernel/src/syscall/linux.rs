@@ -27622,6 +27622,64 @@ fn sys_settimeofday(args: &SyscallArgs) -> SyscallResult {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
             return linux_err(linux_errno_for(e));
         }
+        // Batch 514 — Linux 6.x `kernel/time/time.c::SYSCALL_DEFINE2(settimeofday)`
+        // gates the tz arm with an EINVAL check on `tz_dsttime` after
+        // copy_from_user succeeds and BEFORE the CAP_SYS_TIME gate:
+        //
+        //     if (tz) {
+        //         if (copy_from_user(&new_tz, tz, sizeof(*tz)))
+        //             return -EFAULT;
+        //
+        //         if (new_tz.tz_dsttime)
+        //             return -EINVAL;
+        //     }
+        //
+        //     return do_sys_settimeofday64(tv ? &new_ts : NULL,
+        //                                  tz ? &new_tz : NULL);
+        //
+        // The `tz_dsttime` field has been "always zero" by Linux ABI
+        // contract since the timekeeping rewrite in 2.6.x — the kernel
+        // never honoured DST adjustments at the syscall layer, and
+        // POSIX deprecated the field entirely.  v6.6 keeps the EINVAL
+        // gate so a caller passing a non-zero value (a libc with a
+        // stale `localtime_r` initialiser, or a port from a pre-2.6
+        // system that still sets `tz_dsttime = DST_USA`) observes the
+        // input being rejected rather than silently dropped.
+        //
+        // Pre-batch we skipped the field entirely and returned EPERM
+        // (CAP_SYS_TIME failure).  The observable divergence:
+        //
+        //   settimeofday(NULL, tz_with_dsttime!=0)
+        //     Linux: -EINVAL  (tz_dsttime check)
+        //     Pre-batch: -EPERM (CAP_SYS_TIME)
+        //
+        // Programs probing "did the kernel like my tz layout?" via the
+        // documented errno discriminator (Linux's settimeofday(2) man
+        // page documents EINVAL for tz_dsttime != 0) see contradictory
+        // results pre-batch.  hwclock --systz, ntpd's drift recovery
+        // path, and chrony's `clock_set` retry loop all touch this
+        // gate when probing kernel-side timezone state, and a wrong
+        // errno class confuses their fallback selection.
+        //
+        // Read 8 bytes into a kernel buffer (validate_user_read above
+        // confirmed the range; copy_from_user uses STAC/CLAC for
+        // SMAP-safe access) and check the second i32 (tz_dsttime).
+        let mut tz_buf = [0u8; 8];
+        // SAFETY: validate_user_read above confirmed 8 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg1, tz_buf.as_mut_ptr(), 8)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        // struct timezone { int tz_minuteswest; int tz_dsttime; }
+        // tz_dsttime occupies bytes [4..8].
+        let tz_dsttime = i32::from_ne_bytes(match <[u8; 4]>::try_from(&tz_buf[4..8]) {
+            Ok(b) => b,
+            Err(_) => return linux_err(errno::EINVAL),
+        });
+        if tz_dsttime != 0 {
+            return linux_err(errno::EINVAL);
+        }
     }
     // Setting the wall clock requires CAP_SYS_TIME.  We don't expose
     // a way for userspace to acquire that capability through this
@@ -64886,7 +64944,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // NULL tv + non-NULL tz -> EPERM (tz alone is "set timezone only",
-        // and we don't have CAP_SYS_TIME).
+        // and we don't have CAP_SYS_TIME).  `tz_buf` is all-zero so
+        // tz_dsttime == 0, passing the Linux 6.x dsttime-must-be-zero
+        // gate (see batch 514 docs in sys_settimeofday body) and
+        // surfacing the CAP_SYS_TIME failure.
         let a = SyscallArgs { arg0: 0, arg1: tz_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
@@ -64896,6 +64957,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   settimeofday Linux 6.x value gate (tv_sec unchecked, tv_usec strict-`>` USEC_PER_SEC): OK"
+        );
+
+        // Batch 514: tz_dsttime != 0 -> EINVAL.  Linux 6.x
+        // `kernel/time/time.c::SYSCALL_DEFINE2(settimeofday)`:
+        //
+        //     if (tz) {
+        //         if (copy_from_user(&new_tz, tz, sizeof(*tz)))
+        //             return -EFAULT;
+        //         if (new_tz.tz_dsttime)
+        //             return -EINVAL;
+        //     }
+        //
+        // The dsttime check fires AHEAD of do_sys_settimeofday64's
+        // CAP_SYS_TIME gate, so the EINVAL is what userspace observes
+        // even when the caller lacks the capability.  Probe by setting
+        // bytes [4..8] of the tz buffer to a non-zero i32 and confirm
+        // the errno class flips from EPERM to EINVAL.  Use a
+        // disambiguator value (`DST_AUSTRALIA = 2` from the historical
+        // <time.h> table — a value a stale port would plausibly set)
+        // so the failure case can be distinguished from a stray bit
+        // flip.
+        let mut tz_dst_buf = [0u8; 8];
+        // tz_minuteswest stays 0; tz_dsttime = DST_AUSTRALIA = 2.
+        tz_dst_buf[4..8].copy_from_slice(&2i32.to_ne_bytes());
+        let tz_dst_ptr = tz_dst_buf.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: tz_dst_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: settimeofday tz_dsttime!=0 not EINVAL (batch 514)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Discriminator: tz_dsttime = 0 with a non-zero tz_minuteswest
+        // still surfaces EPERM (the dsttime gate is on dsttime
+        // alone — tz_minuteswest is forwarded to do_sys_settimeofday64
+        // verbatim and only blocked by CAP_SYS_TIME).  Confirms the
+        // gate is reading the right field and not the whole tz word.
+        let mut tz_mw_only = [0u8; 8];
+        tz_mw_only[0..4].copy_from_slice(&300i32.to_ne_bytes()); // +5h00 west
+        // bytes [4..8] stay zero (tz_dsttime = 0).
+        let tz_mw_only_ptr = tz_mw_only.as_ptr() as u64;
+        let a = SyscallArgs { arg0: 0, arg1: tz_mw_only_ptr, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SETTIMEOFDAY, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: settimeofday tz_minuteswest!=0 dsttime=0 not EPERM (batch 514 discriminator)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   settimeofday tz_dsttime!=0 rejected as EINVAL ahead of CAP_SYS_TIME (v6.6 kernel/time/time.c::SYSCALL_DEFINE2(settimeofday): `if (new_tz.tz_dsttime) return -EINVAL`): OK"
         );
 
         // mincore misaligned -> EINVAL.

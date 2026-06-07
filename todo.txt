@@ -47087,3 +47087,108 @@ Summary stamp added:
 **Build:** clean (`cargo build -p kernel`, 50.8s).
 
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+
+
+Batch 514 — settimeofday rejects tz_dsttime != 0 as EINVAL (v6.6 fidelity)
+============================================================================
+
+Divergence:
+  Linux 6.x's `kernel/time/time.c::SYSCALL_DEFINE2(settimeofday)` gates
+  the tz arm with an EINVAL check on `tz_dsttime` after a successful
+  copy_from_user and AHEAD of the CAP_SYS_TIME gate in
+  do_sys_settimeofday64.  Pre-batch we skipped the field entirely
+  (validate_user_read only) and surfaced -EPERM from the unconditional
+  CAP_SYS_TIME failure trailer, losing the dsttime-specific errno
+  signal.
+
+Linux v6.6 source (verbatim from `kernel/time/time.c`):
+
+  SYSCALL_DEFINE2(settimeofday, struct __kernel_old_timeval __user *, tv,
+                  struct timezone __user *, tz)
+  {
+      struct timespec64 new_ts;
+      struct timezone new_tz;
+
+      if (tv) {
+          if (get_user(new_ts.tv_sec, &tv->tv_sec) ||
+              get_user(new_ts.tv_nsec, &tv->tv_usec))
+              return -EFAULT;
+
+          if (new_ts.tv_nsec > USEC_PER_SEC || new_ts.tv_nsec < 0)
+              return -EINVAL;
+
+          new_ts.tv_nsec *= NSEC_PER_USEC;
+      }
+      if (tz) {
+          if (copy_from_user(&new_tz, tz, sizeof(*tz)))
+              return -EFAULT;
+
+          if (new_tz.tz_dsttime)
+              return -EINVAL;
+      }
+
+      return do_sys_settimeofday64(tv ? &new_ts : NULL,
+                                   tz ? &new_tz : NULL);
+  }
+
+Why this matters:
+
+  * `tz_dsttime` has been "always zero" by Linux ABI contract since
+    the timekeeping rewrite in 2.6.x — the kernel never honoured DST
+    adjustments at the syscall layer, and POSIX deprecated the field
+    entirely.  Linux v6.6 keeps the EINVAL gate so a caller passing
+    a stale value (a libc with a historical `localtime_r`
+    initialiser, or a port from a pre-2.6 system that still sets
+    `tz_dsttime = DST_USA = 1`, `DST_AUSTRALIA = 2`, etc.) observes
+    the input being rejected rather than silently dropped.
+  * Documented in settimeofday(2): "ERRORS: EINVAL ... or tz_dsttime
+    is nonzero".  Pre-batch we returned EPERM in that case, which
+    discriminates "you lack CAP_SYS_TIME" from "your input shape is
+    wrong" the wrong way.
+  * hwclock(8)'s --systz path, ntpd's drift recovery probe, and
+    chrony's `clock_set` retry loop all distinguish EPERM (drop, the
+    kernel won't let me) from EINVAL (drop, my struct is wrong)
+    when sequencing fallback strategies.  An EPERM where Linux
+    returns EINVAL causes the caller to retry the same broken call
+    after waiting for a CAP_SYS_TIME-bearing process to install the
+    time — a fallback that will never trigger because the kernel's
+    actual complaint is about the dsttime byte the caller never
+    cleared.
+
+Fix (sys_settimeofday):
+  After the existing `validate_user_read(tz, 8)` gate, copy the
+  8-byte timezone into a kernel buffer (matching Linux's
+  `copy_from_user(&new_tz, tz, sizeof(*tz))`), parse the second i32
+  as `tz_dsttime` (bytes [4..8], native-endian), and reject with
+  -EINVAL if non-zero — BEFORE falling through to the CAP_SYS_TIME
+  trailer.  `struct timezone { int tz_minuteswest; int tz_dsttime; }`
+  has tz_dsttime at byte offset 4; sizeof on x86_64 is 8.
+
+Boot probes added (extending the existing settimeofday block):
+
+  1. `settimeofday(NULL, tz_with_dsttime=DST_AUSTRALIA=2)` → asserts
+     -EINVAL.  Picks `DST_AUSTRALIA` as the divergence sentinel
+     because (a) it's a non-zero value a legacy port would
+     plausibly set, (b) it discriminates from `1` (DST_USA) and `0`
+     (no DST), reducing the chance a stray bit flip masquerades
+     as a passing probe.
+  2. Discriminator: `settimeofday(NULL, tz_with_minuteswest=300,
+     dsttime=0)` → asserts -EPERM.  Confirms the gate is reading
+     bytes [4..8] (tz_dsttime), not the whole tz word — a wrong
+     offset would catch the +5h00-west minuteswest as a
+     "non-zero" hit and mis-EINVAL.
+
+Summary stamp:
+  `settimeofday tz_dsttime!=0 rejected as EINVAL ahead of
+   CAP_SYS_TIME (v6.6 kernel/time/time.c::SYSCALL_DEFINE2(settimeofday):
+   `if (new_tz.tz_dsttime) return -EINVAL`): OK`
+  (visible in `build/serial-test.txt`).
+
+The pre-existing `tz-only -> EPERM` probe (NULL tv + zeroed tz_buf)
+still passes because tz_buf is all-zero (dsttime=0 falls through to
+the CAP_SYS_TIME trailer).  A comment was added there to flag the
+batch 514 interaction.
+
+Build: clean (`cargo build -p kernel`, 52.2s).
+
+Boot test: PASS @ 24s (`bash scripts/boot-test.sh`).

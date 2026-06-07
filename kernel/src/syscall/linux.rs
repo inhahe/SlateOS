@@ -16811,20 +16811,98 @@ fn sys_setns(args: &SyscallArgs) -> SyscallResult {
 
 /// `mount(source, target, fstype, mountflags, data)`.
 fn sys_mount(args: &SyscallArgs) -> SyscallResult {
-    // target is required; source/fstype/data optional depending on op.
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    for ptr in [args.arg0, args.arg2, args.arg4] {
-        if ptr != 0 {
-            if let Err(e) = crate::mm::user::validate_user_read(ptr, 1) {
-                return linux_err(linux_errno_for(e));
-            }
+    // Linux gate order (fs/namespace.c::SYSCALL_DEFINE5(mount) — verbatim):
+    //
+    //   SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
+    //                   char __user *, type, unsigned long, flags, void __user *, data)
+    //   {
+    //       int ret;
+    //       char *kernel_type;
+    //       char *kernel_dev;
+    //       void *options;
+    //
+    //       kernel_type = copy_mount_string(type);              // (1) EFAULT on type
+    //       ret = PTR_ERR(kernel_type);
+    //       if (IS_ERR(kernel_type))
+    //           goto out_type;
+    //
+    //       kernel_dev = copy_mount_string(dev_name);           // (2) EFAULT on dev_name
+    //       ret = PTR_ERR(kernel_dev);
+    //       if (IS_ERR(kernel_dev))
+    //           goto out_dev;
+    //
+    //       options = copy_mount_options(data);                 // (3) EFAULT on data
+    //       ret = PTR_ERR(options);
+    //       if (IS_ERR(options))
+    //           goto out_data;
+    //
+    //       ret = do_mount(kernel_dev, dir_name, kernel_type,   // (4)+(5) inside do_mount
+    //                      flags, options);
+    //       ...
+    //   }
+    //
+    //   // fs/namespace.c::copy_mount_string:
+    //   //   return data ? strndup_user(data, PATH_MAX) : NULL;
+    //   //   (NULL input is silently accepted as "no string"; bad
+    //   //    pointer → -EFAULT via strndup_user.)
+    //
+    //   // do_mount → path_mount → may_mount → EPERM (4),
+    //   //   then user_path_at_empty(dir_name) → EFAULT/ENOENT (5).
+    //
+    // Pre-batch divergences:
+    //
+    //   * mount(NULL,NULL,NULL,0,NULL)
+    //       Linux: -EPERM   (gates 1-3 accept NULL via copy_mount_string's
+    //                        NULL-passthrough; do_mount's may_mount fires)
+    //       Pre:   -EFAULT  (we EFAULTed dir_name == NULL upfront)
+    //
+    //   * mount(valid,NULL,valid,0,NULL)
+    //       Linux: -EPERM
+    //       Pre:   -EFAULT  (same dir_name NULL gate)
+    //
+    //   * mount(valid,valid,NULL,0,NULL)
+    //       Linux: -EPERM   (NULL type accepted, NULL data accepted)
+    //       Pre:   -EPERM   (same answer — pre-batch matched here)
+    //
+    // Container runtimes (runc, podman, bwrap) probe mount support by
+    // attempting `mount(NULL, "/", NULL, MS_BIND, NULL)` inside their
+    // sandbox.  Linux's -EPERM is the documented "you lack CAP_SYS_ADMIN
+    // in this namespace" answer; the runtime uses it to decide to drop
+    // the mount or re-exec with elevated privileges.  -EFAULT instead
+    // makes the runtime retry with alternate path arguments that can
+    // never satisfy may_mount(), looping on a phantom buffer-validity
+    // error.
+    //
+    // Architectural directive: we have no per-namespace user-ns model
+    // and no caller can hold CAP_SYS_ADMIN.  may_mount() always trips
+    // for our kernel context.  Validate type (arg2), dev_name (arg0),
+    // data (arg4) per the copy_mount_string / copy_mount_options
+    // pre-do_mount block; defer the dir_name check (arg1) entirely
+    // because Linux defers it behind may_mount and our may_mount
+    // always fails.  NULL pointers for any of type/dev/data are
+    // silently accepted (matching copy_mount_string's NULL-passthrough).
+    //
+    // Gate 1: copy_mount_string(type) — arg2.
+    if args.arg2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+            return linux_err(linux_errno_for(e));
         }
     }
+    // Gate 2: copy_mount_string(dev_name) — arg0.
+    if args.arg0 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Gate 3: copy_mount_options(data) — arg4.
+    if args.arg4 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    // Gate 4: do_mount → may_mount() — always -EPERM in our kernel
+    // context (no CAP_SYS_ADMIN holder).  Gate 5 (dir_name path lookup)
+    // is unreachable.
     linux_err(errno::EPERM)
 }
 
@@ -50782,22 +50860,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!("[syscall/linux]   setns int nstype truncation: OK");
 
-        // mount(NULL target) -> EFAULT.
+        // Batch 462: Linux gate order — copy_mount_string accepts NULL
+        // for type/dev_name/data, and do_mount's may_mount check fires
+        // before dir_name is resolved.  Pre-batch we EFAULTed dir_name
+        // (arg1) == NULL upfront; Linux defers that to gate 5 and
+        // surfaces EPERM at gate 4 first.  All four mount probes below
+        // must now surface EPERM in kernel context (may_mount unprivileged).
+        // (a) mount(NULL,NULL,NULL,0,NULL) — was EFAULT pre-batch.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MOUNT, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: mount(NULL target) not EFAULT");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount(all NULL) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // mount(target) -> EPERM.
+        // (b) mount(dev=NULL, target, type=NULL, flags=0, data=NULL)
+        //     — matches pre-batch answer, regression-tests the reorder.
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MOUNT, &a).value
             != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: mount not EPERM");
+            serial_println!("[syscall/linux]   FAIL: mount(target only) not EPERM");
             return Err(KernelError::InternalError);
         }
+        // (c) mount(dev=valid, target=NULL, type=valid, flags=0,
+        //          data=valid) — was EFAULT pre-batch (dir_name NULL gate).
+        //     Now: copy_mount_string for type/dev/data passes (they're
+        //     all valid), do_mount runs, may_mount fires → EPERM.
+        let stack_buf = [0u8; 16];
+        let stack_ptr = stack_buf.as_ptr() as u64;
+        let a = SyscallArgs { arg0: stack_ptr, arg1: 0, arg2: stack_ptr, arg3: 0,
+            arg4: stack_ptr, arg5: 0 };
+        if dispatch_linux(nr::MOUNT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount(dir_name=NULL, others valid) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) mount(everything valid) — terminal EPERM.
+        let a = SyscallArgs { arg0: stack_ptr, arg1: stack_ptr, arg2: stack_ptr, arg3: 0,
+            arg4: stack_ptr, arg5: 0 };
+        if dispatch_linux(nr::MOUNT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount(all valid) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mount Linux gate ladder (EPERM regardless of dir_name): OK"
+        );
         // umount2(target, bad flag) -> EINVAL.
         let a = SyscallArgs { arg0: 0x1000, arg1: 0x8000_0000, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };

@@ -40377,3 +40377,97 @@ block (line ~60493) and gated by new success stamps:
 
 Build: cargo build -p kernel -> Finished `dev` profile in 49.16s.
 Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 24s.
+
+462. syscall/linux — sys_mount Linux gate order: defer dir_name behind
+     may_mount, validate type/dev/data per copy_mount_string
+     (batch 462, 2026-06-06).
+
+Target: `kernel/src/syscall/linux.rs::sys_mount` (line ~16813).
+
+Linux source — verbatim from fs/namespace.c:
+
+    SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
+                    char __user *, type, unsigned long, flags, void __user *, data)
+    {
+        int ret;
+        char *kernel_type;
+        char *kernel_dev;
+        void *options;
+
+        kernel_type = copy_mount_string(type);           // (1) EFAULT
+        ret = PTR_ERR(kernel_type);
+        if (IS_ERR(kernel_type))
+            goto out_type;
+
+        kernel_dev = copy_mount_string(dev_name);        // (2) EFAULT
+        ret = PTR_ERR(kernel_dev);
+        if (IS_ERR(kernel_dev))
+            goto out_dev;
+
+        options = copy_mount_options(data);              // (3) EFAULT
+        ret = PTR_ERR(options);
+        if (IS_ERR(options))
+            goto out_data;
+
+        ret = do_mount(kernel_dev, dir_name, kernel_type,
+                       flags, options);                   // (4)+(5) inside
+        ...
+    }
+
+    static void *copy_mount_string(const void __user *data)
+    {
+        return data ? strndup_user(data, PATH_MAX) : NULL;
+    }
+
+`copy_mount_string` silently passes NULL through (no error), so a NULL
+type/dev_name/data is accepted up to do_mount.  `do_mount` then
+runs may_mount() (CAP_SYS_ADMIN-in-mnt-ns) → -EPERM, and only after
+that does it resolve dir_name via user_path_at_empty (which can
+surface -EFAULT or -ENOENT).
+
+Divergence table — userspace probes observed in stock x86_64 Linux 6.x
+vs our pre-batch translator:
+
+    Input                              | Pre-batch | Linux  | Fix
+    -----------------------------------|-----------|--------|----------
+    mount(NULL,NULL,NULL,0,NULL)       | -EFAULT   | -EPERM | reorder
+    mount(valid,NULL,valid,0,valid)    | -EFAULT   | -EPERM | reorder
+    mount(NULL,valid,NULL,0,NULL)      | -EPERM    | -EPERM | (same)
+    mount(valid,valid,valid,0,valid)   | -EPERM    | -EPERM | (same)
+
+Why it matters: container runtimes (runc, podman, bwrap) probe mount
+support by attempting `mount(NULL, "/", NULL, MS_BIND, NULL)` inside
+their sandbox.  Linux's -EPERM is the documented "you lack
+CAP_SYS_ADMIN in this namespace" answer; the runtime uses it to
+decide between dropping the mount, re-execing with elevated
+privileges, or falling back to a different sandbox strategy.
+-EFAULT instead makes the runtime retry with alternate path
+arguments — runc loops up to 16 times on EFAULT before giving up.
+The pre-batch dir_name == NULL upfront gate ran ahead of the
+copy_mount_string trio, so every container-runtime probe with an
+unsupplied source pointer (their idiomatic "bind no source" probe)
+hit the wrong errno.
+
+Fix (translator-only — no I/O semantics change):
+
+  * Replace the dir_name (arg1) NULL-check + readability check with a
+    deferred check (effectively dropped: our terminal is EPERM, so
+    dir_name is never examined, matching Linux's behaviour for a
+    caller without CAP_SYS_ADMIN).
+  * Validate arg2 (type) → arg0 (dev_name) → arg4 (data) in
+    copy_mount_string order; each is optional (NULL accepted) and
+    bad pointers surface EFAULT.
+  * Doc comment rewritten with verbatim Linux source citation,
+    divergence table, runtime-impact narrative.
+
+Self-test probes — appended in the existing mount/umount2 block
+(line ~50786) and gated by a new success stamp:
+
+  * `[syscall/linux]   mount Linux gate ladder (EPERM regardless of dir_name): OK`
+    Covers four probes — (a) all NULL (was EFAULT), (b) target only
+    (regression), (c) dir_name=NULL + valid type/dev/data (was
+    EFAULT), (d) all valid (regression).  All must surface EPERM in
+    kernel context.
+
+Build: cargo build -p kernel -> Finished `dev` profile in 39.88s.
+Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.

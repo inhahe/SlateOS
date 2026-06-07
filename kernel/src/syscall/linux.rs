@@ -31069,6 +31069,74 @@ fn sys_syslog(args: &SyscallArgs) -> SyscallResult {
 /// `struct utsname` has 6 fields × 65 bytes = 390 bytes total.  We fill
 /// the standard fields with values that satisfy Linux programs probing
 /// for "are we running on Linux x86_64?".
+///
+/// ## Linux source — `kernel/sys.c::SYSCALL_DEFINE1(newuname)`
+///
+/// ```c
+/// SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
+/// {
+///     struct new_utsname tmp;
+///
+///     down_read(&uts_sem);
+///     memcpy(&tmp, utsname(), sizeof(tmp));
+///     up_read(&uts_sem);
+///     if (copy_to_user(name, &tmp, sizeof(tmp)))
+///         return -EFAULT;
+///
+///     if (override_release(name->release, sizeof(name->release)))
+///         return -EFAULT;
+///     if (override_architecture(name))
+///         return -EFAULT;
+///     return 0;
+/// }
+/// ```
+///
+/// `utsname()` returns `&current->nsproxy->uts_ns->name`, a
+/// `struct new_utsname` of 6 × 65-byte fields.  v6.6 is a pure
+/// snapshot-and-memcpy — no substitution layer between the stored
+/// state and the user buffer.  The only post-copy mutations are
+/// `override_release` (boot-param `UTS_RELEASE` override, off by
+/// default) and `override_architecture` (32-bit personality
+/// fixup, irrelevant for x86_64), both of which leave nodename
+/// and domainname untouched.
+///
+/// ## Batch 511 divergence — empty-domain fabrication
+///
+/// Pre-batch we ran the read through two substitution arms:
+///
+/// ```text
+///   if nodename == "unknown" { nodename_bytes = "localhost" }
+///   if domain.is_empty()     { domain_bytes   = "localdomain" }
+/// ```
+///
+/// The first arm is dead code (we `init_defaults()` at function
+/// entry, which guarantees `STATE` is Some, so `get_hostname()`
+/// never returns the `"unknown"` sentinel — that's the
+/// `nameservice::get_hostname` fallback for the
+/// `STATE.as_ref()` None case, which doesn't apply post-init).
+/// But the second arm is live: after a userspace
+/// `setdomainname("", 0)` clears the domainname field, Linux's
+/// `utsname()->domainname` is 65 zero bytes and `newuname`
+/// copies those zeros out verbatim — programs see an empty
+/// domainname.  Pre-batch we observed the empty string and
+/// substituted `"localdomain"`, fabricating 11 bytes that no
+/// Linux kernel ever wrote.
+///
+/// Concrete impact: glibc's `getdomainname(3)`, the `domainname(1)`
+/// utility (util-linux), NIS / ypbind probes, sssd's hostname
+/// resolver, and ansible's `setup` fact collector all read uname's
+/// `domainname` field and compare against the empty string to mean
+/// "no domain configured."  Pre-batch they saw `"localdomain"`
+/// and treated the host as configured-but-misnamed.  Post-batch
+/// they see the empty string they cleared, matching Linux.
+///
+/// The fix removes both substitution arms — uname is now a pure
+/// read of the nameservice state, mirroring v6.6's pure-memcpy
+/// contract.  If the design wants Linux-fidelity defaults
+/// (`"(none)"` for nodename and domainname per
+/// `init/version-timestamp.c::init_uts_ns`), that's a
+/// nameservice-layer change (`init_defaults` initial values),
+/// not a translator-layer substitution.
 fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     // Lazy-init nameservice so get_hostname/get_domain return the
     // configured defaults rather than the "unknown"/empty fallback.
@@ -31090,27 +31158,19 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
         // buf[off + n] is the NUL terminator (already zero).
     }
     fill(&mut buf, 0, b"OuRoS");                    // sysname
-    // nodename / domainname now live in the global nameservice
-    // state; sethostname / setdomainname update them and uname
-    // reads them back.  Falls back to "localhost" / "localdomain"
-    // if nameservice isn't initialised (kernel-only test contexts).
+    // Batch 511: pure read of nameservice state — no substitution
+    // layer.  Mirrors v6.6's `memcpy(&tmp, utsname(), sizeof(tmp))`.
+    // If userspace cleared nodename via `sethostname("", 0)` or
+    // domainname via `setdomainname("", 0)`, the corresponding
+    // field is emitted as zero bytes (empty C string), exactly
+    // as Linux's `newuname` would.
     let nodename = crate::fs::nameservice::get_hostname();
-    let nodename_bytes = if nodename == "unknown" {
-        alloc::string::String::from("localhost")
-    } else {
-        nodename
-    };
-    fill(&mut buf, 1, nodename_bytes.as_bytes());
+    fill(&mut buf, 1, nodename.as_bytes());
     fill(&mut buf, 2, b"0.1.0-ouros");              // release
     fill(&mut buf, 3, b"#1 SMP");                   // version
     fill(&mut buf, 4, b"x86_64");                   // machine
     let domain = crate::fs::nameservice::get_domain();
-    let domain_bytes = if domain.is_empty() {
-        alloc::string::String::from("localdomain")
-    } else {
-        domain
-    };
-    fill(&mut buf, 5, domain_bytes.as_bytes());
+    fill(&mut buf, 5, domain.as_bytes());
 
     // SAFETY: copy_to_user validates the user range.
     let r = unsafe {
@@ -45751,6 +45811,187 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             crate::fs::nameservice::set_hostname(&original)
                 .expect("restore hostname");
             let _ = crate::fs::nameservice::set_domain(&orig_domain);
+        }
+
+        // Batch 511: sys_uname is now a pure read of the nameservice
+        // state — no `"" -> "localdomain"` or `"unknown" -> "localhost"`
+        // substitution.  Mirrors v6.6's
+        // `memcpy(&tmp, utsname(), sizeof(tmp))` contract: whatever
+        // userspace has set via sethostname/setdomainname is what
+        // uname returns, including the cleared / empty state that
+        // `sethostname("", 0)` and `setdomainname("", 0)` install.
+        //
+        // We can't fault the user pointer (kernel-context bypass), but
+        // the substitution divergence is observable directly via the
+        // returned utsname buffer's nodename and domainname fields.
+        {
+            crate::fs::nameservice::init_defaults();
+            let saved_node = crate::fs::nameservice::get_hostname();
+            let saved_dom  = crate::fs::nameservice::get_domain();
+
+            // (a) Domain cleared -> uname's domainname field must be
+            //     empty (first byte NUL).  Pre-batch the translator
+            //     would substitute "localdomain", so the first byte
+            //     would be 'l' (0x6c).
+            crate::fs::nameservice::set_domain("")
+                .expect("clear domain for uname probe");
+            // Sanity-check the storage layer agrees the domain is
+            // empty before we run uname against it; rules out a stale
+            // STATE between batches.
+            if !crate::fs::nameservice::get_domain().is_empty() {
+                serial_println!(
+                    "[syscall/linux]   FAIL: set_domain(\"\") did not clear domain ({:?})",
+                    crate::fs::nameservice::get_domain(),
+                );
+                return Err(KernelError::InternalError);
+            }
+            let mut uname_buf = [0xAAu8; 6 * 65];
+            let a = SyscallArgs {
+                arg0: uname_buf.as_mut_ptr() as u64,
+                arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::UNAME, &a).value;
+            if r != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: uname(buf) with empty domain returned {} (want 0)",
+                    r,
+                );
+                let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                return Err(KernelError::InternalError);
+            }
+            // domainname is field index 5 (offset 5*65 = 325, length 65).
+            // First byte must be NUL — Linux's verbatim empty-string
+            // copy.  Pre-batch (substitution to "localdomain") would
+            // write 0x6c ('l').
+            #[allow(clippy::indexing_slicing)]
+            if uname_buf[5 * 65] != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: uname domainname[0] = 0x{:02x} after set_domain(\"\") (want 0x00 — pre-batch fabricated 'localdomain', first byte 0x6c)",
+                    uname_buf[5 * 65],
+                );
+                let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                return Err(KernelError::InternalError);
+            }
+            // Also confirm the remaining 64 bytes of the field are
+            // zero — uname must fully zero-fill, not leave the caller's
+            // sentinel bytes behind.
+            #[allow(clippy::indexing_slicing)]
+            for i in 0..65 {
+                if uname_buf[5 * 65 + i] != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: uname domainname[{}] = 0x{:02x} after set_domain(\"\") (want 0x00 — full field must be zero-filled)",
+                        i, uname_buf[5 * 65 + i],
+                    );
+                    let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // (b) Hostname cleared -> uname's nodename field must be
+            //     empty (first byte NUL).  Pre-batch the "unknown"
+            //     fallback was dead code (STATE is Some after
+            //     init_defaults), so this row actually passes both
+            //     pre- and post-batch — we probe it to lock in that
+            //     no future substitution leaks into the field.
+            crate::fs::nameservice::set_hostname("")
+                .expect("clear hostname for uname probe");
+            uname_buf.fill(0xAA);
+            let r = dispatch_linux(nr::UNAME, &a).value;
+            if r != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: uname(buf) with empty hostname returned {} (want 0)",
+                    r,
+                );
+                let _ = crate::fs::nameservice::set_hostname(&saved_node);
+                let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                return Err(KernelError::InternalError);
+            }
+            // nodename is field index 1 (offset 65, length 65).
+            #[allow(clippy::indexing_slicing)]
+            if uname_buf[65] != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: uname nodename[0] = 0x{:02x} after set_hostname(\"\") (want 0x00)",
+                    uname_buf[65],
+                );
+                let _ = crate::fs::nameservice::set_hostname(&saved_node);
+                let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                return Err(KernelError::InternalError);
+            }
+
+            // (c) Non-empty round-trip: set domain to a distinctive
+            //     value, run uname, confirm the bytes round-trip
+            //     without modification.  Guards against a future
+            //     regression that re-introduces a substitution layer
+            //     under any condition.
+            crate::fs::nameservice::set_hostname("rt-host")
+                .expect("set rt-host");
+            crate::fs::nameservice::set_domain("rt.example")
+                .expect("set rt.example");
+            uname_buf.fill(0xAA);
+            let r = dispatch_linux(nr::UNAME, &a).value;
+            if r != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: uname(buf) round-trip returned {} (want 0)",
+                    r,
+                );
+                let _ = crate::fs::nameservice::set_hostname(&saved_node);
+                let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                return Err(KernelError::InternalError);
+            }
+            #[allow(clippy::indexing_slicing)]
+            {
+                // nodename = "rt-host" + NUL pad.
+                let want_node = b"rt-host";
+                for (i, &c) in want_node.iter().enumerate() {
+                    if uname_buf[65 + i] != c {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: uname nodename[{}] = 0x{:02x}, want 0x{:02x} (\"rt-host\" round-trip)",
+                            i, uname_buf[65 + i], c,
+                        );
+                        let _ = crate::fs::nameservice::set_hostname(&saved_node);
+                        let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                        return Err(KernelError::InternalError);
+                    }
+                }
+                if uname_buf[65 + want_node.len()] != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: uname nodename missing NUL terminator after \"rt-host\"",
+                    );
+                    let _ = crate::fs::nameservice::set_hostname(&saved_node);
+                    let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                    return Err(KernelError::InternalError);
+                }
+                // domainname = "rt.example" + NUL pad.
+                let want_dom = b"rt.example";
+                for (i, &c) in want_dom.iter().enumerate() {
+                    if uname_buf[5 * 65 + i] != c {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: uname domainname[{}] = 0x{:02x}, want 0x{:02x} (\"rt.example\" round-trip)",
+                            i, uname_buf[5 * 65 + i], c,
+                        );
+                        let _ = crate::fs::nameservice::set_hostname(&saved_node);
+                        let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                        return Err(KernelError::InternalError);
+                    }
+                }
+                if uname_buf[5 * 65 + want_dom.len()] != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: uname domainname missing NUL terminator after \"rt.example\"",
+                    );
+                    let _ = crate::fs::nameservice::set_hostname(&saved_node);
+                    let _ = crate::fs::nameservice::set_domain(&saved_dom);
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            // Restore the original uts state so subsequent boot
+            // phases see unchanged hostname / domain.
+            crate::fs::nameservice::set_hostname(&saved_node)
+                .expect("restore hostname after uname probes");
+            let _ = crate::fs::nameservice::set_domain(&saved_dom);
+            serial_println!(
+                "[syscall/linux]   uname pure-read contract — no \"\" -> \"localdomain\" / \"unknown\" -> \"localhost\" substitution (v6.6 kernel/sys.c::SYSCALL_DEFINE1(newuname): `memcpy(&tmp, utsname(), sizeof(tmp))`): OK"
+            );
         }
 
         // Batch 336: sethostname / setdomainname `len` is declared

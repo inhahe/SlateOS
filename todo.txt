@@ -46744,3 +46744,144 @@ Summary stamp added:
 **Build:** clean (`cargo build -p kernel`, 43.0s).
 
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
+
+================================================================
+Batch 511 — uname: pure read of nameservice state, no `"" -> "localdomain"` fabrication (v6.6)
+================================================================
+
+**Where:** `kernel/src/syscall/linux.rs::sys_uname`.
+
+**Divergence found:** Pre-batch the translator ran the nameservice
+read through two substitution arms before emitting the utsname
+buffer:
+
+    let nodename = crate::fs::nameservice::get_hostname();
+    let nodename_bytes = if nodename == "unknown" {
+        alloc::string::String::from("localhost")
+    } else {
+        nodename
+    };
+    fill(&mut buf, 1, nodename_bytes.as_bytes());
+    ...
+    let domain = crate::fs::nameservice::get_domain();
+    let domain_bytes = if domain.is_empty() {
+        alloc::string::String::from("localdomain")
+    } else {
+        domain
+    };
+    fill(&mut buf, 5, domain_bytes.as_bytes());
+
+Linux v6.6 has no such substitution.  From
+`kernel/sys.c::SYSCALL_DEFINE1(newuname)` (verbatim):
+
+    SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
+    {
+        struct new_utsname tmp;
+
+        down_read(&uts_sem);
+        memcpy(&tmp, utsname(), sizeof(tmp));
+        up_read(&uts_sem);
+        if (copy_to_user(name, &tmp, sizeof(tmp)))
+            return -EFAULT;
+
+        if (override_release(name->release, sizeof(name->release)))
+            return -EFAULT;
+        if (override_architecture(name))
+            return -EFAULT;
+        return 0;
+    }
+
+`utsname()` returns `&current->nsproxy->uts_ns->name`, a
+`struct new_utsname` of 6 × 65-byte fields.  The whole
+implementation is a pure snapshot-and-memcpy — no field-by-field
+fabrication.  The two post-copy hooks (`override_release`,
+`override_architecture`) touch only `release` and `machine`, never
+`nodename` or `domainname`.
+
+So when userspace clears domainname via `setdomainname("", 0)`,
+Linux's `utsname()->domainname` is 65 zero bytes and `newuname`
+copies those zeros out verbatim — programs see an empty domainname
+(strlen 0, first byte NUL).  Pre-batch we observed the empty
+string and substituted "localdomain", fabricating 11 bytes that no
+Linux kernel ever wrote.
+
+**Why it matters:**
+
+  - glibc's `getdomainname(3)` walks the kernel's `domainname` field
+    and copies up to `len` bytes; a caller passing a small `len`
+    against the empty domain expects to see a NUL at offset 0 and
+    interpret it as "no domain set."  Pre-batch they read
+    `"localdomain"` and treated the host as configured.
+  - The `domainname(1)` utility (util-linux) prints the kernel's
+    `domainname` field directly; an admin who just ran
+    `domainname ""` (the documented "clear" idiom) would see the
+    next `domainname` invocation print `localdomain` instead of an
+    empty line, contradicting their explicit clear.
+  - NIS / ypbind's startup probes call `uname` and treat empty
+    domainname as "NIS not configured, skip the bind."  Pre-batch
+    they saw `"localdomain"` and attempted to bind a non-existent
+    NIS domain.
+  - sssd's hostname resolver, ansible's `setup` fact collector, and
+    systemd's `nss-myhostname` all consult `uname.domainname` and
+    compare against the empty string as the canonical "unset"
+    indicator.
+
+The `"unknown" -> "localhost"` arm was dead code (`init_defaults()`
+at function entry guarantees `STATE` is `Some`, after which
+`get_hostname()` never returns the `"unknown"` sentinel — that's
+the `STATE.as_ref()` None-fallback in `nameservice::get_hostname`).
+But the pattern was unsound — any future change to nameservice that
+re-introduced an `"unknown"` return path would silently fabricate
+again.  Both arms removed in the same patch to match v6.6's
+no-substitution contract.
+
+**Fix (translator-only):** Replace both substitution arms with a
+direct pass-through to the nameservice read:
+
+    let nodename = crate::fs::nameservice::get_hostname();
+    fill(&mut buf, 1, nodename.as_bytes());
+    ...
+    let domain = crate::fs::nameservice::get_domain();
+    fill(&mut buf, 5, domain.as_bytes());
+
+`fill()` already handles short / empty inputs correctly — it copies
+`s.len().min(64)` bytes and leaves the remainder of the 65-byte
+field as the zero-init NULs.  An empty `domain` produces 65 NUL
+bytes in the output field, exactly what v6.6's memcpy emits.
+
+No nameservice state is touched.  No defaults change.  If the
+design later wants Linux-fidelity defaults (`"(none)"` for nodename
+and domainname per `init/version-timestamp.c::init_uts_ns`), that's
+a nameservice-layer change (`init_defaults` initial values), not a
+translator-layer substitution.
+
+**Boot probes added** (after the existing batch 57 nameservice
+round-trip block):
+
+  1. set_domain("") → uname → assert `domainname[0]` is NUL and the
+     full 65-byte field is zero-filled.  Pre-batch would write
+     `"localdomain\0..."` (first byte 0x6c = 'l').  This is the
+     concrete divergence demonstrator.
+  2. set_hostname("") → uname → assert `nodename[0]` is NUL.
+     Pre-batch passes (the "unknown" substitution didn't trigger
+     for empty), but locks in the no-substitution contract against
+     future regression.
+  3. set_hostname("rt-host"), set_domain("rt.example") → uname →
+     assert both fields round-trip exactly (byte-for-byte equality
+     against the expected payload, with NUL terminator).  Guards
+     against a future regression that re-introduces a substitution
+     layer under any condition.
+
+Each branch saves and restores the original hostname / domain so
+subsequent boot phases observe unchanged uts state.  An additional
+sanity check after `set_domain("")` confirms the storage layer
+agrees the domain is empty before we run uname against it — rules
+out stale `STATE` between batches contaminating the probe.
+
+Summary stamp added:
+  `uname pure-read contract — no "" -> "localdomain" / "unknown" -> "localhost" substitution (v6.6 kernel/sys.c::SYSCALL_DEFINE1(newuname): `memcpy(&tmp, utsname(), sizeof(tmp))`): OK`
+  (visible in `build/serial-test.txt`).
+
+**Build:** clean (`cargo build -p kernel`, 46.1s).
+
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

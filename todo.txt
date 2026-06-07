@@ -46393,3 +46393,92 @@ EINVAL (batch 506): OK` (serial-test.txt).
 **Build:** clean (`cargo build -p kernel`, 50.2s).
 
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+## Batch 507 — Linux ABI fidelity: sched_setattr() validates sched_flags against v6.6's mask ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV) (2026-06-07)
+
+**File:** `kernel/src/syscall/linux.rs` (`sys_sched_setattr`).
+
+**Change:** `sched_flags` (offset 8..16 of `struct sched_attr`) is
+now read and validated against v6.6's accept mask.  Any bit
+outside `(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV)` returns -EINVAL,
+mirroring `__sched_setscheduler`'s sanity check exactly.
+
+**Linux v6.6 source** — `kernel/sched/syscalls.c::__sched_setscheduler`:
+
+```c
+/* Sanity check the sched_flags. */
+if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
+    return -EINVAL;
+```
+
+`include/uapi/linux/sched.h` (v6.6) defines the userspace flags:
+
+```c
+#define SCHED_FLAG_RESET_ON_FORK    0x01
+#define SCHED_FLAG_RECLAIM          0x02
+#define SCHED_FLAG_DL_OVERRUN       0x04
+#define SCHED_FLAG_KEEP_POLICY      0x08
+#define SCHED_FLAG_KEEP_PARAMS      0x10
+#define SCHED_FLAG_UTIL_CLAMP_MIN   0x20
+#define SCHED_FLAG_UTIL_CLAMP_MAX   0x40
+
+#define SCHED_FLAG_KEEP_ALL    (SCHED_FLAG_KEEP_POLICY | \
+                                SCHED_FLAG_KEEP_PARAMS)
+#define SCHED_FLAG_UTIL_CLAMP  (SCHED_FLAG_UTIL_CLAMP_MIN | \
+                                SCHED_FLAG_UTIL_CLAMP_MAX)
+#define SCHED_FLAG_ALL    (SCHED_FLAG_RESET_ON_FORK | \
+                           SCHED_FLAG_RECLAIM       | \
+                           SCHED_FLAG_DL_OVERRUN    | \
+                           SCHED_FLAG_KEEP_ALL      | \
+                           SCHED_FLAG_UTIL_CLAMP)
+```
+
+That's SCHED_FLAG_ALL = 0x7F.  `kernel/sched/sched.h` (v6.6)
+defines the internal-only SCHED_FLAG_SUGOV = 0x1000_0000, never
+set from userspace but defensively tolerated on the input side.
+
+**Divergence (pre-batch):** the translator read `sched_flags` only
+implicitly — the doc-comment said "sched_flags is accepted (only
+RESET_ON_FORK = 0x01 is non-zero interesting and we silently drop
+it)" — and never validated the value.  Any value, including
+0xFFFF_FFFF_FFFF_FFFF, silently passed through.
+
+**Why it matters:** glibc-on-v6.6 feature probes for sched_attr
+extensions walk the sched_flags bit positions to discover which
+extensions the kernel implements (e.g. UTIL_CLAMP_MIN/MAX added in
+5.3, KEEP_POLICY/PARAMS in 5.5, DL_OVERRUN in 4.16).  A probe that
+sets a single high bit (e.g. bit 0x80) and gets Ok(0) back would
+incorrectly conclude that bit is a valid sched_flags extension —
+mis-training the runtime into setting that bit on subsequent calls
+where v6.6 returns -EINVAL.  After this batch, the bit-walk
+probe accurately stops at 0x7F (plus SUGOV's 0x1000_0000), giving
+the same shape as a real v6.6 kernel.
+
+**Post-batch behaviour:**
+  - `sched_flags & ~(0x7F | 0x1000_0000) != 0` → EINVAL (was 0).
+  - `sched_flags == 0x7F` → 0 (all known userspace bits, unchanged).
+  - `sched_flags == 0x1000_0000` (SCHED_FLAG_SUGOV) → 0 (defensive
+    tolerance, unchanged).
+  - `sched_flags == 0` → 0 (unchanged).
+  - The check fires after the SCHED_DEADLINE EOPNOTSUPP arm and
+    before the priority validity gate — matching v6.6's relative
+    ordering for non-DEADLINE policies.  (DEADLINE + bad flags
+    still returns EOPNOTSUPP via our translator concession; v6.6
+    would return EINVAL via the flags check.  Documented as a
+    deliberate translator concession.)
+
+**Boot probes added.**
+  1. `sched_flags = 0x80` → EINVAL (first unknown bit above
+     SCHED_FLAG_ALL; was 0).
+  2. `sched_flags = u64::MAX` → EINVAL (strongest form).
+  3. `sched_flags = 0x7F` (SCHED_FLAG_ALL) → 0 (regression guard;
+     mask check must not over-reject known bits).
+  4. `sched_flags = 0x1000_0000` (SCHED_FLAG_SUGOV) → 0 (defensive
+     tolerance guard).
+
+Summary stamp added: `sched_setattr sched_flags mask ~(ALL|SUGOV)
+-> EINVAL (batch 507): OK` (serial-test.txt).
+
+**Build:** clean (`cargo build -p kernel`, 45.0s).
+
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).

@@ -21779,9 +21779,16 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
 ///     policy enum and rejected only because our kernel lacks the
 ///     class implementation; SCHED_EXT is not named at all and is
 ///     rejected by the generic "unknown policy" arm.
-///   * sched_flags is accepted (only RESET_ON_FORK = 0x01 is non-zero
-///     interesting and we silently drop it — same approach as the
-///     sched_nice / sched_runtime / etc. fields).
+///   * sched_flags is validated against v6.6's mask
+///     `~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV)`: any unknown bit returns
+///     -EINVAL, matching `__sched_setscheduler`'s sanity check.  The
+///     accepted bits (RESET_ON_FORK, RECLAIM, DL_OVERRUN, KEEP_POLICY,
+///     KEEP_PARAMS, UTIL_CLAMP_MIN, UTIL_CLAMP_MAX, plus the
+///     internal-only SUGOV bit Linux tolerates) are accepted but not
+///     acted on by this stub — same approach as the sched_nice /
+///     sched_runtime / etc. fields.  Batch 507 added the validation;
+///     pre-batch any value (including 0xFFFF_FFFF_FFFF_FFFF) silently
+///     passed through.
 ///   * Persist policy + priority into the PCB via the same setters as
 ///     sys_sched_setscheduler.
 fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
@@ -21878,6 +21885,9 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
     let policy = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let sched_flags = u64::from_le_bytes([
+        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+    ]);
     let priority = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
 
     // Reject SCHED_DEADLINE (a v6.6-defined class our kernel doesn't
@@ -21903,6 +21913,53 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     // gate 5 across the sister policy-install ABI.
     if policy == SCHED_DEADLINE {
         return linux_err(errno::EOPNOTSUPP);
+    }
+    // ## Batch 507 — validate sched_flags against v6.6's mask
+    //
+    // Linux v6.6 `kernel/sched/syscalls.c::__sched_setscheduler` includes
+    // a sanity check on `attr->sched_flags`:
+    //
+    //   /* Sanity check the sched_flags. */
+    //   if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
+    //       return -EINVAL;
+    //
+    // where `include/uapi/linux/sched.h` (v6.6) defines the userspace
+    // flag set:
+    //
+    //   #define SCHED_FLAG_RESET_ON_FORK    0x01
+    //   #define SCHED_FLAG_RECLAIM          0x02
+    //   #define SCHED_FLAG_DL_OVERRUN       0x04
+    //   #define SCHED_FLAG_KEEP_POLICY      0x08
+    //   #define SCHED_FLAG_KEEP_PARAMS      0x10
+    //   #define SCHED_FLAG_UTIL_CLAMP_MIN   0x20
+    //   #define SCHED_FLAG_UTIL_CLAMP_MAX   0x40
+    //   #define SCHED_FLAG_KEEP_ALL    (SCHED_FLAG_KEEP_POLICY | \
+    //                                   SCHED_FLAG_KEEP_PARAMS)
+    //   #define SCHED_FLAG_UTIL_CLAMP  (SCHED_FLAG_UTIL_CLAMP_MIN | \
+    //                                   SCHED_FLAG_UTIL_CLAMP_MAX)
+    //   #define SCHED_FLAG_ALL         (SCHED_FLAG_RESET_ON_FORK | \
+    //                                   SCHED_FLAG_RECLAIM       | \
+    //                                   SCHED_FLAG_DL_OVERRUN    | \
+    //                                   SCHED_FLAG_KEEP_ALL      | \
+    //                                   SCHED_FLAG_UTIL_CLAMP)
+    //
+    // SCHED_FLAG_SUGOV is internal-only (`kernel/sched/sched.h`,
+    // 0x1000_0000) and is never set from userspace; the v6.6 check
+    // tolerates it on the input side defensively.  The userspace-
+    // visible accept mask is therefore SCHED_FLAG_ALL = 0x7F, plus
+    // SCHED_FLAG_SUGOV = 0x1000_0000.  Any other bit -> -EINVAL.
+    //
+    // Pre-batch we read sched_flags but never validated it — any value
+    // (including obvious garbage like 0xFFFF_FFFF_FFFF_FFFF) silently
+    // passed through.  glibc-on-v6.6 feature probes that walk the
+    // sched_flags bits to discover which extensions the kernel
+    // supports would have seen Ok(0) for every bit, mis-training the
+    // runtime into thinking all 64 bits are valid flags.  Now we mirror
+    // v6.6's exact mask check.
+    const SCHED_FLAG_ALL: u64 = 0x7F;
+    const SCHED_FLAG_SUGOV: u64 = 0x1000_0000;
+    if sched_flags & !(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV) != 0 {
+        return linux_err(errno::EINVAL);
     }
     // Cap priority to i32 range before the shared validator; Linux
     // accepts priorities up to 99 so the truncation is harmless.
@@ -57603,6 +57660,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   sched_setattr SCHED_EXT (v6.6 absent) -> EINVAL (batch 506): OK"
+        );
+        // Batch 507: sched_setattr sched_flags mask validation.  v6.6's
+        // __sched_setscheduler enforces
+        //   if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
+        //       return -EINVAL;
+        // where SCHED_FLAG_ALL = 0x7F (RESET_ON_FORK | RECLAIM |
+        // DL_OVERRUN | KEEP_ALL | UTIL_CLAMP) and SCHED_FLAG_SUGOV =
+        // 0x1000_0000 (internal-only).  Pre-batch we read sched_flags
+        // but never validated it.
+        //
+        // Case A: sched_flags = 0x80 (first unknown bit above
+        // SCHED_FLAG_ALL) -> EINVAL.
+        let mut flags_bad = [0u8; 48];
+        flags_bad[0..4].copy_from_slice(&48u32.to_le_bytes());
+        // policy = SCHED_OTHER (0); priority = 0.
+        flags_bad[8..16].copy_from_slice(&0x80u64.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 0, arg1: flags_bad.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr sched_flags=0x80 not EINVAL (batch 507; was 0)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case B: sched_flags = 0xFFFF_FFFF_FFFF_FFFF (every bit set,
+        // including all unknown bits) -> EINVAL.  Strongest form of
+        // the same check.
+        let mut flags_max = [0u8; 48];
+        flags_max[0..4].copy_from_slice(&48u32.to_le_bytes());
+        flags_max[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 0, arg1: flags_max.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr sched_flags=u64::MAX not EINVAL (batch 507)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case C: sched_flags = SCHED_FLAG_ALL = 0x7F (every legal
+        // userspace bit set) -> 0.  Regression guard that the mask
+        // check doesn't over-reject the known bits.
+        let mut flags_all = [0u8; 48];
+        flags_all[0..4].copy_from_slice(&48u32.to_le_bytes());
+        flags_all[8..16].copy_from_slice(&0x7Fu64.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 0, arg1: flags_all.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr sched_flags=SCHED_FLAG_ALL expected 0, got {}",
+                dispatch_linux(nr::SCHED_SETATTR, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Case D: sched_flags = SCHED_FLAG_SUGOV (0x1000_0000) -> 0.
+        // v6.6's check defensively tolerates the internal-only bit
+        // even though userspace shouldn't set it.
+        let mut flags_sugov = [0u8; 48];
+        flags_sugov[0..4].copy_from_slice(&48u32.to_le_bytes());
+        flags_sugov[8..16].copy_from_slice(&0x1000_0000u64.to_le_bytes());
+        let a = SyscallArgs {
+            arg0: 0, arg1: flags_sugov.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_setattr sched_flags=SCHED_FLAG_SUGOV expected 0, got {}",
+                dispatch_linux(nr::SCHED_SETATTR, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setattr sched_flags mask ~(ALL|SUGOV) -> EINVAL (batch 507): OK"
         );
 
         // sched_setattr SCHED_OTHER with non-zero priority -> -EINVAL

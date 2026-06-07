@@ -9878,24 +9878,117 @@ fn sys_setdomainname(args: &SyscallArgs) -> SyscallResult {
 // EFAULT/EINVAL as Linux would.
 // ---------------------------------------------------------------------------
 
-/// `mlock(addr, len)` — accept after validating the range.
+/// `mlock(addr, len)` — accept after validating the page-aligned range.
+///
+/// Linux's `mm/mlock.c::do_mlock()` (called by both `SYSCALL_DEFINE2(mlock)`
+/// and `SYSCALL_DEFINE2(munlock)` via the `vm_flags_t` flags arg):
+///
+/// ```c
+/// static __must_check int do_mlock(unsigned long start, size_t len,
+///                                  vm_flags_t flags)
+/// {
+///     unsigned long locked;
+///     unsigned long lock_limit;
+///     int error = -ENOMEM;
+///
+///     start = untagged_addr(start);
+///
+///     if (!can_do_mlock())
+///         return -EPERM;
+///
+///     len = PAGE_ALIGN(len + (offset_in_page(start)));
+///     start &= PAGE_MASK;
+///
+///     lock_limit = rlimit(RLIMIT_MEMLOCK);
+///     ...
+///     mmap_write_lock(current->mm);
+///     error = apply_vma_lock_flags(start, len, flags);
+///     mmap_write_unlock(current->mm);
+///     ...
+/// }
+/// ```
+///
+/// Two divergences pre-batch:
+///
+///   1. `len == 0` short-circuited BEFORE Linux's `len += offset_in_page(start)`
+///      rewrite.  Calling `mlock(0x4001, 0)` on Linux rounds to one page
+///      (start=0x4000, len=4096) and proceeds to walk that page; we
+///      returned `0` unconditionally even when the call would have spanned
+///      a real VMA on Linux.
+///   2. We range-checked the *raw* `(addr, len)` the caller passed rather
+///      than the page-aligned `(start, len_aligned)` pair Linux's
+///      `apply_vma_lock_flags` walks.  A caller passing `(0x4000, 8191)`
+///      locks 8192 bytes on Linux (`PAGE_ALIGN(8191)`); we ranged 8191.
+///      A caller passing `(0xFFFF_FFFF_FFFF_F001, 0x1000)` has Linux's
+///      `start + len_aligned` overflow (start=0xFFFF_FFFF_FFFF_F000,
+///      len_aligned=0x2000, end=0x1000), which goes to `-ENOMEM`; we
+///      passed it through `validate_user_read` and (in kernel-context
+///      self-test, with `is_kernel_context()` bypass active) silently
+///      returned `0`.
+///
+/// Linux's `PAGE_ALIGN` macro is `(addr + PAGE_SIZE - 1) & PAGE_MASK`
+/// at C unsigned-long width, which wraps silently on overflow.  Mirror
+/// that with `wrapping_add` so `len = u64::MAX` (with any `offset_in_page`)
+/// collapses to `len_aligned = 0` and the routine exits via `end == start`
+/// (success), matching Linux's wrap-to-zero exactly.  A true overflow
+/// of `start + len_aligned` (with non-zero `len_aligned`) is the
+/// genuine `-ENOMEM` case Linux's `end < start` gate catches.
+///
+/// Linux's `PAGE_SIZE` on x86_64 is 4096 — that is what userspace
+/// observes via `sysconf(_SC_PAGESIZE)`.  Our kernel uses 16 KiB
+/// internal frames, but the ABI page boundary visible through this
+/// syscall is 4 KiB.
+///
+/// `can_do_mlock` (CAP_IPC_LOCK || RLIMIT_MEMLOCK > 0) and the
+/// per-process locked-pages accounting against RLIMIT_MEMLOCK are
+/// not gated yet; when wired they go before the `PAGE_ALIGN`
+/// rewrite to match Linux's gate order.
 fn sys_mlock(args: &SyscallArgs) -> SyscallResult {
+    // Linux ABI page size on x86_64 (sysconf(_SC_PAGESIZE)); the
+    // internal frame size of this kernel is larger but is not
+    // observable through this syscall.
+    const ABI_PAGE_SIZE: u64 = 4096;
+
     let addr = args.arg0;
     let len = args.arg1;
-    if len == 0 {
+
+    // Linux: `len = PAGE_ALIGN(len + offset_in_page(start)); start &= PAGE_MASK;`
+    // Both arithmetic operations use C unsigned-long wrap.
+    let offset_in_page = addr & (ABI_PAGE_SIZE - 1);
+    let len_aligned = len
+        .wrapping_add(offset_in_page)
+        .wrapping_add(ABI_PAGE_SIZE - 1)
+        & !(ABI_PAGE_SIZE - 1);
+    let start = addr & !(ABI_PAGE_SIZE - 1);
+
+    let end = start.wrapping_add(len_aligned);
+    if end < start {
+        return linux_err(errno::ENOMEM);
+    }
+    if end == start {
+        // Either the caller asked for len==0 with a page-aligned start,
+        // or Linux's PAGE_ALIGN wrapped to 0 on len near u64::MAX.  Both
+        // exit via Linux's "len_aligned == 0 → apply_vma_lock_flags is a
+        // no-op" path, which returns 0.
         return SyscallResult::ok(0);
     }
-    let len_usize = match usize::try_from(len) {
+    let len_usize = match usize::try_from(len_aligned) {
         Ok(v) => v,
         Err(_) => return linux_err(errno::ENOMEM),
     };
-    if let Err(e) = crate::mm::user::validate_user_read(addr, len_usize) {
+    if let Err(e) = crate::mm::user::validate_user_read(start, len_usize) {
         return linux_err(linux_errno_for(e));
     }
     SyscallResult::ok(0)
 }
 
-/// `munlock(addr, len)` — accept after validating the range.
+/// `munlock(addr, len)` — accept after validating the page-aligned range.
+///
+/// Linux routes `munlock()` through the same `do_mlock()` path as
+/// `mlock()` (with `VM_LOCKED` cleared instead of set in `vm_flags_t`);
+/// the gate order — including `PAGE_ALIGN(len + offset_in_page(start))`
+/// and `start &= PAGE_MASK` — is identical.  Reuse the mlock translator
+/// directly.
 fn sys_munlock(args: &SyscallArgs) -> SyscallResult {
     sys_mlock(args)
 }
@@ -42346,6 +42439,79 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   mlockall ONFAULT-modifier gate: OK");
+
+        // Batch 449: mlock / munlock PAGE_ALIGN(len + offset_in_page(start))
+        // and start &= PAGE_MASK fidelity.  See sys_mlock doc comment for
+        // the per-input divergence table.
+        //
+        // Probe (a): mlock(start = u64::MAX & ~0xFFF | 1, len = 0x1000)
+        // — start = 0xFFFF_FFFF_FFFF_F001, offset_in_page = 1, so
+        //   len_aligned = PAGE_ALIGN(0x1000 + 1) = 0x2000, start &=
+        //   PAGE_MASK = 0xFFFF_FFFF_FFFF_F000, end = start + 0x2000 = 0
+        //   (wraps), end < start, so Linux returns -ENOMEM.  Pre-batch we
+        //   handed (raw_addr=0xFFFF_FFFF_FFFF_F001, raw_len=0x1000) to
+        //   validate_user_read, which under is_kernel_context() bypass
+        //   returns Ok, so the self-test saw 0 where Linux returns ENOMEM.
+        let a = SyscallArgs {
+            arg0: 0xFFFF_FFFF_FFFF_F001,
+            arg1: 0x1000,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MLOCK, &a).value
+            != -i64::from(errno::ENOMEM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlock(end-wrap) not ENOMEM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::MUNLOCK, &a).value
+            != -i64::from(errno::ENOMEM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: munlock(end-wrap) not ENOMEM"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe (b): mlock(start = 0xFFFF_FFFF_FFFF_F000, len = u64::MAX)
+        // — offset_in_page = 0, len_aligned = u64::MAX.wrapping_add(0xFFF)
+        //   & ~0xFFF = 0xFFE & ~0xFFF = 0 (Linux's PAGE_ALIGN wrap-to-zero
+        //   exactly).  end == start fires, success.  This locks in the
+        //   wrapping_add semantics on len near u64::MAX matching Linux's
+        //   C unsigned-long wrap; checked_add here would have returned
+        //   -ENOMEM instead.
+        let a = SyscallArgs {
+            arg0: 0xFFFF_FFFF_FFFF_F000,
+            arg1: u64::MAX,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MLOCK, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlock(len=u64::MAX, page-aligned start) not 0 (wrap-to-zero)"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Probe (c): mlock(start = 0x4001, len = 0) — Linux extends to
+        // one page (PAGE_ALIGN(0 + 1) = 0x1000), start &= PAGE_MASK =
+        // 0x4000, end = 0x5000, then proceeds to apply_vma_lock_flags
+        // which under the self-test's is_kernel_context() bypass passes
+        // the validate_user_read check and returns 0.  Pre-batch our
+        // `len == 0` short-circuit fired before the PAGE_ALIGN rewrite,
+        // so the same input also returned 0 — but for the wrong reason
+        // (skipping the page-walk entirely rather than walking one page).
+        // The post-batch path still returns 0; the probe locks in that
+        // the short-circuit is gone (covered by probes (a) and (b)).
+        let a = SyscallArgs { arg0: 0x4001, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MLOCK, &a).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mlock(0x4001, 0) not 0 (PAGE_ALIGN extends to one page)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mlock PAGE_ALIGN(len+offset_in_page) / wrap-to-zero / end<start: OK"
+        );
     }
 
     // msync flag/alignment validation.

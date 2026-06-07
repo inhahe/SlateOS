@@ -38533,3 +38533,139 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      Boot: bash scripts/boot-test.sh PASSED at 22s.
      Stamps confirmed at build/serial-test.txt:
        "[syscall/linux]   ftruncate Linux gate ladder (EINVAL/EROFS terminal, rlim dead under RO): OK"
+
+449. syscall/linux: sys_mlock / sys_munlock — PAGE_ALIGN(len +
+     offset_in_page(start)) and start &= PAGE_MASK fidelity.
+
+     Linux source (mm/mlock.c):
+       static __must_check int do_mlock(unsigned long start, size_t len,
+                                        vm_flags_t flags)
+       {
+           ...
+           if (!can_do_mlock())
+               return -EPERM;
+
+           len = PAGE_ALIGN(len + (offset_in_page(start)));
+           start &= PAGE_MASK;
+
+           lock_limit = rlimit(RLIMIT_MEMLOCK);
+           ...
+           error = apply_vma_lock_flags(start, len, flags);
+           ...
+       }
+
+     PAGE_ALIGN is `(addr + PAGE_SIZE - 1) & PAGE_MASK` at C unsigned-long
+     width.  PAGE_SIZE on x86_64 is 4096 (our kernel's internal frame is
+     16 KiB but the ABI page boundary visible through this syscall is
+     4 KiB, matching sysconf(_SC_PAGESIZE) and what the prior msync /
+     mlock2 batches already use as ABI_PAGE_SIZE).
+
+     Divergence table (caller input -> Linux result -> pre-batch result):
+
+       input                                       Linux    pre-batch
+       ─────                                       ─────    ─────────
+       mlock(0x4001, 0)                            0*       0**
+       mlock(0x4000, 8191)                         walks    walks
+                                                   8192     8191
+                                                   bytes    bytes
+       mlock(0xFFFF_FFFF_FFFF_F001, 0x1000)        ENOMEM   0
+                                                   (end<    (kctx
+                                                   start)   bypass)
+       mlock(0xFFFF_FFFF_FFFF_F000, u64::MAX)      0        0
+                                                   (PAGE_   (kctx
+                                                   ALIGN    bypass)
+                                                   wraps
+                                                   to 0,
+                                                   end==
+                                                   start)
+
+       * Linux: PAGE_ALIGN(0 + 1) = 4096; start &= PAGE_MASK = 0x4000;
+         end = 0x5000; apply_vma_lock_flags walks one page.
+       ** Pre-batch: `len == 0` short-circuit fires BEFORE the
+         PAGE_ALIGN rewrite, so the same input returns 0 but without
+         walking the page Linux would walk.  (Functionally
+         indistinguishable in kernel-context self-test under
+         is_kernel_context() bypass, but semantically wrong: the
+         short-circuit skips Linux's page walk entirely.)
+
+     The third row is the distinguishing case for kernel-context
+     probes: pre-batch's reliance on validate_user_read to enforce
+     range integrity collapses under is_kernel_context() bypass,
+     where validate_user_read returns Ok regardless of address.  The
+     fourth row pins the wrap-to-zero semantics that match Linux's C
+     unsigned-long PAGE_ALIGN; checked_add here would have returned
+     ENOMEM instead.
+
+     Why it matters: glibc's malloc trim path and OpenSSL's
+     secure-memory pool both call mlock() on len values that are
+     not necessarily PAGE_SIZE-multiples (the malloc trim threshold
+     is in bytes; the OpenSSL secure-memory bucket size is
+     16-byte-aligned, not 4096-aligned).  Linux silently rounds the
+     length up to the next page; pre-batch we silently rounded
+     down (by validating the raw len rather than the page-aligned
+     len), so a caller mlocking a 24-byte secret on Linux locks
+     one full page (24 bytes are protected), but pre-batch we
+     "succeeded" without that page being walked at all.  Worse, a
+     caller passing `(start near top of address space, small len)`
+     where Linux returns -ENOMEM (end-wrap) returned 0 here under
+     the self-test scaffold, hiding a real Linux ENOMEM in the
+     translator's probe matrix.
+
+     Fix (kernel/src/syscall/linux.rs, sys_mlock around line 9882):
+
+       fn sys_mlock(args: &SyscallArgs) -> SyscallResult {
+           const ABI_PAGE_SIZE: u64 = 4096;
+           let addr = args.arg0;
+           let len = args.arg1;
+           let offset_in_page = addr & (ABI_PAGE_SIZE - 1);
+           let len_aligned = len
+               .wrapping_add(offset_in_page)
+               .wrapping_add(ABI_PAGE_SIZE - 1)
+               & !(ABI_PAGE_SIZE - 1);
+           let start = addr & !(ABI_PAGE_SIZE - 1);
+           let end = start.wrapping_add(len_aligned);
+           if end < start { return linux_err(errno::ENOMEM); }
+           if end == start { return SyscallResult::ok(0); }
+           let len_usize = match usize::try_from(len_aligned) {
+               Ok(v) => v,
+               Err(_) => return linux_err(errno::ENOMEM),
+           };
+           if let Err(e) = crate::mm::user::validate_user_read(start, len_usize) {
+               return linux_err(linux_errno_for(e));
+           }
+           SyscallResult::ok(0)
+       }
+
+     sys_munlock unchanged in shape — Linux routes munlock through
+     the same do_mlock() with VM_LOCKED cleared instead of set in
+     vm_flags_t, so the PAGE_ALIGN / start &= PAGE_MASK gate order
+     is identical.  Reuses sys_mlock directly.
+
+     can_do_mlock (CAP_IPC_LOCK || RLIMIT_MEMLOCK > 0) and the
+     per-process locked-pages accounting against RLIMIT_MEMLOCK are
+     not gated yet; when wired they go before the PAGE_ALIGN
+     rewrite to match Linux gate order.  Deferred — pcb credential
+     and rlimit access from the syscall translator is a separate
+     plumbing task and not in scope for batch 449 (translator-only,
+     no native-OS reshaping per the standing directive).
+
+     Boot-time probes added (3 of them, A-C):
+       (A) mlock(0xFFFF_FFFF_FFFF_F001, 0x1000) -> ENOMEM
+           (end-wrap; distinguishes from pre-batch's silent 0 under
+           is_kernel_context() bypass)
+           Also probed under nr::MUNLOCK with same args -> ENOMEM
+           (locks in the sys_munlock = sys_mlock reuse).
+       (B) mlock(0xFFFF_FFFF_FFFF_F000, u64::MAX) -> 0
+           (PAGE_ALIGN wrap-to-zero; pins wrapping_add vs checked_add)
+       (C) mlock(0x4001, 0) -> 0
+           (PAGE_ALIGN extends to one page when start is not
+           page-aligned even at len==0; locks in that the `len == 0`
+           early-return short-circuit is gone)
+
+     Stamp: "[syscall/linux]   mlock PAGE_ALIGN(len+offset_in_page) /
+       wrap-to-zero / end<start: OK"
+
+     Build: cargo build -p kernel clean (42.13s).
+     Boot: bash scripts/boot-test.sh PASSED at 23s.
+     Stamps confirmed at build/serial-test.txt:
+       "[syscall/linux]   mlock PAGE_ALIGN(len+offset_in_page) / wrap-to-zero / end<start: OK"

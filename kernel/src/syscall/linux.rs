@@ -29217,9 +29217,10 @@ fn sys_io_pgetevents(args: &SyscallArgs) -> SyscallResult {
 /// calls versus "kernel doesn't implement the op."
 fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
     let _dirfd = args.arg0 as i32;
-    let path = args.arg1;
+    let _path = args.arg1;
+    #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg2 as u32;
-    let attr = args.arg3;
+    let _attr = args.arg3;
     let size = args.arg4;
     // AT_RECURSIVE=0x8000, AT_NO_AUTOMOUNT=0x800, AT_SYMLINK_NOFOLLOW=0x100,
     // AT_EMPTY_PATH=0x1000.
@@ -29250,154 +29251,65 @@ fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
     if size < 32 {
         return linux_err(errno::EINVAL);
     }
-    if attr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(attr, 32) {
-        return linux_err(linux_errno_for(e));
-    }
-    // Path validation happens after copy_mount_setattr in Linux (via
-    // user_path_at), so any string-pointer faults surface only once the
-    // attr-struct gates have all passed.
-    if path != 0 {
-        if let Err(e) = validate_user_str(path) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // Read struct mount_attr { __u64 attr_set, attr_clr, propagation,
-    // userns_fd }.
-    let mut buf = [0u8; 32];
-    // SAFETY: validate_user_read above confirmed 32 bytes readable.
-    if let Err(e) = unsafe {
-        crate::mm::user::copy_from_user(attr, buf.as_mut_ptr(), 32)
-    } {
-        return linux_err(linux_errno_for(e));
-    }
-
-    // Forward-compat zero check (batch 229).  Linux's
-    // `copy_struct_from_user` (used inside fs/namespace.c::
-    // copy_mount_setattr) walks the bytes in `[sizeof(struct
-    // mount_attr), usize)` and returns -E2BIG if any trailing byte
-    // is non-zero — the canonical signal a probe expects when it's
-    // trying to use a newer ABI field the running kernel doesn't
-    // recognise.  Pre-batch 229 we silently ignored bytes past
-    // offset 32.  A probe with (size=40, byte[32]=1) saw the call
-    // succeed (returning the attr-validation result) where Linux
-    // returns E2BIG.  Same pattern fixed in batch 227 (openat2) and
-    // batch 228 (clone3).
-    const MOUNT_ATTR_KSIZE: u64 = 32;
-    if size > MOUNT_ATTR_KSIZE {
-        let excess_addr = attr.wrapping_add(MOUNT_ATTR_KSIZE);
-        #[allow(clippy::cast_possible_truncation)]
-        let excess_len = (size - MOUNT_ATTR_KSIZE) as usize;
-        if let Err(e) = crate::mm::user::validate_user_read(excess_addr, excess_len) {
-            return linux_err(linux_errno_for(e));
-        }
-        let mut chunk = [0u8; 64];
-        let mut off: usize = 0;
-        while off < excess_len {
-            let take = core::cmp::min(64, excess_len - off);
-            // SAFETY: validate_user_read above confirmed `excess_len`
-            // bytes are readable at `excess_addr`.
-            if let Err(e) = unsafe {
-                crate::mm::user::copy_from_user(
-                    excess_addr.wrapping_add(off as u64),
-                    chunk.as_mut_ptr(),
-                    take,
-                )
-            } {
-                return linux_err(linux_errno_for(e));
-            }
-            if chunk[..take].iter().any(|&b| b != 0) {
-                return linux_err(errno::E2BIG);
-            }
-            off += take;
-        }
-    }
-    let attr_set = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[0..8]) {
-        Ok(b) => b,
-        Err(_) => return linux_err(errno::EINVAL),
-    });
-    let attr_clr = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[8..16]) {
-        Ok(b) => b,
-        Err(_) => return linux_err(errno::EINVAL),
-    });
-    let propagation = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[16..24]) {
-        Ok(b) => b,
-        Err(_) => return linux_err(errno::EINVAL),
-    });
-    let userns_fd = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[24..32]) {
-        Ok(b) => b,
-        Err(_) => return linux_err(errno::EINVAL),
-    });
-    // MOUNT_ATTR_MASK from include/uapi/linux/mount.h:
-    //   RDONLY=0x1, NOSUID=0x2, NODEV=0x4, NOEXEC=0x8,
-    //   __ATIME=0x70 (RELATIME=0, NOATIME=0x10, STRICTATIME=0x20),
-    //   NODIRATIME=0x80, IDMAP=0x100000, NOSYMFOLLOW=0x200000.
-    const MOUNT_ATTR_MASK: u64 = 0x1 | 0x2 | 0x4 | 0x8
-        | 0x70 | 0x80 | 0x100000 | 0x200000;
-    const MOUNT_ATTR_IDMAP: u64 = 0x100000;
-    if attr_set & !MOUNT_ATTR_MASK != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    if attr_clr & !MOUNT_ATTR_MASK != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // Batch 243: Linux fs/namespace.c::build_mount_kattr() rejects
-    // attr_set/attr_clr overlap upfront — "set bit X and clear bit X"
-    // is contradictory: `if (attr->attr_set & attr->attr_clr) return
-    // -EINVAL;`.  Pre-batch we accepted this nonsense input and
-    // proceeded to ENOSYS where Linux returns EINVAL.  Probes that
-    // populate both set and clear masks from a single user-supplied
-    // bitmask (a common bug pattern) saw the wrong errno.
-    if attr_set & attr_clr != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // ATIME bits in attr_set are mutually exclusive — masked value must
-    // be exactly one of RELATIME (0), NOATIME (0x10), STRICTATIME (0x20).
-    // 0x30..=0x70 (multiple bits set or 0x40 standalone) is invalid.
-    const MOUNT_ATTR_ATIME_MASK: u64 = 0x70;
-    let atime_set = attr_set & MOUNT_ATTR_ATIME_MASK;
-    if !matches!(atime_set, 0 | 0x10 | 0x20) {
-        return linux_err(errno::EINVAL);
-    }
-    // Linux: cannot clear ATIME bits without setting one.  If attr_clr
-    // touches __ATIME but attr_set doesn't, the result would be an
-    // inconsistent state — reject.
-    let atime_clr = attr_clr & MOUNT_ATTR_ATIME_MASK;
-    if atime_clr != 0 && atime_set == 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // propagation must be 0 or exactly one of:
-    //   MS_UNBINDABLE = 1 << 17 = 0x20000
-    //   MS_PRIVATE    = 1 << 18 = 0x40000
-    //   MS_SLAVE      = 1 << 19 = 0x80000
-    //   MS_SHARED     = 1 << 20 = 0x100000
-    if !matches!(propagation, 0 | 0x20000 | 0x40000 | 0x80000 | 0x100000) {
-        return linux_err(errno::EINVAL);
-    }
-    // Batch 243: Linux build_mount_kattr() userns_fd validation:
-    //   if (attr->attr_set & MOUNT_ATTR_IDMAP) {
-    //       if (attr->userns_fd > INT_MAX) return -EINVAL;
-    //       ... fd lookup ...
-    //   } else if (attr->userns_fd) {
-    //       return -EINVAL;  // userns_fd set without IDMAP
-    //   }
-    // Pre-batch we never read userns_fd, so any value (including
-    // pathological u64::MAX with IDMAP unset) silently advanced to
-    // ENOSYS.  Container runtimes (Podman, Bubblewrap) that set
-    // userns_fd alongside MOUNT_ATTR_IDMAP for ID-mapped mounts saw
-    // ENOSYS rather than the documented EINVAL when they forgot the
-    // IDMAP bit.
-    if attr_set & MOUNT_ATTR_IDMAP != 0 {
-        // INT_MAX = 0x7FFF_FFFF; reject userns_fd above that.
-        if userns_fd > 0x7FFF_FFFF {
-            return linux_err(errno::EINVAL);
-        }
-    } else if userns_fd != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    linux_err(errno::ENOSYS)
+    // Batch 493: Linux v6.6 fs/namespace.c::SYSCALL_DEFINE5(mount_setattr)
+    // line 4651 runs `if (!may_mount()) return -EPERM;` IMMEDIATELY
+    // AFTER the size-VER0 EINVAL gate (line 4648-4649) and BEFORE
+    // `copy_struct_from_user(&attr, sizeof(attr), uattr, usize)`
+    // (line 4654).  `may_mount()` is `ns_capable(current->nsproxy->
+    // mnt_ns->user_ns, CAP_SYS_ADMIN)` (line 1842).
+    //
+    // Pre-batch we ran (NULL/EFAULT, trailing-zero/E2BIG, attr parse/
+    // EINVAL, terminal ENOSYS) all without ever firing EPERM, because
+    // this kernel never grants CAP_SYS_ADMIN to Linux-ABI callers
+    // (consistent with the architectural directive applied in batches
+    // 343 swapoff, 348 acct, 392 fsopen, 393 fsmount, 394 fspick, 492
+    // move_mount — all sister `may_mount()`-gated calls).  Multiple
+    // observables were Linux-inverted for the unprivileged caller:
+    //
+    //   * (flags=0, size=32, attr=<zeroed>)            Linux EPERM, ours ENOSYS
+    //   * (flags=0, size=64, attr=NULL)                Linux EPERM, ours EFAULT
+    //   * (size=32, attr_set=0x400 bad bit)            Linux EPERM, ours EINVAL
+    //   * (size=32, attr_clr=0x400 bad bit)            Linux EPERM, ours EINVAL
+    //   * (size=32, attr_set=0x30 ATIME conflict)      Linux EPERM, ours EINVAL
+    //   * (size=32, attr_set=0x40 undef ATIME bit)     Linux EPERM, ours EINVAL
+    //   * (size=32, attr_clr=0x10 without set)         Linux EPERM, ours EINVAL
+    //   * (size=32, propagation=MS_SHARED 0x100000)    Linux EPERM, ours ENOSYS
+    //   * (size=32, propagation=SHARED|PRIVATE)        Linux EPERM, ours EINVAL
+    //   * (size=32, propagation=0xdead bogus)          Linux EPERM, ours EINVAL
+    //   * (size=32, attr_set/clr overlap on RDONLY)    Linux EPERM, ours EINVAL
+    //   * (size=32, attr_set=RDONLY, clr=NOSUID)       Linux EPERM, ours ENOSYS
+    //   * (size=32, userns_fd=5 without IDMAP)         Linux EPERM, ours EINVAL
+    //   * (size=32, userns_fd=INT_MAX+1 + IDMAP)       Linux EPERM, ours EINVAL
+    //   * (size=32, userns_fd=5 + IDMAP)               Linux EPERM, ours ENOSYS
+    //   * (size=32, userns_fd=0 + IDMAP)               Linux EPERM, ours ENOSYS
+    //   * (size=40, [32..40)=zeros)                    Linux EPERM, ours ENOSYS
+    //   * (size=40, byte[32]=1 trailing non-zero)      Linux EPERM, ours E2BIG
+    //
+    // All eighteen flip from a mix of EFAULT/EINVAL/E2BIG/ENOSYS to
+    // EPERM, matching Linux's gate-4 cutoff for the unprivileged caller.
+    // Gates 1-3 (flag mask, size > PAGE_SIZE, size < VER0) remain intact
+    // because Linux runs them BEFORE may_mount; their observables are
+    // unchanged.
+    //
+    // Why it matters: mount-attribute mutation tools (`mount -o
+    // remount,...` via the new mount API in util-linux 2.39+,
+    // systemd's `MountAPIVFS=` with attr-set, OCI runtime `runc`'s
+    // ID-mapped mount setup, CRIU's `mount-restore` with kattr
+    // replay, container-build tooling like buildah's overlay-mount
+    // configuration) all distinguish EPERM ("you need CAP_SYS_ADMIN")
+    // from EINVAL ("your kattr is wrong") and ENOSYS ("kernel too
+    // old").  Pre-batch our EINVAL/ENOSYS responses led these tools
+    // either to log spurious "kattr malformed" diagnostics or to
+    // attempt feature-detect retries with reduced attr-set masks
+    // that don't fix the underlying privilege problem.
+    //
+    // Architectural restatement: the diagnostic gates removed below
+    // (NULL/EFAULT, trailing-zero/E2BIG, attr_set/clr/propagation/
+    // userns_fd validation) are correct for the privileged path
+    // they were modelling, but no Linux-ABI caller in this kernel
+    // ever holds CAP_SYS_ADMIN.  Their observables are unreachable
+    // and were actively misleading by masking the real EPERM signal.
+    linux_err(errno::EPERM)
 }
 
 /// `fchmodat2(dirfd, path, mode, flags)` — Linux syscall #452.
@@ -64279,35 +64191,39 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   io_pgetevents sigset validation: OK"
         );
 
-        // mount_setattr bad flags -> EINVAL.
+        // Batch 493: Linux v6.6 fs/namespace.c::SYSCALL_DEFINE5(
+        // mount_setattr) line 4651 runs `if (!may_mount()) return
+        // -EPERM;` BETWEEN size-VER0 (line 4648) and
+        // copy_struct_from_user (line 4654).  Probes for gates 1-3
+        // (flags-EINVAL, size-E2BIG, size-EINVAL) remain — Linux runs
+        // them BEFORE may_mount.  Probes for gates 5+ (NULL/EFAULT,
+        // trailing-zero/E2BIG, attr_set/clr/propagation/userns_fd
+        // EINVAL, terminal ENOSYS) all flip to EPERM because they
+        // pass size validation and hit gate-4 may_mount → EPERM.
+        //
+        // Gates 1-3 (preserved errnos):
+        //
+        // (1a) bad flags -> EINVAL (gate 1).
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x80, arg3: attr_ptr, arg4: 32, arg5: 0 };
         if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: mount_setattr bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr too-small size -> EINVAL.
+        // (1b) too-small size -> EINVAL (gate 3 — size < VER0).
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: attr_ptr, arg4: 16, arg5: 0 };
         if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: mount_setattr small size not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr valid -> ENOSYS.
-        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x8000, arg3: attr_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr valid not ENOSYS");
-            return Err(KernelError::InternalError);
-        }
-        // mount_setattr size > PAGE_SIZE (4097) -> E2BIG.
+        // (1c) size > PAGE_SIZE (4097) -> E2BIG (gate 2).
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: attr_ptr, arg4: 4097, arg5: 0 };
         if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
             serial_println!("[syscall/linux]   FAIL: mount_setattr size>PAGE_SIZE not E2BIG");
             return Err(KernelError::InternalError);
         }
-        // Batch 223 discriminator: (attr=NULL, size=8192) — Linux
-        // copy_mount_setattr() checks `usize > PAGE_SIZE` BEFORE NULL/access
-        // gates, so the size-E2BIG return must outrank attr=NULL.  Prior
-        // to batch 223 this returned EINVAL because the (attr==NULL ||
-        // size<VER0) collapsed gate ran first.
+        // (1d) Batch 223 discriminator: (attr=NULL, size=8192) — Linux
+        // gates `usize > PAGE_SIZE` BEFORE NULL/access AND BEFORE
+        // may_mount, so size-E2BIG outranks both attr=NULL and EPERM.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 8192, arg5: 0 };
         if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
             serial_println!(
@@ -64315,21 +64231,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 223 discriminator: (attr=NULL, size=64) — valid size range,
-        // so the size gates pass.  copy_struct_from_user then sees a NULL
-        // user pointer and Linux returns -EFAULT.  Prior to batch 223 we
-        // returned EINVAL for any NULL attr regardless of size.
-        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 64, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr (NULL, size=64) not EFAULT"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Batch 223 discriminator: (attr=NULL, size=16) — size < VER0, so
-        // the size-EINVAL gate fires before NULL-EFAULT.  This confirms
-        // the EINVAL/EFAULT layering: only the in-range-but-NULL case
-        // surfaces as EFAULT.
+        // (1e) Batch 223 discriminator: (attr=NULL, size=16) — size <
+        // VER0, so gate-3 EINVAL fires before may_mount EPERM.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 16, arg5: 0 };
         if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
             serial_println!(
@@ -64337,8 +64240,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // mount_setattr attr_set has bit outside MOUNT_ATTR_MASK -> EINVAL.
-        // 0x400 is unallocated in the current MOUNT_ATTR_* space.
+        // ----- Gate 4 (may_mount → EPERM) probes -----
+        //
+        // (2a) valid path/flags/size=32, attr=valid -> EPERM
+        // (was ENOSYS pre-batch 493).
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0x8000, arg3: attr_ptr, arg4: 32, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr valid not EPERM (batch 493)");
+            return Err(KernelError::InternalError);
+        }
+        // (2b) Batch 223 → 493: (attr=NULL, size=64) — gates 1-3 pass,
+        // gate-4 EPERM fires before copy_struct_from_user EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: 0, arg4: 64, arg5: 0 };
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: mount_setattr (NULL, size=64) not EPERM (batch 493)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Batch 493: all the following probes pass gates 1-3 (flags
+        // & size validation), so they reach gate-4 may_mount → EPERM.
+        // Pre-batch each surfaced an EINVAL / ENOSYS / E2BIG from the
+        // (now-unreachable) gate-5+ logic; post-batch all return EPERM.
+        //
+        // (2c) attr_set has bit outside MOUNT_ATTR_MASK (0x400) -> EPERM
+        // (was EINVAL pre-batch).
         let bad_attr_set: [u8; 32] = {
             let mut b = [0u8; 32];
             b[0..8].copy_from_slice(&0x400u64.to_ne_bytes());
@@ -64346,11 +64272,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let bad_attr_set_ptr = bad_attr_set.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: bad_attr_set_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr bad attr_set not EINVAL");
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr bad attr_set not EPERM (batch 493)");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr attr_clr has bit outside MOUNT_ATTR_MASK -> EINVAL.
+        // (2d) attr_clr has bit outside MOUNT_ATTR_MASK -> EPERM (was
+        // EINVAL).
         let bad_attr_clr: [u8; 32] = {
             let mut b = [0u8; 32];
             b[8..16].copy_from_slice(&0x400u64.to_ne_bytes());
@@ -64358,12 +64285,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let bad_attr_clr_ptr = bad_attr_clr.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: bad_attr_clr_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr bad attr_clr not EINVAL");
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr bad attr_clr not EPERM (batch 493)");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr attr_set has both NOATIME (0x10) and STRICTATIME
-        // (0x20) — ATIME bits are mutually exclusive -> EINVAL.
+        // (2e) attr_set NOATIME|STRICTATIME conflict -> EPERM (was EINVAL).
         let conflicting_atime: [u8; 32] = {
             let mut b = [0u8; 32];
             b[0..8].copy_from_slice(&0x30u64.to_ne_bytes());
@@ -64371,12 +64297,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let conflicting_atime_ptr = conflicting_atime.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: conflicting_atime_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr conflicting ATIME not EINVAL");
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr conflicting ATIME not EPERM (batch 493)");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr attr_set ATIME=0x40 (single bit in the __ATIME
-        // mask but not a defined value) -> EINVAL.
+        // (2f) attr_set ATIME=0x40 undef bit -> EPERM (was EINVAL).
         let undef_atime: [u8; 32] = {
             let mut b = [0u8; 32];
             b[0..8].copy_from_slice(&0x40u64.to_ne_bytes());
@@ -64384,13 +64309,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let undef_atime_ptr = undef_atime.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: undef_atime_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr undef ATIME not EINVAL");
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr undef ATIME not EPERM (batch 493)");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr attr_clr clears ATIME without attr_set setting
-        // ATIME -> EINVAL (cannot leave the mount in an inconsistent
-        // state).
+        // (2g) attr_clr ATIME without attr_set ATIME -> EPERM (was EINVAL).
         let clr_atime_only: [u8; 32] = {
             let mut b = [0u8; 32];
             b[8..16].copy_from_slice(&0x10u64.to_ne_bytes());
@@ -64398,12 +64321,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let clr_atime_only_ptr = clr_atime_only.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: clr_atime_only_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr clr ATIME without set not EINVAL");
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr clr ATIME without set not EPERM (batch 493)");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr propagation = MS_SHARED (0x100000) — valid;
-        // gate passes -> ENOSYS.
+        // (2h) propagation=MS_SHARED valid -> EPERM (was ENOSYS).
         let prop_shared: [u8; 32] = {
             let mut b = [0u8; 32];
             b[16..24].copy_from_slice(&0x100000u64.to_ne_bytes());
@@ -64411,12 +64333,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let prop_shared_ptr = prop_shared.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: prop_shared_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr MS_SHARED not ENOSYS");
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr MS_SHARED not EPERM (batch 493)");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr propagation = MS_SHARED | MS_PRIVATE — more than
-        // one propagation type -> EINVAL.
+        // (2i) propagation=SHARED|PRIVATE two-types -> EPERM (was EINVAL).
         let prop_both: [u8; 32] = {
             let mut b = [0u8; 32];
             b[16..24].copy_from_slice(&(0x100000u64 | 0x40000u64).to_ne_bytes());
@@ -64424,11 +64345,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let prop_both_ptr = prop_both.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: prop_both_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr two prop types not EINVAL");
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr two prop types not EPERM (batch 493)");
             return Err(KernelError::InternalError);
         }
-        // mount_setattr propagation = arbitrary value (0xdead) -> EINVAL.
+        // (2j) propagation=0xdead bogus -> EPERM (was EINVAL).
         let prop_bogus: [u8; 32] = {
             let mut b = [0u8; 32];
             b[16..24].copy_from_slice(&0xdeadu64.to_ne_bytes());
@@ -64436,20 +64357,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let prop_bogus_ptr = prop_bogus.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0, arg3: prop_bogus_ptr, arg4: 32, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mount_setattr bogus prop not EINVAL");
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: mount_setattr bogus prop not EPERM (batch 493)");
             return Err(KernelError::InternalError);
         }
-        // Batch 243: mount_setattr attr_set and attr_clr overlap on
-        // the same bit -> EINVAL.  Linux build_mount_kattr() rejects
-        // (attr_set & attr_clr) != 0 upfront because "set X and
-        // clear X" is contradictory.  Pre-batch we accepted this and
-        // advanced to ENOSYS.
+        // (2k) attr_set/clr overlap on RDONLY -> EPERM (was EINVAL).
         let attr_set_clr_overlap: [u8; 32] = {
             let mut b = [0u8; 32];
-            // attr_set = RDONLY (0x1)
             b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-            // attr_clr = RDONLY (0x1) — same bit
             b[8..16].copy_from_slice(&0x1u64.to_ne_bytes());
             b
         };
@@ -64458,21 +64373,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg0: 0, arg1: path_ptr, arg2: 0,
             arg3: attr_set_clr_overlap_ptr, arg4: 32, arg5: 0,
         };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr set/clr overlap not EINVAL"
+                "[syscall/linux]   FAIL: mount_setattr set/clr overlap not EPERM (batch 493)"
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 243: distinct bits in attr_set and attr_clr -> ENOSYS
-        // (overlap gate doesn't fire when the bits are different).
-        // Proves the new gate is narrow (only fires on overlap) not
-        // broad (rejecting any set+clr combo).
+        // (2l) attr_set=RDONLY, attr_clr=NOSUID distinct -> EPERM (was ENOSYS).
         let attr_set_clr_distinct: [u8; 32] = {
             let mut b = [0u8; 32];
-            // attr_set = RDONLY (0x1)
             b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-            // attr_clr = NOSUID (0x2)
             b[8..16].copy_from_slice(&0x2u64.to_ne_bytes());
             b
         };
@@ -64481,21 +64391,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg0: 0, arg1: path_ptr, arg2: 0,
             arg3: attr_set_clr_distinct_ptr, arg4: 32, arg5: 0,
         };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr set/clr distinct not ENOSYS"
+                "[syscall/linux]   FAIL: mount_setattr set/clr distinct not EPERM (batch 493)"
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 243: userns_fd!=0 without MOUNT_ATTR_IDMAP in attr_set
-        // -> EINVAL.  Linux: `else if (attr->userns_fd) return -EINVAL;`.
-        // Pre-batch we never read userns_fd, so any value silently
-        // advanced to ENOSYS.
+        // (2m) userns_fd=5 without MOUNT_ATTR_IDMAP -> EPERM (was EINVAL).
         let userns_no_idmap: [u8; 32] = {
             let mut b = [0u8; 32];
-            // attr_set = RDONLY (0x1) — IDMAP (0x100000) NOT set
             b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-            // userns_fd = 5 (some fd value)
             b[24..32].copy_from_slice(&5u64.to_ne_bytes());
             b
         };
@@ -64504,19 +64409,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg0: 0, arg1: path_ptr, arg2: 0,
             arg3: userns_no_idmap_ptr, arg4: 32, arg5: 0,
         };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr userns_fd without IDMAP not EINVAL"
+                "[syscall/linux]   FAIL: mount_setattr userns_fd without IDMAP not EPERM (batch 493)"
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 243: userns_fd > INT_MAX with IDMAP set -> EINVAL.
-        // Linux: `if (attr->userns_fd > INT_MAX) return -EINVAL;`.
+        // (2n) userns_fd=INT_MAX+1 with IDMAP -> EPERM (was EINVAL).
         let userns_overflow: [u8; 32] = {
             let mut b = [0u8; 32];
-            // attr_set = IDMAP (0x100000)
             b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
-            // userns_fd = INT_MAX + 1 = 0x80000000
             b[24..32].copy_from_slice(&0x80000000u64.to_ne_bytes());
             b
         };
@@ -64525,19 +64427,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg0: 0, arg1: path_ptr, arg2: 0,
             arg3: userns_overflow_ptr, arg4: 32, arg5: 0,
         };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr userns_fd > INT_MAX not EINVAL"
+                "[syscall/linux]   FAIL: mount_setattr userns_fd > INT_MAX not EPERM (batch 493)"
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 243: userns_fd with IDMAP and a sane fd value -> ENOSYS
-        // (gate passes, full userns setup is unimplemented).
+        // (2o) userns_fd=5 + IDMAP -> EPERM (was ENOSYS).
         let userns_ok: [u8; 32] = {
             let mut b = [0u8; 32];
-            // attr_set = IDMAP (0x100000)
             b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
-            // userns_fd = 5
             b[24..32].copy_from_slice(&5u64.to_ne_bytes());
             b
         };
@@ -64546,20 +64445,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg0: 0, arg1: path_ptr, arg2: 0,
             arg3: userns_ok_ptr, arg4: 32, arg5: 0,
         };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr IDMAP+sane userns_fd not ENOSYS"
+                "[syscall/linux]   FAIL: mount_setattr IDMAP+sane userns_fd not EPERM (batch 493)"
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 243: userns_fd = 0 with IDMAP set -> ENOSYS (Linux
-        // permits fd=0; the >INT_MAX check is the only fd value
-        // gate, not "fd must be > 0").
+        // (2p) userns_fd=0 + IDMAP -> EPERM (was ENOSYS).
         let userns_zero_with_idmap: [u8; 32] = {
             let mut b = [0u8; 32];
-            // attr_set = IDMAP (0x100000)
             b[0..8].copy_from_slice(&0x100000u64.to_ne_bytes());
-            // userns_fd = 0
             b
         };
         let userns_zero_with_idmap_ptr = userns_zero_with_idmap.as_ptr() as u64;
@@ -64567,51 +64462,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg0: 0, arg1: path_ptr, arg2: 0,
             arg3: userns_zero_with_idmap_ptr, arg4: 32, arg5: 0,
         };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr IDMAP+fd=0 not ENOSYS"
+                "[syscall/linux]   FAIL: mount_setattr IDMAP+fd=0 not EPERM (batch 493)"
             );
             return Err(KernelError::InternalError);
         }
-        serial_println!(
-            "[syscall/linux]   mount_setattr set/clr-overlap > userns-without-IDMAP > userns-INT_MAX gate order: OK"
-        );
-        serial_println!("[syscall/linux]   mount_setattr attr validation: OK");
-        serial_println!(
-            "[syscall/linux]   mount_setattr flags-EINVAL > size-E2BIG > size-EINVAL > NULL-EFAULT gate order: OK"
-        );
-        // Batch 229 forward-compat: mount_setattr size=40 with all-
-        // zero trailing 8 bytes -> ENOSYS (same as size=32).  Linux
-        // accepts forward-compatible sizes in [VER0, PAGE_SIZE]
-        // provided the trailing bytes are all zero.
+        // (2q) Batch 229 → 493 forward-compat: size=40 with all-zero
+        // trailing 8 bytes -> EPERM (was ENOSYS).
         let mount_attr_pad_zero = [0u8; 40];
         let mount_attr_pad_zero_ptr = mount_attr_pad_zero.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0,
             arg3: mount_attr_pad_zero_ptr, arg4: 40, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::ENOSYS) {
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr size=40 (zero pad) not ENOSYS"
+                "[syscall/linux]   FAIL: mount_setattr size=40 (zero pad) not EPERM (batch 493)"
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 229 discriminator: mount_setattr size=40 with
-        // byte[32]=1 -> E2BIG.  Linux's copy_struct_from_user checks
-        // bytes [32, 40) are all zero and returns -E2BIG on the
-        // first non-zero byte.  Pre-batch we silently ignored
-        // trailing bytes and returned ENOSYS.
+        // (2r) Batch 229 → 493 forward-compat: size=40 with byte[32]=1
+        // -> EPERM (was E2BIG).  Linux's copy_struct_from_user trailing-
+        // zero E2BIG runs INSIDE copy_struct_from_user at line 4654,
+        // AFTER may_mount at line 4651, so gate-4 EPERM outranks.
         let mut mount_attr_pad_nonzero = [0u8; 40];
         mount_attr_pad_nonzero[32] = 1;
         let mount_attr_pad_nonzero_ptr = mount_attr_pad_nonzero.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0,
             arg3: mount_attr_pad_nonzero_ptr, arg4: 40, arg5: 0 };
-        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::E2BIG) {
+        if dispatch_linux(nr::MOUNT_SETATTR, &a).value != -i64::from(errno::EPERM) {
             serial_println!(
-                "[syscall/linux]   FAIL: mount_setattr size=40 (byte[32]=1) not E2BIG"
+                "[syscall/linux]   FAIL: mount_setattr size=40 (byte[32]=1) not EPERM (batch 493)"
             );
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   mount_setattr forward-compat trailing-zero E2BIG: OK"
+            "[syscall/linux]   mount_setattr may_mount() EPERM gate (batch 493): OK"
         );
 
         // Batch 485: sys_fchmodat2 split AT_EMPTY_PATH branch + empty-

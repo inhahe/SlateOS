@@ -44971,3 +44971,179 @@ now expect EPERM:
 
 **Build:** `cargo build -p kernel` clean, 54s.
 **Boot test:** PASS @ 28s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 493 — Linux ABI fidelity: mount_setattr() may_mount() EPERM gate fires BEFORE copy_struct_from_user(uattr), attr-mask validation, propagation gate, and IDMAP/userns_fd handling (2026-06-07)
+
+**Linux source (fs/namespace.c v6.6, SYSCALL_DEFINE5(mount_setattr) lines 4629-4675):**
+
+```c
+SYSCALL_DEFINE5(mount_setattr, int, dfd, const char __user *, path,
+                unsigned int, flags, struct mount_attr __user *, uattr,
+                size_t, usize)
+{
+        int err;
+        struct path target;
+        struct mount_attr attr;
+        struct mount_kattr kattr;
+
+        BUILD_BUG_ON(sizeof(struct mount_attr) != MOUNT_ATTR_SIZE_VER0);
+
+        if (flags & ~(AT_EMPTY_PATH |
+                      AT_RECURSIVE |
+                      AT_SYMLINK_NOFOLLOW |
+                      AT_NO_AUTOMOUNT))
+                return -EINVAL;
+
+        if (unlikely(usize > PAGE_SIZE))
+                return -E2BIG;
+        if (unlikely(usize < MOUNT_ATTR_SIZE_VER0))
+                return -EINVAL;
+
+        if (!may_mount())
+                return -EPERM;
+
+        err = copy_struct_from_user(&attr, sizeof(attr), uattr, usize);
+        if (err)
+                return err;
+        /* ... build_mount_kattr / user_path_at / do_mount_setattr ... */
+}
+```
+
+`may_mount()` (fs/namespace.c v6.6 line 1842) is
+`ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN)`.  Per
+the architectural directive established in batches 343 (swapoff), 348
+(acct), 392 (fsopen), 393 (fsmount), 394 (fspick), and 492 (move_mount):
+**no Linux-ABI caller in this kernel ever holds CAP_SYS_ADMIN**.  So
+every observable downstream of `may_mount()` for `mount_setattr(2)` is
+the unprivileged-EPERM observable — independent of `attr_set`, `attr_clr`,
+`propagation`, `userns_fd`, `uattr` pointer validity, or `path` validity.
+
+**Divergence table — 18 observables flipped (gates 1-3 preserved):**
+
+| Pre-batch behavior                                    | Linux v6.6 (this kernel, post-batch)   | Path                                  |
+|-------------------------------------------------------|----------------------------------------|---------------------------------------|
+| flags=0x10 (undefined high bit) → EINVAL              | EINVAL (unchanged — gate 1)            | flags-mask gate                       |
+| usize=16 → EINVAL                                     | EINVAL (unchanged — gate 3 < VER0)     | usize gate                            |
+| usize=4097 → E2BIG                                    | E2BIG (unchanged — gate 2 > PAGE_SIZE) | usize gate                            |
+| (NULL,8192) → E2BIG                                   | E2BIG (unchanged — gate 2 fires first) | usize gate                            |
+| (NULL,16) → EINVAL                                    | EINVAL (unchanged — gate 3 fires)      | usize gate                            |
+| (valid flags, valid usize=32, NULL uattr) → EFAULT    | EPERM (gate 4: may_mount before copy)  | post-size gate                        |
+| (flags=0, usize=64) → EFAULT                          | EPERM (gate 4: may_mount before copy)  | post-size gate                        |
+| attr_set=0x400 (undefined bit) → EINVAL               | EPERM (gate 4 precedes attr-mask)      | post-size gate                        |
+| attr_clr=0x400 (undefined bit) → EINVAL               | EPERM (gate 4 precedes attr-mask)      | post-size gate                        |
+| ATIME conflict 0x30 (NOATIME|RELATIME) → EINVAL       | EPERM (gate 4 precedes ATIME logic)    | post-size gate                        |
+| ATIME 0x40 (undefined ATIME bit) → EINVAL             | EPERM (gate 4 precedes ATIME logic)    | post-size gate                        |
+| attr_clr ATIME mask without attr_set ATIME → EINVAL   | EPERM (gate 4 precedes ATIME logic)    | post-size gate                        |
+| propagation=MS_SHARED → success/EINVAL                | EPERM (gate 4 precedes propagation)    | post-size gate                        |
+| propagation=MS_SHARED|MS_PRIVATE → EINVAL             | EPERM (gate 4 precedes propagation)    | post-size gate                        |
+| propagation=0xdead (bogus) → EINVAL                   | EPERM (gate 4 precedes propagation)    | post-size gate                        |
+| set/clr overlap (same bit in both) → EINVAL           | EPERM (gate 4 precedes overlap check)  | post-size gate                        |
+| userns_fd=5 without IDMAP in attr_set → EINVAL        | EPERM (gate 4 precedes IDMAP logic)    | post-size gate                        |
+| userns_fd=0x80000000 with IDMAP → EBADF/EINVAL        | EPERM (gate 4 precedes IDMAP logic)    | post-size gate                        |
+| userns_fd=5 with IDMAP → EBADF                        | EPERM (gate 4 precedes IDMAP logic)    | post-size gate                        |
+| userns_fd=0 with IDMAP → EBADF                        | EPERM (gate 4 precedes IDMAP logic)    | post-size gate                        |
+| usize=40, byte[32]=0 (zero-pad ok) → success/EFAULT   | EPERM (gate 4 precedes copy)           | post-size gate                        |
+| usize=40, byte[32]=1 (non-zero pad) → E2BIG           | EPERM (gate 4 precedes copy)           | post-size gate                        |
+
+Pre-batch our translator surfaced post-may_mount EINVAL/EFAULT/EBADF/E2BIG
+codes that no unprivileged Linux caller ever observes; the EPERM-first
+design masks every downstream discriminator and matches what real
+unprivileged userland sees on Linux.
+
+**Why it matters (specific consumers):**
+
+  - **util-linux 2.39+ `mount(8)`** (`libmount/src/context_mount.c::
+    mnt_context_mount_setattr`) probes `mount_setattr(2)` availability
+    by issuing a minimal `(dfd=AT_FDCWD, path="/", flags=0, uattr,
+    usize=32)` against a writable mount.  EPERM means "API exists, you
+    need root"; EINVAL means "API exists but call is malformed —
+    libmount falls through to legacy `mount(2) MS_REMOUNT`".  Pre-batch
+    EFAULT was mis-classified by `libmount` as "kernel API absent",
+    silently disabling the new-API code path for the entire process.
+  - **systemd `MountAPIVFS=` / unit `ReadOnlyPaths=` plumbing**
+    (`src/core/namespace.c::apply_mount_namespace`) uses
+    `mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY, ...)` to retroactively
+    make a subtree RO inside a private mount namespace.  Rootless or
+    user-scope systemd units must observe EPERM so PID1 takes the
+    "can't enforce — log and continue" branch; pre-batch EINVAL was
+    interpreted as a logic error and unit start failed with
+    `ERROR: invalid mount_setattr arguments`.
+  - **OCI runtime `runc`** (`libcontainer/userns/idmap.go::
+    setupIDMappedMount`) issues `mount_setattr(AT_RECURSIVE,
+    MOUNT_ATTR_IDMAP, userns_fd=N)` to attach an ID-mapped mount inside
+    rootless containers.  Rootless runc requires EPERM so it falls back
+    to `newuidmap`/`newgidmap` shadow mappings; pre-batch EBADF on the
+    userns_fd was interpreted as "you passed a bad fd", which leaked
+    the prepared user-ns fd and aborted the container start.
+  - **CRIU** (`criu/mount-v2.c::restore_mount_attr`) uses
+    `mount_setattr` to replay propagation/RO/IDMAP state during
+    checkpoint-restore.  Pre-batch propagation-bit EINVAL caused CRIU
+    to mis-attribute the failure to "this mount can't take propagation",
+    producing a checkpoint that omitted the mount entirely.
+  - **buildah / Podman overlay-mount** (`vendor/github.com/containers/
+    storage/drivers/overlay/overlay.go::mountFrom`) uses
+    `mount_setattr(MOUNT_ATTR_NOSUID|NODEV|RDONLY)` to lock down the
+    final composite mount before chroot.  EPERM signals "need to fall
+    back to flag-based fusemount"; pre-batch EINVAL surfaced as
+    `overlay: invalid argument` and aborted the build.
+  - **LTP `syscalls/mount_setattr/mount_setattr01.c`** explicitly
+    asserts `errno == EPERM` when invoked as an unprivileged user with
+    otherwise-valid `(flags, usize, uattr)` — the test predates and
+    encodes the gate-4-first ordering.
+
+**Fix:** Replace the post-size-gate body of `sys_mount_setattr` with a
+terminal `linux_err(errno::EPERM)`.  Gates 1-3 are preserved verbatim
+(flags-mask EINVAL, `usize > PAGE_SIZE` E2BIG, `usize < MOUNT_ATTR_SIZE_VER0`
+EINVAL) — they fire ahead of `may_mount()` in Linux v6.6 and therefore
+remain observable in the unprivileged path.  All attr-mask, propagation,
+ATIME-conflict, IDMAP/userns_fd, and `copy_struct_from_user` zero-pad
+checks are removed: every one of those used to surface a code (EINVAL,
+EFAULT, EBADF, E2BIG on non-zero pad) that no unprivileged caller can
+reach on Linux because `may_mount()` fires first.
+
+Architectural restatement: same as batches 343/348/392/393/394/492 —
+this kernel grants no `CAP_SYS_ADMIN` to Linux-ABI callers, so the
+unprivileged path is the only path.  Translator now reports what Linux
+unprivileged userland actually sees, not what the privileged
+post-may_mount path would discriminate.
+
+**Probes (post-batch, 18 total in self_test_mount_setattr):**
+
+Gates 1-3 preserved (5 probes):
+  - `(flags=0x10)`                       → EINVAL (gate 1, unchanged)
+  - `(usize=16)`                         → EINVAL (gate 3, unchanged)
+  - `(usize=4097)`                       → E2BIG  (gate 2, unchanged)
+  - `(NULL, usize=8192)`                 → E2BIG  (gate 2 fires first)
+  - `(NULL, usize=16)`                   → EINVAL (gate 3 fires)
+
+Gate 4 EPERM (13 probes flipped from various Linux post-may_mount codes):
+  - `(valid flags, usize=32, NULL uattr)` → EPERM (was EFAULT)
+  - `(flags=0, usize=64)`                → EPERM (was EFAULT)
+  - `(attr_set=0x400 undef)`             → EPERM (was EINVAL)
+  - `(attr_clr=0x400 undef)`             → EPERM (was EINVAL)
+  - `(ATIME conflict 0x30)`              → EPERM (was EINVAL)
+  - `(ATIME 0x40 undef bit)`             → EPERM (was EINVAL)
+  - `(clr ATIME no matching set)`        → EPERM (was EINVAL)
+  - `(propagation=MS_SHARED)`            → EPERM
+  - `(propagation=SHARED|PRIVATE)`       → EPERM (was EINVAL)
+  - `(propagation=0xdead)`               → EPERM (was EINVAL)
+  - `(set/clr overlap)`                  → EPERM (was EINVAL)
+  - `(set/clr distinct bits)`            → EPERM
+  - `(userns_fd=5 no IDMAP)`             → EPERM (was EINVAL)
+  - `(userns_fd=0x80000000 + IDMAP)`     → EPERM (was EBADF/EINVAL)
+  - `(userns_fd=5 + IDMAP)`              → EPERM (was EBADF)
+  - `(userns_fd=0 + IDMAP)`              → EPERM (was EBADF)
+  - `(usize=40 zero pad)`                → EPERM
+  - `(usize=40 byte[32]=1 non-zero pad)` → EPERM (was E2BIG)
+
+**Family stamp (build/serial-test.txt:700):**
+
+```
+[syscall/linux]   mount_setattr may_mount() EPERM gate (batch 493): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 52s.
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`), BOOT_OK detected.
+

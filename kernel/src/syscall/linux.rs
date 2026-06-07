@@ -14280,6 +14280,85 @@ fn sys_fanotify_init(args: &SyscallArgs) -> SyscallResult {
         | FAN_REPORT_PIDFD | FAN_REPORT_TID | FAN_REPORT_FID
         | FAN_REPORT_DIR_FID | FAN_REPORT_NAME | FAN_REPORT_TARGET_FID;
 
+    // Batch 491: Linux 6.6 fs/notify/fanotify/fanotify_user.c
+    // SYSCALL_DEFINE2(fanotify_init) opens with a CAP_SYS_ADMIN-fail
+    // EPERM gate that runs BEFORE the FANOTIFY_INIT_FLAGS mask check:
+    //
+    //     if (!capable(CAP_SYS_ADMIN)) {
+    //         if ((flags & FANOTIFY_ADMIN_INIT_FLAGS) || !fid_mode)
+    //             return -EPERM;
+    //         internal_flags |= FANOTIFY_UNPRIV;
+    //     }
+    //
+    // Where (include/linux/fanotify.h v6.6):
+    //
+    //     #define FANOTIFY_ADMIN_INIT_FLAGS   (FANOTIFY_PERM_CLASSES |
+    //                                          FAN_REPORT_TID |
+    //                                          FAN_REPORT_PIDFD |
+    //                                          FAN_UNLIMITED_QUEUE |
+    //                                          FAN_UNLIMITED_MARKS)
+    //     #define FANOTIFY_PERM_CLASSES       (FAN_CLASS_CONTENT |
+    //                                          FAN_CLASS_PRE_CONTENT)
+    //     #define FANOTIFY_FID_BITS           (FAN_REPORT_DFID_NAME_TARGET)
+    //     #define FAN_REPORT_DFID_NAME_TARGET (FAN_REPORT_DFID_NAME |
+    //                                          FAN_REPORT_FID |
+    //                                          FAN_REPORT_TARGET_FID)
+    //     #define FAN_REPORT_DFID_NAME        (FAN_REPORT_DIR_FID |
+    //                                          FAN_REPORT_NAME)
+    //
+    // Numeric values: ADMIN = 0x4|0x8|0x80|0x100|0x10|0x20 = 0x1BC.
+    //                 FID_BITS = 0x200|0x400|0x800|0x1000 = 0x1E00.
+    //
+    // Pre-batch we ran the EINVAL flag-mask check first, so an
+    // unprivileged probe passing flags=0 (or flags=0x80 / 0x100 /
+    // 0x180 / 0x1c00 / etc.) saw ENOSYS or EINVAL where Linux returns
+    // EPERM ahead of either gate.  Concrete divergences:
+    //
+    //   * fanotify_init(0, 0)             Linux: EPERM (!fid_mode)
+    //                                     Pre:   ENOSYS
+    //   * fanotify_init(FAN_REPORT_PIDFD, 0)  Linux: EPERM (admin flag)
+    //                                     Pre:   ENOSYS
+    //   * fanotify_init(FAN_REPORT_TID, 0)    Linux: EPERM (admin flag)
+    //                                     Pre:   ENOSYS
+    //   * fanotify_init(FAN_CLASS_CONTENT|FAN_CLASS_PRE_CONTENT, 0)
+    //                                     Linux: EPERM (admin flags)
+    //                                     Pre:   EINVAL (class==MASK gate)
+    //   * fanotify_init(0x2000, 0)        Linux: EPERM (!fid_mode)
+    //                                     Pre:   EINVAL (mask gate)
+    //   * fanotify_init(0, 0x10)          Linux: EPERM (!fid_mode)
+    //                                     Pre:   EINVAL (event_f_flags
+    //                                                   bad bit)
+    //
+    // Userspace impact: util-linux's `lsattr -A` and audit subsystem
+    // helpers probe fanotify_init availability with flags=0 to discover
+    // whether the kernel supports fanotify at all.  Pre-batch they
+    // got ENOSYS and concluded "kernel built without CONFIG_FANOTIFY",
+    // which mismatches Linux's real answer (EPERM = "kernel has
+    // fanotify but you need privileges").  systemd-journald's audit
+    // probes, AIDE's filesystem scanner, ClamAV's on-access scanner,
+    // and AppArmor / SELinux audit plumbing all expect EPERM to
+    // distinguish "no privilege" (escalate) from ENOSYS (give up).
+    // LTP's fanotify1*..15* suite asserts EPERM at exactly this gate.
+    //
+    // Architectural directive (same as swapon/pivot_root/etc.): no
+    // caller can hold CAP_SYS_ADMIN, so gate-1 trips on any
+    // (flags & ADMIN_INIT_FLAGS) || !fid_mode shape.  Translator-only
+    // fix: insert the gate ahead of the FANOTIFY_INIT_FLAGS mask.
+    const FANOTIFY_ADMIN_INIT_FLAGS: u32 = FAN_CLASS_CONTENT
+        | FAN_CLASS_PRE_CONTENT
+        | FAN_REPORT_TID
+        | FAN_REPORT_PIDFD
+        | FAN_UNLIMITED_QUEUE
+        | FAN_UNLIMITED_MARKS;
+    const FANOTIFY_FID_BITS: u32 = FAN_REPORT_FID
+        | FAN_REPORT_DIR_FID
+        | FAN_REPORT_NAME
+        | FAN_REPORT_TARGET_FID;
+    let fid_mode = flags & FANOTIFY_FID_BITS;
+    if (flags & FANOTIFY_ADMIN_INIT_FLAGS) != 0 || fid_mode == 0 {
+        return linux_err(errno::EPERM);
+    }
+
     if flags & !FANOTIFY_INIT_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
@@ -49187,31 +49266,43 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // fanotify_init() -> ENOSYS.
+        // Batch 491: fanotify_init(0, 0) — unprivileged caller has
+        // !fid_mode, so Linux's CAP_SYS_ADMIN-fail EPERM gate fires
+        // before any flag-mask check.  Pre-batch (245) this returned
+        // ENOSYS via the terminal; Linux returns EPERM.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init not ENOSYS");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init(0,0) not EPERM");
             return Err(KernelError::InternalError);
         }
-        // fanotify_init with unknown flag bit (0x2000) -> EINVAL (see todo 182).
+        // Batch 491: unknown flag bit 0x2000 — Linux still hits the
+        // EPERM gate first because fid_mode is zero and 0x2000 isn't
+        // a FID bit.
         let a = SyscallArgs { arg0: 0x2000, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init bad flag not EINVAL");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init bad flag not EPERM");
             return Err(KernelError::InternalError);
         }
-        // fanotify_init with both CONTENT+PRE_CONTENT class bits -> EINVAL.
+        // Batch 491: CONTENT|PRE_CONTENT — both bits are in
+        // FANOTIFY_ADMIN_INIT_FLAGS (FANOTIFY_PERM_CLASSES), so the
+        // EPERM gate fires before the class==MASK check.
         let a = SyscallArgs { arg0: 0xc, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init dual class not EINVAL");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init dual class not EPERM");
             return Err(KernelError::InternalError);
         }
-        // fanotify_init with FAN_REPORT_NAME but no FAN_REPORT_DIR_FID -> EINVAL.
+        // fanotify_init with FAN_REPORT_NAME but no FAN_REPORT_DIR_FID
+        // -> EINVAL.  FAN_REPORT_NAME is in FANOTIFY_FID_BITS (so
+        // fid_mode is non-zero) and is NOT in
+        // FANOTIFY_ADMIN_INIT_FLAGS, so the EPERM gate is bypassed
+        // and Linux proceeds to the FAN_REPORT_NAME w/o
+        // FAN_REPORT_DIR_FID interlock — still EINVAL.
         let a = SyscallArgs { arg0: 0x800, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
@@ -49219,7 +49310,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fanotify_init NAME w/o DIR_FID not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // fanotify_init with FAN_REPORT_NAME | FAN_REPORT_DIR_FID -> ENOSYS.
+        // fanotify_init with FAN_REPORT_NAME | FAN_REPORT_DIR_FID
+        // -> ENOSYS.  fid_mode set, neither bit in admin flags.
         let a = SyscallArgs { arg0: 0xc00, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
@@ -49227,7 +49319,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fanotify_init NAME+DIR_FID not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // fanotify_init with FAN_REPORT_TARGET_FID missing FID -> EINVAL.
+        // fanotify_init with FAN_REPORT_TARGET_FID missing FID
+        // -> EINVAL.  fid_mode set (TARGET_FID|DIR_FID|NAME), none
+        // in admin flags, so EPERM gate is bypassed.
         let a = SyscallArgs { arg0: 0x1c00, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
@@ -49243,58 +49337,93 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fanotify_init full FID trio not ENOSYS");
             return Err(KernelError::InternalError);
         }
-        // Batch 245: FAN_REPORT_PIDFD (0x80) + FAN_REPORT_TID (0x100) ->
-        // EINVAL (mutually exclusive — pidfd refers to the process, TID
-        // to the thread, so requesting both contradicts itself).
+        // Batch 491: PIDFD+TID — both in admin flags; EPERM gate
+        // fires before the mutex-exclusion check.  (Pre-batch
+        // expected EINVAL from the mutex check; that gate is now
+        // unreachable for unprivileged callers, but the EPERM
+        // answer is still ABI-correct.)
         let a = SyscallArgs { arg0: 0x180, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init PIDFD+TID not EINVAL");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init PIDFD+TID not EPERM");
             return Err(KernelError::InternalError);
         }
-        // Batch 245: FAN_REPORT_PIDFD alone -> ENOSYS (gate passes).
+        // Batch 491: PIDFD alone -> EPERM (admin flag).
         let a = SyscallArgs { arg0: 0x80, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init PIDFD alone not ENOSYS");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init PIDFD alone not EPERM");
             return Err(KernelError::InternalError);
         }
-        // Batch 245: FAN_REPORT_TID alone -> ENOSYS (gate passes).
+        // Batch 491: TID alone -> EPERM (admin flag).
         let a = SyscallArgs { arg0: 0x100, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init TID alone not ENOSYS");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init TID alone not EPERM");
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   fanotify_init PIDFD-TID-mutex gate order: OK"
+            "[syscall/linux]   fanotify_init CAP_SYS_ADMIN gate (batch 491): OK"
         );
 
-        // fanotify_init with unknown event_f_flags bit (0x10) -> EINVAL.
+        // Batch 491: bad event_f_flags with flags=0 — EPERM gate
+        // fires first because !fid_mode, regardless of event_f_flags
+        // shape.
         let a = SyscallArgs { arg0: 0, arg1: 0x10, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init bad event_f_flags not EINVAL");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init bad event_f_flags not EPERM");
             return Err(KernelError::InternalError);
         }
-        // fanotify_init with access mode == 3 (invalid combo) -> EINVAL.
+        // Batch 491: O_ACCMODE=3 with flags=0 — EPERM gate fires
+        // first (!fid_mode).
         let a = SyscallArgs { arg0: 0, arg1: 0x3, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init O_ACCMODE=3 not EINVAL");
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init O_ACCMODE=3 not EPERM");
             return Err(KernelError::InternalError);
         }
-        // fanotify_init with O_CLOEXEC|O_NONBLOCK (valid event_f_flags) -> ENOSYS.
+        // Batch 491: valid event_f_flags with flags=0 — EPERM
+        // (!fid_mode).  Pre-batch this returned ENOSYS.
         let a = SyscallArgs { arg0: 0, arg1: 0o2_004_000, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init flags=0 valid e_f_f not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 491: valid event_f_flags PLUS a fid bit (FAN_REPORT_FID
+        // = 0x200) — passes EPERM gate (fid_mode set, no admin), then
+        // proceeds through event_f_flags validation to ENOSYS terminal.
+        // This is the new probe that exercises the post-EPERM-gate
+        // event_f_flags path.
+        let a = SyscallArgs { arg0: 0x200, arg1: 0o2_004_000, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
             != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: fanotify_init valid event_f_flags not ENOSYS");
+            serial_println!("[syscall/linux]   FAIL: fanotify_init FID + valid e_f_f not ENOSYS");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 491: FID + bad event_f_flags bit -> EINVAL (passes
+        // EPERM gate via fid_mode, hits event_f_flags mask).
+        let a = SyscallArgs { arg0: 0x200, arg1: 0x10, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init FID + bad e_f_f not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 491: FID + O_ACCMODE=3 -> EINVAL.
+        let a = SyscallArgs { arg0: 0x200, arg1: 0x3, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FANOTIFY_INIT, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fanotify_init FID + O_ACCMODE=3 not EINVAL");
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   fanotify_init flag validation: OK");

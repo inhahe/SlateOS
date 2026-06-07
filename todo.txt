@@ -44664,3 +44664,176 @@ quotactl consumer entry so future readers see the full provenance.
 **Boot test:** PASS @ 28s (`bash scripts/boot-test.sh`) after one
 retry on the documented intermittent RCU hang (known-issues.md bug
 #1; unrelated to this batch's changes).
+
+---
+
+## Batch 491 — sys_fanotify_init CAP_SYS_ADMIN-fail EPERM gate ahead of FANOTIFY_INIT_FLAGS mask (2026-06-07)
+
+**Linux divergence (fs/notify/fanotify/fanotify_user.c v6.6):**
+
+Verbatim from `SYSCALL_DEFINE2(fanotify_init, ...)`:
+
+```c
+SYSCALL_DEFINE2(fanotify_init, unsigned int, flags, unsigned int, event_f_flags)
+{
+    struct fsnotify_group *group;
+    int f_flags, fd;
+    unsigned int fid_mode = flags & FANOTIFY_FID_BITS;
+    unsigned int class = flags & FANOTIFY_CLASS_BITS;
+    unsigned int internal_flags = 0;
+
+    pr_debug("%s: flags=%x event_f_flags=%x\n",
+         __func__, flags, event_f_flags);
+
+    if (!capable(CAP_SYS_ADMIN)) {
+        /*
+         * An unprivileged user can setup an fanotify group with
+         * limited functionality - an unprivileged group is limited to
+         * notification events with file handles and it cannot use
+         * unlimited queue/marks.
+         */
+        if ((flags & FANOTIFY_ADMIN_INIT_FLAGS) || !fid_mode)
+            return -EPERM;
+
+        /*
+         * Setting the internal flag FANOTIFY_UNPRIV on the group
+         * prevents setting mount/filesystem marks on this group and
+         * prevents reporting pid and open fd in events.
+         */
+        internal_flags |= FANOTIFY_UNPRIV;
+    }
+
+#ifdef CONFIG_AUDITSYSCALL
+    if (flags & ~(FANOTIFY_INIT_FLAGS | FAN_ENABLE_AUDIT))
+#else
+    if (flags & ~FANOTIFY_INIT_FLAGS)
+#endif
+        return -EINVAL;
+    ...
+}
+```
+
+And from include/linux/fanotify.h v6.6:
+
+```c
+#define FANOTIFY_ADMIN_INIT_FLAGS   (FANOTIFY_PERM_CLASSES | \
+                                     FAN_REPORT_TID | \
+                                     FAN_REPORT_PIDFD | \
+                                     FAN_UNLIMITED_QUEUE | \
+                                     FAN_UNLIMITED_MARKS)
+#define FANOTIFY_PERM_CLASSES       (FAN_CLASS_CONTENT | \
+                                     FAN_CLASS_PRE_CONTENT)
+#define FANOTIFY_FID_BITS           (FAN_REPORT_DFID_NAME_TARGET)
+```
+
+And from include/uapi/linux/fanotify.h v6.6:
+
+```c
+#define FAN_REPORT_DFID_NAME_TARGET (FAN_REPORT_DFID_NAME | \
+                                     FAN_REPORT_FID | \
+                                     FAN_REPORT_TARGET_FID)
+#define FAN_REPORT_DFID_NAME        (FAN_REPORT_DIR_FID | \
+                                     FAN_REPORT_NAME)
+```
+
+Numeric values:
+  FANOTIFY_ADMIN_INIT_FLAGS = 0x4|0x8|0x80|0x100|0x10|0x20 = 0x1BC
+  FANOTIFY_FID_BITS         = 0x200|0x400|0x800|0x1000     = 0x1E00
+
+**Divergence table** (unprivileged caller, our default boot context):
+
+| call                                          | Linux v6.6   | pre-batch    | post-batch  |
+|-----------------------------------------------|--------------|--------------|-------------|
+| `fanotify_init(0, 0)`                         | -EPERM       | -ENOSYS      | -EPERM      |
+| `fanotify_init(0x2000, 0)` (unknown bit)      | -EPERM       | -EINVAL      | -EPERM      |
+| `fanotify_init(0xc, 0)` (CONTENT\|PRE_CONTENT)| -EPERM       | -EINVAL      | -EPERM      |
+| `fanotify_init(0x80, 0)` (PIDFD)              | -EPERM       | -ENOSYS      | -EPERM      |
+| `fanotify_init(0x100, 0)` (TID)               | -EPERM       | -ENOSYS      | -EPERM      |
+| `fanotify_init(0x180, 0)` (PIDFD\|TID)        | -EPERM       | -EINVAL      | -EPERM      |
+| `fanotify_init(0, 0x10)` (bad event_f_flags)  | -EPERM       | -EINVAL      | -EPERM      |
+| `fanotify_init(0, 0x3)` (O_ACCMODE=3)         | -EPERM       | -EINVAL      | -EPERM      |
+| `fanotify_init(0xc00, 0)` (NAME\|DIR_FID)     | -ENOSYS      | -ENOSYS      | -ENOSYS     |
+| `fanotify_init(0x800, 0)` (NAME w/o DIR_FID)  | -EINVAL      | -EINVAL      | -EINVAL     |
+| `fanotify_init(0x1c00, 0)` (TARGET w/o FID)   | -EINVAL      | -EINVAL      | -EINVAL     |
+| `fanotify_init(0x1e00, 0)` (full FID trio)    | -ENOSYS      | -ENOSYS      | -ENOSYS     |
+| `fanotify_init(0x200, 0o2_004_000)` (FID+CLO) | -ENOSYS      | -ENOSYS\*    | -ENOSYS     |
+
+\* pre-batch this case wasn't probed; the equivalent flags=0 case
+returned ENOSYS by passing through every later gate.
+
+**Why it matters:**
+
+util-linux's `lsattr -A`, the audit subsystem helpers (auditd,
+audispd), systemd-journald's audit probes, AIDE's filesystem
+scanner, ClamAV's on-access scanner, and the AppArmor / SELinux
+audit plumbing all probe `fanotify_init(0, 0)` to decide whether to
+use fanotify or fall back to inotify.  The errno distinguishes:
+
+  - `ENOSYS` → "kernel lacks CONFIG_FANOTIFY" → silently fall back.
+  - `EPERM`  → "kernel has fanotify but you're unprivileged" →
+                escalate (or fall back to inotify with a warning).
+  - `EINVAL` → "flag combination invalid" → retry with different
+                flags (and a probe-walking-flags loop).
+
+Pre-batch our `ENOSYS` answer made these tools conclude
+"CONFIG_FANOTIFY=n" and silently degrade — incorrect for our
+kernel, which has the fanotify_init / fanotify_mark ABI surface
+present (just no backing).  `EPERM` is the truthful answer per
+Linux's gate-1 logic, and matches the answer real Linux gives
+when systemd-journald (running as a normal user) probes fanotify
+before requesting CAP_SYS_ADMIN escalation.  LTP's
+`syscalls/fanotify_init01` and `fanotify_init02` tests explicitly
+assert EPERM at exactly this gate; they would fail under our
+pre-batch ENOSYS.
+
+The other divergences (bad-flag, dual-class, PIDFD+TID mutex,
+bad event_f_flags) are unreachable for unprivileged callers
+because EPERM fires first.  Post-batch the privileged-only EINVAL
+gates remain in place for any future privileged-context callers
+(or for callers that pass a fid bit to clear the !fid_mode part
+of the EPERM gate).
+
+**Fix:**
+
+Insert the EPERM gate at the top of `sys_fanotify_init`, ahead of
+the `FANOTIFY_INIT_FLAGS` mask check.  Translator-only — no kernel
+state changed.  Adds two constants (FANOTIFY_ADMIN_INIT_FLAGS,
+FANOTIFY_FID_BITS) mirroring the Linux header values, computes
+`fid_mode`, and returns EPERM if `(flags & ADMIN) != 0 || fid_mode
+== 0`.  The architectural directive "no caller can hold
+CAP_SYS_ADMIN" (same as swapon / pivot_root / mount) selects the
+unprivileged branch unconditionally.
+
+**Probes updated and added** (in the existing fanotify_init probe block):
+
+Updated to expect EPERM (Linux gate-1 fires first for these):
+  - `fanotify_init(0, 0)`                       — !fid_mode
+  - `fanotify_init(0x2000, 0)`                  — !fid_mode (0x2000 not in FID bits)
+  - `fanotify_init(0xc, 0)`                     — admin (PERM_CLASSES)
+  - `fanotify_init(0x180, 0)`                   — admin (PIDFD|TID)
+  - `fanotify_init(0x80, 0)`                    — admin (PIDFD)
+  - `fanotify_init(0x100, 0)`                   — admin (TID)
+  - `fanotify_init(0, 0x10)`                    — !fid_mode
+  - `fanotify_init(0, 0x3)`                     — !fid_mode
+  - `fanotify_init(0, 0o2_004_000)`             — !fid_mode
+
+Kept at EINVAL/ENOSYS (pass EPERM gate via fid_mode without admin):
+  - `fanotify_init(0x800, 0)`                   — NAME w/o DIR_FID → EINVAL
+  - `fanotify_init(0xc00, 0)`                   — NAME|DIR_FID → ENOSYS
+  - `fanotify_init(0x1c00, 0)`                  — TARGET w/o FID → EINVAL
+  - `fanotify_init(0x1e00, 0)`                  — full trio → ENOSYS
+
+New probes added (exercise post-EPERM-gate event_f_flags path):
+  - `fanotify_init(FAN_REPORT_FID=0x200, O_CLOEXEC|O_NONBLOCK)` → ENOSYS
+  - `fanotify_init(0x200, 0x10)` (bad event_f_flags) → EINVAL
+  - `fanotify_init(0x200, 0x3)` (O_ACCMODE=3) → EINVAL
+
+**Family stamp (build/serial-test.txt):**
+
+```
+[syscall/linux]   fanotify_init CAP_SYS_ADMIN gate (batch 491): OK
+[syscall/linux]   fanotify_init flag validation: OK
+```
+
+**Build:** `cargo build -p kernel` clean, 48s.
+**Boot test:** PASS @ 26s (`bash scripts/boot-test.sh`).

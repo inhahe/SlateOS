@@ -38038,3 +38038,100 @@ OBSOLETE NOTE BELOW (pre-relaxation):
        "[syscall/linux]   get/setpriority PRIO_PGRP/USER neg-who
        ESRCH: OK"
 
+
+445. [2026-06-06] syscall/linux batch 445 — sys_capget pid validation
+     gate (Linux gate order).
+
+     Linux source (kernel/capability.c::SYSCALL_DEFINE2(capget)):
+
+       ret = cap_validate_magic(header, &tocopy);
+       if ((dataptr == NULL) || (ret != 0))
+           return ((dataptr == NULL) && (ret == -EINVAL)) ? 0 : ret;
+
+       if (get_user(pid, &header->pid))
+           return -EFAULT;
+
+       if (pid < 0)
+           return -EINVAL;
+
+       ret = 0;
+
+       if (pid && (pid != task_pid_vnr(current))) {
+           struct task_struct *target;
+           rcu_read_lock();
+           target = find_task_by_vpid(pid);
+           if (!target)
+               ret = -ESRCH;
+           else
+               ret = cap_get_target_pid(pid, &pE, &pI, &pP);
+           rcu_read_unlock();
+       } else {
+           const struct cred *cred = current_cred();
+           pE = cred->cap_effective;
+           ...
+       }
+
+     Pre-batch sys_capget ignored the pid field of the header entirely
+     — once the version was V1/V2/V3 and datap was non-NULL, we
+     unconditionally wrote 24 bytes of 0xff into datap and returned 0.
+
+     Observable divergences:
+
+       | call shape                                | Linux  | Pre   |
+       |-------------------------------------------|--------|-------|
+       | capget(V3, pid=-1,    datap=valid)        | EINVAL | 0     |
+       | capget(V3, pid=12345, datap=valid)        | ESRCH  | 0     |
+       | capget(V3, pid=0,     datap=valid)        | 0      | 0     |
+       | capget(V3, pid=-1,    datap=NULL)         | 0      | 0     |
+
+     Why it matters: capget's pid<0 rejection is what libcap-ng's
+     version probe relies on to distinguish "kernel rejected my pid"
+     from "kernel doesn't know this version" — pre-batch the rejection
+     was swallowed and the probe got back a fake all-zeros capset.
+     The pid>0 && pid != current ESRCH gate is what `getpcaps <pid>`
+     and `pscap` rely on when scanning the process tree: a stale pid
+     should surface ESRCH so the tool moves on, not 0 with bogus
+     all-ones data.
+
+     Fix (translator-only — native PCB / capability backing untouched):
+
+       1. After the existing NULL-datap version-probe early return,
+          parse the pid out of hdr_buf[4..8] (already copy_from_user'd
+          for the version field — no second user copy needed).
+       2. pid_i32 < 0 -> linux_err(errno::EINVAL).
+       3. pid_i32 > 0 && pid_i32 != current_pid_i32 ->
+          pcb::state(pid as u64).is_none() -> linux_err(ESRCH).
+       4. Otherwise fall through to the existing datap write path.
+
+     Kernel context (caller_pid() == None) is treated as current pid 0
+     for the comparison: a non-zero pid in the header always triggers
+     the lookup branch, mirroring what a userspace probe sees when it
+     queries a foreign pid.
+
+     Self-test (kernel/src/syscall/linux.rs ~line 60266):
+       Discriminator A: capget(V3 hdr w/ pid=-1, valid datap)
+                        -> EINVAL (post) vs 0 (pre).
+       Discriminator B: capget(V3 hdr w/ pid=12345, valid datap)
+                        -> ESRCH (post) vs 0 (pre).
+       Discriminator C: capget(V3 hdr w/ pid=0, valid datap)
+                        -> 0 (both — current-cred path).
+       Discriminator D: capget(V3 hdr w/ pid=-1, datap=NULL)
+                        -> 0 (both — NULL-datap early return fires
+                            before the pid check).
+
+     Stamp: "[syscall/linux]   capget pid validation (Linux gate order): OK".
+
+     Scope note: For pid>0 && pid==current_pid_i32, Linux reads the
+     caller's own creds and returns success.  Our kernel-context tests
+     route through caller_pid()==None which compares as current_pid==0,
+     so pid_in_hdr==current_pid==0 is the only "current task" form we
+     can exercise here.  Discriminator C covers that.  A userspace
+     probe with pid==self would see the same Linux-shaped success.
+
+     Build: cargo build -p kernel clean (55.00s).
+     Boot test: bash scripts/boot-test.sh PASSED first attempt
+     (BOOT_OK at 23s).
+     Stamps confirmed at build/serial-test.txt:
+       "[syscall/linux]   capget/capset NULL-data error matrix: OK"
+       "[syscall/linux]   capset pid != current EPERM gating: OK"
+       "[syscall/linux]   capget pid validation (Linux gate order): OK"

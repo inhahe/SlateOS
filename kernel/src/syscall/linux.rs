@@ -8688,6 +8688,52 @@ fn sys_capget(args: &SyscallArgs) -> SyscallResult {
         // by getting this far, so return 0.
         return SyscallResult::ok(0);
     }
+    // Linux's sys_capget (kernel/capability.c) gate sequence after the
+    // version check, run only on the non-NULL-datap path:
+    //
+    //   if (get_user(pid, &header->pid)) return -EFAULT;
+    //   if (pid < 0) return -EINVAL;
+    //   if (pid && (pid != task_pid_vnr(current))) {
+    //       target = find_task_by_vpid(pid);
+    //       if (!target) ret = -ESRCH;
+    //       else        ret = cap_get_target_pid(pid, ...);
+    //   } else {
+    //       /* read current's cred */
+    //   }
+    //
+    // Pre-batch we ignored the pid field entirely, so:
+    //   capget(V3, pid=-1,    datap=valid) -> us: 0, Linux: -EINVAL
+    //   capget(V3, pid=12345, datap=valid) -> us: 0, Linux: -ESRCH
+    //     (no such task — kernel-context self-test never sees
+    //      caller_pid() != 12345, and pcb::state(12345) is None)
+    //
+    // The 8-byte header was already copy_from_user'd above into
+    // hdr_buf, so the pid field lives in hdr_buf[4..8] — no second
+    // user copy is needed (Linux's `get_user(pid, &header->pid)` reads
+    // from the same already-validated header memory).
+    let pid_in_hdr = i32::from_ne_bytes([
+        hdr_buf[4], hdr_buf[5], hdr_buf[6], hdr_buf[7],
+    ]);
+    if pid_in_hdr < 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // pid == 0 or pid == current -> caller's own creds (success).
+    // pid > 0 && pid != current -> find_task_by_vpid; missing -> ESRCH.
+    // Kernel context (caller_pid() == None) is treated as "current pid
+    // 0" — the kernel can only act as itself, so any non-zero pid in
+    // the header goes through the find_task path, mirroring what an
+    // unprivileged userspace caller would see.
+    let current_pid_i32: i32 = match caller_pid() {
+        Some(p) => i32::try_from(p).unwrap_or(0),
+        None => 0,
+    };
+    if pid_in_hdr != 0 && pid_in_hdr != current_pid_i32 {
+        #[allow(clippy::cast_sign_loss)]
+        let pid_u = pid_in_hdr as u64;
+        if pcb::state(pid_u).is_none() {
+            return linux_err(errno::ESRCH);
+        }
+    }
     let total = elems.saturating_mul(12);
     if let Err(e) = crate::mm::user::validate_user_write(datap, total) {
         return linux_err(linux_errno_for(e));
@@ -60262,6 +60308,118 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             serial_println!(
                 "[syscall/linux]   capset pid != current EPERM gating: OK"
+            );
+        }
+
+        // ---- capget pid validation (Linux gate order) ----
+        // Linux's sys_capget (kernel/capability.c) gate order after
+        // cap_validate_magic succeeds AND dataptr != NULL:
+        //   if (get_user(pid, &header->pid)) return -EFAULT;
+        //   if (pid < 0)                     return -EINVAL;
+        //   if (pid && pid != task_pid_vnr(current)) {
+        //       target = find_task_by_vpid(pid);
+        //       if (!target) ret = -ESRCH;
+        //       ...
+        //   }
+        //
+        // Pre-batch sys_capget ignored the pid field entirely, so:
+        //   * capget(V3, pid=-1,    datap=valid) -> 0 (should be EINVAL)
+        //   * capget(V3, pid=12345, datap=valid) -> 0 (should be ESRCH —
+        //     find_task_by_vpid fails because no such PCB exists).
+        //
+        // The NULL-datap probe path (covered by the prior version-
+        // probe matrix) bypasses pid inspection: cap_validate_magic
+        // returns 0 and the early return at the head of the body fires
+        // before the pid check.  Discriminator D below pins that down.
+        {
+            const V3: u32 = 0x2008_0522;
+
+            // Helper to build an 8-byte capget header with a given pid.
+            let build_hdr = |pid: i32| -> [u8; 8] {
+                let mut hdr = [0u8; 8];
+                let v3 = V3.to_ne_bytes();
+                hdr[0] = v3[0]; hdr[1] = v3[1];
+                hdr[2] = v3[2]; hdr[3] = v3[3];
+                let pid_le = pid.to_ne_bytes();
+                hdr[4] = pid_le[0]; hdr[5] = pid_le[1];
+                hdr[6] = pid_le[2]; hdr[7] = pid_le[3];
+                hdr
+            };
+
+            // Discriminator A: capget(V3 hdr w/ pid=-1, valid datap)
+            //   pre-batch -> 0 (all-ones data written, pid ignored)
+            //   post-batch -> -EINVAL (Linux gate `if (pid < 0)`).
+            let hdr_a = build_hdr(-1);
+            let hdr_a_ptr = (&raw const hdr_a[0]) as u64;
+            let mut datap_buf = [0u8; 24];
+            let datap_a = (&raw mut datap_buf[0]) as u64;
+            core::hint::black_box(&hdr_a);
+            core::hint::black_box(&datap_buf);
+            let a = SyscallArgs {
+                arg0: hdr_a_ptr, arg1: datap_a, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capget(V3, pid=-1, valid datap) not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator B: capget(V3 hdr w/ pid=12345, valid datap)
+            //   pre-batch -> 0 (silent success, all-ones written)
+            //   post-batch -> -ESRCH (find_task_by_vpid(12345) fails;
+            //     no PCB exists for pid 12345 in self-test context).
+            let hdr_b = build_hdr(12345);
+            let hdr_b_ptr = (&raw const hdr_b[0]) as u64;
+            core::hint::black_box(&hdr_b);
+            let a = SyscallArgs {
+                arg0: hdr_b_ptr, arg1: datap_a, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::ESRCH) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capget(V3, pid=other, valid datap) not ESRCH"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator C: capget(V3 hdr w/ pid=0, valid datap) -> 0
+            //   acceptance: pid==0 ("current task") takes the
+            //   else-branch in Linux (no find_task call) and the call
+            //   succeeds.  Pre-batch behaviour preserved.
+            let hdr_c = build_hdr(0);
+            let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
+            core::hint::black_box(&hdr_c);
+            let a = SyscallArgs {
+                arg0: hdr_c_ptr, arg1: datap_a, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPGET, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capget(V3, pid=0, valid datap) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Discriminator D: capget(V3 hdr w/ pid=-1, datap=NULL) -> 0
+            //   acceptance: the NULL-datap arm at the head of sys_capget
+            //   returns 0 BEFORE the pid<0 check runs.  Pre- and
+            //   post-batch behaviour both yield 0; this guards against
+            //   accidentally re-ordering the pid check ahead of the
+            //   NULL-datap version-probe early return.
+            let hdr_d = build_hdr(-1);
+            let hdr_d_ptr = (&raw const hdr_d[0]) as u64;
+            core::hint::black_box(&hdr_d);
+            let a = SyscallArgs {
+                arg0: hdr_d_ptr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::CAPGET, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: capget(V3, pid=-1, NULL datap) not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            serial_println!(
+                "[syscall/linux]   capget pid validation (Linux gate order): OK"
             );
         }
 

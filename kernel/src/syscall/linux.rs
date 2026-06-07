@@ -20357,7 +20357,11 @@ fn sys_fsopen(_args: &SyscallArgs) -> SyscallResult {
 ///   1. `fd < 0` -> EINVAL (the literal first gate).
 ///   2. switch(cmd): each command has a different valid argument
 ///      shape, and Linux validates them per-arm before any pointer
-///      lookup.  The default case is EINVAL.
+///      lookup.  The default case is **EOPNOTSUPP**, not EINVAL —
+///      Linux v6.6 fs/fsopen.c line 397 reads `default: return
+///      -EOPNOTSUPP;` (batch 494 fix).  Pre-batch we returned EINVAL
+///      on unknown cmd which mis-classified "this kernel doesn't
+///      implement that command" as "your call is malformed".
 ///   3. Then key/value lookup proceeds.
 ///
 /// Per-cmd argument shapes (Linux):
@@ -20441,7 +20445,15 @@ fn sys_fsconfig(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EINVAL);
             }
         }
-        _ => return linux_err(errno::EINVAL),
+        // Batch 494: Linux v6.6 fs/fsopen.c line 397 reads
+        // `default: return -EOPNOTSUPP;` — unknown cmd is reported
+        // as "operation not supported", not "invalid argument".  The
+        // discriminator matters: a userspace mount tool probing for
+        // a newer FSCONFIG_* command (e.g. a hypothetical
+        // FSCONFIG_SET_PATH_FD) needs EOPNOTSUPP to learn "your
+        // kernel is too old, fall back" whereas EINVAL would route
+        // to "you mis-specified the call, abort with a bug report".
+        _ => return linux_err(errno::EOPNOTSUPP),
     }
     // Gate 3: key, when set, must be a readable C string (Linux
     // strndup_user).  In kernel test context validate_user_str is a
@@ -55987,12 +55999,48 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   fsopen may_mount EPERM-first gate (Linux gate 1 fires before flag/ptr): OK");
 
-        // fsconfig bad cmd -> EINVAL.
+        // Batch 494: fsconfig bad cmd -> EOPNOTSUPP, not EINVAL.
+        // Linux v6.6 fs/fsopen.c line 397: `default: return -EOPNOTSUPP;`.
+        // Pre-batch we returned EINVAL on the default switch arm.
+        // Probe 4a: cmd=99 (just past the valid range 0..=8).
         let a = SyscallArgs { arg0: 0, arg1: 99, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: fsconfig bad cmd not EINVAL");
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig cmd=99 not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
+        // Probe 4b: cmd=9 (the first value past FSCONFIG_CMD_CREATE_EXCL=8).
+        let a = SyscallArgs { arg0: 0, arg1: 9, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig cmd=9 not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Probe 4c: cmd=u32::MAX (Linux treats cmd as unsigned int, so this
+        // is the maximum-positive unsigned value — still > 8, default arm).
+        let a = SyscallArgs { arg0: 0, arg1: u64::from(u32::MAX), arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig cmd=u32::MAX not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Probe 4d: cmd=0x80000000 (sign bit set; reinterpreted as i32 it's
+        // negative, but Linux's `unsigned int cmd` treats it as a huge
+        // positive — either way the default arm fires).
+        let a = SyscallArgs { arg0: 0, arg1: 0x8000_0000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig cmd=0x80000000 not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Probe 4e: cmd=0x100000000 (high half set, low half zero — would
+        // alias FSCONFIG_SET_FLAG=0 if we truncated to u32 incorrectly).
+        // Linux's `unsigned int cmd` truncates to the low 32 bits, so on
+        // Linux this aliases cmd=0 and hits SET_FLAG.  Our cast does the
+        // same i32 truncation, so this exercises the truncation parity.
+        // With key=NULL we expect SET_FLAG's per-arm EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0000, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FSCONFIG, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fsconfig cmd=0x100000000 (truncated to SET_FLAG) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   fsconfig default-arm EOPNOTSUPP (batch 494): OK");
         // Batch 242: fsconfig with fd<0 -> EINVAL (Linux's first gate).
         // Pre-batch-242 we accepted negative fds and returned EPERM via
         // the no-op validate_linux_fd in kernel context.

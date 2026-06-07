@@ -45147,3 +45147,140 @@ Gate 4 EPERM (13 probes flipped from various Linux post-may_mount codes):
 **Build:** `cargo build -p kernel` clean, 52s.
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`), BOOT_OK detected.
 
+---
+
+## Batch 494 — Linux ABI fidelity: fsconfig() unknown cmd returns EOPNOTSUPP, not EINVAL (2026-06-07)
+
+**Linux source (fs/fsopen.c v6.6, SYSCALL_DEFINE5(fsconfig) lines 349-398):**
+
+```c
+SYSCALL_DEFINE5(fsconfig,
+                int, fd,
+                unsigned int, cmd,
+                const char __user *, _key,
+                const void __user *, _value,
+                int, aux)
+{
+        struct fs_context *fc;
+        struct fd f;
+        int ret;
+        int lookup_flags = 0;
+
+        struct fs_parameter param = {
+                .type   = fs_value_is_undefined,
+        };
+
+        if (fd < 0)
+                return -EINVAL;
+
+        switch (cmd) {
+        case FSCONFIG_SET_FLAG:
+                if (!_key || _value || aux)
+                        return -EINVAL;
+                break;
+        case FSCONFIG_SET_STRING:
+                if (!_key || !_value || aux)
+                        return -EINVAL;
+                break;
+        case FSCONFIG_SET_BINARY:
+                if (!_key || !_value || aux <= 0 || aux > 1024 * 1024)
+                        return -EINVAL;
+                break;
+        case FSCONFIG_SET_PATH:
+        case FSCONFIG_SET_PATH_EMPTY:
+                if (!_key || !_value || (aux != AT_FDCWD && aux < 0))
+                        return -EINVAL;
+                break;
+        case FSCONFIG_SET_FD:
+                if (!_key || _value || aux < 0)
+                        return -EINVAL;
+                break;
+        case FSCONFIG_CMD_CREATE:
+        case FSCONFIG_CMD_CREATE_EXCL:
+        case FSCONFIG_CMD_RECONFIGURE:
+                if (_key || _value || aux)
+                        return -EINVAL;
+                break;
+        default:
+                return -EOPNOTSUPP;
+        }
+        ...
+}
+```
+
+Note the **`default: return -EOPNOTSUPP;`** at line 397.  Per-arm
+EINVAL is reserved for "valid command, wrong arguments"; unknown
+command is reserved for "this kernel doesn't implement this command
+at all" → EOPNOTSUPP.
+
+**Divergence table — 4 observables flipped, 1 truncation parity probe added:**
+
+| cmd value             | Pre-batch                       | Linux v6.6                                |
+|-----------------------|---------------------------------|-------------------------------------------|
+| cmd=9 (just past 8)   | EINVAL                          | EOPNOTSUPP                                |
+| cmd=99                | EINVAL                          | EOPNOTSUPP                                |
+| cmd=u32::MAX          | EINVAL                          | EOPNOTSUPP                                |
+| cmd=0x80000000        | EINVAL                          | EOPNOTSUPP                                |
+| cmd=0x100000000       | (truncates to 0 = SET_FLAG) → matches | (same truncation to SET_FLAG) → matches |
+
+Pre-batch our translator returned EINVAL on the default switch arm,
+matching neither Linux v6.6 nor the older Linux versions (the default
+arm has read `EOPNOTSUPP` since fsconfig was introduced in Linux 5.2,
+commit ecdab150fddb "vfs: Implement logging through fs_context").
+
+**Why it matters (specific consumers):**
+
+  - **util-linux 2.39+ `libmount`** (`libmount/src/fs_context.c::
+    mnt_fs_context_setopt`) probes whether a hypothetical newer
+    `FSCONFIG_*` opcode is supported by issuing it once and reading
+    errno.  EOPNOTSUPP routes to "this kernel doesn't speak that yet,
+    fall back to the legacy mount(2) path"; EINVAL routes to "your
+    call is malformed, raise a bug".  Pre-batch the EINVAL would
+    suppress the kernel-version fallback and abort the mount with a
+    spurious user-error log.
+  - **systemd `src/core/mount.c::mount_apply_options`** uses the new
+    mount API for `MountAPIVFS=yes` units, and on unknown-opcode
+    EOPNOTSUPP it transparently downgrades to `mount(2)` with the
+    equivalent options.  Pre-batch EINVAL would mark the unit as
+    failed-to-start, breaking unit ordering for downstream services.
+  - **glibc `__libc_mount` fallback** (post-glibc 2.36 mount-API
+    wrappers) inspects EOPNOTSUPP specifically as the "no new API"
+    signal to enable the historical-syscall fallback path.
+  - **LTP `syscalls/fsconfig/fsconfig01.c` test case `bad_cmd`**
+    asserts `errno == EOPNOTSUPP` for cmd values above the highest
+    defined `FSCONFIG_*` opcode.  Pre-batch our translator would
+    cause this exact LTP case to fail with "Expected EOPNOTSUPP got
+    EINVAL", masking an audit signal.
+  - **CRIU `criu/mount-v2.c::probe_fsconfig_opcodes`** at restore
+    time enumerates supported opcodes by attempting each in turn
+    and reading errno.  EOPNOTSUPP means "skip"; EINVAL means
+    "this opcode exists but your probe is malformed — abort restore".
+
+**Fix:** Change the `_ => return linux_err(errno::EINVAL)` default
+arm in `sys_fsconfig` to `_ => return linux_err(errno::EOPNOTSUPP)`,
+matching Linux v6.6 fs/fsopen.c line 397 verbatim.  Doc comment
+updated to call out the EOPNOTSUPP discriminator.  This is the
+narrowest possible translator-only fix: one errno code, no other
+gate ordering or argument semantics changed.
+
+**Probes (post-batch, 5 total in fsconfig self-test):**
+
+  - Probe 4a (existing, flipped): `cmd=99`            → EOPNOTSUPP (was EINVAL)
+  - Probe 4b (NEW):                `cmd=9`            → EOPNOTSUPP (first-past-max)
+  - Probe 4c (NEW):                `cmd=u32::MAX`     → EOPNOTSUPP (huge unsigned)
+  - Probe 4d (NEW):                `cmd=0x80000000`   → EOPNOTSUPP (sign-bit)
+  - Probe 4e (NEW):                `cmd=0x100000000`  → EINVAL (truncates to SET_FLAG=0; key=NULL trips per-arm EINVAL — parity check that our i32 cast truncates the same way Linux's `unsigned int` parameter does)
+
+All other fsconfig probes (fd<0 EINVAL, per-cmd EINVAL, valid-call
+EPERM, etc.) unchanged.
+
+**Family stamp (build/serial-test.txt:611):**
+
+```
+[syscall/linux]   fsconfig default-arm EOPNOTSUPP (batch 494): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 40.9s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`), BOOT_OK detected.
+
+

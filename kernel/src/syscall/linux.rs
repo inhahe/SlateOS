@@ -9736,12 +9736,15 @@ fn sys_syncfs(args: &SyscallArgs) -> SyscallResult {
 /// process exists).
 ///
 /// Gate order (matching Linux's kernel/sys.c::SYSCALL_DEFINE2(sethostname),
-/// batch 397):
+/// batch 397; batch 479 fixed gate 4):
 ///   1. `CAP_SYS_ADMIN` (modelled as `uid == 0`) → `-EPERM` —
 ///      kernel-context bypasses.
 ///   2. `len < 0 || len > 64` → `-EINVAL`.
 ///   3. `name == NULL && len != 0` → `-EFAULT`.
-///   4. `len == 0` → `-EINVAL` (nameservice rejects empty names).
+///   4. `len == 0` → install empty name via `nameservice::set_hostname("")`
+///      and return `0` (Linux's `memset(u->nodename + len, 0,
+///      sizeof(u->nodename) - len)` with `len == 0` zeros the entire
+///      64-byte field, leaving the kernel observing an empty hostname).
 ///   5. `copy_from_user` → `-EFAULT`.
 ///   6. Non-UTF-8 input → `-EINVAL` (deviation from Linux which
 ///      accepts arbitrary bytes; documented in todo.txt — the
@@ -9850,10 +9853,47 @@ fn sys_sethostname(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EFAULT);
     }
 
+    // Batch 479: sethostname(_, 0) is "clear the nodename field" — Linux
+    // returns 0.  Linux's body after the len/CAP gates reads:
+    //
+    //   down_write(&uts_sem);
+    //   errno = -EFAULT;
+    //   if (!copy_from_user(tmp, name, len)) {
+    //       struct new_utsname *u;
+    //       add_device_randomness(tmp, len);
+    //       u = utsname();
+    //       memcpy(u->nodename, tmp, len);
+    //       memset(u->nodename + len, 0, sizeof(u->nodename) - len);
+    //       errno = 0;
+    //       uts_proc_notify(UTS_PROC_HOSTNAME);
+    //       __new_utsname_release();
+    //   }
+    //   up_write(&uts_sem);
+    //   return errno;
+    //
+    // With len == 0: copy_from_user(tmp, name, 0) returns 0 without
+    // touching `name` (so even NULL `name` is fine), memcpy(_, _, 0)
+    // is a no-op, and memset(u->nodename + 0, 0, 64) zeros the whole
+    // nodename field.  Observable result: kernel hostname becomes the
+    // empty string and the syscall returns 0.
+    //
+    // Pre-batch we returned EINVAL here on the grounds that the
+    // nameservice rejected empty strings — a translator-internal
+    // policy bleeding through the Linux ABI surface.  systemd-
+    // hostnamed and util-linux `hostname -d` both use sethostname(_, 0)
+    // as a "reset hostname to empty" idiom; returning EINVAL trips
+    // those code paths into believing the kernel doesn't support
+    // clearing the nodename, which then either leaves stale state or
+    // forks a fallback chain.  Batch 479 routes len==0 to
+    // set_hostname("") (which now accepts empty per the matching
+    // nameservice change) and returns 0, mirroring Linux exactly.
+    // setdomainname has had this shape since the original landing;
+    // sethostname is brought into sister alignment here.
     if len == 0 {
-        // Empty hostname is rejected by Linux with EINVAL (the
-        // nameservice also rejects empty strings).
-        return linux_err(errno::EINVAL);
+        if let Err(e) = crate::fs::nameservice::set_hostname("") {
+            return linux_err(linux_errno_for(e));
+        }
+        return SyscallResult::ok(0);
     }
 
     // Copy from user into a stack buffer (max 64 bytes per the
@@ -44113,8 +44153,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // sethostname / setdomainname validation.
     //   - len > 64 -> EINVAL.
     //   - NULL pointer with non-zero len -> EFAULT.
-    //   - NULL pointer with zero len:
-    //     * sethostname -> EINVAL (empty name rejected, batch 57).
+    //   - NULL pointer with zero len (batch 479 fixed sethostname):
+    //     * sethostname -> 0 (clear-nodename, mirrors Linux's
+    //       `memset(u->nodename, 0, 64)` with len==0).
     //     * setdomainname -> 0 (clear-domain is allowed, batch 57).
     {
         // Initialise nameservice up front so the setdomainname
@@ -44139,19 +44180,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 57: sethostname now rejects empty hostnames with
-        // EINVAL (the nameservice refuses zero-length names).
-        // setdomainname accepts (clear-domain operation).
+        // Batch 479: sethostname(_, 0) clears the nodename and returns
+        // 0 — matches Linux's `memset(u->nodename + len, 0,
+        // sizeof(u->nodename) - len)` with len==0 zeroing the whole
+        // 64-byte field.  Pre-batch (57 through 478) we returned
+        // EINVAL because the underlying nameservice rejected empty
+        // strings.  Round-trip: snapshot the existing hostname, call
+        // sethostname(NULL, 0) via the syscall surface, observe the
+        // empty hostname through nameservice::get_hostname, then
+        // restore.  setdomainname has had this shape since batch 57;
+        // re-probed here as a regression guard.
+        let saved_hostname = crate::fs::nameservice::get_hostname();
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SETHOSTNAME, &a).value
-            != -i64::from(errno::EINVAL) {
+        if dispatch_linux(nr::SETHOSTNAME, &a).value != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: sethostname(NULL,0) not EINVAL ({})",
+                "[syscall/linux]   FAIL: sethostname(NULL,0) not 0 ({})",
                 dispatch_linux(nr::SETHOSTNAME, &a).value
             );
             return Err(KernelError::InternalError);
         }
+        if crate::fs::nameservice::get_hostname() != "" {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(NULL,0) did not clear nodename ({:?})",
+                crate::fs::nameservice::get_hostname(),
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Confirm a non-NULL pointer with len=0 also clears (the
+        // pointer is never read in Linux's copy_from_user with
+        // length 0, so the address is irrelevant).
+        let probe_buf = [0x41u8; 4];
+        let a2 = SyscallArgs {
+            arg0: probe_buf.as_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        // First write a non-empty hostname so we can see the clear
+        // take effect (rather than reading a still-empty value).
+        crate::fs::nameservice::set_hostname("batch479-pre")
+            .expect("seed pre-state for sethostname(VALID,0) probe");
+        if dispatch_linux(nr::SETHOSTNAME, &a2).value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(VALID,0) not 0 ({})",
+                dispatch_linux(nr::SETHOSTNAME, &a2).value
+            );
+            return Err(KernelError::InternalError);
+        }
+        if crate::fs::nameservice::get_hostname() != "" {
+            serial_println!(
+                "[syscall/linux]   FAIL: sethostname(VALID,0) did not clear nodename ({:?})",
+                crate::fs::nameservice::get_hostname(),
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Restore the original hostname so subsequent boot phases see
+        // unchanged uts state.
+        crate::fs::nameservice::set_hostname(&saved_hostname)
+            .expect("restore hostname after sethostname(_, 0) probes");
         if dispatch_linux(nr::SETDOMAINNAME, &a).value != 0 {
             serial_println!(
                 "[syscall/linux]   FAIL: setdomainname(NULL,0) not 0 ({})",
@@ -44159,6 +44244,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   sethostname(_, 0) clears nodename (Linux v6.6 kernel/sys.c: `memset(u->nodename + len, 0, sizeof(u->nodename) - len)`): OK"
+        );
 
         // Batch 57: hostname/domain round-trip via the underlying
         // nameservice.  We can't reach the user-pointer copy_from_user

@@ -139,9 +139,18 @@ pub fn get_hostname() -> String {
 }
 
 /// Set system hostname.
+///
+/// Empty names are accepted: this models Linux's
+/// `sethostname(_, 0)` "clear the nodename field" semantics
+/// (`memset(u->nodename + len, 0, sizeof(u->nodename) - len)` with
+/// `len == 0` zeros the entire 64-byte field, leaving the kernel
+/// observing an empty hostname).  The Linux ABI translator relies
+/// on this so it can mirror Linux's len==0 → 0 success contract
+/// without a translator-side hack (batch 479).  Mirrors
+/// [`set_domain`]'s already-permissive empty-string policy.
 pub fn set_hostname(name: &str) -> KernelResult<()> {
     with_state(|state| {
-        if name.is_empty() || name.len() > 253 {
+        if name.len() > 253 {
             return Err(KernelError::InvalidArgument);
         }
         state.hostname = String::from(name);
@@ -260,10 +269,16 @@ pub fn self_test() {
     assert_eq!(list_hosts().len(), 2);
     crate::serial_println!("  [1/8] defaults: OK");
 
-    // 2: Set hostname.
+    // 2: Set hostname.  Empty names are accepted (mirrors Linux's
+    // sethostname(_, 0) "clear the nodename field" semantics; see
+    // set_hostname's doc comment).  Over-long names still reject.
     set_hostname("myhost").expect("set");
     assert_eq!(get_hostname(), "myhost");
-    assert!(set_hostname("").is_err());
+    set_hostname("").expect("clear");
+    assert_eq!(get_hostname(), "");
+    // Restore a sane value so subsequent tests' resolve/hosts paths
+    // don't surface an empty hostname through any incidental reader.
+    set_hostname("myhost").expect("restore");
     crate::serial_println!("  [2/8] hostname: OK");
 
     // 3: Resolve.

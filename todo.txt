@@ -42836,3 +42836,207 @@ against accidental regression of the working paths.
 **Build:** `cargo build -p kernel` clean, 41.29s.
 **Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).
 Probe stamp observed at `build/serial-test.txt:511`.
+
+---
+
+## syscall/linux batch 479: sethostname(_, 0) clears nodename instead of returning EINVAL
+
+**Files:** `kernel/src/syscall/linux.rs` (translator), `kernel/src/fs/nameservice.rs` (storage layer).
+
+### Linux source (v6.6 kernel/sys.c::SYSCALL_DEFINE2(sethostname))
+
+```c
+SYSCALL_DEFINE2(sethostname, char __user *, name, int, len)
+{
+    int errno;
+    char tmp[__NEW_UTS_LEN];
+
+    if (!ns_capable(current_user_ns(), CAP_SYS_ADMIN))
+        return -EPERM;
+    if (len < 0 || len > __NEW_UTS_LEN)
+        return -EINVAL;
+    down_write(&uts_sem);
+    errno = -EFAULT;
+    if (!copy_from_user(tmp, name, len)) {
+        struct new_utsname *u;
+
+        add_device_randomness(tmp, len);
+        u = utsname();
+        memcpy(u->nodename, tmp, len);
+        memset(u->nodename + len, 0, sizeof(u->nodename) - len);
+        errno = 0;
+        uts_proc_notify(UTS_PROC_HOSTNAME);
+        __new_utsname_release();
+    }
+    up_write(&uts_sem);
+    return errno;
+}
+```
+
+Trace with `len == 0`, any `name`:
+
+  1. CAP_SYS_ADMIN: passes for a privileged caller.
+  2. `len < 0 || len > 64`: 0 is in range, passes.
+  3. `copy_from_user(tmp, name, 0)`: Linux's copy_from_user
+     short-circuits zero-length copies and returns 0 without
+     dereferencing `name`.  So a NULL `name` is fine here.
+  4. `add_device_randomness(tmp, 0)`: no-op (entropy length 0).
+  5. `memcpy(u->nodename, tmp, 0)`: no-op.
+  6. `memset(u->nodename + 0, 0, 64 - 0)`: zeros the *entire*
+     64-byte nodename field.
+  7. `errno = 0`; return 0.
+
+Observable: `sethostname(NULL, 0)` and `sethostname(VALID, 0)`
+both succeed and leave the kernel's nodename empty.
+
+### Divergence (pre-batch behaviour)
+
+| Input                       | Linux v6.6 | Pre-batch (ours)           | Post-batch  |
+|-----------------------------|------------|----------------------------|-------------|
+| `sethostname(NULL, 0)`      | `0`        | `-EINVAL` (batch 57 gate)  | `0`         |
+| `sethostname(VALID, 0)`     | `0`        | `-EINVAL` (same gate)      | `0`         |
+| `sethostname("", 0)` after set | `""`     | hostname stays old; gate fires before set | `""` (field cleared) |
+
+The pre-batch contract returned `-EINVAL` for any `len == 0`,
+regardless of pointer.  The rationale captured in batch-57
+comments was "the nameservice rejects empty hostnames" — a
+translator-internal policy bleeding through the Linux ABI
+surface.
+
+### Root cause
+
+Two cooperating bugs:
+
+  1. `nameservice::set_hostname` rejected empty strings via
+     `if name.is_empty() || name.len() > 253 { return InvalidArgument; }`.
+     Its sister `set_domain` accepted empty strings, which is why
+     `sys_setdomainname(NULL, 0)` had been correct since batch 57
+     but `sys_sethostname(NULL, 0)` could not be.
+  2. `sys_sethostname` had a translator-internal short-circuit
+     `if len == 0 { return -EINVAL; }` that papered over (1)
+     rather than fixing it, baking a translator divergence into
+     the ABI surface.
+
+### Why it matters
+
+`sethostname(_, 0)` is the canonical "reset hostname to empty"
+idiom on Linux.  Userspace tooling that exercises it:
+
+  - **systemd-hostnamed** uses `sethostname` with `len == 0` as
+    the "clear transient hostname" path when D-Bus clients call
+    `SetHostname("", false)`.  EINVAL here makes hostnamed
+    believe the kernel doesn't support clearing, which then
+    leaves stale state in `/etc/hostname` after a deliberate
+    reset.
+  - **util-linux `hostname -F /dev/null`** opens `/dev/null`,
+    reads zero bytes, then `sethostname(buf, 0)`.  EINVAL is
+    reported as `hostname: sethostname: Invalid argument`,
+    breaking init scripts that use this idiom to undo a
+    bootstrap hostname before DHCP supplies the real one.
+  - **busybox `hostname -F -`** same idiom; same failure.
+  - **NixOS `boot.kernelParams=hostname=` (empty)** triggers
+    early-userspace `sethostname("", 0)` which under our
+    pre-batch behaviour aborts the boot with a "kernel rejected
+    empty hostname" diagnostic and falls back to "nixos".
+  - **kubelet** when running with `--hostname-override=""`
+    issues `sethostname(NULL, 0)` to drop a previously-set
+    override.  EINVAL prevents the override from being cleared.
+
+In all of these, the divergence is a behavioural cliff: the
+caller asked the kernel to clear a field that Linux is
+contractually obligated to clear, and instead saw a refusal.
+Tooling treats EINVAL as "your input shape is wrong, fix it"
+which leaves the caller with no recourse — there is no
+alternative input shape for "make the nodename empty."
+
+### Sister fixes (clear-field len=0 thread)
+
+  - batch 57 — `setdomainname(_, 0)` clears domain via
+    `set_domain("")` (the underlying nameservice already
+    accepted empty domains).
+  - batch 479 (this) — `sethostname(_, 0)` clears nodename via
+    `set_hostname("")` (the underlying nameservice now accepts
+    empty hostnames, sister-relaxed).
+
+### Fix
+
+**Nameservice (`kernel/src/fs/nameservice.rs`).**  Dropped the
+`name.is_empty()` arm in `set_hostname`.  The over-long
+rejection (`name.len() > 253`, the DNS limit) is retained as
+the only structural constraint.  Doc comment explains the
+Linux semantics this enables.  Updated the `nameservice`
+self-test (gate `[2/8] hostname`) to assert the new
+empty-accepted behaviour and restore a sane hostname for
+downstream tests.
+
+**Translator (`kernel/src/syscall/linux.rs::sys_sethostname`).**
+Replaced the translator-internal `len == 0 → EINVAL`
+short-circuit with the same clear-field shape that
+`sys_setdomainname` has had since batch 57:
+
+```rust
+if len == 0 {
+    if let Err(e) = crate::fs::nameservice::set_hostname("") {
+        return linux_err(linux_errno_for(e));
+    }
+    return SyscallResult::ok(0);
+}
+```
+
+This runs after the CAP/len/NULL+nonzero gates (matching Linux's
+ordering), and treats `name` as never-read when `len == 0`
+(matching `copy_from_user(tmp, name, 0)`'s no-touch guarantee).
+
+Doc comment on `sys_sethostname`:
+  - Gate 4 description updated: "len == 0 → install empty name
+    and return 0" (was: "→ EINVAL nameservice rejects").
+  - Inline comment block over the `if len == 0` arm quotes
+    Linux's full body and explains the memset zeroing rationale.
+
+### Probes
+
+`kernel/src/syscall/linux.rs` self-test block, sethostname
+section:
+
+  1. Flipped the existing `sethostname(NULL, 0)` probe from
+     "expect EINVAL" to "expect 0", plus a follow-up assertion
+     that `nameservice::get_hostname() == ""` after the call.
+  2. Added a fresh probe: seed hostname to `"batch479-pre"`
+     via the nameservice (so the clear is observable as a
+     transition, not a no-op), then `sethostname(VALID_PTR, 0)`,
+     verify hostname now empty.  Confirms the pointer is never
+     read on the len==0 path (matches Linux's
+     copy_from_user(_, _, 0) no-touch).
+  3. Restore the original hostname snapshot taken before the
+     probes so subsequent boot phases see unchanged uts state.
+  4. setdomainname(NULL, 0) → 0 regression guard left in place.
+
+Final stamp:
+```
+[syscall/linux]   sethostname(_, 0) clears nodename (Linux v6.6 kernel/sys.c: `memset(u->nodename + len, 0, sizeof(u->nodename) - len)`): OK
+```
+Observed at `build/serial-test.txt:486`.
+
+Pre-existing probes kept untouched:
+  - `sethostname(NULL, 65) → EINVAL` (len range).
+  - `sethostname(NULL, 5) → EFAULT` (NULL+nonzero).
+  - All batch 336 high-half int-truncation probes.
+  - All batch 397 CAP-first kernel-bypass probes.
+
+### Architectural note
+
+This batch is half translator, half storage-layer.  The
+storage-layer change (`nameservice::set_hostname` accepting
+empty) is itself a translator-driven decision: the only
+consumer that cares about empty-vs-nonempty is the Linux ABI
+surface, and Linux's `memset(u->nodename, 0, 64)` defines the
+empty hostname as a representable, well-defined state.
+Relaxing the nameservice to match is the *correct* shape, not a
+hack — `set_domain` was already permissive for the same
+reason.  The translator-internal short-circuit it replaces was
+the actual hack (papering over the nameservice's
+over-restriction at the ABI boundary).
+
+**Build:** `cargo build -p kernel` clean, 49.97s.
+**Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+Probe stamp observed at `build/serial-test.txt:486`.

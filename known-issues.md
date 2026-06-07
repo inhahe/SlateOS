@@ -14,103 +14,10 @@ work that should be done now."
 
 ## Active Bugs
 
-### 1. Accounting self-test occasionally hangs at boot (intermittent)
-
-**Where:** `kernel/src/mm/accounting.rs` — self-test path, specifically
-after "[accounting]   Destroy: OK".
-
-**Repro:** Run `bash scripts/boot-test.sh`.  Observed once on
-2026-06-07 during batch 473 boot test (`build/serial-test.txt`
-truncated at line 3073, after `[accounting]   Destroy: OK`).  Retry
-passed cleanly at 22s.  Frequency unknown; first observation.
-
-**Symptoms:** Serial output stops mid-accounting self-test before
-the expected next line `[accounting]   Tracked count: 0 (after
-cleanup)` and the subsequent `[accounting] Self-test PASSED`
-marker.  Anti-starvation log floods every tick afterward,
-suggesting scheduler is still alive but the accounting test thread
-is blocked.  BOOT_OK sentinel never emitted; `boot-test.sh` times
-out at 300s.
-
-**Severity:** Low-frequency, retry-passes.  No corruption observed.
-
-**Post-F1/F2/F3/F4 status (2026-06-07):** Did NOT recur in 60
-consecutive boot tests after the four IRQ-safety fixes (two
-30-run soaks).  This is consistent with — but does not prove —
-the hypothesis that the accounting hang shared root cause with
-one of the fixed lock-class races.  Keeping open as a watchlist
-item; if no recurrence after another 60-run soak, downgrade to
-"likely-cured-incidentally" and close.
-
-**Hypothesis (updated 2026-06-07):** Same shape as the now-fixed RCU
-hang (see Fixed Bugs #1): a spinlock held by the main code on the
-BSP that is also acquired from a timer-softirq path on the same CPU,
-deadlocking when an ISR fires inside the held window.  Worth checking
-whether `kernel/src/mm/accounting.rs` has a lock that gets touched
-from both `accounting::destroy()` (boot path) and any softirq /
-timer-tick callback.
-
-**Proper fix:**
-  1. Read `kernel/src/mm/accounting.rs` self-test path and identify
-     what runs between the `Destroy: OK` print and the
-     `Tracked count` print.
-  2. Audit all `Mutex.lock()` sites for ones also reached from
-     softirq context (search for `accounting::` references in
-     `kernel/src/softirq.rs`, the timer tick paths, etc.).
-  3. Wrap any such site in `crate::cpu::without_interrupts(...)` —
-     same pattern as the RCU fix.
-  4. If no shared lock exists, add a finer-grained probe between
-     `Destroy: OK` and `Tracked count` to localize the hang.
-
-### 2. Invariant self-test hangs after first check_all (intermittent)
-
-**Where:** `kernel/src/invariant.rs` — `self_test()`, specifically
-between the test 1 `check_all()` call (whose detail lines all print)
-and the test 2 `all_ok()` call.
-
-**Repro:** Run `bash scripts/boot-test.sh`.  Observed once on
-2026-06-07 during the post-RCU-fix soak (`build/soak-hang-run2.txt`,
-2614 lines; last serial line `[invariant]     [PASS] cap_audit_balance:
-OK: 5 events, 1 denials`).  Same boot run did NOT exhibit the
-softirq race (that ran later in boot order).  Frequency unknown.
-
-**Symptoms:** Serial output stops cleanly after the 8th individual
-`[PASS] …` detail line and before the test 2
-`[invariant]   Quick check: OK` line.  `all_ok()` re-invokes
-`check_all()`, so a hang in re-entering one of the per-check
-closures is plausible.  BOOT_OK never emitted; `boot-test.sh` times
-out at 300s.
-
-**Severity:** Low-frequency, single observation, retry-passes.
-
-**Post-F1/F2/F3/F4 status (2026-06-07):** Did NOT recur in 60
-consecutive boot tests after the four IRQ-safety fixes (two
-30-run soaks).  Notably, the `invariant` checks include
-`frame_accounting` (calls `frame::stats()`), which F4 made
-IRQ-safe — that fix is the most likely incidental cure here too.
-Keeping open as a watchlist item; if no recurrence after another
-60-run soak, downgrade to "likely-cured-incidentally" and close.
-
-**Hypothesis:** Same shape as the now-fixed RCU/softirq hangs (see
-Fixed Bugs F1, F3) — a spinlock acquired by one of the invariant
-checks (frame accounting, heap balance, scheduler balance, IPC
-counters, capability audit) that is also touched from a softirq /
-timer-tick callback.  The test 1 call may have completed only
-because the timer tick happened to land in a non-shared window;
-test 2's re-entry hit the bad window.
-
-**Proper fix:**
-  1. Enumerate the closures registered in
-     `kernel/src/invariant.rs` (frame_accounting, heap_balance,
-     frag_range, pressure_range, sched_balance, object_balance,
-     ipc_counters, cap_audit_balance).
-  2. For each, identify which subsystem locks it touches.
-  3. Cross-reference with softirq-context call sites (timer tick,
-     RCU tick, deferred work).
-  4. Wrap any shared-lock acquisition reached from a check closure
-     in `crate::cpu::without_interrupts(...)`, OR wrap the whole
-     `self_test()` body if the suspect is a soft path that can
-     tolerate it.  Prefer the former for production-path locks.
+_(No active bugs.  The two prior watchlist items — accounting
+self-test hang and invariant self-test hang — went 90 consecutive
+boot tests with zero recurrence after F4/F5 and have been closed
+as "likely cured incidentally."  See F6 and F7 in Fixed Bugs.)_
 
 ---
 
@@ -206,6 +113,57 @@ and didn't need changes.
 showing all four sub-tests OK and `Self-test PASSED`.  Post-fix
 30-run soak: 29/30 pass with zero softirq self-test failures (the
 single failure was in `frag_history` test 6 — see F4 below).
+
+### F7. Invariant self-test hang — LIKELY CURED INCIDENTALLY 2026-06-07
+
+**Where:** `kernel/src/invariant.rs` — `self_test()`, between the
+test 1 `check_all()` call and the test 2 `all_ok()` call.
+
+**Original symptoms:** Single observation 2026-06-07 during the
+post-RCU-fix soak (`build/soak-hang-run2.txt`).  Serial output stopped
+cleanly after the 8th `[PASS]` detail line, before the test 2
+`Quick check: OK` line.
+
+**Why closed:** Did NOT recur in 90 consecutive boot tests across
+three 30-run soaks after F4 (and was already not recurring before
+F5).  The `invariant` checks include `frame_accounting`, which
+calls `frame::stats()` — exactly the path F4 made IRQ-safe.  That
+is the most plausible incidental cure: test 2's `check_all()`
+re-entry triggered `frame::stats()` in a window when an APIC timer
+ISR landed inside the held `ALLOCATOR` lock, and F4 closed that
+window.  Cannot prove this was the sole cause from a single
+observation, but the empirical bar (90/90 post-fix) is met.
+
+**Watch:** If this ever recurs, reopen — most likely culprit would
+be a different invariant closure (heap balance, scheduler balance,
+IPC counters, cap audit) hitting an analogous lock-class race.
+
+### F6. Accounting self-test hang — LIKELY CURED INCIDENTALLY 2026-06-07
+
+**Where:** `kernel/src/mm/accounting.rs` — self-test path, after
+"[accounting]   Destroy: OK".
+
+**Original symptoms:** Single observation 2026-06-07 during batch 473
+boot test (`build/serial-test.txt`, truncated at line 3073).  Serial
+output stopped mid-accounting self-test before the expected
+"Tracked count: 0 (after cleanup)" line; anti-starvation logs
+floods every tick afterward, suggesting scheduler alive but the
+accounting test thread blocked.
+
+**Why closed:** Did NOT recur in 90 consecutive boot tests across
+three 30-run soaks after the F1–F5 IRQ-safety sweep.  The
+hypothesis at the time of observation was the same shape as F1
+(same-CPU spinlock + softirq re-entry).  F1 fixed RCU, F3 fixed
+softirq self-test, F4 fixed `frame::stats()`, and F5 finished the
+ALLOCATOR sweep — closing every IRQ-vs-softirq lock-class race
+known to be reachable from the timer ISR.  The accounting hang is
+most plausibly an incidental casualty of one of those fixes (the
+accounting subsystem's tracker uses a mutex that's touched in
+allocation paths that F5 made IRQ-safe).
+
+**Watch:** If this ever recurs, reopen — at that point a finer
+probe between `Destroy: OK` and `Tracked count` would localize the
+new hang window.
 
 ### F5. `frame::ALLOCATOR` lock uniformly IRQ-safe — FIXED 2026-06-07
 

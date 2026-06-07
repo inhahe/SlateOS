@@ -14383,57 +14383,27 @@ fn sys_signalfd(args: &SyscallArgs) -> SyscallResult {
 /// `signalfd4(fd, mask, sizemask, flags)`.
 ///
 /// Gate order (matches Linux fs/signalfd.c):
-///   1+2. (outer SYSCALL_DEFINE4 combined-OR) `sizemask != sizeof(sigset_t)
-///        || copy_from_user(&mask, user_mask, 8)` -> EINVAL.
+///   1. (outer SYSCALL_DEFINE4) `sizemask != sizeof(sigset_t)` -> EINVAL.
+///   2. (outer) `copy_from_user(&mask, user_mask, 8)` -> EFAULT.
 ///   3. (do_signalfd4) `flags & ~(SFD_CLOEXEC | SFD_NONBLOCK)` -> EINVAL.
 ///   4. fd != -1: validate then surface EINVAL (no signalfd kind here).
 ///
-/// ## Batch 517 — combined-OR EINVAL for sizemask + copy_from_user
-///
-/// Linux v6.6 `fs/signalfd.c::SYSCALL_DEFINE4(signalfd4)` verbatim:
-/// ```c
-/// SYSCALL_DEFINE4(signalfd4, int, ufd, sigset_t __user *, user_mask,
-///         size_t, sizemask, int, flags)
-/// {
-///     sigset_t mask;
-///
-///     if (sizemask != sizeof(sigset_t) ||
-///         copy_from_user(&mask, user_mask, sizeof(mask)))
-///         return -EINVAL;
-///     return do_signalfd4(ufd, &mask, flags);
-/// }
-/// ```
-///
-/// Both arms of the OR feed a SINGLE `return -EINVAL` — there is no
-/// EFAULT path here.  Pre-batch we surfaced EFAULT for NULL /
-/// unreadable `user_mask` when `sizemask == 8`, following the
-/// "typical" `copy_from_user` -> EFAULT convention.  But signalfd4's
-/// combined gate collapses both failure modes onto EINVAL; userspace
-/// (glibc's `__signalfd` wrapper, systemd's signal-handler bootstrap,
-/// OpenSSH's session monitor) distinguishes EINVAL ("call shape is
-/// wrong") from EFAULT ("pointer is bad") to choose between
-/// retry-with-different-mask vs allocate-different-buffer, so the
-/// errno here is observable.
-///
 /// Pre-batch the flag-mask check fired ahead of the sizemask + mask
 /// gates, so a probe of (sizemask=8, mask=NULL, flags=bogus) saw
-/// EINVAL where Linux returns EINVAL via the OR (same outcome, but
-/// for the right reason).  Batch 256 then split the gates and (in
-/// error) made gate 2 surface EFAULT; batch 517 restores fidelity.
+/// EINVAL where Linux returns EFAULT.
 fn sys_signalfd4(args: &SyscallArgs) -> SyscallResult {
     let mask_ptr = args.arg1;
     let sizemask = args.arg2 as usize;
-    // Gates 1+2 (combined-OR): sizemask mismatch OR copy_from_user
-    // failure both surface EINVAL.  See doc comment above for the
-    // verbatim Linux v6.6 source.
+    // Gate 1: sizemask must be sizeof(sigset_t) = 8.
     if sizemask != 8 {
         return linux_err(errno::EINVAL);
     }
+    // Gate 2: copy_from_user(mask) -> EFAULT.
     if mask_ptr == 0 {
-        return linux_err(errno::EINVAL);
+        return linux_err(errno::EFAULT);
     }
-    if crate::mm::user::validate_user_read(mask_ptr, 8).is_err() {
-        return linux_err(errno::EINVAL);
+    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
+        return linux_err(linux_errno_for(e));
     }
     // Gate 3 (do_signalfd4): flags must be a subset of
     // SFD_CLOEXEC|SFD_NONBLOCK.
@@ -50648,59 +50618,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   signalfd/signalfd4 fd discrimination: OK");
 
-        // Batch 256 (sizemask -> mask -> flag-mask -> fd disp gate
-        // order) — refined by batch 517 which corrected the mask-arm
-        // outcome from EFAULT to EINVAL (Linux v6.6's combined-OR gate
-        // `sizemask != 8 || copy_from_user(...) -> -EINVAL`).
+        // Batch 256: signalfd4 gate order (outer sizemask -> outer
+        // copy_from_user -> do_signalfd4 flag-mask -> fd disp).
         //
-        // Discriminator A (mask-arm vs flag-mask): sizemask=8 (passes),
-        // mask=NULL, flags=bogus -> EINVAL.  Pre-batch-256 the flag
-        // gate fired first.  Pre-batch-517 we returned EFAULT for the
-        // NULL pointer; Linux's combined OR makes it EINVAL.
+        // Discriminator A (gate 2 vs gate 3): sizemask=8 (passes),
+        // mask=NULL, flags=bogus -> EFAULT.  Pre-batch the flag-mask
+        // check fired ahead of the mask read and returned EINVAL.
         let a = SyscallArgs {
             arg0: u64::MAX,
             arg1: 0,
             arg2: 8, arg3: 0x8000_0000, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::SIGNALFD4, &a).value
-            != -i64::from(errno::EINVAL) {
+            != -i64::from(errno::EFAULT) {
             serial_println!(
-                "[syscall/linux]   FAIL: signalfd4(sizemask=8, NULL, bad flag) expected EINVAL, got {}",
+                "[syscall/linux]   FAIL: signalfd4(sizemask=8, NULL, bad flag) expected EFAULT, got {}",
                 dispatch_linux(nr::SIGNALFD4, &a).value,
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 517 probe 1: sizemask=8, mask=NULL, flags=valid ->
-        // EINVAL (combined-OR mask arm).  Isolates the mask gate from
-        // any flag-mask contamination: with valid flags the only fault
-        // is the NULL mask pointer, and Linux's combined gate makes
-        // that EINVAL (not EFAULT).
-        let a = SyscallArgs {
-            arg0: u64::MAX,
-            arg1: 0,
-            arg2: 8, arg3: 0, arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::SIGNALFD4, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: signalfd4(sizemask=8, NULL, flags=0) expected EINVAL, got {}",
-                dispatch_linux(nr::SIGNALFD4, &a).value,
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Note: a "BAD_PTR" sub-case probe (mask=unreadable user
-        // address) would also exercise the combined-OR mask arm, but
-        // `validate_user_read` bypasses validation in kernel context
-        // (self-tests run as bare kernel tasks).  The NULL probe above
-        // already exercises the explicit `mask_ptr == 0` arm; the
-        // unreadable-pointer arm is covered by Discriminator A which
-        // pairs NULL with a bogus flag.
-        //
-        // Discriminator B (gate 1 wins over gate 2): sizemask=7,
-        // mask=NULL -> EINVAL.  Sizemask arm of the OR fires; both
-        // arms produce EINVAL so the outcome is unchanged, but this
-        // confirms we don't dereference the NULL when sizemask is
-        // already wrong (no spurious page-fault path).
+        // Discriminator B (gate 1 wins over gate 2 EFAULT): sizemask=7,
+        // mask=NULL -> EINVAL (sizemask gate fires before any pointer
+        // touch).  Confirms the wrong sizemask answer hasn't slipped
+        // into EFAULT territory.
         let a = SyscallArgs {
             arg0: u64::MAX,
             arg1: 0,
@@ -50714,10 +50654,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Discriminator C (gate 1+2 wins over gate 3): sizemask=7,
-        // mask=valid, flags=bogus -> EINVAL.  All three would produce
-        // EINVAL, but order matters for which "reason" the kernel
-        // records internally; in Linux the combined-OR fires first.
+        // Discriminator C (gate 1 wins over gate 3): sizemask=7,
+        // mask=valid, flags=bogus -> EINVAL (sizemask gate ahead of the
+        // flag-mask gate; both produce EINVAL but the former wins).
         let a = SyscallArgs {
             arg0: u64::MAX,
             arg1: sigmask.as_ptr() as u64,
@@ -50732,7 +50671,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   signalfd4 combined-OR EINVAL (sizemask | copy_from_user) > flag-mask gate order: OK"
+            "[syscall/linux]   signalfd4 sizemask > mask EFAULT > flag-mask gate order: OK"
         );
 
         // timerfd_create with bogus clockid -> EINVAL.

@@ -43801,3 +43801,149 @@ unchanged.
 
 **Build:** `cargo build -p kernel` clean, 1m 13s.
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 485 — sys_fchmodat2: split AT_EMPTY_PATH branch + fix batch-484 regression (2026-06-07)
+
+Translator-only Linux ABI fidelity fix.  Fixes a regression that batch
+484 (sys_fchmodat drop-flags-mask + empty-path) introduced into
+sys_fchmodat2's AT_EMPTY_PATH branch, and brings fchmodat2 in line
+with the empty-path → ENOENT contract for its non-AT_EMPTY_PATH path.
+
+### Linux source — `fs/open.c` (v6.6, verified via raw.githubusercontent.com/torvalds/linux/v6.6/fs/open.c)
+
+```c
+static int do_fchmodat(int dfd, const char __user *filename,
+                       umode_t mode, unsigned int flags)
+{
+    ...
+    if (unlikely(flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)))
+        return -EINVAL;
+    ...
+    /* getname()/getname_uflags() routes empty paths to either
+       -ENOENT (no AT_EMPTY_PATH) or operate-on-dirfd (with
+       AT_EMPTY_PATH). */
+    ...
+}
+
+SYSCALL_DEFINE4(fchmodat2, int, dfd, const char __user *, filename,
+                umode_t, mode, unsigned int, flags)
+{
+    return do_fchmodat(dfd, filename, mode, flags);
+}
+```
+
+`fchmodat2`'s valid-flags mask in v6.6 is `AT_SYMLINK_NOFOLLOW |
+AT_EMPTY_PATH` (= 0x100 | 0x1000) — our pre-batch translator
+already had this mask, so the mask itself is correct.
+
+### Divergence (pre-batch translator vs Linux)
+
+| call                                                      | Linux v6.6 | pre-batch | post-batch |
+|-----------------------------------------------------------|------------|-----------|------------|
+| `fchmodat2(_, valid, _, 0x800_0000)`                      | EINVAL     | EINVAL    | EINVAL     |
+| `fchmodat2(_, valid, _, NOFOLLOW)`                        | EROFS      | EROFS     | EROFS      |
+| `fchmodat2(_, "", _, 0)`                                  | ENOENT     | EROFS     | ENOENT     |
+| `fchmodat2(AT_FDCWD, "", _, AT_EMPTY_PATH)`               | EROFS      | EROFS\*   | EROFS      |
+| `fchmodat2(AT_FDCWD, valid, _, NOFOLLOW\|EMPTY_PATH)`     | EROFS      | EROFS     | EROFS      |
+| `fchmodat2(_, valid, _, 0x1_0000_0100)` (high\|NOFOLLOW)  | EROFS      | EROFS     | EROFS      |
+| `fchmodat2(_, valid, _, 0x1_0000_0010)` (high\|bad)       | EINVAL     | EINVAL    | EINVAL     |
+
+\*\*\* batch-484 regression: this row briefly read ENOENT between
+batches 484 and 485, because sys_fchmodat2 forwarded to
+sys_fchmodat which after batch 484 ran check_path_str_nonempty
+unconditionally.  Batch 485 fixes this by splitting the branches
+explicitly inside sys_fchmodat2.
+
+### Root cause
+
+Pre-batch sys_fchmodat2 forwarded the args verbatim to sys_fchmodat
+after a flags-mask + pointer-audit check:
+
+```rust
+fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
+    ...
+    if flags & !VALID != 0 { return EINVAL; }
+    if path != 0 { validate_user_str(path)?; }
+    sys_fchmodat(args)
+}
+```
+
+This was always missing the empty-path → ENOENT contract (Linux's
+non-AT_EMPTY_PATH getname() returns -ENOENT for empty paths).
+Batch 484 reshaped sys_fchmodat to call check_path_str_nonempty,
+which made the forward-to-fchmodat path *also* return ENOENT for
+empty paths — even when AT_EMPTY_PATH was set.  Linux's AT_EMPTY_PATH
+branch goes through getname_uflags(LOOKUP_EMPTY) which accepts empty
+paths (the operation targets dirfd directly), so this is a divergence.
+
+### Why it matters
+
+Real consumers that pass AT_EMPTY_PATH with an empty path expect
+operate-on-dirfd semantics:
+
+- glibc's `fchmodat()` wrapper post-Linux-6.6 uses syscall #452
+  (fchmodat2) when flags ≠ 0.  Pre-batch-485, an empty path with
+  AT_EMPTY_PATH would have surfaced as "no such file or directory"
+  instead of the expected EROFS — broken contract.
+- POSIX-2024 chmod-on-fd via `/proc/self/fd/N` fallback used to
+  emulate AT_EMPTY_PATH on older kernels; now that fchmodat2 exposes
+  it natively, callers expect Linux's contract.
+- Container runtimes (runc, crun) set permissions on freshly-opened
+  file descriptors via fchmodat2(fd, "", mode, AT_EMPTY_PATH) — the
+  ENOENT regression would break mount-prep.
+- systemd-nspawn / portable services that bind-mount with explicit
+  mode-fixup.
+- LTP `fchmodat2_01` validates the AT_EMPTY_PATH branch on supported
+  kernels.
+
+The empty-path → ENOENT (non-AT_EMPTY_PATH) contract matters for the
+same coreutils/busybox/glibc/LTP surface as batches 481-484.
+
+### Fix
+
+Rewrote sys_fchmodat2 (line 29143) to:
+
+1. Validate flags mask against `AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH`
+   (unchanged from pre-batch).
+2. Cast arg3 as `u32` (Linux's `unsigned int` parameter; was `i32`).
+3. If AT_EMPTY_PATH set: validate dirfd (AT_FDCWD or open fd), skip
+   pathname dereference, return EROFS.  Mirrors sys_fchownat's
+   AT_EMPTY_PATH branch.
+4. Else: route pathname through check_path_str_nonempty (batch 481
+   helper) for empty-path → ENOENT, then return EROFS.
+
+Updated check_path_str_nonempty's doc comment to add sys_fchmodat2
+(non-AT_EMPTY_PATH branch) as a batch-485 consumer.
+
+### Probe retrofit
+
+Replaced the two-probe fchmodat2 coverage (bad-flag → EINVAL,
+valid → EROFS) with a fuller block covering:
+
+- bad flag → EINVAL (preserved)
+- valid NOFOLLOW → EROFS (preserved)
+- empty path → ENOENT (new, exercises check_path_str_nonempty)
+- AT_FDCWD + empty + AT_EMPTY_PATH → EROFS (new, exercises the
+  AT_EMPTY_PATH branch — this would have returned ENOENT between
+  batches 484 and 485 without the fix)
+- AT_FDCWD + valid + NOFOLLOW|AT_EMPTY_PATH → EROFS (new, both
+  flag bits combined)
+- high|NOFOLLOW (0x1_0000_0100) → EROFS (new, int-truncation test;
+  low 32 = 0x100, mask passes)
+- high|bad-low (0x1_0000_0010) → EINVAL (new, int-truncation test;
+  low 32 = 0x10, mask rejects)
+
+Empty-path buffer planted locally as `fchm2_empty: [u8; 1] = [0u8]`,
+referenced through `core::hint::black_box`.
+
+Final stamp (line 699 of build/serial-test.txt):
+
+```
+[syscall/linux]   fchmodat2 AT_EMPTY_PATH branch + empty-path ->
+ ENOENT + int-truncation (Linux v6.6 fs/open.c do_fchmodat): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 45.23s.
+**Boot test:** PASS @ 24s (`bash scripts/boot-test.sh`).

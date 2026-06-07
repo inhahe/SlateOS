@@ -13368,7 +13368,8 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
 /// EROFS terminal.  Batch 481.  Batch 482 extended to `sys_mkdir` and
 /// `sys_mkdirat`.  Batch 483 extended to `sys_chmod`, `sys_chown`,
 /// `sys_lchown`, and `sys_fchownat` (non-`AT_EMPTY_PATH` branch).
-/// Batch 484 extended to `sys_fchmodat`.
+/// Batch 484 extended to `sys_fchmodat`.  Batch 485 extended to
+/// `sys_fchmodat2` (non-`AT_EMPTY_PATH` branch).
 fn check_path_str_nonempty(ptr: u64) -> Result<(), i32> {
     if ptr == 0 {
         return Err(errno::EFAULT);
@@ -29140,32 +29141,84 @@ fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
-/// `fchmodat2(dirfd, path, mode, flags)` — fchmodat with AT_SYMLINK_NOFOLLOW
-/// support.
+/// `fchmodat2(dirfd, path, mode, flags)` — Linux syscall #452.
 ///
-/// New in Linux 6.6, the only addition over fchmodat(2) is supporting
-/// `AT_SYMLINK_NOFOLLOW` on the flags argument (fchmodat ignores
-/// flags and was specced as the symlink-following variant only).
-/// Forward to the existing fchmodat for AT_FDCWD-only paths; otherwise
-/// the same dirfd restrictions apply.
+/// ## Linux source — `fs/open.c::do_fchmodat` / `SYSCALL_DEFINE4(fchmodat2)` (v6.6)
+///
+/// ```c
+/// static int do_fchmodat(int dfd, const char __user *filename,
+///                        umode_t mode, unsigned int flags)
+/// {
+///     ...
+///     if (unlikely(flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)))
+///         return -EINVAL;
+///     ...
+/// }
+///
+/// SYSCALL_DEFINE4(fchmodat2, int, dfd, const char __user *, filename,
+///                 umode_t, mode, unsigned int, flags)
+/// {
+///     return do_fchmodat(dfd, filename, mode, flags);
+/// }
+/// ```
+///
+/// `fchmodat2` is the 4-arg flavor introduced in Linux 6.6: it
+/// forwards `flags` to `do_fchmodat`, which validates against
+/// `~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)`.  `flags` is `unsigned
+/// int` (low 32 bits only).
+///
+/// ## Pre-batch divergence (revised by batch 485)
+///
+/// Pre-batch the routine forwarded to `sys_fchmodat` after a flags
+/// gate.  Batch 484 made `sys_fchmodat` call `check_path_str_nonempty`
+/// unconditionally — that introduced a regression here: a caller of
+/// `fchmodat2(dirfd, "", _, AT_EMPTY_PATH)` would see `-ENOENT`
+/// where Linux gives `-EROFS` (the AT_EMPTY_PATH branch operates on
+/// `dirfd` directly, not on the pathname).  Batch 485 splits the
+/// branches explicitly:
+///
+/// - `AT_EMPTY_PATH` set: validate `dirfd` (AT_FDCWD or open fd), no
+///   pathname dereference, EROFS terminal.
+/// - `AT_EMPTY_PATH` unset: empty path → ENOENT via
+///   `check_path_str_nonempty`, then EROFS terminal.
 fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
-    let _dirfd = args.arg0 as i32;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const VALID_FLAGS: u32 = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH;
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let dirfd = args.arg0 as i32;
     let path = args.arg1;
-    let _mode = args.arg2 as u32;
-    let flags = args.arg3 as i32;
-    // AT_SYMLINK_NOFOLLOW = 0x100, AT_EMPTY_PATH = 0x1000.
-    const VALID: i32 = 0x100 | 0x1000;
-    if flags & !VALID != 0 {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg3 as u32;
+
+    if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    if path != 0 {
-        if let Err(e) = validate_user_str(path) {
-            return linux_err(linux_errno_for(e));
+
+    if flags & AT_EMPTY_PATH != 0 {
+        // AT_EMPTY_PATH: operation targets dirfd directly; path may
+        // be empty.  AT_FDCWD (-100) is always valid; any other dirfd
+        // must reference an open fd.  Same shape as sys_fchownat's
+        // AT_EMPTY_PATH branch.
+        if dirfd != -100 {
+            let pid = match caller_pid() {
+                Some(p) => p,
+                None => return linux_err(errno::EROFS),
+            };
+            if pcb::linux_fd_lookup(pid, dirfd).is_none() {
+                return linux_err(errno::EBADF);
+            }
         }
+        return linux_err(errno::EROFS);
     }
-    // Forward to fchmodat (drops the flags difference; matches kernel
-    // <6.6 behaviour as observed via the historical fchmodat ABI).
-    sys_fchmodat(args)
+
+    // Non-AT_EMPTY_PATH: empty path → ENOENT (Linux getname empty-path
+    // discrimination), then EROFS terminal.
+    if let Err(e) = check_path_str_nonempty(path) {
+        return linux_err(e);
+    }
+    linux_err(errno::EROFS)
 }
 
 /// `futex_wake(uaddr2*, mask, nr, flags)` — futex2 wake (Linux 6.7+).
@@ -63865,18 +63918,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   mount_setattr forward-compat trailing-zero E2BIG: OK"
         );
 
+        // Batch 485: sys_fchmodat2 split AT_EMPTY_PATH branch + empty-
+        // path → ENOENT.  Linux v6.6 fs/open.c::do_fchmodat validates
+        // flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) → EINVAL, and
+        // its getname()/getname_uflags() routes empty paths to either
+        // -ENOENT (no AT_EMPTY_PATH) or operate-on-dirfd (with
+        // AT_EMPTY_PATH).  Pre-batch we forwarded to sys_fchmodat
+        // unconditionally — which after batch 484 added empty-path
+        // ENOENT, broke the AT_EMPTY_PATH branch (gave ENOENT instead
+        // of EROFS).
+        let fchm2_empty: [u8; 1] = [0u8];
+        core::hint::black_box(&fchm2_empty);
+        let fchm2_e = fchm2_empty.as_ptr() as u64;
+
         // fchmodat2 bad flag -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0o644, arg3: 0x800_0000, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: fchmodat2 bad flag not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // fchmodat2 valid -> EROFS (forwards to fchmodat which is read-only).
+        // fchmodat2 valid NOFOLLOW -> EROFS (non-AT_EMPTY_PATH branch).
         let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0o644, arg3: 0x100, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: fchmodat2 valid not EROFS");
             return Err(KernelError::InternalError);
         }
+        // fchmodat2(_, "", _, 0) -> ENOENT (Linux getname empty-path,
+        // non-AT_EMPTY_PATH).
+        let a = SyscallArgs { arg0: 0, arg1: fchm2_e, arg2: 0o644, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat2(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        // fchmodat2(AT_FDCWD, "", _, AT_EMPTY_PATH) -> EROFS (operate
+        // on dirfd directly; AT_FDCWD always valid).  Pre-batch 485
+        // this returned ENOENT due to the batch-484 forward.
+        // AT_FDCWD = -100, signed-extended to u64 = 0xFFFFFFFFFFFFFF9C.
+        let at_fdcwd: u64 = (-100_i64) as u64;
+        let a = SyscallArgs { arg0: at_fdcwd, arg1: fchm2_e, arg2: 0o644, arg3: 0x1000, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat2(AT_FDCWD, \"\", AT_EMPTY_PATH) not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // fchmodat2(AT_FDCWD, valid, _, NOFOLLOW|AT_EMPTY_PATH) -> EROFS
+        // (both flag bits accepted; AT_EMPTY_PATH branch dominates).
+        let a = SyscallArgs { arg0: at_fdcwd, arg1: path_ptr, arg2: 0o644, arg3: 0x1100, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat2(NOFOLLOW|EMPTY_PATH) not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // fchmodat2 int truncation: high-half garbage in flags arg
+        // must be stripped (Linux's `unsigned int flags` parameter).
+        // arg3 = 0x1_0000_0100 → low 32 = 0x100 (NOFOLLOW) → mask
+        // passes, EROFS terminal.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0o644, arg3: 0x1_0000_0100, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EROFS) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat2(high|NOFOLLOW) not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // arg3 = 0x1_0000_0010 → low 32 = 0x10 (unknown bit) → mask
+        // rejects → EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: path_ptr, arg2: 0o644, arg3: 0x1_0000_0010, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHMODAT2, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: fchmodat2(high|bad-low) not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   fchmodat2 AT_EMPTY_PATH branch + empty-path -> ENOENT + int-truncation (Linux v6.6 fs/open.c do_fchmodat): OK"
+        );
 
         // futex2 wake/wait — batch 120 plumbs these through to the
         // legacy handlers.  flags use the FUTEX2 layout: size in bits

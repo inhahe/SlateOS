@@ -163,9 +163,20 @@ static ITEMS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// full (item dropped).
 ///
 /// Safe to call from any context (ISR, softirq, or normal task).
+///
+/// IRQ-safety: `QUEUE` is acquired both from softirq context
+/// (`ktimer::process_expirations` → `workqueue::submit`) and from
+/// non-IRQ-safe main paths (kshell, supervisor restart callbacks).
+/// If main code held `QUEUE.lock()` when a timer ISR fired on the
+/// same CPU, the softirq's submit would re-enter the spinlock and
+/// deadlock against itself.  Wrap acquisitions in
+/// `without_interrupts(...)` — same pattern as the RCU CALLBACKS fix
+/// (F1) and the frame::stats fix (F4).
 pub fn submit(func: fn(u64), arg: u64) -> bool {
     let item = WorkItem { func, arg };
-    let enqueued = QUEUE.lock().enqueue(item);
+    let enqueued = crate::cpu::without_interrupts(|| {
+        QUEUE.lock().enqueue(item)
+    });
 
     if enqueued {
         ITEMS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
@@ -183,7 +194,7 @@ pub fn submit(func: fn(u64), arg: u64) -> bool {
 #[must_use]
 #[allow(dead_code)]
 pub fn pending_count() -> usize {
-    QUEUE.lock().len()
+    crate::cpu::without_interrupts(|| QUEUE.lock().len())
 }
 
 /// Total items executed since boot.
@@ -237,7 +248,13 @@ extern "C" fn worker_entry(_arg: u64) {
     loop {
         // Drain all pending items.
         loop {
-            let item = QUEUE.lock().dequeue();
+            // IRQ-safe acquisition: ktimer's softirq path also calls
+            // workqueue::submit() → QUEUE.lock().  If a timer ISR
+            // fires while the worker holds QUEUE.lock for a dequeue
+            // and the softirq path tries to submit, the spinlock
+            // would deadlock against itself on this CPU.  See the
+            // matching note on submit() above.
+            let item = crate::cpu::without_interrupts(|| QUEUE.lock().dequeue());
             match item {
                 Some(work) => {
                     // Execute the work item outside the lock.
@@ -251,8 +268,11 @@ extern "C" fn worker_entry(_arg: u64) {
         // Block on the wait queue until submit() wakes us.
         // Use wait_timeout as a fallback in case a wake is missed
         // (defense in depth — shouldn't happen but costs nothing).
+        // The predicate also takes QUEUE.lock; IRQ-safe wrap as
+        // above so a timer firing inside the predicate evaluation
+        // can't deadlock with a softirq-driven submit.
         WORKER_WQ.wait_timeout(
-            || QUEUE.lock().len() > 0,
+            || crate::cpu::without_interrupts(|| QUEUE.lock().len() > 0),
             POLL_INTERVAL_TICKS,
         );
     }

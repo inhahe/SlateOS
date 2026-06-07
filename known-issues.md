@@ -248,4 +248,38 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-(none recorded yet — file created 2026-06-06)
+### TD1. `frame::ALLOCATOR` lock acquisitions are not uniformly IRQ-safe
+
+**Where:** `kernel/src/mm/frame.rs` — 16 sites take `allocator.lock()`
+(grep `allocator.lock` in the file).  Only `stats()` (F4) and the
+panic-handler `try_stats()` are currently IRQ-safe.  The other 14
+sites — `alloc_*`, `free_*`, `is_allocator_owned`, `refcount`,
+`validate_free_lists`, etc. — take the lock without wrapping in
+`without_interrupts`.
+
+**Why this is debt, not an active bug:** A 2026-06-07 audit of every
+softirq sub-handler reachable from `softirq.rs::handle_timer()`
+showed none currently take `ALLOCATOR.lock` (the Explore-traced
+paths: sched wake processing, IPC timer expirations, ktimer→workqueue
+submission, cache writeback, watchdog, kstat, loadavg, irq_storm,
+irqbalance, RCU tick, cpufreq, thermal).  So there is no
+*currently-exploitable* deadlock on alloc/free.
+
+**Why this is still worth fixing:** As soon as any new softirq
+subsystem touches the allocator — kswapd periodic reclaim, RCU-deferred
+page free, memory-pressure-driven reclaim ticks, scrub completion —
+the deadlock window opens silently.  Future-proofing means making
+ALLOCATOR an IRQ-safe lock at the type level, not relying on
+inspecting every caller.
+
+**Proper fix:**
+  1. Define a small helper, e.g.
+     `fn with_allocator<F, R>(f: F) -> Option<R> where F: FnOnce(&mut BuddyAllocator) -> R`,
+     that wraps `ALLOCATOR.get()? . lock()` inside
+     `without_interrupts(...)`.
+  2. Convert all 16 `let mut guard = allocator.lock();` sites to use
+     the helper.
+  3. Spot-check that no site needs to hold the lock across a code
+     path that itself needs IRQs on (none should — the lock is a
+     fast-path buddy-allocator lock).
+  4. Re-run boot test + 30-run soak to confirm no regression.

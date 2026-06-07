@@ -12811,12 +12811,18 @@ fn sys_readlinkat(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `chmod(path, mode)`.
+///
+/// Empty-path → ENOENT (batch 483): `do_fchmodat(AT_FDCWD, path, mode)`
+/// calls `getname(filename)`, which routes through `getname_flags(_, 0,
+/// NULL)` — an empty user-string takes the `!len && !(flags &
+/// LOOKUP_EMPTY)` branch and returns `-ENOENT` before `path_setattr`
+/// ever sees the read-only mount.  See `check_path_str_nonempty`'s doc
+/// comment for the verbatim Linux quote.
 fn sys_chmod(args: &SyscallArgs) -> SyscallResult {
-    match validate_user_str(args.arg0) {
-        Ok(()) => linux_err(errno::EROFS),
-        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
-        Err(e) => linux_err(linux_errno_for(e)),
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
+    linux_err(errno::EROFS)
 }
 
 /// `fchmod(fd, mode)`.
@@ -12868,12 +12874,16 @@ fn sys_fchmodat(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `chown(path, uid, gid)`.
+///
+/// Empty-path → ENOENT (batch 483): `do_fchownat(AT_FDCWD, path, ...,
+/// 0)` calls `getname(filename)` (no `AT_EMPTY_PATH` from the bare
+/// `chown` entry), which surfaces `-ENOENT` for an empty user-string
+/// before any inode lookup.
 fn sys_chown(args: &SyscallArgs) -> SyscallResult {
-    match validate_user_str(args.arg0) {
-        Ok(()) => linux_err(errno::EROFS),
-        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
-        Err(e) => linux_err(linux_errno_for(e)),
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
+    linux_err(errno::EROFS)
 }
 
 /// `fchown(fd, uid, gid)`.
@@ -12892,12 +12902,16 @@ fn sys_fchown(args: &SyscallArgs) -> SyscallResult {
 
 /// `lchown(path, uid, gid)` — identical to chown without symlink
 /// follow; same answer for us.
+///
+/// Empty-path → ENOENT (batch 483): `do_fchownat(AT_FDCWD, path, ...,
+/// AT_SYMLINK_NOFOLLOW)` still calls `getname(filename)` — `AT_EMPTY_PATH`
+/// is not implied — so an empty user-string surfaces `-ENOENT` before
+/// any lookup.
 fn sys_lchown(args: &SyscallArgs) -> SyscallResult {
-    match validate_user_str(args.arg0) {
-        Ok(()) => linux_err(errno::EROFS),
-        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
-        Err(e) => linux_err(linux_errno_for(e)),
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
+    linux_err(errno::EROFS)
 }
 
 /// `fchownat(dirfd, path, uid, gid, flags)`.
@@ -12944,11 +12958,15 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
         }
         return linux_err(errno::EROFS);
     }
-    match validate_user_str(args.arg1) {
-        Ok(()) => linux_err(errno::EROFS),
-        Err(KernelError::InvalidAddress) if args.arg1 == 0 => linux_err(errno::EFAULT),
-        Err(e) => linux_err(linux_errno_for(e)),
+    // Empty-path → ENOENT (batch 483): without AT_EMPTY_PATH,
+    // do_fchownat()'s getname(filename) routes through
+    // getname_flags(_, 0, NULL) and surfaces -ENOENT for an empty
+    // user-string before user_path_at_empty() runs.  See
+    // check_path_str_nonempty's doc comment for the verbatim quote.
+    if let Err(e) = check_path_str_nonempty(args.arg1) {
+        return linux_err(e);
     }
+    linux_err(errno::EROFS)
 }
 
 // ---------------------------------------------------------------------------
@@ -13335,7 +13353,9 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
 /// branch.  Used by `sys_symlink`, `sys_symlinkat`, `sys_link`, and
 /// `sys_linkat` (when `AT_EMPTY_PATH` is not set) to match Linux's
 /// empty-path errno before falling through to the read-only-FS
-/// EROFS terminal.  Batch 481.
+/// EROFS terminal.  Batch 481.  Batch 482 extended to `sys_mkdir` and
+/// `sys_mkdirat`.  Batch 483 extended to `sys_chmod`, `sys_chown`,
+/// `sys_lchown`, and `sys_fchownat` (non-`AT_EMPTY_PATH` branch).
 fn check_path_str_nonempty(ptr: u64) -> Result<(), i32> {
     if ptr == 0 {
         return Err(errno::EFAULT);
@@ -47262,6 +47282,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   readlink/readlinkat bufsiz<=0 fires before pointer access (Linux v6.6 fs/stat.c: `if (bufsiz <= 0) return -EINVAL`): OK"
         );
 
+        // Batch 483: chmod/chown/lchown/fchownat empty-path -> ENOENT.
+        // sys_chmod, sys_chown, sys_lchown, and sys_fchownat (non-
+        // AT_EMPTY_PATH branch) now route the user-pointer through
+        // check_path_str_nonempty (batch 481 helper), which reads the
+        // first byte to distinguish empty (-ENOENT) from non-empty
+        // (proceed).  These probes must point at kernel-resident
+        // buffers — the legacy 0x1000 sentinels are unmapped and the
+        // helper would page-fault.  See sys_chmod/sys_chown/sys_lchown/
+        // sys_fchownat doc comments for the Linux references.
+        let cm_nonempty: [u8; 2] = *b"f\0";
+        let cm_empty: [u8; 1] = [0u8];
+        core::hint::black_box(&cm_nonempty);
+        core::hint::black_box(&cm_empty);
+        let cm_ne = cm_nonempty.as_ptr() as u64;
+        let cm_e = cm_empty.as_ptr() as u64;
+
         // chmod(NULL,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -47270,8 +47306,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: chmod(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
+        // chmod("",_) -> ENOENT (Linux getname empty-path).
+        let a = SyscallArgs { arg0: cm_e, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHMOD, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: chmod(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
         // chmod(path,_) -> EROFS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: cm_ne, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CHMOD, &a).value
             != -i64::from(errno::EROFS) {
@@ -47397,8 +47441,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   fchmodat int truncation (high-half ignored): OK"
         );
 
+        // Batch 483: chown/lchown/fchownat probes also need planted
+        // kernel-resident buffers — same retrofit as the chmod block
+        // above.  sys_chown/sys_lchown route through
+        // check_path_str_nonempty which dereferences the first byte;
+        // sys_fchownat's non-AT_EMPTY_PATH branch does the same.
+        let co_nonempty: [u8; 2] = *b"o\0";
+        let co_empty: [u8; 1] = [0u8];
+        core::hint::black_box(&co_nonempty);
+        core::hint::black_box(&co_empty);
+        let co_ne = co_nonempty.as_ptr() as u64;
+        let co_e = co_empty.as_ptr() as u64;
+
         // chown / lchown(path,_,_) -> EROFS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: co_ne, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CHOWN, &a).value
             != -i64::from(errno::EROFS) {
@@ -47408,6 +47464,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if dispatch_linux(nr::LCHOWN, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: lchown not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // chown("",_,_) / lchown("",_,_) -> ENOENT (Linux getname).
+        let a = SyscallArgs { arg0: co_e, arg1: 0, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::CHOWN, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: chown(\"\") not ENOENT");
+            return Err(KernelError::InternalError);
+        }
+        if dispatch_linux(nr::LCHOWN, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: lchown(\"\") not ENOENT");
             return Err(KernelError::InternalError);
         }
         // chown(NULL,_,_) -> EFAULT.
@@ -47426,7 +47495,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: fchown not EROFS");
             return Err(KernelError::InternalError);
         }
-        // fchownat bogus flag -> EINVAL.
+        // fchownat bogus flag -> EINVAL.  (flags-mask gate fires before
+        // pointer dereference, so the raw sentinel is still safe here.)
         let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
             arg4: 0x800_0000, arg5: 0 };
         if dispatch_linux(nr::FCHOWNAT, &a).value
@@ -47435,11 +47505,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // fchownat(_, path, _, _, 0) -> EROFS.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: co_ne, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::FCHOWNAT, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: fchownat not EROFS");
+            return Err(KernelError::InternalError);
+        }
+        // fchownat(_, "", _, _, 0) -> ENOENT (Linux getname; no
+        // AT_EMPTY_PATH).
+        let a = SyscallArgs { arg0: 0, arg1: co_e, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FCHOWNAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!("[syscall/linux]   FAIL: fchownat(\"\") not ENOENT");
             return Err(KernelError::InternalError);
         }
 
@@ -47456,13 +47535,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // VALID_FLAGS = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH (0x100 |
         // 0x1000) surface.
         //
-        // (a) fchownat(0, 0x1000, 0, 0, 0x1_0000_0100) → EROFS
+        // (a) fchownat(0, path, 0, 0, 0x1_0000_0100) → EROFS
         //     (high|NOFOLLOW; truncates to 0x100, mask passes, no
-        //     EMPTY_PATH branch, validate_user_str succeeds in kernel
-        //     context, EROFS terminal).
+        //     EMPTY_PATH branch, check_path_str_nonempty (batch 483)
+        //     reads first byte ('o'\0), non-empty proceeds, EROFS
+        //     terminal).  Pointer retrofitted from raw 0x1000 sentinel
+        //     to kernel-resident co_nonempty buffer (batch 483).
         let a = SyscallArgs {
             arg0: 0,
-            arg1: 0x1000,
+            arg1: co_ne,
             arg2: 0,
             arg3: 0,
             arg4: 0x1_0000_0100,
@@ -47477,13 +47558,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (b) fchownat(0, 0x1000, 0, 0, 0x1_0000_1100) → EROFS
+        // (b) fchownat(0, path, 0, 0, 0x1_0000_1100) → EROFS
         //     (high|NOFOLLOW|EMPTY_PATH; truncates to 0x1100, mask
         //     passes, AT_EMPTY_PATH branch fires; dirfd=0 in kernel
-        //     context → caller_pid()=None → EROFS).
+        //     context → caller_pid()=None → EROFS).  The AT_EMPTY_PATH
+        //     branch never dereferences the path, but keep co_ne for
+        //     uniformity with the rest of the truncation block.
         let a = SyscallArgs {
             arg0: 0,
-            arg1: 0x1000,
+            arg1: co_ne,
             arg2: 0,
             arg3: 0,
             arg4: 0x1_0000_1100,
@@ -47498,12 +47581,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (c) fchownat(0, 0x1000, 0, 0, 0x1_0000_0000) → EROFS
+        // (c) fchownat(0, path, 0, 0, 0x1_0000_0000) → EROFS
         //     (high-half garbage only, low half zero; truncates to 0,
         //     mask passes, no EMPTY_PATH branch, EROFS terminal).
         let a = SyscallArgs {
             arg0: 0,
-            arg1: 0x1000,
+            arg1: co_ne,
             arg2: 0,
             arg3: 0,
             arg4: 0x1_0000_0000,
@@ -47518,14 +47601,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (d) fchownat(0, 0x1000, 0, 0, 0x1_0000_0010) → EINVAL
+        // (d) fchownat(0, path, 0, 0, 0x1_0000_0010) → EINVAL
         //     (high|bad-low 0x10; truncates to 0x10, mask check
-        //     rejects bit outside VALID_FLAGS; verifies mask gate
-        //     still rejects bogus low bits after high half is
-        //     stripped).
+        //     rejects bit outside VALID_FLAGS before any pointer
+        //     access — co_ne is unused, but keep for uniformity).
         let a = SyscallArgs {
             arg0: 0,
-            arg1: 0x1000,
+            arg1: co_ne,
             arg2: 0,
             arg3: 0,
             arg4: 0x1_0000_0010,
@@ -47542,6 +47624,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   fchownat int truncation (high-half ignored): OK"
+        );
+
+        serial_println!(
+            "[syscall/linux]   chmod/chown/lchown/fchownat empty-path -> ENOENT (Linux v6.6 fs/namei.c::getname_flags: `if (unlikely(!len)) {{ if (!(flags & LOOKUP_EMPTY)) ... retval = -ENOENT; }}`): OK"
         );
 
         // truncate gate-ladder coverage is provided by the dedicated

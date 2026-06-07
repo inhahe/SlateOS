@@ -43474,3 +43474,184 @@ Final stamp at `build/serial-test.txt:508`:
 
 **Build:** `cargo build -p kernel` clean, 44.14s.
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+---
+
+## Batch 483 — chmod/chown/lchown/fchownat: empty-path → ENOENT (2026-06-07)
+
+Translator-only Linux ABI fidelity fix.  Fifth wave of the
+empty-path → ENOENT compliance pass started by batch 481
+(symlink/link/linkat) and continued by batch 482 (mkdir/mkdirat).
+Brings `chmod`, `chown`, `lchown`, and `fchownat` (non-AT_EMPTY_PATH
+branch) into line with Linux's `getname()` discrimination of empty
+user-strings before any filesystem-state errno (here EROFS).
+
+### Linux source — `fs/namei.c::getname_flags()` (v6.6)
+
+```c
+struct filename *
+getname_flags(const char __user *filename, int flags, int *empty)
+{
+    struct filename *result;
+    char *kname;
+    int len;
+
+    result = __getname();
+    if (unlikely(!result))
+        return ERR_PTR(-ENOMEM);
+
+    ...
+    kname = (char *)result->iname;
+    result->name = kname;
+
+    len = strncpy_from_user(kname, filename, EMBEDDED_NAME_MAX);
+    if (unlikely(len < 0)) {
+        __putname(result);
+        return ERR_PTR(len);
+    }
+
+    if (unlikely(!len)) {
+        if (!(flags & LOOKUP_EMPTY)) {
+            __putname(result);
+            return ERR_PTR(-ENOENT);
+        }
+    }
+    ...
+}
+```
+
+`fs/open.c::do_fchmodat()` calls `getname(filename)` (flags = 0, no
+LOOKUP_EMPTY), so an empty path → `-ENOENT` before `path_setattr`
+ever runs.  `fs/open.c::do_fchownat()` likewise routes through
+`getname()` when AT_EMPTY_PATH is *not* set; the AT_EMPTY_PATH
+branch instead calls `getname_uflags(_, LOOKUP_EMPTY)` and accepts
+empty paths (targeting `dirfd` directly).
+
+`sys_chmod(path, mode)` = `do_fchmodat(AT_FDCWD, path, mode)`.
+`sys_chown(path, u, g)` = `do_fchownat(AT_FDCWD, path, u, g, 0)`.
+`sys_lchown(path, u, g)` = `do_fchownat(AT_FDCWD, path, u, g,
+AT_SYMLINK_NOFOLLOW)`.  None of these set AT_EMPTY_PATH (`lchown`'s
+`AT_SYMLINK_NOFOLLOW` is a different bit, 0x100, not 0x1000), so all
+three reject empty paths with ENOENT in Linux.  `fchownat`'s
+non-AT_EMPTY_PATH branch behaves the same way.
+
+### Divergence (pre-batch translator vs Linux)
+
+| call                                              | Linux v6.6 | pre-batch | post-batch |
+|---------------------------------------------------|------------|-----------|------------|
+| `chmod(NULL, _)`                                  | EFAULT     | EFAULT    | EFAULT     |
+| `chmod("", _)`                                    | ENOENT     | EROFS     | ENOENT     |
+| `chmod(valid, _)`                                 | EROFS      | EROFS     | EROFS      |
+| `chown(NULL, _, _)`                               | EFAULT     | EFAULT    | EFAULT     |
+| `chown("", _, _)`                                 | ENOENT     | EROFS     | ENOENT     |
+| `chown(valid, _, _)`                              | EROFS      | EROFS     | EROFS      |
+| `lchown("", _, _)`                                | ENOENT     | EROFS     | ENOENT     |
+| `lchown(valid, _, _)`                             | EROFS      | EROFS     | EROFS      |
+| `fchownat(_, "", _, _, 0)`                        | ENOENT     | EROFS     | ENOENT     |
+| `fchownat(_, valid, _, _, 0)`                     | EROFS      | EROFS     | EROFS      |
+| `fchownat(_, _, _, _, AT_EMPTY_PATH)` (untouched) | EROFS      | EROFS     | EROFS      |
+
+### Root cause
+
+The four syscall bodies only ran `validate_user_str(path)` (pointer-
+audit-without-dereference) before returning the EROFS terminal.
+`validate_user_str` doesn't distinguish "valid pointer to empty
+string" from "valid pointer to non-empty string" — so an empty
+user-string sailed through to EROFS where Linux would have stopped
+at `getname()` with `-ENOENT`.
+
+### Why it matters
+
+This is the same class of empty-path fidelity bug that batches 481
+and 482 fixed for the create-link and create-dir families.  Real
+consumers that probe owner/mode metadata before opening:
+
+- glibc `chmod`/`chown`/`lchown` test suite (sysdeps/posix and the
+  io tests under nptl/) explicitly verify the `EINVAL`-vs-`ENOENT`
+  contract for empty paths.
+- LTP `chmod07`, `chown05`, `lchown03`, `fchownat04` — all expect
+  ENOENT for an empty pathname.
+- POSIX-compliance test suites (PCTS, Open Posix Test Suite) include
+  empty-path coverage for these four entry points.
+- systemd's tmpfiles parser, coreutils' `install --mode=`/`chown`,
+  busybox's `chmod -R`/`chown -R`, and dpkg's permission-restoration
+  helpers all surface EROFS-vs-ENOENT to the user verbatim; mistaking
+  "no path supplied" for "filesystem read-only" produces incorrect
+  diagnostics in maintenance scripts.
+
+The EROFS-vs-ENOENT distinction also matters for caller logic that
+treats ENOENT as "skip this entry" but EROFS as "abort the batch"
+(common pattern in install/setcap scripts).
+
+### Fix
+
+Routed all four pathname arguments through the existing
+`check_path_str_nonempty` helper introduced in batch 481:
+
+- `sys_chmod` (line 12814): replaced `validate_user_str → EROFS`
+  match with `check_path_str_nonempty(arg0)? → EROFS`.
+- `sys_chown` (line 12877): same.
+- `sys_lchown` (line 12902): same.
+- `sys_fchownat` (line 12914) non-AT_EMPTY_PATH branch: same,
+  preserving the existing AT_EMPTY_PATH dirfd-validation path that
+  uses raw pointer access skipping the empty-path gate (matching
+  Linux's `getname_uflags(_, LOOKUP_EMPTY)` semantics).
+
+Updated `check_path_str_nonempty`'s doc comment to list the four new
+consumers alongside the symlink/link family and mkdir/mkdirat.
+
+`sys_fchmodat` is *not* included in this batch.  Linux has two
+entry points for "fchmodat-like" behavior: `SYSCALL_DEFINE3(fchmodat,
+int, dfd, const char __user *, filename, umode_t, mode)` — which
+takes *no* flags arg and behaves like `sys_chmod` — and
+`SYSCALL_DEFINE4(fchmodat2, int, dfd, const char __user *, filename,
+umode_t, mode, unsigned int, flags)` — which is the syscall glibc's
+fchmodat() actually wraps when flags ≠ 0.  Our `sys_fchmodat` mixes
+both by accepting a flags arg from R10, so untangling which Linux
+entry point to mirror needs its own batch.
+
+### Probe retrofit
+
+Updated the CHMOD/CHOWN/LCHOWN/FCHOWNAT probe block (lines ~47285-
+47620) to plant kernel-resident buffers for the pointer arguments:
+
+```rust
+let cm_nonempty: [u8; 2] = *b"f\0";
+let cm_empty: [u8; 1] = [0u8];
+core::hint::black_box(&cm_nonempty);
+core::hint::black_box(&cm_empty);
+let cm_ne = cm_nonempty.as_ptr() as u64;
+let cm_e = cm_empty.as_ptr() as u64;
+
+let co_nonempty: [u8; 2] = *b"o\0";
+let co_empty: [u8; 1] = [0u8];
+core::hint::black_box(&co_nonempty);
+core::hint::black_box(&co_empty);
+let co_ne = co_nonempty.as_ptr() as u64;
+let co_e = co_empty.as_ptr() as u64;
+```
+
+`cm_ne`/`co_ne` replace the legacy 0x1000 sentinels in the existing
+"valid path" probes (the helper now dereferences the first byte —
+0x1000 is unmapped under kernel context and would page-fault, same
+issue batch 481 already retrofitted for truncate/symlink/mkdir).
+`cm_e`/`co_e` drive new "empty-path → ENOENT" probes for chmod,
+chown, lchown, and fchownat (non-AT_EMPTY_PATH branch).
+
+The batch-311 fchmodat int-truncation probes (a)-(d) still use the
+raw 0x1000 sentinel because `sys_fchmodat` was *not* modified in this
+batch — it still uses `validate_user_str` which bypasses validation
+in kernel context.  The batch-312 fchownat int-truncation probes
+(a)-(d) were retrofitted to `co_ne`; probes (a), (c), (d) now
+reach the new `check_path_str_nonempty` helper.
+
+### Final stamp (line 516 of build/serial-test.txt)
+
+```
+[syscall/linux]   chmod/chown/lchown/fchownat empty-path -> ENOENT
+ (Linux v6.6 fs/namei.c::getname_flags: `if (unlikely(!len)) { if
+ (!(flags & LOOKUP_EMPTY)) ... retval = -ENOENT; }`): OK
+```
+
+**Build:** `cargo build -p kernel` clean, 1m 45s.
+**Boot test:** PASS @ 41s (`bash scripts/boot-test.sh`).

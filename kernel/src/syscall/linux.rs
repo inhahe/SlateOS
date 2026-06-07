@@ -7654,12 +7654,35 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
         buf[40..48].copy_from_slice(&free_bytes.to_ne_bytes());
     }
 
-    // procs at offset 80..82 (ushort): live process count.  Linux
-    // counts all threads; we currently model one PCB per process,
-    // which under-reports thread-rich workloads — documented as a
-    // limitation in todo.txt.  Saturating cast guards against the
-    // unlikely u16::MAX overflow.
-    let procs_u: u64 = pcb::count() as u64;
+    // procs at offset 80..82 (ushort): live task / thread count.
+    //
+    // ## Linux source — `kernel/sys.c::do_sysinfo`
+    //
+    //     val->procs = nr_threads;
+    //
+    // `nr_threads` (`kernel/fork.c`) is the system-wide count of
+    // tasks — every thread is a task, every multi-threaded process
+    // contributes one task per thread.  The field name `procs` is
+    // a vestigial misnomer dating to single-threaded UNIX; the
+    // kernel's actual source is the thread/task counter.
+    //
+    // Pre-batch we sourced this from `pcb::count()` (process count),
+    // which under-reports thread-rich workloads — a single Java
+    // VM with 200 threads contributes 1 to pcb::count but 200 to
+    // Linux's nr_threads.  Userspace consumers (procps `vmstat r/b`
+    // columns derive the runnable estimate partly from
+    // sysinfo.procs; monitoring agents like collectd's `sysinfo`
+    // plugin export it as `processes/forked`; container runtimes
+    // use it as a sanity check against `/proc/sys/kernel/threads-max`)
+    // saw a value off by orders of magnitude on multi-threaded
+    // workloads.  Batch 512 switches the source to
+    // `crate::proc::thread::thread_count()`, the size of the
+    // THREAD_OWNERS map — every spawn() / spawn_user() registers
+    // and every on_thread_exit() de-registers, so the count is the
+    // live task population, matching Linux's `nr_threads`.
+    //
+    // Saturating cast guards against the unlikely u16::MAX overflow.
+    let procs_u: u64 = crate::proc::thread::thread_count() as u64;
     #[allow(clippy::cast_possible_truncation)]
     let procs_u16: u16 = if procs_u > u64::from(u16::MAX) {
         u16::MAX
@@ -43293,23 +43316,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
 
-        // Batch 58: verify the storage layer that sysinfo's `procs`
-        // field reads — pcb::count() — reflects live PCB allocations
-        // and decrements on destroy.  We can't reach a user-pointer
-        // copy_to_user from kernel context to inspect the wire-level
-        // bytes, but we can confirm the source of truth round-trips
-        // and that the saturating-cast guard at u16::MAX doesn't fire
-        // on normal counts.
+        // Batch 58 / batch 512: verify the storage layers for
+        // sysinfo's `procs` field.  The wire-level `procs` at
+        // offset 80..82 must source from `thread::thread_count()`
+        // (v6.6 `nr_threads`), NOT from `pcb::count()` (v6.6
+        // `nr_running_processes`-equivalent).
+        //
+        // We read sysinfo_buf[80..82] directly — sysinfo_buf above
+        // is the wire-level buffer just written by sysinfo() —
+        // and compare against thread_count() and pcb::count()
+        // snapshots taken at the same boot moment.
         {
-            let before = pcb::count();
+            // (a) Source-of-truth round-trip: both counters must
+            //     respond to create / spawn / destroy.  Locks in
+            //     that pcb::count and thread_count are independent
+            //     live counters (pre-batch a regression that wired
+            //     them together would silently re-introduce the
+            //     under-reporting bug).
+            let before_p = pcb::count();
             let test_pid = pcb::create("sysinfo-procs-test", 0);
-            assert!(pcb::count() > before,
+            assert!(pcb::count() > before_p,
                 "pcb::count did not increment after create");
             pcb::destroy(test_pid);
-            assert_eq!(pcb::count(), before,
+            assert_eq!(pcb::count(), before_p,
                 "pcb::count did not decrement after destroy");
+
             // u16 saturating cast: a count of u16::MAX+1 must clamp.
-            // We don't actually allocate that many PCBs here, just
+            // We don't actually allocate that many tasks here, just
             // re-derive the cast inline as a regression guard for the
             // cast itself.
             let overflow: u64 = u64::from(u16::MAX) + 1;
@@ -43320,6 +43353,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 overflow as u16
             };
             assert_eq!(clamped, u16::MAX);
+
+            // (b) Wire-level batch 512 contract: re-issue sysinfo
+            //     against a fresh buffer and confirm procs equals
+            //     thread::thread_count() at the moment of the call,
+            //     mirroring v6.6's `val->procs = nr_threads`.
+            //
+            //     Race window: between snapshotting thread_count and
+            //     issuing the sysinfo call, another CPU could in
+            //     principle spawn / exit a thread.  We're running in
+            //     a single-task self-test on a single-CPU QEMU boot,
+            //     so no such concurrent thread lifecycle is possible
+            //     here; the accept window of ±2 below is purely a
+            //     belt-and-braces guard for future SMP runs of the
+            //     self-test (which we don't currently do).
+            let mut buf2 = [0u8; 112];
+            let a2 = SyscallArgs {
+                arg0: buf2.as_mut_ptr() as u64,
+                arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            let thr_before = crate::proc::thread::thread_count();
+            let pcb_before = pcb::count();
+            if dispatch_linux(nr::SYSINFO, &a2).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sysinfo(valid) batch-512 probe not 0",
+                );
+                return Err(KernelError::InternalError);
+            }
+            let thr_after = crate::proc::thread::thread_count();
+            #[allow(clippy::indexing_slicing)]
+            let procs_wire = u16::from_ne_bytes([buf2[80], buf2[81]]);
+            // Expected wire value: thread::thread_count() (with the
+            // u16 saturation we apply).  Accept ±2 for the SMP-future
+            // race window described above.
+            let expected_lo = thr_before.min(thr_after).saturating_sub(2);
+            let expected_hi = thr_before.max(thr_after).saturating_add(2);
+            let pw = procs_wire as usize;
+            if pw < expected_lo || pw > expected_hi {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sysinfo.procs = {} outside thread_count window [{}, {}] (pcb::count = {}, pre-batch would have reported pcb::count)",
+                    pw, expected_lo, expected_hi, pcb_before,
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Discriminator: if thread_count differs from pcb::count,
+            // the wire value must track thread_count, not pcb::count.
+            // Linux v6.6 always reports thread count; tracking
+            // pcb::count would be the pre-batch under-report.
+            if thr_before != pcb_before && pw == pcb_before {
+                serial_println!(
+                    "[syscall/linux]   FAIL: sysinfo.procs = {} matches pcb::count ({}) not thread_count ({}, {}) — batch 512 regression",
+                    pw, pcb_before, thr_before, thr_after,
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[syscall/linux]   sysinfo.procs sources from thread::thread_count() not pcb::count() (v6.6 kernel/sys.c::do_sysinfo: `val->procs = nr_threads`): OK"
+            );
         }
         // times(NULL) succeeds with the tick count.
         if dispatch_linux(nr::TIMES, &a).value < 0 {

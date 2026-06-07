@@ -46885,3 +46885,89 @@ Summary stamp added:
 **Build:** clean (`cargo build -p kernel`, 46.1s).
 
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+================================================================
+Batch 512 — sysinfo.procs sources from thread_count(), not pcb::count() (v6.6 nr_threads)
+================================================================
+
+**Where:** `kernel/src/syscall/linux.rs::sys_sysinfo`, the
+`procs` field at struct offset 80..82.
+
+**Divergence found:** Pre-batch the translator wrote:
+
+    let procs_u: u64 = pcb::count() as u64;
+
+into `procs`.  Linux v6.6's `kernel/sys.c::do_sysinfo` (verbatim):
+
+    val->procs = nr_threads;
+
+`nr_threads` (declared in `kernel/fork.c`) is the system-wide count
+of tasks — every thread is a task, every multi-threaded process
+contributes one task per thread.  Linux's field name `procs` is a
+vestigial misnomer dating to single-threaded UNIX; the kernel's
+actual source is the thread/task counter, not a process counter.
+
+Pre-batch we read `pcb::count()`, which is the live-process
+counter (one entry per PCB in `PROCESS_TABLE`).  On a thread-rich
+workload (a single Java VM with 200 threads, a Chrome process with
+50+ helper threads, etc.) Linux's `nr_threads` is one-to-two
+orders of magnitude larger than the process count.  Our pre-batch
+output under-reported by exactly that factor.
+
+**Why it matters:**
+
+  - procps `vmstat`'s `r` (runnable) and `b` (blocked) columns
+    derive a partial estimate from sysinfo.procs; under-reporting
+    makes the system appear less busy than it is.
+  - collectd's `sysinfo` plugin exports `processes/forked`
+    directly from this field — Grafana dashboards keyed on this
+    metric saw a Java-heavy host appear to have ~1 process where
+    Linux would report ~200.
+  - Container runtimes (docker, podman) sanity-check this field
+    against `/proc/sys/kernel/threads-max` before fork-bombing a
+    container; a misleadingly low value bypasses the rate-limit.
+  - htop reads `/proc/loadavg`'s 4th field for total tasks but
+    falls back to sysinfo on some BSDs — and the libsystem
+    abstraction crate `sysinfo` (Rust) uses sysinfo directly on
+    Linux for its `processes()` accessor.
+
+**Fix (translator-only):** Switch the source from
+`pcb::count()` to `crate::proc::thread::thread_count()`.  The
+latter is the size of the `THREAD_OWNERS` map — every `spawn()`
+and `spawn_user()` registers an entry, every `on_thread_exit()`
+de-registers — so the count is the live task population, the
+direct semantic equivalent of v6.6's `nr_threads`.
+
+No PCB or thread-table state is touched.  No new APIs added.
+
+**Boot probes added** (folded into the existing batch 58 procs
+block in self_test):
+
+  1. Source-of-truth round-trip preserved: create a sentinel PCB,
+     assert pcb::count() increments, destroy it, assert it
+     decrements.  Locks in that pcb::count and thread_count
+     remain independent live counters (defense against a future
+     regression that wires them together and re-introduces the
+     under-report bug).
+  2. u16 saturation regression guard unchanged: derives the cast
+     inline against u16::MAX+1 and asserts clamping.
+  3. Wire-level batch 512 contract: issue sysinfo into a fresh
+     112-byte buffer, snapshot `thread::thread_count()` and
+     `pcb::count()` around the call, parse `procs` from
+     `buf2[80..82]` as a u16, and assert the parsed value lies
+     in the `[thread_count − 2, thread_count + 2]` window
+     (±2 reserves margin for future SMP self-test runs; we're
+     single-CPU today so the window is effectively exact).
+  4. Discriminator: if `thread_count() != pcb::count()` at the
+     moment of the call, the wire value must match thread_count,
+     NOT pcb::count.  This is the exact pre-batch failure mode —
+     if the source code regressed to pcb::count and the two
+     counters differed, this branch would fire.
+
+Summary stamp added:
+  `sysinfo.procs sources from thread::thread_count() not pcb::count() (v6.6 kernel/sys.c::do_sysinfo: \`val->procs = nr_threads\`): OK`
+  (visible in `build/serial-test.txt`).
+
+**Build:** clean (`cargo build -p kernel`, 52.3s).
+
+**Boot test:** PASS @ 27s (`bash scripts/boot-test.sh`).

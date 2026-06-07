@@ -62,6 +62,48 @@ on a UMA single-CPU QEMU configuration that condition may never fire.
 
 ---
 
+### 2. Accounting self-test occasionally hangs at boot (intermittent)
+
+**Where:** `kernel/src/mm/accounting.rs` — self-test path, specifically
+after "[accounting]   Destroy: OK".
+
+**Repro:** Run `bash scripts/boot-test.sh`.  Observed once on
+2026-06-07 during batch 473 boot test (`build/serial-test.txt`
+truncated at line 3073, after `[accounting]   Destroy: OK`).  Retry
+passed cleanly at 22s.  Frequency unknown; first observation.
+
+**Symptoms:** Serial output stops mid-accounting self-test before
+the expected next line `[accounting]   Tracked count: 0 (after
+cleanup)` and the subsequent `[accounting] Self-test PASSED`
+marker.  Anti-starvation log floods every tick afterward,
+suggesting scheduler is still alive but the accounting test thread
+is blocked.  BOOT_OK sentinel never emitted; `boot-test.sh` times
+out at 300s.
+
+**Severity:** Low-frequency, retry-passes.  No corruption observed.
+
+**Hypothesis (unconfirmed):** Possible deadlock or lost wakeup in
+the cleanup path between Destroy and Tracked-count read-back —
+maybe a per-CPU iteration awaiting a counter that's already been
+decremented to zero, or a missed wake on a condition variable
+guarding the tracked-count snapshot.
+
+**Proper fix:**
+  1. Read `kernel/src/mm/accounting.rs` self-test path and identify
+     what runs between the `Destroy: OK` print and the
+     `Tracked count` print.
+  2. Add a finer-grained probe between those two stamps to localize
+     the hang to a specific call.
+  3. Audit any locks held across the destroy → tracked-count
+     transition; in particular, look for a global accounting lock
+     that the destroy path takes and that the tracked-count snapshot
+     also needs.
+  4. If the issue is a per-CPU iteration awaiting a counter that
+     races with destroy decrementing it, switch to a snapshot-read
+     pattern that doesn't spin.
+
+---
+
 ## Technical Debt
 
 (none recorded yet — file created 2026-06-06)

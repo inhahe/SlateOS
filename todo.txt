@@ -41972,3 +41972,124 @@ Probe block stamps:
 
 **Build:** `cargo build -p kernel` clean, 43.63s.
 **Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`).
+
+## Batch 473 — sys_accept4 gate order: FD lookup before flag validation (Linux 5.6+ refactor)
+
+**Linux 6.x source quote** (net/socket.c — modern `__sys_accept4`):
+
+    int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
+                      int __user *upeer_addrlen, int flags)
+    {
+            int ret = -EBADF;
+            CLASS(fd, f)(fd);
+
+            if (!fd_empty(f))                              /* gate 1: fdget */
+                    ret = __sys_accept4_file(fd_file(f),
+                                             upeer_sockaddr,
+                                             upeer_addrlen, flags);
+
+            return ret;
+    }
+
+    int __sys_accept4_file(struct file *file, ..., int flags)
+    {
+            ...
+            if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))   /* gate 2: flags */
+                    return -EINVAL;
+            ...
+    }
+
+The `CLASS(fd, f)(fd)` expands to a scope-bound `fdget` macro;
+on a bad fd, `fd_empty(f)` is true and the function returns the
+pre-initialized `ret = -EBADF`.  The flag mask check only runs
+*inside* `__sys_accept4_file`, after fdget succeeded.
+
+This is the post-5.6 layout.  Pre-5.6, flag validation lived in
+`__sys_accept4` itself, before the fdget call (so bad fd + bad
+flags returned `-EINVAL`).  Commit moving the check inside
+`__sys_accept4_file` was part of the "factor out so accept4()
+and recvfrom() can share the file pointer code path" refactor
+landed in 5.6.
+
+**Divergence table**
+
+    Shape                                          pre-batch       Linux 6.x
+    --------------------------------------------   -------------   ---------
+    accept4(bad_fd, NULL, NULL, bad_flags)         EINVAL          EBADF
+    accept4(bad_fd, NULL, NULL, good_flags)        EBADF           EBADF
+    accept4(good_fd, NULL, NULL, bad_flags)        EINVAL          EINVAL
+    accept4(good_fd, bad_ptr, NULL, good_flags)    EFAULT          EFAULT
+
+Only the first row changes — bad-fd-with-bad-flags shifts from
+EINVAL (pre-batch, modeling pre-5.6 Linux) to EBADF (post-batch,
+modeling Linux 5.6+).
+
+**Why it matters**
+
+Modern userspace tooling that probes accept4 capability ordering
+(strace test suite, ltp accept4 tests, glibc's accept4 fallback
+shim that re-tries without the flag bits on EINVAL) assumes the
+Linux 5.6+ order: bad fd → EBADF regardless of flags.  Our
+pre-batch order modeled the 5.5-and-earlier kernel, so a probe
+that intentionally passes a closed/never-opened fd with the
+intent of testing "is this a real kernel fd error or a flag
+rejection?" would get the wrong errno on us.
+
+The glibc accept4 fallback path in particular keys off EINVAL to
+decide "kernel doesn't accept SOCK_CLOEXEC|SOCK_NONBLOCK, fall
+back to accept + fcntl".  On our pre-batch translator a closed
+fd with the SOCK_CLOEXEC flag would have returned EINVAL,
+spuriously triggering the fallback retry loop.
+
+**Fix description**
+
+`kernel/src/syscall/linux.rs` — `sys_accept4` (the `accept4`
+syscall translator, distinct from `sys_accept`):
+
+  Gate order changed from
+        gate 1: flag mask check       → EINVAL
+        gate 2: validate_linux_fd     → EBADF
+        gate 3: validate_sockaddr_out → EFAULT
+  to
+        gate 1: validate_linux_fd     → EBADF
+        gate 2: flag mask check       → EINVAL
+        gate 3: validate_sockaddr_out → EFAULT
+
+Doc comment rewritten to cite the modern `__sys_accept4` /
+`__sys_accept4_file` split and to note the pre-5.6 history that
+the prior order was matching.
+
+Translator-only — no native accept path changed.
+
+**Probes added: none.**
+
+Justification: in boot-time kernel context, `caller_pid()`
+returns `None`, so `validate_linux_fd` is unconditionally `Ok(())`
+for any fd value (it has no userspace fd table to look up
+against).  This means the gate-order divergence (bad_fd + bad_flags
+→ EBADF vs EINVAL) cannot be observed from the boot self-test
+environment: gate 1 always passes, so gate 2 always runs, so the
+result for bad flags is EINVAL whichever order is written.
+
+The existing batch-466 accept4 probes (sys_accept4 bad-flag probes
+at lines 57625, 58981, 58991) continue to pass: each uses fd=3 with
+a flag value outside the SOCK_CLOEXEC|SOCK_NONBLOCK mask, hits
+gate 1 (no-op in kernel ctx, Ok), then gate 2, and returns EINVAL
+as expected.  The reorder is invisible to them.
+
+The fix is correct against the Linux source and observable only
+from a userspace process with a real fd table, which we don't
+exercise in self-test.  Once we have userspace boot, the
+divergence becomes testable; a follow-up batch should add the
+probe then.
+
+**Build:** `cargo build -p kernel` clean, 41.03s.
+**Boot test:** PASS @ 22s (`bash scripts/boot-test.sh`) on second
+attempt — first attempt hung in accounting self-test at
+`build/serial-test.txt:3073` after `[accounting]   Destroy: OK`
+with no further output.  Hang is unrelated to this batch
+(accept4 was already exercised earlier in the boot via batch-466
+probes at lines 57625/58981/58991, all OK).  Logged in
+`known-issues.md` as Bug #2 "Accounting self-test occasionally
+hangs at boot (intermittent)".
+

@@ -23822,38 +23822,52 @@ fn sys_accept(args: &SyscallArgs) -> SyscallResult {
 
 /// `accept4(sockfd, addr*, addrlen*, flags)`.
 ///
-/// Linux's `__sys_accept4` (`net/socket.c`):
+/// Linux 6.x source (`net/socket.c`):
 /// ```c
 /// int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
 ///                   int __user *upeer_addrlen, int flags)
 /// {
+///     int ret = -EBADF;
+///     CLASS(fd, f)(fd);
+///
+///     if (!fd_empty(f))                                  // Gate 1: fd
+///         ret = __sys_accept4_file(fd_file(f),
+///                                  upeer_sockaddr,
+///                                  upeer_addrlen, flags);
+///
+///     return ret;
+/// }
+///
+/// int __sys_accept4_file(struct file *file, ..., int flags)
+/// {
 ///     ...
-///     if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))    // Gate 1: flags
+///     if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))       // Gate 2: flags
 ///         return -EINVAL;
 ///     ...
-///     newfile = do_accept(file, ..., upeer_sockaddr,    // Gate 2: fd
-///                         upeer_addrlen, flags);         // (inside do_accept)
-///     ...                                                // Gate 3: pointer
-/// }                                                      // (inside do_accept,
-///                                                        //  only if non-NULL)
+/// }
 /// ```
-/// So the gate order is FLAGS → FD → POINTER.  Pre-batch we had
-/// FLAGS → POINTER → FD; this reorder swaps the last two.  See
-/// `sys_accept` for the full Batch 434 rationale.
+/// Modern Linux gate order: FD → FLAGS → POINTER.  Pre-Linux-5.6
+/// the order was FLAGS → FD; the kernel was refactored in 5.6 to
+/// move flag validation inside __sys_accept4_file (which only runs
+/// after fdget succeeds).  Pre-batch-473 our code mirrored the
+/// older pre-5.6 order (FLAGS → FD → POINTER), so a bogus fd with
+/// bad flags returned EINVAL where modern Linux returns EBADF.
 fn sys_accept4(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg3 as u32;
-    // Linux gate 1: SOCK_CLOEXEC (0o2_000_000) and SOCK_NONBLOCK
-    // (0o4000) are the only defined flag bits.  Linux validates
-    // flags BEFORE calling do_accept (so before fd lookup).
-    if flags & !(0o2_000_000 | 0o4000) != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // Linux gate 2: fdget(fd) → EBADF.
+    // Linux gate 1: fdget(fd) → EBADF (runs first since
+    // Linux 5.6's __sys_accept4 refactor).
     if let Err(r) = validate_linux_fd(fd) {
         return r;
+    }
+    // Linux gate 2: SOCK_CLOEXEC (0o2_000_000) and SOCK_NONBLOCK
+    // (0o4000) are the only defined flag bits.  This check now
+    // lives inside __sys_accept4_file (Linux 5.6+), so it runs
+    // only after fdget succeeds.
+    if flags & !(0o2_000_000 | 0o4000) != 0 {
+        return linux_err(errno::EINVAL);
     }
     // Linux gate 3: move_addr_to_user pointer access, only if
     // upeer_sockaddr != NULL.

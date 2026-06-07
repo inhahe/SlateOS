@@ -277,9 +277,44 @@ pub fn synchronize() {
         }
     }
 
+    // The calling CPU is, by RCU invariant, NOT in an RCU read-side
+    // critical section: writers (callers of synchronize) cannot also
+    // be readers.  Therefore the act of calling synchronize() is a
+    // quiescent point for the calling CPU itself, and we can report
+    // it explicitly here.  This guarantees the calling CPU's snapshot
+    // condition is satisfied without depending on a subsequent
+    // yield_now() / timer_tick() to bump the counter — which is
+    // important on single-CPU configurations (UP QEMU), where the
+    // boot-time RCU self-test runs on the BSP before the scheduler
+    // is fully driving the BSP as a regular task and yield_now() may
+    // not result in a context switch.  Fixes known-issues #1 (RCU
+    // self-test occasionally hangs at boot).
+    //
+    // Defensive check: if the caller somehow does have read_nesting > 0
+    // on the current CPU (programmer error — calling synchronize from
+    // inside a read-side critical section), we still bump the counter
+    // (it's sound — read_nesting=0 will be re-checked below), but the
+    // wait loop will refuse to break until nesting drops to 0.
+    let self_cpu = smp::current_cpu_index();
+    if let Some(counter) = QS_COUNTERS.get(self_cpu) {
+        counter.fetch_add(1, Ordering::Release);
+    }
+
     // Wait for all CPUs to pass through a quiescent state.
+    //
+    // Iteration cap: at 100 ms/iter on a busy system this caps the
+    // wait at ~1000 s, but on UP QEMU each iteration is a yield_now
+    // that takes microseconds — so 1_000_000 iterations bounds the
+    // wait at well under a second under healthy conditions.  If we
+    // hit the cap, we emit diagnostics and break: a stale RCU grace
+    // period is preferable to a silent boot hang (known-issues #1
+    // history).  The bound is generous; healthy callers complete in
+    // 1–2 iterations.
+    const MAX_WAIT_ITERS: u64 = 1_000_000;
+    let mut iters: u64 = 0;
     loop {
         let mut all_quiescent = true;
+        let mut not_quiescent_cpu = usize::MAX;
         for i in 0..cpu_count.min(MAX_CPUS) {
             // Skip offline CPUs.
             if !crate::cpu_hotplug::is_online(i) {
@@ -301,6 +336,7 @@ pub fn synchronize() {
                 .map_or(0, |n| n.load(Ordering::Relaxed));
             if nesting > 0 {
                 all_quiescent = false;
+                if not_quiescent_cpu == usize::MAX { not_quiescent_cpu = i; }
                 continue;
             }
 
@@ -311,10 +347,23 @@ pub fn synchronize() {
 
             if current <= snap {
                 all_quiescent = false;
+                if not_quiescent_cpu == usize::MAX { not_quiescent_cpu = i; }
             }
         }
 
         if all_quiescent {
+            break;
+        }
+
+        iters += 1;
+        if iters >= MAX_WAIT_ITERS {
+            // Safety net for known-issues #1: emit a diagnostic and
+            // break rather than hang the boot.  In practice we should
+            // never reach this with the self-QS bump above.
+            serial_println!(
+                "[rcu] WARNING: synchronize() exceeded {} iterations (gp={}, stuck_cpu={}); proceeding",
+                MAX_WAIT_ITERS, gp, not_quiescent_cpu
+            );
             break;
         }
 
@@ -341,12 +390,23 @@ pub fn synchronize() {
 pub fn call(arg: u64, func: fn(u64)) -> bool {
     let gp = GP_COUNTER.load(Ordering::SeqCst);
     let cb = RcuCallback { arg, func, gp_num: gp };
-    let mut queue = CALLBACKS.lock();
-    let ok = queue.push(cb);
-    if !ok {
-        serial_println!("[rcu] WARNING: callback queue full, dropping callback");
-    }
-    ok
+    // IRQ-safe critical section: the same CALLBACKS lock is acquired
+    // from rcu::tick() running in softirq context (which dispatches
+    // with interrupts enabled), so a timer ISR that interrupts a
+    // caller of call() and then runs the softirq would otherwise
+    // spin-deadlock on this spinlock.  Disabling interrupts on the
+    // local CPU for the brief lock-hold window prevents the re-entry.
+    // Fixes known-issues #1 (RCU self-test occasionally hangs at boot)
+    // — observed at 2/10 boot tests on UP QEMU, hanging between the
+    // "Quiescent state" and "Callback registration" probes.
+    crate::cpu::without_interrupts(|| {
+        let mut queue = CALLBACKS.lock();
+        let ok = queue.push(cb);
+        if !ok {
+            serial_println!("[rcu] WARNING: callback queue full, dropping callback");
+        }
+        ok
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -412,24 +472,33 @@ pub fn tick() {
 // ---------------------------------------------------------------------------
 
 /// Process callbacks whose grace period has elapsed.
+///
+/// IRQ-safe wrt the CALLBACKS lock: pops one callback at a time inside
+/// an interrupts-disabled critical section, then invokes the callback
+/// with interrupts restored.  This way the lock is never held across
+/// a window that a timer ISR could observe — preventing the deadlock
+/// where a CPU holding CALLBACKS (in synchronize/tick/call) is
+/// interrupted, the softirq runs on the same CPU, and tries to
+/// re-acquire the lock.  See call() for the matching companion fix.
 fn process_callbacks(completed_gp: u64) {
-    let mut queue = CALLBACKS.lock();
-
-    // Process callbacks in order, stopping at the first one whose
-    // grace period hasn't completed yet.
     loop {
-        match queue.peek_gp() {
-            Some(gp_num) if gp_num <= completed_gp => {
-                if let Some(cb) = queue.pop() {
-                    // Drop the lock before invoking the callback
-                    // (callback might register more callbacks).
-                    drop(queue);
-                    (cb.func)(cb.arg);
-                    CALLBACKS_INVOKED.fetch_add(1, Ordering::Relaxed);
-                    queue = CALLBACKS.lock();
-                }
+        let next_cb = crate::cpu::without_interrupts(|| {
+            let mut queue = CALLBACKS.lock();
+            match queue.peek_gp() {
+                Some(gp_num) if gp_num <= completed_gp => queue.pop(),
+                _ => None,
             }
-            _ => break,
+        });
+
+        match next_cb {
+            Some(cb) => {
+                // Invoke with interrupts in their natural state — the
+                // callback may itself call rcu::call(), which now does
+                // its own without_interrupts wrap.
+                (cb.func)(cb.arg);
+                CALLBACKS_INVOKED.fetch_add(1, Ordering::Relaxed);
+            }
+            None => break,
         }
     }
 }
@@ -456,11 +525,16 @@ pub struct RcuStats {
 /// Get RCU statistics.
 #[must_use]
 pub fn stats() -> RcuStats {
+    // Same IRQ-safe rationale as call() / process_callbacks(): the
+    // CALLBACKS lock is also acquired in softirq context, so a stats
+    // reader that gets interrupted while holding it could deadlock
+    // with rcu::tick() on the same CPU.
+    let pending = crate::cpu::without_interrupts(|| CALLBACKS.lock().len());
     RcuStats {
         gp_completed: GP_COMPLETED.load(Ordering::Relaxed),
         sync_calls: SYNC_CALLS.load(Ordering::Relaxed),
         callbacks_invoked: CALLBACKS_INVOKED.load(Ordering::Relaxed),
-        pending_callbacks: CALLBACKS.lock().len(),
+        pending_callbacks: pending,
         gp_counter: GP_COUNTER.load(Ordering::Relaxed),
     }
 }
@@ -505,8 +579,18 @@ pub fn self_test() {
     serial_println!("[rcu]   Callback registration: OK");
 
     // Test 5: Synchronize (on single-CPU, should complete immediately
-    // since we report quiescent state on yield).
+    // since synchronize() now reports a self-QS for the calling CPU
+    // — see the fix for known-issues #1 in `synchronize()`).
+    //
+    // The pre-stamp localizes any future hang: if "Synchronize: pre"
+    // is the last serial output, the hang is inside synchronize();
+    // if it's "Synchronize: post" without "Callback invoked", the
+    // callback dispatch path is the problem.
+    serial_println!("[rcu]   Synchronize: pre (gp_counter={})",
+        GP_COUNTER.load(Ordering::Relaxed));
     synchronize();
+    serial_println!("[rcu]   Synchronize: post (gp_completed={})",
+        GP_COMPLETED.load(Ordering::Relaxed));
     serial_println!("[rcu]   Synchronize: OK");
 
     // The callback should have been invoked during synchronize().

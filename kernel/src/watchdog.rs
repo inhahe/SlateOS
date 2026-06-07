@@ -249,12 +249,21 @@ pub fn self_test() {
     serial_println!("[watchdog] Running self-test...");
 
     // Test 1: Heartbeat increments.
+    //
+    // The APIC timer ISR also calls watchdog::heartbeat() on every tick
+    // (see apic.rs), so the before-load → heartbeat() → after-load
+    // window races with the timer.  If a tick lands inside that window
+    // the assertion (after == before + 1) trips because the counter
+    // actually advanced twice — once by us, once by the ISR.  Observed
+    // once in 15 boot tests on 2026-06-07 ([367] vs [368]).  Disable
+    // interrupts on the local CPU so the ISR cannot race.
     let cpu = smp::current_cpu_index();
-    let before = HEARTBEATS.get(cpu)
-        .map_or(0, |h| h.load(Ordering::Relaxed));
-    heartbeat();
-    let after = HEARTBEATS.get(cpu)
-        .map_or(0, |h| h.load(Ordering::Relaxed));
+    let (before, after) = crate::cpu::without_interrupts(|| {
+        let b = HEARTBEATS.get(cpu).map_or(0, |h| h.load(Ordering::Relaxed));
+        heartbeat();
+        let a = HEARTBEATS.get(cpu).map_or(0, |h| h.load(Ordering::Relaxed));
+        (b, a)
+    });
     assert_eq!(after, before + 1, "heartbeat should increment");
     serial_println!("[watchdog]   Heartbeat increment: OK");
 

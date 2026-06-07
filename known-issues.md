@@ -12,57 +12,9 @@ work that should be done now."
 
 ---
 
-## Bugs
+## Active Bugs
 
-### 1. RCU self-test occasionally hangs at boot (intermittent)
-
-**Where:** `kernel/src/sync/rcu.rs` — self-test path, specifically after
-"Quiescent state: OK (counter N → N+1)" emission.
-
-**Repro:** Run `bash scripts/boot-test.sh` repeatedly.  Observed once
-on 2026-06-06 during batch 394 boot test (`build/serial-test.txt`
-truncated at line 1627, mid-RCU self-test).  Retry passed cleanly at
-26s.  Frequency initially appeared low (~1 in N for some N>10 — not
-yet characterized).
-
-**2026-06-06 frequency revision (batch 455 boot test):** Observed
-2 consecutive hangs in 3 attempts on the same QEMU invocation
-parameters during batch 455 boot test.  Both stalled after
-`[rcu]   Callback registration: OK` with no further serial output
-within the 300s timeout.  Third attempt passed at 23s.  This is
-substantially more frequent than the original estimate; the bug may
-be highly sensitive to host scheduler / QEMU timing such that some
-windows reproduce it 60%+ of the time while others almost never
-hit it.  Worth prioritizing a real fix rather than relying on retry.
-
-**Symptoms:** Serial output stops mid-RCU test; no further milestones.
-QEMU appears alive but kernel makes no further progress.  BOOT_OK
-sentinel never emitted, so `boot-test.sh` times out at 300s.
-
-**Severity:** Low-frequency, retry-passes.  No corruption observed.
-
-**Hypothesis (unconfirmed):** Likely a missed quiescent-state
-declaration or a per-CPU counter race in the synchronize_rcu() wait
-loop when running under a single CPU.  The self-test may be polling on
-a condition that requires another CPU to advance the grace period —
-on a UMA single-CPU QEMU configuration that condition may never fire.
-
-**Proper fix:**
-  1. Read `kernel/src/sync/rcu.rs` self-test path and locate the post-
-     "Quiescent state" assertion.
-  2. Add a printout immediately before and after the hanging point to
-     pin down whether it's a synchronize_rcu() spin, a per-CPU walk,
-     or a final-counter check.
-  3. Audit for single-CPU edge cases — RCU implementations
-     traditionally assume ≥2 CPUs for grace-period progress and need
-     explicit "self-quiesce" calls under UMA.
-  4. If the hang is a per-CPU iteration that expects nonzero quiescent
-     counters from CPUs that don't exist, gate the iteration on
-     `online_cpu_mask`.
-
----
-
-### 2. Accounting self-test occasionally hangs at boot (intermittent)
+### 1. Accounting self-test occasionally hangs at boot (intermittent)
 
 **Where:** `kernel/src/mm/accounting.rs` — self-test path, specifically
 after "[accounting]   Destroy: OK".
@@ -82,25 +34,82 @@ out at 300s.
 
 **Severity:** Low-frequency, retry-passes.  No corruption observed.
 
-**Hypothesis (unconfirmed):** Possible deadlock or lost wakeup in
-the cleanup path between Destroy and Tracked-count read-back —
-maybe a per-CPU iteration awaiting a counter that's already been
-decremented to zero, or a missed wake on a condition variable
-guarding the tracked-count snapshot.
+**Hypothesis (updated 2026-06-07):** Same shape as the now-fixed RCU
+hang (see Fixed Bugs #1): a spinlock held by the main code on the
+BSP that is also acquired from a timer-softirq path on the same CPU,
+deadlocking when an ISR fires inside the held window.  Worth checking
+whether `kernel/src/mm/accounting.rs` has a lock that gets touched
+from both `accounting::destroy()` (boot path) and any softirq /
+timer-tick callback.
 
 **Proper fix:**
   1. Read `kernel/src/mm/accounting.rs` self-test path and identify
      what runs between the `Destroy: OK` print and the
      `Tracked count` print.
-  2. Add a finer-grained probe between those two stamps to localize
-     the hang to a specific call.
-  3. Audit any locks held across the destroy → tracked-count
-     transition; in particular, look for a global accounting lock
-     that the destroy path takes and that the tracked-count snapshot
-     also needs.
-  4. If the issue is a per-CPU iteration awaiting a counter that
-     races with destroy decrementing it, switch to a snapshot-read
-     pattern that doesn't spin.
+  2. Audit all `Mutex.lock()` sites for ones also reached from
+     softirq context (search for `accounting::` references in
+     `kernel/src/softirq.rs`, the timer tick paths, etc.).
+  3. Wrap any such site in `crate::cpu::without_interrupts(...)` —
+     same pattern as the RCU fix.
+  4. If no shared lock exists, add a finer-grained probe between
+     `Destroy: OK` and `Tracked count` to localize the hang.
+
+---
+
+## Fixed Bugs
+
+### F1. RCU self-test occasionally hangs at boot (intermittent) — FIXED 2026-06-07
+
+**Where:** `kernel/src/rcu.rs` — `call()`, `process_callbacks()`,
+`stats()` and (defense-in-depth) `synchronize()`.
+
+**Root cause:** The `CALLBACKS` spinlock was acquired both from
+direct callers (boot path → `rcu::call`, `rcu::stats`,
+`rcu::synchronize` → `process_callbacks`) AND from `rcu::tick()`
+running in softirq context.  Softirqs dispatch with interrupts
+re-enabled on the same CPU.  If a timer ISR fired while a direct
+caller held the lock, the softirq's `process_callbacks()` re-entered
+the same critical section on the same CPU and deadlocked the
+spin::Mutex.  The hang manifested between
+`[rcu]   Quiescent state: OK` and `[rcu]   Callback registration: OK`
+(i.e. inside `rcu::call`) because that's the first lock acquisition
+after the periodic softirq starts running.
+
+**Diagnosed by:** Running boot-test.sh 10× — observed 2 hangs, both
+with the serial log truncated at exactly the same point (after
+"Quiescent state" probe, before "Callback registration").  This
+showed the hang was in `call()`, not `synchronize()` as the original
+hypothesis suggested.
+
+**Fix:** Wrap every `CALLBACKS.lock()` site in
+`crate::cpu::without_interrupts(...)` so the lock cannot be acquired
+from a path that is interruptible.  Additionally, in `synchronize()`,
+explicitly bump the calling CPU's own QS counter after snapshotting
+(the caller cannot itself be in a read-side critical section by RCU
+invariant), and add a million-iteration safety cap with diagnostic
+print so any future grace-period failure surfaces a warning instead
+of a silent hang.  Added finer-grained "[rcu]   Synchronize: pre/post"
+self-test probes to localize any future regression.
+
+**Verification:** 20/20 consecutive boot tests pass after the fix
+(previously 2/10 hung).
+
+### F2. Watchdog self-test heartbeat-increment assertion race — FIXED 2026-06-07
+
+**Where:** `kernel/src/watchdog.rs` — `self_test()` test 1.
+
+**Root cause:** The test does
+`before = HEARTBEATS[cpu].load(); heartbeat(); after = HEARTBEATS[cpu].load();`
+and asserts `after == before + 1`.  But the APIC timer ISR also calls
+`watchdog::heartbeat()` on every tick (via `apic.rs`), so a timer
+interrupt landing inside the before→after window can cause the
+counter to advance twice, tripping the assertion.  Observed once on
+2026-06-07: panic with `left: 368, right: 367`.
+
+**Fix:** Wrap test 1's load/heartbeat/load sequence in
+`crate::cpu::without_interrupts(...)`.
+
+**Verification:** 20/20 consecutive boot tests pass after the fix.
 
 ---
 

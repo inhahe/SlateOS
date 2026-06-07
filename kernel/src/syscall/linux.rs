@@ -14926,44 +14926,151 @@ fn sys_keyctl(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOSYS)
 }
 
+/// Emulate Linux's `key_get_type_from_user(type, _type, sizeof(type))`
+/// from `security/keys/keyctl.c`.  Linux source (verbatim):
+///
+/// ```c
+/// long key_get_type_from_user(char *type,
+///                             const char __user *_type,
+///                             unsigned len)
+/// {
+///     int ret;
+///
+///     ret = strncpy_from_user(type, _type, len);
+///     if (ret < 0)
+///         return ret;
+///     if (ret == 0 || ret >= len)
+///         return -EINVAL;
+///     if (type[0] == '.')
+///         return -EPERM;
+///     type[len - 1] = '\0';
+///     return 0;
+/// }
+/// ```
+///
+/// Linux's callers pass `sizeof(type)` where `type` is a 32-byte stack
+/// buffer.  `strncpy_from_user` returns `-EFAULT` for NULL/unmapped,
+/// `ret == 0` for an empty string (first byte was NUL), and `ret >= len`
+/// when the string is too long to fit (no NUL within `len`).
+///
+/// We mirror the gate ladder using `read_user_cstr` with `max_len = 31`
+/// (i.e. `sizeof(type) - 1`) so the ENAMETOOLONG return matches the
+/// `ret >= len` arm and the empty-Vec return matches the `ret == 0` arm.
+fn key_get_type_from_user_emulation(
+    user_ptr: u64,
+) -> Result<alloc::vec::Vec<u8>, i32> {
+    // sizeof(type) - 1 in Linux's KEY_TYPE-equivalent stack buffer.
+    const KEY_TYPE_MAX_LEN: usize = 31;
+    let bytes = match read_user_cstr(user_ptr, KEY_TYPE_MAX_LEN) {
+        Ok(b) => b,
+        // Linux: ret >= len => -EINVAL.
+        Err(e) if e == errno::ENAMETOOLONG => return Err(errno::EINVAL),
+        // Linux: ret < 0 propagates (strncpy_from_user EFAULT).
+        Err(e) => return Err(e),
+    };
+    // Linux: ret == 0 (empty C string) => -EINVAL.
+    if bytes.is_empty() {
+        return Err(errno::EINVAL);
+    }
+    // Linux: type[0] == '.' => -EPERM (the '.'-prefix namespace is
+    // reserved for kernel-internal key types like `.user_session`).
+    if bytes[0] == b'.' {
+        return Err(errno::EPERM);
+    }
+    Ok(bytes)
+}
+
 /// `add_key(type, description, payload, plen, keyring)`.
 ///
-/// Linux's `security/keys/keyctl.c::sys_add_key` validates the inputs
-/// before reaching the keyring backend:
-///   * `type` and `description` are non-NULL C strings (EFAULT
-///     otherwise).
-///   * `plen <= 1 MiB - 1` (Linux's hard cap; otherwise EINVAL).
-///   * If `plen > 0`, `payload` must point at a readable buffer of
-///     `plen` bytes; NULL or an unmapped range produces EFAULT.
-///   * `plen == 0` with `payload == NULL` is a valid "no payload"
-///     call (some key types — e.g. `keyring` — accept it).
+/// Linux source — `security/keys/keyctl.c::SYSCALL_DEFINE5(add_key, ...)`
+/// (verbatim, with backend-specific lines elided):
 ///
-/// We don't have a keyring backend, so the final answer is ENOSYS,
-/// but the gates above must fire ahead of ENOSYS so probes see the
-/// same errno shape they would on Linux.
+/// ```c
+/// SYSCALL_DEFINE5(add_key, const char __user *, _type,
+///                 const char __user *, _description,
+///                 const void __user *, _payload,
+///                 size_t, plen,
+///                 key_serial_t, ringid)
+/// {
+///     ...
+///     ret = -EINVAL;
+///     if (plen > 1024 * 1024 - 1)
+///         goto error;
+///
+///     /* draw all the data into kernel space */
+///     ret = key_get_type_from_user(type, _type, sizeof(type));
+///     if (ret < 0)
+///         goto error;
+///
+///     description = NULL;
+///     if (_description) {
+///         description = strndup_user(_description, KEY_MAX_DESC_SIZE);
+///         if (IS_ERR(description)) {
+///             ret = PTR_ERR(description);
+///             goto error;
+///         }
+///         if (!*description) {
+///             kfree(description);
+///             description = NULL;
+///         }
+///     }
+///
+///     /* pull the payload in if one was supplied */
+///     payload = NULL;
+///     if (plen) {
+///         ret = -ENOMEM;
+///         payload = kvmalloc(plen, GFP_KERNEL);
+///         if (!payload)
+///             goto error2;
+///         ret = -EFAULT;
+///         if (copy_from_user(payload, _payload, plen) != 0)
+///             goto error3;
+///     }
+///     ...
+/// }
+/// ```
+///
+/// Per-gate divergence table (pre-batch → Linux):
+///
+/// | input                                          | pre-batch | Linux |
+/// |------------------------------------------------|-----------|-------|
+/// | `_type=NULL, plen=2 MiB`                       | EFAULT    | EINVAL (plen gate first) |
+/// | `_type="user", _description=NULL, plen=0`      | EFAULT    | ENOSYS (NULL desc OK)    |
+/// | `_type="",     _description="d", plen=0`       | ENOSYS    | EINVAL (empty type)      |
+/// | `_type=".int", _description="d", plen=0`       | ENOSYS    | EPERM  (`.`-prefix)      |
+/// | 33-byte no-NUL type, valid desc, plen=0        | ENOSYS    | EINVAL (too long)        |
+///
+/// Translator-only fix: this stub still returns ENOSYS at the bottom
+/// (no keyring backend), but the gates above must fire in Linux's
+/// order so syscall probes observe the same errno shape.
 fn sys_add_key(args: &SyscallArgs) -> SyscallResult {
-    // type and description must be non-NULL C strings.
-    if args.arg0 == 0 || args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    // plen > 1 MiB - 1 -> EINVAL.  Matches the hard cap in Linux's
-    // sys_add_key (security/keys/keyctl.c: `if (plen > 1024 * 1024 - 1)
-    // goto error;`).  Keeps probes that intentionally pass an absurd
-    // plen seeing the same errno.
-    let plen = args.arg3 as usize;
+    // Gate-1 (Linux's literal first gate): plen overflow.
+    //   if (plen > 1024 * 1024 - 1) goto error;
     const ADD_KEY_PLEN_MAX: usize = 1024 * 1024 - 1;
+    let plen = args.arg3 as usize;
     if plen > ADD_KEY_PLEN_MAX {
         return linux_err(errno::EINVAL);
     }
-    // payload pointer must be valid when plen > 0; plen == 0 with
-    // payload == NULL is allowed (Linux passes that for empty key
-    // types).
+    // Gate-2: key_get_type_from_user(type, _type, sizeof(type)).
+    if let Err(e) = key_get_type_from_user_emulation(args.arg0) {
+        return linux_err(e);
+    }
+    // Gate-3: description — OPTIONAL.  Linux's literal guard:
+    //   description = NULL;
+    //   if (_description) { description = strndup_user(...); ... }
+    // strndup_user remaps too-long (PAGE_SIZE-class) to EINVAL; NULL
+    // and other faults propagate as EFAULT.
+    const KEY_MAX_DESC_SIZE: usize = 4096;
+    if args.arg1 != 0 {
+        match read_user_cstr(args.arg1, KEY_MAX_DESC_SIZE - 1) {
+            Ok(_) => {}
+            Err(e) if e == errno::ENAMETOOLONG => {
+                return linux_err(errno::EINVAL);
+            }
+            Err(e) => return linux_err(e),
+        }
+    }
+    // Gate-4: payload — `if (plen) { ... copy_from_user(...) ... }`.
     if plen > 0 {
         if args.arg2 == 0 {
             return linux_err(errno::EFAULT);
@@ -14972,36 +15079,87 @@ fn sys_add_key(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
+    // No keyring backend — final answer is ENOSYS.
     linux_err(errno::ENOSYS)
 }
 
 /// `request_key(type, description, callout_info, keyring)`.
 ///
-/// Linux's `security/keys/keyctl.c::sys_request_key` validates the
-/// three string pointers before ever consulting the keyring backend:
-///   * `type` and `description` are required, non-NULL C strings.
-///   * `callout_info` is optional — NULL means "no callout".  When
-///     non-NULL it must point at a readable C string; Linux's
-///     `strndup_user` returns EFAULT for an unmapped range.
+/// Linux source — `security/keys/keyctl.c::SYSCALL_DEFINE4(request_key, ...)`
+/// (verbatim, with backend-specific lines elided):
 ///
-/// We don't have a keyring backend, so the operation itself returns
-/// ENOSYS; the gates above must fire ahead of that so probes see the
-/// same errno shape they would on Linux.
+/// ```c
+/// SYSCALL_DEFINE4(request_key, const char __user *, _type,
+///                 const char __user *, _description,
+///                 const char __user *, _callout_info,
+///                 key_serial_t, destringid)
+/// {
+///     ...
+///     /* pull the type into kernel space */
+///     ret = key_get_type_from_user(type, _type, sizeof(type));
+///     if (ret < 0)
+///         goto error;
+///
+///     /* pull the description into kernel space */
+///     description = strndup_user(_description, KEY_MAX_DESC_SIZE);
+///     if (IS_ERR(description)) {
+///         ret = PTR_ERR(description);
+///         goto error;
+///     }
+///
+///     /* pull the callout info into kernel space */
+///     callout_info = NULL;
+///     callout_len = 0;
+///     if (_callout_info) {
+///         callout_info = strndup_user(_callout_info, PAGE_SIZE);
+///         if (IS_ERR(callout_info)) {
+///             ret = PTR_ERR(callout_info);
+///             goto error2;
+///         }
+///         callout_len = strlen(callout_info);
+///     }
+///     ...
+/// }
+/// ```
+///
+/// Key contrast with `add_key`: the description has **no** `if
+/// (_description)` guard — `strndup_user(NULL, ...)` returns `-EFAULT`,
+/// so NULL description is rejected.  `callout_info`, by contrast, is
+/// gated by `if (_callout_info)` and so NULL is silently accepted.
+///
+/// Per-gate divergence table (pre-batch → Linux):
+///
+/// | input                                          | pre-batch | Linux |
+/// |------------------------------------------------|-----------|-------|
+/// | `_type="",     _description="d"`               | ENOSYS    | EINVAL (empty type) |
+/// | `_type=".int", _description="d"`               | ENOSYS    | EPERM  (`.`-prefix) |
+/// | 33-byte no-NUL type, valid desc                | ENOSYS    | EINVAL (too long)   |
+///
+/// Translator-only fix: no keyring backend, so the final answer stays
+/// ENOSYS, but the gates fire in Linux's order.
 fn sys_request_key(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 || args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
+    // Gate-1: key_get_type_from_user(type, _type, sizeof(type)).
+    if let Err(e) = key_get_type_from_user_emulation(args.arg0) {
+        return linux_err(e);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
+    // Gate-2: description REQUIRED.  Linux has no NULL guard here;
+    // strndup_user(NULL, ...) returns -EFAULT.
+    const KEY_MAX_DESC_SIZE: usize = 4096;
+    match read_user_cstr(args.arg1, KEY_MAX_DESC_SIZE - 1) {
+        Ok(_) => {}
+        Err(e) if e == errno::ENAMETOOLONG => return linux_err(errno::EINVAL),
+        Err(e) => return linux_err(e),
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    // callout_info: optional.  NULL is "no callout"; when present it
-    // must be a readable C string (Linux's strndup_user behaviour).
+    // Gate-3: callout_info OPTIONAL.  `if (_callout_info)` guard;
+    // when present strndup_user uses PAGE_SIZE (4096) as the cap.
     if args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-            return linux_err(linux_errno_for(e));
+        const REQUEST_KEY_CALLOUT_MAX: usize = 4096;
+        match read_user_cstr(args.arg2, REQUEST_KEY_CALLOUT_MAX - 1) {
+            Ok(_) => {}
+            Err(e) if e == errno::ENAMETOOLONG => {
+                return linux_err(errno::EINVAL);
+            }
+            Err(e) => return linux_err(e),
         }
     }
     linux_err(errno::ENOSYS)
@@ -48348,74 +48506,257 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   keyctl switch-default EOPNOTSUPP at cmd>=33: OK");
-        // add_key(NULL,_,_,_,_) -> EFAULT.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // === Batch 459: add_key / request_key Linux gate ladder ===
+        //
+        // Pre-batch behaviour:
+        //   * Both syscalls did a NULL-pointer check + 1-byte
+        //     validate_user_read on type/description, then jumped to
+        //     ENOSYS.  This rejected NULL description for add_key
+        //     (Linux silently accepts), accepted empty/dot-prefixed/
+        //     over-length type strings (Linux's key_get_type_from_user
+        //     rejects those with EINVAL/EPERM), and ran the type-NULL
+        //     gate before the plen-overflow gate (Linux orders
+        //     plen-overflow first).
+        //
+        // The probes below exercise each gate in Linux's order.  Test
+        // buffers are stack-allocated so type validation is
+        // deterministic regardless of whatever random bytes live at
+        // 0x1000-class virtual addresses.
+        let valid_type: &[u8] = b"user\0";
+        let valid_desc: &[u8] = b"k\0";
+        let empty_str: &[u8] = b"\0";
+        let dot_type: &[u8] = b".internal\0";
+        // 33 non-NUL bytes => Linux's strncpy_from_user copies 32 and
+        // returns 32 >= sizeof(type)=32 => EINVAL.
+        let oversized_type: &[u8] =
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\0";
+
+        // add_key(NULL type, ...) -> EFAULT (key_get_type_from_user's
+        // strncpy_from_user fault path).
+        let a = SyscallArgs {
+            arg0: 0, arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::ADD_KEY, &a).value
             != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: add_key(NULL,_,_,_,_) not EFAULT");
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(NULL type) not EFAULT"
+            );
             return Err(KernelError::InternalError);
         }
-        // add_key(t,d,NULL,0,_) -> ENOSYS (no payload is valid).
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::ADD_KEY, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: add_key not ENOSYS");
-            return Err(KernelError::InternalError);
-        }
-        // add_key(t,d,NULL,8,_) -> EFAULT (NULL payload with plen>0).
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 8,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::ADD_KEY, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: add_key(NULL payload,plen>0) not EFAULT");
-            return Err(KernelError::InternalError);
-        }
-        // add_key(t,d,payload,1<<21,_) -> EINVAL (plen > 1 MiB - 1).
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0x3000,
-            arg3: 1u64 << 21, arg4: 0, arg5: 0 };
+        // add_key(NULL type, _, _, plen=2MiB, _) -> EINVAL.
+        // GATE-ORDER PROBE: Linux runs `if (plen > 1024*1024-1)` BEFORE
+        // key_get_type_from_user, so the EINVAL beats the type EFAULT.
+        // Pre-batch returned EFAULT here.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 1u64 << 21,
+            arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::ADD_KEY, &a).value
             != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: add_key(plen=2MiB) not EINVAL");
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(plen=2MiB,NULL type) not EINVAL (plen gate must precede type gate)"
+            );
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   add_key payload/plen validation: OK");
-        // request_key(t,d,callout_info,_) -> ENOSYS (`a` still has the
-        // 0x1000/0x2000/0x3000 pointers from the last add_key test; for
-        // request_key those are type/description/callout_info, all
-        // non-NULL — exercises the new callout_info validation gate).
-        if dispatch_linux(nr::REQUEST_KEY, &a).value
+        // add_key("", ...) -> EINVAL (empty type, gate-2 ret==0).
+        let a = SyscallArgs {
+            arg0: empty_str.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(empty type) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // add_key(".internal", ...) -> EPERM (gate-2 type[0]=='.').
+        let a = SyscallArgs {
+            arg0: dot_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(.internal type) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // add_key(33-byte no-NUL type, ...) -> EINVAL (gate-2 ret>=len).
+        let a = SyscallArgs {
+            arg0: oversized_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(33-byte type) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // add_key("user", NULL desc, NULL, 0, 0) -> ENOSYS.
+        // KEY DIVERGENCE: Linux's `if (_description)` guard makes
+        // description OPTIONAL.  Pre-batch wrongly returned EFAULT.
+        let a = SyscallArgs {
+            arg0: valid_type.as_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ADD_KEY, &a).value
             != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: request_key not ENOSYS");
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(NULL desc) not ENOSYS (description must be optional)"
+            );
             return Err(KernelError::InternalError);
         }
-        // request_key(t,d,NULL,_) -> ENOSYS (callout_info is optional;
-        // NULL means "no callout" and must skip the validation gate).
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::REQUEST_KEY, &a).value
+        // add_key("user", "k", NULL, 0, 0) -> ENOSYS (happy-path stub).
+        let a = SyscallArgs {
+            arg0: valid_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ADD_KEY, &a).value
             != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: request_key(NULL callout) not ENOSYS");
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(valid,valid) not ENOSYS"
+            );
             return Err(KernelError::InternalError);
         }
-        // request_key(NULL,...) -> EFAULT (type pointer required).
-        let a = SyscallArgs { arg0: 0, arg1: 0x2000, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // add_key("user", "k", NULL, 8, 0) -> EFAULT (plen>0, NULL
+        // payload — gate-4 fault).
+        let a = SyscallArgs {
+            arg0: valid_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 8, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(plen>0,NULL payload) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // add_key("user", "k", payload, 1<<21, 0) -> EINVAL (gate-1).
+        let a = SyscallArgs {
+            arg0: valid_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: valid_desc.as_ptr() as u64,
+            arg3: 1u64 << 21, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::ADD_KEY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: add_key(plen=2MiB,valid) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   add_key Linux gate ladder (plen/type/desc/payload): OK"
+        );
+
+        // request_key probes — same type validation; description is
+        // REQUIRED (no `if (_description)` guard); callout_info is
+        // optional.
+        //
+        // request_key(NULL type, ...) -> EFAULT.
+        let a = SyscallArgs {
+            arg0: 0, arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::REQUEST_KEY, &a).value
             != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: request_key(NULL type) not EFAULT");
+            serial_println!(
+                "[syscall/linux]   FAIL: request_key(NULL type) not EFAULT"
+            );
             return Err(KernelError::InternalError);
         }
-        // request_key(t,NULL,_,_) -> EFAULT (description required).
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // request_key("", ...) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: empty_str.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: request_key(empty type) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // request_key(".internal", ...) -> EPERM.
+        let a = SyscallArgs {
+            arg0: dot_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: request_key(.internal type) not EPERM"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // request_key(33-byte no-NUL type, ...) -> EINVAL.
+        let a = SyscallArgs {
+            arg0: oversized_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: request_key(33-byte type) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // request_key("user", NULL desc, _, _) -> EFAULT (NULL desc is
+        // NOT accepted; strndup_user(NULL, ...) -> -EFAULT).
+        let a = SyscallArgs {
+            arg0: valid_type.as_ptr() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
         if dispatch_linux(nr::REQUEST_KEY, &a).value
             != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: request_key(NULL desc) not EFAULT");
+            serial_println!(
+                "[syscall/linux]   FAIL: request_key(NULL desc) not EFAULT"
+            );
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   request_key callout/type/desc validation: OK");
+        // request_key("user", "k", NULL callout, _) -> ENOSYS (callout
+        // is OPTIONAL).
+        let a = SyscallArgs {
+            arg0: valid_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: request_key(valid,valid,NULL callout) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // request_key("user", "k", "k" callout, _) -> ENOSYS (callout
+        // gate accepts readable C string).
+        let a = SyscallArgs {
+            arg0: valid_type.as_ptr() as u64,
+            arg1: valid_desc.as_ptr() as u64,
+            arg2: valid_desc.as_ptr() as u64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::REQUEST_KEY, &a).value
+            != -i64::from(errno::ENOSYS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: request_key(valid,valid,valid callout) not ENOSYS"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   request_key Linux gate ladder (type/desc/callout): OK"
+        );
 
         // Batch 376: userfaultfd gate order reversed.  Linux's
         // SYSCALL_DEFINE1(userfaultfd) checks EPERM (no UFFD_USER_MODE_ONLY

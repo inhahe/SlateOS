@@ -39952,3 +39952,210 @@ bash scripts/boot-test.sh : BOOT_OK after 22s, no regressions, stamp
   "uselib + _sysctl unconditional ENOSYS (no pre-ENOSYS arg touch):
   OK" present.
 
+
+
+------------------------------------------------------------
+Batch 459 (2026-06-06): sys_add_key / sys_request_key
+Linux gate ladder + NULL-description acceptance for add_key.
+------------------------------------------------------------
+
+Linux source (verbatim, `security/keys/keyctl.c`):
+
+    SYSCALL_DEFINE5(add_key, const char __user *, _type,
+                    const char __user *, _description,
+                    const void __user *, _payload,
+                    size_t, plen,
+                    key_serial_t, ringid)
+    {
+        ...
+        ret = -EINVAL;
+        if (plen > 1024 * 1024 - 1)
+            goto error;
+
+        /* draw all the data into kernel space */
+        ret = key_get_type_from_user(type, _type, sizeof(type));
+        if (ret < 0)
+            goto error;
+
+        description = NULL;
+        if (_description) {
+            description = strndup_user(_description, KEY_MAX_DESC_SIZE);
+            if (IS_ERR(description)) {
+                ret = PTR_ERR(description);
+                goto error;
+            }
+            if (!*description) {
+                kfree(description);
+                description = NULL;
+            }
+        }
+
+        payload = NULL;
+        if (plen) {
+            ret = -ENOMEM;
+            payload = kvmalloc(plen, GFP_KERNEL);
+            if (!payload)
+                goto error2;
+            ret = -EFAULT;
+            if (copy_from_user(payload, _payload, plen) != 0)
+                goto error3;
+        }
+        ...
+    }
+
+    SYSCALL_DEFINE4(request_key, const char __user *, _type,
+                    const char __user *, _description,
+                    const char __user *, _callout_info,
+                    key_serial_t, destringid)
+    {
+        ...
+        ret = key_get_type_from_user(type, _type, sizeof(type));
+        if (ret < 0)
+            goto error;
+
+        description = strndup_user(_description, KEY_MAX_DESC_SIZE);
+        if (IS_ERR(description)) {
+            ret = PTR_ERR(description);
+            goto error;
+        }
+
+        callout_info = NULL;
+        callout_len = 0;
+        if (_callout_info) {
+            callout_info = strndup_user(_callout_info, PAGE_SIZE);
+            ...
+        }
+        ...
+    }
+
+    long key_get_type_from_user(char *type,
+                                const char __user *_type,
+                                unsigned len)
+    {
+        int ret;
+
+        ret = strncpy_from_user(type, _type, len);
+        if (ret < 0)
+            return ret;
+        if (ret == 0 || ret >= len)
+            return -EINVAL;
+        if (type[0] == '.')
+            return -EPERM;
+        type[len - 1] = '\0';
+        return 0;
+    }
+
+Per-gate divergence table (pre-batch -> Linux):
+
+| syscall      | input                                          | pre-batch | Linux  |
+|--------------|------------------------------------------------|-----------|--------|
+| add_key      | _type=NULL, plen=2 MiB                         | EFAULT    | EINVAL |
+| add_key      | _type="user", _description=NULL, plen=0        | EFAULT    | ENOSYS |
+| add_key      | _type="",     _description="d", plen=0         | ENOSYS    | EINVAL |
+| add_key      | _type=".int", _description="d", plen=0         | ENOSYS    | EPERM  |
+| add_key      | 33-byte no-NUL type, valid desc, plen=0        | ENOSYS    | EINVAL |
+| request_key  | _type="",     _description="d"                 | ENOSYS    | EINVAL |
+| request_key  | _type=".int", _description="d"                 | ENOSYS    | EPERM  |
+| request_key  | 33-byte no-NUL type, valid desc                | ENOSYS    | EINVAL |
+
+Why this matters:
+
+  1. NULL description for add_key.  The pre-batch code's blanket
+     `if (args.arg0 == 0 || args.arg1 == 0) return EFAULT;` line
+     rejected NULL description.  Linux's literal `if (_description)`
+     guard around `strndup_user` means NULL is silently accepted
+     (description stays NULL and the keyring code uses an empty
+     description).  glibc's `add_key` wrapper does pass NULL when the
+     caller wants a default description, so any future Linux ABI
+     binary that relied on this behaviour would see a spurious EFAULT
+     and fail to register a key.  This was a real bug, not just a
+     stub artefact.
+
+  2. Empty / dot-prefixed / over-length type strings.  Linux's
+     `key_get_type_from_user` discriminates: empty=EINVAL, '.'-prefix
+     reserved-namespace=EPERM, 32+ bytes=EINVAL.  Pre-batch saw none
+     of those distinctions and folded everything into ENOSYS.  The
+     EPERM gate in particular is security-relevant: the '.' prefix
+     marks kernel-internal key types like `.user_session`, and Linux
+     rejects userspace attempts to instantiate them with EPERM
+     (not ENOSYS or any other shape).  An audit log scanning for
+     EPERM on add_key would never fire on our pre-batch implementation.
+
+  3. Gate-1 (plen) precedes gate-2 (type).  Linux's literal first
+     check is the plen overflow.  Pre-batch ran the NULL-type check
+     first.  A caller passing _type=NULL together with an oversized
+     plen would see EFAULT pre-batch, EINVAL on Linux.  Any binary
+     that branches on errno to distinguish "bad plen" vs "bad
+     pointer" would get the wrong shape.
+
+  4. request_key never had the NULL-description bug (Linux genuinely
+     requires description here — no `if (_description)` guard), but
+     the type-validation divergences were the same.
+
+Translator-only stance: we still have no keyring backend, so the
+final answer for every well-formed call remains ENOSYS.  The fix is
+in the gate ordering and per-gate errno mapping, not in adding any
+keyring functionality.  Native OS architecture (capability handles,
+not keyrings) is unchanged.
+
+Fix description (kernel/src/syscall/linux.rs):
+
+  1. New helper `key_get_type_from_user_emulation(user_ptr) ->
+     Result<Vec<u8>, i32>` (around line ~14929) mirrors Linux's
+     32-byte-buffer `strncpy_from_user` semantics:
+       * NULL / unmapped       -> EFAULT (via read_user_cstr)
+       * empty (first byte NUL)-> EINVAL  (matches ret==0 arm)
+       * 32+ bytes without NUL -> EINVAL  (matches ret>=len arm)
+       * type[0]=='.'           -> EPERM
+       * otherwise              -> Ok(bytes)
+     Returns the bytes (currently unused by the stub) so a future
+     real backend can pass them straight to `lookup_user_key_type`.
+
+  2. sys_add_key rewritten to mirror Linux's gate order:
+       Gate-1: plen > 1024*1024-1 -> EINVAL
+       Gate-2: key_get_type_from_user_emulation(_type)
+       Gate-3: if (_description) read_user_cstr(_description, 4095)
+               with too-long remapped to EINVAL (strndup_user
+               behaviour); NULL silently accepted (KEY DIVERGENCE
+               FIX).
+       Gate-4: if (plen) validate _payload pointer.
+     Fall through to ENOSYS.
+
+  3. sys_request_key rewritten with the same gate-2 helper, then
+     description REQUIRED (no NULL guard -> NULL produces EFAULT
+     via read_user_cstr), then callout_info OPTIONAL (PAGE_SIZE
+     cap).  Falls through to ENOSYS.
+
+Self-test probes (kernel/src/syscall/linux.rs, around line ~48352):
+
+  Replaced the pre-batch 4-line add_key + 4-line request_key probe
+  cluster with a 14-probe block using stack-allocated buffers for
+  deterministic type-string content.  Probes (in order):
+
+    add_key:
+      [1] (NULL type, valid desc) -> EFAULT
+      [2] (NULL type, plen=2MiB)   -> EINVAL (gate-1 precedes type)
+      [3] ("", valid desc)         -> EINVAL (empty type)
+      [4] (".internal", valid)     -> EPERM
+      [5] (33-byte no-NUL type)    -> EINVAL (too long)
+      [6] ("user", NULL desc)      -> ENOSYS (NEW; was EFAULT)
+      [7] ("user", "k")            -> ENOSYS (happy path)
+      [8] ("user", "k", plen=8, NULL payload) -> EFAULT
+      [9] ("user", "k", plen=2MiB) -> EINVAL
+
+    request_key:
+      [10] (NULL type, valid desc) -> EFAULT
+      [11] ("", valid desc)        -> EINVAL
+      [12] (".internal", valid)    -> EPERM
+      [13] (33-byte no-NUL type)   -> EINVAL
+      [14] ("user", NULL desc)     -> EFAULT (REQUIRED here)
+      [15] ("user", "k", NULL callout) -> ENOSYS
+      [16] ("user", "k", "k" callout)  -> ENOSYS
+
+  Success stamps:
+    "[syscall/linux]   add_key Linux gate ladder (plen/type/desc/payload): OK"
+    "[syscall/linux]   request_key Linux gate ladder (type/desc/callout): OK"
+
+Build: cargo build -p kernel  -> Finished `dev` profile in 39.03s.
+Boot:  bash scripts/boot-test.sh -> BOOT_OK detected after 22s.
+

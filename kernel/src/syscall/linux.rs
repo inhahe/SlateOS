@@ -12245,30 +12245,179 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
 // if it is a File it returns EROFS.
 // ---------------------------------------------------------------------------
 
-/// `truncate(path, length)`.
+/// `truncate(path, length)` — Linux gate-ladder fidelity.
+///
+/// ## Linux source — `fs/open.c::do_sys_truncate` / `vfs_truncate`
+///
+/// ```c
+/// long do_sys_truncate(const char __user *pathname, loff_t length)
+/// {
+///     unsigned int lookup_flags = LOOKUP_FOLLOW;
+///     struct path path;
+///     int error;
+///
+///     if (length < 0)              /* sorry, but loff_t says... */
+///         return -EINVAL;
+///
+/// retry:
+///     error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
+///     if (!error) {
+///         error = vfs_truncate(&path, length);
+///         path_put(&path);
+///     }
+///     ...
+///     return error;
+/// }
+///
+/// int vfs_truncate(const struct path *path, loff_t length)
+/// {
+///     struct inode *inode = path->dentry->d_inode;
+///
+///     /* For directories it's -EISDIR, for other non-regulars - -EINVAL */
+///     if (S_ISDIR(inode->i_mode))
+///         return -EISDIR;
+///     if (!S_ISREG(inode->i_mode))
+///         return -EINVAL;
+///
+///     error = mnt_want_write(path->mnt);
+///     if (error)
+///         goto out;                /* -EROFS on a read-only mount */
+///
+///     error = inode_permission(idmap, inode, MAY_WRITE);
+///     if (error)
+///         goto mnt_drop_write_and_out;       /* -EACCES */
+///
+///     ...
+///     error = do_truncate(idmap, path->dentry, length, 0, NULL);
+///     /* ^ this dispatches notify_change -> inode_newsize_ok which
+///        emits -EFBIG when length > RLIMIT_FSIZE (and queues SIGXFSZ). */
+///     ...
+/// }
+/// ```
+///
+/// ## Gate ladder
+///
+/// For an unprivileged caller on this kernel — every mount is read-
+/// only; we don't have a writable backing yet:
+///
+///   1. `length < 0`                                  -> EINVAL
+///   2. `pathname == NULL`                            -> EFAULT (getname)
+///   3. `read_user_cstr(pathname)`                    -> EFAULT / ENAMETOOLONG
+///   4. `canonicalize_path(cwd, path)`                -> ENOENT (empty) /
+///        EINVAL (embedded NUL) / ENAMETOOLONG
+///   5. `Vfs::stat(canonicalized)`:
+///        - `NotFound`                                -> ENOENT
+///        - `EntryType::Directory`                    -> EISDIR
+///        - `EntryType::Symlink` / `VolumeLabel`      -> EINVAL  (non-regular)
+///        - `EntryType::File`                         -> fall through
+///   6. terminal **EROFS** — every mount in this kernel is read-only;
+///      Linux's `inode_newsize_ok` / RLIMIT_FSIZE / EFBIG check runs
+///      *after* `mnt_want_write` and is therefore dead code in our
+///      universe.  When writable mounts land, the EFBIG gate will be
+///      re-inserted at its proper position (between mnt_want_write
+///      success and do_truncate).
+///
+/// ## Divergence table (pre-batch vs Linux vs post-batch 447)
+///
+/// | call shape                              | Linux  | Pre   | Post   |
+/// |-----------------------------------------|--------|-------|--------|
+/// | `truncate(_, -1)`                       | EINVAL | EINVAL| EINVAL |
+/// | `truncate(NULL, 0)`                     | EFAULT | EFAULT| EFAULT |
+/// | `truncate(bad_ptr, 0)`                  | EFAULT | EFAULT| EFAULT |
+/// | `truncate("", 0)`                       | ENOENT | EROFS | ENOENT |
+/// | `truncate("/__nonexistent__", 0)`       | ENOENT | EROFS | ENOENT |
+/// | `truncate("/some_dir", 0)`              | EISDIR | EROFS | EISDIR |
+/// | `truncate("/file", HUGE)` low-rlim      | EROFS  | EFBIG | EROFS  |
+/// | `truncate("/file", 0)`                  | EROFS  | EROFS | EROFS  |
+///
+/// The most consequential rows are #4/#5/#6/#7:
+///
+/// - Probes that detect "does this path exist" via truncate get the
+///   wrong answer pre-batch.  uClibc's `mkstemp()` retry loop opens
+///   the file then truncates to match the requested initial size;
+///   ENOENT means "try a different random name" while EROFS means
+///   "give up on this entire surface as writable".  Pre-batch we
+///   forced the latter for every miss.
+/// - systemd's journald log-rotation reads `truncate(path, 0)` on a
+///   stale log path; ENOENT teaches it to recreate, EROFS teaches it
+///   to shut down logging.  Pre-batch we shut down logging for
+///   nonexistent paths.
+/// - `./configure` probes (autoconf's `AC_FUNC_FTRUNCATE`) on
+///   `truncate(dir, N)` differentiate EISDIR ("you passed a dir, not
+///   a file") from EROFS ("mount is read-only"); pre-batch the
+///   probe never distinguished these and disabled both code paths.
+/// - SIGXFSZ-aware programs (nginx's `client_max_body_size` reserve,
+///   sqlite's WAL size cap) need to know whether EFBIG is the cause
+///   (lowered RLIMIT_FSIZE) or whether EROFS is the cause (mount
+///   went read-only).  Pre-batch we surfaced EFBIG before EROFS,
+///   masking the actual cause from the diagnostic path.
+///
+/// ## Architectural directive
+///
+/// Pure ABI translator fidelity.  The native OS does not need to
+/// implement writable mounts to satisfy this gate — EROFS is the
+/// truthful terminal answer for every File.  The RLIMIT_FSIZE
+/// arithmetic that pre-batch ran inline is removed because it
+/// produces the wrong errno *order*: Linux runs mnt_want_write
+/// before inode_newsize_ok, so on a read-only mount EROFS always
+/// wins.  When/if a writable backing is plumbed in, the EFBIG check
+/// returns at its proper position (after the EROFS arm becomes a
+/// path that succeeds, before do_truncate dispatches to the FS).
 fn sys_truncate(args: &SyscallArgs) -> SyscallResult {
-    // Negative length -> EINVAL per POSIX.
+    // Gate 1: negative length -> EINVAL (Linux's `if (length < 0)`).
+    // x86_64 ABI: Linux declares `loff_t` (i64) for length; arg1 is a
+    // 64-bit register so no truncation games.
     #[allow(clippy::cast_possible_wrap)]
     let length = args.arg1 as i64;
     if length < 0 {
         return linux_err(errno::EINVAL);
     }
-    match validate_user_str(args.arg0) {
-        Ok(()) => {
-            // RLIMIT_FSIZE: same ordering as Linux — limit check fires
-            // before the FS-level EROFS, so a process that lowered
-            // RLIMIT_FSIZE sees EFBIG regardless of whether the
-            // underlying mount is read-only.
-            #[allow(clippy::cast_sign_loss)]
-            let new_size = length as u64;
-            if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
-                return linux_err(e);
-            }
-            linux_err(errno::EROFS)
-        }
-        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
-        Err(e) => linux_err(linux_errno_for(e)),
+    // Gate 2: NULL pathname -> EFAULT (getname).
+    let path = args.arg0;
+    if path == 0 {
+        return linux_err(errno::EFAULT);
     }
+    // Gate 3: getname-equivalent — read NUL-terminated path from user.
+    const PATH_MAX: usize = 4096;
+    let path_bytes = match read_user_cstr(path, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    // Gate 4: canonicalize against the caller's cwd — user_path_at
+    // equivalent for the *string* phase (before VFS dentry walk).
+    let cwd = match caller_pid() {
+        Some(pid) => pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']),
+        None => alloc::vec![b'/'],
+    };
+    let canon = match canonicalize_path(&cwd, &path_bytes) {
+        Ok(p) => p,
+        Err(e) => return linux_err(e),
+    };
+    let path_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    // Gate 5: VFS stat — Linux's user_path_at dentry walk + the
+    // S_ISDIR/S_ISREG triage at the top of vfs_truncate.
+    match crate::fs::Vfs::stat(path_str) {
+        Ok(entry) => match entry.entry_type {
+            crate::fs::EntryType::Directory => return linux_err(errno::EISDIR),
+            crate::fs::EntryType::File => {}
+            // Symlink / VolumeLabel: non-regular -> Linux's
+            // `if (!S_ISREG(...)) return -EINVAL;`.  We don't follow
+            // symlinks at the VFS layer (no link resolution in this
+            // tree yet), so a symlink surfaces here directly; the
+            // EINVAL is Linux's terminal answer for any non-regular
+            // non-directory inode.
+            _ => return linux_err(errno::EINVAL),
+        },
+        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+    // Gate 6: terminal EROFS — every mount in this kernel is read-only.
+    // Linux's RLIMIT_FSIZE / EFBIG check runs *after* mnt_want_write
+    // and is therefore unreachable here; do not re-insert it pre-mount.
+    linux_err(errno::EROFS)
 }
 
 /// `ftruncate(fd, length)`.
@@ -43039,6 +43188,104 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
+    // truncate — Linux gate ladder fidelity (batch 447).
+    //
+    // Linux's truncate runs `length<0 → user_path_at → S_ISDIR/S_ISREG
+    // triage → mnt_want_write` in strict order; a caller on a read-
+    // only mount (which is every mount in this kernel) should see
+    // EINVAL/EFAULT/ENAMETOOLONG/ENOENT/EISDIR BEFORE the terminal
+    // EROFS whenever the input fails an earlier gate.  Pre-batch we
+    // collapsed every non-EFAULT non-EINVAL case to EROFS (and ran
+    // RLIMIT_FSIZE before the EROFS, which produced EFBIG-where-Linux-
+    // returns-EROFS for callers with a low rlim).
+    {
+        // Probe A: length<0 -> EINVAL.  Linux gates this before path
+        // resolution, so the pathname pointer is unread; pass NULL to
+        // catch any accidental EFAULT-before-EINVAL regression.
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TRUNCATE, &a).value
+            != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: truncate(_, -1) not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Probe B: NULL path with length>=0 -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TRUNCATE, &a).value
+            != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: truncate(NULL, 0) not EFAULT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Probe C: empty path "" -> ENOENT (canonicalize_path empty).
+        let empty = b"\0";
+        let empty_ptr = empty.as_ptr() as u64;
+        let a = SyscallArgs { arg0: empty_ptr, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TRUNCATE, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: truncate(\"\", 0) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Probe D: nonexistent path -> ENOENT (Vfs::stat NotFound).
+        let missing = b"/__nonexistent_truncate_target_xyz\0";
+        let missing_ptr = missing.as_ptr() as u64;
+        let a = SyscallArgs { arg0: missing_ptr, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::TRUNCATE, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: truncate(missing, 0) not ENOENT"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Probe E: existing directory -> EISDIR.  Gated on
+        // Vfs::mkdir succeeding (matches the chroot-self-test
+        // convention of skipping if the root mount is non-writable).
+        let probe_dir = "/syscall_truncate_dir_probe";
+        if crate::fs::Vfs::mkdir(probe_dir).is_ok() {
+            let dir_path = b"/syscall_truncate_dir_probe\0";
+            let dir_ptr = dir_path.as_ptr() as u64;
+            let a = SyscallArgs { arg0: dir_ptr, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::TRUNCATE, &a).value
+                != -i64::from(errno::EISDIR) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: truncate(dir, 0) not EISDIR"
+                );
+                return Err(KernelError::InternalError);
+            }
+            let _ = crate::fs::Vfs::remove(probe_dir);
+        }
+        // Probe F: existing regular file -> EROFS (terminal).  Gated
+        // on Vfs::write_file succeeding.
+        let probe_file = "/syscall_truncate_file_probe.txt";
+        if crate::fs::Vfs::write_file(probe_file, b"x").is_ok() {
+            let file_path = b"/syscall_truncate_file_probe.txt\0";
+            let file_ptr = file_path.as_ptr() as u64;
+            // length=0 to keep the call shape minimal.
+            let a = SyscallArgs { arg0: file_ptr, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::TRUNCATE, &a).value
+                != -i64::from(errno::EROFS) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: truncate(regular file, 0) not EROFS"
+                );
+                return Err(KernelError::InternalError);
+            }
+            let _ = crate::fs::Vfs::remove(probe_file);
+        }
+        serial_println!(
+            "[syscall/linux]   truncate Linux gate ladder (EINVAL/EFAULT/ENOENT/EISDIR/EROFS): OK"
+        );
+    }
+
     // getitimer / setitimer / alarm / pause — input validation.
     {
         // getitimer(which=3, _) -> EINVAL.
@@ -44404,7 +44651,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   fchownat int truncation (high-half ignored): OK"
         );
 
-        // truncate(NULL,_) -> EFAULT.
+        // truncate gate-ladder coverage is provided by the dedicated
+        // batch-447 truncate self-test block above ("truncate Linux gate
+        // ladder ..."), which exercises EINVAL / EFAULT / ENOENT /
+        // EISDIR / EROFS against real backing inputs.  The legacy
+        // stub-era probes here (which passed `0x1000` as a raw user-
+        // pointer sentinel) became unsafe once sys_truncate started
+        // actually reading the path bytes — `0x1000` is an unmapped
+        // kernel-context address and copy_from_user on it page-faults.
+        // Keep only NULL→EFAULT and negative-length→EINVAL here as
+        // smoke checks; the full ladder lives in the dedicated block.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TRUNCATE, &a).value
@@ -44412,21 +44668,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: truncate(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // truncate(path, -1) -> EINVAL.
-        // (Constructed as u64::MAX for "negative" semantics.)
-        let a = SyscallArgs { arg0: 0x1000, arg1: u64::MAX, arg2: 0, arg3: 0,
+        // truncate(NULL, -1) -> EINVAL (length<0 fires before getname).
+        let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TRUNCATE, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: truncate(_,-1) not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        // truncate(path, 0) -> EROFS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::TRUNCATE, &a).value
-            != -i64::from(errno::EROFS) {
-            serial_println!("[syscall/linux]   FAIL: truncate not EROFS");
             return Err(KernelError::InternalError);
         }
         // ftruncate(_, -1) -> EINVAL.

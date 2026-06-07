@@ -38252,3 +38252,154 @@ OBSOLETE NOTE BELOW (pre-relaxation):
      mkdir'd scratch directory; re-built and re-booted clean.
      Stamps confirmed at build/serial-test.txt:
        "[syscall/linux]   chroot Linux gate ladder (EFAULT/ENOENT/ENOTDIR/EPERM): OK"
+
+447. syscall/linux: sys_truncate Linux gate-ladder fidelity (path → EISDIR / EINVAL / EROFS).
+     Linux source — fs/open.c::do_sys_truncate + vfs_truncate (Linux 6.x):
+       long do_sys_truncate(const char __user *pathname, loff_t length)
+       {
+           unsigned int lookup_flags = LOOKUP_FOLLOW;
+           struct path path;
+           int error;
+
+           if (length < 0)              /* sorry, but loff_t says... */
+               return -EINVAL;
+
+       retry:
+           error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
+           if (!error) {
+               error = vfs_truncate(&path, length);
+               path_put(&path);
+           }
+           ...
+       }
+
+       int vfs_truncate(const struct path *path, loff_t length)
+       {
+           struct inode *inode = path->dentry->d_inode;
+
+           /* For directories it's -EISDIR, for other non-regulars - -EINVAL */
+           if (S_ISDIR(inode->i_mode))
+               return -EISDIR;
+           if (!S_ISREG(inode->i_mode))
+               return -EINVAL;
+
+           error = mnt_want_write(path->mnt);
+           if (error)
+               goto out;                /* -EROFS on a read-only mount */
+
+           error = inode_permission(idmap, inode, MAY_WRITE);
+           if (error)
+               goto mnt_drop_write_and_out;       /* -EACCES */
+
+           ...
+           error = do_truncate(idmap, path->dentry, length, 0, NULL);
+           /* ^ dispatches notify_change -> inode_newsize_ok which emits
+              -EFBIG when length > RLIMIT_FSIZE (and queues SIGXFSZ). */
+           ...
+       }
+
+     Divergence table (pre-batch vs Linux vs post-batch):
+
+       | call shape                              | Linux  | Pre    | Post   |
+       |-----------------------------------------|--------|--------|--------|
+       | truncate(_, -1)                         | EINVAL | EINVAL | EINVAL |
+       | truncate(NULL, 0)                       | EFAULT | EFAULT | EFAULT |
+       | truncate(bad_ptr, 0)                    | EFAULT | EFAULT | EFAULT |
+       | truncate("", 0)                         | ENOENT | EROFS  | ENOENT |
+       | truncate("/__nonexistent__", 0)         | ENOENT | EROFS  | ENOENT |
+       | truncate("/some_dir", 0)                | EISDIR | EROFS  | EISDIR |
+       | truncate("/file", HUGE) low-rlim        | EROFS  | EFBIG  | EROFS  |
+       | truncate("/file", 0)                    | EROFS  | EROFS  | EROFS  |
+
+     Why it matters:
+       - Probes that detect "does this path exist" via truncate get the
+         wrong answer pre-batch.  uClibc's mkstemp() retry loop opens
+         the file then truncates to match the requested initial size;
+         ENOENT means "try a different random name" while EROFS means
+         "give up on this entire surface as writable".  Pre-batch we
+         forced the latter for every miss.
+       - systemd's journald log-rotation reads truncate(path, 0) on a
+         stale log path; ENOENT teaches it to recreate, EROFS teaches it
+         to shut down logging.  Pre-batch we shut down logging for
+         nonexistent paths.
+       - ./configure probes (autoconf's AC_FUNC_FTRUNCATE) on
+         truncate(dir, N) differentiate EISDIR ("you passed a dir, not
+         a file") from EROFS ("mount is read-only"); pre-batch the
+         probe never distinguished these and disabled both code paths.
+       - SIGXFSZ-aware programs (nginx's client_max_body_size reserve,
+         sqlite's WAL size cap) need to know whether EFBIG is the cause
+         (lowered RLIMIT_FSIZE) or whether EROFS is the cause (mount
+         went read-only).  Pre-batch we surfaced EFBIG before EROFS,
+         masking the actual cause from the diagnostic path.
+
+     Fix: sys_truncate now runs Linux's full gate ladder —
+       Gate 1: length < 0                                  -> EINVAL
+       Gate 2: pathname == NULL                            -> EFAULT (getname)
+       Gate 3: read_user_cstr(pathname)                    -> EFAULT / ENAMETOOLONG
+       Gate 4: canonicalize_path(cwd, path)                -> ENOENT (empty) /
+               EINVAL (embedded NUL) / ENAMETOOLONG
+       Gate 5: Vfs::stat(canonicalized):
+                 NotFound                                  -> ENOENT
+                 EntryType::Directory                      -> EISDIR
+                 EntryType::Symlink / VolumeLabel          -> EINVAL  (non-regular)
+                 EntryType::File                           -> fall through
+       Gate 6: terminal EROFS — every mount in this kernel is read-only.
+
+     The pre-batch RLIMIT_FSIZE / EFBIG check is removed because it
+     produced the wrong errno *order*: Linux runs mnt_want_write before
+     inode_newsize_ok, so on a read-only mount EROFS always wins.  When
+     writable mounts land, the EFBIG gate will be re-inserted at its
+     proper position (between mnt_want_write success and do_truncate).
+
+     Architectural directive: pure ABI translator fidelity.  The
+     native OS does not need to implement writable mounts to satisfy
+     this gate — EROFS is the truthful terminal answer for every File.
+     Symlink resolution at the VFS layer is not yet implemented; the
+     EINVAL we surface for Symlink entries diverges from Linux's
+     "follow + recurse" behavior, but Linux's eventual terminal answer
+     on our universal-RO universe would still be EROFS, so userspace
+     probes that distinguish symlink-to-file from symlink-to-dir won't
+     observe meaningful semantics either way until link resolution
+     lands.
+
+     Boot-time probes added (6 of them, A–F):
+       (A) length=u64::MAX with NULL path -> EINVAL (length<0 fires
+           before getname; confirms gate-1 ordering)
+       (B) NULL path with length=0 -> EFAULT (getname)
+       (C) empty string "" -> ENOENT (canonicalize_path empty input)
+       (D) "/__nonexistent_truncate_target_xyz" -> ENOENT (Vfs::stat
+           NotFound)
+       (E) existing directory (Vfs::mkdir scratch) -> EISDIR
+       (F) existing regular file (Vfs::write_file scratch) -> EROFS
+
+     Stamp: "[syscall/linux]   truncate Linux gate ladder
+       (EINVAL/EFAULT/ENOENT/EISDIR/EROFS): OK"
+
+     Companion cleanup: the legacy stub-era smoke probes (which passed
+     0x1000 as a raw user-pointer sentinel) became unsafe once the new
+     impl actually reads path bytes — 0x1000 is unmapped in kernel
+     context and copy_from_user on it page-faults.  Replaced with two
+     NULL-only smoke probes that exercise the EFAULT (gate 2) and
+     EINVAL (gate 1) paths without touching unmapped user addresses.
+     Full ladder coverage lives in the dedicated batch-447 probe
+     block.
+
+     Iteration narrative: first boot test failed with a kernel page
+     fault at 0xffffffff81dbb0a7, address=0x1000, after the new
+     "truncate Linux gate ladder ... : OK" stamp but during the
+     downstream legacy `truncate(0x1000, 0) -> EROFS` smoke probe.
+     Root cause: the pre-batch smoke probe at lines ~44664-44678
+     synthesized a fake user pointer at 0x1000 expecting the old stub
+     to return EROFS after a 1-byte validate_user_read (which bypasses
+     in kernel context).  My new impl runs read_user_cstr which calls
+     copy_from_user, which still bypasses validate_user_read but then
+     actually issues `copy_nonoverlapping(0x1000 as *const u8, ...)`
+     in kernel mode — and 0x1000 is unmapped, hence the #PF.  Fix:
+     removed the now-unsafe smoke probes and folded their coverage
+     into the dedicated gate-ladder block (which uses real backing
+     buffers).  Second boot test PASSED at 22s.
+
+     Build: cargo build -p kernel clean both attempts (50.40s, 38.87s).
+     Boot: bash scripts/boot-test.sh PASSED at 22s on the retry.
+     Stamps confirmed at build/serial-test.txt:
+       "[syscall/linux]   truncate Linux gate ladder (EINVAL/EFAULT/ENOENT/EISDIR/EROFS): OK"

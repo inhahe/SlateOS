@@ -13306,44 +13306,95 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
 // (the target, even if our representation is by-value).
 // ---------------------------------------------------------------------------
 
-/// `symlink(target, linkpath)`.
+/// Linux-style `getname()` empty-path discrimination for syscalls
+/// that otherwise only stub-validate the user pointer.  Mirrors
+/// `fs/namei.c::getname_flags(filename, 0, NULL)` (Linux v6.6 line
+/// 191-200): a NULL/unreadable pointer surfaces `-EFAULT` via
+/// `strncpy_from_user`, and a successfully copied empty path
+/// surfaces `-ENOENT` via the `!len && !(flags & LOOKUP_EMPTY)`
+/// branch.  Used by `sys_symlink`, `sys_symlinkat`, `sys_link`, and
+/// `sys_linkat` (when `AT_EMPTY_PATH` is not set) to match Linux's
+/// empty-path errno before falling through to the read-only-FS
+/// EROFS terminal.  Batch 481.
+fn check_path_str_nonempty(ptr: u64) -> Result<(), i32> {
+    if ptr == 0 {
+        return Err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(ptr, 1) {
+        return Err(linux_errno_for(e));
+    }
+    let mut b: u8 = 0;
+    // SAFETY: validate_user_read above confirmed the byte is
+    // readable for unprivileged callers.  Kernel context (boot
+    // probes) bypasses validation and dereferences directly — the
+    // caller is responsible for passing a kernel-resident buffer
+    // address rather than a raw u64 sentinel like 0x1000.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(ptr, &raw mut b, 1)
+    };
+    if let Err(e) = r {
+        return Err(linux_errno_for(e));
+    }
+    if b == 0 {
+        return Err(errno::ENOENT);
+    }
+    Ok(())
+}
+
+/// `symlink(target, linkpath)` — Linux gate ladder.
+///
+/// `fs/namei.c::SYSCALL_DEFINE2(symlink)` dispatches to
+/// `do_symlinkat(getname(oldname), AT_FDCWD, getname(newname))`.
+/// `getname()` is `getname_flags(_, 0, NULL)` — no `LOOKUP_EMPTY`,
+/// so an empty path surfaces `-ENOENT` (line 196 of fs/namei.c
+/// v6.6).  Pre-batch (480 and earlier) we only validated pointer
+/// readability and never inspected the first byte, so an empty
+/// target/linkpath returned `EROFS` instead of `ENOENT`.  Order
+/// matches Linux: oldname (target) gates before newname (linkpath).
+///
+/// **Why it matters:** glibc's `symlink(3)` and POSIX-conformance
+/// test suites (e.g. xfstests' generic/523, LTP `symlink03`)
+/// expect ENOENT for the empty-path case to discriminate "your
+/// input is shaped wrong" from "the filesystem won't accept this."
+/// Pre-batch translator squashed both into EROFS, masking the
+/// input-shape diagnostic.
 fn sys_symlink(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 || args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-        return linux_err(linux_errno_for(e));
+    if let Err(e) = check_path_str_nonempty(args.arg1) {
+        return linux_err(e);
     }
     linux_err(errno::EROFS)
 }
 
-/// `symlinkat(target, newdirfd, linkpath)`.
+/// `symlinkat(target, newdirfd, linkpath)` — same Linux contract as
+/// `sys_symlink`; see that body's doc for the empty-path ENOENT
+/// rationale (batch 481).
 fn sys_symlinkat(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 || args.arg2 == 0 {
-        return linux_err(errno::EFAULT);
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-        return linux_err(linux_errno_for(e));
+    if let Err(e) = check_path_str_nonempty(args.arg2) {
+        return linux_err(e);
     }
     linux_err(errno::EROFS)
 }
 
-/// `link(oldpath, newpath)`.
+/// `link(oldpath, newpath)` — Linux gate ladder.
+///
+/// `fs/namei.c::SYSCALL_DEFINE2(link)` dispatches to
+/// `do_linkat(AT_FDCWD, getname(oldname), AT_FDCWD,
+/// getname(newname), 0)`.  Both names go through plain `getname()`
+/// (no `LOOKUP_EMPTY`), so an empty path → `-ENOENT` via the
+/// fs/namei.c v6.6 line 196 branch.  See `sys_symlink` for the
+/// rationale; batch 481.
 fn sys_link(args: &SyscallArgs) -> SyscallResult {
-    if args.arg0 == 0 || args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
+    if let Err(e) = check_path_str_nonempty(args.arg0) {
+        return linux_err(e);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-        return linux_err(linux_errno_for(e));
+    if let Err(e) = check_path_str_nonempty(args.arg1) {
+        return linux_err(e);
     }
     linux_err(errno::EROFS)
 }
@@ -13364,7 +13415,8 @@ fn sys_link(args: &SyscallArgs) -> SyscallResult {
 /// truncation pattern after batches 308-314.
 fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
     // AT_SYMLINK_FOLLOW (0x400) | AT_EMPTY_PATH (0x1000).
-    const VALID_FLAGS: u32 = 0x400 | 0x1000;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const VALID_FLAGS: u32 = 0x400 | AT_EMPTY_PATH;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let flags_i32 = args.arg4 as i32;
     #[allow(clippy::cast_sign_loss)]
@@ -13372,14 +13424,26 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    if args.arg1 == 0 || args.arg3 == 0 {
-        return linux_err(errno::EFAULT);
+    // Linux do_linkat: oldname goes through getname_uflags(oldname,
+    // flags) — which sets LOOKUP_EMPTY iff AT_EMPTY_PATH is set in
+    // the syscall flags.  With LOOKUP_EMPTY, an empty oldname is
+    // allowed (operates on dirfd directly); without it, empty
+    // oldname → -ENOENT per fs/namei.c v6.6 line 196.  Batch 481.
+    if flags & AT_EMPTY_PATH != 0 {
+        // Empty oldname permitted; still reject NULL.
+        if args.arg1 == 0 {
+            return linux_err(errno::EFAULT);
+        }
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
+            return linux_err(linux_errno_for(e));
+        }
+    } else if let Err(e) = check_path_str_nonempty(args.arg1) {
+        return linux_err(e);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 1) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 1) {
-        return linux_err(linux_errno_for(e));
+    // newname always uses plain getname() (no LOOKUP_EMPTY) — empty
+    // newname always surfaces -ENOENT regardless of AT_EMPTY_PATH.
+    if let Err(e) = check_path_str_nonempty(args.arg3) {
+        return linux_err(e);
     }
     linux_err(errno::EROFS)
 }
@@ -47468,40 +47532,117 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // symlink(NULL,_) -> EFAULT.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+        // Batch 481: symlink/link/linkat empty-path -> ENOENT.  Linux's
+        // getname() (fs/namei.c v6.6, line 191-200) returns -ENOENT for
+        // a zero-length path when LOOKUP_EMPTY is not set; symlink,
+        // symlinkat, link, and linkat (without AT_EMPTY_PATH) all take
+        // this path.  Pre-batch we only pointer-validated and returned
+        // EROFS, breaking glibc/LTP empty-path discrimination.  Probes
+        // here use kernel-resident byte buffers so the new
+        // check_path_str_nonempty's first-byte read has well-defined
+        // memory to touch (the legacy 0x1000/0x2000 sentinels were
+        // unmapped — same retrofit that the truncate block above did
+        // for the same reason).
+        let nonempty_a: [u8; 2] = *b"x\0";
+        let nonempty_b: [u8; 2] = *b"y\0";
+        let empty_buf: [u8; 1] = [0u8];
+        core::hint::black_box(&nonempty_a);
+        core::hint::black_box(&nonempty_b);
+        core::hint::black_box(&empty_buf);
+        let ptr_a = nonempty_a.as_ptr() as u64;
+        let ptr_b = nonempty_b.as_ptr() as u64;
+        let ptr_e = empty_buf.as_ptr() as u64;
+
+        // symlink(NULL, valid) -> EFAULT (oldname processed first).
+        let a = SyscallArgs { arg0: 0, arg1: ptr_b, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SYMLINK, &a).value
             != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: symlink(NULL,_) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // symlink(x, y) -> EROFS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+        // symlink(empty, valid) -> ENOENT (new — batch 481).
+        let a = SyscallArgs { arg0: ptr_e, arg1: ptr_b, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYMLINK, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: symlink(empty,_) not ENOENT ({})",
+                dispatch_linux(nr::SYMLINK, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // symlink(valid, empty) -> ENOENT (new — batch 481;
+        // newname's getname is run only after oldname's succeeds).
+        let a = SyscallArgs { arg0: ptr_a, arg1: ptr_e, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYMLINK, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: symlink(_,empty) not ENOENT ({})",
+                dispatch_linux(nr::SYMLINK, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // symlink(valid, valid) -> EROFS (terminal — RO mounts).
+        let a = SyscallArgs { arg0: ptr_a, arg1: ptr_b, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SYMLINK, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: symlink not EROFS");
             return Err(KernelError::InternalError);
         }
-        // symlinkat(x, _, y) -> EROFS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0x2000, arg3: 0,
+        // symlinkat(valid, _, valid) -> EROFS.
+        let a = SyscallArgs { arg0: ptr_a, arg1: 0, arg2: ptr_b, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SYMLINKAT, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: symlinkat not EROFS");
             return Err(KernelError::InternalError);
         }
-        // link(x, y) -> EROFS.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
+        // symlinkat(empty, _, valid) -> ENOENT (batch 481).
+        let a = SyscallArgs { arg0: ptr_e, arg1: 0, arg2: ptr_b, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SYMLINKAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: symlinkat(empty,_,_) not ENOENT ({})",
+                dispatch_linux(nr::SYMLINKAT, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // link(valid, valid) -> EROFS.
+        let a = SyscallArgs { arg0: ptr_a, arg1: ptr_b, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LINK, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: link not EROFS");
             return Err(KernelError::InternalError);
         }
-        // linkat bogus flag -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+        // link(empty, valid) -> ENOENT (batch 481).
+        let a = SyscallArgs { arg0: ptr_e, arg1: ptr_b, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LINK, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: link(empty,_) not ENOENT ({})",
+                dispatch_linux(nr::LINK, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // link(valid, empty) -> ENOENT (batch 481).
+        let a = SyscallArgs { arg0: ptr_a, arg1: ptr_e, arg2: 0, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LINK, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: link(_,empty) not ENOENT ({})",
+                dispatch_linux(nr::LINK, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // linkat bogus flag -> EINVAL (flag check still first).
+        let a = SyscallArgs { arg0: 0, arg1: ptr_a, arg2: 0, arg3: ptr_b,
             arg4: 0x800_0000, arg5: 0 };
         if dispatch_linux(nr::LINKAT, &a).value
             != -i64::from(errno::EINVAL) {
@@ -47509,13 +47650,54 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // linkat with valid AT_SYMLINK_FOLLOW (0x400) -> EROFS.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+        let a = SyscallArgs { arg0: 0, arg1: ptr_a, arg2: 0, arg3: ptr_b,
             arg4: 0x400, arg5: 0 };
         if dispatch_linux(nr::LINKAT, &a).value
             != -i64::from(errno::EROFS) {
             serial_println!("[syscall/linux]   FAIL: linkat not EROFS");
             return Err(KernelError::InternalError);
         }
+        // linkat(_, empty, _, valid, 0) -> ENOENT (batch 481;
+        // AT_EMPTY_PATH not set so getname_uflags has no
+        // LOOKUP_EMPTY, empty oldname surfaces ENOENT).
+        let a = SyscallArgs { arg0: 0, arg1: ptr_e, arg2: 0, arg3: ptr_b,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::LINKAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linkat(_,empty,_,_,0) not ENOENT ({})",
+                dispatch_linux(nr::LINKAT, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // linkat(_, empty, _, valid, AT_EMPTY_PATH) -> EROFS (batch
+        // 481; AT_EMPTY_PATH allows empty oldname, falls through).
+        let a = SyscallArgs { arg0: 0, arg1: ptr_e, arg2: 0, arg3: ptr_b,
+            arg4: 0x1000, arg5: 0 };
+        if dispatch_linux(nr::LINKAT, &a).value
+            != -i64::from(errno::EROFS) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linkat(_,empty,_,_,AT_EMPTY_PATH) not EROFS ({})",
+                dispatch_linux(nr::LINKAT, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        // linkat(_, valid, _, empty, AT_EMPTY_PATH) -> ENOENT (batch
+        // 481; AT_EMPTY_PATH does NOT extend to newname, which
+        // always uses plain getname()).
+        let a = SyscallArgs { arg0: 0, arg1: ptr_a, arg2: 0, arg3: ptr_e,
+            arg4: 0x1000, arg5: 0 };
+        if dispatch_linux(nr::LINKAT, &a).value
+            != -i64::from(errno::ENOENT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linkat(_,_,_,empty,AT_EMPTY_PATH) not ENOENT ({})",
+                dispatch_linux(nr::LINKAT, &a).value,
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   symlink/link/linkat empty-path -> ENOENT (Linux v6.6 fs/namei.c::getname_flags: `!len && !(flags & LOOKUP_EMPTY)` -> -ENOENT): OK"
+        );
 
         // Batch 315: linkat int truncation — high-half register
         // garbage must be stripped before the flags mask check.
@@ -47528,11 +47710,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // writable FS in kernel context after validate_user_read
         // succeeds for non-NULL paths).
         //
-        // (a) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0400) → EROFS
+        // (a) linkat(0, valid, 0, valid, 0x1_0000_0400) → EROFS
         //     (high|AT_SYMLINK_FOLLOW; truncates to 0x400, mask
-        //     passes, paths validated, EROFS terminal).
+        //     passes, paths validated, EROFS terminal).  Batch 481
+        //     swapped 0x1000/0x2000 sentinels for the kernel-resident
+        //     ptr_a/ptr_b buffers above so the new
+        //     check_path_str_nonempty's first-byte read targets
+        //     mapped memory.
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: ptr_a, arg2: 0, arg3: ptr_b,
             arg4: 0x1_0000_0400, arg5: 0,
         };
         let v = dispatch_linux(nr::LINKAT, &a).value;
@@ -47544,11 +47730,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (b) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_1400) → EROFS
+        // (b) linkat(0, valid, 0, valid, 0x1_0000_1400) → EROFS
         //     (high|AT_SYMLINK_FOLLOW|AT_EMPTY_PATH; truncates to
         //     0x1400, mask passes, EROFS terminal).
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: ptr_a, arg2: 0, arg3: ptr_b,
             arg4: 0x1_0000_1400, arg5: 0,
         };
         let v = dispatch_linux(nr::LINKAT, &a).value;
@@ -47560,11 +47746,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (c) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0000) → EROFS
+        // (c) linkat(0, valid, 0, valid, 0x1_0000_0000) → EROFS
         //     (high-half only, low half zero; truncates to 0, mask
         //     passes, EROFS terminal).
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: ptr_a, arg2: 0, arg3: ptr_b,
             arg4: 0x1_0000_0000, arg5: 0,
         };
         let v = dispatch_linux(nr::LINKAT, &a).value;
@@ -47576,13 +47762,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (d) linkat(0, 0x1000, 0, 0x2000, 0x1_0000_0010) → EINVAL
+        // (d) linkat(0, valid, 0, valid, 0x1_0000_0010) → EINVAL
         //     (high|bad-low 0x10; truncates to 0x10, mask rejects bit
         //     outside AT_SYMLINK_FOLLOW|AT_EMPTY_PATH; verifies mask
         //     gate still rejects invalid bits after the high half is
         //     stripped — locks in the truncation behaviour).
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: ptr_a, arg2: 0, arg3: ptr_b,
             arg4: 0x1_0000_0010, arg5: 0,
         };
         let v = dispatch_linux(nr::LINKAT, &a).value;

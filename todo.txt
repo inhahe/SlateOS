@@ -43183,3 +43183,190 @@ at `build/serial-test.txt:683`.
 
 **Build:** `cargo build -p kernel` clean, 44.54s.
 **Boot test:** PASS @ 25s (`bash scripts/boot-test.sh`).
+
+---
+
+## 481. Linux ABI fidelity batch — symlink/link/linkat empty-path → ENOENT (2026-06-07)
+
+### Linux v6.6 contract (verbatim, `fs/namei.c`)
+
+```c
+// getname_flags (line 191-200):
+atomic_set(&result->refcnt, 1);
+/* The empty path is special. */
+if (unlikely(!len)) {
+    if (empty)
+        *empty = 1;
+    if (!(flags & LOOKUP_EMPTY)) {
+        putname(result);
+        return ERR_PTR(-ENOENT);
+    }
+}
+
+// getname (line 217-220):
+struct filename *getname(const char __user * filename)
+{
+    return getname_flags(filename, 0, NULL);
+}
+
+// symlinkat (line 4520-4528):
+SYSCALL_DEFINE3(symlinkat, const char __user *, oldname,
+                int, newdfd, const char __user *, newname)
+{
+    return do_symlinkat(getname(oldname), newdfd, getname(newname));
+}
+
+SYSCALL_DEFINE2(symlink, const char __user *, oldname,
+                const char __user *, newname)
+{
+    return do_symlinkat(getname(oldname), AT_FDCWD, getname(newname));
+}
+
+// link / linkat (line 4701-4711):
+SYSCALL_DEFINE5(linkat, int, olddfd, const char __user *, oldname,
+                int, newdfd, const char __user *, newname, int, flags)
+{
+    ...
+    return do_linkat(olddfd, getname_uflags(oldname, flags),
+                     newdfd, getname(newname), flags);
+}
+
+SYSCALL_DEFINE2(link, const char __user *, oldname,
+                const char __user *, newname)
+{
+    return do_linkat(AT_FDCWD, getname(oldname),
+                     AT_FDCWD, getname(newname), 0);
+}
+```
+
+`getname()` passes `flags=0` (no `LOOKUP_EMPTY`), so an empty
+path → `-ENOENT`.  `getname_uflags(oldname, flags)` sets
+`LOOKUP_EMPTY` iff `flags & AT_EMPTY_PATH` — so `linkat`'s
+oldname allows empty *only* when AT_EMPTY_PATH is set;
+`linkat`'s newname always uses plain `getname()` and therefore
+always rejects empty.  `symlink`/`symlinkat`/`link` never set
+`LOOKUP_EMPTY` for either name.
+
+### Divergence (pre-batch translator vs Linux)
+
+| call                                                | Linux v6.6 | pre-batch | post-batch |
+|-----------------------------------------------------|------------|-----------|------------|
+| `symlink(NULL, valid)`                              | EFAULT     | EFAULT    | EFAULT     |
+| `symlink("", valid)`                                | ENOENT     | EROFS     | ENOENT     |
+| `symlink(valid, "")`                                | ENOENT     | EROFS     | ENOENT     |
+| `symlink(valid, valid)`                             | EROFS      | EROFS     | EROFS      |
+| `symlinkat("", _, valid)`                           | ENOENT     | EROFS     | ENOENT     |
+| `link("", valid)`                                   | ENOENT     | EROFS     | ENOENT     |
+| `link(valid, "")`                                   | ENOENT     | EROFS     | ENOENT     |
+| `linkat(_, "", _, valid, 0)`                        | ENOENT     | EROFS     | ENOENT     |
+| `linkat(_, "", _, valid, AT_EMPTY_PATH)`            | EROFS      | EROFS     | EROFS      |
+| `linkat(_, valid, _, "", AT_EMPTY_PATH)`            | ENOENT     | EROFS     | ENOENT     |
+
+### Root cause
+
+The four syscalls were stubs that only ran NULL-pointer and
+`validate_user_read(_, 1)` checks before returning the EROFS
+terminal.  They never read the first byte of the string and so
+could not distinguish "empty path" from "non-empty path on a
+read-only mount."  Both squashed into EROFS.
+
+### Why it matters
+
+`getname()`'s empty-path → ENOENT is one of the cornerstones of
+POSIX path-handling diagnostics.  Several real users depend on
+this discrimination:
+
+  - **glibc's `symlink(3)`/`link(3)`** propagate the kernel errno
+    verbatim; programs that pass user-supplied paths (rsync,
+    cp -s, ln) report "No such file or directory" for empty
+    input rather than "Read-only file system" — the former
+    points at the caller's bug, the latter (mis)points at the
+    mount.
+  - **xfstests' generic/523 and LTP `symlink03` / `link08`** assert
+    `errno == ENOENT` for empty-path inputs.  Pre-batch we'd
+    fail those compliance tests.
+  - **systemd's symlink-management helpers** in `tmpfiles.d` use
+    empty-path probes to discover whether a target slot is
+    pre-populated before symlinking; ENOENT is the "go ahead,
+    create it" signal, EROFS is the "give up, the mount is
+    sealed" signal.  Pre-batch we always said the latter,
+    forcing systemd into a defensive fallback that never tries.
+  - **busybox `ln -s ""`** prints "ln: ...: No such file or
+    directory" on Linux; we'd print "Read-only file system",
+    which is a worse diagnostic for the actual user error.
+
+### Fix
+
+Translator-only.  Introduced `check_path_str_nonempty(ptr)`
+helper that:
+
+  1. NULL → EFAULT (matches `getname`'s `strncpy_from_user`
+     failure mode for `name == NULL`).
+  2. `validate_user_read(ptr, 1)` → EFAULT on
+     unmapped/kernel-space pointer.
+  3. `copy_from_user(ptr, &b, 1)` reads the first byte; if it
+     is NUL → ENOENT (Linux's `!len && !LOOKUP_EMPTY` branch).
+  4. Otherwise Ok.
+
+`sys_symlink`, `sys_symlinkat`, `sys_link` all call the helper
+for both names in oldname-first order.  `sys_linkat` keeps its
+flag-mask gate at position 1, then routes oldname through the
+helper *only* when `AT_EMPTY_PATH` is not set (preserving
+Linux's `getname_uflags(oldname, flags)` semantics).  Newname
+always uses the helper because `linkat`'s newname has no
+LOOKUP_EMPTY option.
+
+### Probe-buffer retrofit
+
+Pre-batch probes passed `0x1000` / `0x2000` as raw user-pointer
+sentinels.  Those addresses are unmapped in kernel context and
+the old stubs never dereferenced them (`validate_user_read`
+returns Ok in kernel context without touching memory).  The new
+helper *does* dereference (one byte via `copy_from_user`), so
+the sentinels would have page-faulted.
+
+Followed the same retrofit `sys_truncate` did in batch 447:
+plant kernel-resident byte arrays (`nonempty_a = b"x\0"`,
+`nonempty_b = b"y\0"`, `empty_buf = b"\0"`), pass their
+`.as_ptr() as u64` to the probes.  `core::hint::black_box`
+keeps LLVM from optimising the buffers away.  The legacy
+batch-315 linkat int-truncation probes were updated to use the
+same buffers since they too pass linkat raw 0x1000/0x2000
+addresses.
+
+### Probes
+
+Six new and five updated probes, plus one stamp:
+
+  - `symlink(NULL, valid) → EFAULT`           — preserved.
+  - `symlink(empty, valid) → ENOENT`          — NEW.
+  - `symlink(valid, empty) → ENOENT`          — NEW.
+  - `symlink(valid, valid) → EROFS`           — updated buffer.
+  - `symlinkat(valid, _, valid) → EROFS`      — updated buffer.
+  - `symlinkat(empty, _, valid) → ENOENT`     — NEW.
+  - `link(valid, valid) → EROFS`              — updated buffer.
+  - `link(empty, valid) → ENOENT`             — NEW.
+  - `link(valid, empty) → ENOENT`             — NEW.
+  - `linkat(bad flag) → EINVAL`               — updated buffer.
+  - `linkat(valid AT_SYMLINK_FOLLOW) → EROFS` — updated buffer.
+  - `linkat(_, empty, _, valid, 0) → ENOENT`  — NEW.
+  - `linkat(_, empty, _, valid, AT_EMPTY_PATH) → EROFS` — NEW
+    (confirms AT_EMPTY_PATH allows empty oldname).
+  - `linkat(_, valid, _, empty, AT_EMPTY_PATH) → ENOENT` — NEW
+    (confirms AT_EMPTY_PATH does NOT extend to newname).
+  - batch 315 linkat truncation probes (a)-(d) — all updated
+    to use ptr_a/ptr_b buffers.
+
+Final stamp:
+
+  `[syscall/linux]   symlink/link/linkat empty-path -> ENOENT
+   (Linux v6.6 fs/namei.c::getname_flags: \`!len && !(flags &
+   LOOKUP_EMPTY)\` -> -ENOENT): OK`
+
+at `build/serial-test.txt:515`.
+
+**Build:** `cargo build -p kernel` clean, 53.36s.
+**Boot test:** PASS @ 25s on retry (`bash scripts/boot-test.sh`;
+the first attempt tripped known-issue #1, the intermittent RCU
+self-test hang documented in `known-issues.md`, unrelated to
+this batch).

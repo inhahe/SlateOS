@@ -13783,10 +13783,35 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          test_lock_pi_timeout (held lock -> ETIMEDOUT, WAITERS cleared),
 ##          and syscall-layer ABI gating (foreign owner -> EAGAIN, uncontended
 ##          LOCK/UNLOCK round trip, LOCK_PI2 abs-timeout wiring).
-##        * FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI: still absent.
-##          These need a combined wait-then-PI-requeue primitive (the
-##          condvar-to-PI-mutex handoff path) in the futex layer; routing
-##          alone is not enough.  Warrants its own batch.
+##        * FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI: DONE (Batch 352b).
+##          Implemented the combined wait-then-PI-requeue primitives in
+##          kernel/src/ipc/futex.rs.  A requeue-PI waiter parks in a private
+##          RequeuePiWaiter queue keyed by (cond_addr, addr_space,
+##          target_addr) — deliberately NOT in the plain FutexTable, so a
+##          stray FUTEX_WAKE on the condvar word can't pull a thread destined
+##          for the PI mutex (documented simplification: only CMP_REQUEUE_PI
+##          moves requeue-PI waiters).  futex_cmp_requeue_pi uses a
+##          budget = 1 + nr_requeue: the first matching waiter found while the
+##          PI mutex word is free becomes the proxy-locked owner (word stored
+##          to its TID, PiOwner pushed), and the rest are requeued as PiWaiters
+##          with WAITERS set + priority boost applied to the new owner.  This
+##          means no "free mutex with requeued waiters but no owner" state can
+##          arise.  futex_wait_requeue_pi closes the timeout-vs-transfer race
+##          the same way lock_pi does: under one PI_FUTEX_TABLE lock it checks
+##          owners[pidx] for our TID first (transfer won) before removing our
+##          waiter (timeout won), then on timeout clears WAITERS if last and
+##          deboosts the real owner derived from the word's TID bits.  Native
+##          handlers sys_futex_wait_requeue_pi (218) / sys_futex_cmp_requeue_pi
+##          (219) added + dispatched; classic sys_futex ops 11/12 wired (op 12
+##          requires nr_wake==1 -> EINVAL otherwise; nr_requeue read from the
+##          utime slot as a plain int; absolute timeout NULL=forever,
+##          CLOCK_MONOTONIC unless FUTEX_CLOCK_REALTIME).  Self-tests:
+##          ipc/futex test_requeue_pi runs the full condvar->PI-mutex handoff
+##          in two spawned (nonzero-TID) workers (TID-0 boot thread can't own
+##          a PI word), plus syscall-layer ABI gating (value mismatch->EAGAIN,
+##          uaddr==uaddr2->EINVAL, empty broadcast->0, stale compare->EAGAIN,
+##          nr_wake!=1->EINVAL).  Also retargeted two pre-existing "unknown op"
+##          ABI probes off op 11 (now implemented) onto op 14.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##

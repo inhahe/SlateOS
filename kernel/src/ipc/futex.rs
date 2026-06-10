@@ -824,6 +824,34 @@ struct PiWaiter {
     priority: u8,
 }
 
+/// A task parked on a condvar waiting to be requeued onto a PI mutex.
+///
+/// This backs the `FUTEX_WAIT_REQUEUE_PI` / `FUTEX_CMP_REQUEUE_PI` pair —
+/// the condition-variable-to-PI-mutex handoff used by `pthread_cond_wait`
+/// on a `PTHREAD_PRIO_INHERIT` mutex.  A waiter blocks on `cond_addr` (a
+/// plain, non-PI futex word) but remembers the PI mutex (`target_addr`) it
+/// must end up holding.  A later `futex_cmp_requeue_pi` either grants it
+/// ownership of `target_addr` (if free) or moves it onto the PI waiter
+/// queue for `target_addr`, where it waits for the holder to unlock.
+///
+/// Kept in its own queue (not [`FutexTable`]) so that a plain
+/// `FUTEX_WAKE` on the condvar word cannot accidentally wake a requeue-PI
+/// waiter into an inconsistent state: such waiters are serviced *only* by
+/// `futex_cmp_requeue_pi`, matching the way glibc's PI condvar signals.
+struct RequeuePiWaiter {
+    /// The condvar (source) address the task is parked on.
+    cond_addr: u64,
+    /// Address-space key (PML4 physical address, 0 = kernel).
+    addr_space: u64,
+    /// The PI mutex (destination) address the task will be requeued onto.
+    target_addr: u64,
+    /// The blocked task's ID.
+    task_id: TaskId,
+    /// The task's effective priority captured at wait time (used to pick
+    /// the top waiter to grant the mutex to, and to boost the holder).
+    priority: u8,
+}
+
 /// An ownership record for a PI futex.
 struct PiOwner {
     /// The futex address this task holds.
@@ -845,15 +873,20 @@ struct PiFutexTable {
     waiters: [VecDeque<PiWaiter>; NUM_BUCKETS],
     /// Ownership records, bucketed by address hash.
     owners: [VecDeque<PiOwner>; NUM_BUCKETS],
+    /// Condvar waiters awaiting requeue onto a PI mutex, bucketed by the
+    /// *condvar* address hash (the source key, not the PI mutex).
+    requeue_waiters: [VecDeque<RequeuePiWaiter>; NUM_BUCKETS],
 }
 
 impl PiFutexTable {
     const fn new() -> Self {
         const EMPTY_W: VecDeque<PiWaiter> = VecDeque::new();
         const EMPTY_O: VecDeque<PiOwner> = VecDeque::new();
+        const EMPTY_R: VecDeque<RequeuePiWaiter> = VecDeque::new();
         Self {
             waiters: [EMPTY_W; NUM_BUCKETS],
             owners: [EMPTY_O; NUM_BUCKETS],
+            requeue_waiters: [EMPTY_R; NUM_BUCKETS],
         }
     }
 }
@@ -1350,6 +1383,399 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Requeue-PI: condvar → PI mutex handoff (FUTEX_WAIT/CMP_REQUEUE_PI)
+// ---------------------------------------------------------------------------
+//
+// These two operations implement the path `pthread_cond_wait` takes when
+// the associated mutex is priority-inheriting:
+//
+//   * A waiter calls `futex_wait_requeue_pi(cond, val, pi_mutex, timeout)`.
+//     It has *already* released `pi_mutex` in userspace.  It checks
+//     `*cond == val`; if so it parks on the condvar's requeue queue,
+//     remembering that it must wind up owning `pi_mutex`.
+//
+//   * A signaller calls `futex_cmp_requeue_pi(cond, pi_mutex, nr, val)`.
+//     After verifying `*cond == val`, it takes the highest-priority parked
+//     waiter and tries to acquire `pi_mutex` *for* it: if the mutex is
+//     free, that waiter becomes the owner and is woken; otherwise it (and
+//     up to `nr` further waiters) are moved onto the PI waiter queue for
+//     `pi_mutex`, where the current holder's eventual `unlock_pi` hands the
+//     lock down one at a time.  This avoids the thundering herd *and*
+//     preserves priority inheritance across the handoff.
+//
+// Simplification vs. Linux: a plain `FUTEX_WAKE` on the condvar does not
+// wake a requeue-PI waiter (they live on a private queue).  glibc's PI
+// condvar only ever signals via `FUTEX_CMP_REQUEUE_PI`, so this is
+// behaviourally complete for the intended caller.  Documented in todo.txt.
+
+/// Remove and return the highest-priority requeue-PI waiter parked on
+/// `cond_addr` whose destination matches `target_addr`.
+///
+/// "Highest priority" = lowest priority number; ties break FIFO (earliest
+/// enqueued), matching the ordering `unlock_pi` uses for the PI queue.
+fn take_best_requeue_waiter(
+    table: &mut PiFutexTable,
+    cidx: usize,
+    cond_addr: u64,
+    addr_space: u64,
+    target_addr: u64,
+) -> Option<RequeuePiWaiter> {
+    // SAFETY: cidx is masked to NUM_BUCKETS - 1 by bucket_index.
+    #[allow(clippy::indexing_slicing)]
+    let q = &mut table.requeue_waiters[cidx];
+    let mut best: Option<usize> = None;
+    let mut best_prio: u8 = u8::MAX;
+    for (i, w) in q.iter().enumerate() {
+        if w.cond_addr == cond_addr
+            && w.addr_space == addr_space
+            && w.target_addr == target_addr
+            && w.priority < best_prio
+        {
+            best_prio = w.priority;
+            best = Some(i);
+        }
+    }
+    best.and_then(|i| q.remove(i))
+}
+
+/// Wait on a condvar futex, to be requeued onto a PI mutex on wake.
+///
+/// Backs `FUTEX_WAIT_REQUEUE_PI`.  Atomically checks `*cond_addr == val`;
+/// if it matches, the caller parks until a `futex_cmp_requeue_pi` (on
+/// `cond_addr` targeting `pi_addr`) either grants it ownership of `pi_addr`
+/// or moves it onto the PI waiter queue and a later `unlock_pi` transfers
+/// ownership.  On success the caller returns owning `pi_addr`.
+///
+/// `timeout_ns`:
+/// - `None` — wait indefinitely.
+/// - `Some(0)` — value matched but do not block: returns `Err(TimedOut)`.
+/// - `Some(ns)` — wait up to `ns` nanoseconds (covers *both* phases: while
+///   parked on the condvar and after requeue while awaiting the mutex).
+///
+/// # Returns
+///
+/// - `Ok(())` — woken and now owns `pi_addr`.
+/// - `Err(WouldBlock)` — `*cond_addr != val` (→ `EAGAIN`); no blocking.
+/// - `Err(TimedOut)` — the deadline expired (→ `ETIMEDOUT`).
+/// - `Err(InvalidAddress)` — either address is null.
+/// - `Err(BadAlignment)` — either address is not 4-byte aligned.
+/// - `Err(InvalidArgument)` — `cond_addr == pi_addr` (Linux requires they
+///   differ).
+///
+/// # Safety contract
+///
+/// `cond_addr` must point to a valid, aligned readable `AtomicU32`;
+/// `pi_addr` to a valid, aligned readable/writable `AtomicU32`.
+pub fn futex_wait_requeue_pi(
+    cond_addr: u64,
+    val: u32,
+    pi_addr: u64,
+    timeout_ns: Option<u64>,
+) -> KernelResult<()> {
+    if cond_addr == 0 || pi_addr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    if cond_addr & 3 != 0 || pi_addr & 3 != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+    // Linux rejects uaddr == uaddr2 with EINVAL: requeuing onto the same
+    // word makes no sense and would corrupt the queue bookkeeping.
+    if cond_addr == pi_addr {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let current_id = sched::current_task_id();
+    let addr_space = current_addr_space();
+    let our_priority =
+        sched::get_effective_priority(current_id).unwrap_or(sched::task::IDLE_PRIORITY);
+
+    // SAFETY: caller validated cond_addr as a readable, aligned user word.
+    let cond = unsafe { &*(cond_addr as *const AtomicU32) };
+    // SAFETY: caller validated pi_addr as a writable, aligned user word.
+    let pi = unsafe { &*(pi_addr as *const AtomicU32) };
+
+    // Park on the condvar queue iff *cond_addr == val.  The value check and
+    // the enqueue happen under the same PI table lock that
+    // futex_cmp_requeue_pi takes, so a concurrent signaller cannot slip
+    // between the two.
+    {
+        let mut table = PI_FUTEX_TABLE.lock();
+        let actual = cond.load(Ordering::Acquire);
+        if actual != val {
+            super::stats::futex_spurious();
+            return Err(KernelError::WouldBlock);
+        }
+        // Zero timeout: value matched but we must not block.
+        if matches!(timeout_ns, Some(0)) {
+            return Err(KernelError::TimedOut);
+        }
+        super::stats::futex_wait();
+        let cidx = FutexTable::bucket_index(cond_addr, addr_space);
+        // SAFETY: cidx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        table.requeue_waiters[cidx].push_back(RequeuePiWaiter {
+            cond_addr,
+            addr_space,
+            target_addr: pi_addr,
+            task_id: current_id,
+            priority: our_priority,
+        });
+    }
+
+    // We are conceptually trying to acquire pi_addr; record it so that once
+    // cmp_requeue_pi moves us onto the PI waiter queue, transitive PI sees
+    // us as blocked on that lock.  Cleared on every exit path below.
+    sched::set_blocked_on_pi_addr(current_id, Some(pi_addr));
+
+    // Arm a one-shot timeout if requested.  The same timer covers both the
+    // condvar-wait phase and the post-requeue PI-wait phase.
+    let timer_handle = match timeout_ns {
+        Some(ns) => {
+            fn rq_timeout_wake(tid: u64) {
+                if !sched::try_wake(tid) {
+                    sched::defer_wake(tid);
+                }
+            }
+            Some(crate::hrtimer::schedule_ns(ns, rq_timeout_wake, current_id))
+        }
+        None => None,
+    };
+
+    // Block until we own pi_addr, or the timer fires.  Deboost data is
+    // gathered under the lock and applied after release (PI_FUTEX_TABLE →
+    // SCHED order).
+    let mut deboost: Option<(TaskId, Option<u8>)> = None;
+    let outcome: KernelResult<()> = loop {
+        sched::block_current();
+
+        let mut table = PI_FUTEX_TABLE.lock();
+        let pidx = FutexTable::bucket_index(pi_addr, addr_space);
+        let cidx = FutexTable::bucket_index(cond_addr, addr_space);
+
+        // (1) Did cmp_requeue_pi / unlock_pi make us the PI mutex owner?
+        // SAFETY: pidx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        let is_owner = table.owners[pidx]
+            .iter()
+            .any(|o| o.addr == pi_addr && o.addr_space == addr_space && o.owner_id == current_id);
+        if is_owner {
+            break Ok(());
+        }
+
+        // Not the owner.  The only wakes that reach a requeue-PI waiter are
+        // an ownership transfer (handled above) or the timeout timer —
+        // cmp_requeue_pi requeues us *without* waking.  So with no timeout
+        // this wake is spurious: re-block.
+        if timeout_ns.is_none() {
+            drop(table);
+            continue;
+        }
+
+        // Timed out.  We are still queued in exactly one place; remove
+        // ourselves and clean up.
+
+        // Phase A: still parked on the condvar (never signalled).
+        // SAFETY: cidx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        if let Some(pos) = table.requeue_waiters[cidx].iter().position(|w| {
+            w.task_id == current_id && w.cond_addr == cond_addr && w.addr_space == addr_space
+        }) {
+            table.requeue_waiters[cidx].remove(pos);
+            break Err(KernelError::TimedOut);
+        }
+
+        // Phase B: requeued onto the PI mutex, awaiting ownership transfer.
+        // SAFETY: pidx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        if let Some(pos) = table.waiters[pidx].iter().position(|w| {
+            w.task_id == current_id && w.addr == pi_addr && w.addr_space == addr_space
+        }) {
+            table.waiters[pidx].remove(pos);
+            // Clear WAITERS if we were the last PI waiter on this address.
+            // SAFETY: pidx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            let more = table.waiters[pidx]
+                .iter()
+                .any(|w| w.addr == pi_addr && w.addr_space == addr_space);
+            if !more {
+                pi.fetch_and(!FUTEX_WAITERS_BIT, Ordering::Release);
+            }
+            // Deboost the real owner now that our donation is gone.
+            // SAFETY: pidx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            let real_owner = table.owners[pidx]
+                .iter()
+                .find(|o| o.addr == pi_addr && o.addr_space == addr_space)
+                .map(|o| o.owner_id);
+            deboost = real_owner.map(|oid| (oid, recalculate_inherited_for_owner(&table, oid)));
+            break Err(KernelError::TimedOut);
+        }
+
+        // Not owner and in neither queue: unreachable, since every queue
+        // transition happens under this lock.  Treat defensively as a
+        // spurious wake and re-block rather than returning a bogus success.
+        drop(table);
+        continue;
+    };
+
+    if let Some(handle) = timer_handle {
+        crate::hrtimer::cancel(handle);
+    }
+    sched::set_blocked_on_pi_addr(current_id, None);
+    if let Some((oid, recalc)) = deboost {
+        sched::set_inherited_priority(oid, recalc);
+    }
+    outcome
+}
+
+/// Signal a PI condvar: wake/requeue waiters from `cond_addr` onto the PI
+/// mutex `pi_addr`.
+///
+/// Backs `FUTEX_CMP_REQUEUE_PI`.  After verifying `*cond_addr == val`
+/// (race detection; mismatch → `Err(WouldBlock)`), at most one waiter is
+/// granted ownership of `pi_addr` (only if the mutex is currently free)
+/// and up to `max_requeue` further waiters are moved onto the PI waiter
+/// queue for `pi_addr`.  The granted owner is woken; requeued waiters stay
+/// blocked until the holder unlocks.
+///
+/// Returns the number of waiters affected (woken + requeued), matching
+/// Linux's `futex_requeue` return convention.
+///
+/// # Errors
+///
+/// - `Err(WouldBlock)` — `*cond_addr != val` (→ `EAGAIN`); nothing touched.
+/// - `Err(InvalidAddress)` / `Err(BadAlignment)` — bad address.
+/// - `Err(InvalidArgument)` — `cond_addr == pi_addr`.
+///
+/// # Safety contract
+///
+/// `cond_addr` must point to a valid, aligned readable `AtomicU32`;
+/// `pi_addr` to a valid, aligned readable/writable `AtomicU32`.
+pub fn futex_cmp_requeue_pi(
+    cond_addr: u64,
+    pi_addr: u64,
+    max_requeue: u32,
+    val: u32,
+) -> KernelResult<u32> {
+    if cond_addr == 0 || pi_addr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    if cond_addr & 3 != 0 || pi_addr & 3 != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+    if cond_addr == pi_addr {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let addr_space = current_addr_space();
+
+    // SAFETY: caller validated cond_addr as a readable, aligned user word.
+    let cond = unsafe { &*(cond_addr as *const AtomicU32) };
+    // SAFETY: caller validated pi_addr as a writable, aligned user word.
+    let pi = unsafe { &*(pi_addr as *const AtomicU32) };
+
+    // Results collected under the table lock, applied after release.
+    let mut owner_to_wake: Option<TaskId> = None;
+    let mut woken: u32 = 0;
+    let mut requeued: u32 = 0;
+    let mut boost: Option<(TaskId, u8)> = None;
+
+    {
+        let mut table = PI_FUTEX_TABLE.lock();
+
+        // Compare *cond_addr == val under the lock (mismatch → EAGAIN).
+        let actual = cond.load(Ordering::Acquire);
+        if actual != val {
+            super::stats::futex_spurious();
+            return Err(KernelError::WouldBlock);
+        }
+
+        let cidx = FutexTable::bucket_index(cond_addr, addr_space);
+        let pidx = FutexTable::bucket_index(pi_addr, addr_space);
+
+        // Budget: one implicit wake (the proxy-lock acquisition, Linux's
+        // nr_wake which must be 1) plus max_requeue requeues.
+        let budget = max_requeue.saturating_add(1);
+        let mut processed: u32 = 0;
+        let mut best_requeue_prio: u8 = u8::MAX;
+
+        while processed < budget {
+            let Some(w) =
+                take_best_requeue_waiter(&mut table, cidx, cond_addr, addr_space, pi_addr)
+            else {
+                break;
+            };
+            processed = processed.saturating_add(1);
+
+            // Re-read the owner each iteration (it changes after a grant).
+            let word = pi.load(Ordering::Acquire);
+            let owner_tid = word & FUTEX_TID_MASK;
+
+            if owner_tid == 0 && owner_to_wake.is_none() {
+                // Mutex free: grant ownership to this (highest-prio) waiter.
+                #[allow(clippy::cast_possible_truncation)]
+                let new_tid = (w.task_id as u32) & FUTEX_TID_MASK;
+                pi.store(new_tid, Ordering::Release);
+                // SAFETY: pidx is masked to NUM_BUCKETS - 1.
+                #[allow(clippy::indexing_slicing)]
+                table.owners[pidx].push_back(PiOwner {
+                    addr: pi_addr,
+                    addr_space,
+                    owner_id: w.task_id,
+                });
+                owner_to_wake = Some(w.task_id);
+                woken = 1;
+            } else {
+                // Mutex held: requeue as a PI waiter (do NOT wake — the
+                // holder's unlock_pi will transfer ownership later).
+                // SAFETY: pidx is masked to NUM_BUCKETS - 1.
+                #[allow(clippy::indexing_slicing)]
+                table.waiters[pidx].push_back(PiWaiter {
+                    addr: pi_addr,
+                    addr_space,
+                    task_id: w.task_id,
+                    priority: w.priority,
+                });
+                if w.priority < best_requeue_prio {
+                    best_requeue_prio = w.priority;
+                }
+                requeued = requeued.saturating_add(1);
+            }
+        }
+
+        // If we parked any PI waiters, set the WAITERS bit and arrange to
+        // boost the current owner up to the best requeued priority.
+        if requeued > 0 {
+            pi.fetch_or(FUTEX_WAITERS_BIT, Ordering::Release);
+            let owner_id = owner_to_wake.or_else(|| {
+                let word = pi.load(Ordering::Acquire);
+                let t = word & FUTEX_TID_MASK;
+                if t == 0 { None } else { Some(u64::from(t)) }
+            });
+            if let Some(oid) = owner_id {
+                boost = Some((oid, best_requeue_prio));
+            }
+        }
+    }
+
+    // Apply scheduler effects outside the PI table lock.  Requeued waiters
+    // already recorded `blocked_on_pi_addr = pi_addr` in their wait path, so
+    // only the boost and the wake of the new owner remain.
+    if let Some((oid, prio)) = boost {
+        sched::boost_priority(oid, prio);
+        sched::pi_chain_boost(oid, prio, find_pi_owner);
+    }
+    if let Some(o) = owner_to_wake {
+        sched::wake(o);
+    }
+
+    super::stats::futex_wake(woken);
+    Ok(woken.saturating_add(requeued))
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1369,6 +1795,7 @@ pub fn self_test() -> KernelResult<()> {
     test_requeue()?;
     test_wake_op()?;
     test_pi_trylock_deadlock()?;
+    test_requeue_pi()?;
     test_priority_inheritance()?;
 
     serial_println!("[futex] Futex self-test PASSED");
@@ -1470,6 +1897,138 @@ fn test_pi_trylock_deadlock() -> KernelResult<()> {
     }
 
     serial_println!("[futex]   Trylock/lock PI (acquire/deadlock/contended): OK");
+    Ok(())
+}
+
+// --- Requeue-PI handoff test state ---------------------------------------
+//
+// Statics (not stack words) so they stay live across the whole handoff
+// chain: a worker that acquires the PI mutex unlocks it to pass ownership
+// to the next worker, which only then dereferences these words.
+
+/// Condvar futex word for the requeue-PI test (expected value: 0).
+static RPI_COND: AtomicU32 = AtomicU32::new(0);
+/// PI mutex futex word for the requeue-PI test (0 = free).
+static RPI_PI: AtomicU32 = AtomicU32::new(0);
+/// Number of workers that have reached the requeue-PI wait.
+static RPI_READY: AtomicU32 = AtomicU32::new(0);
+/// Number of workers that completed the full acquire→unlock handoff.
+static RPI_DONE: AtomicU32 = AtomicU32::new(0);
+/// Number of workers that hit an unexpected error.
+static RPI_FAIL: AtomicU32 = AtomicU32::new(0);
+
+/// Worker for the requeue-PI test: parks on the condvar, and on wake must
+/// own the PI mutex, which it then unlocks to hand off to the next waiter.
+extern "C" fn requeue_pi_worker(_arg: u64) {
+    let cond = (&raw const RPI_COND) as u64;
+    let pi = (&raw const RPI_PI) as u64;
+    RPI_READY.fetch_add(1, Ordering::SeqCst);
+    match futex_wait_requeue_pi(cond, 0, pi, None) {
+        Ok(()) => {
+            // We now own the PI mutex.  Record progress, then unlock to
+            // transfer ownership to the next requeued waiter (if any).
+            RPI_DONE.fetch_add(1, Ordering::SeqCst);
+            if futex_unlock_pi(pi).is_err() {
+                RPI_FAIL.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        Err(_) => {
+            RPI_FAIL.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Test: `FUTEX_WAIT_REQUEUE_PI` / `FUTEX_CMP_REQUEUE_PI` condvar→PI-mutex
+/// handoff.
+///
+/// Two workers park on the condvar (PI mutex initially free).  A
+/// `cmp_requeue_pi` grants the mutex to one and requeues the other onto the
+/// PI waiter queue; the chain of `unlock_pi` calls then walks ownership
+/// down so both workers complete.  Also checks that a stale compare value
+/// reports `WouldBlock` without disturbing the queue.
+fn test_requeue_pi() -> KernelResult<()> {
+    let cond = (&raw const RPI_COND) as u64;
+    let pi = (&raw const RPI_PI) as u64;
+
+    // (a) Stale compare must do nothing.  No waiters parked yet, but the
+    //     value check happens first, so a mismatch short-circuits to EAGAIN.
+    RPI_COND.store(0, Ordering::SeqCst);
+    match futex_cmp_requeue_pi(cond, pi, u32::MAX, 7) {
+        Err(KernelError::WouldBlock) => {}
+        result => {
+            serial_println!("[futex]   FAIL: cmp_requeue_pi stale compare {:?}", result);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (b) Functional handoff with two waiters.
+    RPI_COND.store(0, Ordering::SeqCst);
+    RPI_PI.store(0, Ordering::SeqCst);
+    RPI_READY.store(0, Ordering::SeqCst);
+    RPI_DONE.store(0, Ordering::SeqCst);
+    RPI_FAIL.store(0, Ordering::SeqCst);
+
+    sched::spawn(b"futex-rqpi0", 16, requeue_pi_worker, 0, 0)?;
+    sched::spawn(b"futex-rqpi1", 16, requeue_pi_worker, 0, 0)?;
+
+    // Let both workers reach the requeue-PI wait and block.
+    for _ in 0..50 {
+        if RPI_READY.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        sched::yield_now();
+    }
+    if RPI_READY.load(Ordering::SeqCst) < 2 {
+        serial_println!("[futex]   FAIL: requeue-PI workers never parked");
+        return Err(KernelError::InternalError);
+    }
+    // Extra yields so both are fully blocked inside futex_wait_requeue_pi.
+    sched::yield_now();
+    sched::yield_now();
+
+    // Signal: grant the mutex to the top waiter, requeue the rest.  One is
+    // woken (granted ownership) + one requeued = 2 affected.
+    let affected = match futex_cmp_requeue_pi(cond, pi, u32::MAX, 0) {
+        Ok(n) => n,
+        Err(e) => {
+            serial_println!("[futex]   FAIL: cmp_requeue_pi returned {:?}", e);
+            return Err(KernelError::InternalError);
+        }
+    };
+    if affected != 2 {
+        serial_println!("[futex]   FAIL: cmp_requeue_pi affected={} (expected 2)", affected);
+        return Err(KernelError::InternalError);
+    }
+
+    // Let the unlock_pi handoff chain run both workers to completion.
+    for _ in 0..200 {
+        if RPI_DONE.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        sched::yield_now();
+    }
+    let done = RPI_DONE.load(Ordering::SeqCst);
+    let fail = RPI_FAIL.load(Ordering::SeqCst);
+    let final_word = RPI_PI.load(Ordering::SeqCst);
+    sched::reap_dead_tasks();
+
+    if done != 2 || fail != 0 {
+        serial_println!(
+            "[futex]   FAIL: requeue-PI done={} fail={} (expected 2/0)",
+            done,
+            fail
+        );
+        return Err(KernelError::InternalError);
+    }
+    if final_word != 0 {
+        serial_println!(
+            "[futex]   FAIL: requeue-PI final word={:#x} (expected 0)",
+            final_word
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[futex]   Requeue-PI (condvar → PI mutex handoff): OK");
     Ok(())
 }
 

@@ -734,6 +734,33 @@ pub const SYS_FUTEX_TRYLOCK_PI: u64 = 216;
 /// expires before acquisition.
 pub const SYS_FUTEX_LOCK_PI_TIMEOUT: u64 = 217;
 
+/// Wait on a condvar futex, to be requeued onto a PI mutex on wake.
+///
+/// Backs the condvar→PI-mutex handoff (`pthread_cond_wait` on a
+/// priority-inheriting mutex).  The caller parks on the condvar word until
+/// a [`SYS_FUTEX_CMP_REQUEUE_PI`] grants or transfers ownership of the PI
+/// mutex to it.
+///
+/// `arg0`: condvar futex word pointer (readable, 4-byte aligned).
+/// `arg1`: expected condvar value (`u32`).
+/// `arg2`: PI mutex futex word pointer (writable, 4-byte aligned).
+/// `arg3`: timeout in nanoseconds (used only when `arg4` is non-zero).
+/// `arg4`: timeout flag — 0 = wait indefinitely, non-zero = use `arg3`.
+///
+/// Returns: 0 on success (now owns the PI mutex); `WouldBlock` (`EAGAIN`)
+/// on value mismatch; `TimedOut` (`ETIMEDOUT`) if the deadline expires.
+pub const SYS_FUTEX_WAIT_REQUEUE_PI: u64 = 218;
+
+/// Signal a PI condvar: wake/requeue waiters onto a PI mutex.
+///
+/// `arg0`: condvar futex word pointer (readable, 4-byte aligned).
+/// `arg1`: PI mutex futex word pointer (writable, 4-byte aligned).
+/// `arg2`: maximum number of waiters to requeue (`u32`).
+/// `arg3`: expected condvar value (`u32`); mismatch → `EAGAIN`.
+///
+/// Returns: number of waiters affected (woken + requeued).
+pub const SYS_FUTEX_CMP_REQUEUE_PI: u64 = 219;
+
 /// Create a one-way pipe.
 ///
 /// Returns two handles packed into `rax` (read end) and `rdx` (write end).

@@ -1587,6 +1587,68 @@ pub fn sys_futex_lock_pi_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_FUTEX_WAIT_REQUEUE_PI` — park on a condvar to be requeued onto a
+/// PI mutex (the `pthread_cond_wait`-on-PI-mutex path).
+///
+/// `arg0`: condvar futex word pointer (readable, 4-byte aligned).
+/// `arg1`: expected condvar value.
+/// `arg2`: PI mutex futex word pointer (writable, 4-byte aligned).
+/// `arg3`: timeout in nanoseconds (used only when `arg4` is non-zero).
+/// `arg4`: timeout flag — 0 = wait indefinitely, non-zero = use `arg3`.
+///
+/// Returns: 0 on success (now owns the PI mutex).
+pub fn sys_futex_wait_requeue_pi(args: &SyscallArgs) -> SyscallResult {
+    let cond_addr = args.arg0;
+    #[allow(clippy::cast_possible_truncation)]
+    let expected = args.arg1 as u32;
+    let pi_addr = args.arg2;
+    let timeout_ns = if args.arg4 != 0 { Some(args.arg3) } else { None };
+
+    // The condvar word is read; the PI mutex word is read and written.
+    if let Err(e) = crate::mm::user::validate_user_read(cond_addr, 4) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(pi_addr, 4) {
+        return SyscallResult::err(e);
+    }
+
+    match futex::futex_wait_requeue_pi(cond_addr, expected, pi_addr, timeout_ns) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FUTEX_CMP_REQUEUE_PI` — signal a PI condvar, requeuing waiters
+/// onto the PI mutex.
+///
+/// `arg0`: condvar futex word pointer (readable, 4-byte aligned).
+/// `arg1`: PI mutex futex word pointer (writable, 4-byte aligned).
+/// `arg2`: maximum number of waiters to requeue.
+/// `arg3`: expected condvar value (mismatch → `EAGAIN`).
+///
+/// Returns: number of waiters affected (woken + requeued).
+pub fn sys_futex_cmp_requeue_pi(args: &SyscallArgs) -> SyscallResult {
+    let cond_addr = args.arg0;
+    let pi_addr = args.arg1;
+    #[allow(clippy::cast_possible_truncation)]
+    let max_requeue = args.arg2 as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let expected = args.arg3 as u32;
+
+    // The condvar word is read; the PI mutex word is read and written.
+    if let Err(e) = crate::mm::user::validate_user_read(cond_addr, 4) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(pi_addr, 4) {
+        return SyscallResult::err(e);
+    }
+
+    match futex::futex_cmp_requeue_pi(cond_addr, pi_addr, max_requeue, expected) {
+        Ok(n) => SyscallResult::ok(i64::from(n)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipe handlers (220–229)
 // ---------------------------------------------------------------------------

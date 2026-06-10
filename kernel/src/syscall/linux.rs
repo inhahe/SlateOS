@@ -32390,10 +32390,16 @@ fn sys_time(args: &SyscallArgs) -> SyscallResult {
 ///   highest-priority waiter and restoring the caller's priority.
 /// - `FUTEX_TRYLOCK_PI` (8): non-blocking PI acquire; `-EAGAIN` if held by
 ///   another task, `-EDEADLK` if already held by the caller.
+/// - `FUTEX_WAIT_REQUEUE_PI` (11): park on the condvar word `uaddr`
+///   (compared against `val`) to be requeued onto the PI mutex `uaddr2`;
+///   returns owning the mutex.  The `utime` slot is an *absolute* timeout
+///   (NULL = forever), CLOCK_MONOTONIC unless `FUTEX_CLOCK_REALTIME`.
+/// - `FUTEX_CMP_REQUEUE_PI` (12): signal/broadcast — after checking
+///   `*uaddr == val3`, grant the PI mutex `uaddr2` to the top waiter (if
+///   free) and requeue up to `val2` (the `utime` slot, read as an integer)
+///   of the rest onto its PI waiter queue.  `val` (nr_wake) must be 1.
 ///
-/// All other operations return `-ENOSYS`.  Known absent: `FUTEX_WAIT_REQUEUE_PI`
-/// / `FUTEX_CMP_REQUEUE_PI` (the requeue-to-PI condvar handoff path — these
-/// need a combined wait-then-PI-requeue primitive in the futex layer).
+/// All other operations return `-ENOSYS`.
 fn sys_futex(args: &SyscallArgs) -> SyscallResult {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
@@ -32405,6 +32411,8 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
     const FUTEX_TRYLOCK_PI: u64 = 8;
     const FUTEX_WAIT_BITSET: u64 = 9;
     const FUTEX_WAKE_BITSET: u64 = 10;
+    const FUTEX_WAIT_REQUEUE_PI: u64 = 11;
+    const FUTEX_CMP_REQUEUE_PI: u64 = 12;
     const FUTEX_LOCK_PI2: u64 = 13;
     const FUTEX_PRIVATE_FLAG: u64 = 0x80;
     const FUTEX_CLOCK_REALTIME: u64 = 0x100;
@@ -32654,6 +32662,66 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                 arg0: uaddr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
             linux_from_native(handlers::sys_futex_trylock_pi(&a))
+        }
+        FUTEX_WAIT_REQUEUE_PI => {
+            // Condvar→PI-mutex wait (pthread_cond_wait on a PI mutex):
+            //   uaddr  (arg0) — condvar futex word (read for the compare)
+            //   val    (arg2) — expected condvar value
+            //   utime  (arg3) — *absolute* timeout (struct timespec ptr),
+            //                   NULL = wait forever.  Like the other WAIT
+            //                   ops, the clock is CLOCK_MONOTONIC unless
+            //                   FUTEX_CLOCK_REALTIME is set.
+            //   uaddr2 (arg4) — the PI mutex to be requeued onto
+            //   val3   (arg5) — unused (ignored, as Linux does)
+            let addr2 = args.arg4;
+            let native = if timeout_ptr == 0 {
+                let a = SyscallArgs {
+                    arg0: uaddr, arg1: val, arg2: addr2,
+                    arg3: 0, arg4: 0, arg5: 0,
+                };
+                handlers::sys_futex_wait_requeue_pi(&a)
+            } else {
+                let ts = match read_timespec(timeout_ptr) {
+                    Ok(t) => t,
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                };
+                let abs_ns = ts.to_nanos();
+                let clockid_realtime = (raw_op & FUTEX_CLOCK_REALTIME) != 0;
+                let now_ns = if clockid_realtime {
+                    crate::timekeeping::clock_realtime()
+                } else {
+                    crate::timekeeping::clock_monotonic()
+                };
+                let rel_ns = abs_ns.saturating_sub(now_ns);
+                let a = SyscallArgs {
+                    arg0: uaddr, arg1: val, arg2: addr2,
+                    arg3: rel_ns, arg4: 1, arg5: 0,
+                };
+                handlers::sys_futex_wait_requeue_pi(&a)
+            };
+            linux_from_native(native)
+        }
+        FUTEX_CMP_REQUEUE_PI => {
+            // Condvar signal/broadcast onto a PI mutex:
+            //   uaddr  (arg0) — condvar futex word (read for the compare)
+            //   val    (arg2) — nr_wake; Linux mandates exactly 1
+            //   utime  (arg3) — nr_requeue (a plain integer in the timeout
+            //                   slot), the max waiters to move to the mutex
+            //   uaddr2 (arg4) — the PI mutex requeue target
+            //   val3   (arg5) — expected condvar value (compare → EAGAIN)
+            // Linux requires nr_wake == 1 for the requeue-PI variant.
+            if val != 1 {
+                return linux_err(errno::EINVAL);
+            }
+            let addr2 = args.arg4;
+            let max_requeue = clamp_futex_nr(timeout_ptr);
+            #[allow(clippy::cast_possible_truncation)]
+            let cmpval = val3 as u32;
+            let a = SyscallArgs {
+                arg0: uaddr, arg1: addr2, arg2: u64::from(max_requeue),
+                arg3: u64::from(cmpval), arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_futex_cmp_requeue_pi(&a))
         }
         _ => linux_err(errno::ENOSYS),
     }
@@ -60753,10 +60821,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET|REALTIME not 0");
                 return Err(KernelError::InternalError);
             }
-            // Unknown op (op=11, FUTEX_WAIT_REQUEUE_PI — not implemented)
-            // -> ENOSYS.
+            // Unknown op (op=14 is past the highest defined FUTEX command,
+            // FUTEX_LOCK_PI2=13) -> ENOSYS.  (ops 11/12 are now implemented
+            // as FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI.)
             let a = SyscallArgs {
-                arg0: futex_ptr, arg1: 11,
+                arg0: futex_ptr, arg1: 14,
                 arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
             if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::ENOSYS) {
@@ -60971,6 +61040,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let _ = dispatch_linux(nr::FUTEX, &a);
             let _ = free_word.first();
 
+            // --- Requeue-PI ops (WAIT_REQUEUE_PI=11, CMP_REQUEUE_PI=12) ---
+            // The condvar→PI-mutex handoff.  The *functional* multi-waiter
+            // handoff (acquire → unlock → transfer) is covered by
+            // `futex::self_test::test_requeue_pi`, which runs in spawned
+            // nonzero-TID workers.  Here we verify the ABI translation: the
+            // argument overload mapping and the error gates, all of which are
+            // non-blocking and TID-agnostic.
+            const FUTEX_WAIT_REQUEUE_PI_OP: u64 = 11;
+            const FUTEX_CMP_REQUEUE_PI_OP: u64 = 12;
+            let mut rq_cond: [u32; 1] = [0];
+            let rq_cond_ptr = rq_cond.as_mut_ptr() as u64;
+            let mut rq_pi: [u32; 1] = [0];
+            let rq_pi_ptr = rq_pi.as_mut_ptr() as u64;
+
+            // (a) WAIT_REQUEUE_PI value mismatch: *cond(0) != val(9) → EAGAIN,
+            //     no blocking.  uaddr2 (arg4) is the PI mutex; NULL timeout.
+            let a = SyscallArgs {
+                arg0: rq_cond_ptr, arg1: FUTEX_WAIT_REQUEUE_PI_OP,
+                arg2: 9, arg3: 0, arg4: rq_pi_ptr, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX_WAIT_REQUEUE_PI mismatch not EAGAIN"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (b) WAIT_REQUEUE_PI with uaddr == uaddr2 → EINVAL (Linux forbids
+            //     requeuing a word onto itself).  Value matches so the EINVAL
+            //     gate, not the compare, is what fires.
+            let a = SyscallArgs {
+                arg0: rq_cond_ptr, arg1: FUTEX_WAIT_REQUEUE_PI_OP,
+                arg2: 0, arg3: 0, arg4: rq_cond_ptr, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX_WAIT_REQUEUE_PI uaddr==uaddr2 not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (c) CMP_REQUEUE_PI broadcast onto an empty condvar: *cond(0) ==
+            //     val3(0), nr_wake=val=1 (mandated), nr_requeue=arg3=MAX,
+            //     uaddr2=arg4.  No waiters parked → 0 affected.
+            let a = SyscallArgs {
+                arg0: rq_cond_ptr, arg1: FUTEX_CMP_REQUEUE_PI_OP,
+                arg2: 1, arg3: 0xFFFF_FFFF, arg4: rq_pi_ptr, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI empty not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (d) CMP_REQUEUE_PI stale compare: val3(1) != *cond(0) → EAGAIN.
+            let a = SyscallArgs {
+                arg0: rq_cond_ptr, arg1: FUTEX_CMP_REQUEUE_PI_OP,
+                arg2: 1, arg3: 0xFFFF_FFFF, arg4: rq_pi_ptr, arg5: 1,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI mismatch not EAGAIN"
+                );
+                return Err(KernelError::InternalError);
+            }
+            // (e) CMP_REQUEUE_PI requires nr_wake == 1: val=2 → EINVAL before
+            //     any compare or queue access.
+            let a = SyscallArgs {
+                arg0: rq_cond_ptr, arg1: FUTEX_CMP_REQUEUE_PI_OP,
+                arg2: 2, arg3: 0, arg4: rq_pi_ptr, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE_PI nr_wake!=1 not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            let _ = rq_cond.first();
+            let _ = rq_pi.first();
+
             // Batch 352: FUTEX op int truncation.
             //
             // Linux's SYSCALL_DEFINE6(futex, ..., int op, ...) truncates
@@ -61008,18 +61155,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
 
-            // (c) op = 0x1_0000_000B (high garbage + 11 = FUTEX_LOCK_PI2,
-            //     unsupported).  Truncates to 11 -> still ENOSYS.
-            //     Regression guard: an unsupported truncated op must
-            //     still return ENOSYS.
+            // (c) op = 0x1_0000_000E (high garbage + 14, past the highest
+            //     defined FUTEX command).  Truncates to 14 -> still ENOSYS.
+            //     Regression guard: an unsupported truncated op must still
+            //     return ENOSYS.  (Was op 11 before WAIT_REQUEUE_PI landed.)
             let a = SyscallArgs {
-                arg0: futex_ptr, arg1: 0x1_0000_000B,
+                arg0: futex_ptr, arg1: 0x1_0000_000E,
                 arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
             if dispatch_linux(nr::FUTEX, &a).value
                 != -i64::from(errno::ENOSYS) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: FUTEX(high|LOCK_PI2) not ENOSYS"
+                    "[syscall/linux]   FAIL: FUTEX(high|unknown-14) not ENOSYS"
                 );
                 return Err(KernelError::InternalError);
             }

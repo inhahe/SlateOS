@@ -14815,7 +14815,7 @@ fn sys_inotify_rm_watch(args: &SyscallArgs) -> SyscallResult {
 /// call (instead of ENOSYS unconditionally, which hid validity errors
 /// from probes).
 ///
-/// Per Linux 6.10:
+/// Per Linux v6.6 (verified against `include/uapi/linux/fanotify.h@v6.6`):
 ///   * `flags`: known bits below FAN_REPORT_TARGET_FID, with the
 ///     constraint that the class field (bits 2..3) is one of NOTIF,
 ///     CONTENT, PRE_CONTENT (i.e. `(flags & 0xc) != 0xc`).
@@ -14832,7 +14832,9 @@ fn sys_fanotify_init(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let event_f_flags = args.arg1 as u32;
 
-    // Init-flag bits (FANOTIFY_INIT_FLAGS, Linux 6.10).
+    // Init-flag bits (FANOTIFY_INIT_FLAGS, v6.6 — top bit is
+    // FAN_REPORT_TARGET_FID 0x1000; FAN_REPORT_FD_ERROR 0x2000 is a
+    // 6.11 addition and is correctly absent here).
     const FAN_CLOEXEC: u32 = 0x1;
     const FAN_NONBLOCK: u32 = 0x2;
     const FAN_CLASS_CONTENT: u32 = 0x4;
@@ -14968,7 +14970,7 @@ fn sys_fanotify_init(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
 
-    // event_f_flags mask (FANOTIFY_INIT_FD_FLAGS, Linux 6.10).
+    // event_f_flags mask (FANOTIFY_INIT_FD_FLAGS, v6.6).
     const O_ACCMODE: u32 = 0x3;
     const O_APPEND: u32 = 0o2000;
     const O_NONBLOCK: u32 = 0o4000;
@@ -15001,7 +15003,7 @@ fn sys_fanotify_init(args: &SyscallArgs) -> SyscallResult {
 /// passing `flags = FAN_MARK_ADD | FAN_MARK_REMOVE` sees the EINVAL
 /// Linux returns, not an undifferentiated ENOSYS.
 ///
-/// Per Linux 6.10:
+/// Per Linux v6.6 (verified against `include/uapi/linux/fanotify.h@v6.6`):
 ///   * `FANOTIFY_MARK_FLAGS` = ADD | REMOVE | DONT_FOLLOW | ONLYDIR
 ///     | MOUNT | IGNORED_MASK | IGNORED_SURV_MODIFY | FLUSH
 ///     | FILESYSTEM | EVICTABLE | IGNORE  (= 0x7ff).

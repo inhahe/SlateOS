@@ -22844,20 +22844,28 @@ fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
 /// Mirrors Linux's `security/landlock/syscalls.c::SYSCALL_DEFINE4` gates
 /// ahead of the privilege/fd-kind check:
 ///   * `flags == 0` (currently no defined bits).
-///   * `rule_type ∈ {1=PATH_BENEATH, 2=NET_PORT}`.
+///   * `rule_type == 1` (`LANDLOCK_RULE_PATH_BENEATH`).  v6.6 defines
+///     no other rule type — `LANDLOCK_RULE_NET_PORT (2)` arrived in
+///     Linux 6.7, so v6.6's switch hits `default: return -EINVAL`.
 ///   * `rule_attr` is a non-NULL, 16-byte readable buffer.
 ///   * The `allowed_access` (first u64) must be non-zero — Linux's
-///     `add_rule_path_beneath` and `add_rule_net_port` both return
-///     `ENOMSG` for an empty access mask.
-///   * `allowed_access` must be a subset of the per-rule-type mask:
-///       - PATH_BENEATH: `LANDLOCK_ACCESS_FS_MASK = 0xffff`
-///         (EXECUTE..IOCTL_DEV inclusive, Linux 6.10).
-///       - NET_PORT:     `LANDLOCK_ACCESS_NET_MASK = 0x3`
-///         (BIND_TCP | CONNECT_TCP, Linux 6.7).
-///   * NET_PORT additionally requires `port <= 65535` (u16 range).
+///     `add_rule_path_beneath` returns `ENOMSG` for an empty access mask.
+///   * `allowed_access` must be a subset of the FS mask
+///     `LANDLOCK_ACCESS_FS_MASK = 0x7fff` (EXECUTE(1<<0)..TRUNCATE(1<<14)
+///     inclusive).  `IOCTL_DEV (1<<15)` was added in Linux 6.10 and is
+///     NOT part of v6.6's mask.
+///
+/// Batch 522 — drop the Linux 6.7 `NET_PORT` rule type and the Linux
+/// 6.10 `IOCTL_DEV` access bit: both were accepted with a comment
+/// attributing them to >6.6, contradicting our v6.6 fidelity target
+/// (same class as batches 519/521 for the pidfd family).  Verified
+/// against v6.6 include/uapi/linux/landlock.h: `enum landlock_rule_type`
+/// has only `LANDLOCK_RULE_PATH_BENEATH = 1`, and the FS access flags
+/// run only EXECUTE..TRUNCATE (no NET_* defines, no IOCTL_DEV).
 fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
-    const LANDLOCK_ACCESS_FS_MASK: u64 = 0xffff;
-    const LANDLOCK_ACCESS_NET_MASK: u64 = 0x3;
+    // EXECUTE(1<<0)..TRUNCATE(1<<14) = 0x7fff.  IOCTL_DEV (1<<15) is a
+    // Linux 6.10 addition, absent from v6.6.
+    const LANDLOCK_ACCESS_FS_MASK: u64 = 0x7fff;
     // Linux signature: `SYSCALL_DEFINE4(landlock_add_rule, const int,
     // ruleset_fd, const enum landlock_rule_type, rule_type,
     // const void __user *, rule_attr, const __u32, flags)`.  `flags`
@@ -22872,17 +22880,19 @@ fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
     if flags != 0 {
         return linux_err(errno::EINVAL);
     }
-    // rule_type 1 = LANDLOCK_RULE_PATH_BENEATH, 2 = LANDLOCK_RULE_NET_PORT.
+    // rule_type 1 = LANDLOCK_RULE_PATH_BENEATH — the only rule type in
+    // v6.6 (NET_PORT=2 is a Linux 6.7 addition; v6.6's switch returns
+    // -EINVAL for it via the `default` arm).
     // Linux signature: `const enum landlock_rule_type, rule_type` — the
     // C enum is int-sized, delivered in rsi.  The AMD64 syscall ABI does
     // not zero-extend C int across the syscall instruction, so Linux
     // sees only the low 32 bits.  Pre-batch we matched args.arg1 against
-    // u64 literals 1 and 2, so a probe like rule_type=0x1_0000_0001
-    // failed the match and saw EINVAL where Linux's truncated rule_type
-    // = 1 matches PATH_BENEATH and advances to the attr gate.
+    // a u64 literal, so a probe like rule_type=0x1_0000_0001 failed the
+    // match and saw EINVAL where Linux's truncated rule_type = 1 matches
+    // PATH_BENEATH and advances to the attr gate.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let rule_type = args.arg1 as i32;
-    if !matches!(rule_type, 1 | 2) {
+    if rule_type != 1 {
         return linux_err(errno::EINVAL);
     }
     if args.arg2 == 0 {
@@ -22908,28 +22918,12 @@ fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
         // Linux returns ENOMSG for a zero access mask — "no rule body."
         return linux_err(errno::ENOMSG);
     }
-    match rule_type {
-        1 => {
-            // PATH_BENEATH: allowed_access must be subset of FS mask.
-            if allowed_access & !LANDLOCK_ACCESS_FS_MASK != 0 {
-                return linux_err(errno::EINVAL);
-            }
-        }
-        2 => {
-            // NET_PORT: allowed_access must be subset of NET mask.
-            if allowed_access & !LANDLOCK_ACCESS_NET_MASK != 0 {
-                return linux_err(errno::EINVAL);
-            }
-            // port is at offset 8 as u64; must be <= 65535 (u16 range).
-            let port = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[8..16]) {
-                Ok(b) => b,
-                Err(_) => return linux_err(errno::EINVAL),
-            });
-            if port > 65535 {
-                return linux_err(errno::EINVAL);
-            }
-        }
-        _ => unreachable!("matches! above limited rule_type to 1 or 2"),
+    // PATH_BENEATH (the only v6.6 rule type): allowed_access must be a
+    // subset of the FS mask.  (rule_type is guaranteed == 1 by the gate
+    // above; bytes 8..16 of the attr — the NET_PORT `port` field — are
+    // not part of struct landlock_path_beneath_attr and are ignored.)
+    if allowed_access & !LANDLOCK_ACCESS_FS_MASK != 0 {
+        return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
@@ -59527,20 +59521,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // landlock_add_rule PATH_BENEATH with allowed_access bit
-        // outside LANDLOCK_ACCESS_FS_MASK (bit 0x10000) -> EINVAL.
+        // outside LANDLOCK_ACCESS_FS_MASK -> EINVAL.  Bit 0x8000 is
+        // IOCTL_DEV, a Linux 6.10 addition that is NOT in v6.6's mask
+        // (0x7fff = EXECUTE..TRUNCATE), so it must be rejected.  This
+        // pins the v6.6 mask boundary (batch 522).
         let lpb_bad_access: [u8; 16] = {
             let mut b = [0u8; 16];
-            b[0..8].copy_from_slice(&0x10000u64.to_ne_bytes());
+            b[0..8].copy_from_slice(&0x8000u64.to_ne_bytes());
             b
         };
         let lpb_bad_access_ptr = lpb_bad_access.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: lpb_bad_access_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: landlock_add_rule PATH_BENEATH bad access not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule PATH_BENEATH IOCTL_DEV(6.10) bit not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // landlock_add_rule valid NET_PORT (allowed_access=BIND_TCP=0x1,
-        // port=8080) -> EOPNOTSUPP (batch 396 terminal switch).
+        // landlock_add_rule rule_type=2 (LANDLOCK_RULE_NET_PORT) -> EINVAL.
+        // NET_PORT is a Linux 6.7 rule type; v6.6's switch has no case for
+        // it and returns -EINVAL via `default`.  The rule_type gate fires
+        // before the attr pointer/access/port checks, so a fully valid-
+        // looking NET_PORT attr still gets EINVAL (batch 522 — was
+        // EOPNOTSUPP when NET_PORT was wrongly accepted).
         let lnp_attr: [u8; 16] = {
             let mut b = [0u8; 16];
             b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
@@ -59549,34 +59550,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let lnp_attr_ptr = lnp_attr.as_ptr() as u64;
         let a = SyscallArgs { arg0: 0, arg1: 2, arg2: lnp_attr_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EOPNOTSUPP) {
-            serial_println!("[syscall/linux]   FAIL: landlock_add_rule valid NET_PORT not EOPNOTSUPP");
-            return Err(KernelError::InternalError);
-        }
-        // landlock_add_rule NET_PORT with allowed_access bit outside
-        // LANDLOCK_ACCESS_NET_MASK (0x4) -> EINVAL.
-        let lnp_bad_access: [u8; 16] = {
-            let mut b = [0u8; 16];
-            b[0..8].copy_from_slice(&0x4u64.to_ne_bytes());
-            b
-        };
-        let lnp_bad_access_ptr = lnp_bad_access.as_ptr() as u64;
-        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: lnp_bad_access_ptr, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: landlock_add_rule NET_PORT bad access not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        // landlock_add_rule NET_PORT with port > 65535 -> EINVAL.
-        let lnp_bad_port: [u8; 16] = {
-            let mut b = [0u8; 16];
-            b[0..8].copy_from_slice(&0x1u64.to_ne_bytes());
-            b[8..16].copy_from_slice(&65536u64.to_ne_bytes());
-            b
-        };
-        let lnp_bad_port_ptr = lnp_bad_port.as_ptr() as u64;
-        let a = SyscallArgs { arg0: 0, arg1: 2, arg2: lnp_bad_port_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: landlock_add_rule NET_PORT port>65535 not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: landlock_add_rule NET_PORT(6.7) rule_type not EINVAL");
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   landlock_add_rule attr validation: OK");
@@ -59652,12 +59627,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // (b) rule_type=0x1_0000_0002 (high|NET_PORT), attr=NULL:
-        //     truncates to 2, matches NET_PORT, downstream attr=NULL
-        //     gate returns EFAULT.  Pre-fix returned EINVAL.
+        //     truncates to 2.  NET_PORT (2) is a Linux 6.7 rule type
+        //     absent from v6.6, so the rule_type gate returns EINVAL
+        //     (before the attr=NULL gate could return EFAULT).  This
+        //     still exercises the high-half truncation: the EINVAL comes
+        //     from the truncated low value 2, not from the raw u64.
+        //     (Batch 522 — was EFAULT when NET_PORT was wrongly accepted.)
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0002, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EFAULT) {
+        if dispatch_linux(nr::LANDLOCK_ADD_RULE, &a).value != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|2) not EFAULT"
+                "[syscall/linux]   FAIL: landlock_add_rule(rule_type high|2) not EINVAL"
             );
             return Err(KernelError::InternalError);
         }

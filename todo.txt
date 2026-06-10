@@ -47694,3 +47694,59 @@ Fix:
 
 Build: clean (`bash scripts/boot-test.sh`).
 Boot test: PASS @ 30s.
+
+================================================================
+Batch 522 — landlock_add_rule: drop the Linux 6.7 NET_PORT rule
+type and the Linux 6.10 IOCTL_DEV access bit (v6.6 fidelity)
+================================================================
+
+sys_landlock_add_rule (~line 22858) accepted two things that do not
+exist in our v6.6 fidelity target, each with a comment that itself
+attributed them to a post-6.6 kernel (same bug shape as batches
+519/521 in the pidfd family):
+
+  1. rule_type == 2 (LANDLOCK_RULE_NET_PORT) — the `matches!(1 | 2)`
+     gate let it through to the NET access-mask / port checks and the
+     EOPNOTSUPP terminal.  NET_PORT landed in Linux 6.7.
+  2. LANDLOCK_ACCESS_FS_MASK = 0xffff — the 0x8000 bit is
+     LANDLOCK_ACCESS_FS_IOCTL_DEV, added in Linux 6.10.
+
+Verified against the authoritative v6.6 source
+(WebFetch of raw v6.6 include/uapi/linux/landlock.h):
+  * `enum landlock_rule_type` defines ONLY
+    `LANDLOCK_RULE_PATH_BENEATH = 1`.  No NET_PORT.
+  * FS access flags run only EXECUTE(1<<0)..TRUNCATE(1<<14) = 0x7fff.
+    No LANDLOCK_ACCESS_NET_* defines, no IOCTL_DEV.
+
+So in v6.6: rule_type=2 hits the switch `default: return -EINVAL`,
+and an allowed_access with bit 0x8000 set is outside the FS mask
+(EINVAL).
+
+Fix:
+  * rule_type gate: `matches!(1 | 2)` -> `rule_type != 1` (NET_PORT
+    now EINVAL at the gate, before the attr/access/port checks).
+  * LANDLOCK_ACCESS_FS_MASK: 0xffff -> 0x7fff; removed the now-unused
+    LANDLOCK_ACCESS_NET_MASK const.
+  * Collapsed the per-rule-type `match { 1 => .., 2 => .., _ }` to the
+    single PATH_BENEATH FS-mask subset check (rule_type guaranteed 1).
+  * Doc comment rewritten to state v6.6 semantics and cite the source.
+
+Self-test:
+  * PATH_BENEATH bad-access probe: changed the test bit from 0x10000
+    to 0x8000 (IOCTL_DEV) so it specifically pins the v6.6 mask
+    boundary (a 6.10 bit must be rejected).
+  * Replaced the three NET_PORT probes (valid->EOPNOTSUPP, bad-access,
+    port>65535) with one probe: rule_type=2 + valid-looking attr ->
+    EINVAL (NET_PORT is 6.7).
+  * rule_type high-half-truncation probe (b): rule_type=0x1_0000_0002
+    truncates to 2 -> now EINVAL (was EFAULT via the NET_PORT attr=NULL
+    path); still exercises the truncation (EINVAL comes from low=2).
+
+Build: clean (`bash scripts/boot-test.sh`).
+Boot test: PASS @ 28s.
+
+Follow-up queued for next batch: landlock_create_ruleset still has a
+LANDLOCK_CREATE_RULESET_ERRATA (0x2) special-case; ERRATA is absent
+from v6.6 (header defines only _VERSION = 1<<0), so flags=0x2 should
+fall through to the generic EINVAL rather than the ERRATA EOPNOTSUPP
+query path.

@@ -47547,3 +47547,50 @@ Fix rests on the source-verified gate.
 
 Build: clean (`bash scripts/boot-test.sh`, 2m05s).
 Boot test: PASS @ 27s.
+
+================================================================
+Batch 519 — pidfd_open drops PIDFD_THREAD; only PIDFD_NONBLOCK
+is valid in Linux v6.6 kernel/pid.c
+================================================================
+
+sys_pidfd_open (~line 16814) previously accepted two flags:
+
+    const PIDFD_NONBLOCK: u32 = 0o4000;
+    const PIDFD_THREAD:   u32 = 0o200;
+    const VALID_FLAGS = PIDFD_NONBLOCK | PIDFD_THREAD;
+
+with a comment claiming PIDFD_THREAD landed "since 6.2".  That is
+wrong: PIDFD_THREAD was introduced in Linux 6.9, NOT 6.2, and does
+not appear anywhere in the v6.6 tree.
+
+Verified against the authoritative v6.6 source
+(raw.githubusercontent.com/torvalds/linux/v6.6/kernel/pid.c).
+The v6.6 SYSCALL_DEFINE2(pidfd_open) gate is:
+
+    if (flags & ~PIDFD_NONBLOCK)
+        return -EINVAL;
+    if (pid <= 0)
+        return -EINVAL;
+
+PIDFD_NONBLOCK == O_NONBLOCK == 0o4000 (since 5.10).  PIDFD_THREAD
+is not mentioned anywhere in v6.6 pid.c.
+
+Fix: narrow VALID_FLAGS to PIDFD_NONBLOCK only, remove the
+PIDFD_THREAD const, rewrite the gate comment to cite the verified
+v6.6 source.  A request with the THREAD bit (0o200) — alone or
+combined with NONBLOCK (0o4200) — now hits `flags & ~PIDFD_NONBLOCK`
+and returns EINVAL before the pid lookup, exactly as v6.6 does.
+
+Self-test: two existing probes asserted PIDFD_THREAD -> ESRCH
+(reaching the pid lookup).  Updated both to expect EINVAL (the flag
+gate now fires first): pidfd_open(0o200) and pidfd_open(0o4200) both
+-> EINVAL.  These run with no Linux fd table / no user memory, which
+is fine — the flag gate precedes any fd/memory access.
+
+CRITICAL LESSON reinforced (cf. reverted batch 517): always fetch
+the ACTUAL v6.6 source rather than trusting a plausible-sounding
+"since X.Y" comment.  The prior PIDFD_THREAD addition is exactly the
+kind of memory-based plausible error this discipline guards against.
+
+Build: clean (`bash scripts/boot-test.sh`).
+Boot test: PASS @ 25s.

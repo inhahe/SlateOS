@@ -16812,19 +16812,27 @@ fn sys_memfd_secret(_args: &SyscallArgs) -> SyscallResult {
 ///   * `ESRCH`  — no process with that pid is currently alive.
 ///   * `EBADF`  — kernel-context invocation (no caller PCB).
 fn sys_pidfd_open(args: &SyscallArgs) -> SyscallResult {
-    // Linux 6.2+ accepts two flags here (include/uapi/linux/pidfd.h):
+    // Linux v6.6 kernel/pid.c SYSCALL_DEFINE2(pidfd_open) accepts a
+    // SINGLE flag (verified against the v6.6 source):
+    //
+    //   if (flags & ~PIDFD_NONBLOCK)
+    //       return -EINVAL;
+    //   if (pid <= 0)
+    //       return -EINVAL;
+    //
     //   PIDFD_NONBLOCK = O_NONBLOCK = 0o4000  (since 5.10)
-    //   PIDFD_THREAD   = O_EXCL     = 0o200   (since 6.2)
-    // Pre-batch we only accepted PIDFD_NONBLOCK, so a probe asking for
-    // a per-thread pidfd (PIDFD_THREAD by itself, or PIDFD_NONBLOCK |
-    // PIDFD_THREAD) saw EINVAL where Linux 6.2+ creates a thread-mode
-    // pidfd.  Our PCB doesn't distinguish thread vs process pidfds at
-    // this layer — both end up referring to a process via raw_handle —
-    // so accept the flag and treat it as a hint until a real
-    // thread-aware pidfd lands.
+    //
+    // Batch 519 — drop PIDFD_THREAD: a prior batch added PIDFD_THREAD
+    // (0o200) to VALID_FLAGS with a comment claiming it landed "since
+    // 6.2".  That is wrong on two counts: PIDFD_THREAD was introduced
+    // in Linux 6.9 (commit cda52e37) and does NOT appear ANYWHERE in
+    // the v6.6 tree.  Our fidelity target is v6.6 (see the SCHED_EXT
+    // and bpf() cmd-cap tightening batches), so under v6.6 a probe
+    // passing PIDFD_THREAD — alone or OR'd with PIDFD_NONBLOCK — must
+    // return EINVAL, not a success-shape fd.  Narrow VALID_FLAGS back
+    // to PIDFD_NONBLOCK to match the literal v6.6 gate.
     const PIDFD_NONBLOCK: u32 = 0o4000;
-    const PIDFD_THREAD: u32 = 0o200;
-    const VALID_FLAGS: u32 = PIDFD_NONBLOCK | PIDFD_THREAD;
+    const VALID_FLAGS: u32 = PIDFD_NONBLOCK;
     // Linux declares `unsigned int flags`; the x86_64 ABI truncates
     // args.arg1 to 32 bits before the body runs.  Pre-batch we held
     // it as raw u64, so a probe like flags=0x1_0000_0000 saw EINVAL
@@ -53740,9 +53748,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pidfd_open(0) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pidfd_open with invalid flags -> EINVAL.  Valid flags are
-        // PIDFD_NONBLOCK (0o4000) and PIDFD_THREAD (0o200).  Bit 1
-        // (= 0x1) is outside that set.
+        // pidfd_open with invalid flags -> EINVAL.  The only valid flag
+        // in Linux v6.6 is PIDFD_NONBLOCK (0o4000).  Bit 1 (= 0x1) is
+        // outside that set.
         let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_OPEN, &a).value
@@ -53750,26 +53758,30 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pidfd_open bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pidfd_open with PIDFD_THREAD on a missing pid -> ESRCH.
-        // Pre-batch returned EINVAL (PIDFD_THREAD was rejected as bad
-        // flags); Linux 6.2+ accepts the flag and runs the pid lookup.
+        // Batch 519: pidfd_open with PIDFD_THREAD (0o200) -> EINVAL.
+        // PIDFD_THREAD was introduced in Linux 6.9 and does not exist
+        // in v6.6 (our fidelity target), so the v6.6 gate
+        // `flags & ~PIDFD_NONBLOCK` rejects it BEFORE the pid lookup —
+        // EINVAL, not ESRCH.  (A prior batch wrongly accepted it,
+        // claiming "since 6.2".)
         let a = SyscallArgs { arg0: 0x7FFF_FFFE, arg1: 0o200, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_OPEN, &a).value
-            != -i64::from(errno::ESRCH) {
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: pidfd_open(PIDFD_THREAD, missing) not ESRCH"
+                "[syscall/linux]   FAIL: pidfd_open(PIDFD_THREAD) not EINVAL (v6.6)"
             );
             return Err(KernelError::InternalError);
         }
-        // pidfd_open with PIDFD_NONBLOCK|PIDFD_THREAD on a missing pid
-        // -> ESRCH (both flags pass the validity gate).
+        // Batch 519: PIDFD_NONBLOCK|PIDFD_THREAD (0o4200) -> EINVAL too.
+        // The THREAD bit is outside v6.6's accepted set, so the flag
+        // gate fires even though PIDFD_NONBLOCK on its own is valid.
         let a = SyscallArgs { arg0: 0x7FFF_FFFE, arg1: 0o4200, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_OPEN, &a).value
-            != -i64::from(errno::ESRCH) {
+            != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: pidfd_open(NONBLOCK|THREAD, missing) not ESRCH"
+                "[syscall/linux]   FAIL: pidfd_open(NONBLOCK|THREAD) not EINVAL (v6.6)"
             );
             return Err(KernelError::InternalError);
         }

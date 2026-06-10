@@ -1790,7 +1790,7 @@ pub fn set_exe_path(pid: ProcessId, path: Vec<u8>) -> KernelResult<()> {
     if path.is_empty() || path[0] != b'/' {
         return Err(KernelError::InvalidArgument);
     }
-    if path.iter().any(|&b| b == 0) {
+    if path.contains(&0) {
         return Err(KernelError::InvalidArgument);
     }
     let mut table = PROCESS_TABLE.lock();

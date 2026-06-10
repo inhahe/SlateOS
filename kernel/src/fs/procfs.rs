@@ -2062,14 +2062,13 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
 /// We track a single Linux address-space charge per process
 /// (`linux_as_used`, the sum of Linux-ABI `mmap` sizes) rather than a
 /// full VMA breakdown, so we report:
-///   - `size`     = total address-space charge / 4 KiB
-///   - `resident` = same value (we do not track RSS separately; this is
-///                  an upper bound, which is the safe direction for the
-///                  callers that read statm — they treat it as "at most
-///                  this much")
-///   - `shared`, `text`, `lib`, `data`, `dt` = 0 (we do not yet
-///     attribute the charge to those categories; `lib` and `dt` are
-///     always 0 on modern Linux anyway)
+/// - `size` = total address-space charge / 4 KiB
+/// - `resident` = same value (we do not track RSS separately; this is an
+///   upper bound, which is the safe direction for callers that read
+///   statm — they treat it as "at most this much")
+/// - `shared`, `text`, `lib`, `data`, `dt` = 0 (we do not yet attribute
+///   the charge to those categories; `lib` and `dt` are always 0 on
+///   modern Linux anyway)
 ///
 /// When per-VMA accounting lands this becomes a richer breakdown; the
 /// page-unit contract stays the same.

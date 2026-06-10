@@ -239,4 +239,97 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-_(No outstanding technical debt — TD1 closed as F5 on 2026-06-07.)_
+### TD2. Clippy `clippy::all` deny-level errors not yet zeroed — OPEN 2026-06-10
+
+**Where:** kernel-wide.  Snapshot `cargo clippy -p kernel` (rust 1.95.0,
+2026-06-10): **451 deny-level errors** and **17,320 warn-level
+warnings**.
+
+**What this is — and why the two tiers are treated differently.**
+The workspace lint config (`Cargo.toml [workspace.lints.clippy]`) sets
+`clippy::all = deny (priority -1)`, `clippy::pedantic = warn`, and the
+five correctness-pressure lints (`unwrap_used`, `expect_used`, `panic`,
+`indexing_slicing`, `arithmetic_side_effects`) = `warn`.  So:
+
+* **Warn-level (17,320) — intentional by design, NOT a blocker.**
+  Dominated by:
+  - `arithmetic_side_effects` 7,511
+  - `indexing_slicing` 5,711
+  - `expect_used` 2,689
+  - `unwrap_used` 1,034
+  - `unnecessary_wraps` 156, `cast_ptr_alignment` 107, others < 25 each.
+
+  These are the defensive-pressure lints CLAUDE.md deliberately set to
+  `warn` rather than `deny` because they are pervasive in low-level
+  kernel code (every `a + b`, every `slice[i]`, every page-table index)
+  and forcing `checked_*`/`.get()` everywhere would bury real signal
+  under mechanical noise.  They are advisory: the rule is "prefer `?`,
+  `.get()`, `.checked_*` in new code and surgically harden hot/attacker-
+  reachable paths," not "drive the count to zero."  **These are accepted
+  by design and should NOT be mass-rewritten.**  Two sub-categories DO
+  deserve a real audit pass and should be tracked as their own work:
+  `cast_ptr_alignment` (107 — genuine UB risk if any cast actually
+  under-aligns; most are MMIO/identity-mapped and provably fine but each
+  should carry a `// SAFETY:`/`#[allow]` with justification) and
+  `large_stack_arrays` (7 — kernel stacks are bounded; verify none blow
+  the stack).
+
+* **Deny-level (451 `clippy::all` errors) — these SHOULD be fixed**, per
+  the project's own `all = deny` gate.  The good news: they are almost
+  entirely **mechanical, machine-applicable idiom lints**, not logic
+  bugs.  Top categories:
+  - `doc_overindented_list_items` 137, `doc_lazy_continuation` 21
+    (158 = doc-comment formatting — auto-fixable)
+  - `unwrap_or_default` 21, `manual_strip` 15, `manual_slice_fill` 14,
+    `vec_init_then_push` 13, `manual_memcpy` 10, `manual_clamp` 8,
+    `assign_op_pattern` 8, `manual_div_ceil` 8, `slow_vector_
+    initialization` 7, `while_let_loop` 6, `explicit_counter_loop` 5,
+    `single_char_add_str` 5, `single_match` 5 … (all auto-fixable)
+  - A small tail needs human judgment, not blind `--fix`:
+    `type_complexity` 10 (extract type aliases), `duplicated_attributes`
+    9 (a module-level `#![allow(dead_code)]` duplicating the parent
+    `#[allow]` in `fs/mod.rs` — remove the inner one),
+    `upper_case_acronyms` 9 and `enum_variant_names` 7 (renames — verify
+    no public-API churn), `if_same_then_else` 7 (could be a real copy-
+    paste bug — inspect each), `comparison_to_empty` 7.
+
+**File distribution of the 451 errors** (primary span):
+`syscall/linux.rs` 200, `kshell.rs` 39, `fs/bzip2.rs` 8,
+`syscall/handlers.rs` 8, `sched/mod.rs` 6, `fs/contextmenu.rs` 5,
+`fs/procfs.rs` 5, `fs/monitors.rs`/`fs/tags.rs`/`fs/taskbar.rs`/
+`net/http.rs` 4 each, then a long tail of 1–3 across ~40 more files.
+`linux.rs` alone is 44% of the total (it is the single largest source
+file, ~28k lines, and accretes idiom lints fast).
+
+**Why it's open rather than fixed-on-sight:** the count is large and
+spread across ~50 files; the bulk is `cargo clippy --fix` territory but
+that produces a sweeping multi-file diff that materially changes the
+shape of hot syscall code (`linux.rs`), so it warrants being landed as
+its own reviewable change(s) rather than smuggled into a feature commit.
+Two deny-errors that were authored as part of the /proc work
+(2026-06-10) were fixed immediately at their source:
+`procfs.rs` `gen_pid_statm` doc list (`doc_overindented_list_items`) and
+`pcb.rs` `set_exe_path` (`manual_contains` → `slice.contains`).
+
+**Proper fix / remediation plan:**
+1. `cargo clippy -p kernel --fix --allow-dirty` to clear the
+   machine-applicable bulk (the ~158 doc lints + the manual-idiom
+   families).  Re-run boot-test afterward — these rewrites are
+   semantics-preserving (`manual_memcpy` → `copy_from_slice`,
+   `vec_init_then_push` → `vec![…]`, etc.) but a boot test confirms it.
+2. Hand-fix the judgment tail: dedupe the `#![allow(dead_code)]`
+   attributes, extract `type_complexity` aliases, inspect every
+   `if_same_then_else` for an actual logic bug before collapsing it,
+   and do the acronym/enum renames with a grep for external callers.
+3. Separately audit `cast_ptr_alignment` (107) and `large_stack_arrays`
+   (7) from the warn tier — these are the only warn-level lints with a
+   real correctness dimension; annotate or fix each.
+4. Leave the remaining warn-level lints as-is (by design); revisit only
+   the policy, not the individual sites.
+
+Until step 1–2 land, `cargo clippy -p kernel` exits non-zero, so it
+cannot be used as a CI gate yet.  `cargo build` / boot-test are clean.
+
+---
+
+### (closed) TD1 — `frame::ALLOCATOR` IRQ-safety — closed as F5 on 2026-06-07.

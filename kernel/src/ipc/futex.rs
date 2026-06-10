@@ -764,10 +764,18 @@ pub fn futex_wake_op(
 //
 // ## Futex Word Format (PI variant)
 //
+// This matches Linux's PI futex word layout exactly, so the same word can
+// be shared between our native `SYS_FUTEX_*_PI` syscalls and the Linux-ABI
+// `futex(2)` `FUTEX_LOCK_PI` / `FUTEX_UNLOCK_PI` / `FUTEX_TRYLOCK_PI` ops.
+// A Linux thread's TID is what `gettid()` returns, which on this OS is the
+// kernel `TaskId` (see `sys_gettid`), so the userspace fast-path CAS writes
+// exactly the value the kernel records as the owner.
+//
 // ```text
-// Bits 0-29:  Owner task ID (0 = unlocked)
-// Bit 30:     FUTEX_WAITERS — set by kernel when PI waiters exist
-// Bit 31:     Reserved (must be 0)
+// Bits 0-29:  Owner task ID (0 = unlocked)         (FUTEX_TID_MASK)
+// Bit 30:     FUTEX_OWNER_DIED — owner exited holding the lock (reserved;
+//             recognised but not yet produced by robust-list cleanup)
+// Bit 31:     FUTEX_WAITERS — set by kernel when PI waiters exist
 // ```
 //
 // ## Userspace Fast Path
@@ -782,10 +790,27 @@ pub fn futex_wake_op(
 // ```
 
 /// Mask for the owner task ID in a PI futex word (bits 0–29).
+///
+/// Identical to Linux's `FUTEX_TID_MASK`.  Since `gettid()` returns the
+/// kernel `TaskId`, task IDs must stay within 30 bits for the userspace
+/// fast-path CAS and the kernel owner record to agree.
 const FUTEX_TID_MASK: u32 = 0x3FFF_FFFF;
 
-/// Bit flag indicating PI waiters exist (bit 30 of the futex word).
-const FUTEX_WAITERS_BIT: u32 = 1 << 30;
+/// Bit flag indicating PI waiters exist (bit 31 of the futex word).
+///
+/// Matches Linux's `FUTEX_WAITERS` (`0x8000_0000`).  Set by the kernel on
+/// the contended path so the owner knows it must call into the kernel to
+/// release rather than taking the userspace fast-path CAS.
+const FUTEX_WAITERS_BIT: u32 = 1 << 31;
+
+/// Bit flag indicating the owner died while holding the lock (bit 30).
+///
+/// Matches Linux's `FUTEX_OWNER_DIED` (`0x4000_0000`).  We do not yet run
+/// robust-list cleanup that would set this, but the constant reserves the
+/// bit so it is never mistaken for part of the owner TID and so future
+/// robust-futex support slots in without a layout change.
+#[allow(dead_code)]
+const FUTEX_OWNER_DIED_BIT: u32 = 1 << 30;
 
 /// A task waiting on a PI futex address.
 struct PiWaiter {
@@ -917,26 +942,65 @@ fn recalculate_inherited_for_owner(
     best
 }
 
-/// Lock a PI futex.
+/// Lock a PI futex, blocking indefinitely until acquired.
 ///
 /// Attempts to acquire the lock at `addr`.  If the lock is free (futex
 /// word is 0), atomically sets the owner.  If contended, blocks the
 /// caller and applies priority inheritance to the current lock holder.
 ///
-/// The futex word uses bits 0–29 for the owner task ID and bit 30 as
-/// a waiters flag.
+/// The futex word uses the Linux PI layout: bits 0–29 for the owner
+/// task ID (`FUTEX_TID_MASK`), bit 30 = `FUTEX_OWNER_DIED`, bit 31 =
+/// `FUTEX_WAITERS`.
 ///
 /// # Returns
 ///
 /// - `Ok(())` — lock acquired (either uncontended or after waiting).
 /// - `Err(InvalidAddress)` — `addr` is null.
 /// - `Err(BadAlignment)` — `addr` is not 4-byte aligned.
-/// - `Err(WouldBlock)` — deadlock detected (caller already owns the lock).
+/// - `Err(Deadlock)` — caller already owns the lock (maps to `EDEADLK`).
 ///
 /// # Safety contract
 ///
 /// `addr` must point to a valid, aligned `AtomicU32`.
 pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
+    lock_pi_inner(addr, None)
+}
+
+/// Lock a PI futex with a relative timeout.
+///
+/// Identical to [`futex_lock_pi`] except the caller gives up after
+/// `timeout_ns` nanoseconds.  A `timeout_ns` of 0 means "try once"
+/// (acquire if uncontended, otherwise return immediately).
+///
+/// # Returns
+///
+/// - `Ok(())` — lock acquired before the deadline.
+/// - `Err(TimedOut)` — the deadline expired before acquisition (maps to
+///   `ETIMEDOUT`).
+/// - other errors as for [`futex_lock_pi`].
+///
+/// # Safety contract
+///
+/// `addr` must point to a valid, aligned `AtomicU32`.
+pub fn futex_lock_pi_timeout(addr: u64, timeout_ns: u64) -> KernelResult<()> {
+    lock_pi_inner(addr, Some(timeout_ns))
+}
+
+/// Shared implementation of PI lock acquisition.
+///
+/// `timeout_ns`:
+/// - `None` — block indefinitely until the lock is transferred to us.
+/// - `Some(0)` — non-blocking: acquire only if uncontended.
+/// - `Some(ns)` — block until acquired or until `ns` nanoseconds elapse.
+///
+/// The only events that wake a blocked PI waiter are (a) `futex_unlock_pi`
+/// transferring ownership to us, or (b) our own timeout timer firing.  We
+/// disambiguate by checking, under the `PI_FUTEX_TABLE` lock, whether an
+/// ownership record now exists for us: holding the lock across both the
+/// ownership check and our waiter removal closes the timeout-vs-transfer
+/// race (either `unlock_pi` won the lock and made us owner, or we won the
+/// lock and removed ourselves so `unlock_pi` can no longer pick us).
+fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     if addr == 0 {
         return Err(KernelError::InvalidAddress);
     }
@@ -972,7 +1036,7 @@ pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
         let oid = u64::from(word & FUTEX_TID_MASK);
 
         if oid == current_id {
-            return Err(KernelError::WouldBlock); // Deadlock
+            return Err(KernelError::Deadlock); // Caller already owns it.
         }
         if oid == 0 {
             // Lock was released between CAS and load — retry.
@@ -986,13 +1050,18 @@ pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
             let w2 = atomic.load(Ordering::Acquire);
             let o2 = u64::from(w2 & FUTEX_TID_MASK);
             if o2 == current_id {
-                return Err(KernelError::WouldBlock);
+                return Err(KernelError::Deadlock);
             }
             o2
         } else {
             oid
         }
     };
+
+    // A zero timeout means "try once": contended, so fail without blocking.
+    if matches!(timeout_ns, Some(0)) {
+        return Err(KernelError::TimedOut);
+    }
 
     // Get our effective priority for the PI donation.
     let our_priority = sched::get_effective_priority(current_id)
@@ -1028,13 +1097,151 @@ pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
     // PI for tasks that later block on a lock we hold).
     sched::set_blocked_on_pi_addr(current_id, Some(addr));
 
-    // Block until unlock_pi transfers the lock to us.
-    sched::block_current();
+    // Arm a one-shot timeout timer if requested.
+    let timer_handle = match timeout_ns {
+        Some(ns) => {
+            // ns == 0 was handled above, so this is a real deadline.
+            fn pi_timeout_wake(tid: u64) {
+                if !sched::try_wake(tid) {
+                    sched::defer_wake(tid);
+                }
+            }
+            Some(crate::hrtimer::schedule_ns(ns, pi_timeout_wake, current_id))
+        }
+        None => None,
+    };
 
-    // We've been woken — we now own the lock.  Clear the blocked addr.
+    // Block until ownership is transferred to us, or the timer fires.
+    // Deboost data is collected under the table lock and applied after
+    // release to respect the PI_FUTEX_TABLE → SCHED lock ordering.
+    let mut deboost: Option<(TaskId, Option<u8>)> = None;
+    let outcome: KernelResult<()> = loop {
+        sched::block_current();
+
+        let mut table = PI_FUTEX_TABLE.lock();
+        let idx = FutexTable::bucket_index(addr, addr_space);
+
+        // Did unlock_pi transfer ownership to us?
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        let is_owner = table.owners[idx].iter().any(|o| {
+            o.addr == addr && o.addr_space == addr_space && o.owner_id == current_id
+        });
+
+        if is_owner {
+            break Ok(());
+        }
+
+        // Not the owner.  With no timeout, the only legitimate wake is an
+        // ownership transfer, so any wake without ownership is spurious —
+        // block again.  With a timeout, this wake is the timer firing.
+        if timeout_ns.is_none() {
+            drop(table);
+            continue;
+        }
+
+        // Timed out: remove our waiter entry and clean up PI donation.
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        if let Some(pos) = table.waiters[idx].iter().position(|w| {
+            w.task_id == current_id && w.addr == addr && w.addr_space == addr_space
+        }) {
+            table.waiters[idx].remove(pos);
+        }
+
+        // If no waiters remain on this addr, clear the WAITERS bit.  Doing
+        // this under the table lock serialises against new registrations
+        // (which also take the lock before setting the bit), so we cannot
+        // clear a bit that a freshly-queued waiter still needs.
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        let more = table.waiters[idx]
+            .iter()
+            .any(|w| w.addr == addr && w.addr_space == addr_space);
+        if !more {
+            atomic.fetch_and(!FUTEX_WAITERS_BIT, Ordering::Release);
+        }
+
+        // Deboost the real current owner: with us gone, its inherited
+        // priority may drop.
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        let real_owner = table.owners[idx]
+            .iter()
+            .find(|o| o.addr == addr && o.addr_space == addr_space)
+            .map(|o| o.owner_id);
+        deboost = real_owner.map(|oid| (oid, recalculate_inherited_for_owner(&table, oid)));
+
+        break Err(KernelError::TimedOut);
+    };
+
+    // Cancel the timer (no-op if it already fired).
+    if let Some(handle) = timer_handle {
+        crate::hrtimer::cancel(handle);
+    }
+
+    // We're no longer blocked on this PI address.
     sched::set_blocked_on_pi_addr(current_id, None);
 
-    Ok(())
+    // Apply any deboost outside the table lock.
+    if let Some((oid, recalc)) = deboost {
+        sched::set_inherited_priority(oid, recalc);
+    }
+
+    outcome
+}
+
+/// Try to lock a PI futex without blocking.
+///
+/// Acquires the lock at `addr` if it is uncontended.  If the lock is
+/// held by another task, returns `Err(WouldBlock)` (maps to `EAGAIN`).
+/// If the caller already owns the lock, returns `Err(Deadlock)` (maps to
+/// `EDEADLK`), matching Linux `FUTEX_TRYLOCK_PI`.
+///
+/// # Returns
+///
+/// - `Ok(())` — lock acquired.
+/// - `Err(InvalidAddress)` — `addr` is null.
+/// - `Err(BadAlignment)` — `addr` is not 4-byte aligned.
+/// - `Err(Deadlock)` — caller already owns the lock.
+/// - `Err(WouldBlock)` — lock is held by another task.
+///
+/// # Safety contract
+///
+/// `addr` must point to a valid, aligned `AtomicU32`.
+pub fn futex_trylock_pi(addr: u64) -> KernelResult<()> {
+    if addr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    if addr & 3 != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+
+    let current_id = sched::current_task_id();
+    let addr_space = current_addr_space();
+    #[allow(clippy::cast_possible_truncation)]
+    let current_tid = (current_id as u32) & FUTEX_TID_MASK;
+
+    // SAFETY: Caller guarantees addr is valid and aligned.
+    let atomic = unsafe { &*(addr as *const AtomicU32) };
+
+    // Fast path: CAS 0 → our tid (uncontended acquisition).
+    if atomic
+        .compare_exchange(0, current_tid, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        register_pi_owner(addr, addr_space, current_id);
+        return Ok(());
+    }
+
+    // Contended — distinguish self-deadlock from "held by another".
+    let word = atomic.load(Ordering::Acquire);
+    let oid = u64::from(word & FUTEX_TID_MASK);
+    if oid == current_id {
+        return Err(KernelError::Deadlock);
+    }
+    Err(KernelError::WouldBlock)
 }
 
 /// Unlock a PI futex.
@@ -1161,9 +1368,108 @@ pub fn self_test() -> KernelResult<()> {
     test_blocking_wait_wake()?;
     test_requeue()?;
     test_wake_op()?;
+    test_pi_trylock_deadlock()?;
     test_priority_inheritance()?;
 
     serial_println!("[futex] Futex self-test PASSED");
+    Ok(())
+}
+
+/// Result flag for the PI trylock/deadlock worker.
+///
+/// `0` = not yet finished, `1` = all checks passed, `>= 2` = a check
+/// failed (the value is the 1-based index of the failing check).
+static PI_TRYLOCK_RESULT: AtomicU32 = AtomicU32::new(0);
+
+/// Worker that exercises `futex_trylock_pi` / `futex_lock_pi` ownership
+/// semantics from a task with a **nonzero** TID.
+///
+/// The owner identity is packed into the low 30 bits of the futex word,
+/// so a task with TID 0 (the boot thread during early self-tests) cannot
+/// represent ownership — `CAS(0, 0)` is indistinguishable from acquiring
+/// a free lock.  Real userspace threads never have TID 0, so these checks
+/// must run in a spawned task to be meaningful.
+///
+/// `addr` points to a fresh PI word (initially 0) owned by the driver's
+/// stack frame; the driver keeps it alive until this worker sets
+/// `PI_TRYLOCK_RESULT`.
+#[allow(clippy::cast_possible_truncation)]
+extern "C" fn pi_trylock_worker(addr: u64) {
+    let cur = (sched::current_task_id() as u32) & FUTEX_TID_MASK;
+    // Each step returns false on the first failure; the driver records
+    // `1` for pass and `2` for any failure.
+    let run = || -> bool {
+        // 1: uncontended trylock acquires.
+        if futex_trylock_pi(addr).is_err() {
+            return false;
+        }
+        // 2: re-acquire by the same owner → Deadlock.
+        if !matches!(futex_trylock_pi(addr), Err(KernelError::Deadlock)) {
+            return false;
+        }
+        // 3: release.
+        if futex_unlock_pi(addr).is_err() {
+            return false;
+        }
+        // 4: blocking lock acquires uncontended.
+        if futex_lock_pi(addr).is_err() {
+            return false;
+        }
+        // 5: blocking lock re-acquire by the same owner → Deadlock
+        //    (must not block forever).
+        if !matches!(futex_lock_pi(addr), Err(KernelError::Deadlock)) {
+            return false;
+        }
+        // 6: release.
+        if futex_unlock_pi(addr).is_err() {
+            return false;
+        }
+        // 7: a lock held by another task → WouldBlock.  Plant a foreign
+        //    owner tid that is nonzero and distinct from ours.
+        let foreign_tid = {
+            let t = (cur ^ 1) & FUTEX_TID_MASK;
+            if t == 0 { 2 } else { t }
+        };
+        let foreign = AtomicU32::new(foreign_tid);
+        let faddr = (&raw const foreign) as u64;
+        matches!(futex_trylock_pi(faddr), Err(KernelError::WouldBlock))
+    };
+    PI_TRYLOCK_RESULT.store(if run() { 1 } else { 2 }, Ordering::SeqCst);
+}
+
+/// Test: PI trylock / lock ownership + self-deadlock detection.
+///
+/// Runs the checks in a spawned worker so the owner TID is nonzero (see
+/// [`pi_trylock_worker`]).
+fn test_pi_trylock_deadlock() -> KernelResult<()> {
+    PI_TRYLOCK_RESULT.store(0, Ordering::SeqCst);
+
+    let word = AtomicU32::new(0);
+    let addr = (&raw const word) as u64;
+
+    sched::spawn(b"pi-trylock", 16, pi_trylock_worker, addr, 0)?;
+
+    // The worker never blocks, so it completes promptly once scheduled.
+    // Keep `word` alive (it lives on this frame) until the worker reports.
+    for _ in 0..20 {
+        if PI_TRYLOCK_RESULT.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        sched::yield_now();
+    }
+
+    let result = PI_TRYLOCK_RESULT.load(Ordering::SeqCst);
+    sched::reap_dead_tasks();
+
+    if result != 1 {
+        serial_println!(
+            "[futex]   FAIL: PI trylock/deadlock worker result {} (expected 1)",
+            result
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[futex]   Trylock/lock PI (acquire/deadlock/contended): OK");
     Ok(())
 }
 
@@ -1638,8 +1944,90 @@ pub fn self_test_timeout() -> KernelResult<()> {
     test_timeout_expires()?;
     test_timeout_woken_before_deadline()?;
     test_timeout_zero_nonblocking()?;
+    test_lock_pi_timeout()?;
 
     serial_println!("[futex]   Wait timeout: OK");
+    Ok(())
+}
+
+/// Stage counter for the PI lock-timeout test.
+static PI_TO_STAGE: AtomicU32 = AtomicU32::new(0);
+/// Control word the PI-timeout owner blocks on until the driver wakes it.
+static PI_TO_CONTROL: AtomicU32 = AtomicU32::new(1);
+
+/// Owner task for the PI lock-timeout test.
+///
+/// Locks the PI futex, signals stage 1, then parks on the control word.
+/// When the driver wakes it, unlocks the PI futex and signals stage 2.
+extern "C" fn pi_timeout_owner_task(addr: u64) {
+    let _ = futex_lock_pi(addr);
+    PI_TO_STAGE.store(1, Ordering::SeqCst);
+
+    let ctrl = (&raw const PI_TO_CONTROL) as u64;
+    let _ = futex_wait(ctrl, 1);
+
+    let _ = futex_unlock_pi(addr);
+    PI_TO_STAGE.store(2, Ordering::SeqCst);
+}
+
+/// Timeout test D: `futex_lock_pi_timeout` against a held lock must time
+/// out (returning `TimedOut`), clean up the waiter (clearing the WAITERS
+/// bit), and leave the original owner in possession.  After the owner
+/// releases, the word returns to 0.
+#[allow(clippy::cast_possible_truncation)]
+fn test_lock_pi_timeout() -> KernelResult<()> {
+    PI_TO_STAGE.store(0, Ordering::SeqCst);
+    PI_TO_CONTROL.store(1, Ordering::SeqCst);
+
+    let word = AtomicU32::new(0);
+    let addr = (&raw const word) as u64;
+
+    // Spawn the owner; let it acquire the PI lock and park.
+    let owner_id = sched::spawn(b"pi-to-own", 20, pi_timeout_owner_task, addr, 0)?;
+    sched::yield_now();
+    if PI_TO_STAGE.load(Ordering::SeqCst) != 1 {
+        serial_println!("[futex]   FAIL: pi-timeout owner did not acquire lock");
+        return Err(KernelError::InternalError);
+    }
+
+    // Driver tries to lock with a 10ms timeout; owner holds it → time out.
+    match futex_lock_pi_timeout(addr, 10_000_000) {
+        Err(KernelError::TimedOut) => {}
+        other => {
+            serial_println!("[futex]   FAIL: lock_pi_timeout returned {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // We were the only waiter, so the WAITERS bit must be cleared and the
+    // owner must still hold the lock.
+    let owner_tid = (owner_id as u32) & FUTEX_TID_MASK;
+    let w = word.load(Ordering::SeqCst);
+    if w != owner_tid {
+        serial_println!(
+            "[futex]   FAIL: after PI timeout word={:#x} (expected owner tid {:#x})",
+            w, owner_tid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Wake the owner so it unlocks and exits cleanly.
+    PI_TO_CONTROL.store(0, Ordering::SeqCst);
+    futex_wake((&raw const PI_TO_CONTROL) as u64, 1);
+    for _ in 0..4 {
+        sched::yield_now();
+    }
+    if PI_TO_STAGE.load(Ordering::SeqCst) != 2 {
+        serial_println!("[futex]   FAIL: pi-timeout owner did not release");
+        return Err(KernelError::InternalError);
+    }
+    if word.load(Ordering::SeqCst) != 0 {
+        serial_println!("[futex]   FAIL: pi-timeout word not cleared after unlock");
+        return Err(KernelError::InternalError);
+    }
+
+    sched::reap_dead_tasks();
+    serial_println!("[futex]   Lock PI timeout (held lock → ETIMEDOUT): OK");
     Ok(())
 }
 

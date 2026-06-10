@@ -1540,6 +1540,53 @@ pub fn sys_futex_unlock_pi(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_FUTEX_TRYLOCK_PI` — try to lock a PI futex without blocking.
+///
+/// `arg0`: pointer to 32-bit futex word (4-byte aligned).
+///
+/// Acquires the lock if uncontended.  If held by another task, returns
+/// `WouldBlock` (`EAGAIN`).  If the caller already owns it, returns
+/// `Deadlock` (`EDEADLK`).
+///
+/// Returns: 0 on success.
+pub fn sys_futex_trylock_pi(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+
+    // PI futex reads and writes the 4-byte futex word.
+    if let Err(e) = crate::mm::user::validate_user_write(addr, 4) {
+        return SyscallResult::err(e);
+    }
+
+    match futex::futex_trylock_pi(addr) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FUTEX_LOCK_PI_TIMEOUT` — lock a PI futex with a relative timeout.
+///
+/// `arg0`: pointer to 32-bit futex word (4-byte aligned).
+/// `arg1`: timeout in nanoseconds (0 = try once, never block).
+///
+/// Acquires the lock, blocking up to `arg1` nanoseconds.  Returns
+/// `TimedOut` (`ETIMEDOUT`) if the deadline expires first.
+///
+/// Returns: 0 on success.
+pub fn sys_futex_lock_pi_timeout(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let timeout_ns = args.arg1;
+
+    // PI futex reads and writes the 4-byte futex word.
+    if let Err(e) = crate::mm::user::validate_user_write(addr, 4) {
+        return SyscallResult::err(e);
+    }
+
+    match futex::futex_lock_pi_timeout(addr, timeout_ns) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipe handlers (220–229)
 // ---------------------------------------------------------------------------

@@ -987,6 +987,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::WouldBlock => errno::EAGAIN,
         KernelError::Cancelled => errno::ECANCELED,
         KernelError::TimedOut => errno::ETIMEDOUT,
+        KernelError::Deadlock => errno::EDEADLK,
         KernelError::OutOfMemory => errno::ENOMEM,
         KernelError::InvalidAddress => errno::EFAULT,
         KernelError::PageFault => errno::EFAULT,
@@ -1055,6 +1056,7 @@ pub const fn kernel_error_from_code(code: i32) -> Option<KernelError> {
         -4 => Some(KernelError::WouldBlock),
         -5 => Some(KernelError::Cancelled),
         -6 => Some(KernelError::TimedOut),
+        -7 => Some(KernelError::Deadlock),
         -100 => Some(KernelError::OutOfMemory),
         -101 => Some(KernelError::InvalidAddress),
         -102 => Some(KernelError::PageFault),
@@ -32378,19 +32380,32 @@ fn sys_time(args: &SyscallArgs) -> SyscallResult {
 ///   on `uaddr2`.  Returns the total woken.  An unknown op/cmp selector or
 ///   an out-of-range `FUTEX_OP_OPARG_SHIFT` shift count yields `-EINVAL`.
 ///
-/// All other operations return `-ENOSYS`.  Known absent: `FUTEX_LOCK_PI` /
-/// `FUTEX_UNLOCK_PI` / `FUTEX_LOCK_PI2` / `FUTEX_TRYLOCK_PI` /
-/// `FUTEX_WAIT_REQUEUE_PI` / `FUTEX_CMP_REQUEUE_PI` (PI futex routing through
-/// `handlers::sys_futex_lock_pi` would be a straightforward follow-up but
-/// requires the FUTEX-encoded owner-tid invariant on uaddr).
+/// - `FUTEX_LOCK_PI` (6) / `FUTEX_LOCK_PI2` (13): acquire a priority-
+///   inheritance futex, boosting the holder to the caller's priority.  The
+///   `utime` slot is an *absolute* timeout (NULL = block forever).
+///   `FUTEX_LOCK_PI` uses `CLOCK_REALTIME`; `FUTEX_LOCK_PI2` uses
+///   `CLOCK_MONOTONIC` unless `FUTEX_CLOCK_REALTIME` is set.  Self-deadlock
+///   yields `-EDEADLK`.
+/// - `FUTEX_UNLOCK_PI` (7): release a PI futex, transferring it to the
+///   highest-priority waiter and restoring the caller's priority.
+/// - `FUTEX_TRYLOCK_PI` (8): non-blocking PI acquire; `-EAGAIN` if held by
+///   another task, `-EDEADLK` if already held by the caller.
+///
+/// All other operations return `-ENOSYS`.  Known absent: `FUTEX_WAIT_REQUEUE_PI`
+/// / `FUTEX_CMP_REQUEUE_PI` (the requeue-to-PI condvar handoff path — these
+/// need a combined wait-then-PI-requeue primitive in the futex layer).
 fn sys_futex(args: &SyscallArgs) -> SyscallResult {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
     const FUTEX_REQUEUE: u64 = 3;
     const FUTEX_CMP_REQUEUE: u64 = 4;
     const FUTEX_WAKE_OP: u64 = 5;
+    const FUTEX_LOCK_PI: u64 = 6;
+    const FUTEX_UNLOCK_PI: u64 = 7;
+    const FUTEX_TRYLOCK_PI: u64 = 8;
     const FUTEX_WAIT_BITSET: u64 = 9;
     const FUTEX_WAKE_BITSET: u64 = 10;
+    const FUTEX_LOCK_PI2: u64 = 13;
     const FUTEX_PRIVATE_FLAG: u64 = 0x80;
     const FUTEX_CLOCK_REALTIME: u64 = 0x100;
     const FUTEX_CMD_MASK: u64 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
@@ -32592,6 +32607,53 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                 arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
             linux_from_native(handlers::sys_futex_wake(&a))
+        }
+        FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
+            // Lock a PI futex.  The `utime` slot (arg3) is an *absolute*
+            // timeout (struct timespec pointer), NOT relative as in
+            // FUTEX_WAIT — NULL means block forever.  Linux clock choice:
+            //   FUTEX_LOCK_PI  — always CLOCK_REALTIME.
+            //   FUTEX_LOCK_PI2 — CLOCK_MONOTONIC by default, CLOCK_REALTIME
+            //                    when FUTEX_CLOCK_REALTIME is set.
+            // The futex word is read and written, so it must be writable.
+            if timeout_ptr == 0 {
+                let a = SyscallArgs {
+                    arg0: uaddr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                };
+                linux_from_native(handlers::sys_futex_lock_pi(&a))
+            } else {
+                let ts = match read_timespec(timeout_ptr) {
+                    Ok(t) => t,
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                };
+                let abs_ns = ts.to_nanos();
+                // FUTEX_LOCK_PI is realtime; FUTEX_LOCK_PI2 selects the
+                // clock via FUTEX_CLOCK_REALTIME (default monotonic).
+                let clockid_realtime =
+                    op == FUTEX_LOCK_PI || (raw_op & FUTEX_CLOCK_REALTIME) != 0;
+                let now_ns = if clockid_realtime {
+                    crate::timekeeping::clock_realtime()
+                } else {
+                    crate::timekeeping::clock_monotonic()
+                };
+                let rel_ns = abs_ns.saturating_sub(now_ns);
+                let a = SyscallArgs {
+                    arg0: uaddr, arg1: rel_ns, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                };
+                linux_from_native(handlers::sys_futex_lock_pi_timeout(&a))
+            }
+        }
+        FUTEX_UNLOCK_PI => {
+            let a = SyscallArgs {
+                arg0: uaddr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_futex_unlock_pi(&a))
+        }
+        FUTEX_TRYLOCK_PI => {
+            let a = SyscallArgs {
+                arg0: uaddr, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            linux_from_native(handlers::sys_futex_trylock_pi(&a))
         }
         _ => linux_err(errno::ENOSYS),
     }
@@ -60691,7 +60753,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET|REALTIME not 0");
                 return Err(KernelError::InternalError);
             }
-            // Unknown op (op=11, FUTEX_LOCK_PI2 — we do not implement it)
+            // Unknown op (op=11, FUTEX_WAIT_REQUEUE_PI — not implemented)
             // -> ENOSYS.
             let a = SyscallArgs {
                 arg0: futex_ptr, arg1: 11,
@@ -60812,6 +60874,102 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT regression not 0");
                 return Err(KernelError::InternalError);
             }
+
+            // --- PI futex ops (LOCK_PI=6, UNLOCK_PI=7, TRYLOCK_PI=8,
+            //     LOCK_PI2=13) ---
+            // These verify the classic-op routing into the native PI
+            // handlers.  Ownership identity is packed into the low 30 bits
+            // of the futex word, so a caller with TID 0 (the boot thread
+            // runs these self-tests) cannot represent ownership: CAS(0, 0)
+            // looks like acquiring a free lock.  Real userspace threads
+            // never have TID 0, and the *primitive*-level deadlock checks
+            // run in a spawned (nonzero-TID) worker in `futex::self_test`.
+            // Here we test the parts that are meaningful regardless of TID:
+            //   - the contended path (foreign owner tid → EAGAIN),
+            //   - the uncontended LOCK/UNLOCK round trip,
+            //   - the LOCK_PI2 absolute-timeout argument wiring.
+            const FUTEX_LOCK_PI_OP: u64 = 6;
+            const FUTEX_UNLOCK_PI_OP: u64 = 7;
+            const FUTEX_TRYLOCK_PI_OP: u64 = 8;
+            const FUTEX_LOCK_PI2_OP: u64 = 13;
+            #[allow(clippy::cast_possible_truncation)]
+            let cur_tid = (crate::sched::current_task_id() as u32) & 0x3FFF_FFFF;
+
+            // (a) Contended: plant a foreign owner tid (nonzero, != ours)
+            //     → TRYLOCK_PI must report EAGAIN without touching the word.
+            let foreign_tid = {
+                let t = (cur_tid ^ 1) & 0x3FFF_FFFF;
+                if t == 0 { 2 } else { t }
+            };
+            let mut pi_word: [u32; 1] = [foreign_tid];
+            let pi_ptr = pi_word.as_mut_ptr() as u64;
+            let a = SyscallArgs {
+                arg0: pi_ptr, arg1: FUTEX_TRYLOCK_PI_OP,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI contended not EAGAIN");
+                return Err(KernelError::InternalError);
+            }
+            if pi_word.first().copied() != Some(foreign_tid) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI contended mutated word");
+                return Err(KernelError::InternalError);
+            }
+
+            // (b) If self-deadlock is representable (nonzero TID), TRYLOCK_PI
+            //     on a word we own must report EDEADLK.
+            if cur_tid != 0 {
+                let mut owned: [u32; 1] = [cur_tid];
+                let owned_ptr = owned.as_mut_ptr() as u64;
+                let a = SyscallArgs {
+                    arg0: owned_ptr, arg1: FUTEX_TRYLOCK_PI_OP,
+                    arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                };
+                if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EDEADLK) {
+                    serial_println!("[syscall/linux]   FAIL: FUTEX_TRYLOCK_PI self not EDEADLK");
+                    return Err(KernelError::InternalError);
+                }
+                let _ = owned.first();
+            }
+
+            // (c) Uncontended LOCK_PI (NULL timeout) → 0, then UNLOCK_PI → 0.
+            let mut free_word: [u32; 1] = [0];
+            let free_ptr = free_word.as_mut_ptr() as u64;
+            let a = SyscallArgs {
+                arg0: free_ptr, arg1: FUTEX_LOCK_PI_OP,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_LOCK_PI uncontended not 0");
+                return Err(KernelError::InternalError);
+            }
+            let a = SyscallArgs {
+                arg0: free_ptr, arg1: FUTEX_UNLOCK_PI_OP,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_UNLOCK_PI not 0");
+                return Err(KernelError::InternalError);
+            }
+
+            // (d) LOCK_PI2 with an absolute (already-elapsed, ts=0,0) timeout
+            //     → rel_ns saturates to 0 → try-once → uncontended acquire →
+            //     0.  Exercises read_timespec + abs->rel wiring for the PI
+            //     path.  Follow with UNLOCK_PI to restore the word.
+            let a = SyscallArgs {
+                arg0: free_ptr, arg1: FUTEX_LOCK_PI2_OP,
+                arg2: 0, arg3: ts_ptr, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_LOCK_PI2 timeout-acquire not 0");
+                return Err(KernelError::InternalError);
+            }
+            let a = SyscallArgs {
+                arg0: free_ptr, arg1: FUTEX_UNLOCK_PI_OP,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            let _ = dispatch_linux(nr::FUTEX, &a);
+            let _ = free_word.first();
 
             // Batch 352: FUTEX op int truncation.
             //

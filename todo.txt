@@ -13759,15 +13759,34 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          double-wake + RMW result, unmatched single-wake, EINVAL gates) and
 ##          syscall-layer ABI gating (ADD side effect, bad-op EINVAL, PRIVATE
 ##          flag strip).
-##        * FUTEX_LOCK_PI / FUTEX_UNLOCK_PI / FUTEX_TRYLOCK_PI /
-##          FUTEX_LOCK_PI2 / FUTEX_WAIT_REQUEUE_PI /
-##          FUTEX_CMP_REQUEUE_PI: native handlers exist
-##          (handlers::sys_futex_lock_pi, sys_futex_unlock_pi) but
-##          require the FUTEX-encoded owner-tid invariant on the
-##          uaddr word (low bits hold the owner's TID, high bit is
-##          FUTEX_WAITERS).  Wiring them through sys_futex needs the
-##          owner-tid layout adapter; doable but cross-cutting enough
-##          to warrant its own batch.
+##        * FUTEX_LOCK_PI (6) / FUTEX_UNLOCK_PI (7) / FUTEX_TRYLOCK_PI (8)
+##          / FUTEX_LOCK_PI2 (13) — DONE.  Adopted the Linux PI word
+##          layout in ipc::futex: bits 0-29 = owner TID (FUTEX_TID_MASK
+##          0x3FFFFFFF), bit 30 = FUTEX_OWNER_DIED, bit 31 = FUTEX_WAITERS
+##          (was bit 30).  The linchpin: gettid() == current_task_id(), so
+##          the userspace fast-path CAS writes the same TID the kernel
+##          records as owner.  Added KernelError::Deadlock (-7) -> EDEADLK
+##          for self-deadlock.  Refactored futex_lock_pi into lock_pi_inner
+##          (None = block forever, Some(0) = try-once, Some(ns) = hrtimer
+##          deadline); added futex_lock_pi_timeout and futex_trylock_pi
+##          primitives.  On timeout the waiter removal + ownership check is
+##          done under one PI_FUTEX_TABLE lock so the timeout-vs-transfer
+##          race is closed (either unlock_pi made us owner, or we removed
+##          ourselves first), then we clear WAITERS if last and deboost the
+##          real owner.  Native handlers sys_futex_trylock_pi (216) and
+##          sys_futex_lock_pi_timeout (217) added + dispatched; classic
+##          sys_futex ops 6/7/8/13 wired (LOCK_PI absolute CLOCK_REALTIME
+##          timeout, LOCK_PI2 CLOCK_MONOTONIC unless FUTEX_CLOCK_REALTIME).
+##          Self-tests: ipc/futex test_pi_trylock_deadlock runs in a spawned
+##          (nonzero-TID) worker — a TID-0 owner can't be represented in the
+##          word, so the boot thread can't test ownership directly — plus
+##          test_lock_pi_timeout (held lock -> ETIMEDOUT, WAITERS cleared),
+##          and syscall-layer ABI gating (foreign owner -> EAGAIN, uncontended
+##          LOCK/UNLOCK round trip, LOCK_PI2 abs-timeout wiring).
+##        * FUTEX_WAIT_REQUEUE_PI / FUTEX_CMP_REQUEUE_PI: still absent.
+##          These need a combined wait-then-PI-requeue primitive (the
+##          condvar-to-PI-mutex handoff path) in the futex layer; routing
+##          alone is not enough.  Warrants its own batch.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 22s).
 ##

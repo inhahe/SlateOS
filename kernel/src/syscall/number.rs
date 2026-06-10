@@ -717,6 +717,23 @@ pub const SYS_FUTEX_WAIT_TIMEOUT: u64 = 214;
 /// of waking them all at once.
 pub const SYS_FUTEX_REQUEUE: u64 = 215;
 
+/// Try to lock a PI futex without blocking.
+///
+/// `arg0`: pointer to a 32-bit futex word (must be 4-byte aligned).
+///
+/// Returns: 0 on success.  `WouldBlock` (`EAGAIN`) if held by another
+/// task; `Deadlock` (`EDEADLK`) if the caller already owns it.
+pub const SYS_FUTEX_TRYLOCK_PI: u64 = 216;
+
+/// Lock a PI futex with a relative timeout (nanoseconds).
+///
+/// `arg0`: pointer to a 32-bit futex word (must be 4-byte aligned).
+/// `arg1`: timeout in nanoseconds (0 = try once, never block).
+///
+/// Returns: 0 on success; `TimedOut` (`ETIMEDOUT`) if the deadline
+/// expires before acquisition.
+pub const SYS_FUTEX_LOCK_PI_TIMEOUT: u64 = 217;
+
 /// Create a one-way pipe.
 ///
 /// Returns two handles packed into `rax` (read end) and `rdx` (write end).

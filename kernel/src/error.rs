@@ -32,6 +32,9 @@ pub enum KernelError {
     Cancelled = -5,
     /// A timeout expired before the operation completed.
     TimedOut = -6,
+    /// The operation would deadlock (e.g. locking a PI futex the caller
+    /// already owns).  Maps to `EDEADLK`.
+    Deadlock = -7,
 
     // --- Memory (100 - 199) ---
     /// No physical memory available to satisfy the allocation.
@@ -120,6 +123,7 @@ impl KernelError {
             Self::WouldBlock => "operation would block",
             Self::Cancelled => "operation cancelled",
             Self::TimedOut => "operation timed out",
+            Self::Deadlock => "operation would deadlock",
             Self::OutOfMemory => "out of memory",
             Self::InvalidAddress => "invalid address",
             Self::PageFault => "unresolvable page fault",

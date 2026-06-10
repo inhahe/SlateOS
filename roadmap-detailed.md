@@ -120,11 +120,16 @@ we faithfully implement. Beyond that floor the rules are:
 - **Post-baseline features MAY be kept if fully implemented.** We do
   *not* strip a newer-than-6.6 feature merely for postdating the
   baseline, provided it is correctly and completely implemented and
-  obeys the rule above. Example: `fcntl(F_DUPFD_QUERY)` (Linux 6.10) is
-  **retained** — it answers truthfully and honors its full semantics.
-  (This supersedes the earlier "strict v6.6, strip everything newer"
-  reading that some sweep batches had been following; that reading was
-  an inherited interpretation, not this directive.)
+  obeys the rule above. Retained post-baseline features (audited
+  2026-06-10): `fcntl(F_DUPFD_QUERY)` (Linux 6.10) answers truthfully
+  and honors its full semantics; the futex2 family — `futex_waitv`
+  (5.16), `futex_wait`/`futex_wake` (6.7) — is fully implemented (U32
+  size wired; `FUTEX2_NUMA` → `ENOSYS`; `FUTEX2_PRIVATE` accepted with
+  the same non-tagging behavior as the classic futex). Everything else
+  the sweep batches touched was a *rejected* newer-than-6.6 feature, not
+  a retained one. (This supersedes the earlier "strict v6.6, strip
+  everything newer" reading that some sweep batches had been following;
+  that reading was an inherited interpretation, not this directive.)
 - **Keep sibling features consistent — avoid the "Frankenkernel" trap.**
   Real kernels have monotonically-growing feature sets, so some software
   infers "feature A is present ⇒ its siblings from the same era are
@@ -139,15 +144,24 @@ we faithfully implement. Beyond that floor the rules are:
   one must actually work. If we genuinely cannot provide a sibling,
   record the asymmetry here and in `todo.txt` so it is a known,
   deliberate gap rather than a surprise `ENOSYS` on a path the caller
-  believed was guaranteed.
+  believed was guaranteed. Worked example (audited 2026-06-10):
+  `futex_requeue` (6.7) is a member of the implemented futex2 family but
+  is *not* plumbed through `ipc::futex` yet, so it returns `ENOSYS`.
+  This is acceptable because `ENOSYS` is Linux's own canonical "this
+  kernel lacks this syscall" signal — glibc/pthread fall back to a
+  `FUTEX_WAKE` + rewait loop — so it cannot mislead a caller into a
+  Frankenkernel inference. It is recorded here as the one deliberate
+  futex2 gap.
 
 Rule of thumb: **6.6 is the floor we guarantee; anything above it is
 opt-in but must be truthful and internally consistent** — no lying
 functions, and no lone features whose presence would mislead a caller
-about absent siblings. (Related open consideration: what `uname`
-reports for `release` — currently `0.1.0-ouros`, not a Linux version —
-interacts with version inference and with glibc's startup "kernel too
-old" check; tracked separately.)
+about absent siblings. (Resolved 2026-06-10, batch 526: `uname` now
+reports `sysname = "Linux"` and `release = "6.6.0-ouros"`. These are
+Linux-ABI-only surfaces — only Linux binaries call `uname(2)` in our
+architecture — so reporting the Linux personality is the faithful
+answer, and the leading `6.6` satisfies glibc's startup "kernel too
+old" version gate while the `-ouros` suffix still marks our build.)
 
 The truncation-audit work (batches 281+ in `todo.txt`) is purely inside
 `linux.rs`: masking high-half register garbage at the ABI boundary to

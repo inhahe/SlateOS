@@ -15547,9 +15547,9 @@ fn sys_io_uring_setup(args: &SyscallArgs) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
     // Read enough of the struct to mirror Linux's input gates:
-    //   params.flags  at offset 8..12 — must only contain valid flag
-    //                  bits (0..=16 in Linux 6.10, plus a forward-
-    //                  compat buffer to bit 19).
+    //   params.flags  at offset 8..12 — must be a subset of v6.6's
+    //                  IORING_SETUP_* set (bits 0..=16, mask 0x1_FFFF;
+    //                  enforced by Gate 3 / batch 501 below).
     //   params.resv[3] at offset 28..40 — must be all zeros so future
     //                  ABI extensions can repurpose the fields.
     let mut header = [0u8; 40];

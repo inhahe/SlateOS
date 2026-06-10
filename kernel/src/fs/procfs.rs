@@ -546,6 +546,9 @@ const PID_FILES: &[&str] = &[
     "stat",
     "maps",
     "caps",
+    "comm",
+    "statm",
+    "limits",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1930,6 +1933,159 @@ fn gen_pid_caps(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(text.into_bytes())
 }
 
+/// `/proc/<pid>/comm` — the command name (Linux-exact format).
+///
+/// Linux's `/proc/<pid>/comm` is the task's `comm` field: the command
+/// name with no path, truncated to `TASK_COMM_LEN - 1 == 15` bytes,
+/// followed by a single newline.  Many tools and language runtimes
+/// (glibc's `pthread_getname_np`, Go's runtime, `ps`, `htop`) read this
+/// exact shape, so we match it precisely rather than emitting our
+/// richer status formatting.
+fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
+    // `comm` reflects the scheduler task name (set by exec / prctl
+    // PR_SET_NAME), which is what Linux's `comm` tracks — not the full
+    // process name.  Fall back to the process name only if there is no
+    // scheduler task (e.g. a process record without a live task).
+    let tasks = crate::sched::task_list();
+    let name: String = if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
+        core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
+            .unwrap_or("???")
+            .to_string()
+    } else if let Some(proc_name) = crate::proc::pcb::name(task_id) {
+        proc_name
+    } else {
+        return Err(KernelError::NotFound);
+    };
+
+    // Linux truncates `comm` to TASK_COMM_LEN - 1 = 15 bytes.  Truncate
+    // on a char boundary so we never split a multibyte sequence (our
+    // task names are typically ASCII, but be defensive).
+    const TASK_COMM_LEN_MINUS_1: usize = 15;
+    let truncated = if name.len() > TASK_COMM_LEN_MINUS_1 {
+        let mut end = TASK_COMM_LEN_MINUS_1;
+        while end > 0 && !name.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        name.get(..end).unwrap_or("")
+    } else {
+        name.as_str()
+    };
+
+    let mut data = truncated.as_bytes().to_vec();
+    data.push(b'\n');
+    Ok(data)
+}
+
+/// `/proc/<pid>/statm` — memory usage in pages (Linux-compatible).
+///
+/// Linux emits seven space-separated integers, each a count of pages of
+/// `getpagesize()` bytes (16 KiB here):
+///   `size resident shared text lib data dt`
+///
+/// We track a single Linux address-space charge per process
+/// (`linux_as_used`, the sum of Linux-ABI `mmap` sizes) rather than a
+/// full VMA breakdown, so we report:
+///   - `size`     = total address-space charge / page size
+///   - `resident` = same value (we do not track RSS separately; this is
+///                  an upper bound, which is the safe direction for the
+///                  callers that read statm — they treat it as "at most
+///                  this much")
+///   - `shared`, `text`, `lib`, `data`, `dt` = 0 (we do not yet
+///     attribute the charge to those categories; `lib` and `dt` are
+///     always 0 on modern Linux anyway)
+///
+/// When per-VMA accounting lands this becomes a richer breakdown; the
+/// page-unit contract stays the same.
+fn gen_pid_statm(task_id: u64) -> KernelResult<Vec<u8>> {
+    // statm only applies to processes (which carry the AS charge), not
+    // bare scheduler tasks.
+    let as_bytes = crate::proc::pcb::linux_as_used(task_id)
+        .ok_or(KernelError::NotFound)?;
+    let page = crate::mm::frame::FRAME_SIZE as u64;
+    // page is a non-zero compile-time constant, so this division is
+    // always safe; round up so a partial page still counts as one.
+    let pages = as_bytes.div_ceil(page);
+    // size resident shared text lib data dt
+    let text = format!("{pages} {pages} 0 0 0 0 0\n");
+    Ok(text.into_bytes())
+}
+
+/// `/proc/<pid>/limits` — resource limits table (Linux-compatible).
+///
+/// Reproduces Linux's `/proc/<pid>/limits` column layout exactly so
+/// tools that scrape it (systemd, container runtimes, `ulimit -a`
+/// fallbacks) parse correctly.  Values come from the per-process
+/// `rlimits` table; if the pid has no live PCB we fall back to the
+/// compiled-in [`DEFAULT_RLIMITS`] so the file is never empty for a
+/// valid task id.
+fn gen_pid_limits(task_id: u64) -> KernelResult<Vec<u8>> {
+    use crate::proc::pcb::{self, DEFAULT_RLIMITS, NUM_RLIMITS, RLIM_INFINITY};
+
+    // Linux row labels + units, indexed by RLIMIT_* resource number.
+    const ROWS: [(&str, &str); 16] = [
+        ("Max cpu time", "seconds"),
+        ("Max file size", "bytes"),
+        ("Max data size", "bytes"),
+        ("Max stack size", "bytes"),
+        ("Max core file size", "bytes"),
+        ("Max resident set", "bytes"),
+        ("Max processes", "processes"),
+        ("Max open files", "files"),
+        ("Max locked memory", "bytes"),
+        ("Max address space", "bytes"),
+        ("Max file locks", "locks"),
+        ("Max pending signals", "signals"),
+        ("Max msgqueue size", "bytes"),
+        ("Max nice priority", ""),
+        ("Max realtime priority", ""),
+        ("Max realtime timeout", "us"),
+    ];
+
+    // Validate the task id resolves to *something* (process or task) so
+    // a bogus pid yields NotFound rather than a default table.
+    if pcb::state(task_id).is_none() {
+        let tasks = crate::sched::task_list();
+        if !tasks.iter().any(|t| t.id == task_id) {
+            return Err(KernelError::NotFound);
+        }
+    }
+
+    let mut s = String::with_capacity(1024);
+    // Header — column widths match util-linux / kernel fs/proc/base.c.
+    s.push_str(&format!(
+        "{:<25}{:<21}{:<21}{:<11}\n",
+        "Limit", "Soft Limit", "Hard Limit", "Units"
+    ));
+
+    let fmt_val = |v: u64| -> String {
+        if v == RLIM_INFINITY {
+            String::from("unlimited")
+        } else {
+            format!("{v}")
+        }
+    };
+
+    for resource in 0..NUM_RLIMITS {
+        let (soft, hard) = pcb::get_rlimit(task_id, resource)
+            .unwrap_or_else(|| {
+                // Bare task without a PCB: report the system defaults.
+                #[allow(clippy::indexing_slicing)]
+                DEFAULT_RLIMITS[resource as usize]
+            });
+        #[allow(clippy::indexing_slicing)]
+        let (label, units) = ROWS[resource as usize];
+        s.push_str(&format!(
+            "{:<25}{:<21}{:<21}{:<11}\n",
+            label,
+            fmt_val(soft),
+            fmt_val(hard),
+            units,
+        ));
+    }
+
+    Ok(s.into_bytes())
+}
+
 /// Generate content for a per-PID virtual file.
 fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
     match file_name {
@@ -1938,6 +2094,9 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "stat" => gen_pid_stat(task_id),
         "maps" => gen_pid_maps(task_id),
         "caps" => gen_pid_caps(task_id),
+        "comm" => gen_pid_comm(task_id),
+        "statm" => gen_pid_statm(task_id),
+        "limits" => gen_pid_limits(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -10791,6 +10950,69 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   stat /999999: NotFound OK");
+
+    // --- New per-PID files: comm, statm, limits ---
+
+    // /proc/<pid>/comm — non-empty, newline-terminated, <= 16 bytes
+    // (TASK_COMM_LEN), matching Linux's `comm` shape.
+    let comm_data = fs.read_file(&format!("/{current_tid}/comm"))?;
+    if comm_data.is_empty()
+        || comm_data.last() != Some(&b'\n')
+        || comm_data.len() > 16
+    {
+        serial_println!(
+            "[procfs]   FAIL: comm malformed (len={}, last={:?})",
+            comm_data.len(), comm_data.last()
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   {}/comm: {} bytes OK", current_tid, comm_data.len());
+
+    // /proc/<pid>/limits — works for any live task (falls back to
+    // DEFAULT_RLIMITS without a PCB).  Must carry the Linux header and
+    // the well-known rows tools scrape.
+    let limits_data = fs.read_file(&format!("/{current_tid}/limits"))?;
+    let limits_text = core::str::from_utf8(&limits_data)
+        .map_err(|_| KernelError::InternalError)?;
+    if !limits_text.contains("Soft Limit")
+        || !limits_text.contains("Max open files")
+        || !limits_text.contains("Max stack size")
+    {
+        serial_println!("[procfs]   FAIL: limits missing expected rows");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   {}/limits: {} bytes OK", current_tid, limits_data.len());
+
+    // /proc/<pid>/statm — only processes carry the address-space charge,
+    // so a bare scheduler task legitimately returns NotFound.  When it
+    // does succeed, it must be seven space-separated integers + newline.
+    match fs.read_file(&format!("/{current_tid}/statm")) {
+        Ok(statm_data) => {
+            let statm_text = core::str::from_utf8(&statm_data)
+                .map_err(|_| KernelError::InternalError)?;
+            let trimmed = statm_text.strip_suffix('\n').unwrap_or(statm_text);
+            let fields: Vec<&str> = trimmed.split(' ').collect();
+            if fields.len() != 7
+                || !fields.iter().all(|f| f.parse::<u64>().is_ok())
+            {
+                serial_println!(
+                    "[procfs]   FAIL: statm not 7 integers ({:?})", trimmed
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!("[procfs]   {}/statm: 7 fields OK", current_tid);
+        }
+        Err(KernelError::NotFound) => {
+            serial_println!(
+                "[procfs]   {}/statm: NotFound (bare task, no AS charge) OK",
+                current_tid
+            );
+        }
+        Err(e) => {
+            serial_println!("[procfs]   FAIL: statm unexpected error {:?}", e);
+            return Err(KernelError::InternalError);
+        }
+    }
 
     serial_println!("[procfs] Self-test PASSED");
     Ok(())

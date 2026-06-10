@@ -103,6 +103,52 @@ provide without architectural compromise, the right answer is `ENOSYS`
 a hack into native code to satisfy a Linux quirk. When in doubt, the
 native architecture wins.
 
+#### Version-surface policy (user-directed, 2026-06-10): "baseline + honored extras"
+
+The compat layer uses **Linux 6.6 (LTS)** as its *baseline* reference
+surface — the version whose syscall/flag semantics we treat as the floor
+we faithfully implement. Beyond that floor the rules are:
+
+- **Never accept-without-honoring (the one hard rule).** If we do not
+  actually implement the semantics of a flag / opcode / feature, reject
+  it with the errno real Linux uses when it lacks that feature
+  (`EINVAL` / `ENOSYS` / `EOPNOTSUPP`) — never silently accept it. A
+  program that requests a guarantee we can't keep (e.g. `RWF_ATOMIC`)
+  must get an honest "not supported" so it falls back, not a false
+  success. This is what keeps feature-detection probes correct, and it
+  is the real principle behind the version-attribution audit batches.
+- **Post-baseline features MAY be kept if fully implemented.** We do
+  *not* strip a newer-than-6.6 feature merely for postdating the
+  baseline, provided it is correctly and completely implemented and
+  obeys the rule above. Example: `fcntl(F_DUPFD_QUERY)` (Linux 6.10) is
+  **retained** — it answers truthfully and honors its full semantics.
+  (This supersedes the earlier "strict v6.6, strip everything newer"
+  reading that some sweep batches had been following; that reading was
+  an inherited interpretation, not this directive.)
+- **Keep sibling features consistent — avoid the "Frankenkernel" trap.**
+  Real kernels have monotonically-growing feature sets, so some software
+  infers "feature A is present ⇒ its siblings from the same era are
+  present" and then *uses a sibling without probing it*. Our capability
+  surface is a subset, which breaks that assumption. Therefore: when we
+  implement a post-baseline feature, also implement (or make a
+  deliberate, documented decision about) the closely-related siblings a
+  caller is likely to assume ship alongside it — e.g. a paired
+  `*_QUERY`/`*_SET`, the other operations of the same syscall family, or
+  the companion flags introduced in the same release. If a program is
+  likely to infer one function works from another working, the inferred
+  one must actually work. If we genuinely cannot provide a sibling,
+  record the asymmetry here and in `todo.txt` so it is a known,
+  deliberate gap rather than a surprise `ENOSYS` on a path the caller
+  believed was guaranteed.
+
+Rule of thumb: **6.6 is the floor we guarantee; anything above it is
+opt-in but must be truthful and internally consistent** — no lying
+functions, and no lone features whose presence would mislead a caller
+about absent siblings. (Related open consideration: what `uname`
+reports for `release` — currently `0.1.0-ouros`, not a Linux version —
+interacts with version inference and with glibc's startup "kernel too
+old" check; tracked separately.)
+
 The truncation-audit work (batches 281+ in `todo.txt`) is purely inside
 `linux.rs`: masking high-half register garbage at the ABI boundary to
 match what Linux's kernel sees. It does not touch native code. Future
@@ -383,6 +429,7 @@ _One graphical session at a time. Fast user switching (suspend one session, star
 - [ ] `audio.play` — emit sound
 - [ ] `audio.system_sound` — emit system notification sounds
 - [ ] `audio.volume` — change global volume (elevated)
+- [ ] `audio.exclusive` — take exclusive hold of an output device, bypassing the OS mixer so the app's bitstream goes to the device untouched (Atmos Blu-ray passthrough, exclusive-mode game audio, ASIO music production). Scoped per output device at grant time. Other apps routed to the device are muted-with-toast for the duration; on app exit or crash, the device returns to the mixer automatically. See §3.7 → Audio Settings dialog → Exclusive passthrough.
 
 #### Capability Types — UI
 - [ ] `ui.notification` — show notification in notification pane
@@ -575,6 +622,16 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 - [ ] Virtual filesystem abstraction
 - [ ] Path lookup with dcache equivalent
 - [ ] Benchmark: cached lookup target ~200-500ns per component
+- [ ] **Fast recursive directory traversal — match Linux `find`, not Windows `dir /s`.** Walking large trees (`find /`, `du -sh`, file indexer, backup scan) must be fast in both warm- and cold-cache regimes. NTFS itself is structurally fine; Windows is slow because every open/stat round-trips through the AV/indexer minifilter stack. Our microkernel design eliminates that class of overhead by construction (no filter-driver hook points — drivers can't transparently intercept every fs op the way Windows minifilters do), but the kernel/VFS still has to do the rest:
+  - [ ] **Batched dirent syscall** (`getdents`-style — return many entries per call, not one at a time). One-entry-per-syscall APIs (`FindNextFile`) are 10–100× slower than batched ones at scale.
+  - [ ] **`d_type` (file-type bit) included in the dirent record.** A walk that only needs "name + is-this-a-directory" must never have to touch the inode. ext4 already stores this in the directory entry; the VFS dirent struct and syscall ABI must expose it. This is the single biggest reason `find -type f` is fast on Linux and slow on Windows.
+  - [ ] **Negative-dentry cache.** Repeated lookups of non-existent names (common in `PATH` resolution, library search, `find -name`) must hit cache, not re-walk the directory.
+  - [ ] **Per-CPU dcache shards / RCU-style lookup** so concurrent walks on different CPUs don't contend on a global dcache lock.
+  - [ ] **Benchmark targets for recursive traversal** (name-only walk, no per-file stat):
+    - [ ] Warm cache: ≥ 1M dirents/sec single-threaded on dev hardware (matches Linux `find -type f` on ext4 with hot dcache).
+    - [ ] Cold cache on NVMe: ≥ 100K dirents/sec single-threaded.
+    - [ ] Stat-every-file walk (`find -printf '%s\n'` equivalent): within 20% of Linux on the same hardware and filesystem.
+  - [ ] **Anti-regression test:** measure `find / -type f | wc -l` on a synthetic 1M-file tree at every kernel/VFS change; fail CI on >10% regression.
 
 #### ext4 (Primary)
 - [ ] Port ext4 code (do NOT write from scratch)
@@ -843,7 +900,13 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Can drag and drop icons into and out of system tray
 - [ ] Apps can start in system tray or minimize to system tray
 - [ ] User can override any app: always start in system tray, always in taskbar, or neither
-- [ ] Sound mixer accessible from volume icon: per-app volume, shows currently-playing apps first
+- [ ] **Volume icon popup (click on system-tray volume icon).** Lightweight Aero-styled flyout — opens instantly without launching the full Settings app. Contents:
+  - [ ] **Main volume slider** at top with current level, and a mute toggle next to it. Adjusting the slider takes effect immediately (no Apply button).
+  - [ ] **Output device selector** — dropdown or radio list of available audio output devices (speakers, headphones, HDMI sinks, Bluetooth devices, USB DACs, virtual outputs). Selecting one switches the system default output. Currently active device shown highlighted; unavailable devices (unplugged, asleep) shown disabled with reason. Refreshes live as devices appear/disappear.
+  - [ ] **Per-app volume mixer** — one row per application that has output sound in the current windowing session, each row showing app name, app icon, a volume slider, and a mute toggle. Adjusting an app's slider changes only that app's volume; muting only that app does not affect others.
+    - [ ] **Cap at 10 rows.** If more than 10 apps have output sound this session, show the 10 most recently active (most-recent-first ordering). A "show all (N)" link at the bottom expands the list to the full set or jumps to the full audio settings dialog (below).
+    - [ ] App entries persist for the full windowing session even after the app stops outputting, so the user can pre-mute an app that's about to play (e.g., mute the browser tab before the video starts). Entries are dropped when the app exits.
+  - [ ] **"Audio settings…" button** at the bottom of the popup that opens the full audio settings dialog (§3.7 → Audio Settings dialog). Single dialog covers both output and input — no separate "output settings" and "input settings" entry points; one place to go.
 - [ ] Sound history: view which programs recently played sounds, button to go to that app's sound capabilities
 
 #### Desktop
@@ -889,6 +952,7 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
   - [ ] **File explorer** — Aero-styled chrome (translucent title bar, Aero address bar, pane splits with the same glass treatment), default view styling that matches the rest of the shell
   - [ ] **Search dialog** — Aero-styled modal: glassy chrome, accent-color focus ring, result rows with the same row styling as file explorer
   - [ ] **File/folder select (open/save) dialog** — same chrome and styling as file explorer (it IS the file explorer component per §4.1), Aero-styled OK/Cancel buttons in the footer
+  - [ ] **Indexing Options dialog** — Aero-styled settings modal for the file-indexer (which paths are indexed, which content types, ML/OCR opt-ins, status of current indexing pass): glassy chrome, two-column layout (indexed locations list on the left, configuration controls on the right) matching the Windows Indexing Options dialog visible in the reference file, Aero-styled action buttons in the footer
 - [ ] The default theme is a normal YAML theme file — it uses the same axis system as third-party themes, so users can swap it out wholesale or override any single axis (e.g., keep Aero window decorations but switch icons to a flat-modern pack). No hard-coded "Aero mode" path in the compositor.
 - [ ] Aero blur and transparency are theme axes (window-decorations, taskbar-panel-styling), so users who want a flat/opaque look can disable them without losing the rest of the default visual identity.
 
@@ -1112,6 +1176,46 @@ _Multi-format clipboard: source puts full rich + plain text, OS auto-generates s
 - [ ] Audio mixing (per-app volume control)
 - [ ] System notification sounds (set of sounds for apps to use)
 - [ ] Sound history (which apps played/are playing sound, link to app settings)
+- [ ] **Audio Settings dialog (full).** Single dialog reachable from the volume-icon popup's "Audio settings…" button and from the Settings app. Combines output and input — no separate dialogs — so users learn one place. Aero-styled per §3.4 default theme. Sections:
+  - [ ] **Output**
+    - [ ] **Output device selector** — same device list as the volume-icon popup, but with full per-device controls (test tone, properties, set as default, set as default for communications).
+    - [ ] **Master output volume** with mute.
+    - [ ] **Panning** — left/right balance slider for the selected output device. Center detent. (For multi-channel outputs, the panning control becomes a per-channel level matrix instead of a single left/right slider — single slider is the 2-channel default presentation.)
+    - [ ] **Output channel layout / spatial mode** — radio group covering the *layout* axis (how the audio is spatialized), separate from the bitstream encoding (next control). Options:
+      - [ ] **Mono** — combines all channels into a single output. Applied at the mixer, so it works on any device regardless of the device's own channel count. Always available.
+      - [ ] **Stereo** — standard 2-channel. Always available.
+      - [ ] **Multichannel (5.1 / 7.1 PCM)** — discrete-channel surround over uncompressed PCM. Available when the active output device advertises ≥6 channels (HDMI sinks, surround USB DACs, multichannel SPDIF). Sub-selector for the exact layout (5.1, 7.1, 5.1.2, 5.1.4, 7.1.4).
+      - [ ] **Spatial / object-based** — object-based immersive audio with height channels. Available when the device advertises support for at least one supported bitstream format (see next control). When selected, the bitstream-format sub-selector is enabled.
+      - [ ] Selection is per output device, not global — headphones can be stereo while HDMI is Spatial. Unavailable options are disabled with a hover tooltip explaining why ("HDMI sink advertises only 2 channels", "no installed spatial-audio renderer supports this device", etc.).
+    - [ ] **Spatial bitstream format** — **single-select dropdown** (radio semantics), only enabled when the layout above is set to **Spatial / object-based**. This control picks the *wire format* the mixer encodes its output as when sending to this device — only one bitstream goes over the cable at any moment in time, so checkboxes would be misleading (the user would tick three and only one would ever actually be active). Populated dynamically from **the intersection of (formats the device advertises) ∩ (formats the OS has installed encoders for)**. A device typically advertises many formats at once (an AVR's CEA-861 audio data block usually lists Dolby Digital, DD+, TrueHD, Atmos, DTS, DTS-HD MA, DTS:X all together; Bluetooth A2DP devices commonly list SBC, AAC, aptX, LDAC, LE Audio LC3; USB audio descriptors list multiple alternate settings) — the dropdown surfaces all of them and lets the user pick the active one. Likely contents in 2026:
+      - [ ] **IAMF (Immersive Audio Model and Formats)** — *recommended.* Royalty-free open standard from the Alliance for Open Media (Google / Samsung / Netflix / Amazon / Meta — same group behind AV1). Supports channel-based, scene-based (Ambisonics), and object-based audio in one container. Default when the device supports it. Same role in audio as AV1 has in video for this OS.
+      - [ ] **Dolby Atmos** — dominant proprietary object-based format (Netflix, Disney+, Apple Music, Tidal, UHD Blu-ray). Use when the device advertises Atmos but not IAMF.
+      - [ ] **DTS:X** — DTS's object-based equivalent. Use when the device advertises DTS:X but not IAMF or Atmos.
+      - [ ] **Sony 360 Reality Audio** — object-based, music-streaming oriented. Niche but real.
+      - [ ] **MPEG-H 3D Audio** — ISO standard, used in ATSC 3.0 broadcast. Patent-licensed.
+      - [ ] **Higher-Order Ambisonics (HOA, scene-based)** — fully open, no licensing. Useful for VR / game-audio pass-through and as an internal mixer representation.
+      - [ ] Format ordering in the dropdown puts the open-standard options (IAMF, HOA) first, followed by proprietary formats. The OS picks the highest-ranked supported format by default when the user selects "Spatial / object-based" without explicitly choosing a format.
+      - [ ] Unsupported formats are listed but disabled with a hover tooltip explaining the missing capability (e.g., "HDMI sink does not advertise Atmos", "no IAMF encoder installed", "Bluetooth A2DP profile does not support DTS:X").
+      - [ ] **Preferred-format priority list** (power-user, behind a "Show advanced" disclosure). Instead of locking in one format, the user can supply a reorderable priority list (default: IAMF → HOA → Atmos → DTS:X → 360 RA → MPEG-H → multichannel PCM → stereo). The OS uses the highest-ranked entry the active device supports; if the user later plugs in a different device that doesn't support the top choice, the OS automatically uses the next supported entry without re-prompting. Same ordinal model (one active format per device at any moment), just with a fallback chain instead of a single hard choice.
+    - [ ] **App-input formats are independent of the device wire format.** Apps don't pick a bitstream format — they pick an *input* format to the mixer. A game might feed the mixer 7.1 PCM, a music player feeds stereo, a VR app feeds Ambisonics, an Atmos-aware movie player feeds Atmos objects, all simultaneously. The mixer composes them into a unified spatial scene and encodes that scene *once* into the device's selected wire format. Multiple apps with different native formats running at the same time is the normal case, not an edge case. The OS audio framework accepts any of: stereo / multichannel PCM, Ambisonics (1st through higher-order), Dolby Atmos objects, IAMF channel/scene/object payloads, and bitstream passthrough buffers (for apps that already hold the encoded stream).
+    - [ ] **Per-device format selection is fully independent.** Every output device has its own layout / bitstream / HRTF selection. A user can simultaneously have an Atmos AVR on HDMI and stereo headphones on USB, both active, with different apps routed to different sinks (Spotify → headphones, movie player → AVR). Each device-output path picks the best format from its own advertised list with no cross-device interference. Per-app output routing (which app goes to which device) is a separate control in the per-app output mixer below.
+    - [ ] **Exclusive passthrough** — checkbox per output device in the device's advanced section, plus a per-request OS API for apps to take exclusive hold temporarily. When an app holds the device exclusively:
+      - [ ] The mixer steps aside completely for the duration. The OS's device-format selection is bypassed; the app's chosen bitstream goes over the wire untouched. (Required for fidelity-critical passthrough like Atmos Blu-ray, ASIO music production where the existing roadmap entry already covers this case, and exclusive-mode game audio with sub-millisecond latency budgets.)
+      - [ ] Other apps routed to that device are muted-with-toast: a notification appears that says e.g. "Spotify can't play to HDMI — held exclusively by Plex" with one-click options to reroute Spotify to a different device or wait silently.
+      - [ ] Exclusive hold is **capability-gated** (`audio.exclusive`) — granted at install time, never ambient. Users can revoke it per app in settings. Without the capability, the app's request to take exclusive hold fails and the app falls back to the shared mixer path.
+      - [ ] Exclusive hold is **time-bounded by the app's session** — if the app crashes or exits, the device returns to the mixer automatically. No way for a misbehaving app to permanently capture a device.
+    - [ ] **Headphone HRTF renderer** — dropdown, only meaningful when the active output device is a headphone (wired or Bluetooth). Orthogonal to the bitstream format above: HRTF takes any of the spatial / multichannel outputs and binaural-renders them down to stereo for headphones. Options:
+      - [ ] **Off** — pure stereo passthrough, no HRTF processing. Lowest latency.
+      - [ ] **Built-in HRTF (open)** — OS-provided open binaural renderer (based on libspatialaudio / IEM Plug-in Suite equivalents). Default when headphones are connected and the layout is Spatial or Multichannel.
+      - [ ] **Dolby Atmos for Headphones** — Dolby's binaural Atmos renderer (when installed and licensed).
+      - [ ] **Sony 360 Reality Audio for Headphones** — Sony's binaural 360 RA renderer.
+      - [ ] **DTS Headphone:X** — DTS's binaural renderer.
+      - [ ] Personalized HRTF: per-user HRTF profile (from ear-photo measurement or imported SOFA file) used by the Built-in HRTF renderer for better localization. Per-user, optional, never enabled silently.
+      - [ ] Same disable-with-reason pattern: renderers that aren't installed are listed but disabled with a tooltip.
+    - [ ] **Per-app output mixer** — full list (not capped at 10 like the popup) of every app with output sound in the current windowing session. Each row: app name, icon, volume slider, mute toggle, **per-app panning slider** (center detent). Per-app panning is applied independently of the device-level panning; both compose.
+  - [ ] **Input** (covered separately in input-device settings — same dialog, separate section, mirroring the output controls where applicable: input device selector, master input level, per-app input gain, monitor toggle, noise suppression / echo cancellation toggles).
+  - [ ] **Changes apply live.** No "OK / Cancel / Apply" buttons — adjusting any control takes effect immediately. A small "revert to last opened state" button in the footer for accidental changes, with a session-scoped undo history.
+  - [ ] Settings persist per user. Per-device settings (volume, panning, channel config) persist per device and survive unplug/replug.
 - [ ] ASIO driver — actual low-latency audio I/O for professional/music production use
   - [ ] Direct hardware access path bypassing the mixer when an app holds exclusive ASIO mode
   - [ ] Target: ≤ 3ms round-trip latency at 48 kHz (64-sample buffer), competitive with Windows ASIO drivers
@@ -1131,6 +1235,17 @@ _Multi-format clipboard: source puts full rich + plain text, OS auto-generates s
 
 - [ ] Path bar with autocomplete (absolute or relative paths)
 - [ ] Thumbnails for images, video, PDFs (built-in generators, registered through the same OS-wide mechanism as third-party generators — see §2.3 File Type Associations → Thumbnail-generator registration). Explorer is a thumbnail *consumer*, never an executor: every generator runs in its own sandboxed worker, so a buggy or malicious generator can never crash the explorer or compromise its caps.
+- [ ] **Thumbnail cache — stored in a dedicated OS directory, never alongside the source files.** Generated thumbnails are persisted in a centralized cache so re-listing a directory is fast and so the same thumbnail can be served to other consumers (file picker, image viewer, taskbar previews, etc.) without re-running the generator. The cache lives in a dedicated OS-managed directory (under the per-user state path, e.g. `~/.cache/os/thumbnails/` — exact path TBD; never in the user's source directories). Rationale:
+  - [ ] **No `Thumbs.db`-style pollution.** The cache must never write sidecar files into the directories being thumbnailed. This avoids the Windows-era pattern where every photo folder ends up with a hidden cache file that complicates sync (cloud sync diffs noisy), syncs to other devices that don't want it, breaks read-only mounts, ends up in backups, and shows up in `ls -a` / scripted tooling that has to learn to ignore it. Source directories stay clean.
+  - [ ] **One cache, many filesystems.** A single OS-managed cache means a thumbnail generated on the local SSD is reusable when the same file is later opened from a network mount, an external drive, or a read-only filesystem (which can't store a sidecar anyway). Cache keyed by content-derived identity (see below), not by path, so moves and renames don't invalidate.
+  - [ ] **Cache schema.** SQLite-backed index file plus a blob directory (one file per thumbnail, named by hash) so individual thumbnails can be invalidated and recompacted without rewriting a monolithic database. Index columns: cache key, source path (most recent known), source mtime, source size, source inode, generator id + version, thumbnail size bucket, blob filename, last-accessed timestamp, byte size.
+  - [ ] **Cache key (identity).** Primary key is `(source-content-hash, generator-id, generator-version, thumbnail-size-bucket)`. The content hash is taken from a lightweight signature — a fast hash over (size, mtime, first 64 KiB, last 64 KiB) is typically sufficient and avoids reading huge files; a full content hash is used for files below a threshold (e.g. 16 MiB) where it's cheap and worth the precision. Falling back to `(absolute-path, mtime, size)` only when content hashing fails (e.g. permission denied). The hash strategy is documented and versioned so the cache can be migrated forward if the strategy changes.
+  - [ ] **Invalidation.** Cache entries are invalidated automatically when source mtime/size changes (caught either by the lookup path before serving a stale thumbnail or by the filesystem change-notification stream the OS already maintains for the directory-size cache). Generator-version bumps invalidate all entries from that generator. Moves and pure renames do *not* invalidate, because the cache key is content-derived; the cache just updates the "most recent known source path" field on next access.
+  - [ ] **Size cap with the same model as the directory-size cache.** Install-time default fixed byte cap based on total disk size at install (default ~0.5% of the system drive, e.g. ~5 GiB on a 1 TB drive — thumbnails are larger and longer-lived than dir-size entries, so a more generous default is warranted). Settings UI exposes a single byte-count control with a "(recommended)" tip computed in the moment against current free space, and a one-click "use recommended" button — same pattern as §4.1's directory-size cache so users learn one model. Pressure-aware shrinking via the kernel shrinker subsystem: under disk-space or memory pressure the cache evicts cold entries by LRU all the way to zero, then refills toward the cap when pressure subsides. Same anti-pattern note applies — do *not* size the cap by free disk; size the *fill* by pressure.
+  - [ ] **Per-user, never cross-user.** Each user has their own cache directory under their own per-user state path. A thumbnail one user generated for a file they could read is never served to another user, even when they request a thumbnail for the same file — that second user goes through their own generator invocation, which the sandbox restricts to files *they* can read. This prevents the cache from leaking thumbnails of files the requesting user wouldn't have been able to open themselves.
+  - [ ] **No cache in source directories, ever.** Hard rule, enforced by the framework: the generator-runner API does not accept "write near the source" as an option, and the source-file path passed to the generator is read-only-mounted in the sandbox. A misbehaving or malicious generator that tries to write `Thumbs.db`-style sidecars cannot do so because the sandbox has no write capability outside the OS cache directory.
+  - [ ] **Cache management UI.** Settings → Storage shows the cache's current size and entry count, with a "clear cache" button (forces full regeneration on next view), a per-extension breakdown ("`.psd` thumbnails: 412 entries, 318 MB"), and the byte-count cap control. Power users can disable the cache entirely per extension — useful for highly-volatile file types where the cache miss rate would be high enough that caching wastes space.
+  - [ ] **Backup-aware.** The cache directory is marked with a "do-not-back-up" attribute so the OS backup tool (§4.4) skips it by default — losing the cache is harmless, regenerating it is just CPU time. Same attribute used by other regenerable caches (page cache spillover, font atlases, etc.) to keep backups focused on irreplaceable data.
 - [ ] Detail column view:
   - [ ] **No content-based column auto-selection.** The OS never inspects a directory's contents to decide which columns to show. A folder containing only audio files does *not* automatically gain bitrate/length/sample-rate columns; a folder of photos does *not* automatically gain width/height/camera columns. The visible column set is determined exclusively by (a) the user's explicit per-view preference, (b) the user's saved default for "all folders" or for the specific folder, or (c) the OS's initial out-of-the-box default — never by sniffing what's inside the directory. Rationale: content-sniffing makes the column set jitter as the user navigates (same view changing shape when the user enters or leaves a folder of mixed content), creates surprise when a single off-type file in an otherwise-uniform directory suppresses or restores a column, makes "why did my columns change?" answers require explaining the heuristic, and forces the OS to scan every file's type on every directory listing just to decide chrome. The user is in charge of which columns are shown; the OS just shows them.
   - [ ] User can show/hide any column from a column-picker dropdown on the header row (Windows-style). Changes apply to the current view, with a "save as default for all folders" / "save as default for this folder" option in the same menu.

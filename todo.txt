@@ -47973,3 +47973,22 @@ fcntl catch-all (EINVAL) plus flipping the batch-94 self-test probe.
 If (ii), add a short "forward-compat features intentionally retained"
 note to the Linux Compatibility Boundary section so future sweeps
 don't re-flag it.
+
+RESOLVED 2026-06-10 — user chose option (ii) "baseline + honored
+extras."  F_DUPFD_QUERY is RETAINED (correctly implemented, honors
+full semantics).  Policy now documented in roadmap-detailed.md
+"Version-surface policy" under the Linux Compatibility Boundary
+section.  Key consequences for future sweeps:
+  * Do NOT strip a post-6.6 feature merely for postdating the 6.6
+    baseline — only strip/EINVAL features whose semantics we do NOT
+    actually implement (the "never accept-without-honoring" rule).
+  * NEW obligation: keep SIBLING features consistent.  When adding a
+    post-baseline feature, also implement (or deliberately document
+    the absence of) the closely-related siblings a caller is likely
+    to assume ship alongside it (paired *_QUERY/*_SET, same-family
+    ops, same-release companion flags), so cross-feature inference
+    does not hit a surprise ENOSYS.
+  * The within-syscall flag-attribution fixes already done (landlock
+    ERRATA, RWF mask, etc.) remain correct: those were flags we do
+    NOT implement, so rejecting them is the honest answer, fully
+    consistent with option (ii).

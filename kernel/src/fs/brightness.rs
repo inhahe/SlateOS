@@ -208,11 +208,7 @@ pub fn update_ambient(display_id: u32, lux: u32) -> KernelResult<u32> {
                 let (lux_hi, bright_hi) = pair[1];
                 if lux >= lux_lo && lux <= lux_hi {
                     let range_lux = lux_hi.saturating_sub(lux_lo).max(1);
-                    let range_bright = if bright_hi >= bright_lo {
-                        bright_hi - bright_lo
-                    } else {
-                        0
-                    };
+                    let range_bright = bright_hi.saturating_sub(bright_lo);
                     target = bright_lo + (lux - lux_lo) * range_bright / range_lux;
                     break;
                 }

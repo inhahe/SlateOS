@@ -239,12 +239,7 @@ impl LogRing {
         let mut newest_seq = after_seq;
 
         // Find the start: oldest entry still in the ring.
-        let oldest_seq = if self.total_written > RING_SIZE as u64 {
-            #[allow(clippy::arithmetic_side_effects)]
-            { self.total_written - RING_SIZE as u64 }
-        } else {
-            0
-        };
+        let oldest_seq = self.total_written.saturating_sub(RING_SIZE as u64);
 
         let start_seq = if after_seq == u64::MAX {
             // Special case: u64::MAX means "read from the beginning".

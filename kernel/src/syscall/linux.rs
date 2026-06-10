@@ -3895,7 +3895,7 @@ fn sys_openat(args: &SyscallArgs) -> SyscallResult {
     if rel_bytes.is_empty() {
         return linux_err(errno::ENOENT);
     }
-    if rel_bytes.iter().any(|&b| b == 0) {
+    if rel_bytes.contains(&0) {
         return linux_err(errno::EINVAL);
     }
 
@@ -4418,10 +4418,10 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
         // Never set WRITABLE on a CoW page — the CoW fault handler
         // will upgrade the page on first write.
         if want_write && !current.contains(PageFlags::COW) {
-            new_flags = new_flags | PageFlags::WRITABLE;
+            new_flags |= PageFlags::WRITABLE;
         }
         if !want_exec {
-            new_flags = new_flags | PageFlags::NO_EXECUTE;
+            new_flags |= PageFlags::NO_EXECUTE;
         }
 
         // SAFETY: same as translate_flags above — pml4 is valid,
@@ -6886,7 +6886,7 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EINVAL);
             }
             match args.arg1 {
-                0 | 1 | 2 => SyscallResult::ok(0), // PR_SPEC_NOT_AFFECTED
+                0..=2 => SyscallResult::ok(0), // PR_SPEC_NOT_AFFECTED
                 _ => linux_err(errno::ENODEV),
             }
         }
@@ -6917,7 +6917,7 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EINVAL);
             }
             match args.arg1 {
-                0 | 1 | 2 => linux_err(errno::ENXIO),
+                0..=2 => linux_err(errno::ENXIO),
                 _ => linux_err(errno::ENODEV),
             }
         }
@@ -9891,7 +9891,7 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
 
     let n_cpus = crate::smp::cpu_count().max(1);
     // Round up to whole bytes.
-    let needed_bytes = (n_cpus + 7) / 8;
+    let needed_bytes = n_cpus.div_ceil(8);
     if cpusetsize < needed_bytes {
         return linux_err(errno::EINVAL);
     }
@@ -9968,7 +9968,7 @@ fn sys_sched_getaffinity(args: &SyscallArgs) -> SyscallResult {
     // Translator-only stance preserved: no scheduler state change.  We
     // just expose the v6.6 retlen semantics via our existing cpu_count
     // input.
-    let cpumask_size = ((n_cpus + 63) / 64) * 8;
+    let cpumask_size = n_cpus.div_ceil(64) * 8;
     let write_bytes = cpusetsize.min(cpumask_size);
     // Set bits 0..n_cpus.
     for cpu in 0..n_cpus {
@@ -19869,7 +19869,7 @@ fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
 ///                 indefinitely; callers can break the wait by
 ///                 changing the polled fd's state from another task).
 fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
 
     // Quick path: no fds, just a timed sleep.
     if nfds == 0 {
@@ -19883,8 +19883,7 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let nfds_usize = nfds as usize;
     let len = nfds_usize.saturating_mul(8);
-    let mut buf: Vec<u8> = Vec::new();
-    buf.resize(len, 0);
+    let mut buf: Vec<u8> = vec![0; len];
 
     // Read the pollfd array in once.  We re-compute revents from this
     // local copy on every loop iteration so the user-visible writes
@@ -20081,7 +20080,7 @@ fn fd_set_byte_len(nfds: i32) -> Result<usize, SyscallResult> {
         return Err(linux_err(errno::EINVAL));
     }
     // bits → bytes, rounded up.
-    Ok(((nfds_u + 7) / 8) as usize)
+    Ok(nfds_u.div_ceil(8) as usize)
 }
 
 /// Shared core for `sys_select` / `sys_pselect6` — does the
@@ -20100,7 +20099,7 @@ fn select_core(
     len: usize,
     timeout_ms_signed: i64,
 ) -> SyscallResult {
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
 
     // Quick path: no fds, just a timed sleep.
     if nfds == 0 || len == 0 {
@@ -20113,12 +20112,9 @@ fn select_core(
 
     // Snapshot the three input fd_sets.  Each is `len` bytes.  An
     // input pointer that is NULL is treated as the all-zero set.
-    let mut rd: Vec<u8> = Vec::new();
-    rd.resize(len, 0);
-    let mut wr: Vec<u8> = Vec::new();
-    wr.resize(len, 0);
-    let mut ex: Vec<u8> = Vec::new();
-    ex.resize(len, 0);
+    let mut rd: Vec<u8> = vec![0; len];
+    let mut wr: Vec<u8> = vec![0; len];
+    let mut ex: Vec<u8> = vec![0; len];
 
     for (ptr, dst) in [(readfds_ptr, &mut rd), (writefds_ptr, &mut wr), (exceptfds_ptr, &mut ex)] {
         if ptr != 0 {
@@ -20134,12 +20130,9 @@ fn select_core(
     // Output fd_sets — Linux semantics: only bits for ready fds are
     // set; all other bits are zero.  Start from all-zero and OR in
     // the ready bits.
-    let mut rd_out: Vec<u8> = Vec::new();
-    rd_out.resize(len, 0);
-    let mut wr_out: Vec<u8> = Vec::new();
-    wr_out.resize(len, 0);
-    let mut ex_out: Vec<u8> = Vec::new();
-    ex_out.resize(len, 0);
+    let mut rd_out: Vec<u8> = vec![0; len];
+    let mut wr_out: Vec<u8> = vec![0; len];
+    let mut ex_out: Vec<u8> = vec![0; len];
 
     let pid = caller_pid();
     let mut remaining_ms: i64 = timeout_ms_signed;
@@ -21626,7 +21619,7 @@ fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
         if maxnode > (1 << 23) {
             return linux_err(errno::EINVAL);
         }
-        let bytes = ((maxnode + 7) / 8) as usize;
+        let bytes = maxnode.div_ceil(8) as usize;
         if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, bytes) {
             return linux_err(linux_errno_for(e));
         }
@@ -21751,7 +21744,7 @@ fn sys_set_mempolicy(args: &SyscallArgs) -> SyscallResult {
         if maxnode > (1 << 23) {
             return linux_err(errno::EINVAL);
         }
-        let bytes = ((maxnode + 7) / 8) as usize;
+        let bytes = maxnode.div_ceil(8) as usize;
         if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, bytes) {
             return linux_err(linux_errno_for(e));
         }
@@ -21902,7 +21895,7 @@ fn sys_get_mempolicy(args: &SyscallArgs) -> SyscallResult {
         if maxnode > (1 << 23) {
             return linux_err(errno::EINVAL);
         }
-        let bytes = ((maxnode + 7) / 8) as usize;
+        let bytes = maxnode.div_ceil(8) as usize;
         if let Err(e) = crate::mm::user::validate_user_write(nodemask_ptr, bytes) {
             return linux_err(linux_errno_for(e));
         }
@@ -22033,7 +22026,7 @@ fn sys_migrate_pages(args: &SyscallArgs) -> SyscallResult {
         // rejects as "no valid target node".
         return linux_err(errno::EINVAL);
     }
-    let bytes = ((maxnode + 7) / 8) as usize;
+    let bytes = maxnode.div_ceil(8) as usize;
     if args.arg2 == 0 || args.arg3 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -24553,7 +24546,7 @@ fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     // Reader-only clocks have no .timer_create — Linux returns EOPNOTSUPP.
-    if matches!(clockid, 4 | 5 | 6) {
+    if matches!(clockid, 4..=6) {
         return linux_err(errno::EOPNOTSUPP);
     }
     // Batch 206: good_sigevent content validation.  Linux's
@@ -27900,7 +27893,7 @@ fn sys_mincore(args: &SyscallArgs) -> SyscallResult {
     let vec_ptr = args.arg2;
     // (1) addr must be page-aligned (16 KiB here).  Linux: `start &
     // ~PAGE_MASK → -EINVAL` is the first gate.
-    if addr % 0x4000 != 0 {
+    if !addr.is_multiple_of(0x4000) {
         return linux_err(errno::EINVAL);
     }
     // (2) Backing range [addr, addr+length) must lie inside user
@@ -28008,7 +28001,7 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
         if flags & 1 == 0 {
             return linux_err(errno::EINVAL);
         }
-        if new_addr % 0x4000 != 0 {
+        if !new_addr.is_multiple_of(0x4000) {
             return linux_err(errno::EINVAL);
         }
     }
@@ -28022,7 +28015,7 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
         }
     }
     // (4) old_addr must be page-aligned (16 KiB here; see fn doc).
-    if old_addr % 0x4000 != 0 {
+    if !old_addr.is_multiple_of(0x4000) {
         return linux_err(errno::EINVAL);
     }
     // (5) PAGE_ALIGN(new_size) must be non-zero.  Linux's mm/mremap.c
@@ -29280,7 +29273,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
             consumed = consumed.saturating_add(1);
             continue;
         }
-        let name_len = ent.name.as_bytes().len();
+        let name_len = ent.name.len();
         let raw = HDR.saturating_add(name_len).saturating_add(1); // +1 for NUL
         // Pad to 8.
         let reclen = (raw + 7) & !7usize;
@@ -30057,7 +30050,7 @@ fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
     let pgoff = args.arg3;
     let _flags = args.arg4;
     // 16 KiB alignment — see CLAUDE.md architectural rules.
-    if addr % 0x4000 != 0 {
+    if !addr.is_multiple_of(0x4000) {
         return linux_err(errno::EINVAL);
     }
     // Linux: `if (prot) return -EINVAL;` — any non-zero prot
@@ -32239,8 +32232,8 @@ fn encode_linux_wstatus(info: &crate::proc::pcb::ExitInfo) -> i32 {
     let code = info.exit_code;
     if (128..=255).contains(&code) {
         // Killed by signal: kernel convention is exit_code = 128 + sig.
-        let sig = (code - 128) & 0x7f;
-        sig
+        
+        (code - 128) & 0x7f
     } else {
         // Normal exit: low byte of exit_code lives in bits 8..=15.
         #[allow(clippy::cast_sign_loss)]
@@ -32984,7 +32977,7 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     //   THREAD_CPUTIME_ID(3), MONOTONIC_RAW(4),
     //   REALTIME_COARSE(5), MONOTONIC_COARSE(6).
     // These produce EOPNOTSUPP from `common_nsleep`'s caller.
-    if matches!(clockid_i32, 3 | 4 | 5 | 6) {
+    if matches!(clockid_i32, 3..=6) {
         return linux_err(errno::EOPNOTSUPP);
     }
     let req = match read_timespec(req_ptr) {
@@ -38099,7 +38092,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 other => {
                     serial_println!(
                         "[syscall/linux]   FAIL: NPROC tight fork expected WouldBlock, got {:?}",
-                        other.map(|p| { let _ = pcb::destroy(p); "Ok(pid)" }),
+                        other.map(|p| { pcb::destroy(p); "Ok(pid)" }),
                     );
                     pcb::destroy(parent);
                     return Err(KernelError::InternalError);
@@ -46092,7 +46085,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //   * len = 16 with cpumask_size <= 8: expect 8.
         {
             let n_cpus = crate::smp::cpu_count().max(1);
-            let cpumask_size = ((n_cpus + 63) / 64) * 8;
+            let cpumask_size = n_cpus.div_ceil(64) * 8;
 
             // len = 128 (default cpu_set_t) should return cpumask_size.
             let mut large = [0u8; 128];
@@ -46258,7 +46251,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        if crate::fs::nameservice::get_hostname() != "" {
+        if !crate::fs::nameservice::get_hostname().is_empty() {
             serial_println!(
                 "[syscall/linux]   FAIL: sethostname(NULL,0) did not clear nodename ({:?})",
                 crate::fs::nameservice::get_hostname(),
@@ -46284,7 +46277,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        if crate::fs::nameservice::get_hostname() != "" {
+        if !crate::fs::nameservice::get_hostname().is_empty() {
             serial_println!(
                 "[syscall/linux]   FAIL: sethostname(VALID,0) did not clear nodename ({:?})",
                 crate::fs::nameservice::get_hostname(),
@@ -47455,9 +47448,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         // adjtimex with modes=0 (read-only) -> TIME_ERROR (5).  The
         // buffer is populated with the current time state.
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         // modes already 0 from the zero-fill above.
         let a = SyscallArgs { arg0: tx_ptr, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -47491,9 +47482,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // adjtimex with modes != 0 -> EPERM (no CAP_SYS_TIME).
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         // modes = ADJ_OFFSET = 1.
         tx_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
         let a = SyscallArgs { arg0: tx_ptr, arg1: 0, arg2: 0, arg3: 0,
@@ -47575,9 +47564,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // clock_adjtime(CLOCK_REALTIME, &tx) modes=0 -> TIME_ERROR.
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_ADJTIME, &a).value != 5 {
@@ -47589,9 +47576,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // clock_adjtime(CLOCK_TAI, &tx) modes=0 -> TIME_ERROR.
         // (Our TAI offset is 0; we accept the clk_id and return the
         // same snapshot as CLOCK_REALTIME.)
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         let a = SyscallArgs { arg0: 11, arg1: tx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_ADJTIME, &a).value != 5 {
@@ -47601,9 +47586,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // clock_adjtime(CLOCK_REALTIME, modes=ADJ_OFFSET) -> EPERM.
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         tx_buf[0..4].copy_from_slice(&1u32.to_le_bytes());
         let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -47617,9 +47600,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Batch 516 — ntp_validate_timex gate fidelity.
         // modes = ADJ_ADJTIME alone (0x8000): singleshot bit missing
         // -> Linux EINVAL ahead of the EPERM gate.
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         tx_buf[0..4].copy_from_slice(&0x8000u32.to_le_bytes());
         let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -47634,9 +47615,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // modes = ADJ_ADJTIME|READONLY (0xa000): SINGLESHOT still
         // missing -> EINVAL.  Discriminates "READONLY clears CAP" from
         // "SINGLESHOT bit required regardless".
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         tx_buf[0..4].copy_from_slice(&0xa000u32.to_le_bytes());
         let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -47651,9 +47630,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // modes = ADJ_OFFSET_SINGLESHOT (0x8001): write singleshot
         // adjustment -> EPERM (no CAP_SYS_TIME).  Discriminates the
         // SINGLESHOT-OK path from the READONLY-clears-CAP arm.
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         tx_buf[0..4].copy_from_slice(&0x8001u32.to_le_bytes());
         let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -47669,9 +47646,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // SINGLESHOT): read singleshot offset, no CAP_SYS_TIME needed
         // -> TIME_ERROR (5) and writes a timex snapshot.  This is the
         // key chrony/ntpd discovery probe.
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         tx_buf[0..4].copy_from_slice(&0xa001u32.to_le_bytes());
         let a = SyscallArgs { arg0: 0, arg1: tx_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -47684,9 +47659,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         // Same battery via the legacy adjtimex entry — proves both
         // entries route through the new ntp_validate_timex gate.
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         tx_buf[0..4].copy_from_slice(&0x8000u32.to_le_bytes());
         let a = SyscallArgs { arg0: tx_ptr, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -47698,9 +47671,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        for b in &mut tx_buf {
-            *b = 0;
-        }
+        tx_buf.fill(0);
         tx_buf[0..4].copy_from_slice(&0xa001u32.to_le_bytes());
         let a = SyscallArgs { arg0: tx_ptr, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -61306,9 +61277,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //
         // Re-prime the cstat_buf sentinel since the success probe above
         // overwrote the first 40 bytes with zeros.
-        for byte in &mut cstat_buf {
-            *byte = 0xCC;
-        }
+        cstat_buf.fill(0xCC);
         // (a) flags=0x1_0000_0000 (high-only), range=NULL, cstat=NULL:
         //     truncates to 0, gate passes, downstream EFAULT on NULL
         //     range pointer (cstat_range is checked first).
@@ -61380,7 +61349,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // (rounded down) so the alignment gate doesn't preempt the
         // overflow gate.
         let a = SyscallArgs {
-            arg0: u64::MAX & !0xFFFu64,
+            arg0: !0xFFFu64,
             arg1: 0x2000,
             arg2: 0,
             arg3: 0,
@@ -65478,7 +65447,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // overflow path).  Use a page-aligned addr near u64::MAX so we
         // pass gate 1 and provoke the overflow exclusively.
         let a = SyscallArgs {
-            arg0: u64::MAX & !0x3FFFu64,
+            arg0: !0x3FFFu64,
             arg1: 0x4000,
             arg2: 0,
             arg3: 0, arg4: 0, arg5: 0,
@@ -66792,8 +66761,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // batch we ran which gate first (EINVAL).
             {
                 let packed: i32 =
-                    (pcb::LINUX_IOPRIO_CLASS_RT
-                        << pcb::LINUX_IOPRIO_CLASS_SHIFT) | 0;
+                    pcb::LINUX_IOPRIO_CLASS_RT << pcb::LINUX_IOPRIO_CLASS_SHIFT;
                 let a = SyscallArgs {
                     arg0: 99, arg1: test_pid, arg2: packed as u64,
                     arg3: 0, arg4: 0, arg5: 0,

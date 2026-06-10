@@ -322,7 +322,7 @@ pub fn process_frame(src_mac: &MacAddress, payload: &[u8]) -> KernelResult<()> {
                     // must actually contain that many bytes.
                     if addr_subtype == 1
                         && addr_str_len >= 5
-                        && tlv.value.len() >= 1 + addr_str_len
+                        && tlv.value.len() > addr_str_len
                     {
                         // IPv4.
                         neighbor.mgmt_ip = Ipv4Addr([

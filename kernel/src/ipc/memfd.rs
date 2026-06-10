@@ -579,7 +579,7 @@ fn test_read_at_pwrite_at() -> KernelResult<()> {
     }
     let mut buf = [0u8; 8];
     let n = read_at(h, 0, &mut buf)?;
-    if n != 8 || &buf[..4] != [0; 4] || &buf[4..] != b"WXYZ" {
+    if n != 8 || buf[..4] != [0; 4] || &buf[4..] != b"WXYZ" {
         serial_println!("[memfd]   FAIL: read_at got {:?}", buf);
         close(h);
         return Err(KernelError::InternalError);

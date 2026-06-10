@@ -107,9 +107,7 @@ fn half_md4_hash(name: &[u8], seed: &[u32; 4]) -> (u32, u32) {
 
     while offset < name.len() {
         // Fill buf with up to 8 u32s from the name.
-        for slot in &mut buf {
-            *slot = 0;
-        }
+        buf.fill(0);
         for (i, slot) in buf.iter_mut().enumerate() {
             let byte_off = offset.saturating_add(i.saturating_mul(4));
             if byte_off < name.len() {
@@ -141,9 +139,7 @@ fn tea_hash(name: &[u8], seed: &[u32; 4]) -> (u32, u32) {
     let mut offset = 0usize;
 
     while offset < name.len() {
-        for slot in &mut buf {
-            *slot = 0;
-        }
+        buf.fill(0);
         for (i, slot) in buf.iter_mut().enumerate() {
             let byte_off = offset.saturating_add(i.saturating_mul(4));
             if byte_off < name.len() {

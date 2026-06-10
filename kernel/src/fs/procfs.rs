@@ -3822,7 +3822,7 @@ fn gen_taskbar() -> Vec<u8> {
         for p in &pinned {
             out.push_str(&format!("  [{}] {} ({})\n", p.position, p.name, p.app_id));
         }
-        out.push_str("\n");
+        out.push('\n');
     }
 
     let running = super::taskbar::running_apps();
@@ -3863,7 +3863,7 @@ fn gen_startmenu() -> Vec<u8> {
         for f in &favs {
             out.push_str(&format!("  [{}] {} ({})\n", f.position, f.name, f.app_id));
         }
-        out.push_str("\n");
+        out.push('\n');
     }
 
     let links = super::startmenu::quick_links();
@@ -3872,7 +3872,7 @@ fn gen_startmenu() -> Vec<u8> {
         for ql in &links {
             out.push_str(&format!("  {} ({})\n", ql.label, ql.app_id));
         }
-        out.push_str("\n");
+        out.push('\n');
     }
 
     let recent = super::startmenu::recent_apps();
@@ -3907,7 +3907,7 @@ fn gen_filepicker() -> Vec<u8> {
         for bm in &bookmarks {
             out.push_str(&format!("  {} → {}\n", bm.label, bm.path));
         }
-        out.push_str("\n");
+        out.push('\n');
     }
 
     let recent = super::filepicker::recent_dirs();
@@ -3942,7 +3942,7 @@ fn gen_theme() -> Vec<u8> {
         for (role, color) in &overrides {
             out.push_str(&format!("  {:20} {}\n", role.label(), color.to_hex()));
         }
-        out.push_str("\n");
+        out.push('\n');
     }
 
     let custom = super::theme::list_custom();

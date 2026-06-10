@@ -755,11 +755,11 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[index]   ERROR: ext('archive.tar.gz') != 'gz'");
             return Err(KernelError::InternalError);
         }
-        if extract_extension("Makefile") != "" {
+        if !extract_extension("Makefile").is_empty() {
             serial_println!("[index]   ERROR: ext('Makefile') should be empty");
             return Err(KernelError::InternalError);
         }
-        if extract_extension(".bashrc") != "" {
+        if !extract_extension(".bashrc").is_empty() {
             serial_println!("[index]   ERROR: ext('.bashrc') should be empty");
             return Err(KernelError::InternalError);
         }
@@ -767,7 +767,7 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[index]   ERROR: ext('PHOTO.JPG') != 'jpg'");
             return Err(KernelError::InternalError);
         }
-        if extract_extension("file.") != "" {
+        if !extract_extension("file.").is_empty() {
             serial_println!("[index]   ERROR: ext('file.') should be empty");
             return Err(KernelError::InternalError);
         }

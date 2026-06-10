@@ -1746,7 +1746,7 @@ pub fn set_cwd(pid: ProcessId, new_cwd: Vec<u8>) -> KernelResult<()> {
     if new_cwd.len() > CWD_MAX_LEN {
         return Err(KernelError::InvalidArgument);
     }
-    if new_cwd.iter().any(|&b| b == 0) {
+    if new_cwd.contains(&0) {
         return Err(KernelError::InvalidArgument);
     }
     let mut table = PROCESS_TABLE.lock();

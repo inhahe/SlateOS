@@ -135,7 +135,7 @@ pub fn parse_reply(data: &[u8]) -> Option<FtpReply> {
     };
 
     Some(FtpReply {
-        code: code,
+        code,
         message,
     })
 }

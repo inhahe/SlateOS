@@ -89,6 +89,7 @@ impl core::fmt::Display for ContainerState {
 
 /// Configuration for creating a container.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct ContainerConfig {
     /// Container name (for human identification).
     pub name: String,
@@ -111,23 +112,6 @@ pub struct ContainerConfig {
     pub net_dns: Option<[u8; 4]>,
 }
 
-impl Default for ContainerConfig {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            uid_mappings: Vec::new(),
-            gid_mappings: Vec::new(),
-            cpu_quota: 0,
-            mem_limit: 0,
-            io_ops_limit: 0,
-            io_bytes_limit: 0,
-            net_ip: None,
-            net_mask: None,
-            net_gateway: None,
-            net_dns: None,
-        }
-    }
-}
 
 impl ContainerConfig {
     /// Create a minimal container config with a name.

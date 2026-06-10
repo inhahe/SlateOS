@@ -4306,7 +4306,7 @@ pub fn self_test() -> KernelResult<()> {
     //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
     //   time = 0
     //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
-    let dos_epoch_date: u16 = ((1 << 5)) | 1;
+    let dos_epoch_date: u16 = (1 << 5) | 1;
     let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
     // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
     let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;

@@ -523,7 +523,7 @@ pub fn self_test() -> KernelResult<()> {
         clear_history();
         // Navigate (will fail for non-existent paths, use root).
         let _ = go("/");
-        assert!(can_go_back() == false || can_go_back()); // History starts at 0.
+        assert!(!can_go_back() || can_go_back()); // History starts at 0.
         serial_println!("[pathbar] test 5 passed: navigation");
     }
 

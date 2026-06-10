@@ -74,6 +74,7 @@ pub struct InputMethod {
 
 /// Current composition state.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct CompositionState {
     /// Raw keystroke buffer.
     pub buffer: String,
@@ -85,16 +86,6 @@ pub struct CompositionState {
     pub active: bool,
 }
 
-impl Default for CompositionState {
-    fn default() -> Self {
-        Self {
-            buffer: String::new(),
-            candidates: Vec::new(),
-            selected: 0,
-            active: false,
-        }
-    }
-}
 
 /// An emoji entry.
 #[derive(Debug, Clone)]

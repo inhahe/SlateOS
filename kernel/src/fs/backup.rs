@@ -273,7 +273,6 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
     if !opts.dry_run {
         Vfs::mkdir(&backup_dir).inspect_err(|&e| {
             if matches!(e, KernelError::AlreadyExists) {
-                return;
             }
         }).or_else(|e| {
             if matches!(e, KernelError::AlreadyExists) { Ok(()) } else { Err(e) }

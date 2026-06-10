@@ -280,11 +280,7 @@ pub fn snap(window_id: u64, pos: SnapPosition, cur_x: i32, cur_y: i32, cur_w: u3
 /// Unsnap a window (restore to pre-snap position).
 pub fn unsnap(window_id: u64) -> Option<(i32, i32, u32, u32)> {
     let mut state = STATE.lock();
-    if let Some(ws) = state.windows.remove(&window_id) {
-        Some((ws.pre_snap_x, ws.pre_snap_y, ws.pre_snap_w, ws.pre_snap_h))
-    } else {
-        None
-    }
+    state.windows.remove(&window_id).map(|ws| (ws.pre_snap_x, ws.pre_snap_y, ws.pre_snap_w, ws.pre_snap_h))
 }
 
 /// Get the current snap state of a window.

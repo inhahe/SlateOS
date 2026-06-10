@@ -597,7 +597,6 @@ fn test_register_unregister() {
     // Info should work.
     let i = info("test_ct_1").expect("info failed");
     assert_eq!(i.name, "test_ct_1");
-    assert!(i.last_seq > 0 || i.last_seq == 0); // Valid seq.
 
     // Unregister.
     unregister("test_ct_1").expect("unregister failed");

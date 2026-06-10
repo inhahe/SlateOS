@@ -1182,7 +1182,7 @@ pub fn self_test() -> KernelResult<()> {
         let ts = NtpTimestamp { seconds: 0, fraction: 0x8000_0000 };
         // 0.5 seconds = 500_000_000 ns
         let ns = ts.to_nanos();
-        let diff = if ns > 500_000_000 { ns - 500_000_000 } else { 500_000_000 - ns };
+        let diff = ns.abs_diff(500_000_000);
         assert!(diff < 2, "0.5 seconds should be ~500M ns");
 
         passed = passed.saturating_add(1);
@@ -1195,7 +1195,7 @@ pub fn self_test() -> KernelResult<()> {
         let ts = NtpTimestamp::from_nanos(original_ns);
         assert!(ts.seconds == 1, "1.5s → seconds=1");
         let recovered = ts.to_nanos();
-        let diff = if recovered > original_ns { recovered - original_ns } else { original_ns - recovered };
+        let diff = recovered.abs_diff(original_ns);
         assert!(diff < 10, "round-trip should be close"); // Allow tiny rounding error
 
         passed = passed.saturating_add(1);

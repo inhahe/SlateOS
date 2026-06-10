@@ -612,11 +612,11 @@ pub fn segment_flags_to_page_flags(seg: &LoadableSegment) -> PageFlags {
     let mut flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
 
     if seg.writable {
-        flags = flags | PageFlags::WRITABLE;
+        flags |= PageFlags::WRITABLE;
     }
 
     if !seg.executable {
-        flags = flags | PageFlags::NO_EXECUTE;
+        flags |= PageFlags::NO_EXECUTE;
     }
 
     flags

@@ -509,8 +509,11 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 3: UDP socket collection ---
     {
         let udp = collect_udp_sockets();
+        // Smoke-test: exercise field access on every collected socket.
+        // (local_port is unsigned, so there is no meaningful range to
+        // assert; collection succeeding without panicking is the check.)
         for s in &udp {
-            assert!(s.local_port > 0 || s.local_port == 0, "port valid");
+            let _ = s.local_port;
         }
 
         passed = passed.saturating_add(1);

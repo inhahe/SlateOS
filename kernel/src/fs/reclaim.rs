@@ -227,10 +227,7 @@ pub fn check() -> Option<ReclaimResult> {
     }
 
     // Get disk usage.
-    let (usage_pct, _total, _free) = match get_usage() {
-        Some(u) => u,
-        None => return None, // Can't determine usage.
-    };
+    let (usage_pct, _total, _free) = get_usage()?;
 
     let high = HIGH_WM.load(Ordering::Relaxed);
 

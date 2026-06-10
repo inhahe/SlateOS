@@ -320,10 +320,7 @@ pub fn compress_for_write(path: &str, data: &[u8]) -> Option<Vec<u8>> {
     }
 
     // Find matching rule.
-    let algo = match find_algorithm(path) {
-        Some(a) => a,
-        None => return None,
-    };
+    let algo = find_algorithm(path)?;
 
     if algo == Algorithm::None {
         return None;
@@ -749,7 +746,7 @@ fn test_min_size_filter() {
     assert!(r1.is_none(), "small file should be skipped");
 
     // Large file — should be compressed.
-    let large: Vec<u8> = core::iter::repeat(b'A').take(2048).collect();
+    let large: Vec<u8> = core::iter::repeat_n(b'A', 2048).collect();
     let r2 = compress_for_write("/tmp/fcomp_min/large.txt", &large);
     assert!(r2.is_some(), "large file should be compressed");
 

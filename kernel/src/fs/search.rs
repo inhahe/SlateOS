@@ -601,7 +601,7 @@ fn glob_match_impl(pat: &[char], txt: &[char], pi: usize, ti: usize) -> bool {
             }
         }
         c => {
-            if ti < txt.len() && (txt[ti] == c || txt[ti].to_ascii_lowercase() == c.to_ascii_lowercase()) {
+            if ti < txt.len() && (txt[ti] == c || txt[ti].eq_ignore_ascii_case(&c)) {
                 glob_match_impl(pat, txt, pi + 1, ti + 1)
             } else {
                 false

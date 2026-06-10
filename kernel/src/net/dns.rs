@@ -359,7 +359,7 @@ impl DnsCache {
         }
         for i in 0..cached_len {
             if let (Some(&a), Some(&b)) = (cached.get(i), query.get(i)) {
-                if a.to_ascii_lowercase() != b.to_ascii_lowercase() {
+                if !a.eq_ignore_ascii_case(&b) {
                     return false;
                 }
             } else {
@@ -873,7 +873,7 @@ fn names_eq_case_insensitive(a: &str, b: &str) -> bool {
     }
     a.bytes()
         .zip(b.bytes())
-        .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+        .all(|(x, y)| x.eq_ignore_ascii_case(&y))
 }
 
 // CNAME targets are now passed directly via `cname_out` parameters

@@ -262,11 +262,11 @@ pub fn add(path: &str, tag: &str) -> KernelResult<()> {
         let mut idx = INDEX.lock();
         idx.by_tag
             .entry(norm.clone())
-            .or_insert_with(BTreeSet::new)
+            .or_default()
             .insert(String::from(path));
         idx.by_path
             .entry(String::from(path))
-            .or_insert_with(BTreeSet::new)
+            .or_default()
             .insert(norm);
     }
 
@@ -360,7 +360,7 @@ pub fn set(path: &str, tags: &[&str]) -> KernelResult<()> {
             let norm = normalize_tag(tag);
             idx.by_tag
                 .entry(norm.clone())
-                .or_insert_with(BTreeSet::new)
+                .or_default()
                 .insert(String::from(path));
             path_tags.insert(norm);
         }
@@ -686,7 +686,7 @@ fn index_walk(
                     let norm = normalize_tag(tag);
                     by_tag
                         .entry(norm.clone())
-                        .or_insert_with(BTreeSet::new)
+                        .or_default()
                         .insert(full.clone());
                     path_tags.insert(norm);
                 }

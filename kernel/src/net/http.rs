@@ -874,11 +874,7 @@ fn resolve_redirect(base: &Url, location: &str) -> String {
             // Relative path — resolve against current path.
             let base_path = match base.path.rfind('/') {
                 Some(idx) => {
-                    if let Some(slice) = base.path.get(..idx.saturating_add(1)) {
-                        slice
-                    } else {
-                        "/"
-                    }
+                    base.path.get(..idx.saturating_add(1)).unwrap_or("/")
                 }
                 None => "/",
             };

@@ -833,12 +833,7 @@ pub fn query(filter: &EventFilter, max_results: usize) -> QueryResult {
     }
 
     // Determine scan range.
-    let oldest_seq = if ring.total_written > RING_SIZE as u64 {
-        #[allow(clippy::arithmetic_side_effects)]
-        { ring.total_written - RING_SIZE as u64 }
-    } else {
-        0
-    };
+    let oldest_seq = ring.total_written.saturating_sub(RING_SIZE as u64);
 
     let start_seq = if let Some(after) = filter.after_seq {
         // Start scanning from after_seq + 1, but not before oldest.

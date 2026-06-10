@@ -440,20 +440,20 @@ pub fn self_test() {
     // Test 2: Active session should be the one we created.
     let active = active_session().expect("active session");
     assert_eq!(active.uid, 1000);
-    assert_eq!(active.is_active, true);
+    assert!(active.is_active);
     crate::serial_println!("  [2/11] active session: OK");
 
     // Test 3: Create second session, first becomes background.
     let id2 = create_session(1001, "bob", SessionType::Console, ":1", "tty2").expect("create session 2");
     let s1 = get_session(id1).expect("get session 1");
     assert_eq!(s1.state, SessionState::Background);
-    assert_eq!(s1.is_active, false);
+    assert!(!s1.is_active);
     crate::serial_println!("  [3/11] second session backgrounds first: OK");
 
     // Test 4: Switch back to first session.
     switch_session(id1).expect("switch session");
     let s1 = get_session(id1).expect("get s1");
-    assert_eq!(s1.is_active, true);
+    assert!(s1.is_active);
     assert_eq!(s1.state, SessionState::Active);
     crate::serial_println!("  [4/11] switch session: OK");
 

@@ -998,7 +998,7 @@ pub fn self_test() -> KernelResult<()> {
         assert!(oid_name("1.3.6.1.2.1.1.1.0") == "sysDescr", "sysDescr");
         assert!(oid_name("1.3.6.1.2.1.1.5.0") == "sysName", "sysName");
         assert!(oid_name("1.3.6.1.2.1.6.9.0") == "tcpCurrEstab", "tcp");
-        assert!(oid_name("1.2.3.4.5") == "", "unknown");
+        assert!(oid_name("1.2.3.4.5").is_empty(), "unknown");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[snmp]   test 8 (OID names) PASSED");

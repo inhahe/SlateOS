@@ -702,13 +702,13 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // Build page flags from mmap flags.
     let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
     if flags & MAP_WRITE != 0 {
-        page_flags = page_flags | PageFlags::WRITABLE;
+        page_flags |= PageFlags::WRITABLE;
     }
     if flags & MAP_EXEC == 0 {
-        page_flags = page_flags | PageFlags::NO_EXECUTE;
+        page_flags |= PageFlags::NO_EXECUTE;
     }
     if flags & MAP_NOCACHE != 0 {
-        page_flags = page_flags | PageFlags::NO_CACHE;
+        page_flags |= PageFlags::NO_CACHE;
     }
 
     // Pick a virtual address.
@@ -2611,9 +2611,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
     if fd_map_count > 256 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    let fd_map_byte_len = fd_map_count
-        .checked_mul(core::mem::size_of::<FdMapEntry>())
-        .unwrap_or(usize::MAX);
+    let fd_map_byte_len = fd_map_count.saturating_mul(core::mem::size_of::<FdMapEntry>());
     if fd_map_count > 0 && fd_map_ptr != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(spawn_args.fd_map_ptr, fd_map_byte_len) {
             return SyscallResult::err(e);
@@ -2759,9 +2757,7 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
     let count = fds.len().min(out_cap);
 
     if count > 0 && out_ptr != 0 {
-        let byte_len = count
-            .checked_mul(core::mem::size_of::<FdMapEntry>())
-            .unwrap_or(usize::MAX);
+        let byte_len = count.saturating_mul(core::mem::size_of::<FdMapEntry>());
 
         if let Err(e) = crate::mm::user::validate_user_write(args.arg0, byte_len) {
             // Put the fds back — caller can retry with a valid buffer.

@@ -335,10 +335,7 @@ pub fn check_create(uid: u32, gid: u32) -> QuotaCheckResult {
 
     // Check user inode quota.
     if let Some(entry) = inner.entries.get(&QuotaSubject::User(uid)) {
-        match check_inodes(entry, now) {
-            QuotaCheckResult::Denied => return QuotaCheckResult::Denied,
-            _ => {}
-        }
+        if check_inodes(entry, now) == QuotaCheckResult::Denied { return QuotaCheckResult::Denied }
     }
 
     // Check group inode quota.

@@ -202,12 +202,9 @@ pub fn tcp_server_test(port: u16, max_polls: u32) -> KernelResult<ThroughputResu
     for _ in 0..polls {
         super::poll();
         if super::tcp::listener_has_pending(listener) {
-            match super::tcp::accept(listener) {
-                Ok(h) => {
-                    conn_handle = Some(h);
-                    break;
-                }
-                Err(_) => {}
+            if let Ok(h) = super::tcp::accept(listener) {
+                conn_handle = Some(h);
+                break;
             }
         }
     }

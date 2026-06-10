@@ -273,7 +273,7 @@ fn test_set_get() -> KernelResult<()> {
         remove_service_limits("test.slimit1").ok();
         return Err(KernelError::InternalError);
     }
-    let g = got.unwrap_or(ResourceLimits::unlimited());
+    let g = got.unwrap_or_default();
     if g.max_rss_frames != 100 || g.cpu_quota_pct != 25 || g.max_threads != 8 || g.max_handles != 64 {
         serial_println!("[slimits]   FAIL: limits mismatch after set");
         remove_service_limits("test.slimit1").ok();
@@ -310,7 +310,7 @@ fn test_update() -> KernelResult<()> {
     set_service_limits("test.slimit2", limits1)?;
     set_service_limits("test.slimit2", limits2)?;
 
-    let got = get_service_limits("test.slimit2").unwrap_or(ResourceLimits::unlimited());
+    let got = get_service_limits("test.slimit2").unwrap_or_default();
     if got.max_rss_frames != 200 || got.cpu_quota_pct != 20 {
         serial_println!("[slimits]   FAIL: update didn't replace limits");
         remove_service_limits("test.slimit2").ok();
@@ -376,7 +376,7 @@ fn test_profiles() -> KernelResult<()> {
 
     // Apply a profile to a service.
     apply_profile("test.slimit4", ServiceProfile::NetworkService)?;
-    let got = get_service_limits("test.slimit4").unwrap_or(ResourceLimits::unlimited());
+    let got = get_service_limits("test.slimit4").unwrap_or_default();
     if got.max_rss_frames != 4096 || got.cpu_quota_pct != 25 || got.max_threads != 16 {
         serial_println!("[slimits]   FAIL: NetworkService profile wrong after apply");
         remove_service_limits("test.slimit4").ok();

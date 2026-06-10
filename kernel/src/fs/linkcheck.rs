@@ -252,7 +252,7 @@ fn walk_tree(
                     if let Ok(meta) = Vfs::metadata(&full) {
                         if meta.nlinks > 1 {
                             let key = alloc::format!("{}_{}", meta.size, meta.modified_ns);
-                            hardlink_map.entry(key).or_insert_with(Vec::new).push(full.clone());
+                            hardlink_map.entry(key).or_default().push(full.clone());
                         }
                     }
                 }

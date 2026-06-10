@@ -346,7 +346,7 @@ pub fn switch(target_id: u32) -> KernelResult<()> {
 pub fn list() -> Vec<SessionInfo> {
     let table = TABLE.lock();
     let mut result = Vec::with_capacity(table.sessions.len());
-    for (_, session) in &table.sessions {
+    for session in table.sessions.values() {
         result.push(SessionInfo {
             id: session.id,
             name: session.name.clone(),

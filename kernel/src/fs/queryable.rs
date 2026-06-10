@@ -489,9 +489,9 @@ pub fn set_attr(path: &str, name: &str, value: AttrValue) -> KernelResult<()> {
         // Insert new index entry.
         let new_key = value_to_key(&value);
         let val_map = store.indexes.entry(attr_name_owned.clone())
-            .or_insert_with(BTreeMap::new);
+            .or_default();
         val_map.entry(new_key)
-            .or_insert_with(BTreeSet::new)
+            .or_default()
             .insert(String::from(path));
     }
 
@@ -608,7 +608,7 @@ pub fn create_index(attr_name: &str) -> KernelResult<()> {
         if let Some(val) = file.attrs.get(attr_name) {
             let key = value_to_key(val);
             val_map.entry(key)
-                .or_insert_with(BTreeSet::new)
+                .or_default()
                 .insert(file.path.clone());
         }
     }

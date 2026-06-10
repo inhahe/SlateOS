@@ -543,7 +543,7 @@ unsafe fn wrmsr(msr: u32, val: u64) {
 #[cfg(target_arch = "x86_64")]
 unsafe fn vmware_backdoor(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
     let eax: u32;
-    let ebx: u32;
+    
     let ecx: u32;
     let edx: u32;
     // SAFETY: The VMware backdoor uses a reserved I/O port that is only
@@ -563,7 +563,7 @@ unsafe fn vmware_backdoor(cmd: u32, arg: u32) -> (u32, u32, u32, u32) {
             options(nomem, preserves_flags, nostack),
         );
     }
-    ebx = ebx_out as u32;
+    let ebx: u32 = ebx_out as u32;
     (eax, ebx, ecx, edx)
 }
 

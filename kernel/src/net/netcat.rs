@@ -375,7 +375,7 @@ pub fn self_test() -> KernelResult<()> {
         assert!(service_name(22) == "ssh", "port 22");
         assert!(service_name(53) == "dns", "port 53");
         assert!(service_name(23) == "telnet", "port 23");
-        assert!(service_name(12345) == "", "unknown port");
+        assert!(service_name(12345).is_empty(), "unknown port");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[nc]   test 1 (service name) PASSED");

@@ -340,7 +340,7 @@ pub unsafe fn mark_cow(pml4_phys: u64, virt: VirtAddr) -> KernelResult<()> {
     // Build new flags: remove WRITABLE, add COW.
     let mut flags = pte.flags();
     flags = PageFlags::from_bits(flags.bits() & !PageFlags::WRITABLE.bits());
-    flags = flags | PageFlags::COW;
+    flags |= PageFlags::COW;
 
     let new_pte = PageTableEntry::new(pte.phys_addr(), flags);
     // SAFETY: pml4_phys valid, virt is an existing present mapping.

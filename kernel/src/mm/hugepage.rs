@@ -242,7 +242,7 @@ pub unsafe fn unmap_huge_2m(
     // SAFETY: We're invalidating our own mapping which we just removed.
     unsafe { flush_tlb_range(vaddr, HUGE_PAGE_SIZE_2M); }
 
-    Ok(PhysFrame::from_addr(phys_addr).ok_or(KernelError::InvalidAddress)?)
+    PhysFrame::from_addr(phys_addr).ok_or(KernelError::InvalidAddress)
 }
 
 /// Flush TLB entries for a virtual address range.

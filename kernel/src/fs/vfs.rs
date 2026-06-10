@@ -4661,7 +4661,7 @@ fn match_char_class(ch: u8, pattern: &[u8], start: usize, ci: bool) -> Option<(b
 /// Compare two bytes, optionally case-insensitively.
 fn char_eq(a: u8, b: u8, case_insensitive: bool) -> bool {
     if case_insensitive {
-        a.to_ascii_lowercase() == b.to_ascii_lowercase()
+        a.eq_ignore_ascii_case(&b)
     } else {
         a == b
     }

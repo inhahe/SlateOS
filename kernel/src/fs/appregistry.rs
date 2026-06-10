@@ -286,7 +286,7 @@ pub fn register(info: AppInfo) -> KernelResult<()> {
     // Add MIME index entries.
     for mime in &info.mime_types {
         reg.mime_index.entry(mime.clone())
-            .or_insert_with(BTreeSet::new)
+            .or_default()
             .insert(info.id.clone());
     }
 
@@ -364,11 +364,11 @@ pub fn menu_tree() -> Vec<(AppCategory, Vec<MenuEntry>)> {
             exec_path: app.exec_path.clone(),
         };
         for &cat in &app.categories {
-            tree.entry(cat).or_insert_with(Vec::new).push(entry.clone());
+            tree.entry(cat).or_default().push(entry.clone());
         }
         // If no categories, put in Other.
         if app.categories.is_empty() {
-            tree.entry(AppCategory::Other).or_insert_with(Vec::new).push(entry);
+            tree.entry(AppCategory::Other).or_default().push(entry);
         }
     }
 

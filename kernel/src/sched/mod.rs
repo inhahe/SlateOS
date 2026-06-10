@@ -3247,7 +3247,7 @@ fn schedule_inner(requeue: bool) {
         // Process any deferred wakes that were queued by ISR-context
         // hrtimer callbacks when the SCHED lock was contended.  We now
         // hold the lock, so we can safely wake these tasks.
-        drain_deferred_wakes_locked(&mut *state, cpu);
+        drain_deferred_wakes_locked(&mut state, cpu);
 
         // Re-enqueue the current task if requested (on its current CPU).
         //
@@ -3362,7 +3362,7 @@ fn schedule_inner(requeue: bool) {
                     // us between try_lock and drop).  Those wakes are
                     // deferred and MUST be processed here — otherwise the
                     // woken task is never enqueued and we spin forever.
-                    drain_deferred_wakes_locked(&mut *s, cpu);
+                    drain_deferred_wakes_locked(&mut s, cpu);
 
                     let mut idle_migrated = priority_rr::MigratedTasks::new();
                     let ready_id = match PER_CPU_SCHED.pick_next_local(cpu) {

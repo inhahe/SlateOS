@@ -514,7 +514,7 @@ pub fn bunzip2(data: &[u8]) -> KernelResult<Vec<u8>> {
 
         // Update stream CRC: stream_crc = (stream_crc << 1 | stream_crc >> 31) ^ block_crc
         let block_crc = bz2_crc32(&block_data);
-        stream_crc = (stream_crc << 1) | (stream_crc >> 31);
+        stream_crc = stream_crc.rotate_left(1);
         stream_crc ^= block_crc;
 
         output.extend_from_slice(&block_data);
@@ -1592,7 +1592,7 @@ pub fn bzip2_compress(data: &[u8], level: u8) -> Vec<u8> {
         // Update stream CRC: rotate left by 1, then XOR with block CRC.
         #[allow(clippy::arithmetic_side_effects)]
         {
-            stream_crc = (stream_crc << 1) | (stream_crc >> 31);
+            stream_crc = stream_crc.rotate_left(1);
             stream_crc ^= block_crc;
         }
 

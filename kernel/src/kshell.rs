@@ -329,7 +329,7 @@ fn array_len(name: &str) -> Option<usize> {
 /// Set an array element, growing the array with empty strings if needed.
 fn array_set_element(name: &str, index: usize, value: &str) {
     let mut arrays = ARRAY_VARS.lock();
-    let arr = arrays.entry(String::from(name)).or_insert_with(Vec::new);
+    let arr = arrays.entry(String::from(name)).or_default();
     // Grow the array if needed.
     while arr.len() <= index {
         arr.push(String::new());
@@ -4140,7 +4140,7 @@ fn execute_single(line: &str) {
             }
             ArraySyntax::Append { name, values } => {
                 let mut arrays = ARRAY_VARS.lock();
-                let arr = arrays.entry(name).or_insert_with(Vec::new);
+                let arr = arrays.entry(name).or_default();
                 arr.extend(values);
                 drop(arrays);
                 set_exit(0);
@@ -9753,7 +9753,7 @@ fn cmd_dedup(args: &str) {
     let mut by_size: BTreeMap<u64, Vec<String>> = BTreeMap::new();
     for (path, size) in &file_list {
         by_size.entry(*size)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(path.clone());
     }
 
@@ -9790,7 +9790,7 @@ fn cmd_dedup(args: &str) {
                     let hash = crate::crypto::sha256(&data);
                     let hex = crate::fs::cas::hash_to_hex(&hash);
                     by_hash.entry(hex)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(path.clone());
                     files_hashed = files_hashed.saturating_add(1);
                 }
@@ -20943,7 +20943,7 @@ fn cmd_osreset(args: &str) {
         "checkpoint" | "cp" => { if parts.len() < 2 { shell_println!("Usage: osreset checkpoint <name> [full|keepfiles|keepapps|repair]"); } else { let scope = match parts.get(2).copied().unwrap_or("keepfiles") { "full" => osreset::ResetScope::Full, "keepapps" => osreset::ResetScope::KeepFilesAndApps, "repair" => osreset::ResetScope::RepairOnly, _ => osreset::ResetScope::KeepFiles }; match osreset::create_checkpoint(parts[1], scope) { Ok(id) => shell_println!("Created checkpoint {} '{}'", id, parts[1]), Err(e) => shell_println!("Error: {:?}", e) } } }
         "checkpoints" | "cps" => { let cps = osreset::list_checkpoints(); if cps.is_empty() { shell_println!("No checkpoints"); } else { for c in &cps { let scope = match c.scope { osreset::ResetScope::Full => "full", osreset::ResetScope::KeepFiles => "keep-files", osreset::ResetScope::KeepFilesAndApps => "keep-files+apps", osreset::ResetScope::RepairOnly => "repair" }; let valid = if c.valid { "valid" } else { "invalid" }; shell_println!("  id={} '{}' scope={} [{}]", c.id, c.name, scope, valid); } } }
         "rmcp" => { if parts.len() < 2 { shell_println!("Usage: osreset rmcp <checkpoint_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::delete_checkpoint(id) { Ok(()) => shell_println!("Deleted checkpoint {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
-        "plan" => { if parts.len() < 2 { shell_println!("Usage: osreset plan <full|keepfiles|keepapps|repair>"); } else { let scope = match parts[1] { "full" => osreset::ResetScope::Full, "keepapps" => osreset::ResetScope::KeepFilesAndApps, "repair" => osreset::ResetScope::RepairOnly, _ => osreset::ResetScope::KeepFiles }; match osreset::plan_reset(scope) { Ok(id) => { shell_println!("Created plan {}", id); match osreset::get_plan(id) { Ok(p) => { shell_println!("  Apps to import: {}", p.apps.iter().filter(|a| a.include).count()); shell_println!("  Settings cats:  {}", p.settings.iter().filter(|s| s.include).count()); shell_println!("  Preserve:       {} bytes", p.preserve_bytes); shell_println!("  Delete:         {} bytes", p.delete_bytes); }, Err(_) => {} } }, Err(e) => shell_println!("Error: {:?}", e) } } }
+        "plan" => { if parts.len() < 2 { shell_println!("Usage: osreset plan <full|keepfiles|keepapps|repair>"); } else { let scope = match parts[1] { "full" => osreset::ResetScope::Full, "keepapps" => osreset::ResetScope::KeepFilesAndApps, "repair" => osreset::ResetScope::RepairOnly, _ => osreset::ResetScope::KeepFiles }; match osreset::plan_reset(scope) { Ok(id) => { shell_println!("Created plan {}", id); if let Ok(p) = osreset::get_plan(id) { shell_println!("  Apps to import: {}", p.apps.iter().filter(|a| a.include).count()); shell_println!("  Settings cats:  {}", p.settings.iter().filter(|s| s.include).count()); shell_println!("  Preserve:       {} bytes", p.preserve_bytes); shell_println!("  Delete:         {} bytes", p.delete_bytes); } }, Err(e) => shell_println!("Error: {:?}", e) } } }
         "plans" => { let plans = osreset::list_plans(); if plans.is_empty() { shell_println!("No plans"); } else { for p in &plans { let scope = match p.scope { osreset::ResetScope::Full => "full", osreset::ResetScope::KeepFiles => "keep-files", osreset::ResetScope::KeepFilesAndApps => "keep-files+apps", osreset::ResetScope::RepairOnly => "repair" }; let ex = if p.executed { "executed" } else { "pending" }; shell_println!("  id={} scope={} [{}] apps={} settings={}", p.id, scope, ex, p.apps.len(), p.settings.len()); } } }
         "showplan" => { if parts.len() < 2 { shell_println!("Usage: osreset showplan <plan_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::get_plan(id) { Ok(p) => { shell_println!("Plan {} ({:?}):", p.id, p.scope); if !p.apps.is_empty() { shell_println!("  Apps:"); for a in &p.apps { let risk = match a.risk { osreset::AppRiskLevel::Safe => "safe", osreset::AppRiskLevel::Moderate => "moderate", osreset::AppRiskLevel::Dangerous => "DANGEROUS", osreset::AppRiskLevel::Unknown => "unknown" }; let inc = if a.include { "YES" } else { "no" }; shell_println!("    {} [{}] risk={} settings={} data={}", a.name, inc, risk, a.import_settings, a.import_data); } } if !p.settings.is_empty() { shell_println!("  Settings:"); for s in &p.settings { let inc = if s.include { "YES" } else { "no" }; shell_println!("    {:?} [{}] — {}", s.category, inc, s.description); } } }, Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
         "appinc" => { if parts.len() < 4 { shell_println!("Usage: osreset appinc <plan_id> <app_id> <on|off>"); } else { match parts[1].parse::<u64>() { Ok(pid) => { let inc = matches!(parts[3], "on" | "yes" | "true" | "1"); match osreset::set_app_include(pid, parts[2], inc) { Ok(()) => shell_println!("Set app '{}' include={} in plan {}", parts[2], inc, pid), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid plan id") } } }
@@ -45297,10 +45297,7 @@ fn cmd_storagesense(args: &str) {
                     storagesense::format_bytes(p.estimated_bytes),
                     storagesense::format_bytes(p.last_freed_bytes));
             }
-            match storagesense::estimate_savings() {
-                Ok(est) => shell_println!("Estimated savings: {}", storagesense::format_bytes(est)),
-                Err(_) => {}
-            }
+            if let Ok(est) = storagesense::estimate_savings() { shell_println!("Estimated savings: {}", storagesense::format_bytes(est)) }
         }
         "run" => {
             let cat_name = parts.get(1).copied().unwrap_or("");
@@ -47670,13 +47667,13 @@ fn cmd_playmedia(args: &str) {
         }
         "register" => {
             let app = parts.get(1).copied().unwrap_or("app");
-            let mtype = parts.get(2).and_then(|s| match s.to_lowercase().as_str() {
-                "music" => Some(playmedia::MediaType::Music),
-                "video" => Some(playmedia::MediaType::Video),
-                "podcast" => Some(playmedia::MediaType::Podcast),
-                "audiobook" => Some(playmedia::MediaType::Audiobook),
-                "stream" => Some(playmedia::MediaType::Stream),
-                _ => Some(playmedia::MediaType::Other),
+            let mtype = parts.get(2).map(|s| match s.to_lowercase().as_str() {
+                "music" => playmedia::MediaType::Music,
+                "video" => playmedia::MediaType::Video,
+                "podcast" => playmedia::MediaType::Podcast,
+                "audiobook" => playmedia::MediaType::Audiobook,
+                "stream" => playmedia::MediaType::Stream,
+                _ => playmedia::MediaType::Other,
             }).unwrap_or(playmedia::MediaType::Music);
             match playmedia::register_session(app, mtype) {
                 Ok(id) => shell_println!("Session registered: id={}", id),
@@ -55284,7 +55281,7 @@ fn cmd_authbroker(args: &str) {
             }
         }
         "grants" => {
-            let principal = parts.get(1).map(|s| *s);
+            let principal = parts.get(1).copied();
             authbroker::init_defaults();
             let grants = authbroker::list_grants(principal);
             shell_println!("Active grants ({}):", grants.len());
@@ -65880,7 +65877,6 @@ fn cmd_socket_activation(args: &str) {
 ///   slimit remove NAME                      — remove limits for a service
 fn cmd_service_limits(args: &str) {
     use crate::ipc::service_limits;
-    use crate::mm::rlimits::ResourceLimits;
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     let cmd = parts.first().copied().unwrap_or("");
@@ -65941,7 +65937,7 @@ fn cmd_service_limits(args: &str) {
             }
             let name = parts[1];
             let mut limits = service_limits::get_service_limits(name)
-                .unwrap_or(ResourceLimits::unlimited());
+                .unwrap_or_default();
 
             for &param in &parts[2..] {
                 if let Some(val) = param.strip_prefix("rss=") {
@@ -72676,7 +72672,7 @@ fn cmd_sclatency(args: &str) {
         }
         let pct = count.saturating_mul(100) / s.total_calls.max(1);
         let bar_len = (count.saturating_mul(30) / max_count) as usize;
-        let bar: alloc::string::String = core::iter::repeat('#').take(bar_len).collect();
+        let bar: alloc::string::String = "#".repeat(bar_len);
         shell_println!("  {:>9} [{:>5} {:>3}%] {}",
             labels[i], count, pct, bar);
     }
@@ -73317,7 +73313,7 @@ fn cmd_frame_owner() {
         // Bar: 1 char per 1% of total (64K frames).
         let pct = (count as u64).saturating_mul(100) / (MAX_FRAMES_DISPLAY as u64);
         let bar_len = (pct as usize).min(40);
-        let bar: alloc::string::String = core::iter::repeat('█').take(bar_len).collect();
+        let bar: alloc::string::String = "█".repeat(bar_len);
 
         shell_println!("  {:>12}  {:>6}  {:>8}  {}", owner.name(), count, size_str, bar);
     }
@@ -73461,7 +73457,7 @@ fn cmd_alloc_lat(args: &str) {
                     let pct = count.saturating_mul(100).checked_div(ah.count).unwrap_or(0);
                     let lower_ns = ah.cycles_to_ns(alloc_lat::LatencyHist::bucket_lower_cycles(i));
                     let bar_len = (pct as usize).min(30);
-                    let bar: alloc::string::String = core::iter::repeat('▓').take(bar_len).collect();
+                    let bar: alloc::string::String = core::iter::repeat_n('▓', bar_len).collect();
                     shell_println!("    {:>6}ns  {:>8}  {:>5}%  {}", lower_ns, count, pct, bar);
                 }
             }

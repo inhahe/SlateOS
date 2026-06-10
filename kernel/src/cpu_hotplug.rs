@@ -160,7 +160,7 @@ static TASKS_MIGRATED: AtomicU64 = AtomicU64::new(0);
 pub fn init() {
     let cpus = smp::cpu_count();
     for i in 0..cpus {
-        CPU_STATES.get(i).map(|s| s.store(CpuState::Online as u8, Ordering::Release));
+        if let Some(s) = CPU_STATES.get(i) { s.store(CpuState::Online as u8, Ordering::Release) }
     }
     ONLINE_COUNT.store(cpus as u64, Ordering::Release);
 

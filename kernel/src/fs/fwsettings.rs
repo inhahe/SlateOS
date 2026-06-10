@@ -547,7 +547,7 @@ pub fn check_allowed(
         break;
     }
 
-    let action = matching_action.unwrap_or_else(|| {
+    let action = matching_action.unwrap_or({
         match direction {
             Direction::Inbound => state.default_inbound,
             Direction::Outbound => state.default_outbound,

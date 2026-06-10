@@ -1569,10 +1569,8 @@ fn decode_sequences(
                         rep_offsets[0]
                     }
                     2 => {
-                        let off = rep_offsets[1];
-                        rep_offsets[1] = rep_offsets[0];
-                        rep_offsets[0] = off;
-                        off
+                        rep_offsets.swap(1, 0);
+                        rep_offsets[0]
                     }
                     3 => {
                         let off = rep_offsets[0].wrapping_sub(1);
@@ -1592,10 +1590,8 @@ fn decode_sequences(
                         rep_offsets[0]
                     }
                     2 => {
-                        let off = rep_offsets[1];
-                        rep_offsets[1] = rep_offsets[0];
-                        rep_offsets[0] = off;
-                        off
+                        rep_offsets.swap(1, 0);
+                        rep_offsets[0]
                     }
                     3 => {
                         let off = rep_offsets[2];

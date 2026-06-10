@@ -1691,11 +1691,7 @@ fn update_rtt(conn: &mut TcpConnection, sample_ns: u64) {
         //   SRTT_x8   = SRTT_x8   - (SRTT_x8   >> 3) + R
 
         let srtt = conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT; // True SRTT.
-        let err = if sample_ns >= srtt {
-            sample_ns - srtt
-        } else {
-            srtt - sample_ns
-        };
+        let err = sample_ns.abs_diff(srtt);
 
         // RTTVAR update: 3/4 old + 1/4 |err|.
         conn.rttvar_ns_x4 = conn.rttvar_ns_x4

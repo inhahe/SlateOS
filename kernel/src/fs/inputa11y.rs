@@ -280,7 +280,7 @@ pub fn record_mouse_move() -> KernelResult<()> {
 /// Get sticky key states.
 pub fn get_sticky_states() -> Vec<(Modifier, StickyState)> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        s.sticky_states.iter().cloned().collect()
+        s.sticky_states.to_vec()
     })
 }
 

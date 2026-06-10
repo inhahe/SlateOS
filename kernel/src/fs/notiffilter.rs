@@ -126,7 +126,7 @@ where
     f(state)
 }
 
-fn field_value<'a>(notif: &'a NotifData, field: MatchField) -> &'a str {
+fn field_value(notif: &NotifData, field: MatchField) -> &str {
     match field {
         MatchField::AppName => &notif.app_name,
         MatchField::Category => &notif.category,

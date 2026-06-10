@@ -251,7 +251,7 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
     for (path, size) in &files {
         size_groups
             .entry(*size)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(path.clone());
     }
 
@@ -272,7 +272,7 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
                     let hex = hex_encode(&hash);
                     hash_groups
                         .entry(hex)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(path.clone());
                 }
                 Err(_) => continue, // Skip unreadable files.

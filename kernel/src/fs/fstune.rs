@@ -353,7 +353,7 @@ pub fn apply_workload(profile_id: u64, workload: WorkloadType) -> KernelResult<(
         .ok_or(KernelError::NotFound)?;
     let defaults = defaults_for(profile.fs_type, workload);
     let saved_id = profile.id;
-    let saved_name = core::mem::replace(&mut profile.name, String::new());
+    let saved_name = core::mem::take(&mut profile.name);
     *profile = defaults;
     profile.id = saved_id;
     profile.name = saved_name;

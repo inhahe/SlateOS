@@ -1061,7 +1061,7 @@ fn api_metrics() -> Vec<u8> {
          # TYPE os_cpu_total_ticks counter\n");
     for cpu in 0..sched.num_cpus {
         if let Some(&(total, _idle)) = sched.cpu_ticks.get(cpu) {
-            let _ = write!(t, "os_cpu_total_ticks{{cpu=\"{}\"}} {}\n", cpu, total);
+            let _ = writeln!(t, "os_cpu_total_ticks{{cpu=\"{}\"}} {}", cpu, total);
         }
     }
     let _ = write!(t,
@@ -1069,7 +1069,7 @@ fn api_metrics() -> Vec<u8> {
          # TYPE os_cpu_idle_ticks counter\n");
     for cpu in 0..sched.num_cpus {
         if let Some(&(_total, idle)) = sched.cpu_ticks.get(cpu) {
-            let _ = write!(t, "os_cpu_idle_ticks{{cpu=\"{}\"}} {}\n", cpu, idle);
+            let _ = writeln!(t, "os_cpu_idle_ticks{{cpu=\"{}\"}} {}", cpu, idle);
         }
     }
 

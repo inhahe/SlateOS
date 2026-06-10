@@ -18473,7 +18473,9 @@ fn sys_pivot_root(_args: &SyscallArgs) -> SyscallResult {
 /// unprivileged caller passing a junk flag bit sees -EINVAL ahead of
 /// the -EPERM that would otherwise apply.  Match that order here.
 ///
-/// Valid swap_flags (Linux 6.10):
+/// Valid swap_flags (v6.6 `SWAP_FLAGS_VALID`, verified against
+/// `include/linux/swap.h@v6.6`; these five bits are unchanged since
+/// Linux 3.x, so no post-6.6 flag exists to exclude):
 ///   * `SWAP_FLAG_PRIO_MASK = 0x7FFF` — priority value (0..32767).
 ///   * `SWAP_FLAG_PREFER    = 0x8000` — honour the priority value.
 ///   * `SWAP_FLAG_DISCARD   = 0x10000`
@@ -23252,9 +23254,11 @@ fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
 ///
 ///   * `SET_MODE_STRICT` (0): `flags != 0 || uargs != NULL` -> EINVAL.
 ///   * `SET_MODE_FILTER` (1): `flags & ~SECCOMP_FILTER_FLAG_MASK`
-///     -> EINVAL.  `SECCOMP_FILTER_FLAG_MASK` is 0x3f as of Linux
-///     6.10 (TSYNC | LOG | SPEC_ALLOW | NEW_LISTENER | TSYNC_ESRCH |
-///     WAIT_KILLABLE_RECV).
+///     -> EINVAL.  `SECCOMP_FILTER_FLAG_MASK` is 0x3f in v6.6 (verified
+///     against `include/uapi/linux/seccomp.h@v6.6`, which defines
+///     exactly six filter flags: TSYNC=1<<0 | LOG=1<<1 | SPEC_ALLOW=1<<2
+///     | NEW_LISTENER=1<<3 | TSYNC_ESRCH=1<<4 | WAIT_KILLABLE_RECV=1<<5,
+///     the last added in 5.19; no 7th bit exists in v6.6 to exclude).
 ///   * `GET_ACTION_AVAIL` (2): `flags != 0` -> EINVAL.
 ///   * `GET_NOTIF_SIZES` (3): `flags != 0` -> EINVAL.
 ///   * default: -EINVAL.

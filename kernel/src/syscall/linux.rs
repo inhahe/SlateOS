@@ -22690,11 +22690,14 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
 ///   * `flags == LANDLOCK_CREATE_RULESET_VERSION (0x1)` with
 ///     `attr == NULL && size == 0` returns the Landlock ABI version
 ///     (a *positive* integer: `LANDLOCK_ABI_VERSION` = 1 in Linux 5.13,
-///     growing to 6 in Linux 6.10+).
-///   * `flags == LANDLOCK_CREATE_RULESET_ERRATA (0x2)` (Linux 6.10+)
-///     with `attr == NULL && size == 0` returns the errata bitmap.
-///   * Any other `flags` value — including combinations like
-///     `VERSION | ERRATA` — returns `EINVAL`.
+///     and = 3 in Linux 6.6 — the version this layer targets).
+///   * Any other `flags` value returns `EINVAL`.  v6.6 defines ONLY
+///     the VERSION flag (`security/landlock/syscalls.c`:
+///     `if (flags) { if (flags == VERSION && !attr && !size) return
+///     ABI; return -EINVAL; }`).  `LANDLOCK_CREATE_RULESET_ERRATA
+///     (0x2)` is a Linux 6.10 addition and therefore an *unknown*
+///     flag here — `flags == 0x2` falls into the generic EINVAL arm,
+///     NOT a dedicated errata-query path.
 ///
 /// Batch 384: pre-batch we returned `0` from the VERSION and ERRATA
 /// query paths, claiming "ABI version 0" / "no errata to surface".
@@ -22732,18 +22735,17 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
 /// in this kernel.  The Linux-faithful answer on the
 /// `!landlock_initialized` branch is `-EOPNOTSUPP` for every code
 /// path through this syscall, including the version and errata
-/// queries and the real ruleset construction.  Migrate the three
-/// terminal `0` / `ENOSYS` answers to `EOPNOTSUPP`, leaving the
+/// queries and the real ruleset construction.  Migrate the terminal
+/// `0` / `ENOSYS` answers to `EOPNOTSUPP`, leaving the
 /// pre-`!landlock_initialized` flag-validity gates intact so callers
-/// who poke at flag-level discriminators (Linux 6.10+'s ERRATA-vs-
-/// VERSION mutex, the size/attr query-form constraints) still see
-/// the Linux-shaped `EINVAL`s before the terminal answer.  This makes
+/// who poke at flag-level discriminators (the VERSION query form, the
+/// size/attr query-form constraints) still see the Linux-shaped
+/// `EINVAL`s before the terminal answer.  This makes
 /// the function body internally consistent — every "valid call shape,
 /// no Landlock to back it" path now answers EOPNOTSUPP, the same
 /// errno Linux returns when its `landlock_initialized` gate fires.
 fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
     const LANDLOCK_CREATE_RULESET_VERSION: u32 = 0x1;
-    const LANDLOCK_CREATE_RULESET_ERRATA: u32 = 0x2;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg2 as u32;
     if flags != 0 {
@@ -22758,15 +22760,14 @@ fn sys_landlock_create_ruleset(args: &SyscallArgs) -> SyscallResult {
             // `0`, which Linux never does from this query path.
             return linux_err(errno::EOPNOTSUPP);
         }
-        if flags == LANDLOCK_CREATE_RULESET_ERRATA
-            && args.arg0 == 0
-            && args.arg1 == 0
-        {
-            // Same rationale as VERSION query — Linux's
-            // `!landlock_initialized` arm returns EOPNOTSUPP before
-            // any flag-dispatch can yield the errata bitmap.
-            return linux_err(errno::EOPNOTSUPP);
-        }
+        // Batch 523: v6.6's only valid create_ruleset flag is VERSION.
+        // ERRATA (0x2) is a Linux 6.10 addition, so under v6.6 it is an
+        // unknown flag and hits the generic EINVAL arm — exactly as
+        // every other non-VERSION flag value does.  v6.6 source:
+        //   if (flags) {
+        //       if (flags == VERSION && !attr && !size) return ABI;
+        //       return -EINVAL;
+        //   }
         return linux_err(errno::EINVAL);
     }
     // Real-ruleset path: Linux security/landlock/syscalls.c
@@ -59346,24 +59347,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock version-query not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // Batch 384: landlock_create_ruleset ERRATA-query — same
-        // EOPNOTSUPP rationale as VERSION query.
+        // Batch 523: landlock_create_ruleset flags=0x2 — formerly a
+        // dedicated ERRATA-query path returning EOPNOTSUPP.  ERRATA is
+        // a Linux 6.10 addition and does NOT exist in v6.6, so 0x2 is
+        // an unknown flag and must hit the generic EINVAL arm (v6.6:
+        // `if (flags) { if (VERSION ...) return ABI; return -EINVAL; }`).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value
-            != -i64::from(errno::EOPNOTSUPP)
-        {
-            serial_println!("[syscall/linux]   FAIL: landlock errata-query not EOPNOTSUPP");
+        if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock flags=0x2 (6.10 ERRATA) not EINVAL");
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   landlock_create_ruleset VERSION/ERRATA query -> EOPNOTSUPP (was bogus 0): OK"
+            "[syscall/linux]   landlock_create_ruleset VERSION query -> EOPNOTSUPP, ERRATA(0x2, 6.10) -> EINVAL: OK"
         );
-        // landlock_create_ruleset VERSION|ERRATA (0x3) -> EINVAL
-        // (Linux requires flags to be exactly one dispatch value, not
-        // a bit-OR combination).
+        // landlock_create_ruleset flags=0x3 -> EINVAL.  v6.6 accepts
+        // ONLY flags == VERSION (0x1) exactly; any other value
+        // (including 0x1 OR'd with the 6.10 ERRATA bit) is unknown and
+        // returns EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 3, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: landlock VERSION|ERRATA not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: landlock flags=0x3 not EINVAL");
             return Err(KernelError::InternalError);
         }
         // landlock_create_ruleset VERSION with non-NULL attr -> EINVAL
@@ -59373,10 +59376,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock VERSION+attr not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // landlock_create_ruleset ERRATA with non-zero size -> EINVAL.
+        // landlock_create_ruleset flags=0x2 with non-zero size -> EINVAL
+        // (unknown flag; the size is irrelevant once the flag fails the
+        // VERSION match).
         let a = SyscallArgs { arg0: 0, arg1: 8, arg2: 2, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_CREATE_RULESET, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: landlock ERRATA+size not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: landlock flags=0x2+size not EINVAL");
             return Err(KernelError::InternalError);
         }
         // landlock_create_ruleset bad flags -> EINVAL.

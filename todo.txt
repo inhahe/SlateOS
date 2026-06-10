@@ -47749,4 +47749,58 @@ Follow-up queued for next batch: landlock_create_ruleset still has a
 LANDLOCK_CREATE_RULESET_ERRATA (0x2) special-case; ERRATA is absent
 from v6.6 (header defines only _VERSION = 1<<0), so flags=0x2 should
 fall through to the generic EINVAL rather than the ERRATA EOPNOTSUPP
-query path.
+query path.   [DONE — Batch 523 below.]
+
+================================================================
+Batch 523 — landlock_create_ruleset: drop the Linux 6.10 ERRATA
+(0x2) flag special-case (v6.6 fidelity)
+================================================================
+
+sys_landlock_create_ruleset (~line 22744) had a dedicated branch for
+`flags == LANDLOCK_CREATE_RULESET_ERRATA (0x2)` (with attr=NULL,
+size=0) that returned EOPNOTSUPP, mirroring the VERSION-query branch.
+This is the same version-attribution bug shape as batches 519/521/522:
+ERRATA is a Linux 6.10 addition and does NOT exist in v6.6.
+
+Verified against the authoritative v6.6 source
+(gh api repos/torvalds/linux/contents/security/landlock/syscalls.c
+?ref=v6.6).  The literal v6.6 gate is:
+
+    if (!landlock_initialized)
+        return -EOPNOTSUPP;
+    if (flags) {
+        if ((flags == LANDLOCK_CREATE_RULESET_VERSION) && !attr && !size)
+            return LANDLOCK_ABI_VERSION;   /* = 3 in v6.6 */
+        return -EINVAL;
+    }
+
+The ONLY recognised flag is VERSION (0x1).  ERRATA (0x2) is therefore
+an unknown flag and must hit the `return -EINVAL` arm — there is no
+errata-query path in v6.6.  (LANDLOCK_ABI_VERSION is 3 in v6.6, not the
+"6 in 6.10+" the old doc comment claimed; we model
+!landlock_initialized so we still answer EOPNOTSUPP on the VERSION
+query rather than 3, per the batch-384 hybrid model.)
+
+Fix:
+  * Removed the `LANDLOCK_CREATE_RULESET_ERRATA` const and the entire
+    `if flags == ERRATA && attr==0 && size==0 { return EOPNOTSUPP }`
+    branch, so flags=0x2 falls through to the generic
+    `return linux_err(errno::EINVAL)`.
+  * VERSION-query branch (flags=0x1, attr=0, size=0 -> EOPNOTSUPP)
+    kept unchanged — that is the one real v6.6 flag, and the
+    !landlock_initialized hybrid model keeps it at EOPNOTSUPP.
+  * Doc comment: corrected the ABI-version note (= 3 in v6.6) and
+    rewrote the flag list to state VERSION is the only v6.6 flag, with
+    ERRATA explicitly called out as a 6.10 addition handled by the
+    generic EINVAL arm.
+
+Self-test:
+  * flags=0x2 probe (was "errata-query -> EOPNOTSUPP") flipped to
+    expect EINVAL; success message reworded to
+    "VERSION query -> EOPNOTSUPP, ERRATA(0x2, 6.10) -> EINVAL: OK".
+  * flags=0x3 and flags=0x2+size probes already expected EINVAL
+    (unchanged behaviour); their comments were corrected to stop
+    describing ERRATA as a real flag.
+
+Build: clean (`bash scripts/boot-test.sh`).
+Boot test: PASS @ 28s.

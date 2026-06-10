@@ -14,37 +14,12 @@ work that should be done now."
 
 ## Active Bugs
 
-### A2. FS interceptor self-test: deny handler incorrectly allows an operation — discovered 2026-06-10
-
-**Where:** filesystem interceptor / hook self-test (prints "deny
-handler allowed"). The deny-policy hook returns Allow where the test
-expects the operation to be denied.
-
-**Symptom:** Boot serial log prints a non-fatal self-test failure
-"deny handler allowed" — a registered interceptor that should *deny* a
-filesystem operation let it through. Indicates the interceptor
-dispatch is either not consulting the deny handler's verdict or is
-defaulting to Allow on a path it should block.
-
-**Reproduce:** Run `scripts/boot-test.sh`; grep `build/serial-test.txt`
-for "deny handler allowed". Deterministic — pure in-memory hook logic
-with hardcoded inputs.
-
-**Status:** PRE-EXISTING (unrelated to the 2026-06-10 procfs /
-boot-restructure work). Non-fatal — boot continues. A deny hook that
-fails open is a security-relevant correctness bug, so it is logged for
-a proper fix.
-
-**Proper fix:** Audit the interceptor dispatch path to ensure a deny
-verdict from any registered handler short-circuits to a denied result
-(fail-closed). Add a unit test asserting a deny handler blocks the
-operation and that allow/deny precedence is well-defined when multiple
-handlers are registered.
-
-_(The two prior watchlist items — accounting self-test hang and
-invariant self-test hang — went 90 consecutive boot tests with zero
-recurrence after F4/F5 and have been closed as "likely cured
-incidentally."  See F6 and F7 in Fixed Bugs.)_
+_(No active bugs.  The two prior watchlist items — accounting
+self-test hang and invariant self-test hang — went 90 consecutive
+boot tests with zero recurrence after F4/F5 and have been closed as
+"likely cured incidentally."  See F6 and F7 in Fixed Bugs.  The two
+items discovered 2026-06-10 — quota Test 5 and FS interceptor deny —
+are now fixed; see F8 and F9.)_
 
 ---
 
@@ -79,6 +54,38 @@ code never produces.
 
 **Verification:** boot-test — quota self-test reaches "[quota]   inode
 limit OK" with no ERROR.
+
+### F9. FS interceptor deny handlers fail open for trailing-slash prefixes — FIXED 2026-06-10
+
+**Where:** `kernel/src/fs/intercept.rs` — `pre_check()` interceptor
+match filter.
+
+**Symptom:** Boot serial printed non-fatal "[intercept]   ERROR: deny
+handler allowed". A `Deny` interceptor registered for `/protected/` did
+not block a write to `/protected/secret.txt` — it failed *open*.
+
+**Root cause:** The match filter used
+`path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')`,
+but interceptors are registered with a **trailing-slash** prefix
+(`/protected/`). With the slash included, `get(prefix.len())` looks at
+the byte *after* the slash, so the check only matched double-slash paths
+(`/protected//x`). Real children like `/protected/secret.txt` never
+matched, so the deny handler was never invoked and the operation was
+allowed. (Same idiom bug as F-class integrity.rs fix in commit
+`22a8098f`; see TD3 for the broader audit.)
+
+**Fix:** Extracted `path_matches_prefix(path, prefix)` which normalises
+away a single trailing slash (`strip_suffix('/')`) before applying the
+canonical component-boundary check, so it is correct whether or not the
+registrant supplied a trailing slash, and also matches the protected
+directory node itself (`/protected`). Added boundary regression
+assertions to Test 3: `/protectedX/file.txt` must NOT match (no prefix-
+string leak) and `/protected` (the dir itself) must match.
+
+**Verification:** boot-test — "[intercept]   deny handler with path
+prefix OK" and "[intercept] Self-test passed (10 tests)" with serial
+showing DENIED on both `/protected/secret.txt` and `/protected` and no
+denial of `/protectedX/...`.
 
 ### F1. RCU self-test occasionally hangs at boot (intermittent) — FIXED 2026-06-07
 
@@ -295,6 +302,48 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 ---
 
 ## Technical Debt
+
+### TD3. Prefix-boundary subtree checks: audit every site for trailing-slash correctness — open 2026-06-10
+
+**What:** The "is `path` inside directory subtree `prefix`" check is
+written inline at ~30 sites as
+`path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')`
+(sometimes with a leading `path == prefix ||`).  This idiom is **only
+correct when `prefix` has no trailing slash**.  When `prefix` already
+ends in `/` (e.g. a registration like `"/protected/"`), the
+`get(prefix.len()) == Some(&b'/')` boundary check looks one byte past
+the slash and therefore only matches *double-slash* paths
+(`/protected//x`), so real children never match — the check silently
+fails (open for deny handlers, or simply never fires for "missing file"
+/ exclusion logic).
+
+**Confirmed-buggy and already fixed:**
+- `kernel/src/fs/integrity.rs` baseline-paths filter (commit `22a8098f`)
+  — prefix carried a trailing slash; `verify_dir` never reported missing
+  files.
+- `kernel/src/fs/intercept.rs` `pre_check` interceptor filter — prefixes
+  registered with trailing slashes (`/protected/`) so every deny handler
+  failed open.  Fixed by extracting `path_matches_prefix()` which
+  normalises away a trailing slash before the boundary check (so it is
+  correct for *both* prefix forms).
+
+**Where the rest live (need per-site verification of whether the prefix
+carries a trailing slash):** `vfs.rs` (1185, 1275, 2152, 2368, 2386,
+3279), `undelete.rs:259`, `search.rs:335`, `queryable.rs:690`,
+`overlay.rs:169`, `index.rs` (258, 429, 678, 688), `fswalk.rs`
+(565, 573), `freeze.rs:264`, `findex.rs:304`, `fileversion.rs` (170,
+183), `fcomment.rs` (199, 223, 259), `directio.rs:301`, `dedup.rs:330`,
+`changetrack.rs` (445, 456), `atime.rs:163`, `apps/defrag/src/main.rs:659`.
+Many of these very likely use slash-free prefixes (mount paths, exclude
+dirs) and are therefore correct — but each must be confirmed, not
+assumed.  `notify.rs:304` has an explanatory comment about the idiom.
+
+**Proper fix:** Promote `intercept::path_matches_prefix()` (or an
+equivalent in a shared `fs::pathutil`) to a single canonical helper and
+route every subtree check through it, eliminating the per-site
+trailing-slash footgun entirely.  Until then, audit each listed site:
+where the prefix is built with a trailing slash, the boundary check is
+wrong and must be normalised.
 
 ### TD2. Clippy `clippy::all` deny-level errors not yet zeroed — RESOLVED 2026-06-10
 

@@ -345,6 +345,37 @@ pub fn clear() {
 // Public API — hot path (called by VFS)
 // ---------------------------------------------------------------------------
 
+/// Returns true if `path` lies within the directory subtree denoted by
+/// `prefix`.
+///
+/// An empty prefix (or `"/"`) matches the whole tree.  Otherwise the
+/// prefix names a directory and `path` matches if it equals that
+/// directory or is strictly underneath it.  The match must end on a
+/// path-component boundary so that prefix `/protected` matches
+/// `/protected` and `/protected/secret` but never `/protectedX`.
+///
+/// Callers register prefixes with a trailing slash (e.g. `/protected/`),
+/// but a trailing slash is not required: we normalise it away before the
+/// boundary check so both forms behave identically.  The previous inline
+/// matcher applied the `byte-after-prefix == '/'` boundary check against
+/// a prefix that *already* carried the trailing slash, so it only ever
+/// matched double-slash paths (`/protected//x`) — meaning every real deny
+/// handler registered with a trailing slash silently failed open.
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    // Normalise away a single trailing slash so the boundary check is
+    // uniform whether or not the registrant supplied one.
+    let dir = prefix.strip_suffix('/').unwrap_or(prefix);
+    if dir.is_empty() {
+        // prefix was exactly "/" — the root, which contains everything.
+        return true;
+    }
+    path == dir
+        || (path.starts_with(dir) && path.as_bytes().get(dir.len()) == Some(&b'/'))
+}
+
 /// Check all interceptors before a filesystem operation.
 ///
 /// This is called by the VFS *before* acquiring the VFS lock.
@@ -371,12 +402,7 @@ pub fn pre_check(op: FsOp, path: &str, secondary_path: Option<&str>) -> KernelRe
         .interceptors
         .values()
         .filter(|i| {
-            i.active
-                && i.mask.contains(op_mask)
-                && (i.path_prefix.is_empty()
-                    || path == i.path_prefix
-                    || (path.starts_with(&i.path_prefix)
-                        && path.as_bytes().get(i.path_prefix.len()) == Some(&b'/')))
+            i.active && i.mask.contains(op_mask) && path_matches_prefix(path, &i.path_prefix)
         })
         .map(|i| (i.id, i.handler))
         .collect();
@@ -537,6 +563,24 @@ pub fn self_test() -> KernelResult<()> {
         let result = pre_check(FsOp::Write, "/other/file.txt", None);
         if result.is_err() {
             serial_println!("[intercept]   ERROR: deny handler blocked wrong path");
+            unregister(id);
+            return Err(KernelError::InternalError);
+        }
+
+        // Boundary: a sibling that merely shares the prefix string but is
+        // not a path-component child must NOT match (no "/protectedX" leak).
+        let result = pre_check(FsOp::Write, "/protectedX/file.txt", None);
+        if result.is_err() {
+            serial_println!("[intercept]   ERROR: deny handler matched non-boundary path");
+            unregister(id);
+            return Err(KernelError::InternalError);
+        }
+
+        // Boundary: the protected directory itself (no trailing slash on the
+        // path) must match the "/protected/" prefix.
+        let result = pre_check(FsOp::Write, "/protected", None);
+        if result.is_ok() {
+            serial_println!("[intercept]   ERROR: deny handler missed the protected dir itself");
             unregister(id);
             return Err(KernelError::InternalError);
         }

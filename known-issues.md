@@ -17,9 +17,10 @@ work that should be done now."
 _(No active bugs.  The two prior watchlist items — accounting
 self-test hang and invariant self-test hang — went 90 consecutive
 boot tests with zero recurrence after F4/F5 and have been closed as
-"likely cured incidentally."  See F6 and F7 in Fixed Bugs.  The two
-items discovered 2026-06-10 — quota Test 5 and FS interceptor deny —
-are now fixed; see F8 and F9.)_
+"likely cured incidentally," and as of 2026-06-10 a further 38 clean
+boots (128/128 total) keep them closed.  See F6 and F7 in Fixed Bugs.
+The two items discovered 2026-06-10 — quota Test 5 and FS interceptor
+deny — are now fixed; see F8 and F9.)_
 
 ---
 
@@ -202,6 +203,12 @@ observation, but the empirical bar (90/90 post-fix) is met.
 be a different invariant closure (heap balance, scheduler balance,
 IPC counters, cap audit) hitting an analogous lock-class race.
 
+**Re-verified 2026-06-10:** 38 additional consecutive clean boots
+(8-run + 30-run batches, `build/stability/batch30.log`) on the
+post-procfs-restructure binary, all reaching BOOT_OK in 24–27s with
+no hang at the invariant self-test.  Running total of clean boots
+since the F1–F5 sweep is now 128/128.
+
 ### F6. Accounting self-test hang — LIKELY CURED INCIDENTALLY 2026-06-07
 
 **Where:** `kernel/src/mm/accounting.rs` — self-test path, after
@@ -228,6 +235,12 @@ allocation paths that F5 made IRQ-safe).
 **Watch:** If this ever recurs, reopen — at that point a finer
 probe between `Destroy: OK` and `Tracked count` would localize the
 new hang window.
+
+**Re-verified 2026-06-10:** 38 additional consecutive clean boots
+(8-run + 30-run batches, `build/stability/batch30.log`) on the
+post-procfs-restructure binary, all reaching BOOT_OK in 24–27s with
+no hang at the accounting self-test.  Running total of clean boots
+since the F1–F5 sweep is now 128/128.
 
 ### F5. `frame::ALLOCATOR` lock uniformly IRQ-safe — FIXED 2026-06-07
 

@@ -29862,8 +29862,12 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
 
 /// `preadv2(fd, iov, iovcnt, offset, flags)` — like preadv with RWF_* flags.
 ///
-/// flags ⊆ { RWF_HIPRI=1 | RWF_DSYNC=2 | RWF_SYNC=4 | RWF_NOWAIT=8 |
-/// RWF_APPEND=16 | RWF_NOAPPEND=32 | RWF_ATOMIC=64 | RWF_DONTCACHE=128 }.
+/// flags ⊆ `RWF_SUPPORTED` = { RWF_HIPRI=1 | RWF_DSYNC=2 | RWF_SYNC=4 |
+/// RWF_NOWAIT=8 | RWF_APPEND=16 } (= 0x1F) per v6.6
+/// `include/uapi/linux/fs.h`.  Bits above APPEND are post-6.6
+/// additions and must be rejected with `-EOPNOTSUPP`: RWF_NOAPPEND
+/// (0x20, Linux 6.9), RWF_ATOMIC (0x40, Linux 6.11), RWF_DONTCACHE
+/// (0x80, Linux 6.14).
 /// offset == -1 means "use current file offset" (i.e. behave as
 /// `readv`); we dispatch back through `sys_readv` in that case.
 ///
@@ -29881,8 +29885,13 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
     if offset < -1 {
         return linux_err(errno::EINVAL);
     }
-    // RWF_* mask, kernel ≥ 6.11 maximum bits.
-    const RWF_VALID: u32 = 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128;
+    // Batch 525: RWF_SUPPORTED in v6.6 (include/uapi/linux/fs.h) is
+    // HIPRI|DSYNC|SYNC|NOWAIT|APPEND = 0x1F.  Pre-batch the mask was
+    // 0xFF, accepting RWF_NOAPPEND (0x20, 6.9), RWF_ATOMIC (0x40,
+    // 6.11), and RWF_DONTCACHE (0x80, 6.14) — its own comment admitted
+    // "kernel ≥ 6.11 maximum bits".  v6.6's kiocb_set_rw_flags returns
+    // -EOPNOTSUPP for any bit outside RWF_SUPPORTED.
+    const RWF_VALID: u32 = 1 | 2 | 4 | 8 | 16;
     if flags & !RWF_VALID != 0 {
         return linux_err(errno::EOPNOTSUPP);
     }
@@ -29914,6 +29923,9 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `pwritev2(fd, iov, iovcnt, offset, flags)`.
+///
+/// `flags` validated against v6.6 `RWF_SUPPORTED` (0x1F) — see
+/// `sys_preadv2` for the full per-bit version provenance.
 fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let iov_ptr = args.arg1;
@@ -29923,7 +29935,9 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
     if offset < -1 {
         return linux_err(errno::EINVAL);
     }
-    const RWF_VALID: u32 = 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128;
+    // Batch 525: v6.6 RWF_SUPPORTED = 0x1F (was 0xFF, accepting the
+    // 6.9/6.11/6.14 RWF bits).  See sys_preadv2.
+    const RWF_VALID: u32 = 1 | 2 | 4 | 8 | 16;
     if flags & !RWF_VALID != 0 {
         return linux_err(errno::EOPNOTSUPP);
     }
@@ -66325,6 +66339,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0x10_0000, arg5: 0 };
         if dispatch_linux(nr::PREADV2, &a).value != -i64::from(errno::EOPNOTSUPP) {
             serial_println!("[syscall/linux]   FAIL: preadv2 bad flags not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // Batch 525: RWF mask boundary.  RWF_APPEND (0x10) is the
+        // highest v6.6 RWF_SUPPORTED bit and must pass the flag gate
+        // (then reach EBADF in kernel ctx), while RWF_NOAPPEND (0x20,
+        // Linux 6.9) must be rejected with EOPNOTSUPP.  Pins the v6.6
+        // mask against the 6.9/6.11/6.14 RWF additions.
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0x10, arg5: 0 };
+        if dispatch_linux(nr::PREADV2, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: preadv2 RWF_APPEND(0x10) not EBADF (should pass v6.6 mask)");
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0x20, arg5: 0 };
+        if dispatch_linux(nr::PREADV2, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: preadv2 RWF_NOAPPEND(0x20, 6.9) not EOPNOTSUPP");
+            return Err(KernelError::InternalError);
+        }
+        // pwritev2 RWF_NOAPPEND(0x20) -> EOPNOTSUPP (same v6.6 mask).
+        let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: 0, arg4: 0x20, arg5: 0 };
+        if dispatch_linux(nr::PWRITEV2, &a).value != -i64::from(errno::EOPNOTSUPP) {
+            serial_println!("[syscall/linux]   FAIL: pwritev2 RWF_NOAPPEND(0x20, 6.9) not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
         // preadv2 offset=-1 (use file offset) — falls through to sys_readv,

@@ -47855,3 +47855,50 @@ Self-test:
 
 Build: clean (`bash scripts/boot-test.sh`).
 Boot test: PASS @ 27s.
+
+================================================================
+Batch 525 — preadv2/pwritev2: restrict RWF flag mask to v6.6
+RWF_SUPPORTED (0x1F); reject the 6.9/6.11/6.14 RWF bits
+================================================================
+
+sys_preadv2 (~line 29875) and sys_pwritev2 (~line 29917) both used
+`const RWF_VALID: u32 = 1|2|4|8|16|32|64|128` (= 0xFF).  The preadv2
+comment even read "RWF_* mask, kernel >= 6.11 maximum bits" — an
+explicit admission it was sourced from a post-6.6 kernel (same
+version-attribution bug class as batches 519/521/522/523/524).
+
+Verified against the authoritative v6.6 source
+(gh api repos/torvalds/linux/contents/include/uapi/linux/fs.h?ref=v6.6):
+
+    #define RWF_HIPRI   0x1
+    #define RWF_DSYNC   0x2
+    #define RWF_SYNC    0x4
+    #define RWF_NOWAIT  0x8
+    #define RWF_APPEND  0x10
+    #define RWF_SUPPORTED (RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT |
+                           RWF_APPEND)        /* = 0x1F */
+
+The bits above APPEND are later additions and do NOT exist in v6.6:
+  * RWF_NOAPPEND  (0x20) — Linux 6.9
+  * RWF_ATOMIC    (0x40) — Linux 6.11
+  * RWF_DONTCACHE (0x80) — Linux 6.14
+
+v6.6's kiocb_set_rw_flags() returns -EOPNOTSUPP for any bit outside
+RWF_SUPPORTED, so flags=0x20/0x40/0x80 must be EOPNOTSUPP (our error
+code was already EOPNOTSUPP — only the mask was too permissive).
+
+Fix:
+  * RWF_VALID: 0xFF -> 0x1F at both call sites.
+  * preadv2 doc comment rewritten to list the v6.6 RWF_SUPPORTED set
+    and annotate each excluded bit with its introducing kernel; added
+    a cross-reference note on pwritev2.
+
+Self-test:
+  * Kept the existing high-bit (0x10_0000) EOPNOTSUPP probe.
+  * Added boundary probes: preadv2 RWF_APPEND(0x10) must pass the mask
+    and reach EBADF (kernel ctx, no fd table); preadv2 and pwritev2
+    RWF_NOAPPEND(0x20, 6.9) must be rejected with EOPNOTSUPP.  Pins the
+    v6.6 mask boundary against the 6.9/6.11/6.14 RWF additions.
+
+Build: clean (`bash scripts/boot-test.sh`).
+Boot test: PASS @ 26s.

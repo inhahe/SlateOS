@@ -47594,3 +47594,55 @@ kind of memory-based plausible error this discipline guards against.
 
 Build: clean (`bash scripts/boot-test.sh`).
 Boot test: PASS @ 25s.
+
+================================================================
+Batch 520 — pidfd_getfd checks target-fd validity LAST (after the
+ESRCH gate), matching Linux v6.6 kernel/pid.c
+================================================================
+
+sys_pidfd_getfd (~line 17047) validated the target fd (target_fd < 0
+-> EBADF) BEFORE looking up the pidfd and confirming the target
+process still exists.  That inverts the v6.6 gate order.
+
+Verified against the authoritative v6.6 source
+(raw.githubusercontent.com/torvalds/linux/v6.6/kernel/pid.c).
+SYSCALL_DEFINE3(pidfd_getfd):
+
+    if (flags)                        // 1. EINVAL
+        return -EINVAL;
+    f = fdget(pidfd);
+    if (!f.file)                      // 2. EBADF (pidfd validity)
+        return -EBADF;
+    pid = pidfd_pid(f.file);
+    if (IS_ERR(pid)) ret = PTR_ERR(pid);   // EBADF for non-pidfd
+    else ret = pidfd_getfd(pid, fd);
+
+and the pidfd_getfd() helper:
+
+    task = get_pid_task(pid, PIDTYPE_PID);
+    if (!task)                        // 3. ESRCH (process existence)
+        return -ESRCH;
+    file = __pidfd_fget(task, fd);    // 4. EBADF (target fd validity)
+    if (IS_ERR(file)) return PTR_ERR(file);
+
+So the exact order is: EINVAL (flags) -> EBADF (pidfd) -> ESRCH
+(target process) -> EBADF (target fd).  A live caller holding a
+VALID pidfd to a now-dead target, passing a negative target fd,
+must observe ESRCH (the get_pid_task gate fires first), NOT EBADF.
+The pre-batch code returned EBADF in that case.
+
+Fix: move the `if target_fd < 0 { return EBADF }` check from before
+the pidfd lookup to after the `name(target_pid).is_none() -> ESRCH`
+check.  No behavioural change for any other input shape (a bad pidfd
+still EBADF, a missing process still ESRCH, a valid process with a
+bad fd still EBADF — just now in the correct relative order vs ESRCH).
+Kept the explicit target_fd < 0 guard (defensive: linux_fd_lookup
+must not be handed a negative-cast-to-usize index).
+
+Self-test: the existing "negative target_fd -> EBADF" probe runs in
+kernel context (no caller PCB), so lookup_caller_fd now surfaces
+EBADF before the relocated target_fd check — same observable EBADF,
+probe still passes.  Updated its comment to reflect the new order.
+
+Build: clean (`bash scripts/boot-test.sh`).
+Boot test: PASS @ 25s.

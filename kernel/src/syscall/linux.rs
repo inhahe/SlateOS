@@ -17061,9 +17061,6 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let target_fd = args.arg1 as i32;
-    if target_fd < 0 {
-        return linux_err(errno::EBADF);
-    }
 
     // Look up the pidfd; require kind == PidFd to surface EBADF for
     // non-pidfd descriptors (matches Linux 5.6+ behaviour).
@@ -17080,6 +17077,20 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
     // process is gone, prior to any fd-table lookup.
     if crate::proc::pcb::name(target_pid).is_none() {
         return linux_err(errno::ESRCH);
+    }
+
+    // Batch 520 — the target-fd validity check is done LAST, after the
+    // ESRCH process-existence gate, matching Linux v6.6 kernel/pid.c.
+    // The SYSCALL_DEFINE3(pidfd_getfd) body validates `flags` (EINVAL)
+    // then the pidfd via fdget/pidfd_pid (EBADF); only then does the
+    // pidfd_getfd() helper run get_pid_task (ESRCH) BEFORE __pidfd_fget
+    // (which yields EBADF for an invalid/negative target fd).  So a
+    // live caller holding a valid pidfd to a now-dead target with a
+    // bad target fd must see ESRCH, not EBADF.  Previously this check
+    // sat before the pidfd lookup, inverting that order.  Verified
+    // against raw.githubusercontent.com/torvalds/linux/v6.6/kernel/pid.c.
+    if target_fd < 0 {
+        return linux_err(errno::EBADF);
     }
 
     // Reach into the target's Linux fd table.
@@ -53911,9 +53922,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pidfd_getfd(flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // pidfd_getfd negative target_fd (after flag/pidfd validation)
-        // -> EBADF.  In kernel context validate_linux_fd is a no-op
-        // (no PCB), so the target_fd < 0 check is what fires.
+        // pidfd_getfd negative target_fd -> EBADF.  As of batch 520 the
+        // target_fd < 0 check is relocated to AFTER the pidfd lookup and
+        // ESRCH gate (v6.6 order).  In kernel context there is no caller
+        // PCB, so lookup_caller_fd surfaces EBADF before the relocated
+        // target_fd check is reached — the observable result is the same
+        // EBADF either way, which is what this probe pins.
         let a = SyscallArgs { arg0: 0, arg1: u64::MAX, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PIDFD_GETFD, &a).value

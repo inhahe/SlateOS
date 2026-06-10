@@ -458,7 +458,12 @@ pub fn self_test() {
     // for the one matching our unique magic argument tuple
     // (USER_EVENT + 0xDEAD + 0xBEEF).  The window size is BUFFER_SIZE
     // so we always find it as long as it hasn't wrapped out.
-    let mut entries = [TraceEntry::empty(); BUFFER_SIZE];
+    //
+    // Heap-allocate the window rather than placing a BUFFER_SIZE-entry
+    // array on the stack: at >16 KiB it would risk the kernel stack
+    // budget (clippy::large_stack_arrays).  This self-test runs after the
+    // heap is initialized, so allocation is safe here.
+    let mut entries = alloc::vec![TraceEntry::empty(); BUFFER_SIZE];
     let count = read_recent(&mut entries);
     assert!(count >= 1);
     let ours_slice = &entries[..count];

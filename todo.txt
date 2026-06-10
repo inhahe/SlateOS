@@ -22,24 +22,25 @@
 ##     implementation" note in handlers.rs::sys_process_spawn), thread the
 ##     resolved path into SpawnOptions::exe_path there too.
 
-## OPEN (2026-06-10): clippy `clippy::all` deny errors not yet zeroed
-## `cargo clippy -p kernel` = 451 deny-level errors + 17,320 warn-level
-## warnings (rust 1.95.0 snapshot).  Full breakdown + remediation plan in
-## known-issues.md (Technical Debt > TD2).  Short version:
-##   - warn-level (arithmetic_side_effects/indexing_slicing/expect_used/
-##     unwrap_used) are intentional-by-design per the workspace lint
-##     config; do NOT mass-rewrite.  EXCEPT audit cast_ptr_alignment (107)
-##     and large_stack_arrays (7) — the only warn lints with a real
-##     correctness dimension.
-##   - deny-level 451 errors SHOULD be fixed (the project sets all=deny).
-##     ~90% are machine-applicable idiom lints clearable with
-##     `cargo clippy -p kernel --fix --allow-dirty` (158 are doc-format
-##     lints alone).  Distribution: linux.rs 200, kshell.rs 39, rest a
-##     long tail.  A small judgment tail (if_same_then_else 7 — possible
-##     copy-paste bugs; type_complexity 10; duplicated_attributes 9;
-##     acronym/enum renames) must be hand-fixed, not blind --fix'd.
-##   - boot-test after any --fix sweep; rewrites are semantics-preserving
-##     but confirm.  Until done, clippy can't be a CI gate (build is clean).
+## RESOLVED (2026-06-10): clippy `clippy::all` deny errors zeroed.
+## `cargo clippy -p kernel` now = 0 deny-level errors (was 451) +
+## ~17,297 warn-level warnings.  The deny gate is green / CI-ready.
+## Full record in known-issues.md (Technical Debt > TD2).  Summary:
+##   - All 451 deny errors fixed across reviewable batches (158 doc-format
+##     + 167 machine-applicable idioms + 181 doc-comment + a final hand-
+##     fixed 77 in commit 15dc0168).  if_same_then_else (7) inspected —
+##     no real copy-paste bugs.  cargo build + boot-test pass.
+##   - warn-level lints (arithmetic_side_effects/indexing_slicing/
+##     expect_used/unwrap_used/pedantic) remain intentional-by-design per
+##     the workspace lint config; NOT mass-rewritten.
+##   - cast_ptr_alignment (107): audited — all MMIO/DMA/on-disk/wire code
+##     where alignment is guaranteed by page-aligned frames or naturally-
+##     aligned registers; safe, left as warn.  (ext4/ondisk.rs:1017 is a
+##     benign test-only align-1 stack cast.)
+##   - large_stack_arrays (7): audited — 5 are const-fn-into-static false
+##     positives; ktrace.rs self-test window moved to the heap; scfilter
+##     FilterTable made const-materialized (was a ~19 KiB stack temp
+##     before Box::new).  6 remaining warnings are const-context, no risk.
 
 ## ARCHITECTURAL CONSTRAINT (user, 2026-06-06): Linux compat layer
 ## must NOT reshape the native OS.

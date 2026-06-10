@@ -196,9 +196,11 @@ struct FilterTable {
 }
 
 impl FilterTable {
-    fn new() -> Self {
-        // SAFETY: FilterEntry::empty() is a const fn producing a valid
-        // default state.  This avoids a loop over MAX_FILTERS.
+    // `const fn` so the all-empty table is materialized in read-only
+    // static memory at compile time (see `init`), not built on the stack.
+    const fn new() -> Self {
+        // FilterEntry::empty() is a const fn producing a valid default
+        // state.  This avoids a loop over MAX_FILTERS.
         Self {
             filters: [const { FilterEntry::empty() }; MAX_FILTERS],
         }
@@ -214,7 +216,14 @@ static TABLE: Mutex<Option<Box<FilterTable>>> = Mutex::new(None);
 pub fn init() {
     let mut table = TABLE.lock();
     // Allocate on the heap to avoid stack overflow (FilterTable is ~19 KiB).
-    *table = Some(Box::new(FilterTable::new()));
+    //
+    // `EMPTY` is a `const`, so the all-empty table lives in read-only
+    // static memory; `Box::new` copies it straight to the heap without
+    // first constructing a ~19 KiB temporary on the kernel stack
+    // (a plain `Box::new(FilterTable::new())` would build that temporary
+    // on the stack, which is what we must avoid here).
+    const EMPTY: FilterTable = FilterTable::new();
+    *table = Some(Box::new(EMPTY));
     ENABLED.store(true, Ordering::Release);
     serial_println!("[scfilter] Initialized ({} max filters)", MAX_FILTERS);
 }

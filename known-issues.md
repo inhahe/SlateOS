@@ -239,7 +239,54 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD2. Clippy `clippy::all` deny-level errors not yet zeroed — OPEN 2026-06-10
+### TD2. Clippy `clippy::all` deny-level errors not yet zeroed — RESOLVED 2026-06-10
+
+**RESOLUTION (2026-06-10):** `cargo clippy -p kernel` now reports
+**0 deny-level errors** (down from 451) and ~17,297 warn-level warnings.
+The deny-level `clippy::all` gate is green and can be used as CI.  The
+warn-level lints remain by design (see below).  Landed across several
+reviewable batches: the 158 doc-formatting lints, the 167 machine-
+applicable idiom fixes, the 181 doc-comment lints, and a final hand-
+fixed batch of 77 (commit `15dc0168`) covering `manual_memcpy`,
+`ptr_arg`, `inherent_to_string`→`Display`, `wrong_self_convention`,
+`upper_case_acronyms`, `enum_variant_names`, `type_complexity`,
+`if_same_then_else` (inspected — no real copy-paste bugs), and a tail of
+singletons (`fn_to_numeric_cast`, `forget_non_drop`, `never_loop`,
+`only_used_in_recursion`, `pointers_in_nomem_asm_block`,
+`large_enum_variant`, etc.).  `cargo build` and the QEMU boot test pass.
+
+The two warn-tier correctness audits (step 3 below) are also complete:
+
+* **`cast_ptr_alignment` (107) — audited, safe, left as warn.**  Every
+  site is in MMIO / DMA-ring / on-disk-format / wire-protocol code
+  (virtio, xhci, hda, e1000, ahci, ext4 `ondisk`, smp, `mm/frame`,
+  syscall device-register reads).  Alignment is guaranteed by the
+  page-aligned DMA frame allocation or by naturally-aligned hardware
+  registers; the lint fires only because it sees a bare `*mut u8`/`*const
+  u8` base.  Representative samples verified (e.g. `virtio/queue.rs:168`
+  casts a page-aligned frame + 16-byte descriptor stride to
+  `*mut VirtqDesc`).  One outlier — `ext4/ondisk.rs:1017` — casts an
+  align-1 stack `[u8; 1024]` to a struct pointer; technically UB but
+  benign on x86_64 and confined to a boot self-test.  No production
+  under-alignment.  Eventual cleanup is a per-site `// SAFETY:` +
+  `#[allow]`, but the casts are correct as-is.
+
+* **`large_stack_arrays` (7) — audited; 1 genuine fixed, rest are false
+  positives.**  Five (`cgroup.rs`, `fs/vfs.rs`, `klog.rs`, `mm/rmap.rs`,
+  `sched/priority_rr.rs`) are `const fn` constructors whose arrays are
+  const-evaluated directly into `static`/rodata storage — never on the
+  stack; the lint is conservative.  `ktrace.rs:461` was a genuine 512-
+  entry self-test window on the stack → now heap-allocated via
+  `alloc::vec!`.  `scfilter.rs` built a ~19 KiB `FilterTable` on the
+  stack before `Box::new` (the prior comment's "heap" claim was defeated
+  by the by-value temporary) → `new()` is now `const fn` materialized via
+  a `const EMPTY` binding so the box copies from rodata.  (Fixes + doc in
+  the follow-up commit.)  The 6 remaining warnings are all const-context
+  arrays in static storage and carry no stack-overflow risk.
+
+---
+
+**Original report (for history):**
 
 **Where:** kernel-wide.  Snapshot `cargo clippy -p kernel` (rust 1.95.0,
 2026-06-10): **451 deny-level errors** and **17,320 warn-level

@@ -14,36 +14,6 @@ work that should be done now."
 
 ## Active Bugs
 
-### A1. quota self-test Test 5: inode soft-limit boundary returns SoftWarning instead of Allowed — discovered 2026-06-10
-
-**Where:** `kernel/src/fs/quota.rs` — `self_test()` Test 5 (inode
-soft/hard limit enforcement), and the inode-accounting boundary logic
-in the quota check path it exercises.
-
-**Symptom:** Boot serial log prints a non-fatal self-test ERROR of the
-form "expected Allowed at limit, got SoftWarning" (Test 5). The check
-fires `SoftWarning` when usage is *exactly at* the soft limit; the
-test (matching disk-block semantics) expects `Allowed` at the boundary
-and `SoftWarning` only once usage *exceeds* it. This is an off-by-one
-in the boundary comparison: inode accounting likely uses `>=` where
-block accounting uses `>` (or vice-versa).
-
-**Reproduce:** Run `scripts/boot-test.sh`; grep `build/serial-test.txt`
-for "quota" / "Test 5". The failure is deterministic — Test 5 runs
-unconditionally with hardcoded inputs and pure in-memory logic, so it
-reproduces every boot.
-
-**Status:** PRE-EXISTING (not introduced by the 2026-06-10 procfs /
-boot-restructure work; surfaced while auditing the now-unconditional
-self-test tier). Non-fatal — boot continues. Logged here because it is
-a real correctness discrepancy between inode and block soft-limit
-boundary semantics.
-
-**Proper fix:** Align the inode soft-limit boundary comparison with the
-block soft-limit comparison so that "exactly at the soft limit" returns
-`Allowed` and only strictly-over returns `SoftWarning`. Add a unit test
-pinning both the at-limit and over-limit cases for inodes and blocks.
-
 ### A2. FS interceptor self-test: deny handler incorrectly allows an operation — discovered 2026-06-10
 
 **Where:** filesystem interceptor / hook self-test (prints "deny
@@ -79,6 +49,36 @@ incidentally."  See F6 and F7 in Fixed Bugs.)_
 ---
 
 ## Fixed Bugs
+
+### F8. quota self-test Test 5: wrong inode expectation (test bug, not production) — FIXED 2026-06-10
+
+**Where:** `kernel/src/fs/quota.rs` — `self_test()` Test 5.
+
+**Symptom:** Boot serial printed a non-fatal ERROR "expected Allowed at
+limit, got SoftWarning" from Test 5.
+
+**Root cause:** A *test* bug, not a production-code bug. Test 2 sets the
+test user's limits to `soft_inodes = 100, hard_inodes = 200`. Test 5
+then set usage to 199 inodes and expected `check_create()` to return
+`Allowed`, with a comment reasoning only about the hard limit ("→ 200,
+equals hard, should be allowed"). It ignored that 199 inodes is already
+far over the soft limit of 100, so `check_inodes()` correctly returns
+`SoftWarning` (199+1 = 200 > soft 100; grace not yet enforced). The
+production check path is correct and symmetric with `check_bytes()`
+(both use `new_total > limit`): there is no inode-vs-byte off-by-one.
+
+(Initially mis-logged as Active bug A1 — a supposed production off-by-one
+in the inode soft-limit boundary. That was wrong; corrected on the same
+day after reading the limit setup.)
+
+**Fix:** Rewrote Test 5 to exercise all three quota bands the way Tests
+2-4 do for bytes — under-soft (50 inodes → Allowed), over-soft within
+grace (150 → SoftWarning), and at the hard limit (200 → Denied) — so it
+validates real inode-quota semantics instead of asserting a value the
+code never produces.
+
+**Verification:** boot-test — quota self-test reaches "[quota]   inode
+limit OK" with no ERROR.
 
 ### F1. RCU self-test occasionally hangs at boot (intermittent) — FIXED 2026-06-07
 

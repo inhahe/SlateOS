@@ -659,25 +659,37 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[quota]   hard-limit denial OK");
     }
 
-    // --- Test 5: inode limits ---
+    // --- Test 5: inode limits (soft warning + hard denial) ---
+    // Limits in force from Test 2: soft_inodes = 100, hard_inodes = 200.
+    // check_create() probes inodes_used + 1 against those, mirroring how
+    // Tests 2-4 probe byte usage. The three bands must behave like bytes:
+    // under-soft → Allowed, over-soft (within grace) → SoftWarning, at/over
+    // hard → Denied.
     {
-        set_usage(test_user, 1_000, 199);
-
-        // At 199 inodes, creating one more → 200, which equals hard_inodes.
-        // Should be allowed (not exceeded yet).
+        // Band 1: under the soft limit (50 + 1 = 51 ≤ 100) → Allowed.
+        set_usage(test_user, 1_000, 50);
         let result = check_create(test_uid, test_gid);
         if result != QuotaCheckResult::Allowed {
-            serial_println!("[quota]   ERROR: expected Allowed at limit, got {:?}", result);
+            serial_println!("[quota]   ERROR: expected Allowed under soft inode limit, got {:?}", result);
             cleanup_test(test_user, test_group, was_enabled);
             return Err(KernelError::InternalError);
         }
 
-        set_usage(test_user, 1_000, 200);
+        // Band 2: over soft (150 + 1 = 151 > 100) but under hard (< 200),
+        // grace not yet enforced → SoftWarning.
+        set_usage(test_user, 1_000, 150);
+        let result = check_create(test_uid, test_gid);
+        if result != QuotaCheckResult::SoftWarning {
+            serial_println!("[quota]   ERROR: expected SoftWarning over soft inode limit, got {:?}", result);
+            cleanup_test(test_user, test_group, was_enabled);
+            return Err(KernelError::InternalError);
+        }
 
-        // At 200, creating one more → 201, over hard (200).
+        // Band 3: at the hard limit (200 + 1 = 201 > 200) → Denied.
+        set_usage(test_user, 1_000, 200);
         let result = check_create(test_uid, test_gid);
         if result != QuotaCheckResult::Denied {
-            serial_println!("[quota]   ERROR: expected Denied for inode, got {:?}", result);
+            serial_println!("[quota]   ERROR: expected Denied at hard inode limit, got {:?}", result);
             cleanup_test(test_user, test_group, was_enabled);
             return Err(KernelError::InternalError);
         }

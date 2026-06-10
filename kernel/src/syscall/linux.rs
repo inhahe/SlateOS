@@ -32371,11 +32371,16 @@ fn sys_time(args: &SyscallArgs) -> SyscallResult {
 ///   `-EAGAIN` and touches nothing.  This is the form glibc's
 ///   `pthread_cond_broadcast` uses to move waiters from the condvar word
 ///   onto the associated mutex word without a thundering-herd wakeup.
+/// - `FUTEX_WAKE_OP` (5): atomically applies the operation encoded in
+///   `val3` to `*uaddr2` (SET/ADD/OR/ANDN/XOR), wakes up to `val` waiters on
+///   `uaddr`, then — if the *old* value of `*uaddr2` satisfies the encoded
+///   comparison — wakes up to `val2` (the overloaded `utime` slot) waiters
+///   on `uaddr2`.  Returns the total woken.  An unknown op/cmp selector or
+///   an out-of-range `FUTEX_OP_OPARG_SHIFT` shift count yields `-EINVAL`.
 ///
-/// All other operations return `-ENOSYS`.  Known absent: `FUTEX_WAKE_OP`
-/// (needs an atomic RMW on uaddr2), `FUTEX_LOCK_PI` / `FUTEX_UNLOCK_PI` /
-/// `FUTEX_LOCK_PI2` / `FUTEX_TRYLOCK_PI` / `FUTEX_WAIT_REQUEUE_PI` /
-/// `FUTEX_CMP_REQUEUE_PI` (PI futex routing through
+/// All other operations return `-ENOSYS`.  Known absent: `FUTEX_LOCK_PI` /
+/// `FUTEX_UNLOCK_PI` / `FUTEX_LOCK_PI2` / `FUTEX_TRYLOCK_PI` /
+/// `FUTEX_WAIT_REQUEUE_PI` / `FUTEX_CMP_REQUEUE_PI` (PI futex routing through
 /// `handlers::sys_futex_lock_pi` would be a straightforward follow-up but
 /// requires the FUTEX-encoded owner-tid invariant on uaddr).
 fn sys_futex(args: &SyscallArgs) -> SyscallResult {
@@ -32383,6 +32388,7 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
     const FUTEX_WAKE: u64 = 1;
     const FUTEX_REQUEUE: u64 = 3;
     const FUTEX_CMP_REQUEUE: u64 = 4;
+    const FUTEX_WAKE_OP: u64 = 5;
     const FUTEX_WAIT_BITSET: u64 = 9;
     const FUTEX_WAKE_BITSET: u64 = 10;
     const FUTEX_PRIVATE_FLAG: u64 = 0x80;
@@ -32483,6 +32489,38 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                     uaddr, addr2, max_wake, max_requeue,
                 );
                 SyscallResult::ok(i64::from(n))
+            }
+        }
+        FUTEX_WAKE_OP => {
+            // Classic argument overload (kernel/futex/syscalls.c):
+            //   uaddr  (arg0) — first wait-queue / wake target
+            //   val    (arg2) — nr_wake on uaddr
+            //   utime  (arg3) — nr_wake2 on uaddr2 (a plain integer, NOT a
+            //                   pointer — the timeout slot is reused)
+            //   uaddr2 (arg4) — the RMW target *and* second wake target
+            //   val3   (arg5) — the encoded op (FUTEX_OP_* / FUTEX_OP_CMP_*)
+            //
+            // uaddr2 is read-modify-written, so it must be writable; uaddr is
+            // only a wait-queue key, so a plain pointer check suffices.
+            // Negative nr values mean "wake nobody" in Linux — clamp them
+            // rather than wrapping to a huge u32.
+            let addr2 = args.arg4;
+            let max_wake = clamp_futex_nr(val);
+            let max_wake2 = clamp_futex_nr(timeout_ptr);
+            #[allow(clippy::cast_possible_truncation)]
+            let encoded_op = val3 as u32;
+
+            if let Err(e) = crate::mm::user::validate_user_ptr(uaddr) {
+                return linux_err(linux_errno_for(e));
+            }
+            if let Err(e) = crate::mm::user::validate_user_write(addr2, 4) {
+                return linux_err(linux_errno_for(e));
+            }
+            match crate::ipc::futex::futex_wake_op(
+                uaddr, addr2, max_wake, max_wake2, encoded_op,
+            ) {
+                Ok(n) => SyscallResult::ok(i64::from(n)),
+                Err(e) => linux_err(linux_errno_for(e)),
             }
         }
         FUTEX_WAIT_BITSET => {
@@ -60695,6 +60733,67 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE mismatch not EAGAIN");
                 return Err(KernelError::InternalError);
             }
+            // FUTEX_WAKE_OP (op=5): atomic RMW on uaddr2 + conditional
+            // double wake.  Use a *separate* scratch word so the shared
+            // futex_word (which later tests expect to read as 0) is not
+            // disturbed.  All these are non-blocking: no waiters exist, so
+            // both wake counts are 0 and the return is always 0 — what we
+            // verify is the RMW side effect and the error gating.
+            //
+            // Argument overload: arg2=val(nr_wake), arg3=val2(nr_wake2),
+            // arg4=uaddr2 (RMW target), arg5=encoded op.
+            const FUTEX_WAKE_OP_NR: u64 = 5;
+            let mut wop_word: [u32; 1] = [7];
+            let wop_ptr = wop_word.as_mut_ptr() as u64;
+
+            // ADD 3, compare old GT 0 (true) → word 7 becomes 10, 0 woken.
+            let enc_add = (1u64 << 28) | (4u64 << 24) | (3u64 << 12);
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAKE_OP_NR,
+                arg2: 0, arg3: 0, arg4: wop_ptr, arg5: enc_add,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP ADD not 0");
+                return Err(KernelError::InternalError);
+            }
+            if wop_word.first().copied() != Some(10) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FUTEX_WAKE_OP ADD left {:?} (expected 10)",
+                    wop_word.first()
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Unknown op selector (op field = 7) → EINVAL, word untouched.
+            let enc_bad = 7u64 << 28;
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: FUTEX_WAKE_OP_NR,
+                arg2: 0, arg3: 0, arg4: wop_ptr, arg5: enc_bad,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP bad-op not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+            if wop_word.first().copied() != Some(10) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP bad-op mutated word");
+                return Err(KernelError::InternalError);
+            }
+            // Flag stripping: op=5 | FUTEX_PRIVATE_FLAG still dispatches.
+            // SET 0, compare old(10) NE 0 (true) → word becomes 0, 0 woken.
+            let enc_set = 1u64 << 24; // op=SET(0), cmp=NE(1)
+            let a = SyscallArgs {
+                arg0: futex_ptr,
+                arg1: FUTEX_WAKE_OP_NR | FUTEX_PRIVATE_FLAG_BIT,
+                arg2: 0, arg3: 0, arg4: wop_ptr, arg5: enc_set,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP|PRIVATE not 0");
+                return Err(KernelError::InternalError);
+            }
+            if wop_word.first().copied() != Some(0) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE_OP SET left word nonzero");
+                return Err(KernelError::InternalError);
+            }
+
             // Regression: FUTEX_WAKE with no waiters -> 0.
             let a = SyscallArgs {
                 arg0: futex_ptr, arg1: FUTEX_WAKE_OP,

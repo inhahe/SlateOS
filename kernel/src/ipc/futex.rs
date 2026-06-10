@@ -597,6 +597,164 @@ fn requeue_inner(
 }
 
 // ---------------------------------------------------------------------------
+// FUTEX_WAKE_OP
+// ---------------------------------------------------------------------------
+
+/// Sign-extend a 12-bit field (held in the low bits of `v`) to a full
+/// signed 32-bit value.
+///
+/// The `oparg`/`cmparg` fields of a `FUTEX_WAKE_OP` operation are encoded as
+/// signed 12-bit integers (Linux: `(encoded_op << 8) >> 20`).  We extract the
+/// field with a mask and shift, then replicate bit 11 into the upper bits so
+/// negative operands (e.g. `ADD -1`) round-trip correctly.  Done with masks
+/// rather than shift arithmetic to keep clear of `arithmetic_side_effects`.
+#[allow(clippy::cast_possible_wrap)]
+const fn sign_extend_12(v: u32) -> i32 {
+    let field = v & 0x0fff;
+    if field & 0x0800 != 0 {
+        // Set the upper 20 bits, then reinterpret as i32.
+        (field | 0xffff_f000) as i32
+    } else {
+        field as i32
+    }
+}
+
+/// `FUTEX_WAKE_OP` primitive: conditional double-wake with an atomic RMW.
+///
+/// This is the kernel primitive behind Linux's `FUTEX_WAKE_OP`.  In one
+/// operation it:
+///
+/// 1. Atomically applies an arithmetic/bitwise operation to the 32-bit word
+///    at `addr2`, capturing the *previous* value.
+/// 2. Wakes up to `max_wake` waiters on `addr1`.
+/// 3. If the previous value at `addr2` satisfies the encoded comparison,
+///    wakes up to `max_wake2` waiters on `addr2`.
+///
+/// Returns the total number of tasks woken across both addresses.
+///
+/// Historically this powered glibc's condition-variable broadcast (wake the
+/// waiters on the internal futex while atomically clearing the "wakeup
+/// pending" flag in a single syscall).  Modern glibc no longer uses it, but
+/// it remains part of the futex(2) ABI and other runtimes still rely on it.
+///
+/// # `encoded_op` layout (Linux ABI `val3`)
+///
+/// ```text
+///   bit  31     FUTEX_OP_OPARG_SHIFT  (oparg is a shift count)
+///   bits 30..28 op    (SET=0, ADD=1, OR=2, ANDN=3, XOR=4)
+///   bits 27..24 cmp   (EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5)
+///   bits 23..12 oparg (signed 12-bit)
+///   bits 11..0  cmparg (signed 12-bit)
+/// ```
+///
+/// The word at `addr2` is treated as a *signed* `i32` for the comparison,
+/// matching Linux semantics.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if `addr2` is 0, the `op` or `cmp`
+///   selector is unknown, or `FUTEX_OP_OPARG_SHIFT` is set with a shift
+///   count outside `0..=31` (a negative or oversized shift is undefined in
+///   the C ABI, so we reject it rather than invoke UB).
+///
+/// # Atomicity
+///
+/// The read-modify-write on `addr2` uses a single hardware atomic
+/// (`swap`/`fetch_add`/`fetch_or`/`fetch_and`/`fetch_xor`), so it is atomic
+/// against concurrent userspace CAS loops regardless of the table lock.  We
+/// still perform it under [`FUTEX_TABLE`] so it serialises against the
+/// compare-read in [`requeue_inner`] for the (rare) case where the same word
+/// is the source of a concurrent requeue.  The wakes happen after the lock
+/// is released to preserve the `FUTEX_TABLE → SCHED` lock order; futex
+/// semantics permit the resulting spurious-wakeup window (callers re-check
+/// their predicate).
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+pub fn futex_wake_op(
+    addr1: u64,
+    addr2: u64,
+    max_wake: u32,
+    max_wake2: u32,
+    encoded_op: u32,
+) -> KernelResult<u32> {
+    // addr2 is always dereferenced (the RMW target), so it must be present.
+    if addr2 == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Decode the operation selector.  Bit 31 (FUTEX_OP_OPARG_SHIFT) is tested
+    // separately; the op selector itself is the low 3 bits of the top nibble.
+    const FUTEX_OP_OPARG_SHIFT: u32 = 0x8000_0000;
+    let oparg_shift = encoded_op & FUTEX_OP_OPARG_SHIFT != 0;
+    let op = (encoded_op >> 28) & 0x7;
+    let cmp = (encoded_op >> 24) & 0xf;
+    let oparg_raw = sign_extend_12((encoded_op >> 12) & 0x0fff);
+    let cmparg = sign_extend_12(encoded_op & 0x0fff);
+
+    // Resolve the operand: either the literal signed value, or — when
+    // FUTEX_OP_OPARG_SHIFT is set — `1 << oparg`.  Linux invokes UB for an
+    // out-of-range shift; we reject it as EINVAL instead.
+    let oparg: u32 = if oparg_shift {
+        if !(0..=31).contains(&oparg_raw) {
+            return Err(KernelError::InvalidArgument);
+        }
+        // oparg_raw is in 0..=31, so the shift cannot overflow.
+        1u32 << (oparg_raw as u32)
+    } else {
+        // Two's-complement reinterpretation: a negative operand wraps to the
+        // matching u32 so fetch_add/fetch_xor/etc. compute the intended
+        // signed result.
+        oparg_raw as u32
+    };
+
+    // Validate the op/cmp selectors up front so an unknown selector cannot
+    // mutate the word before erroring out.
+    if op > 4 || cmp > 5 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Phase 1: atomic RMW on *addr2, capturing the old value.
+    let oldval = {
+        let _table = FUTEX_TABLE.lock();
+        // SAFETY: the caller validated addr2 as a writable, 4-byte-aligned
+        // user word (validate_user_write).  AtomicU32 has the same layout as
+        // a u32, and the RMW methods are the only access to this location
+        // here, so there is no torn read/write.
+        let atomic = unsafe { &*(addr2 as *const AtomicU32) };
+        match op {
+            0 => atomic.swap(oparg, Ordering::AcqRel),       // SET
+            1 => atomic.fetch_add(oparg, Ordering::AcqRel),  // ADD (wrapping)
+            2 => atomic.fetch_or(oparg, Ordering::AcqRel),   // OR
+            3 => atomic.fetch_and(!oparg, Ordering::AcqRel), // ANDN
+            // op is bounded to <=4 above; 4 is XOR and the only remaining arm.
+            _ => atomic.fetch_xor(oparg, Ordering::AcqRel),  // XOR
+        }
+    };
+
+    // Compare the *old* value (interpreted as signed) against cmparg.
+    let old_signed = oldval as i32;
+    let matched = match cmp {
+        0 => old_signed == cmparg, // EQ
+        1 => old_signed != cmparg, // NE
+        2 => old_signed < cmparg,  // LT
+        3 => old_signed <= cmparg, // LE
+        4 => old_signed > cmparg,  // GT
+        // cmp is bounded to <=5 above; 5 is GE and the only remaining arm.
+        _ => old_signed >= cmparg, // GE
+    };
+
+    // Phase 2 + 3: wake addr1 unconditionally, addr2 on a comparison match.
+    let mut woken = futex_wake(addr1, max_wake);
+    if matched {
+        woken = woken.saturating_add(futex_wake(addr2, max_wake2));
+    }
+    Ok(woken)
+}
+
+// ---------------------------------------------------------------------------
 // Priority Inheritance (PI) Futex
 // ---------------------------------------------------------------------------
 //
@@ -1002,6 +1160,7 @@ pub fn self_test() -> KernelResult<()> {
     test_wake_no_waiters()?;
     test_blocking_wait_wake()?;
     test_requeue()?;
+    test_wake_op()?;
     test_priority_inheritance()?;
 
     serial_println!("[futex] Futex self-test PASSED");
@@ -1174,6 +1333,140 @@ fn test_requeue() -> KernelResult<()> {
     }
 
     serial_println!("[futex]   Requeue (wake 1 + requeue 2): OK");
+    Ok(())
+}
+
+/// Test 3b: `FUTEX_WAKE_OP` — atomic RMW on the second word plus a
+/// conditional double wake.
+///
+/// Covers the error gates (null target, unknown selector, out-of-range
+/// shift) and both functional paths: a comparison that matches (so both
+/// queues are woken and the RMW result is observed) and one that does not
+/// (only the first queue is woken, the second is left intact).
+#[allow(clippy::cast_possible_truncation)]
+fn test_wake_op() -> KernelResult<()> {
+    let scratch = AtomicU32::new(42);
+    let scratch_addr = (&raw const scratch) as u64;
+
+    // (a) addr2 == 0 → EINVAL (the RMW target is always dereferenced).
+    match futex_wake_op(0, 0, 1, 1, 0) {
+        Err(KernelError::InvalidArgument) => {}
+        r => {
+            serial_println!("[futex]   FAIL: wake_op null-target returned {:?}", r);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (b) Unknown op selector (op = 7) → EINVAL, and the word is untouched
+    //     because the selector is validated before the RMW.
+    let bad_op = 7u32 << 28;
+    match futex_wake_op(0, scratch_addr, 0, 0, bad_op) {
+        Err(KernelError::InvalidArgument) => {}
+        r => {
+            serial_println!("[futex]   FAIL: wake_op bad-op returned {:?}", r);
+            return Err(KernelError::InternalError);
+        }
+    }
+    if scratch.load(Ordering::SeqCst) != 42 {
+        serial_println!("[futex]   FAIL: wake_op bad-op mutated word");
+        return Err(KernelError::InternalError);
+    }
+
+    // (c) FUTEX_OP_OPARG_SHIFT with a shift count > 31 → EINVAL.
+    let bad_shift = 0x8000_0000u32 | (40u32 << 12);
+    match futex_wake_op(0, scratch_addr, 0, 0, bad_shift) {
+        Err(KernelError::InvalidArgument) => {}
+        r => {
+            serial_println!("[futex]   FAIL: wake_op bad-shift returned {:?}", r);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (d) Functional path, comparison matches: ADD 4 to a word holding 1,
+    //     compare old value GT 0 (true), so both queues are woken.
+    REQUEUE_WOKEN.store(0, Ordering::SeqCst);
+    let a1 = AtomicU32::new(1);
+    let a1_addr = (&raw const a1) as u64;
+    let a2 = AtomicU32::new(1);
+    let a2_addr = (&raw const a2) as u64;
+    sched::spawn(b"futex-wop-a1", 16, requeue_waiter_task, a1_addr, 0)?;
+    sched::spawn(b"futex-wop-a2a", 16, requeue_waiter_task, a2_addr, 0)?;
+    sched::spawn(b"futex-wop-a2b", 16, requeue_waiter_task, a2_addr, 0)?;
+    sched::yield_now();
+    sched::yield_now();
+    sched::yield_now();
+    sched::yield_now();
+
+    // op=ADD(1) << 28, cmp=GT(4) << 24, oparg=4 << 12, cmparg=0.
+    let enc_match = (1u32 << 28) | (4u32 << 24) | (4u32 << 12);
+    let woken = futex_wake_op(a1_addr, a2_addr, u32::MAX, u32::MAX, enc_match)?;
+    if woken != 3 {
+        serial_println!("[futex]   FAIL: wake_op matched woke {} (expected 3)", woken);
+        return Err(KernelError::InternalError);
+    }
+    if a2.load(Ordering::SeqCst) != 5 {
+        serial_println!(
+            "[futex]   FAIL: wake_op ADD left word={} (expected 5)",
+            a2.load(Ordering::SeqCst)
+        );
+        return Err(KernelError::InternalError);
+    }
+    sched::yield_now();
+    sched::yield_now();
+    if REQUEUE_WOKEN.load(Ordering::SeqCst) != 3 {
+        serial_println!("[futex]   FAIL: wake_op matched waiters did not all run");
+        return Err(KernelError::InternalError);
+    }
+
+    // (e) Functional path, comparison does NOT match: OR 0 (word stays 1),
+    //     compare old value LT 0 (false), so only the first queue is woken
+    //     and the second waiter is left blocked until we drain it.
+    REQUEUE_WOKEN.store(0, Ordering::SeqCst);
+    let b1 = AtomicU32::new(1);
+    let b1_addr = (&raw const b1) as u64;
+    let b2 = AtomicU32::new(1);
+    let b2_addr = (&raw const b2) as u64;
+    sched::spawn(b"futex-wop-b1", 16, requeue_waiter_task, b1_addr, 0)?;
+    sched::spawn(b"futex-wop-b2", 16, requeue_waiter_task, b2_addr, 0)?;
+    sched::yield_now();
+    sched::yield_now();
+    sched::yield_now();
+    sched::yield_now();
+
+    // op=OR(2) << 28, cmp=LT(2) << 24, oparg=0, cmparg=0 → old(1) < 0 is false.
+    let enc_nomatch = (2u32 << 28) | (2u32 << 24);
+    let woken_b = futex_wake_op(b1_addr, b2_addr, u32::MAX, u32::MAX, enc_nomatch)?;
+    if woken_b != 1 {
+        serial_println!(
+            "[futex]   FAIL: wake_op unmatched woke {} (expected 1)",
+            woken_b
+        );
+        return Err(KernelError::InternalError);
+    }
+    if b2.load(Ordering::SeqCst) != 1 {
+        serial_println!("[futex]   FAIL: wake_op OR 0 mutated word");
+        return Err(KernelError::InternalError);
+    }
+    sched::yield_now();
+    sched::yield_now();
+    if REQUEUE_WOKEN.load(Ordering::SeqCst) != 1 {
+        serial_println!("[futex]   FAIL: wake_op unmatched woke wrong waiter count");
+        return Err(KernelError::InternalError);
+    }
+    // Drain the still-blocked b2 waiter so it does not linger.
+    let drained = futex_wake(b2_addr, u32::MAX);
+    if drained != 1 {
+        serial_println!("[futex]   FAIL: wake_op leftover drain woke {}", drained);
+        return Err(KernelError::InternalError);
+    }
+    sched::yield_now();
+    sched::yield_now();
+    if REQUEUE_WOKEN.load(Ordering::SeqCst) != 2 {
+        serial_println!("[futex]   FAIL: wake_op leftover waiter did not run");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[futex]   Wake-op (RMW + conditional double wake): OK");
     Ok(())
 }
 

@@ -13744,9 +13744,21 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          search keyed on the original addr would leave a stale entry).
 ##          Self-tests: ipc/futex test_requeue (wake 1 + requeue 2 +
 ##          cmp-mismatch EAGAIN) and syscall-layer classic/futex2 gating.
-##        * FUTEX_WAKE_OP (atomic op-then-wake) still ENOSYS — used by
-##          glibc's older condvar implementation but not by current
-##          glibc (>= 2.25 dropped it).  Low-value to add.
+##        * FUTEX_WAKE_OP (atomic op-then-wake) — DONE.  ipc::futex now has
+##          futex_wake_op(addr1, addr2, max_wake, max_wake2, encoded_op):
+##          atomic RMW on *addr2 (SET/ADD/OR/ANDN/XOR via a single hardware
+##          fetch_*), capturing the old value under the FUTEX_TABLE lock, then
+##          wakes up to max_wake on addr1 and — if the *old* signed value of
+##          *addr2 satisfies the encoded cmp (EQ/NE/LT/LE/GT/GE) — up to
+##          max_wake2 on addr2.  oparg/cmparg are sign-extended 12-bit;
+##          FUTEX_OP_OPARG_SHIFT resolves oparg to 1<<oparg with a 0..=31
+##          range gate (UB-safe, EINVAL otherwise); unknown op/cmp -> EINVAL.
+##          Wired through classic sys_futex op 5 (arg overload: val=nr_wake,
+##          utime slot=nr_wake2, uaddr2=RMW target, val3=encoded op; uaddr2
+##          validated writable).  Self-tests: ipc/futex test_wake_op (matched
+##          double-wake + RMW result, unmatched single-wake, EINVAL gates) and
+##          syscall-layer ABI gating (ADD side effect, bad-op EINVAL, PRIVATE
+##          flag strip).
 ##        * FUTEX_LOCK_PI / FUTEX_UNLOCK_PI / FUTEX_TRYLOCK_PI /
 ##          FUTEX_LOCK_PI2 / FUTEX_WAIT_REQUEUE_PI /
 ##          FUTEX_CMP_REQUEUE_PI: native handlers exist

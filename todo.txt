@@ -6,6 +6,28 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## DEFERRED (2026-06-10): /proc/<pid>/exe symlink
+## procfs now serves /proc/<pid>/cwd and /proc/<pid>/root as real
+## symlinks (kernel/src/fs/procfs.rs: PID_LINKS, ProcPath::PidLink,
+## readlink()).  /proc/<pid>/exe is NOT yet provided because it needs
+## the resolved executable path captured at exec time.
+##   WHAT'S MISSING: the ELF loader / exec path does not record the
+##     absolute path of the loaded binary into the PCB.  There is no
+##     `exe_path` field on Process (kernel/src/proc/pcb.rs).
+##   PROPER FIX:
+##     1. Add `pub exe_path: Vec<u8>` to Process (bytes, not String —
+##        paths may hold any byte except '/' and NUL).  Inherit on fork
+##        (clone), and OVERWRITE on exec (not inherited across exec).
+##     2. In the exec/ELF-load path, store the canonicalised path of the
+##        binary being loaded into exe_path before entering userspace.
+##     3. Add "exe" to PID_LINKS and a readlink arm returning exe_path
+##        (String::from_utf8 -> InvalidArgument on non-UTF-8, same policy
+##        as the cwd link).
+##   WHY DEFERRED: touches the exec code path; flagged for the operator
+##     to confirm before modifying the loader.  cwd/root were landed
+##     because their data already lives in the PCB (Process::cwd) and the
+##     root is trivially "/".  This is a clean, additive follow-up.
+
 ## ARCHITECTURAL CONSTRAINT (user, 2026-06-06): Linux compat layer
 ## must NOT reshape the native OS.
 ##

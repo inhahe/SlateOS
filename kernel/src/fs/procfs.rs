@@ -552,6 +552,19 @@ const PID_FILES: &[&str] = &[
     "environ",
 ];
 
+/// Per-PID symbolic links, served via [`FileSystem::readlink`].
+///
+/// These mirror Linux's magic links inside `/proc/<pid>/`:
+/// - `cwd`  → the process's current working directory.
+/// - `root` → the process's filesystem root (always `/` here; we have no
+///   per-process `chroot` / mount namespaces yet, so every process shares
+///   the global VFS root).
+///
+/// `exe` is intentionally absent: it requires capturing the resolved
+/// executable path in the ELF loader at `exec` time, which we do not yet
+/// record.  See `todo.txt` (procfs `/proc/<pid>/exe`).
+const PID_LINKS: &[&str] = &["cwd", "root"];
+
 // ---------------------------------------------------------------------------
 // Content generators
 //
@@ -10643,6 +10656,8 @@ enum ProcPath<'a> {
     RootFile(&'a str),
     PidDir(u64),
     PidFile(u64, &'a str),
+    /// A per-PID symbolic link (e.g. "1/cwd"). Resolved via `readlink`.
+    PidLink(u64, &'a str),
     NotFound,
 }
 
@@ -10683,6 +10698,10 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
     // File inside PID directory (no nested subdirs).
     if !rest.contains('/') && PID_FILES.contains(&rest) {
         return ProcPath::PidFile(pid, rest);
+    }
+    // Symlink inside PID directory (cwd, root).
+    if !rest.contains('/') && PID_LINKS.contains(&rest) {
+        return ProcPath::PidLink(pid, rest);
     }
 
     ProcPath::NotFound
@@ -10738,7 +10757,7 @@ impl FileSystem for ProcFs {
                 if !task_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
-                let entries: Vec<DirEntry> = PID_FILES
+                let mut entries: Vec<DirEntry> = PID_FILES
                     .iter()
                     .map(|name| {
                         let size = generate_pid(pid, name).map_or(0, |d| d.len() as u64);
@@ -10749,9 +10768,17 @@ impl FileSystem for ProcFs {
                         }
                     })
                     .collect();
+                // Per-PID symbolic links (cwd, root).
+                for name in PID_LINKS {
+                    entries.push(DirEntry {
+                        name: String::from(*name),
+                        entry_type: EntryType::Symlink,
+                        size: 0,
+                    });
+                }
                 Ok(entries)
             }
-            ProcPath::RootFile(_) | ProcPath::PidFile(_, _) => {
+            ProcPath::RootFile(_) | ProcPath::PidFile(_, _) | ProcPath::PidLink(_, _) => {
                 Err(KernelError::NotADirectory)
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
@@ -10772,6 +10799,10 @@ impl FileSystem for ProcFs {
                 }
                 generate_pid(pid, file_name)
             }
+            // Reading a symlink's bytes directly is invalid; the VFS follows
+            // it via readlink instead.  Mirrors Linux read() → EINVAL on a
+            // symlink opened without O_PATH.
+            ProcPath::PidLink(_, _) => Err(KernelError::InvalidArgument),
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -10814,7 +10845,49 @@ impl FileSystem for ProcFs {
                     size,
                 })
             }
+            ProcPath::PidLink(pid, link_name) => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                Ok(DirEntry {
+                    name: String::from(link_name),
+                    entry_type: EntryType::Symlink,
+                    size: 0,
+                })
+            }
             ProcPath::NotFound => Err(KernelError::NotFound),
+        }
+    }
+
+    /// Resolve a per-PID symbolic link (`cwd`, `root`).
+    ///
+    /// `cwd` reflects the process's stored current working directory;
+    /// `root` is always `/` (no per-process mount namespaces / chroot
+    /// yet).  Returns `NotFound` for a task id with no live process
+    /// (a bare scheduler task carries no cwd), and `InvalidArgument`
+    /// for any non-link path.
+    ///
+    /// NOTE: the VFS `readlink` API returns `String`, but a cwd is stored
+    /// as raw bytes (paths may contain any byte except `/` and NUL).  We
+    /// surface a non-UTF-8 cwd as an error rather than lossily mangling
+    /// it — silent corruption of a path is never acceptable.  In practice
+    /// canonical cwds are ASCII/UTF-8, so this is a theoretical edge.
+    fn readlink(&mut self, path: &str) -> KernelResult<String> {
+        let rel = strip_root(path);
+        match classify_path(rel) {
+            ProcPath::PidLink(pid, "root") => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                Ok(String::from("/"))
+            }
+            ProcPath::PidLink(pid, "cwd") => {
+                let cwd = crate::proc::pcb::get_cwd(pid)
+                    .ok_or(KernelError::NotFound)?;
+                String::from_utf8(cwd).map_err(|_| KernelError::InvalidArgument)
+            }
+            ProcPath::PidLink(_, _) => Err(KernelError::NotFound),
+            _ => Err(KernelError::InvalidArgument),
         }
     }
 
@@ -10979,12 +11052,13 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[procfs]   stat {}: directory OK", pid_path);
 
-    // readdir on PID directory — should have PID_FILES entries.
+    // readdir on PID directory — should have PID_FILES + PID_LINKS entries.
     let pid_entries = fs.readdir(&pid_path)?;
-    if pid_entries.len() != PID_FILES.len() {
+    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len();
+    if pid_entries.len() != expected_pid_entries {
         serial_println!(
             "[procfs]   FAIL: readdir {} returned {} entries, expected {}",
-            pid_path, pid_entries.len(), PID_FILES.len()
+            pid_path, pid_entries.len(), expected_pid_entries
         );
         return Err(KernelError::InternalError);
     }
@@ -11121,6 +11195,46 @@ pub fn self_test() -> KernelResult<()> {
         }
         Err(e) => {
             serial_println!("[procfs]   FAIL: environ unexpected error {:?}", e);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // /proc/<pid>/root — always resolves to "/" for a live task.
+    let root_link = fs.readlink(&format!("/{current_tid}/root"))?;
+    if root_link != "/" {
+        serial_println!("[procfs]   FAIL: root link = {:?}, expected \"/\"", root_link);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   {}/root -> {:?} OK", current_tid, root_link);
+
+    // /proc/<pid>/cwd — symlink whose target is the process cwd.  A bare
+    // scheduler task has no PCB and thus no cwd (NotFound); a real process
+    // resolves to an absolute path.  Also confirm reading the link's bytes
+    // directly is rejected (EINVAL-style) and that lstat reports a symlink.
+    let cwd_lstat = fs.stat(&format!("/{current_tid}/cwd"))?;
+    if cwd_lstat.entry_type != EntryType::Symlink {
+        serial_println!("[procfs]   FAIL: cwd not a symlink ({:?})", cwd_lstat.entry_type);
+        return Err(KernelError::InternalError);
+    }
+    if fs.read_file(&format!("/{current_tid}/cwd")) != Err(KernelError::InvalidArgument) {
+        serial_println!("[procfs]   FAIL: read_file on cwd symlink should be InvalidArgument");
+        return Err(KernelError::InternalError);
+    }
+    match fs.readlink(&format!("/{current_tid}/cwd")) {
+        Ok(target) => {
+            if !target.starts_with('/') {
+                serial_println!("[procfs]   FAIL: cwd target {:?} not absolute", target);
+                return Err(KernelError::InternalError);
+            }
+            serial_println!("[procfs]   {}/cwd -> {:?} OK", current_tid, target);
+        }
+        Err(KernelError::NotFound) => {
+            serial_println!(
+                "[procfs]   {}/cwd: NotFound (bare task, no cwd) OK", current_tid
+            );
+        }
+        Err(e) => {
+            serial_println!("[procfs]   FAIL: cwd readlink unexpected error {:?}", e);
             return Err(KernelError::InternalError);
         }
     }

@@ -1204,7 +1204,7 @@ fn parse_ascii_num(data: &[u8], offset: usize, len: usize) -> u32 {
 /// Uses the standard civil-to-days algorithm.
 fn datetime_to_epoch(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> u64 {
     // Clamp month to valid range.
-    let month = if month < 1 { 1 } else if month > 12 { 12 } else { month };
+    let month = month.clamp(1, 12);
 
     // Days from epoch to the start of the year.
     // Use the algorithm from Howard Hinnant's date library.

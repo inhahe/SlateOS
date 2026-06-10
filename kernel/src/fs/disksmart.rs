@@ -356,9 +356,9 @@ pub fn check_thresholds() -> u32 {
 
     let mut alerts = 0u32;
     for drive in &state.drives {
-        if drive.temperature_c >= state.config.temp_critical_c {
-            alerts += 1;
-        } else if drive.temperature_c >= state.config.temp_warning_c {
+        if drive.temperature_c >= state.config.temp_critical_c
+            || drive.temperature_c >= state.config.temp_warning_c
+        {
             alerts += 1;
         }
         if drive.reallocated_sectors >= state.config.reallocated_warning {

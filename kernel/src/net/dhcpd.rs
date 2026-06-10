@@ -381,8 +381,11 @@ pub fn lease_count() -> usize {
     leases.iter().filter(|l| l.active).count()
 }
 
+/// A single lease snapshot: (MAC address, assigned IP, expiry in ns).
+pub type LeaseInfo = ([u8; 6], [u8; 4], u64);
+
 /// Get info about all active leases.
-pub fn lease_list() -> ([([u8; 6], [u8; 4], u64); 16], usize) {
+pub fn lease_list() -> ([LeaseInfo; 16], usize) {
     let leases = LEASES.lock();
     let mut out = [([0u8; 6], [0u8; 4], 0u64); 16];
     let mut count = 0;

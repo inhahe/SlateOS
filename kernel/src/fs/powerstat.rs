@@ -90,7 +90,7 @@ pub enum WakeSource {
     UserInput,
     Network,
     Usb,
-    RTC,
+    Rtc,
 }
 
 impl WakeSource {
@@ -101,7 +101,7 @@ impl WakeSource {
             Self::UserInput => "input",
             Self::Network => "network",
             Self::Usb => "usb",
-            Self::RTC => "rtc",
+            Self::Rtc => "rtc",
         }
     }
 }

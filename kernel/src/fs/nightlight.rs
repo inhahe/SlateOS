@@ -492,10 +492,8 @@ fn approx_sun_times(latitude: i32) -> (u8, u8, u8, u8) {
         21 // Far north: ~21:00
     };
 
-    let sunrise_hour = if abs_lat < 23 {
-        6
-    } else if abs_lat < 45 {
-        6
+    let sunrise_hour = if abs_lat < 45 {
+        6 // Tropics and temperate: ~06:00
     } else if abs_lat < 60 {
         5
     } else {

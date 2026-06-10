@@ -264,7 +264,7 @@ fn detect_intel_vtd() -> bool {
                     let base_ptr = (hhdm + dmar_phys + offset as u64) as *const u8;
                     let rb = core::ptr::read_unaligned(base_ptr.add(8) as *const u64);
                     let sg = core::ptr::read_unaligned(base_ptr.add(6) as *const u16);
-                    let fl = core::ptr::read_unaligned(base_ptr.add(4) as *const u8);
+                    let fl = core::ptr::read_unaligned(base_ptr.add(4));
                     (rb, sg, fl)
                 };
 

@@ -114,7 +114,7 @@ pub enum Event {
     /// Network interface state changed.
     NetIfaceChange { iface_id: u16, is_up: bool },
     /// OOM event occurred.
-    OomEvent { victim_pid: u32, freed_pages: u32 },
+    Oom { victim_pid: u32, freed_pages: u32 },
     /// Power state changing.
     PowerStateChange { entering_sleep: bool, sleep_state: u8 },
     /// Filesystem mounted or unmounted.
@@ -137,7 +137,7 @@ impl Event {
             Self::CpuHotplug { .. } => EventKind::CpuHotplug,
             Self::BlockDeviceError { .. } => EventKind::BlockDeviceError,
             Self::NetIfaceChange { .. } => EventKind::NetIfaceChange,
-            Self::OomEvent { .. } => EventKind::OomEvent,
+            Self::Oom { .. } => EventKind::OomEvent,
             Self::PowerStateChange { .. } => EventKind::PowerStateChange,
             Self::FsMount { .. } => EventKind::FsMount,
             Self::PanicImminent => EventKind::PanicImminent,

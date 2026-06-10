@@ -341,13 +341,9 @@ pub fn setup(
     use crate::mm::page_table;
 
     // Clamp and round up to power of 2.
-    let sq = sq_entries
-        .max(MIN_RING_ENTRIES)
-        .min(MAX_RING_ENTRIES)
+    let sq = sq_entries.clamp(MIN_RING_ENTRIES, MAX_RING_ENTRIES)
         .next_power_of_two();
-    let cq = cq_entries
-        .max(MIN_RING_ENTRIES)
-        .min(MAX_RING_ENTRIES)
+    let cq = cq_entries.clamp(MIN_RING_ENTRIES, MAX_RING_ENTRIES)
         .next_power_of_two();
 
     // Check ring table capacity.

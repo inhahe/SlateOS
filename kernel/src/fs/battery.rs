@@ -291,9 +291,7 @@ pub fn update_status(
 
         // Check alerts.
         if src.source_type == PowerSourceType::Battery && charge_state == ChargeState::Discharging {
-            if charge_pct <= state.alerts.critical_pct {
-                state.alert_count += 1;
-            } else if charge_pct <= state.alerts.low_pct {
+            if charge_pct <= state.alerts.critical_pct || charge_pct <= state.alerts.low_pct {
                 state.alert_count += 1;
             }
         }

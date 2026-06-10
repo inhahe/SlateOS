@@ -173,6 +173,18 @@ static INITIALIZED: spin::Mutex<bool> = spin::Mutex::new(false);
 // Initialization
 // ---------------------------------------------------------------------------
 
+/// A built-in column definition row: id, title, type, default width, the file
+/// types it applies to, display order, and the metadata field it reads.
+type BuiltinColumn = (
+    &'static str,
+    &'static str,
+    ColumnType,
+    u32,
+    &'static [&'static str],
+    u32,
+    &'static str,
+);
+
 /// Initialize the column view system with built-in column definitions.
 pub fn init() {
     let mut initialized = INITIALIZED.lock();
@@ -180,7 +192,7 @@ pub fn init() {
         return;
     }
 
-    let defaults: Vec<(&str, &str, ColumnType, u32, &[&str], u32, &str)> = vec![
+    let defaults: Vec<BuiltinColumn> = vec![
         // Universal columns (apply to all file types).
         ("name",        "Name",          ColumnType::Text,      200, &[],                    0,  "name"),
         ("size",        "Size",          ColumnType::Size,       80, &[],                    1,  "size"),

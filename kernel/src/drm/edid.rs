@@ -755,12 +755,19 @@ fn build_test_edid() -> Vec<u8> {
     let dtd1 = &mut edid[54..72];
     let pclk: u16 = 14850; // 148.50 MHz in 10 kHz units
     dtd1[0..2].copy_from_slice(&pclk.to_le_bytes());
-    dtd1[2] = (1920 & 0xFF) as u8;             // H active lo
-    dtd1[3] = (280 & 0xFF) as u8;              // H blank lo
-    dtd1[4] = (((1920 >> 8) & 0x0F) << 4) as u8 | ((280 >> 8) & 0x0F) as u8;
-    dtd1[5] = (1080 & 0xFF) as u8;             // V active lo
-    dtd1[6] = (45 & 0xFF) as u8;               // V blank lo
-    dtd1[7] = (((1080 >> 8) & 0x0F) << 4) as u8 | ((45 >> 8) & 0x0F) as u8;
+    // Bind the timing values so the lo/hi-nibble splits are computed from
+    // runtime values rather than folded to constants (the formula is the
+    // generic EDID DTD packing, valid for any resolution).
+    let h_active: u32 = 1920;
+    let h_blank: u32 = 280;
+    let v_active: u32 = 1080;
+    let v_blank: u32 = 45;
+    dtd1[2] = (h_active & 0xFF) as u8;         // H active lo
+    dtd1[3] = (h_blank & 0xFF) as u8;          // H blank lo
+    dtd1[4] = (((h_active >> 8) & 0x0F) << 4) as u8 | ((h_blank >> 8) & 0x0F) as u8;
+    dtd1[5] = (v_active & 0xFF) as u8;         // V active lo
+    dtd1[6] = (v_blank & 0xFF) as u8;          // V blank lo
+    dtd1[7] = (((v_active >> 8) & 0x0F) << 4) as u8 | ((v_blank >> 8) & 0x0F) as u8;
     // H front porch = 88, H sync = 44.
     dtd1[8] = 88;  // H front porch lo
     dtd1[9] = 44;  // H sync width lo

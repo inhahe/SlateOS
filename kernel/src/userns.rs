@@ -106,7 +106,7 @@ impl IdMapping {
 
     /// Translate an inner ID to an outer ID.
     #[inline]
-    fn to_outer(&self, inner_id: u32) -> Option<u32> {
+    fn to_outer(self, inner_id: u32) -> Option<u32> {
         if !self.contains_inner(inner_id) {
             return None;
         }
@@ -116,7 +116,7 @@ impl IdMapping {
 
     /// Translate an outer ID to an inner ID.
     #[inline]
-    fn to_inner(&self, outer_id: u32) -> Option<u32> {
+    fn to_inner(self, outer_id: u32) -> Option<u32> {
         if !self.contains_outer(outer_id) {
             return None;
         }

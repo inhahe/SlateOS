@@ -166,9 +166,7 @@ pub fn capture(label: u8) -> Checkpoint {
 
     let owner_summary = frame_owner::summary();
     let mut owner_counts = [0u32; NUM_OWNERS];
-    for i in 0..NUM_OWNERS {
-        owner_counts[i] = owner_summary.counts[i];
-    }
+    owner_counts.copy_from_slice(&owner_summary.counts);
 
     let heap_stats = crate::mm::heap::stats();
 

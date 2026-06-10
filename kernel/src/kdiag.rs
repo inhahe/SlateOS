@@ -123,9 +123,7 @@ fn section_memory() -> DiagSection {
     let mut health = SectionHealth::Good;
     if pressure.score > 80 {
         health = SectionHealth::Critical;
-    } else if pressure.score > 50 {
-        health = SectionHealth::Warning;
-    } else if info.fragmentation_pct > 50 {
+    } else if pressure.score > 50 || info.fragmentation_pct > 50 {
         health = SectionHealth::Warning;
     }
 

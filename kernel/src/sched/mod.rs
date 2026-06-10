@@ -4324,7 +4324,7 @@ fn test_workload_profiles() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     match current_workload_profile() {
-        Some(p) if p == WorkloadProfile::Desktop => {}
+        Some(WorkloadProfile::Desktop) => {}
         other => {
             serial_println!(
                 "[sched]   FAIL: current_workload_profile after Desktop = {:?}",
@@ -4347,7 +4347,7 @@ fn test_workload_profiles() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     match current_workload_profile() {
-        Some(p) if p == WorkloadProfile::Server => {}
+        Some(WorkloadProfile::Server) => {}
         other => {
             serial_println!(
                 "[sched]   FAIL: current_workload_profile after Server = {:?}",
@@ -4370,7 +4370,7 @@ fn test_workload_profiles() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     match current_workload_profile() {
-        Some(p) if p == WorkloadProfile::Development => {}
+        Some(WorkloadProfile::Development) => {}
         other => {
             serial_println!(
                 "[sched]   FAIL: current_workload_profile after Development = {:?}",
@@ -4393,7 +4393,7 @@ fn test_workload_profiles() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     match current_workload_profile() {
-        Some(p) if p == WorkloadProfile::Gaming => {}
+        Some(WorkloadProfile::Gaming) => {}
         other => {
             serial_println!(
                 "[sched]   FAIL: current_workload_profile after Gaming = {:?}",

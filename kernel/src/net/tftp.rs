@@ -39,7 +39,7 @@
 //! - Maximum 4 concurrent server transfers.
 
 use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use alloc::format;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -142,12 +142,12 @@ fn build_data(block_num: u16, data: &[u8]) -> Vec<u8> {
 ///
 /// Format: `[OP_ACK(2)] [block#(2)]`
 fn build_ack(block_num: u16) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(4);
-    pkt.push((OP_ACK >> 8) as u8);
-    pkt.push(OP_ACK as u8);
-    pkt.push((block_num >> 8) as u8);
-    pkt.push(block_num as u8);
-    pkt
+    vec![
+        (OP_ACK >> 8) as u8,
+        OP_ACK as u8,
+        (block_num >> 8) as u8,
+        block_num as u8,
+    ]
 }
 
 /// Build an ERROR packet.

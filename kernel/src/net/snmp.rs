@@ -27,7 +27,7 @@
 //! - No SNMP SET operations (read-only).
 //! - No trap receiver.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::format;
 
@@ -118,6 +118,19 @@ pub struct Oid {
     pub components: Vec<u32>,
 }
 
+/// Format OID as a dotted string.
+impl core::fmt::Display for Oid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (i, c) in self.components.iter().enumerate() {
+            if i > 0 {
+                f.write_str(".")?;
+            }
+            write!(f, "{c}")?;
+        }
+        Ok(())
+    }
+}
+
 impl Oid {
     /// Parse an OID from dotted string notation (e.g., "1.3.6.1.2.1.1.1.0").
     #[allow(dead_code)] // Public API.
@@ -136,13 +149,6 @@ impl Oid {
             return None;
         }
         Some(Oid { components })
-    }
-
-    /// Format OID as dotted string.
-    #[allow(dead_code)] // Public API.
-    pub fn to_string(&self) -> String {
-        let parts: Vec<String> = self.components.iter().map(|c| format!("{}", c)).collect();
-        parts.join(".")
     }
 
     /// Check if this OID starts with the given prefix.

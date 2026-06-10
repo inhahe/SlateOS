@@ -35,25 +35,25 @@ use crate::error::{KernelError, KernelResult};
 /// Value type for a preference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrefValue {
-    StringVal(String),
-    IntVal(i64),
-    BoolVal(bool),
+    Str(String),
+    Int(i64),
+    Bool(bool),
 }
 
 impl PrefValue {
     pub fn type_label(&self) -> &'static str {
         match self {
-            Self::StringVal(_) => "string",
-            Self::IntVal(_) => "int",
-            Self::BoolVal(_) => "bool",
+            Self::Str(_) => "string",
+            Self::Int(_) => "int",
+            Self::Bool(_) => "bool",
         }
     }
 
     pub fn display_value(&self) -> String {
         match self {
-            Self::StringVal(s) => s.clone(),
-            Self::IntVal(v) => format!("{}", v),
-            Self::BoolVal(v) => if *v { String::from("true") } else { String::from("false") },
+            Self::Str(s) => s.clone(),
+            Self::Int(v) => format!("{}", v),
+            Self::Bool(v) => if *v { String::from("true") } else { String::from("false") },
         }
     }
 }
@@ -118,9 +118,9 @@ pub fn init_defaults() {
             AppPrefs {
                 app_name: String::from("system"),
                 entries: alloc::vec![
-                    PrefEntry { key: String::from("theme"), value: PrefValue::StringVal(String::from("dark")), modified_ns: now },
-                    PrefEntry { key: String::from("font_size"), value: PrefValue::IntVal(14), modified_ns: now },
-                    PrefEntry { key: String::from("animations"), value: PrefValue::BoolVal(true), modified_ns: now },
+                    PrefEntry { key: String::from("theme"), value: PrefValue::Str(String::from("dark")), modified_ns: now },
+                    PrefEntry { key: String::from("font_size"), value: PrefValue::Int(14), modified_ns: now },
+                    PrefEntry { key: String::from("animations"), value: PrefValue::Bool(true), modified_ns: now },
                 ],
                 total_reads: 0, total_writes: 0, created_ns: now,
             },
@@ -258,24 +258,24 @@ pub fn self_test() {
 
     // 2: Read existing preference.
     let val = get("system", "theme").expect("get");
-    assert_eq!(val, Some(PrefValue::StringVal(String::from("dark"))));
+    assert_eq!(val, Some(PrefValue::Str(String::from("dark"))));
     crate::serial_println!("  [2/8] read: OK");
 
     // 3: Set preference (new app).
-    set("browser", "homepage", PrefValue::StringVal(String::from("https://example.com"))).expect("set");
+    set("browser", "homepage", PrefValue::Str(String::from("https://example.com"))).expect("set");
     let val = get("browser", "homepage").expect("get2");
-    assert_eq!(val, Some(PrefValue::StringVal(String::from("https://example.com"))));
+    assert_eq!(val, Some(PrefValue::Str(String::from("https://example.com"))));
     crate::serial_println!("  [3/8] write new: OK");
 
     // 4: Update existing preference.
-    set("browser", "homepage", PrefValue::StringVal(String::from("https://other.com"))).expect("update");
+    set("browser", "homepage", PrefValue::Str(String::from("https://other.com"))).expect("update");
     let val = get("browser", "homepage").expect("get3");
-    assert_eq!(val, Some(PrefValue::StringVal(String::from("https://other.com"))));
+    assert_eq!(val, Some(PrefValue::Str(String::from("https://other.com"))));
     crate::serial_println!("  [4/8] update: OK");
 
     // 5: Multiple types.
-    set("browser", "tab_count", PrefValue::IntVal(5)).expect("int");
-    set("browser", "dark_mode", PrefValue::BoolVal(true)).expect("bool");
+    set("browser", "tab_count", PrefValue::Int(5)).expect("int");
+    set("browser", "dark_mode", PrefValue::Bool(true)).expect("bool");
     let keys = list_keys("browser");
     assert_eq!(keys.len(), 3);
     crate::serial_println!("  [5/8] types: OK");

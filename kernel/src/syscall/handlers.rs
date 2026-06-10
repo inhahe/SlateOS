@@ -1313,11 +1313,9 @@ pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
         unsafe { core::slice::from_raw_parts(caps_ptr, caps_count) }
     };
 
-    // Get sender PID.
-    let sender_pid = match caller_pid() {
-        Some(pid) => pid,
-        None => 0, // Kernel task — no cap table management needed.
-    };
+    // Get sender PID.  A kernel task (no caller) maps to PID 0, which is
+    // the default and needs no cap-table management.
+    let sender_pid = caller_pid().unwrap_or_default();
 
     match channel::send_with_caps(handle, data, cap_handles, sender_pid) {
         Ok(()) => SyscallResult::ok(0),

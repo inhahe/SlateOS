@@ -275,6 +275,10 @@ pub fn next_expiry_ns() -> Option<u64> {
 ///
 /// Returns the number of timers fired this tick.
 pub fn process_expired() -> u32 {
+    /// An expired timer captured under the lock to fire afterward:
+    /// (callback, argument, interval in ns).
+    type ExpiredTimer = (fn(u64), u64, u64);
+
     if !INITIALIZED.load(Ordering::Relaxed) {
         return 0;
     }
@@ -285,7 +289,7 @@ pub fn process_expired() -> u32 {
 
     // Collect expired timers while holding the lock, then fire them
     // after releasing it (callbacks might schedule new timers).
-    let mut to_fire: [Option<(fn(u64), u64, u64)>; 16] = [None; 16];
+    let mut to_fire: [Option<ExpiredTimer>; 16] = [None; 16];
     let mut fire_count = 0usize;
 
     // Disable interrupts while holding the per-CPU timer lock.

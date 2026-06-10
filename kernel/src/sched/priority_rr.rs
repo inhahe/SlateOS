@@ -606,7 +606,7 @@ impl PerCpuScheduler {
     /// `sched.backend` sysctl parameter (default: PriorityRoundRobin).
     /// Call once during scheduler init.
     pub fn init(&self, num_cpus: usize) {
-        let n = num_cpus.min(MAX_CPUS).max(1);
+        let n = num_cpus.clamp(1, MAX_CPUS);
         self.num_cpus.store(n, Ordering::Release);
 
         let backend_id = super::backend::desired_backend();
@@ -846,7 +846,7 @@ impl PerCpuScheduler {
         // - timer_tick() uses try_lock for its per-CPU lock
         // - We use try_lock for the target
         // - No other code holds two per-CPU locks simultaneously
-        let to_push = (imbalance / 2).max(1).min(4);
+        let to_push = (imbalance / 2).clamp(1, 4);
         let Some(mut local_guard) = self.queues.get(cpu).and_then(|m| m.try_lock()) else {
             return migrations; // Lock contended (timer ISR).
         };

@@ -29,7 +29,7 @@
 #![allow(dead_code)]
 
 use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
@@ -331,31 +331,24 @@ pub fn execute_action(menu: &ContextMenu, item_id: u64) -> KernelResult<String> 
 
 /// Built-in items for a single file.
 fn file_builtin_items(path: &str) -> Vec<MenuItem> {
-    let mut items = Vec::new();
-
-    // Open.
-    items.push(make_item("Open", "", "open", 10));
-
-    // Open with...
-    items.push(make_item("Open with...", "", "openwith", 20));
-
-    items.push(make_separator_at(50));
-
-    // Cut, Copy, Delete.
-    items.push(make_item("Cut", "Ctrl+X", "cut", 100));
-    items.push(make_item("Copy", "Ctrl+C", "copy", 110));
-    items.push(make_item("Paste", "Ctrl+V", "paste", 120));
-
-    items.push(make_separator_at(150));
-
-    // Delete, Rename.
-    items.push(make_item("Delete", "Del", "delete", 200));
-    items.push(make_item("Rename", "F2", "rename", 210));
-
-    items.push(make_separator_at(250));
-
-    // Checksum (per properties module).
-    items.push(make_item("Copy path", "", "copypath", 300));
+    let mut items = vec![
+        // Open.
+        make_item("Open", "", "open", 10),
+        // Open with...
+        make_item("Open with...", "", "openwith", 20),
+        make_separator_at(50),
+        // Cut, Copy, Delete.
+        make_item("Cut", "Ctrl+X", "cut", 100),
+        make_item("Copy", "Ctrl+C", "copy", 110),
+        make_item("Paste", "Ctrl+V", "paste", 120),
+        make_separator_at(150),
+        // Delete, Rename.
+        make_item("Delete", "Del", "delete", 200),
+        make_item("Rename", "F2", "rename", 210),
+        make_separator_at(250),
+        // Checksum (per properties module).
+        make_item("Copy path", "", "copypath", 300),
+    ];
 
     // Check if we can add file-type-specific items.
     let mime = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
@@ -374,53 +367,37 @@ fn file_builtin_items(path: &str) -> Vec<MenuItem> {
 
 /// Built-in items for a directory.
 fn directory_builtin_items(_path: &str) -> Vec<MenuItem> {
-    let mut items = Vec::new();
-
-    items.push(make_item("Open", "", "open", 10));
-    items.push(make_item("Open in new window", "", "open_new", 20));
-    items.push(make_item("Open in terminal", "", "open_terminal", 30));
-
-    items.push(make_separator_at(50));
-
-    items.push(make_item("Cut", "Ctrl+X", "cut", 100));
-    items.push(make_item("Copy", "Ctrl+C", "copy", 110));
-    items.push(make_item("Paste", "Ctrl+V", "paste", 120));
-
-    items.push(make_separator_at(150));
-
-    items.push(make_item("Delete", "Del", "delete", 200));
-    items.push(make_item("Rename", "F2", "rename", 210));
-
-    items.push(make_separator_at(250));
-
-    items.push(make_item("Copy path", "", "copypath", 300));
-
-    items.push(make_separator_at(900));
-    items.push(make_item("Properties", "Alt+Enter", "properties", 999));
-
-    items
+    vec![
+        make_item("Open", "", "open", 10),
+        make_item("Open in new window", "", "open_new", 20),
+        make_item("Open in terminal", "", "open_terminal", 30),
+        make_separator_at(50),
+        make_item("Cut", "Ctrl+X", "cut", 100),
+        make_item("Copy", "Ctrl+C", "copy", 110),
+        make_item("Paste", "Ctrl+V", "paste", 120),
+        make_separator_at(150),
+        make_item("Delete", "Del", "delete", 200),
+        make_item("Rename", "F2", "rename", 210),
+        make_separator_at(250),
+        make_item("Copy path", "", "copypath", 300),
+        make_separator_at(900),
+        make_item("Properties", "Alt+Enter", "properties", 999),
+    ]
 }
 
 /// Built-in items for multiple selection.
 fn multi_builtin_items() -> Vec<MenuItem> {
-    let mut items = Vec::new();
-
-    items.push(make_item("Cut", "Ctrl+X", "cut", 100));
-    items.push(make_item("Copy", "Ctrl+C", "copy", 110));
-
-    items.push(make_separator_at(150));
-
-    items.push(make_item("Delete", "Del", "delete", 200));
-
-    items.push(make_separator_at(250));
-
-    items.push(make_item("Select all", "Ctrl+A", "selectall", 300));
-    items.push(make_item("Invert selection", "", "invert", 310));
-
-    items.push(make_separator_at(900));
-    items.push(make_item("Properties", "Alt+Enter", "properties", 999));
-
-    items
+    vec![
+        make_item("Cut", "Ctrl+X", "cut", 100),
+        make_item("Copy", "Ctrl+C", "copy", 110),
+        make_separator_at(150),
+        make_item("Delete", "Del", "delete", 200),
+        make_separator_at(250),
+        make_item("Select all", "Ctrl+A", "selectall", 300),
+        make_item("Invert selection", "", "invert", 310),
+        make_separator_at(900),
+        make_item("Properties", "Alt+Enter", "properties", 999),
+    ]
 }
 
 /// Built-in items for desktop background.
@@ -502,26 +479,22 @@ fn explorer_bg_builtin_items() -> Vec<MenuItem> {
 
 /// Built-in items for taskbar.
 fn taskbar_builtin_items() -> Vec<MenuItem> {
-    let mut items = Vec::new();
-
-    items.push(make_item("Toolbars", "", "toolbars", 10));
-    items.push(make_item("Task Manager", "Ctrl+Shift+Esc", "taskmgr", 20));
-
-    items.push(make_separator_at(50));
-
-    items.push(make_item("Taskbar settings", "", "taskbar_settings", 100));
-
-    items
+    vec![
+        make_item("Toolbars", "", "toolbars", 10),
+        make_item("Task Manager", "Ctrl+Shift+Esc", "taskmgr", 20),
+        make_separator_at(50),
+        make_item("Taskbar settings", "", "taskbar_settings", 100),
+    ]
 }
 
 /// "New" submenu items (from templates).
 fn new_submenu_items() -> Vec<MenuItem> {
-    let mut items = Vec::new();
-
-    items.push(make_item("Folder", "", "new_folder", 10));
-    items.push(make_separator_at(50));
-    items.push(make_item("Text Document", "", "new_text", 100));
-    items.push(make_item("Rich Text Document", "", "new_rtf", 110));
+    let mut items = vec![
+        make_item("Folder", "", "new_folder", 10),
+        make_separator_at(50),
+        make_item("Text Document", "", "new_text", 100),
+        make_item("Rich Text Document", "", "new_rtf", 110),
+    ];
 
     // Add items from the template system.
     let templates = crate::fs::templates::list();

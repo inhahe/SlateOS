@@ -327,12 +327,7 @@ pub fn count_in_pageblock(pageblock_idx: usize, mtype: MigrateType) -> usize {
 /// Returns `None` if no matching pageblock is found.
 #[must_use]
 pub fn find_pageblock(start_pb: usize, mtype: MigrateType) -> Option<usize> {
-    for pb in start_pb..MAX_PAGEBLOCKS {
-        if get_pageblock_type(pb) == mtype {
-            return Some(pb);
-        }
-    }
-    None
+    (start_pb..MAX_PAGEBLOCKS).find(|&pb| get_pageblock_type(pb) == mtype)
 }
 
 /// Get current migration type statistics.

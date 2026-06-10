@@ -250,12 +250,12 @@ pub fn recognize(phrase: &str, confidence: Confidence) -> KernelResult<Option<St
         let phrase_lower = phrase.to_lowercase();
 
         // Check minimum confidence.
-        let conf_ok = match (confidence, state.min_confidence) {
-            (Confidence::High, _) => true,
-            (Confidence::Medium, Confidence::Medium | Confidence::Low) => true,
-            (Confidence::Low, Confidence::Low) => true,
-            _ => false,
-        };
+        let conf_ok = matches!(
+            (confidence, state.min_confidence),
+            (Confidence::High, _)
+                | (Confidence::Medium, Confidence::Medium | Confidence::Low)
+                | (Confidence::Low, Confidence::Low)
+        );
 
         if !conf_ok {
             state.total_rejected += 1;

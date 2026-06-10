@@ -665,7 +665,7 @@ fn test_split_and() {
 }
 
 fn test_parse_f64() {
-    assert!((parse_f64("3.14").unwrap() - 3.14).abs() < 0.001);
+    assert!((parse_f64("3.25").unwrap() - 3.25).abs() < 0.001);
     assert!((parse_f64("-2.5").unwrap() + 2.5).abs() < 0.001);
     assert!((parse_f64("42").unwrap() - 42.0).abs() < 0.001);
     assert!(parse_f64("").is_err());

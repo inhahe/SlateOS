@@ -782,14 +782,13 @@ impl MountOptions {
         result
     }
 
-    /// Format options as a comma-separated string for /proc/mounts.
-    pub fn to_string(&self) -> String {
+}
+
+/// Format options as a comma-separated string for /proc/mounts.
+impl core::fmt::Display for MountOptions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut parts: Vec<&str> = Vec::new();
-        if self.read_only {
-            parts.push("ro");
-        } else {
-            parts.push("rw");
-        }
+        parts.push(if self.read_only { "ro" } else { "rw" });
         if self.noatime {
             parts.push("noatime");
         }
@@ -799,14 +798,13 @@ impl MountOptions {
         if self.nosuid {
             parts.push("nosuid");
         }
-        let mut s = String::new();
         for (i, part) in parts.iter().enumerate() {
             if i > 0 {
-                s.push(',');
+                f.write_str(",")?;
             }
-            s.push_str(part);
+            f.write_str(part)?;
         }
-        s
+        Ok(())
     }
 }
 

@@ -116,11 +116,13 @@ pub struct ContainerConfig {
 impl ContainerConfig {
     /// Create a minimal container config with a name.
     pub fn new(name: &str) -> Self {
-        let mut cfg = Self::default();
-        cfg.name = String::from(
+        let name = String::from(
             if name.len() > MAX_NAME_LEN { &name[..MAX_NAME_LEN] } else { name }
         );
-        cfg
+        Self {
+            name,
+            ..Self::default()
+        }
     }
 
     /// Add a UID mapping range.

@@ -997,22 +997,17 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
         return None;
     }
     let limit = data.len().saturating_sub(3);
-    for i in 0..limit {
-        if data.get(i) == Some(&b'\r')
+    (0..limit).find(|&i| data.get(i) == Some(&b'\r')
             && data.get(i.wrapping_add(1)) == Some(&b'\n')
             && data.get(i.wrapping_add(2)) == Some(&b'\r')
-            && data.get(i.wrapping_add(3)) == Some(&b'\n')
-        {
-            return Some(i);
-        }
-    }
-    None
+            && data.get(i.wrapping_add(3)) == Some(&b'\n'))
 }
 
+/// Parsed response head: (status code, reason phrase, header name/value pairs).
+type ParsedResponseHead = (u16, String, Vec<(String, String)>);
+
 /// Parse the HTTP response header section (everything before `\r\n\r\n`).
-fn parse_response_headers(
-    data: &[u8],
-) -> KernelResult<(u16, String, Vec<(String, String)>)> {
+fn parse_response_headers(data: &[u8]) -> KernelResult<ParsedResponseHead> {
     let text = core::str::from_utf8(data).map_err(|_| KernelError::InvalidArgument)?;
 
     let mut lines = text.split("\r\n");
@@ -1238,12 +1233,7 @@ fn find_crlf(data: &[u8]) -> Option<usize> {
         return None;
     }
     let limit = data.len().saturating_sub(1);
-    for i in 0..limit {
-        if data.get(i) == Some(&b'\r') && data.get(i.wrapping_add(1)) == Some(&b'\n') {
-            return Some(i);
-        }
-    }
-    None
+    (0..limit).find(|&i| data.get(i) == Some(&b'\r') && data.get(i.wrapping_add(1)) == Some(&b'\n'))
 }
 
 // ---------------------------------------------------------------------------

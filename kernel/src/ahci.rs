@@ -327,12 +327,7 @@ impl AhciPort {
     /// Find a free command slot.
     fn find_free_slot(&self) -> Option<u32> {
         let ci = self.read_reg(PORT_CI);
-        for i in 0..CMD_SLOTS as u32 {
-            if ci & (1 << i) == 0 {
-                return Some(i);
-            }
-        }
-        None
+        (0..CMD_SLOTS as u32).find(|&i| ci & (1 << i) == 0)
     }
 
     /// Issue a command and wait for completion.

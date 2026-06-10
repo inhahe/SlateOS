@@ -30,7 +30,7 @@
 #![allow(dead_code)]
 
 use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -126,18 +126,18 @@ pub fn last_report() -> Option<HealthReport> {
 
 /// Run all health checks and return a report.
 pub fn check() -> KernelResult<HealthReport> {
-    let mut checks = Vec::new();
-
-    checks.push(check_mounts());
-    checks.push(check_space());
-    checks.push(check_journal());
-    checks.push(check_cache());
-    checks.push(check_handles());
-    checks.push(check_quotas());
-    checks.push(check_integrity());
-    checks.push(check_trash());
-    checks.push(check_tmpwatch());
-    checks.push(check_reclaim());
+    let checks = vec![
+        check_mounts(),
+        check_space(),
+        check_journal(),
+        check_cache(),
+        check_handles(),
+        check_quotas(),
+        check_integrity(),
+        check_trash(),
+        check_tmpwatch(),
+        check_reclaim(),
+    ];
 
     // Compute overall status.
     let mut overall = HealthStatus::Healthy;

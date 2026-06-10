@@ -343,10 +343,8 @@ pub fn delete_partition(disk_id: u64, part_id: u64) -> KernelResult<()> {
     if state.partitions.len() == len { return Err(KernelError::NotFound); }
 
     // Renumber remaining partitions.
-    let mut num = 1u32;
-    for p in state.partitions.iter_mut().filter(|p| p.disk_id == disk_id) {
+    for (num, p) in (1u32..).zip(state.partitions.iter_mut().filter(|p| p.disk_id == disk_id)) {
         p.number = num;
-        num += 1;
     }
     OP_COUNT.fetch_add(1, Ordering::Relaxed);
     Ok(())

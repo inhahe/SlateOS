@@ -127,7 +127,7 @@ pub fn check(root: &str, opts: &CheckOptions) -> KernelResult<LinkReport> {
     // Key: (size, modified_ns) → Vec<path>
     let mut hardlink_candidates: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-    walk_tree(root, root, opts, &mut report, &mut hardlink_candidates, 0)?;
+    walk_tree(root, opts, &mut report, &mut hardlink_candidates, 0)?;
 
     // Build hardlink groups from candidates.
     if opts.check_hardlinks {
@@ -208,7 +208,6 @@ pub fn fix_broken(root: &str, dry_run: bool) -> KernelResult<(u64, Vec<String>)>
 // ---------------------------------------------------------------------------
 
 fn walk_tree(
-    root: &str,
     path: &str,
     opts: &CheckOptions,
     report: &mut LinkReport,
@@ -258,7 +257,7 @@ fn walk_tree(
                 }
             }
             EntryType::Directory => {
-                walk_tree(root, &full, opts, report, hardlink_map, depth + 1)?;
+                walk_tree(&full, opts, report, hardlink_map, depth + 1)?;
             }
             EntryType::Symlink => {
                 report.symlinks_scanned = report.symlinks_scanned.saturating_add(1);

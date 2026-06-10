@@ -340,8 +340,13 @@ pub fn stats() -> NatStats {
     }
 }
 
+/// A NAT table entry snapshot: (protocol, original source IP, original source
+/// port, destination IP, destination port, translated NAT port, namespace,
+/// remaining TTL).
+pub type NatEntryInfo = (NatProto, Ipv4Addr, u16, Ipv4Addr, u16, u16, NetNsId, u32);
+
 /// List all active NAT entries (for diagnostics / kshell `nat list`).
-pub fn list_entries() -> Vec<(NatProto, Ipv4Addr, u16, Ipv4Addr, u16, u16, NetNsId, u32)> {
+pub fn list_entries() -> Vec<NatEntryInfo> {
     let table = NAT.lock();
     let mut result = Vec::new();
     for entry in table.entries.iter() {

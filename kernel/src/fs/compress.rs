@@ -676,7 +676,7 @@ fn insert_hash(
     data: &[u8],
     pos: usize,
     head: &mut [u32; HASH_SIZE],
-    prev: &mut Vec<u32>,
+    prev: &mut [u32],
 ) -> u32 {
     let h = lz77_hash(data, pos);
     let old_head = head[h];

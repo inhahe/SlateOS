@@ -2216,11 +2216,12 @@ fn test_full_decompress() -> KernelResult<()> {
     // Build block header.
     // We use 1 filter (LZMA2), no compressed/uncompressed size fields.
     // Block flags: 0x00 (1 filter, no sizes).
-    let mut block_header_body = Vec::new();
-    block_header_body.push(0x00); // flags: 1 filter (0 = 1 filter)
-    block_header_body.push(0x21); // filter ID = LZMA2 (1-byte VLI)
-    block_header_body.push(0x01); // properties size = 1
-    block_header_body.push(0x00); // dict size byte = 0 → 4096
+    let mut block_header_body = vec![
+        0x00, // flags: 1 filter (0 = 1 filter)
+        0x21, // filter ID = LZMA2 (1-byte VLI)
+        0x01, // properties size = 1
+        0x00, // dict size byte = 0 → 4096
+    ];
 
     // Pad to make total block header (including size byte and CRC) a
     // multiple of 4.  Total = 1 (size) + body_len + padding + 4 (CRC).

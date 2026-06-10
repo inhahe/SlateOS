@@ -182,12 +182,7 @@ fn bitmap_find_free(bitmap: &[u8], start: u32, max_bits: u32) -> Option<u32> {
         }
     }
     // Wrap around: search from 0 to `start`.
-    for bit in 0..start {
-        if !bitmap_test(bitmap, bit) {
-            return Some(bit);
-        }
-    }
-    None
+    (0..start).find(|&bit| !bitmap_test(bitmap, bit))
 }
 
 /// Find a contiguous run of `count` free bits starting from `start`.

@@ -40,7 +40,7 @@ pub enum BlkOp {
     Write,
     Discard,
     Flush,
-    FUA,       // Force Unit Access.
+    Fua,       // Force Unit Access.
 }
 
 impl BlkOp {
@@ -50,7 +50,7 @@ impl BlkOp {
             Self::Write => "W",
             Self::Discard => "D",
             Self::Flush => "F",
-            Self::FUA => "FUA",
+            Self::Fua => "FUA",
         }
     }
 }

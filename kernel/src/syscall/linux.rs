@@ -11286,9 +11286,7 @@ fn fill_statfs_default(buf: &mut [u8; STATFS_SIZE]) {
         let off = i * 8;
         let bytes = v.to_ne_bytes();
         #[allow(clippy::indexing_slicing)]
-        for j in 0..8 {
-            buf[off + j] = bytes[j];
-        }
+        buf[off..off + 8].copy_from_slice(&bytes);
     }
 }
 
@@ -12503,16 +12501,12 @@ fn fill_stat_for_fd(
     fn put_u64(buf: &mut [u8; STAT_SIZE], off: usize, v: u64) {
         let bytes = v.to_ne_bytes();
         #[allow(clippy::indexing_slicing)]
-        for j in 0..8 {
-            buf[off + j] = bytes[j];
-        }
+        buf[off..off + 8].copy_from_slice(&bytes);
     }
     fn put_u32(buf: &mut [u8; STAT_SIZE], off: usize, v: u32) {
         let bytes = v.to_ne_bytes();
         #[allow(clippy::indexing_slicing)]
-        for j in 0..4 {
-            buf[off + j] = bytes[j];
-        }
+        buf[off..off + 4].copy_from_slice(&bytes);
     }
 
     put_u64(buf, 0,   0);              // st_dev
@@ -12781,30 +12775,22 @@ fn fill_statx_for_fd(
     fn put_u32(buf: &mut [u8; STATX_SIZE], off: usize, v: u32) {
         let bytes = v.to_ne_bytes();
         #[allow(clippy::indexing_slicing)]
-        for j in 0..4 {
-            buf[off + j] = bytes[j];
-        }
+        buf[off..off + 4].copy_from_slice(&bytes);
     }
     fn put_u64(buf: &mut [u8; STATX_SIZE], off: usize, v: u64) {
         let bytes = v.to_ne_bytes();
         #[allow(clippy::indexing_slicing)]
-        for j in 0..8 {
-            buf[off + j] = bytes[j];
-        }
+        buf[off..off + 8].copy_from_slice(&bytes);
     }
     fn put_u16(buf: &mut [u8; STATX_SIZE], off: usize, v: u16) {
         let bytes = v.to_ne_bytes();
         #[allow(clippy::indexing_slicing)]
-        for j in 0..2 {
-            buf[off + j] = bytes[j];
-        }
+        buf[off..off + 2].copy_from_slice(&bytes);
     }
     fn put_i64(buf: &mut [u8; STATX_SIZE], off: usize, v: i64) {
         let bytes = v.to_ne_bytes();
         #[allow(clippy::indexing_slicing)]
-        for j in 0..8 {
-            buf[off + j] = bytes[j];
-        }
+        buf[off..off + 8].copy_from_slice(&bytes);
     }
 
     put_u32(buf, 0,  STATX_BASIC_STATS);   // stx_mask
@@ -29310,9 +29296,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
         out.push(0);
         // Pad with zeros to reclen.
         let pad = reclen - raw;
-        for _ in 0..pad {
-            out.push(0);
-        }
+        out.resize(out.len().saturating_add(pad), 0);
 
         written = written.saturating_add(reclen);
         consumed = consumed.saturating_add(1);
@@ -31543,9 +31527,7 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
         let off = idx * 65;
         let n = s.len().min(64);
         #[allow(clippy::indexing_slicing)]
-        for i in 0..n {
-            buf[off + i] = s[i];
-        }
+        buf[off..off + n].copy_from_slice(&s[..n]);
         // buf[off + n] is the NUL terminator (already zero).
     }
     // sysname / release are Linux-ABI-only surfaces: in our
@@ -41995,8 +41977,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // *user-facing* errno comes from the gate in `sys_fcntl`.
         // We confirm the gate constants here so a future edit can't
         // silently let the bounds drift apart.
-        assert!(crate::ipc::pipe::MIN_PIPE_BUFFER_CAPACITY >= 4096);
-        assert!(
+        // Compile-time guards: a future edit cannot let the bounds drift apart
+        // without failing the build.
+        const _: () = assert!(crate::ipc::pipe::MIN_PIPE_BUFFER_CAPACITY >= 4096);
+        const _: () = assert!(
             crate::ipc::pipe::MAX_PIPE_BUFFER_CAPACITY
                 >= crate::ipc::pipe::MIN_PIPE_BUFFER_CAPACITY
         );
@@ -55071,7 +55055,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // quotactl_fd with garbage cmds (0xdeadbeef00) -> EINVAL.
         // Pre-batch returned EPERM for any cmd, masking the probe
         // signal that says "the kernel doesn't implement this op."
-        let a = SyscallArgs { arg0: 0, arg1: 0xdead_beef_00, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0xdeadbeef00, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::QUOTACTL_FD, &a).value
             != -i64::from(errno::EINVAL) {
@@ -55082,7 +55066,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         // quotactl_fd with a valid XFS cmd (Q_XQUOTAON = 0x5801) ->
         // EPERM (cmd whitelisted but terminal CAP check).
-        let a = SyscallArgs { arg0: 0, arg1: 0x5801_00, arg2: 0, arg3: 0,
+        let a = SyscallArgs { arg0: 0, arg1: 0x580100, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::QUOTACTL_FD, &a).value
             != -i64::from(errno::EPERM) {
@@ -68172,7 +68156,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //     -> ok(0).  Pre-batch saw the full u64 not match the
             //     arm literal -> EINVAL default arm.
             let a = SyscallArgs {
-                arg0: 0xFFFF_FFFF_5961_6d61, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                arg0: 0xFFFF_FFFF_5961_6D61, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
             if dispatch_linux(nr::PRCTL, &a).value != 0 {
                 serial_println!(
@@ -68204,7 +68188,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 (0x1_0000_0001, 1),                    // high garbage + 1
                 (0x1_0000_0007, 7),                    // high garbage + 7
                 (0xFFFF_FFFF_0000_0001, 1),            // sign-ext high + 1
-                (0xFFFF_FFFF_5961_6d61, 0x5961_6d61),  // sign-ext high + Yama
+                (0xFFFF_FFFF_5961_6D61, 0x5961_6D61),  // sign-ext high + Yama
                 (0xDEAD_BEEF, 0xDEAD_BEEF),            // already in low 32
             ];
             for &(input, expect) in &cases {

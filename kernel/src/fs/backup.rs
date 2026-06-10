@@ -773,8 +773,8 @@ fn collect_entries(
         // Compute relative path.
         let rel = if root == "/" {
             full.clone()
-        } else if full.starts_with(root) {
-            String::from(&full[root.len()..])
+        } else if let Some(stripped) = full.strip_prefix(root) {
+            String::from(stripped)
         } else {
             full.clone()
         };

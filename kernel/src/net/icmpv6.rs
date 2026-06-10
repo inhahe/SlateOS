@@ -35,7 +35,7 @@
 //! EUI-64 interface ID.  Up to 4 global addresses can be configured.
 //! Also extracts RDNSS (RFC 8106) for DNS server discovery.
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use spin::Mutex;
@@ -1764,13 +1764,13 @@ fn test_ra_option_parsing() -> KernelResult<()> {
     //    - Lifetime: 1800s
     //    - One DNS address: 2001:4860:4860::8888
 
-    let mut opts = Vec::new();
-
     // Prefix Information option: type=3, length=4 (32 bytes).
-    opts.push(NDP_OPT_PREFIX_INFO); // Type
-    opts.push(4);                    // Length (4 * 8 = 32 bytes)
-    opts.push(64);                   // Prefix length
-    opts.push(0xC0);                 // Flags: L=1, A=1
+    let mut opts = vec![
+        NDP_OPT_PREFIX_INFO, // Type
+        4,                   // Length (4 * 8 = 32 bytes)
+        64,                  // Prefix length
+        0xC0,                // Flags: L=1, A=1
+    ];
     opts.extend_from_slice(&7200u32.to_be_bytes());  // Valid lifetime
     opts.extend_from_slice(&3600u32.to_be_bytes());  // Preferred lifetime
     opts.extend_from_slice(&[0, 0, 0, 0]);           // Reserved2

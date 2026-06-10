@@ -571,9 +571,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 7: manual offset.
     serial_println!("timezone::self_test 7: manual offset");
-    set_manual_offset(3600_000_000_000)?; // +1 hour
+    set_manual_offset(3_600_000_000_000)?; // +1 hour
     let state = STATE.lock();
-    assert_eq!(state.manual_offset_ns, 3600_000_000_000);
+    assert_eq!(state.manual_offset_ns, 3_600_000_000_000);
     drop(state);
 
     clear_all();

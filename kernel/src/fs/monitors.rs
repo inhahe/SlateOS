@@ -42,11 +42,11 @@ const MAX_MONITORS: usize = 16;
 /// Monitor connection type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectorType {
-    HDMI,
+    Hdmi,
     DisplayPort,
-    VGA,
-    DVI,
-    USBC,
+    Vga,
+    Dvi,
+    UsbC,
     Thunderbolt,
     Internal,
     Virtual,
@@ -55,11 +55,11 @@ pub enum ConnectorType {
 impl ConnectorType {
     pub fn label(self) -> &'static str {
         match self {
-            Self::HDMI => "HDMI",
+            Self::Hdmi => "HDMI",
             Self::DisplayPort => "DisplayPort",
-            Self::VGA => "VGA",
-            Self::DVI => "DVI",
-            Self::USBC => "USB-C",
+            Self::Vga => "VGA",
+            Self::Dvi => "DVI",
+            Self::UsbC => "USB-C",
             Self::Thunderbolt => "Thunderbolt",
             Self::Internal => "Internal",
             Self::Virtual => "Virtual",
@@ -543,7 +543,7 @@ pub fn self_test() {
 
     // Test 2: add monitor.
     {
-        let id = add_monitor("Dell U2723QE", ConnectorType::HDMI, "HDMI-1", 3840, 2160, 60).unwrap();
+        let id = add_monitor("Dell U2723QE", ConnectorType::Hdmi, "HDMI-1", 3840, 2160, 60).unwrap();
         assert_eq!(list_monitors().len(), 2);
         let m = get_monitor(id).unwrap();
         assert_eq!(m.name, "Dell U2723QE");

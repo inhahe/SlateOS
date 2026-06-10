@@ -702,7 +702,7 @@ pub fn is_enabled() -> bool {
 #[allow(dead_code)] // Public API for future settings UI.
 pub fn set_sync_interval_secs(secs: u64) {
     let ns = secs.saturating_mul(1_000_000_000);
-    let clamped = ns.max(MIN_SYNC_INTERVAL_NS).min(MAX_SYNC_INTERVAL_NS);
+    let clamped = ns.clamp(MIN_SYNC_INTERVAL_NS, MAX_SYNC_INTERVAL_NS);
     STATE.lock().sync_interval_ns = clamped;
 }
 

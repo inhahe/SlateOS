@@ -54,7 +54,7 @@ pub enum InterfaceType {
     Ethernet,
     Wifi,
     Loopback,
-    VPN,
+    Vpn,
     Bridge,
     Virtual,
 }
@@ -65,7 +65,7 @@ impl InterfaceType {
             Self::Ethernet => "ethernet",
             Self::Wifi => "wifi",
             Self::Loopback => "loopback",
-            Self::VPN => "vpn",
+            Self::Vpn => "vpn",
             Self::Bridge => "bridge",
             Self::Virtual => "virtual",
         }
@@ -76,7 +76,7 @@ impl InterfaceType {
             "ethernet" | "eth" => Some(Self::Ethernet),
             "wifi" | "wlan" => Some(Self::Wifi),
             "loopback" | "lo" => Some(Self::Loopback),
-            "vpn" => Some(Self::VPN),
+            "vpn" => Some(Self::Vpn),
             "bridge" | "br" => Some(Self::Bridge),
             "virtual" | "virt" => Some(Self::Virtual),
             _ => None,
@@ -124,8 +124,8 @@ impl ConnectionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WifiSecurity {
     Open,
-    WEP,
-    WPA,
+    Wep,
+    Wpa,
     WPA2,
     WPA3,
     Enterprise,
@@ -135,8 +135,8 @@ impl WifiSecurity {
     pub fn label(self) -> &'static str {
         match self {
             Self::Open => "open",
-            Self::WEP => "WEP",
-            Self::WPA => "WPA",
+            Self::Wep => "WEP",
+            Self::Wpa => "WPA",
             Self::WPA2 => "WPA2",
             Self::WPA3 => "WPA3",
             Self::Enterprise => "enterprise",

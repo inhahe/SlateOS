@@ -130,12 +130,12 @@ pub fn charge(handle: MeterHandle, amount: u64) {
         if new_current <= old_peak {
             break;
         }
-        match meter.peak.compare_exchange_weak(
+        // On success we're done; on failure (Err) retry the loop.
+        if meter.peak.compare_exchange_weak(
             old_peak, new_current,
             Ordering::Relaxed, Ordering::Relaxed
-        ) {
-            Ok(_) => break,
-            Err(_) => {} // Retry.
+        ).is_ok() {
+            break;
         }
     }
 }

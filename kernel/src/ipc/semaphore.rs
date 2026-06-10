@@ -247,47 +247,45 @@ pub fn wait(handle: SemHandle) -> KernelResult<()> {
         0,
     );
 
-    loop {
-        {
-            let mut table = SEM_TABLE.lock();
-            let sem = table
-                .get_mut(&handle.id())
-                .ok_or(KernelError::InvalidHandle)?;
+    {
+        let mut table = SEM_TABLE.lock();
+        let sem = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
 
-            if sem.count > 0 {
-                sem.count = sem.count.saturating_sub(1);
-                return Ok(());
-            }
-
-            if sem.closed {
-                return Err(KernelError::ChannelClosed);
-            }
-
-            // Count is 0 — block.
-            if sem.waiters.len() >= MAX_WAITERS {
-                return Err(KernelError::WouldBlock);
-            }
-            sem.waiters.push_back(sched::current_task_id());
+        if sem.count > 0 {
+            sem.count = sem.count.saturating_sub(1);
+            return Ok(());
         }
 
-        sched::block_current();
+        if sem.closed {
+            return Err(KernelError::ChannelClosed);
+        }
 
-        // We were woken.  Two possibilities:
-        // 1. signal() removed us from the waiter queue and woke us — a
-        //    unit has been consumed on our behalf → return Ok.
-        // 2. close() drained all waiters and woke us — sem is gone.
-        //
-        // Distinguish by re-checking whether the semaphore still exists.
-        // If it's been removed from the table (close removes it),
-        // return ChannelClosed.  If it still exists, we were woken by
-        // signal (which removed us from the queue — we won't be in it).
-        {
-            let table = SEM_TABLE.lock();
-            match table.get(&handle.id()) {
-                None => return Err(KernelError::ChannelClosed),
-                Some(sem) if sem.closed => return Err(KernelError::ChannelClosed),
-                Some(_) => return Ok(()), // Woken by signal.
-            }
+        // Count is 0 — block.
+        if sem.waiters.len() >= MAX_WAITERS {
+            return Err(KernelError::WouldBlock);
+        }
+        sem.waiters.push_back(sched::current_task_id());
+    }
+
+    sched::block_current();
+
+    // We were woken.  Two possibilities:
+    // 1. signal() removed us from the waiter queue and woke us — a
+    //    unit has been consumed on our behalf → return Ok.
+    // 2. close() drained all waiters and woke us — sem is gone.
+    //
+    // Distinguish by re-checking whether the semaphore still exists.
+    // If it's been removed from the table (close removes it),
+    // return ChannelClosed.  If it still exists, we were woken by
+    // signal (which removed us from the queue — we won't be in it).
+    {
+        let table = SEM_TABLE.lock();
+        match table.get(&handle.id()) {
+            None => Err(KernelError::ChannelClosed),
+            Some(sem) if sem.closed => Err(KernelError::ChannelClosed),
+            Some(_) => Ok(()), // Woken by signal.
         }
     }
 }

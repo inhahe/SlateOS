@@ -526,21 +526,13 @@ pub fn handle_upgrade(
     // Frame read loop.
     let mut buf = Vec::with_capacity(4096);
 
-    loop {
-        // Read more data from TCP.
-        match tcp::read_blocking(conn_handle, FRAME_READ_TIMEOUT, MAX_FRAME_PAYLOAD) {
-            Ok(data) => {
-                if data.is_empty() {
-                    // Connection closed by peer.
-                    break;
-                }
-                buf.extend_from_slice(&data);
-            }
-            Err(_) => {
-                // Timeout or error — close connection.
-                break;
-            }
+    while let Ok(data) = tcp::read_blocking(conn_handle, FRAME_READ_TIMEOUT, MAX_FRAME_PAYLOAD) {
+        // Read more data from TCP. An empty read or error closes the loop.
+        if data.is_empty() {
+            // Connection closed by peer.
+            break;
         }
+        buf.extend_from_slice(&data);
 
         // Parse all complete frames in the buffer.
         while let Some((frame, consumed)) = parse_frame(&buf) {

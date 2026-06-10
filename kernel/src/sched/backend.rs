@@ -108,6 +108,14 @@ pub fn backend_name(id: u8) -> &'static str {
 /// Each variant holds the concrete scheduler state.  All methods dispatch
 /// via `match` — the compiler inlines the arms, so there's no dynamic
 /// dispatch overhead.
+//
+// NOTE: `clippy::large_enum_variant` would have us box the larger
+// variants, but this enum is stored inline in the per-CPU scheduler and
+// is touched on the scheduler hot path (pick_next, enqueue).  Boxing
+// would add a heap indirection per access and defeat the inline-dispatch
+// design above.  There is exactly one backend per CPU, so the unused
+// space is bounded and constant — an acceptable trade for hot-path speed.
+#[allow(clippy::large_enum_variant)]
 pub enum SchedulerBackend {
     /// Priority round-robin: O(1) bitmap-based pick_next, 32 priority
     /// levels, per-level FIFO queues.  Best for general-purpose workloads.

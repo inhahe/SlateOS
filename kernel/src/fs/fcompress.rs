@@ -680,15 +680,13 @@ fn test_incompressible_skip() {
     let result = compress_for_write("/tmp/fcomp_rand/random.bin", &data);
     // May or may not be None depending on LZ4 overhead for 32 bytes.
     // The important thing is it doesn't panic.
-    if result.is_none() {
-        // Good — skipped because incompressible.
-    } else {
-        // Also fine — tiny data might still fit with overhead.
-        // Verify it round-trips.
-        let decompressed = decompress_for_read(&result.expect("checked"));
+    if let Some(compressed) = result {
+        // Tiny data might still fit with overhead — verify it round-trips.
+        let decompressed = decompress_for_read(&compressed);
         assert!(decompressed.is_some());
         assert_eq!(&decompressed.expect("checked"), &data);
     }
+    // None is also fine — skipped because incompressible.
 
     remove_rules("/tmp/fcomp_rand");
     set_min_size(DEFAULT_MIN_SIZE);

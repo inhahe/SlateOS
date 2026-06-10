@@ -591,7 +591,7 @@ fn build_listing(dir: &str, show_hidden: bool,
 }
 
 /// Sort a listing in place.
-fn sort_listing(items: &mut Vec<ListingItem>, column: SortColumn, dir: SortDirection) {
+fn sort_listing(items: &mut [ListingItem], column: SortColumn, dir: SortDirection) {
     // Directories always come first.
     items.sort_by(|a, b| {
         if a.is_dir != b.is_dir {

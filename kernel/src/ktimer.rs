@@ -289,7 +289,7 @@ fn schedule_internal(
                 // we use Release ordering on the deadline CAS above, so
                 // the stores below will be visible when the scanner reads
                 // the deadline with Acquire.
-                entry.func.store(func as u64, Ordering::Relaxed);
+                entry.func.store(func as *const () as u64, Ordering::Relaxed);
                 entry.arg.store(arg, Ordering::Relaxed);
                 entry.interval.store(interval, Ordering::Relaxed);
                 entry.handle.store(handle_val, Ordering::Release);

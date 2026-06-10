@@ -2431,54 +2431,50 @@ pub fn tick() {
             SessionPhase::WaitServiceRequest | SessionPhase::Authentication |
             SessionPhase::Connected => {
                 // Read encrypted packets.
-                loop {
-                    if let Some(keys) = &session.keys {
-                        let main_key = keys.c2s_main_key;
-                        let header_key = keys.c2s_header_key;
+                while let Some(keys) = &session.keys {
+                    let main_key = keys.c2s_main_key;
+                    let header_key = keys.c2s_header_key;
 
-                        match try_read_packet_encrypted(
-                            &mut session.recv_buf,
-                            session.c2s_seq,
-                            &main_key,
-                            &header_key,
-                        ) {
-                            Ok(Some(payload)) => {
-                                session.c2s_seq += 1;
+                    match try_read_packet_encrypted(
+                        &mut session.recv_buf,
+                        session.c2s_seq,
+                        &main_key,
+                        &header_key,
+                    ) {
+                        Ok(Some(payload)) => {
+                            session.c2s_seq += 1;
 
-                                match process_message(
-                                    session, &payload,
-                                    &host_key_seed, &host_key_public,
-                                ) {
-                                    Ok(responses) => {
-                                        for resp in responses {
-                                            if let Some(keys) = &session.keys {
-                                                let _ = send_packet_encrypted(
-                                                    session.tcp_handle,
-                                                    &resp,
-                                                    session.s2c_seq,
-                                                    &keys.s2c_main_key,
-                                                    &keys.s2c_header_key,
-                                                );
-                                                session.s2c_seq += 1;
-                                            }
+                            match process_message(
+                                session, &payload,
+                                &host_key_seed, &host_key_public,
+                            ) {
+                                Ok(responses) => {
+                                    for resp in responses {
+                                        if let Some(keys) = &session.keys {
+                                            let _ = send_packet_encrypted(
+                                                session.tcp_handle,
+                                                &resp,
+                                                session.s2c_seq,
+                                                &keys.s2c_main_key,
+                                                &keys.s2c_header_key,
+                                            );
+                                            session.s2c_seq += 1;
                                         }
                                     }
-                                    Err(e) => {
-                                        crate::serial_println!("[ssh] Error: {:?}", e);
-                                        session.phase = SessionPhase::Closed;
-                                        break;
-                                    }
+                                }
+                                Err(e) => {
+                                    crate::serial_println!("[ssh] Error: {:?}", e);
+                                    session.phase = SessionPhase::Closed;
+                                    break;
                                 }
                             }
-                            Ok(None) => break, // Need more data.
-                            Err(_) => {
-                                crate::serial_println!("[ssh] Decryption/MAC error");
-                                session.phase = SessionPhase::Closed;
-                                break;
-                            }
                         }
-                    } else {
-                        break;
+                        Ok(None) => break, // Need more data.
+                        Err(_) => {
+                            crate::serial_println!("[ssh] Decryption/MAC error");
+                            session.phase = SessionPhase::Closed;
+                            break;
+                        }
                     }
 
                     if session.phase == SessionPhase::Closed {

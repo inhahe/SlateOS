@@ -896,7 +896,8 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 6: conflict policies.
     {
-        assert_eq!(ConflictPolicy::AutoRename as u8, ConflictPolicy::AutoRename as u8);
+        assert_eq!(ConflictPolicy::AutoRename as u8, 0);
+        assert_ne!(ConflictPolicy::AutoRename as u8, ConflictPolicy::Skip as u8);
         assert_ne!(ConflictPolicy::AutoRename, ConflictPolicy::Skip);
         serial_println!("[fileops] test 6 passed: conflict policies");
     }

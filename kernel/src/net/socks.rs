@@ -28,7 +28,7 @@
 //! 6. Proxy relays data bidirectionally
 
 use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use alloc::format;
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -561,11 +561,7 @@ pub fn self_test() -> KernelResult<()> {
         let target_ip = Ipv4Addr::new(192, 168, 1, 1);
         let target_port: u16 = 8080;
 
-        let mut req = Vec::new();
-        req.push(SOCKS_VERSION);
-        req.push(CMD_CONNECT);
-        req.push(0x00);
-        req.push(ATYP_IPV4);
+        let mut req = vec![SOCKS_VERSION, CMD_CONNECT, 0x00, ATYP_IPV4];
         req.extend_from_slice(&target_ip.0);
         req.extend_from_slice(&target_port.to_be_bytes());
 
@@ -589,11 +585,7 @@ pub fn self_test() -> KernelResult<()> {
         octets[15] = 0x01;
         let target_port: u16 = 443;
 
-        let mut req = Vec::new();
-        req.push(SOCKS_VERSION);
-        req.push(CMD_CONNECT);
-        req.push(0x00);
-        req.push(ATYP_IPV6);
+        let mut req = vec![SOCKS_VERSION, CMD_CONNECT, 0x00, ATYP_IPV6];
         req.extend_from_slice(&octets);
         req.extend_from_slice(&target_port.to_be_bytes());
 
@@ -611,12 +603,13 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 4: Domain CONNECT request ---
     {
         let domain = "example.com";
-        let mut req = Vec::new();
-        req.push(SOCKS_VERSION);
-        req.push(CMD_CONNECT);
-        req.push(0x00);
-        req.push(ATYP_DOMAIN);
-        req.push(domain.len() as u8);
+        let mut req = vec![
+            SOCKS_VERSION,
+            CMD_CONNECT,
+            0x00,
+            ATYP_DOMAIN,
+            domain.len() as u8,
+        ];
         req.extend_from_slice(domain.as_bytes());
         req.extend_from_slice(&80u16.to_be_bytes());
 

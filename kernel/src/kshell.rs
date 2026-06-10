@@ -1183,7 +1183,8 @@ const MAX_FUNC_DEPTH: usize = 32;
 ///
 /// Each frame is a list of `(name, previous_value)` pairs.
 /// `previous_value = None` means the variable didn't exist before `local`.
-static LOCAL_VARS: Mutex<Vec<Vec<(String, Option<String>)>>> = Mutex::new(Vec::new());
+type LocalVarFrame = Vec<(String, Option<String>)>;
+static LOCAL_VARS: Mutex<Vec<LocalVarFrame>> = Mutex::new(Vec::new());
 
 /// Get a positional parameter from the current function scope.
 ///
@@ -1591,7 +1592,8 @@ fn handle_control_flow(line: &str) -> bool {
 
     match first_word {
         "while" | "until" => {
-            let skip = if first_word == "while" { 5 } else { 5 };
+            // Both "while" and "until" are 5 bytes, so the keyword length is fixed.
+            let skip = 5;
             let condition = trimmed.get(skip..).unwrap_or("").trim();
             // Remove trailing "do" if present (allow `while test -f /x; do`).
             let condition = condition.strip_suffix("do")
@@ -7557,8 +7559,8 @@ fn cmd_strings(args: &str) {
             if let Some(n_str) = words.next() {
                 min_len = n_str.parse::<usize>().unwrap_or(4);
             }
-        } else if w.starts_with("-n") {
-            min_len = w[2..].parse::<usize>().unwrap_or(4);
+        } else if let Some(n_str) = w.strip_prefix("-n") {
+            min_len = n_str.parse::<usize>().unwrap_or(4);
         } else {
             path_arg = w;
         }
@@ -9248,14 +9250,14 @@ fn cmd_du(args: &str) {
     for word in args.split_whitespace() {
         if word == "-s" {
             summary_only = true;
-        } else if word.starts_with("-d") {
+        } else if let Some(rest) = word.strip_prefix("-d") {
             // -d N or -dN
-            let num_str = if word.len() > 2 {
-                &word[2..]
-            } else {
+            let num_str = if rest.is_empty() {
                 // -d followed by next arg is not handled in this simple parser;
                 // use -dN form.
                 "0"
+            } else {
+                rest
             };
             max_depth = num_str.parse::<usize>().unwrap_or(0);
         } else {
@@ -9415,10 +9417,10 @@ struct FindFilter<'a> {
 
 /// Parse a `-size` argument like `+1M`, `-512k`, `100c`.
 fn parse_size_predicate(s: &str) -> (i64, char) {
-    let (sign, rest) = if s.starts_with('+') {
-        ('+', &s[1..])
-    } else if s.starts_with('-') {
-        ('-', &s[1..])
+    let (sign, rest) = if let Some(stripped) = s.strip_prefix('+') {
+        ('+', stripped)
+    } else if let Some(stripped) = s.strip_prefix('-') {
+        ('-', stripped)
     } else {
         ('=', s)
     };
@@ -9430,8 +9432,8 @@ fn parse_size_predicate(s: &str) -> (i64, char) {
         (&rest[..rest.len() - 1], 1024i64 * 1024)
     } else if rest.ends_with('k') || rest.ends_with('K') {
         (&rest[..rest.len() - 1], 1024i64)
-    } else if rest.ends_with('c') {
-        (&rest[..rest.len() - 1], 1i64)
+    } else if let Some(stripped) = rest.strip_suffix('c') {
+        (stripped, 1i64)
     } else {
         (rest, 1i64) // default: bytes
     };
@@ -20540,7 +20542,7 @@ fn cmd_netindicator(args: &str) {
         "status" => { let (cs, desc) = netindicator::connection_summary(); shell_println!("{}: {}", cs.label(), desc); }
         "scan" => { netindicator::scan_wifi(); shell_println!("WiFi scan started"); }
         "wifi" => { let nets = netindicator::wifi_networks(); if nets.is_empty() { shell_println!("No WiFi networks"); } else { for n in &nets { shell_println!("  {} {}% [{}] ch{}{}", n.ssid, n.signal, n.security.label(), n.channel, if n.saved {" (saved)"} else {""}); } } }
-        "report" => { let ssid = parts.get(1).copied().unwrap_or(""); let sig = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(50); let sec = match parts.get(3).copied().unwrap_or("wpa2") { "open" => netindicator::WifiSecurity::Open, "wep" => netindicator::WifiSecurity::WEP, "wpa" => netindicator::WifiSecurity::WPA, "wpa3" => netindicator::WifiSecurity::WPA3, _ => netindicator::WifiSecurity::WPA2, }; let ch = parts.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(6); if ssid.is_empty() { shell_println!("Usage: netind report <ssid> [signal] [security] [channel]"); } else { netindicator::report_wifi(ssid, sig, sec, ch, 2437); shell_println!("Reported {} {}% {}", ssid, sig, sec.label()); } }
+        "report" => { let ssid = parts.get(1).copied().unwrap_or(""); let sig = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(50); let sec = match parts.get(3).copied().unwrap_or("wpa2") { "open" => netindicator::WifiSecurity::Open, "wep" => netindicator::WifiSecurity::Wep, "wpa" => netindicator::WifiSecurity::Wpa, "wpa3" => netindicator::WifiSecurity::WPA3, _ => netindicator::WifiSecurity::WPA2, }; let ch = parts.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(6); if ssid.is_empty() { shell_println!("Usage: netind report <ssid> [signal] [security] [channel]"); } else { netindicator::report_wifi(ssid, sig, sec, ch, 2437); shell_println!("Reported {} {}% {}", ssid, sig, sec.label()); } }
         "connect" => { let ssid = parts.get(1).copied().unwrap_or(""); let pw = parts.get(2).copied().unwrap_or(""); if ssid.is_empty() { shell_println!("Usage: netind connect <ssid> [password]"); } else { match netindicator::connect_wifi(ssid, pw) { Ok(()) => shell_println!("Connected to {}", ssid), Err(e) => shell_println!("Error: {:?}", e), } } }
         "disconnect" => { match netindicator::disconnect_wifi() { Ok(()) => shell_println!("Disconnected"), Err(e) => shell_println!("Error: {:?}", e), } }
         "save" => { let ssid = parts.get(1).copied().unwrap_or(""); if ssid.is_empty() { shell_println!("Usage: netind save <ssid>"); } else { let _ = netindicator::save_profile(ssid, netindicator::WifiSecurity::WPA2, true); shell_println!("Saved profile for {}", ssid); } }
@@ -20945,12 +20947,14 @@ fn cmd_osreset(args: &str) {
         "rmcp" => { if parts.len() < 2 { shell_println!("Usage: osreset rmcp <checkpoint_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::delete_checkpoint(id) { Ok(()) => shell_println!("Deleted checkpoint {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
         "plan" => { if parts.len() < 2 { shell_println!("Usage: osreset plan <full|keepfiles|keepapps|repair>"); } else { let scope = match parts[1] { "full" => osreset::ResetScope::Full, "keepapps" => osreset::ResetScope::KeepFilesAndApps, "repair" => osreset::ResetScope::RepairOnly, _ => osreset::ResetScope::KeepFiles }; match osreset::plan_reset(scope) { Ok(id) => { shell_println!("Created plan {}", id); if let Ok(p) = osreset::get_plan(id) { shell_println!("  Apps to import: {}", p.apps.iter().filter(|a| a.include).count()); shell_println!("  Settings cats:  {}", p.settings.iter().filter(|s| s.include).count()); shell_println!("  Preserve:       {} bytes", p.preserve_bytes); shell_println!("  Delete:         {} bytes", p.delete_bytes); } }, Err(e) => shell_println!("Error: {:?}", e) } } }
         "plans" => { let plans = osreset::list_plans(); if plans.is_empty() { shell_println!("No plans"); } else { for p in &plans { let scope = match p.scope { osreset::ResetScope::Full => "full", osreset::ResetScope::KeepFiles => "keep-files", osreset::ResetScope::KeepFilesAndApps => "keep-files+apps", osreset::ResetScope::RepairOnly => "repair" }; let ex = if p.executed { "executed" } else { "pending" }; shell_println!("  id={} scope={} [{}] apps={} settings={}", p.id, scope, ex, p.apps.len(), p.settings.len()); } } }
-        "showplan" => { if parts.len() < 2 { shell_println!("Usage: osreset showplan <plan_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::get_plan(id) { Ok(p) => { shell_println!("Plan {} ({:?}):", p.id, p.scope); if !p.apps.is_empty() { shell_println!("  Apps:"); for a in &p.apps { let risk = match a.risk { osreset::AppRiskLevel::Safe => "safe", osreset::AppRiskLevel::Moderate => "moderate", osreset::AppRiskLevel::Dangerous => "DANGEROUS", osreset::AppRiskLevel::Unknown => "unknown" }; let inc = if a.include { "YES" } else { "no" }; shell_println!("    {} [{}] risk={} settings={} data={}", a.name, inc, risk, a.import_settings, a.import_data); } } if !p.settings.is_empty() { shell_println!("  Settings:"); for s in &p.settings { let inc = if s.include { "YES" } else { "no" }; shell_println!("    {:?} [{}] — {}", s.category, inc, s.description); } } }, Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "showplan" => { if parts.len() < 2 { shell_println!("Usage: osreset showplan <plan_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::get_plan(id) { Ok(p) => { shell_println!("Plan {} ({:?}):", p.id, p.scope); if !p.apps.is_empty() { shell_println!("  Apps:"); for a in &p.apps { let risk = match a.risk { osreset::AppRiskLevel::Safe => "safe", osreset::AppRiskLevel::Moderate => "moderate", osreset::AppRiskLevel::Dangerous => "DANGEROUS", osreset::AppRiskLevel::Unknown => "unknown" }; let inc = if a.include { "YES" } else { "no" }; shell_println!("    {} [{}] risk={} settings={} data={}", a.name, inc, risk, a.import_settings, a.import_data); } }
+                            if !p.settings.is_empty() { shell_println!("  Settings:"); for s in &p.settings { let inc = if s.include { "YES" } else { "no" }; shell_println!("    {:?} [{}] — {}", s.category, inc, s.description); } } }, Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
         "appinc" => { if parts.len() < 4 { shell_println!("Usage: osreset appinc <plan_id> <app_id> <on|off>"); } else { match parts[1].parse::<u64>() { Ok(pid) => { let inc = matches!(parts[3], "on" | "yes" | "true" | "1"); match osreset::set_app_include(pid, parts[2], inc) { Ok(()) => shell_println!("Set app '{}' include={} in plan {}", parts[2], inc, pid), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid plan id") } } }
         "execute" | "exec" => { if parts.len() < 2 { shell_println!("Usage: osreset execute <plan_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::execute_reset(id) { Ok(()) => shell_println!("Reset plan {} executed", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
         "cancel" => { if parts.len() < 2 { shell_println!("Usage: osreset cancel <plan_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::cancel_plan(id) { Ok(()) => shell_println!("Cancelled plan {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
         "rollback" | "rb" => { if parts.len() < 2 { shell_println!("Usage: osreset rollback <checkpoint_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::rollback(id) { Ok(cp) => shell_println!("Rolling back to '{}' (checkpoint {})", cp.name, cp.id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
-        "scan" => { match osreset::scan_integrity() { Ok(r) => { shell_println!("Integrity scan: {}/{} files OK", r.good_files, r.total_files); if r.corrupted_files > 0 { shell_println!("  Corrupted: {}", r.corrupted_files); } if r.missing_files > 0 { shell_println!("  Missing:   {}", r.missing_files); } for path in &r.problem_paths { shell_println!("  ! {}", path); } }, Err(e) => shell_println!("Error: {:?}", e) } }
+        "scan" => { match osreset::scan_integrity() { Ok(r) => { shell_println!("Integrity scan: {}/{} files OK", r.good_files, r.total_files); if r.corrupted_files > 0 { shell_println!("  Corrupted: {}", r.corrupted_files); }
+                if r.missing_files > 0 { shell_println!("  Missing:   {}", r.missing_files); } for path in &r.problem_paths { shell_println!("  ! {}", path); } }, Err(e) => shell_println!("Error: {:?}", e) } }
         "repair" => { match osreset::repair_files() { Ok(n) => { if n > 0 { shell_println!("Repaired {} files", n); } else { shell_println!("No problems to repair (run 'osreset scan' first)"); } }, Err(e) => shell_println!("Error: {:?}", e) } }
         "stats" => { let (cps, plans, problems, ops) = osreset::stats(); shell_println!("Checkpoints: {}  Plans: {}  Problems: {}  Ops: {}", cps, plans, problems, ops); }
         "test" => { match osreset::self_test() { Ok(()) => shell_println!("osreset: all tests passed"), Err(e) => shell_println!("osreset: test FAILED: {:?}", e) } }
@@ -28345,12 +28349,12 @@ fn cmd_monitors(args: &str) {
             if parts.len() >= 7 {
                 let name = parts[1];
                 let conn = match parts[2] {
-                    "hdmi" => monitors::ConnectorType::HDMI,
+                    "hdmi" => monitors::ConnectorType::Hdmi,
                     "dp" => monitors::ConnectorType::DisplayPort,
-                    "vga" => monitors::ConnectorType::VGA,
-                    "dvi" => monitors::ConnectorType::DVI,
-                    "usbc" => monitors::ConnectorType::USBC,
-                    _ => monitors::ConnectorType::HDMI,
+                    "vga" => monitors::ConnectorType::Vga,
+                    "dvi" => monitors::ConnectorType::Dvi,
+                    "usbc" => monitors::ConnectorType::UsbC,
+                    _ => monitors::ConnectorType::Hdmi,
                 };
                 let output = parts[3];
                 let w: u32 = parts[4].parse().unwrap_or(1920);
@@ -49183,7 +49187,7 @@ fn cmd_appdefaults(args: &str) {
             let value = match ptype {
                 "int" | "i" => {
                     if let Ok(v) = raw.parse::<i64>() {
-                        appdefaults::PrefValue::IntVal(v)
+                        appdefaults::PrefValue::Int(v)
                     } else {
                         shell_println!("Invalid integer");
                         return;
@@ -49191,17 +49195,17 @@ fn cmd_appdefaults(args: &str) {
                 }
                 "bool" | "b" => {
                     let v = raw == "true" || raw == "yes" || raw == "1" || raw == "on";
-                    appdefaults::PrefValue::BoolVal(v)
+                    appdefaults::PrefValue::Bool(v)
                 }
-                "string" | "s" => appdefaults::PrefValue::StringVal(alloc::string::String::from(raw)),
+                "string" | "s" => appdefaults::PrefValue::Str(alloc::string::String::from(raw)),
                 _ => {
                     // Auto-detect.
                     if raw == "true" || raw == "false" {
-                        appdefaults::PrefValue::BoolVal(raw == "true")
+                        appdefaults::PrefValue::Bool(raw == "true")
                     } else if let Ok(v) = raw.parse::<i64>() {
-                        appdefaults::PrefValue::IntVal(v)
+                        appdefaults::PrefValue::Int(v)
                     } else {
-                        appdefaults::PrefValue::StringVal(alloc::string::String::from(raw))
+                        appdefaults::PrefValue::Str(alloc::string::String::from(raw))
                     }
                 }
             };
@@ -63214,13 +63218,11 @@ fn cmd_head(args: &str) {
     };
 
     let text = core::str::from_utf8(&data).unwrap_or("<binary>");
-    let mut printed = 0;
-    for line in text.lines() {
+    for (printed, line) in text.lines().enumerate() {
         if printed >= count {
             break;
         }
         shell_println!("{}", line);
-        printed += 1;
     }
 }
 
@@ -63281,8 +63283,8 @@ fn cmd_hexdump(args: &str) {
                     max_bytes = usize::MAX;
                 }
             }
-        } else if w.starts_with("-n") {
-            max_bytes = w[2..].parse::<usize>().unwrap_or(512);
+        } else if let Some(n_str) = w.strip_prefix("-n") {
+            max_bytes = n_str.parse::<usize>().unwrap_or(512);
             if max_bytes == 0 {
                 max_bytes = usize::MAX;
             }
@@ -66103,25 +66105,20 @@ fn cmd_wget(args: &str) {
     crate::console_println!("--- Response ---");
 
     let mut total = 0usize;
-    loop {
-        match crate::net::tcp::read_blocking(conn, 3000, 4096) {
-            Ok(data) => {
-                if data.is_empty() {
-                    // Check if connection closed.
-                    if crate::net::tcp::is_remote_closed(conn) {
-                        break;
-                    }
-                    // No data yet — try again briefly.
-                    continue;
-                }
-                total = total.saturating_add(data.len());
-                // Print as text.
-                match core::str::from_utf8(&data) {
-                    Ok(text) => crate::console_print!("{}", text),
-                    Err(_) => crate::console_print!("(binary: {} bytes)", data.len()),
-                }
+    while let Ok(data) = crate::net::tcp::read_blocking(conn, 3000, 4096) {
+        if data.is_empty() {
+            // Check if connection closed.
+            if crate::net::tcp::is_remote_closed(conn) {
+                break;
             }
-            Err(_) => break,
+            // No data yet — try again briefly.
+            continue;
+        }
+        total = total.saturating_add(data.len());
+        // Print as text.
+        match core::str::from_utf8(&data) {
+            Ok(text) => crate::console_print!("{}", text),
+            Err(_) => crate::console_print!("(binary: {} bytes)", data.len()),
         }
     }
 
@@ -68191,13 +68188,11 @@ fn cmd_head_input(args: &str, input: &str) {
         trimmed.parse::<usize>().unwrap_or(10)
     };
 
-    let mut printed = 0usize;
-    for line in input.lines() {
+    for (printed, line) in input.lines().enumerate() {
         if printed >= count {
             break;
         }
         shell_println!("{}", line);
-        printed += 1;
     }
 }
 
@@ -68482,10 +68477,11 @@ fn cmd_cut_input(args: &str, input: &str) {
     cut_process(input, delim, &fields, chars_range);
 }
 
+/// Parsed `cut` arguments: (delimiter, field numbers, char range, file path).
+type CutArgs = (char, Vec<usize>, Option<(usize, usize)>, Option<String>);
+
 /// Parse cut command arguments.
-///
-/// Returns (delimiter, field_numbers, char_range, file_path).
-fn parse_cut_args(args: &str) -> (char, Vec<usize>, Option<(usize, usize)>, Option<String>) {
+fn parse_cut_args(args: &str) -> CutArgs {
     let mut delim = '\t';
     let mut fields: Vec<usize> = Vec::new();
     let mut chars_range: Option<(usize, usize)> = None;
@@ -69277,14 +69273,10 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
 /// Parse a logical OR expression: and_expr ('||' and_expr)*
 fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
     let mut val = parse_and_expr(tokens, pos);
-    loop {
-        if let Some(ArithToken::Or) = tokens.get(*pos) {
-            *pos = pos.saturating_add(1);
-            let rhs = parse_and_expr(tokens, pos);
-            val = if val != 0 || rhs != 0 { 1 } else { 0 };
-        } else {
-            break;
-        }
+    while let Some(ArithToken::Or) = tokens.get(*pos) {
+        *pos = pos.saturating_add(1);
+        let rhs = parse_and_expr(tokens, pos);
+        val = if val != 0 || rhs != 0 { 1 } else { 0 };
     }
     val
 }
@@ -69292,14 +69284,10 @@ fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
 /// Parse a logical AND expression: cmp_expr ('&&' cmp_expr)*
 fn parse_and_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
     let mut val = parse_cmp_expr(tokens, pos);
-    loop {
-        if let Some(ArithToken::And) = tokens.get(*pos) {
-            *pos = pos.saturating_add(1);
-            let rhs = parse_cmp_expr(tokens, pos);
-            val = if val != 0 && rhs != 0 { 1 } else { 0 };
-        } else {
-            break;
-        }
+    while let Some(ArithToken::And) = tokens.get(*pos) {
+        *pos = pos.saturating_add(1);
+        let rhs = parse_cmp_expr(tokens, pos);
+        val = if val != 0 && rhs != 0 { 1 } else { 0 };
     }
     val
 }
@@ -75973,8 +75961,8 @@ fn cmd_od(args: &str) {
             if let Some(n) = words.next() {
                 max_bytes = n.parse::<usize>().unwrap_or(usize::MAX);
             }
-        } else if w.starts_with("-N") {
-            max_bytes = w[2..].parse::<usize>().unwrap_or(usize::MAX);
+        } else if let Some(n_str) = w.strip_prefix("-N") {
+            max_bytes = n_str.parse::<usize>().unwrap_or(usize::MAX);
         } else {
             file_path = w;
         }
@@ -80159,9 +80147,9 @@ fn parse_awk_args(args: &str) -> (alloc::string::String, alloc::string::String, 
         if !got_program {
             // The program may be quoted — find matching quote.
             let part = parts[i];
-            if part.starts_with('\'') {
+            if let Some(rest) = part.strip_prefix('\'') {
                 // Collect until closing quote.
-                let mut prog = alloc::string::String::from(&part[1..]);
+                let mut prog = alloc::string::String::from(rest);
                 if prog.ends_with('\'') {
                     prog.pop();
                     program = prog;
@@ -80170,8 +80158,8 @@ fn parse_awk_args(args: &str) -> (alloc::string::String, alloc::string::String, 
                     while i < parts.len() {
                         prog.push(' ');
                         let p = parts[i];
-                        if p.ends_with('\'') {
-                            prog.push_str(&p[..p.len() - 1]);
+                        if let Some(stripped) = p.strip_suffix('\'') {
+                            prog.push_str(stripped);
                             break;
                         }
                         prog.push_str(p);
@@ -80332,8 +80320,8 @@ fn awk_pattern_matches(pattern: &str, line: &str, nr: usize, nf: usize) -> bool 
     }
 
     // NR comparisons: NR > N, NR < N, NR == N, NR >= N, NR <= N, NR != N
-    if pattern.starts_with("NR") {
-        let rest = pattern[2..].trim();
+    if let Some(after_nr) = pattern.strip_prefix("NR") {
+        let rest = after_nr.trim();
         if let Some(n_str) = rest.strip_prefix(">=") {
             if let Ok(n) = n_str.trim().parse::<usize>() {
                 return nr >= n;
@@ -80367,8 +80355,8 @@ fn awk_pattern_matches(pattern: &str, line: &str, nr: usize, nf: usize) -> bool 
     }
 
     // NF comparisons.
-    if pattern.starts_with("NF") {
-        let rest = pattern[2..].trim();
+    if let Some(after_nf) = pattern.strip_prefix("NF") {
+        let rest = after_nf.trim();
         if let Some(n_str) = rest.strip_prefix(">=") {
             if let Ok(n) = n_str.trim().parse::<usize>() {
                 return nf >= n;
@@ -80528,8 +80516,8 @@ fn awk_eval_expr(
     }
 
     // Field reference: $N
-    if expr.starts_with('$') {
-        if let Ok(n) = expr[1..].parse::<usize>() {
+    if let Some(field_num) = expr.strip_prefix('$') {
+        if let Ok(n) = field_num.parse::<usize>() {
             if n == 0 {
                 return alloc::string::String::from(line);
             }

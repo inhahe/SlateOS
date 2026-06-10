@@ -26,6 +26,10 @@ use super::mode::{DrmMode, DrmModeFlags, PixelFormat};
 use super::plane::{DrmPlane, PlaneType};
 use super::DrmObjectId;
 
+/// The full set of DRM objects a driver exposes for one device: connectors,
+/// CRTCs, planes, and encoders.
+pub type DrmObjectSet = (Vec<DrmConnector>, Vec<DrmCrtc>, Vec<DrmPlane>, Vec<DrmEncoder>);
+
 // ===========================================================================
 // DrmDriver trait (documentation / testing interface)
 // ===========================================================================
@@ -44,7 +48,7 @@ pub trait DrmDriver: Send {
     fn enumerate(
         &mut self,
         alloc_id: &dyn Fn() -> DrmObjectId,
-    ) -> KernelResult<(Vec<DrmConnector>, Vec<DrmCrtc>, Vec<DrmPlane>, Vec<DrmEncoder>)>;
+    ) -> KernelResult<DrmObjectSet>;
 
     /// Allocate a GPU buffer.
     fn gem_create(
@@ -131,7 +135,7 @@ impl LimineBackend {
     pub fn enumerate(
         &mut self,
         alloc_id: &dyn Fn() -> DrmObjectId,
-    ) -> KernelResult<(Vec<DrmConnector>, Vec<DrmCrtc>, Vec<DrmPlane>, Vec<DrmEncoder>)> {
+    ) -> KernelResult<DrmObjectSet> {
         if self.fb_addr == 0 || self.width == 0 || self.height == 0 {
             return Err(KernelError::NotSupported);
         }
@@ -379,7 +383,7 @@ impl VirtioGpuBackend {
     pub fn enumerate(
         &mut self,
         alloc_id: &dyn Fn() -> DrmObjectId,
-    ) -> KernelResult<(Vec<DrmConnector>, Vec<DrmCrtc>, Vec<DrmPlane>, Vec<DrmEncoder>)> {
+    ) -> KernelResult<DrmObjectSet> {
         if !self.available {
             return Err(KernelError::NotSupported);
         }

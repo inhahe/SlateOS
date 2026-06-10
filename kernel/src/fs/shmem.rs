@@ -34,6 +34,11 @@ use crate::error::{KernelError, KernelResult};
 // ---------------------------------------------------------------------------
 
 /// Shared memory permissions.
+//
+// The shared `Read` prefix is intentional: these name a permission lattice
+// (every mapping is at least readable), so the prefix carries meaning rather
+// than being the redundant naming `enum_variant_names` warns about.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShmPermission {
     ReadOnly,

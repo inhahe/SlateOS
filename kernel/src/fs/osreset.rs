@@ -476,7 +476,7 @@ pub fn execute_reset(plan_id: u64) -> KernelResult<()> {
 pub fn cancel_plan(plan_id: u64) -> KernelResult<()> {
     let mut state = STATE.lock();
     let before = state.plans.len();
-    state.plans.retain(|p| !(p.id == plan_id && !p.executed));
+    state.plans.retain(|p| p.id != plan_id || p.executed);
     if state.plans.len() == before {
         return Err(KernelError::NotFound);
     }

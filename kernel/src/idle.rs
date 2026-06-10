@@ -267,12 +267,16 @@ fn idle_mwait() {
     unsafe {
         // MONITOR: arm address monitoring for the cache line.
         // ECX=0 (no extensions), EDX=0 (no hints).
+        // NOTE: no `nomem` — MONITOR arms hardware monitoring of the
+        // pointed-to cache line, so the compiler must treat the memory
+        // behind `monitor_addr` as accessed and must not reorder writes
+        // to NEED_RESCHED across this block.
         core::arch::asm!(
             "monitor",
             in("rax") monitor_addr,
             in("ecx") 0u32,
             in("edx") 0u32,
-            options(nomem, nostack, preserves_flags),
+            options(nostack, preserves_flags),
         );
 
         // Re-check the flag after MONITOR but before MWAIT.

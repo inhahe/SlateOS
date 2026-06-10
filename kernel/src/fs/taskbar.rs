@@ -59,6 +59,11 @@ const MAX_WINDOWS_PER_APP: usize = 64;
 // ---------------------------------------------------------------------------
 
 /// Display style for taskbar entries.
+//
+// Every mode shows the icon; the shared `Icon` prefix names what (if anything)
+// accompanies it, so it is meaningful rather than the redundant prefix
+// `enum_variant_names` targets.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabelMode {
     /// Icon only (default).

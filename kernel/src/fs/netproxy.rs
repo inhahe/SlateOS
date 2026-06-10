@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -163,19 +163,20 @@ pub fn init_defaults() {
     if guard.is_some() {
         return;
     }
-    let mut bypass = Vec::new();
-    bypass.push(BypassRule {
-        pattern: String::from("localhost"),
-        description: String::from("Loopback"),
-    });
-    bypass.push(BypassRule {
-        pattern: String::from("127.0.0.0/8"),
-        description: String::from("Loopback range"),
-    });
-    bypass.push(BypassRule {
-        pattern: String::from("::1"),
-        description: String::from("IPv6 loopback"),
-    });
+    let bypass = vec![
+        BypassRule {
+            pattern: String::from("localhost"),
+            description: String::from("Loopback"),
+        },
+        BypassRule {
+            pattern: String::from("127.0.0.0/8"),
+            description: String::from("Loopback range"),
+        },
+        BypassRule {
+            pattern: String::from("::1"),
+            description: String::from("IPv6 loopback"),
+        },
+    ];
 
     *guard = Some(State {
         mode: ProxyMode::None,

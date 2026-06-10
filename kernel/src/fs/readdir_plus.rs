@@ -315,7 +315,7 @@ fn matches_type_filter(entry_type: EntryType, filter: TypeFilter) -> bool {
 }
 
 /// Sort entries according to the specified order.
-fn sort_entries(entries: &mut Vec<DirEntryPlus>, order: SortOrder) {
+fn sort_entries(entries: &mut [DirEntryPlus], order: SortOrder) {
     match order {
         SortOrder::Name => entries.sort_by(|a, b| a.name.cmp(&b.name)),
         SortOrder::NameDesc => entries.sort_by(|a, b| b.name.cmp(&a.name)),

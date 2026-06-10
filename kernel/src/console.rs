@@ -918,9 +918,9 @@ fn putchar_normal(con: &mut ConsoleInner, c: u8) {
             let next = (con.cursor_col / TAB_STOP).saturating_add(1).saturating_mul(TAB_STOP);
             if next >= con.cols {
                 con.cursor_col = 0;
-                if con.cursor_row >= con.scroll_bottom {
-                    scroll_up_locked(con);
-                } else if con.cursor_row >= con.rows.saturating_sub(1) {
+                if con.cursor_row >= con.scroll_bottom
+                    || con.cursor_row >= con.rows.saturating_sub(1)
+                {
                     scroll_up_locked(con);
                 } else {
                     con.cursor_row = con.cursor_row.saturating_add(1);
@@ -994,9 +994,9 @@ fn render_codepoint(con: &mut ConsoleInner, cp: u32) {
     // Handle line wrap.
     if con.cursor_col >= con.cols {
         con.cursor_col = 0;
-        if con.cursor_row >= con.scroll_bottom {
-            scroll_up_locked(con);
-        } else if con.cursor_row >= con.rows.saturating_sub(1) {
+        if con.cursor_row >= con.scroll_bottom
+            || con.cursor_row >= con.rows.saturating_sub(1)
+        {
             scroll_up_locked(con);
         } else {
             con.cursor_row = con.cursor_row.saturating_add(1);

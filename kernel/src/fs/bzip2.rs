@@ -307,9 +307,7 @@ fn bwt_inverse(block: &[u8], block_len: usize, orig_ptr: u32) -> KernelResult<Ve
 
     // Reset cumul for building T (we need the running version).
     let mut running = [0u32; 256];
-    for i in 0..256 {
-        running[i] = cumul[i];
-    }
+    running.copy_from_slice(&cumul[..256]);
 
     for i in 0..block_len {
         let c = block[i] as usize;
@@ -1155,9 +1153,7 @@ fn compute_code_lengths(freqs: &[u32], alpha_size: usize, max_len: u8) -> Vec<u8
         available[i] = true;
     }
 
-    let mut next_internal = alpha_size;
-
-    for _ in 0..alpha_size - 1 {
+    for (next_internal, _) in (alpha_size..).zip(0..alpha_size - 1) {
         // Find the two minimum-frequency available nodes.
         let mut min1 = 0usize;
         let mut min1_freq = u64::MAX;
@@ -1183,7 +1179,6 @@ fn compute_code_lengths(freqs: &[u32], alpha_size: usize, max_len: u8) -> Vec<u8
         available[min1] = false;
         available[min2] = false;
         available[next_internal] = true;
-        next_internal += 1;
     }
 
     // Compute depths from root.  Since parent[i] > i for all non-root nodes,
@@ -1568,7 +1563,7 @@ fn compress_block(writer: &mut MsbBitWriter, block: &[u8]) -> u32 {
 /// The output is a complete bzip2 stream that can be decompressed
 /// with [`bunzip2`].
 pub fn bzip2_compress(data: &[u8], level: u8) -> Vec<u8> {
-    let level = level.max(1).min(9);
+    let level = level.clamp(1, 9);
     let block_size = (level as usize).saturating_mul(100_000);
 
     let mut writer = MsbBitWriter::with_capacity(data.len().saturating_add(256));
@@ -1698,11 +1693,8 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[bzip2]   FAIL: compression round-trip mismatch");
         return Err(KernelError::InternalError);
     }
-    let ratio = if test_str.is_empty() {
-        0
-    } else {
-        compressed.len().wrapping_mul(100) / test_str.len()
-    };
+    // `test_str` is a fixed non-empty literal, so the division is always safe.
+    let ratio = compressed.len().wrapping_mul(100) / test_str.len();
     crate::serial_println!(
         "[bzip2]   Compression round-trip ({}B → {}B, {}%) ✓",
         test_str.len(), compressed.len(), ratio

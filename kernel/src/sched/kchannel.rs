@@ -530,13 +530,9 @@ pub fn self_test() {
         while TEST_CH.try_recv().is_some() {}
 
         extern "C" fn consumer(_: u64) {
-            loop {
-                match TEST_CH.recv() {
-                    Ok(val) => {
-                        SUM.fetch_add(val, AOrdering::Relaxed);
-                    }
-                    Err(_) => break, // Channel closed.
-                }
+            // Loop until the channel is closed.
+            while let Ok(val) = TEST_CH.recv() {
+                SUM.fetch_add(val, AOrdering::Relaxed);
             }
         }
 

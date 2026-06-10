@@ -29,7 +29,6 @@ pub mod a11y;
 pub mod acl;
 pub mod acpistat;
 pub mod aiostat;
-#[allow(dead_code)]
 pub mod ar;
 pub mod atime;
 pub mod archive;
@@ -63,7 +62,6 @@ pub mod bench;
 pub mod bluetooth;
 pub mod bpfstat;
 pub mod budstat;
-#[allow(dead_code)]
 pub mod bzip2;
 pub mod cache;
 pub mod capsettings;
@@ -95,7 +93,6 @@ pub mod changetrack;
 pub mod columnview;
 pub mod compress;
 pub mod contextmenu;
-#[allow(dead_code)]
 pub mod cpio;
 pub mod crashreport;
 pub mod credentials;
@@ -228,7 +225,6 @@ pub mod logrotate;
 pub mod location;
 pub mod magnifier;
 pub mod loginscreen;
-#[allow(dead_code)]
 pub mod lz4;
 pub mod mediakeys;
 pub mod memdiag;
@@ -378,7 +374,6 @@ pub mod swapmon;
 pub mod sysanimations;
 pub mod systemsounds;
 pub mod systemimage;
-#[allow(dead_code)]
 pub mod rar;
 pub mod rlimit;
 pub mod symlink_security;
@@ -449,13 +444,9 @@ pub mod writeback;
 pub mod windowrules;
 pub mod wintiling;
 pub mod winsnap;
-#[allow(dead_code)]
 pub mod sevenz;
-#[allow(dead_code)]
 pub mod xz;
-#[allow(dead_code)]
 pub mod zip;
-#[allow(dead_code)]
 pub mod zstd;
 pub mod zramstat;
 

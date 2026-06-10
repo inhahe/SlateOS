@@ -266,14 +266,17 @@ pub fn alloc_for_user(
         }
     }
 
-    // Leak the DmaBuffer — the physical memory is now owned by the
-    // process mapping.  It will be freed when the process unmaps
-    // the DMA region (via SYS_DMA_FREE).
+    // The physical memory is now owned by the process mapping.  It will
+    // be freed when the process unmaps the DMA region (via SYS_DMA_FREE).
     //
     // We need to store the order somewhere so we can free the correct
     // buddy block later.  We store it in a tracking table.
+    //
+    // `DmaBuffer` has no `Drop` impl (the buddy frame is not auto-freed),
+    // so letting `buf` fall out of scope here does not release the
+    // physical memory — it stays allocated and tracked above until
+    // SYS_DMA_FREE.
     track_dma_mapping(pml4_phys, user_virt, phys, buf.order, alloc_size);
-    core::mem::forget(buf);
 
     Ok((user_virt, phys, alloc_size))
 }

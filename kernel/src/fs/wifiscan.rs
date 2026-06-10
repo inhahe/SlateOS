@@ -58,6 +58,11 @@ impl SecurityType {
 }
 
 /// Wi-Fi band.
+//
+// The `Band` prefix and `Ghz` suffix are the standard way to name Wi-Fi bands
+// (2.4/5/6 GHz); stripping them would produce identifiers that cannot lead with
+// a digit or that lose their unit, so the lint is suppressed here deliberately.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Band {
     Band24Ghz,

@@ -226,7 +226,7 @@ pub fn set_filter_delay(ms: u32) -> KernelResult<()> {
 
 /// Set mouse speed.
 pub fn set_mouse_speed(speed: u32) -> KernelResult<()> {
-    with_state(|state| { state.config.mouse_speed = speed.max(1).min(100); Ok(()) })
+    with_state(|state| { state.config.mouse_speed = speed.clamp(1, 100); Ok(()) })
 }
 
 /// Press a modifier (for sticky keys).

@@ -241,16 +241,14 @@ fn parse_request(data: &[u8]) -> Option<HttpRequest> {
     let mut if_none_match = None;
     let mut accept_encoding = None;
     let mut range = None;
-    let mut header_count = 0;
 
-    for line in text.lines().skip(1) {
+    for (header_count, line) in text.lines().skip(1).enumerate() {
         if line.is_empty() || line == "\r" {
             break; // End of headers.
         }
         if header_count >= MAX_HEADERS {
             break; // Safety limit.
         }
-        header_count += 1;
 
         if let Some(colon) = line.find(':') {
             let name = line[..colon].trim();
@@ -1368,8 +1366,8 @@ fn etag_matches(if_none_match: &Option<String>, body: &[u8]) -> bool {
         for candidate in inm.split(',') {
             let trimmed = candidate.trim();
             // Strip weak indicator if present.
-            let tag = if trimmed.starts_with("W/") {
-                &trimmed[2..]
+            let tag = if let Some(stripped) = trimmed.strip_prefix("W/") {
+                stripped
             } else {
                 trimmed
             };

@@ -1910,8 +1910,23 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     let envp_slices: alloc::vec::Vec<&[u8]> =
         envp_bufs.iter().map(alloc::vec::Vec::as_slice).collect();
 
+    // Resolve the executable's absolute path for /proc/<pid>/exe.  We
+    // canonicalise the caller's filename against the process cwd so a
+    // relative execve still yields an absolute exe link.  Best-effort:
+    // on failure we pass None and the link reports NotFound.
+    let exe_path: Option<alloc::vec::Vec<u8>> = {
+        let cwd = crate::proc::pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
+        canonicalize_path(&cwd, filename_bytes.as_slice()).ok()
+    };
+
     // ---- 7. Exec.  After this point the old AS is gone on success. ----
-    match exec_process(pid, &elf_data, &argv_slices, &envp_slices) {
+    match exec_process(
+        pid,
+        &elf_data,
+        &argv_slices,
+        &envp_slices,
+        exe_path.as_deref(),
+    ) {
         Ok(result) => {
             // Reset caught signal handlers (POSIX) and drop the now-
             // stale signal trampoline; the new image's libc init

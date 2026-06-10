@@ -3958,8 +3958,10 @@ pub fn sys_process_exec_with_frame(
     };
 
     // Exec: validate ELF, tear down old AS, load new AS, set up stack,
-    // store argv/envp.
-    match exec_process(pid, &elf_copy, &argv_slices, &envp_slices) {
+    // store argv/envp.  This native exec variant takes raw ELF bytes with
+    // no filesystem path, so we pass None — exec_process clears any stale
+    // /proc/<pid>/exe path from the replaced image.
+    match exec_process(pid, &elf_copy, &argv_slices, &envp_slices, None) {
         Ok(result) => {
             // POSIX: exec resets caught signals to default and drops the
             // (now-stale) signal trampoline — the new image's libc init

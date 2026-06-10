@@ -64267,9 +64267,11 @@ fn cmd_run(args: &str) {
 
     crate::console_println!("Loading {} ({} bytes)...", path, elf_data.len());
 
-    // Spawn a new process from the ELF data.
+    // Spawn a new process from the ELF data.  `path` is the resolved
+    // absolute path of the binary; record it so /proc/<pid>/exe works.
     let name = args.rsplit('/').next().unwrap_or(args);
-    let options = crate::proc::spawn::SpawnOptions::new(name);
+    let options = crate::proc::spawn::SpawnOptions::new(name)
+        .exe_path(path.as_bytes());
 
     match crate::proc::spawn::spawn_process(&elf_data, &options) {
         Ok(result) => {

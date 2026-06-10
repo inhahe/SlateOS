@@ -1955,6 +1955,10 @@ extern "C" fn kernel_main() -> ! {
         fd_map: &[],
         argv: &[],
         envp: &[],
+        // init is a compiled-in (INIT_ELF) binary with no on-disk path, so
+        // we record no exe path rather than fabricate one to a file that
+        // may not exist; /proc/1/exe therefore reports NotFound.
+        exe_path: None,
     };
     match proc::spawn::spawn_process(INIT_ELF, &spawn_opts) {
         Ok(result) => {

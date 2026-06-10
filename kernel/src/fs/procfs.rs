@@ -559,11 +559,10 @@ const PID_FILES: &[&str] = &[
 /// - `root` → the process's filesystem root (always `/` here; we have no
 ///   per-process `chroot` / mount namespaces yet, so every process shares
 ///   the global VFS root).
-///
-/// `exe` is intentionally absent: it requires capturing the resolved
-/// executable path in the ELF loader at `exec` time, which we do not yet
-/// record.  See `todo.txt` (procfs `/proc/<pid>/exe`).
-const PID_LINKS: &[&str] = &["cwd", "root"];
+/// - `exe`  → the resolved absolute path of the executable image,
+///   captured at spawn/`exec` time (empty until the process has loaded a
+///   binary, in which case the link reports `NotFound`).
+const PID_LINKS: &[&str] = &["cwd", "root", "exe"];
 
 // ---------------------------------------------------------------------------
 // Content generators
@@ -10886,6 +10885,17 @@ impl FileSystem for ProcFs {
                     .ok_or(KernelError::NotFound)?;
                 String::from_utf8(cwd).map_err(|_| KernelError::InvalidArgument)
             }
+            ProcPath::PidLink(pid, "exe") => {
+                // Empty path means the process has not exec'd a binary
+                // (e.g. a bare scheduler task or a not-yet-exec'd child):
+                // Linux reports no /proc/<pid>/exe target in that case.
+                let exe = crate::proc::pcb::get_exe_path(pid)
+                    .ok_or(KernelError::NotFound)?;
+                if exe.is_empty() {
+                    return Err(KernelError::NotFound);
+                }
+                String::from_utf8(exe).map_err(|_| KernelError::InvalidArgument)
+            }
             ProcPath::PidLink(_, _) => Err(KernelError::NotFound),
             _ => Err(KernelError::InvalidArgument),
         }
@@ -11235,6 +11245,40 @@ pub fn self_test() -> KernelResult<()> {
         }
         Err(e) => {
             serial_println!("[procfs]   FAIL: cwd readlink unexpected error {:?}", e);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // /proc/<pid>/exe — symlink to the executable image.  The self-test
+    // task is a bare kernel task that never exec'd a binary, so NotFound
+    // is the expected, correct outcome; when it does resolve (a real
+    // exec'd process), the target must be an absolute path.  Reading the
+    // link's bytes directly must be rejected, and lstat must report a
+    // symlink regardless.
+    let exe_lstat = fs.stat(&format!("/{current_tid}/exe"))?;
+    if exe_lstat.entry_type != EntryType::Symlink {
+        serial_println!("[procfs]   FAIL: exe not a symlink ({:?})", exe_lstat.entry_type);
+        return Err(KernelError::InternalError);
+    }
+    if fs.read_file(&format!("/{current_tid}/exe")) != Err(KernelError::InvalidArgument) {
+        serial_println!("[procfs]   FAIL: read_file on exe symlink should be InvalidArgument");
+        return Err(KernelError::InternalError);
+    }
+    match fs.readlink(&format!("/{current_tid}/exe")) {
+        Ok(target) => {
+            if !target.starts_with('/') {
+                serial_println!("[procfs]   FAIL: exe target {:?} not absolute", target);
+                return Err(KernelError::InternalError);
+            }
+            serial_println!("[procfs]   {}/exe -> {:?} OK", current_tid, target);
+        }
+        Err(KernelError::NotFound) => {
+            serial_println!(
+                "[procfs]   {}/exe: NotFound (task never exec'd a binary) OK", current_tid
+            );
+        }
+        Err(e) => {
+            serial_println!("[procfs]   FAIL: exe readlink unexpected error {:?}", e);
             return Err(KernelError::InternalError);
         }
     }

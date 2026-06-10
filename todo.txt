@@ -6,27 +6,21 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
-## DEFERRED (2026-06-10): /proc/<pid>/exe symlink
-## procfs now serves /proc/<pid>/cwd and /proc/<pid>/root as real
-## symlinks (kernel/src/fs/procfs.rs: PID_LINKS, ProcPath::PidLink,
-## readlink()).  /proc/<pid>/exe is NOT yet provided because it needs
-## the resolved executable path captured at exec time.
-##   WHAT'S MISSING: the ELF loader / exec path does not record the
-##     absolute path of the loaded binary into the PCB.  There is no
-##     `exe_path` field on Process (kernel/src/proc/pcb.rs).
-##   PROPER FIX:
-##     1. Add `pub exe_path: Vec<u8>` to Process (bytes, not String —
-##        paths may hold any byte except '/' and NUL).  Inherit on fork
-##        (clone), and OVERWRITE on exec (not inherited across exec).
-##     2. In the exec/ELF-load path, store the canonicalised path of the
-##        binary being loaded into exe_path before entering userspace.
-##     3. Add "exe" to PID_LINKS and a readlink arm returning exe_path
-##        (String::from_utf8 -> InvalidArgument on non-UTF-8, same policy
-##        as the cwd link).
-##   WHY DEFERRED: touches the exec code path; flagged for the operator
-##     to confirm before modifying the loader.  cwd/root were landed
-##     because their data already lives in the PCB (Process::cwd) and the
-##     root is trivially "/".  This is a clean, additive follow-up.
+## DONE (2026-06-10): /proc/<pid>/exe symlink
+## procfs serves /proc/<pid>/{cwd,root,exe} as real symlinks
+## (kernel/src/fs/procfs.rs: PID_LINKS, ProcPath::PidLink, readlink()).
+## exe is backed by Process::exe_path (kernel/src/proc/pcb.rs): a Vec<u8>
+## inherited on fork and overwritten/cleared on exec.  Captured at spawn
+## via SpawnOptions::exe_path (shell `run` passes the resolved path) and
+## at exec via exec_process(.., exe_path) — linux_execve canonicalises the
+## filename against the process cwd; the native raw-bytes exec passes None
+## (clears the stale path).  Operator approved on 2026-06-10.
+##   KNOWN LIMITATION: the native raw-ELF spawn syscall (sys_process_spawn)
+##     and exec-with-frame have no filesystem path, so binaries launched
+##     that way report /proc/<pid>/exe = NotFound.  This is correct given
+##     no path exists; when path-based spawn lands (see the "final
+##     implementation" note in handlers.rs::sys_process_spawn), thread the
+##     resolved path into SpawnOptions::exe_path there too.
 
 ## ARCHITECTURAL CONSTRAINT (user, 2026-06-06): Linux compat layer
 ## must NOT reshape the native OS.

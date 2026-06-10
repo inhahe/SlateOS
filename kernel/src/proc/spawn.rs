@@ -254,6 +254,16 @@ pub struct SpawnOptions<'a> {
     ///
     /// An empty slice means no environment (the default).
     pub envp: &'a [&'a [u8]],
+    /// Resolved absolute path of the executable, stored to back
+    /// `/proc/<pid>/exe`.
+    ///
+    /// `None` (the default) means the caller has no path to record (e.g.
+    /// the spawn syscall, which today takes raw ELF bytes with no
+    /// filesystem path); in that case `/proc/<pid>/exe` reports
+    /// `NotFound`.  The shell's `run` command and the init loader pass
+    /// the canonical path they loaded the binary from.  Bytes, not
+    /// `&str`: a path may contain any byte except `/` and NUL.
+    pub exe_path: Option<&'a [u8]>,
 }
 
 impl<'a> SpawnOptions<'a> {
@@ -268,7 +278,16 @@ impl<'a> SpawnOptions<'a> {
             fd_map: &[],
             argv: &[],
             envp: &[],
+            exe_path: None,
         }
+    }
+
+    /// Set the resolved executable path (backs `/proc/<pid>/exe`).
+    #[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.
+    #[must_use]
+    pub fn exe_path(mut self, path: &'a [u8]) -> Self {
+        self.exe_path = Some(path);
+        self
     }
 
     /// Set the parent process.
@@ -655,6 +674,18 @@ pub fn spawn_process(
         }
     }
 
+    // Record the executable path (backs /proc/<pid>/exe) when the caller
+    // supplied one.  Best-effort: a malformed path or a missing PCB only
+    // means /proc/<pid>/exe reports NotFound — never fail the spawn.
+    if let Some(path) = options.exe_path {
+        if let Err(e) = pcb::set_exe_path(pid, path.to_vec()) {
+            serial_println!(
+                "[spawn] Failed to record exe path for process {}: {:?}",
+                pid, e,
+            );
+        }
+    }
+
     // Step 6: Create the entry info struct (heap-allocated, freed by
     // the trampoline when the thread first runs) and spawn the
     // initial thread.
@@ -738,6 +769,10 @@ pub fn spawn_process(
 /// - `elf_data` — raw bytes of the new ELF64 executable.
 /// - `argv` — command-line arguments for the new process image.
 /// - `envp` — environment variables for the new process image.
+/// - `exe_path` — resolved absolute path of the new image, recorded to
+///   back `/proc/<pid>/exe`.  `None` leaves the previous value cleared
+///   (the exec replaces the image, so a stale path would be wrong); an
+///   absolute path overwrites it.
 ///
 /// The argv/envp data is stored in the PCB (replacing any previous
 /// values) and can be read by the new binary via
@@ -754,6 +789,7 @@ pub fn exec_process(
     elf_data: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
+    exe_path: Option<&[u8]>,
 ) -> KernelResult<ExecResult> {
     // Step 1: Parse and validate the ELF binary BEFORE tearing down
     // the old address space.  If the ELF is bad, the process keeps
@@ -962,6 +998,21 @@ pub fn exec_process(
                 argv.len(), envp.len(), pid,
             );
         }
+    }
+
+    // Record the new image's path for /proc/<pid>/exe.  exec replaces the
+    // image, so we always overwrite: a supplied absolute path takes
+    // effect; otherwise the previous (now-stale) path is cleared so the
+    // link reports NotFound rather than the old binary.  Best-effort.
+    if let Some(path) = exe_path {
+        if let Err(e) = pcb::set_exe_path(pid, path.to_vec()) {
+            serial_println!(
+                "[exec] Failed to record exe path for process {}: {:?}",
+                pid, e,
+            );
+        }
+    } else {
+        pcb::clear_exe_path(pid);
     }
 
     serial_println!(
@@ -1226,6 +1277,7 @@ fn test_spawn_with_capabilities() -> KernelResult<()> {
         fd_map: &[],
         argv: &[],
         envp: &[],
+        exe_path: None,
     };
 
     let result = spawn_process(&elf_data, &options)?;

@@ -352,6 +352,21 @@ pub struct Process {
     /// the field is cheap (one heap allocation per process) and keeps
     /// fork's structural invariant simple: every child inherits.
     pub cwd: Vec<u8>,
+    /// Resolved absolute path of the executable image, stored as bytes.
+    ///
+    /// Backs `/proc/<pid>/exe` (a magic symlink in Linux).  Captured at
+    /// `exec` time by the ELF loader, which writes the canonical path of
+    /// the binary it loaded.  Empty until the process has exec'd a binary
+    /// (e.g. a freshly kernel-spawned task or a forked child that has not
+    /// yet `execve`d), in which case `/proc/<pid>/exe` reports `NotFound`,
+    /// matching Linux's behaviour for a process with no mm-backed exe.
+    ///
+    /// Lifecycle differs from [`Self::cwd`]: `exe_path` is **inherited on
+    /// `fork`** (clone — the child runs the same image until it execs) but
+    /// **overwritten on `exec`** (exec replaces the image, so the path is
+    /// not carried across the exec boundary).  Stored as bytes because a
+    /// path may contain any byte except `/` and NUL.
+    pub exe_path: Vec<u8>,
     /// Per-process Linux resource limits.
     ///
     /// Indexed by `RLIMIT_*` resource number (0..=15).  Each entry is
@@ -953,6 +968,8 @@ impl Process {
             // Every process starts at the filesystem root.  `chdir`
             // changes this; `fork_create` clones the parent's value.
             cwd: alloc::vec![b'/'],
+            // Empty until the ELF loader records the exec'd binary's path.
+            exe_path: Vec::new(),
             // Compiled-in Linux rlimit defaults; modified per-process
             // by setrlimit / prlimit64 and inherited across fork.
             rlimits: DEFAULT_RLIMITS,
@@ -1192,6 +1209,7 @@ pub fn fork_create(
         linux_ioprio,
         proc_argv,
         proc_envp,
+        exe_path,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1237,6 +1255,9 @@ pub fn fork_create(
             // it execve's (Linux semantics).
             parent.proc_argv.clone(),
             parent.proc_envp.clone(),
+            // A forked child runs the same executable image until it
+            // execve's, so it inherits the parent's exe path.
+            parent.exe_path.clone(),
         )
     };
 
@@ -1299,6 +1320,9 @@ pub fn fork_create(
         // the shared argv/environ until the child execve's.
         proc_argv,
         proc_envp,
+        // Inherited from the parent: the child runs the same image until
+        // it execve's, at which point the loader overwrites this.
+        exe_path,
         // Linux/native ABI is a property of the loaded binary, so a
         // forked child speaks the same ABI as its parent.
         abi_mode,
@@ -1731,6 +1755,63 @@ pub fn set_cwd(pid: ProcessId, new_cwd: Vec<u8>) -> KernelResult<()> {
         .ok_or(KernelError::NoSuchProcess)?;
     proc.cwd = new_cwd;
     Ok(())
+}
+
+/// Return a clone of the process's executable path, or `None` if the
+/// process does not exist.  An empty `Vec` means the process has not yet
+/// exec'd a binary (no `/proc/<pid>/exe` target).
+///
+/// Returns a cloned `Vec<u8>` because [`Process::exe_path`] lives inside
+/// the lock-protected table and references cannot escape the lock.
+#[must_use]
+pub fn get_exe_path(pid: ProcessId) -> Option<Vec<u8>> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.exe_path.clone())
+}
+
+/// Record the resolved absolute path of the executable a process has
+/// loaded, backing `/proc/<pid>/exe`.
+///
+/// Called by the ELF loader at `exec` time with the canonical path of
+/// the binary being loaded.  Overwrites any prior value (exec replaces
+/// the image; the path is not carried across the exec boundary).  Stored
+/// as raw bytes — a path may contain any byte except `/` and NUL.
+///
+/// Performs a shallow sanity check: the path must be non-empty, start
+/// with `b'/'` (absolute), and contain no interior NULs.  The caller is
+/// responsible for full canonicalisation.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` is not in the table.
+/// - [`KernelError::InvalidArgument`] if `path` is empty, not absolute,
+///   or contains an interior NUL.
+pub fn set_exe_path(pid: ProcessId, path: Vec<u8>) -> KernelResult<()> {
+    if path.is_empty() || path[0] != b'/' {
+        return Err(KernelError::InvalidArgument);
+    }
+    if path.iter().any(|&b| b == 0) {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+    proc.exe_path = path;
+    Ok(())
+}
+
+/// Clear a process's recorded executable path.
+///
+/// Used on `exec` when the caller supplied no path: the old path refers
+/// to the now-replaced image and must not survive, so we drop it and
+/// `/proc/<pid>/exe` reports `NotFound` until a path is recorded.
+/// No-op if the process does not exist.
+pub fn clear_exe_path(pid: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.exe_path.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------

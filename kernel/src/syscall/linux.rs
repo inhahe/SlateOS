@@ -31215,25 +31215,19 @@ fn sys_futimesat(args: &SyscallArgs) -> SyscallResult {
 ///   * futex_requeue(NULL, 1, 0, 0)        Linux: EINVAL  Pre: EFAULT
 ///     (NULL check fired before
 ///     flag-mask check.)
-///   * futex_requeue(waiters, 0, -1, -1)   Linux: 0 (or ENOSYS via
-///     our terminal)
-///     Pre:   EINVAL
+///   * futex_requeue(waiters, 0, -1, -1)   Linux: 0          Pre: EINVAL
 ///
-/// We don't have futex_requeue plumbed through ipc::futex yet, so
-/// the terminal stays at ENOSYS.  That's a known limitation, not a
-/// translator-layer divergence — userspace probes that see ENOSYS
-/// fall back to a wake-and-rewait loop, which works.
+/// Now wired into `ipc::futex::futex_cmp_requeue`.  Linux passes
+/// `futexes[0].val` as the compare value (a `FUTEX_CMP_REQUEUE`-style
+/// `*uaddr1 == cmpval` check) and `futexes[0].uaddr` / `futexes[1].uaddr`
+/// as the source/destination words.  Negative `nr_wake` / `nr_requeue`
+/// are clamped to 0 to reproduce Linux's `++ret >= nr` early-break
+/// (an `int` that's negative makes the loop terminate immediately, i.e.
+/// "wake/requeue nothing"), rather than wrapping into a huge `u32`.
 fn sys_futex2_requeue(args: &SyscallArgs) -> SyscallResult {
     let waiters = args.arg0;
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg1 as u32;
-    // nr_wake / nr_requeue are int per the Linux signature.  We
-    // don't reject negative values — Linux's futex_requeue treats
-    // them as "wake/requeue at most nothing" and returns benign 0.
-    // Since our terminal is ENOSYS, the nr values are ultimately
-    // unused, but reading them keeps the C ABI surface honest.
-    let _nr_wake = args.arg2 as i32;
-    let _nr_requeue = args.arg3 as i32;
 
     // Gate 1: flags must be 0 (Linux 6.7+ defines no flag bits).
     if flags != 0 {
@@ -31244,19 +31238,94 @@ fn sys_futex2_requeue(args: &SyscallArgs) -> SyscallResult {
     if waiters == 0 {
         return linux_err(errno::EINVAL);
     }
-    // Gate 3: futex_parse_waitv would copy_from_user the 2-entry
-    // array (48 bytes) and validate each entry's flags.  We do the
-    // copy-readability check here as the EFAULT-emitting gate; the
-    // per-entry flag validation is unused because we terminate at
-    // ENOSYS.
+    // Gate 3: copy_from_user the 2-entry futex_waitv array (48 bytes)
+    // and validate each entry's flags (futex_parse_waitv equivalent).
     if let Err(e) = crate::mm::user::validate_user_read(waiters, 48) {
         return linux_err(linux_errno_for(e));
     }
-    // Terminal: requeue is not wired into ipc::futex.  Linux
-    // userspace probes interpret ENOSYS as "this kernel doesn't
-    // support futex_requeue" and fall back to FUTEX_WAKE +
-    // pthread_cond rewait, which is correct.
-    linux_err(errno::ENOSYS)
+
+    // struct futex_waitv { __u64 val; __u64 uaddr; __u32 flags; __u32 __reserved; }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct FutexWaitv {
+        val: u64,
+        uaddr: u64,
+        flags: u32,
+        __reserved: u32,
+    }
+    let mut entries = [FutexWaitv { val: 0, uaddr: 0, flags: 0, __reserved: 0 }; 2];
+    // SAFETY: validate_user_read proved the 48-byte range is mapped
+    // readable; copy_from_user re-validates under SMAP and writes into a
+    // kernel-owned buffer of matching size (2 × 24 = 48 bytes).
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(
+            waiters,
+            entries.as_mut_ptr().cast::<u8>(),
+            48,
+        )
+    } {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Per-entry flag validation, identical to the futex_waitv wait path.
+    const FUTEX2_SIZE_MASK: u32 = 0x03;
+    const FUTEX2_SIZE_U32: u32 = 0x02;
+    const FUTEX2_NUMA: u32 = 0x04;
+    const FUTEX2_PRIVATE: u32 = 0x80;
+    const FUTEX2_VALID_MASK: u32 = FUTEX2_SIZE_MASK | FUTEX2_NUMA | FUTEX2_PRIVATE;
+    for entry in &entries {
+        if entry.__reserved != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        if (entry.flags & !FUTEX2_VALID_MASK) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        if (entry.flags & FUTEX2_SIZE_MASK) != FUTEX2_SIZE_U32 {
+            return linux_err(errno::EINVAL);
+        }
+        if (entry.flags & FUTEX2_NUMA) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+    }
+
+    // SAFETY/bounds: entries has exactly 2 elements (fixed-size array),
+    // so indices 0 and 1 are always valid.
+    let (addr1, addr2, cmpval) = {
+        let e0 = &entries[0];
+        let e1 = &entries[1];
+        #[allow(clippy::cast_possible_truncation)]
+        let cmp = e0.val as u32;
+        (e0.uaddr, e1.uaddr, cmp)
+    };
+
+    // The futex word is the same kind of user pointer the wait path
+    // validates: addr1 is read for the compare, addr2 is a wait-queue key.
+    if let Err(e) = crate::mm::user::validate_user_read(addr1, 4) {
+        return linux_err(linux_errno_for(e));
+    }
+    if addr2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_ptr(addr2) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+
+    let max_wake = clamp_futex_nr(args.arg2);
+    let max_requeue = clamp_futex_nr(args.arg3);
+
+    match crate::ipc::futex::futex_cmp_requeue(addr1, addr2, max_wake, max_requeue, cmpval) {
+        Ok(n) => SyscallResult::ok(i64::from(n)),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// Clamp a Linux `int` futex count argument (passed in a `u64` register)
+/// to a `u32` waiter count.  A negative `int` means "wake/requeue
+/// nothing" in Linux (the `++ret >= nr` loop terminates immediately), so
+/// negatives map to 0 rather than wrapping to a huge `u32`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn clamp_futex_nr(raw: u64) -> u32 {
+    let signed = raw as i32;
+    if signed < 0 { 0 } else { signed as u32 }
 }
 
 /// `lsm_list_modules(ids*, size*, flags)`.
@@ -32293,16 +32362,27 @@ fn sys_time(args: &SyscallArgs) -> SyscallResult {
 ///   When per-waiter bitmask state is added to the futex layer this
 ///   becomes a one-line change.
 ///
-/// All other operations return `-ENOSYS`.  Known absent: `FUTEX_REQUEUE`
-/// / `FUTEX_CMP_REQUEUE` / `FUTEX_WAKE_OP` (need atomic-on-uaddr2),
-/// `FUTEX_LOCK_PI` / `FUTEX_UNLOCK_PI` / `FUTEX_LOCK_PI2` /
-/// `FUTEX_TRYLOCK_PI` / `FUTEX_WAIT_REQUEUE_PI` / `FUTEX_CMP_REQUEUE_PI`
-/// (PI futex routing through `handlers::sys_futex_lock_pi` would be a
-/// straightforward follow-up but requires the FUTEX-encoded owner-tid
-/// invariant on uaddr).
+/// - `FUTEX_REQUEUE` (3): wake up to `val` waiters on `uaddr`, then
+///   requeue up to `val2` (the overloaded `utime`/`timeout` argument
+///   slot, read as an integer) of the remaining waiters onto `uaddr2`.
+///   No value compare.
+/// - `FUTEX_CMP_REQUEUE` (4): like `FUTEX_REQUEUE` but first checks
+///   `*uaddr == val3` atomically under the futex lock; a mismatch yields
+///   `-EAGAIN` and touches nothing.  This is the form glibc's
+///   `pthread_cond_broadcast` uses to move waiters from the condvar word
+///   onto the associated mutex word without a thundering-herd wakeup.
+///
+/// All other operations return `-ENOSYS`.  Known absent: `FUTEX_WAKE_OP`
+/// (needs an atomic RMW on uaddr2), `FUTEX_LOCK_PI` / `FUTEX_UNLOCK_PI` /
+/// `FUTEX_LOCK_PI2` / `FUTEX_TRYLOCK_PI` / `FUTEX_WAIT_REQUEUE_PI` /
+/// `FUTEX_CMP_REQUEUE_PI` (PI futex routing through
+/// `handlers::sys_futex_lock_pi` would be a straightforward follow-up but
+/// requires the FUTEX-encoded owner-tid invariant on uaddr).
 fn sys_futex(args: &SyscallArgs) -> SyscallResult {
     const FUTEX_WAIT: u64 = 0;
     const FUTEX_WAKE: u64 = 1;
+    const FUTEX_REQUEUE: u64 = 3;
+    const FUTEX_CMP_REQUEUE: u64 = 4;
     const FUTEX_WAIT_BITSET: u64 = 9;
     const FUTEX_WAKE_BITSET: u64 = 10;
     const FUTEX_PRIVATE_FLAG: u64 = 0x80;
@@ -32361,6 +32441,49 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                 arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
             };
             linux_from_native(handlers::sys_futex_wake(&a))
+        }
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            // Classic argument overload: `val` (arg2) is nr_wake, the
+            // `utime`/`timeout` slot (arg3) carries nr_requeue (val2) as a
+            // plain integer (NOT a pointer), `uaddr2` (arg4) is the requeue
+            // target, and `val3` (arg5) is the compare value for the CMP
+            // variant.  Negative nr values mean "do nothing" in Linux, so
+            // clamp them rather than wrapping to a huge u32.
+            let addr2 = args.arg4;
+            let max_wake = clamp_futex_nr(val);
+            let max_requeue = clamp_futex_nr(timeout_ptr);
+
+            // addr2 is a wait-queue key; validate when it participates.
+            if addr2 != 0 {
+                if let Err(e) = crate::mm::user::validate_user_ptr(addr2) {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+
+            if op == FUTEX_CMP_REQUEUE {
+                // The compare reads *uaddr, so it must be readable.
+                if let Err(e) = crate::mm::user::validate_user_read(uaddr, 4) {
+                    return linux_err(linux_errno_for(e));
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                let cmpval = val3 as u32;
+                match crate::ipc::futex::futex_cmp_requeue(
+                    uaddr, addr2, max_wake, max_requeue, cmpval,
+                ) {
+                    Ok(n) => SyscallResult::ok(i64::from(n)),
+                    Err(e) => linux_err(linux_errno_for(e)),
+                }
+            } else {
+                // Plain FUTEX_REQUEUE: no compare, but uaddr is still a
+                // wait-queue key that must be a valid user pointer.
+                if let Err(e) = crate::mm::user::validate_user_ptr(uaddr) {
+                    return linux_err(linux_errno_for(e));
+                }
+                let n = crate::ipc::futex::futex_requeue(
+                    uaddr, addr2, max_wake, max_requeue,
+                );
+                SyscallResult::ok(i64::from(n))
+            }
         }
         FUTEX_WAIT_BITSET => {
             // Linux: bitmask must be non-zero — a zero mask could never
@@ -60540,6 +60663,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: FUTEX unknown op not ENOSYS");
                 return Err(KernelError::InternalError);
             }
+            // FUTEX_REQUEUE (op=3): no waiters, uaddr2=0 (wake-only),
+            // val=nr_wake=1, arg3=nr_requeue=0 -> 0.  Argument overload:
+            // arg2=val(nr_wake), arg3=val2(nr_requeue), arg4=uaddr2.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: 3,
+                arg2: 1, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_REQUEUE no-waiters not 0");
+                return Err(KernelError::InternalError);
+            }
+            // FUTEX_CMP_REQUEUE (op=4): val3 (arg5) is the compare value.
+            // *futex_ptr == 0, so cmpval=0 matches -> proceeds, 0 waiters
+            // -> 0.
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: 4,
+                arg2: 1, arg3: 0, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE match not 0");
+                return Err(KernelError::InternalError);
+            }
+            // FUTEX_CMP_REQUEUE with stale cmpval=1 != *futex_ptr(0)
+            // -> EAGAIN (the broadcast race-detection path).
+            let a = SyscallArgs {
+                arg0: futex_ptr, arg1: 4,
+                arg2: 1, arg3: 0, arg4: 0, arg5: 1,
+            };
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_CMP_REQUEUE mismatch not EAGAIN");
+                return Err(KernelError::InternalError);
+            }
             // Regression: FUTEX_WAKE with no waiters -> 0.
             let a = SyscallArgs {
                 arg0: futex_ptr, arg1: FUTEX_WAKE_OP,
@@ -67672,10 +67827,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: futex_requeue flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // futex_requeue valid -> ENOSYS.
+        // futex_requeue with a well-formed 2-entry waitv.  Each entry is
+        // 24 bytes: { u64 val, u64 uaddr, u32 flags, u32 __reserved }.  As
+        // a [u64; 3]: [val, uaddr, flags|(reserved<<32)].  entry0 targets
+        // u32_ptr (current value 0) with FUTEX2_SIZE_U32; entry1's uaddr
+        // is 0 (wake-only — no requeue target).  With no waiters queued
+        // and the compare value (entry0.val=0) matching *u32_ptr, the call
+        // wakes 0 and requeues 0 -> returns 0.
+        let valid_waitv: [u64; 6] = [
+            0, u32_ptr, F2_SIZE_U32,
+            0, 0, F2_SIZE_U32,
+        ];
+        let valid_waitv_ptr = (&raw const valid_waitv[0]) as u64;
+        core::hint::black_box(&valid_waitv);
+        let a = SyscallArgs { arg0: valid_waitv_ptr, arg1: 0, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue valid no-waiters not 0");
+            return Err(KernelError::InternalError);
+        }
+        // Compare-value mismatch: entry0.val=1 but *u32_ptr=0 -> EAGAIN.
+        // (futex2 requeue carries CMP_REQUEUE semantics via futexes[0].val.)
+        let mismatch_waitv: [u64; 6] = [
+            1, u32_ptr, F2_SIZE_U32,
+            0, 0, F2_SIZE_U32,
+        ];
+        let mismatch_waitv_ptr = (&raw const mismatch_waitv[0]) as u64;
+        core::hint::black_box(&mismatch_waitv);
+        let a = SyscallArgs { arg0: mismatch_waitv_ptr, arg1: 0, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::EAGAIN) {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue cmp mismatch not EAGAIN");
+            return Err(KernelError::InternalError);
+        }
+        // All-zero entries fail the size-class gate (flags 0 != SIZE_U32)
+        // -> EINVAL, before any wake/requeue work.
         let a = SyscallArgs { arg0: waiters_ptr, arg1: 0, arg2: 1, arg3: 1, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: futex_requeue valid not ENOSYS");
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue bad-size not EINVAL");
             return Err(KernelError::InternalError);
         }
 
@@ -67699,19 +67886,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: futex_requeue NULL+bad-flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // futex_requeue(waiters, 0, nr_wake=u64::MAX, nr_requeue=u64::MAX)
-        // -> ENOSYS (negative-as-signed nr values are benign per Linux;
-        // pre-batch returned EINVAL).
+        // futex_requeue(valid_waitv, 0, nr_wake=u64::MAX, nr_requeue=u64::MAX)
+        // -> 0.  Negative-as-signed nr values clamp to 0 (Linux's
+        // `++ret >= nr` early-break), so with no waiters nothing happens.
+        // Using valid_waitv ensures we exercise the clamp path, not the
+        // size-class gate.
         let a = SyscallArgs {
-            arg0: waiters_ptr, arg1: 0,
+            arg0: valid_waitv_ptr, arg1: 0,
             arg2: u64::MAX, arg3: u64::MAX, arg4: 0, arg5: 0,
         };
-        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: futex_requeue nr<0 not ENOSYS");
+        if dispatch_linux(nr::FUTEX_REQUEUE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: futex_requeue nr<0 not 0");
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   futex2_requeue NULL-EINVAL + nr<0 benign: OK"
+            "[syscall/linux]   futex2_requeue valid/EAGAIN/NULL-EINVAL + nr<0 benign: OK"
         );
     }
 

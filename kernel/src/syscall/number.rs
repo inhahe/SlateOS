@@ -703,6 +703,20 @@ pub const SYS_FUTEX_UNLOCK_PI: u64 = 213;
 /// `TimedOut` if timeout expired.
 pub const SYS_FUTEX_WAIT_TIMEOUT: u64 = 214;
 
+/// Wake up to `max_wake` waiters on one futex, then requeue up to
+/// `max_requeue` of the remaining waiters onto a second futex.
+///
+/// `arg0`: source futex address (`addr1`).
+/// `arg1`: destination futex address (`addr2`; 0 = wake-only).
+/// `arg2`: maximum number of waiters to wake from `addr1`.
+/// `arg3`: maximum number of waiters to requeue to `addr2`.
+///
+/// Returns: total tasks affected (woken + requeued).  This is the
+/// primitive behind condition-variable broadcast (`pthread_cond_*`):
+/// it moves waiters from the condvar futex to the mutex futex instead
+/// of waking them all at once.
+pub const SYS_FUTEX_REQUEUE: u64 = 215;
+
 /// Create a one-way pipe.
 ///
 /// Returns two handles packed into `rax` (read end) and `rdx` (write end).

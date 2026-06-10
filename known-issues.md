@@ -14,7 +14,31 @@ work that should be done now."
 
 ## Active Bugs
 
-_(No active bugs.  The two prior watchlist items — accounting
+### W1. Intermittent boot-test hang recurred once at the OOM self-test — WATCHLIST 2026-06-10
+
+**Where:** boot self-test sequence; serial output (`build/serial-test.txt`)
+truncated mid-line at `[sysctl] mm.oom_pol…` during `mm::oom::self_test()`
+Test 3 (the `register_kill_callback` / `handle_oom(10)` step).
+
+**Symptom:** One boot-test run did not reach `BOOT_OK` within 300s; serial
+stopped mid-line inside the OOM self-test.  The very next run (identical
+binary) reached `BOOT_OK` in 26s with the full OOM test passing.
+
+**Assessment:** Same class as F1/F6/F7 — an intermittent hang that
+truncates serial mid-line at whatever self-test happens to be running,
+historically traced to spin::Mutex / interrupt-window / RCU timing rather
+than the self-test's own logic.  `mm::oom::self_test()` and `handle_oom()`
+are fully synchronous (no spawning, no blocking, fake kill callback), so
+the OOM code is almost certainly the *victim*, not the *cause*.  This is
+the first recorded recurrence since the F6/F7 "likely cured incidentally"
+closure (128/128 prior clean boots), so it is logged here rather than
+re-opening F6/F7.
+
+**Next step if it recurs:** soak `scripts/boot-test.sh` ~20× to get a
+recurrence rate and bisect the hang window the way F1/F4 were diagnosed
+(finer-grained pre/post serial markers around the suspected lock).
+
+_(No other active bugs.  The two prior watchlist items — accounting
 self-test hang and invariant self-test hang — went 90 consecutive
 boot tests with zero recurrence after F4/F5 and have been closed as
 "likely cured incidentally," and as of 2026-06-10 a further 38 clean

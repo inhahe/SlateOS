@@ -302,17 +302,43 @@ pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelRe
         let mut table = FUTEX_TABLE.lock();
         let idx = FutexTable::bucket_index(addr, addr_space);
 
-        #[allow(clippy::indexing_slicing)]
-        let bucket = &mut table.buckets[idx];
-
         // If we're still in the bucket, the timer woke us (not futex_wake).
         // Match on both addr and addr_space to avoid false positives from
         // other processes that collide into the same bucket.
-        if let Some(pos) = bucket.iter().position(|w| {
-            w.task_id == current_task && w.addr == addr && w.addr_space == addr_space
-        }) {
-            bucket.remove(pos);
+        let found = {
+            // SAFETY: idx is masked to NUM_BUCKETS-1 by bucket_index.
+            #[allow(clippy::indexing_slicing)]
+            let bucket = &mut table.buckets[idx];
+            if let Some(pos) = bucket.iter().position(|w| {
+                w.task_id == current_task && w.addr == addr && w.addr_space == addr_space
+            }) {
+                bucket.remove(pos);
+                true
+            } else {
+                false
+            }
+        };
+
+        if found {
             was_timed_out = true;
+        } else {
+            // Not in the original bucket.  Either futex_wake removed us, or
+            // we were requeued to a *different* address (and thus a
+            // different bucket) by futex_requeue before the timer fired.  A
+            // requeued waiter carries the destination addr, so a search keyed
+            // on the original `addr` would miss it and leave a stale entry.
+            // Scan all buckets by task_id (scoped to our address space) and
+            // evict any lingering entry for this task.
+            for bucket in &mut table.buckets {
+                if let Some(pos) = bucket
+                    .iter()
+                    .position(|w| w.task_id == current_task && w.addr_space == addr_space)
+                {
+                    bucket.remove(pos);
+                    was_timed_out = true;
+                    break;
+                }
+            }
         }
     }
 
@@ -386,6 +412,188 @@ pub fn futex_wake(addr: u64, max_wake: u32) -> u32 {
     let result = wake_count as u32;
     super::stats::futex_wake(result);
     result
+}
+
+/// Wake up to `max_wake` waiters on `addr1`, then requeue up to
+/// `max_requeue` of the *remaining* waiters from `addr1` to `addr2`.
+///
+/// This is the kernel primitive behind Linux's `FUTEX_REQUEUE`,
+/// `FUTEX_CMP_REQUEUE`, and the futex2 `futex_requeue` syscall.  Its
+/// purpose is to avoid the "thundering herd" wakeup storm in
+/// condition-variable implementations: `pthread_cond_broadcast` wakes one
+/// waiter on the condvar's internal futex and *moves* the rest onto the
+/// associated mutex's futex, where they will be woken one at a time as the
+/// mutex is released.  Waking them all at once would have every waiter
+/// race for the mutex, with all but one immediately re-blocking.
+///
+/// Both addresses are interpreted in the caller's address space, so a
+/// process can only ever wake or move its own waiters (cross-process
+/// aliasing is prevented by the `addr_space` key, exactly as in
+/// [`futex_wake`]).
+///
+/// Returns the total number of tasks affected: woken + requeued (this
+/// matches Linux's `futex_requeue` return value).
+///
+/// # Arguments
+///
+/// - `addr1`: source futex address; waiters here are woken then requeued.
+/// - `addr2`: destination futex address; waiters are moved here.  If
+///   `addr2 == 0`, the requeue phase is skipped (wake-only behaviour).
+/// - `max_wake`: maximum number of waiters to wake from `addr1`.
+/// - `max_requeue`: maximum number of *remaining* waiters to move to
+///   `addr2`.
+pub fn futex_requeue(addr1: u64, addr2: u64, max_wake: u32, max_requeue: u32) -> u32 {
+    // No compare: requeue_inner never returns Err when `compare` is None,
+    // so the unwrap_or is a safe default and never actually taken.
+    requeue_inner(addr1, addr2, max_wake, max_requeue, None).unwrap_or(0)
+}
+
+/// Compare-and-requeue: the `FUTEX_CMP_REQUEUE` / futex2 variant.
+///
+/// Atomically (under the futex table lock) checks `*addr1 == expected`
+/// before doing any wake or requeue.  If the value has changed, returns
+/// `Err(WouldBlock)` (→ `EAGAIN`) and touches nothing — this is the race
+/// detection that lets `pthread_cond_broadcast` retry safely when another
+/// thread mutated the condvar word concurrently.
+///
+/// The caller must have validated that `addr1` is a readable user pointer.
+///
+/// Returns the total number of tasks affected on success.
+pub fn futex_cmp_requeue(
+    addr1: u64,
+    addr2: u64,
+    max_wake: u32,
+    max_requeue: u32,
+    expected: u32,
+) -> KernelResult<u32> {
+    requeue_inner(addr1, addr2, max_wake, max_requeue, Some(expected))
+}
+
+/// Shared body for [`futex_requeue`] and [`futex_cmp_requeue`].
+///
+/// When `compare` is `Some(v)`, `*addr1` is read under the table lock and
+/// checked against `v` before any state change; a mismatch yields
+/// `Err(WouldBlock)`.  When `compare` is `None`, no read occurs and the
+/// function always returns `Ok`.
+#[allow(clippy::arithmetic_side_effects)]
+fn requeue_inner(
+    addr1: u64,
+    addr2: u64,
+    max_wake: u32,
+    max_requeue: u32,
+    compare: Option<u32>,
+) -> KernelResult<u32> {
+    if addr1 == 0 {
+        return Ok(0);
+    }
+
+    let addr_space = current_addr_space();
+
+    // Collect task IDs to wake while holding the table lock, then wake
+    // them outside the lock to respect lock ordering (FUTEX_TABLE → SCHED).
+    let mut to_wake: [TaskId; 32] = [0; 32];
+    let mut wake_count: usize = 0;
+    let mut requeued: u32 = 0;
+
+    {
+        let mut table = FUTEX_TABLE.lock();
+        let idx1 = FutexTable::bucket_index(addr1, addr_space);
+
+        // Compare phase (CMP_REQUEUE only): the value check must happen
+        // under the same lock that guards the wake/requeue, so that a
+        // concurrent waker/setter cannot slip between the check and the
+        // dequeue.  Done before touching any queue so a mismatch leaves
+        // the table untouched.
+        if let Some(expected) = compare {
+            // SAFETY: the caller validated addr1 is a readable, aligned
+            // user pointer (4-byte futex word), mirroring the load in
+            // futex_wait_timeout which also reads under this lock.
+            let actual = unsafe {
+                let ptr = addr1 as *const AtomicU32;
+                (*ptr).load(Ordering::Acquire)
+            };
+            if actual != expected {
+                super::stats::futex_spurious();
+                return Err(KernelError::WouldBlock);
+            }
+        }
+
+        // Phase 1: wake up to max_wake waiters on addr1 (mirrors futex_wake).
+        {
+            // SAFETY: idx1 is masked to NUM_BUCKETS-1 by bucket_index.
+            #[allow(clippy::indexing_slicing)]
+            let bucket = &mut table.buckets[idx1];
+            let mut i = 0;
+            while i < bucket.len()
+                && wake_count < max_wake as usize
+                && wake_count < to_wake.len()
+            {
+                if let Some(waiter) = bucket.get(i)
+                    && waiter.addr == addr1
+                    && waiter.addr_space == addr_space
+                    && let Some(removed) = bucket.remove(i)
+                {
+                    if let Some(slot) = to_wake.get_mut(wake_count) {
+                        *slot = removed.task_id;
+                    }
+                    #[allow(clippy::arithmetic_side_effects)]
+                    {
+                        wake_count += 1;
+                    }
+                    // Don't increment i — the next element shifted down.
+                    continue;
+                }
+                #[allow(clippy::arithmetic_side_effects)]
+                {
+                    i += 1;
+                }
+            }
+        }
+
+        // Phase 2: requeue up to max_requeue of the remaining addr1 waiters
+        // onto addr2.  Re-borrow the source and destination buckets each
+        // iteration: addr1 and addr2 may hash to the same bucket, so we
+        // cannot hold two mutable borrows simultaneously.
+        if addr2 != 0 && max_requeue > 0 {
+            let idx2 = FutexTable::bucket_index(addr2, addr_space);
+            while requeued < max_requeue {
+                // Detach the next matching waiter from the source bucket.
+                let moved = {
+                    // SAFETY: idx1 is masked to NUM_BUCKETS-1.
+                    #[allow(clippy::indexing_slicing)]
+                    let b1 = &mut table.buckets[idx1];
+                    match b1
+                        .iter()
+                        .position(|w| w.addr == addr1 && w.addr_space == addr_space)
+                    {
+                        Some(p) => b1.remove(p),
+                        None => None,
+                    }
+                };
+                let Some(mut waiter) = moved else { break };
+                // Re-point the waiter at the destination futex so that a
+                // later wake/timeout on addr2 will find and match it.
+                waiter.addr = addr2;
+                // SAFETY: idx2 is masked to NUM_BUCKETS-1.
+                #[allow(clippy::indexing_slicing)]
+                table.buckets[idx2].push_back(waiter);
+                #[allow(clippy::arithmetic_side_effects)]
+                {
+                    requeued += 1;
+                }
+            }
+        }
+    }
+
+    // Wake the collected tasks outside the FUTEX_TABLE lock.
+    for task_id in to_wake.get(..wake_count).unwrap_or(&[]) {
+        sched::wake(*task_id);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let woken = wake_count as u32;
+    super::stats::futex_wake(woken);
+    Ok(woken.saturating_add(requeued))
 }
 
 // ---------------------------------------------------------------------------
@@ -793,6 +1001,7 @@ pub fn self_test() -> KernelResult<()> {
     test_wait_value_mismatch()?;
     test_wake_no_waiters()?;
     test_blocking_wait_wake()?;
+    test_requeue()?;
     test_priority_inheritance()?;
 
     serial_println!("[futex] Futex self-test PASSED");
@@ -878,6 +1087,93 @@ fn test_blocking_wait_wake() -> KernelResult<()> {
     }
 
     serial_println!("[futex]   Blocking wait + wake: OK");
+    Ok(())
+}
+
+/// Counter for the requeue self-test: each woken waiter increments it.
+static REQUEUE_WOKEN: AtomicU32 = AtomicU32::new(0);
+
+/// Waiter task for the requeue test.  Blocks on `addr` (value 1 at spawn
+/// time); on wake, bumps `REQUEUE_WOKEN`.
+extern "C" fn requeue_waiter_task(addr: u64) {
+    let _ = futex_wait(addr, 1);
+    REQUEUE_WOKEN.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Test 5: `futex_requeue` — wake one waiter on `addr1` and move the rest
+/// onto `addr2`, then drain `addr2`.  Also checks that a `CMP_REQUEUE`
+/// value mismatch reports `WouldBlock` (→ `EAGAIN`) without touching the
+/// queues.
+fn test_requeue() -> KernelResult<()> {
+    // (a) CMP_REQUEUE with a stale compare value must do nothing.
+    let guard = AtomicU32::new(5);
+    let guard_addr = (&raw const guard) as u64;
+    let sink = AtomicU32::new(0);
+    let sink_addr = (&raw const sink) as u64;
+    match futex_cmp_requeue(guard_addr, sink_addr, 1, u32::MAX, 6) {
+        Err(KernelError::WouldBlock) => {}
+        result => {
+            serial_println!(
+                "[futex]   FAIL: cmp_requeue mismatch returned {:?}",
+                result
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (b) Functional requeue: three waiters on addr1, wake 1, requeue 2.
+    REQUEUE_WOKEN.store(0, Ordering::SeqCst);
+    let word1 = AtomicU32::new(1);
+    let addr1 = (&raw const word1) as u64;
+    let word2 = AtomicU32::new(1);
+    let addr2 = (&raw const word2) as u64;
+
+    sched::spawn(b"futex-rq0", 16, requeue_waiter_task, addr1, 0)?;
+    sched::spawn(b"futex-rq1", 16, requeue_waiter_task, addr1, 0)?;
+    sched::spawn(b"futex-rq2", 16, requeue_waiter_task, addr1, 0)?;
+
+    // Let all three block on addr1.
+    sched::yield_now();
+    sched::yield_now();
+    sched::yield_now();
+    sched::yield_now();
+
+    // Wake exactly one; requeue the remaining two onto addr2.  The table
+    // lock is held for the whole operation, so no waiter can run (and
+    // self-remove) mid-requeue: all three are accounted for here.
+    let affected = futex_requeue(addr1, addr2, 1, u32::MAX);
+    if affected != 3 {
+        serial_println!("[futex]   FAIL: requeue affected={} (expected 3)", affected);
+        return Err(KernelError::InternalError);
+    }
+
+    // Let the single woken waiter run and report.
+    sched::yield_now();
+    sched::yield_now();
+    let after_wake = REQUEUE_WOKEN.load(Ordering::SeqCst);
+    if after_wake != 1 {
+        serial_println!(
+            "[futex]   FAIL: after requeue woken={} (expected 1)",
+            after_wake
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Drain addr2: the two requeued waiters must be wakeable there.
+    let woken2 = futex_wake(addr2, u32::MAX);
+    if woken2 != 2 {
+        serial_println!("[futex]   FAIL: addr2 wake={} (expected 2)", woken2);
+        return Err(KernelError::InternalError);
+    }
+    sched::yield_now();
+    sched::yield_now();
+    let total = REQUEUE_WOKEN.load(Ordering::SeqCst);
+    if total != 3 {
+        serial_println!("[futex]   FAIL: total woken={} (expected 3)", total);
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[futex]   Requeue (wake 1 + requeue 2): OK");
     Ok(())
 }
 

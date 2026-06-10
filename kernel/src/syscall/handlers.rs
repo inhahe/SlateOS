@@ -1468,6 +1468,35 @@ pub fn sys_futex_wait_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_FUTEX_REQUEUE` — wake N waiters on `addr1`, requeue M to `addr2`.
+///
+/// `arg0`: source futex address (`addr1`).
+/// `arg1`: destination futex address (`addr2`; 0 = wake-only).
+/// `arg2`: maximum number of tasks to wake from `addr1`.
+/// `arg3`: maximum number of tasks to requeue to `addr2`.
+///
+/// Returns: total tasks affected (woken + requeued).
+pub fn sys_futex_requeue(args: &SyscallArgs) -> SyscallResult {
+    let addr1 = args.arg0;
+    let addr2 = args.arg1;
+    let max_wake = args.arg2 as u32;
+    let max_requeue = args.arg3 as u32;
+
+    // Both addresses serve as wait-queue keys.  Validate that addr1 is a
+    // user pointer; validate addr2 only when it participates (non-zero).
+    if let Err(e) = crate::mm::user::validate_user_ptr(addr1) {
+        return SyscallResult::err(e);
+    }
+    if addr2 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_ptr(addr2) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let affected = futex::futex_requeue(addr1, addr2, max_wake, max_requeue);
+    SyscallResult::ok(i64::from(affected))
+}
+
 /// `SYS_FUTEX_LOCK_PI` — lock a PI (Priority Inheritance) futex.
 ///
 /// `arg0`: pointer to 32-bit futex word (4-byte aligned).

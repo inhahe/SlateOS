@@ -13732,13 +13732,18 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          path (or in a futex-specific result wrapper).
 ##        * FUTEX_REQUEUE / FUTEX_CMP_REQUEUE (used by
 ##          pthread_cond_broadcast for the optimized requeue-batch path)
-##          still return -ENOSYS.  Implementing them needs a
-##          futex_requeue helper that atomically transfers waiters from
-##          one bucket to another while running the cmpval check.  The
-##          futex.rs bucket layout already supports this; what's
-##          missing is the requeue routine and its handler.  Deferred
-##          to a future batch focused on pthread_cond_broadcast
-##          throughput.
+##          — DONE.  ipc::futex now has futex_requeue() (no compare) and
+##          futex_cmp_requeue() (atomic *uaddr1==cmpval check under the
+##          FUTEX_TABLE lock, EAGAIN on mismatch).  Wired through classic
+##          sys_futex ops 3/4 (arg overload: val=nr_wake, utime slot=
+##          nr_requeue, uaddr2=target, val3=cmpval), futex2
+##          sys_futex2_requeue (futexes[0].val as cmpval, negative nr
+##          clamped to 0), and a native SYS_FUTEX_REQUEUE (215).  Also
+##          fixed futex_wait_timeout cleanup to scan all buckets for a
+##          requeued timed-waiter (it carries the destination addr, so a
+##          search keyed on the original addr would leave a stale entry).
+##          Self-tests: ipc/futex test_requeue (wake 1 + requeue 2 +
+##          cmp-mismatch EAGAIN) and syscall-layer classic/futex2 gating.
 ##        * FUTEX_WAKE_OP (atomic op-then-wake) still ENOSYS — used by
 ##          glibc's older condvar implementation but not by current
 ##          glibc (>= 2.25 dropped it).  Low-value to add.
@@ -13848,11 +13853,10 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          U64 futexes, this needs a wider WAIT handler in
 ##          ipc::futex (the value compare and wake bucket hash both
 ##          assume u32).
-##        * futex2_requeue still ENOSYS.  Same blocker as
-##          FUTEX_CMP_REQUEUE — needs a futex_requeue helper in
-##          ipc::futex that atomically transfers waiters between
-##          buckets while running the cmpval check.  Deferred to the
-##          same future batch.
+##        * futex2_requeue — DONE.  Wired to ipc::futex::futex_cmp_requeue
+##          (parses the 2-entry futex_waitv array, uses futexes[0].val as
+##          the cmpval, clamps negative nr_wake/nr_requeue to 0).  See the
+##          batch note under FUTEX_REQUEUE / FUTEX_CMP_REQUEUE above.
 ##        * NUMA path: returns ENOSYS rather than silently ignoring the
 ##          flag.  If callers fall back gracefully (Linux man page says
 ##          they should), this is the right answer; if they hard-fail,

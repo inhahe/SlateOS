@@ -54,6 +54,7 @@ use super::number::{
     SYS_FS_LIST_XATTRS,
     SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT,
     SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI,
+    SYS_FUTEX_REQUEUE,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
     SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
     SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_POLL,
@@ -298,6 +299,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FUTEX_WAIT as usize] = Some(handlers::sys_futex_wait);
     handlers[SYS_FUTEX_WAKE as usize] = Some(handlers::sys_futex_wake);
     handlers[SYS_FUTEX_WAIT_TIMEOUT as usize] = Some(handlers::sys_futex_wait_timeout);
+    handlers[SYS_FUTEX_REQUEUE as usize] = Some(handlers::sys_futex_requeue);
     handlers[SYS_FUTEX_LOCK_PI as usize] = Some(handlers::sys_futex_lock_pi);
     handlers[SYS_FUTEX_UNLOCK_PI as usize] = Some(handlers::sys_futex_unlock_pi);
     handlers[SYS_PIPE_CREATE as usize] = Some(handlers::sys_pipe_create);

@@ -170,9 +170,13 @@ pub fn get(hash: &Hash256) -> KernelResult<Vec<u8>> {
         // This should never happen in normal operation — indicates
         // memory corruption.
         drop(cas);
-        CAS.lock().integrity_failures = CAS.lock()
-            .integrity_failures
-            .saturating_add(1);
+        // Acquire the lock exactly once: `CAS.lock().x = CAS.lock().y` keeps
+        // both temporary guards alive until the statement ends, deadlocking
+        // the non-reentrant mutex on the second acquisition.
+        {
+            let mut inner = CAS.lock();
+            inner.integrity_failures = inner.integrity_failures.saturating_add(1);
+        }
         return Err(KernelError::CorruptedData);
     }
 

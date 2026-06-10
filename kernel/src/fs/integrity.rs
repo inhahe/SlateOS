@@ -455,9 +455,14 @@ pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
             if dir == "/" {
                 true // All paths under root.
             } else {
-                *p == dir
-                    || (p.starts_with(&prefix)
-                        && p.as_bytes().get(prefix.len()) == Some(&b'/'))
+                // `prefix` already ends with '/', so `starts_with(&prefix)`
+                // alone enforces the directory boundary (it won't match a
+                // sibling like "/tmp/dirX/..").  A previous extra check that
+                // the byte *at* prefix.len() was another '/' was wrong — it
+                // only matched double-slash paths, so no real file under the
+                // directory was ever included and "missing" detection in
+                // verify_dir silently never fired.
+                *p == dir || p.starts_with(&prefix)
             }
         })
         .map(|(p, e)| (p.clone(), e.hash, e.size))
@@ -592,9 +597,14 @@ pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
         }
     }
 
-    // Update verify count.
-    INTEGRITY.lock().verify_count = INTEGRITY.lock()
-        .verify_count.saturating_add(1);
+    // Update verify count.  Acquire the lock exactly once: writing
+    // `INTEGRITY.lock().x = INTEGRITY.lock().y` keeps both temporary lock
+    // guards alive until the end of the statement, which deadlocks the
+    // non-reentrant mutex on the second acquisition.
+    {
+        let mut inner = INTEGRITY.lock();
+        inner.verify_count = inner.verify_count.saturating_add(1);
+    }
 
     (results, summary)
 }

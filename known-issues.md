@@ -14,10 +14,67 @@ work that should be done now."
 
 ## Active Bugs
 
-_(No active bugs.  The two prior watchlist items — accounting
-self-test hang and invariant self-test hang — went 90 consecutive
-boot tests with zero recurrence after F4/F5 and have been closed
-as "likely cured incidentally."  See F6 and F7 in Fixed Bugs.)_
+### A1. quota self-test Test 5: inode soft-limit boundary returns SoftWarning instead of Allowed — discovered 2026-06-10
+
+**Where:** `kernel/src/fs/quota.rs` — `self_test()` Test 5 (inode
+soft/hard limit enforcement), and the inode-accounting boundary logic
+in the quota check path it exercises.
+
+**Symptom:** Boot serial log prints a non-fatal self-test ERROR of the
+form "expected Allowed at limit, got SoftWarning" (Test 5). The check
+fires `SoftWarning` when usage is *exactly at* the soft limit; the
+test (matching disk-block semantics) expects `Allowed` at the boundary
+and `SoftWarning` only once usage *exceeds* it. This is an off-by-one
+in the boundary comparison: inode accounting likely uses `>=` where
+block accounting uses `>` (or vice-versa).
+
+**Reproduce:** Run `scripts/boot-test.sh`; grep `build/serial-test.txt`
+for "quota" / "Test 5". The failure is deterministic — Test 5 runs
+unconditionally with hardcoded inputs and pure in-memory logic, so it
+reproduces every boot.
+
+**Status:** PRE-EXISTING (not introduced by the 2026-06-10 procfs /
+boot-restructure work; surfaced while auditing the now-unconditional
+self-test tier). Non-fatal — boot continues. Logged here because it is
+a real correctness discrepancy between inode and block soft-limit
+boundary semantics.
+
+**Proper fix:** Align the inode soft-limit boundary comparison with the
+block soft-limit comparison so that "exactly at the soft limit" returns
+`Allowed` and only strictly-over returns `SoftWarning`. Add a unit test
+pinning both the at-limit and over-limit cases for inodes and blocks.
+
+### A2. FS interceptor self-test: deny handler incorrectly allows an operation — discovered 2026-06-10
+
+**Where:** filesystem interceptor / hook self-test (prints "deny
+handler allowed"). The deny-policy hook returns Allow where the test
+expects the operation to be denied.
+
+**Symptom:** Boot serial log prints a non-fatal self-test failure
+"deny handler allowed" — a registered interceptor that should *deny* a
+filesystem operation let it through. Indicates the interceptor
+dispatch is either not consulting the deny handler's verdict or is
+defaulting to Allow on a path it should block.
+
+**Reproduce:** Run `scripts/boot-test.sh`; grep `build/serial-test.txt`
+for "deny handler allowed". Deterministic — pure in-memory hook logic
+with hardcoded inputs.
+
+**Status:** PRE-EXISTING (unrelated to the 2026-06-10 procfs /
+boot-restructure work). Non-fatal — boot continues. A deny hook that
+fails open is a security-relevant correctness bug, so it is logged for
+a proper fix.
+
+**Proper fix:** Audit the interceptor dispatch path to ensure a deny
+verdict from any registered handler short-circuits to a denied result
+(fail-closed). Add a unit test asserting a deny handler blocks the
+operation and that allow/deny precedence is well-defined when multiple
+handlers are registered.
+
+_(The two prior watchlist items — accounting self-test hang and
+invariant self-test hang — went 90 consecutive boot tests with zero
+recurrence after F4/F5 and have been closed as "likely cured
+incidentally."  See F6 and F7 in Fixed Bugs.)_
 
 ---
 

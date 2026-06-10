@@ -880,133 +880,165 @@ extern "C" fn kernel_main() -> ! {
     // Step 20f: Mount root filesystem.
     // Try to mount a FAT filesystem from the first block device.
     // Auto-detects FAT16 or FAT32.  Non-fatal if no filesystem is present.
-    match fs::fat::init("vda") {
-        Ok(()) => {
-            // Mount an in-memory filesystem at /tmp for temporary files.
-            // This is volatile (lost on reboot) and heap-backed.
-            if let Err(e) = fs::memfs::mount("/tmp") {
-                serial_println!("[boot] WARNING: failed to mount memfs at /tmp: {:?}", e);
-            }
-
-            // Mount procfs at /proc for system information.
-            // Read-only virtual filesystem — content generated on the fly.
-            if let Err(e) = fs::procfs::mount("/proc") {
-                serial_println!("[boot] WARNING: failed to mount procfs at /proc: {:?}", e);
-            }
-
-            // Mount devfs at /dev for standard device files.
-            // Provides /dev/null, /dev/zero, /dev/random, /dev/console.
-            if let Err(e) = fs::devfs::mount("/dev") {
-                serial_println!("[boot] WARNING: failed to mount devfs at /dev: {:?}", e);
-            }
-
-            // Mount sysfs at /sys for kernel configuration and hardware info.
-            // Writable for tunables (hostname, sysctl params), read-only for
-            // system info (kernel version, PCI devices, cache stats).
-            if let Err(e) = fs::sysfs::mount("/sys") {
-                serial_println!("[boot] WARNING: failed to mount sysfs at /sys: {:?}", e);
-            }
-
-            // Probe secondary block devices for ext4 filesystems.
-            // Try common virtio-blk device names.  The first ext4 partition
-            // found is mounted at /mnt.  Non-fatal if none found.
-            for ext4_dev in &["vdb", "vdc"] {
-                if fs::ext4::probe(ext4_dev) {
-                    match fs::ext4::mount(ext4_dev, "/mnt") {
-                        Ok(()) => break,
-                        Err(e) => {
-                            serial_println!(
-                                "[boot] WARNING: ext4 detected on {} but mount failed: {:?}",
-                                ext4_dev, e
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Probe for ISO 9660 filesystems (CD-ROM images).
-            // In QEMU, an ISO image can be attached as a virtio-blk device.
-            for iso_dev in &["vdb", "vdc", "vdd"] {
-                if fs::iso9660::probe(iso_dev) {
-                    match fs::iso9660::mount(iso_dev, "/cdrom") {
-                        Ok(()) => break,
-                        Err(e) => {
-                            serial_println!(
-                                "[boot] WARNING: ISO 9660 detected on {} but mount failed: {:?}",
-                                iso_dev, e
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Initialize the change journal (persistent change tracking).
-            // Must happen before self-tests so all VFS operations are captured.
-            fs::journal::init();
-
-            // Run filesystem self-test.
-            if let Err(e) = fs::fat::self_test() {
-                serial_println!("WARNING: FAT self-test failed: {:?}", e);
-            }
-            // Run file handle self-test (requires mounted filesystem).
-            if let Err(e) = fs::handle::self_test() {
-                serial_println!("WARNING: File handle self-test failed: {:?}", e);
-            }
-            // Run io_ring file handle test (requires mounted /tmp).
-            if let Err(e) = ipc::io_ring::self_test_fh() {
-                serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
-            }
-            // Run buffer cache self-test (validates caching, write-back, LRU).
-            if let Err(e) = fs::cache::self_test() {
-                serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
-            }
-            // Run recycle bin self-test (trash, list, restore, empty).
-            if let Err(e) = fs::trash::self_test() {
-                serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
-            }
-            // Run change notification self-test (watch, emit, read, close).
-            if let Err(e) = fs::notify::self_test() {
-                serial_println!("WARNING: Change notification self-test failed: {:?}", e);
-            }
-            // Initialize and self-test the change journal (persistent change tracking).
-            if let Err(e) = fs::journal::self_test() {
-                serial_println!("WARNING: Change journal self-test failed: {:?}", e);
-            }
-            // Run in-memory filesystem self-test (standalone, doesn't touch VFS mount).
-            if let Err(e) = fs::memfs::self_test() {
-                serial_println!("WARNING: MemFs self-test failed: {:?}", e);
-            }
-            // Run procfs self-test (validates virtual file generation).
-            if let Err(e) = fs::procfs::self_test() {
-                serial_println!("WARNING: ProcFs self-test failed: {:?}", e);
-            }
-            // Run devfs self-test (validates device file operations).
-            if let Err(e) = fs::devfs::self_test() {
-                serial_println!("WARNING: DevFs self-test failed: {:?}", e);
-            }
-            // Run sysfs self-test (validates kernel tunables, hostname, PCI).
-            if let Err(e) = fs::sysfs::self_test() {
-                serial_println!("WARNING: SysFs self-test failed: {:?}", e);
-            }
-            // Run ext4 self-test (reads directory listing and files if mounted).
-            if let Err(e) = fs::ext4::self_test() {
-                serial_println!("WARNING: ext4 self-test failed: {:?}", e);
-            }
-            // Run VFS-level self-test (symlinks, cross-mount resolution).
-            if let Err(e) = fs::vfs::self_test() {
-                serial_println!("WARNING: VFS self-test failed: {:?}", e);
-            }
-            // Flush buffer cache to disk so data survives power loss / QEMU kill.
-            if let Err(e) = fs::cache::flush_all() {
-                serial_println!("WARNING: Buffer cache flush failed: {:?}", e);
-            }
-        }
+    // Prefer a real FAT filesystem on vda (auto-detects FAT16/FAT32).  If no
+    // on-disk filesystem is present, fall back to a volatile in-memory root so
+    // the system *always* has a usable "/" — the virtual filesystems
+    // (/proc, /dev, /sys, /tmp) mount underneath it and userspace sees a
+    // working namespace even on a diskless boot.  (This also means the
+    // boot-test, whose vda is a raw swap disk with no FAT, still exercises the
+    // virtual-filesystem layer instead of silently skipping it.)
+    let fat_ok = match fs::fat::init("vda") {
+        Ok(()) => true,
         Err(e) => {
-            serial_println!("[fs] No FAT filesystem on vda: {:?} (non-fatal)", e);
+            serial_println!(
+                "[fs] No FAT filesystem on vda: {:?} — using in-memory root (non-fatal)",
+                e
+            );
+            if let Err(me) = fs::memfs::mount("/") {
+                serial_println!(
+                    "[boot] WARNING: failed to mount fallback in-memory root: {:?}",
+                    me
+                );
+            }
+            false
+        }
+    };
+
+    // --- Virtual filesystem mounts (independent of which root we have) ---
+
+    // Mount an in-memory filesystem at /tmp for temporary files.
+    // This is volatile (lost on reboot) and heap-backed.
+    if let Err(e) = fs::memfs::mount("/tmp") {
+        serial_println!("[boot] WARNING: failed to mount memfs at /tmp: {:?}", e);
+    }
+    // Mount procfs at /proc for system information.
+    // Read-only virtual filesystem — content generated on the fly.
+    if let Err(e) = fs::procfs::mount("/proc") {
+        serial_println!("[boot] WARNING: failed to mount procfs at /proc: {:?}", e);
+    }
+    // Mount devfs at /dev for standard device files.
+    // Provides /dev/null, /dev/zero, /dev/random, /dev/console.
+    if let Err(e) = fs::devfs::mount("/dev") {
+        serial_println!("[boot] WARNING: failed to mount devfs at /dev: {:?}", e);
+    }
+    // Mount sysfs at /sys for kernel configuration and hardware info.
+    // Writable for tunables (hostname, sysctl params), read-only for
+    // system info (kernel version, PCI devices, cache stats).
+    if let Err(e) = fs::sysfs::mount("/sys") {
+        serial_println!("[boot] WARNING: failed to mount sysfs at /sys: {:?}", e);
+    }
+
+    // Probe secondary block devices for ext4 filesystems.
+    // Try common virtio-blk device names.  The first ext4 partition
+    // found is mounted at /mnt.  Non-fatal if none found.
+    for ext4_dev in &["vdb", "vdc"] {
+        if fs::ext4::probe(ext4_dev) {
+            match fs::ext4::mount(ext4_dev, "/mnt") {
+                Ok(()) => break,
+                Err(e) => {
+                    serial_println!(
+                        "[boot] WARNING: ext4 detected on {} but mount failed: {:?}",
+                        ext4_dev, e
+                    );
+                }
+            }
         }
     }
 
+    // Probe for ISO 9660 filesystems (CD-ROM images).
+    // In QEMU, an ISO image can be attached as a virtio-blk device.
+    for iso_dev in &["vdb", "vdc", "vdd"] {
+        if fs::iso9660::probe(iso_dev) {
+            match fs::iso9660::mount(iso_dev, "/cdrom") {
+                Ok(()) => break,
+                Err(e) => {
+                    serial_println!(
+                        "[boot] WARNING: ISO 9660 detected on {} but mount failed: {:?}",
+                        iso_dev, e
+                    );
+                }
+            }
+        }
+    }
+
+    // Initialize the change journal (persistent change tracking).
+    // Must happen before self-tests so all VFS operations are captured.
+    fs::journal::init();
+
+    // --- Disk-backed filesystem self-tests ---
+    // These exercise the on-disk FAT root (and its buffer-cache / journal /
+    // recycle-bin layers), so they only run when a real FAT filesystem
+    // mounted.  On a diskless (in-memory root) boot they are skipped; the
+    // virtual-filesystem self-tests below still run unconditionally.
+    if fat_ok {
+        if let Err(e) = fs::fat::self_test() {
+            serial_println!("WARNING: FAT self-test failed: {:?}", e);
+        }
+        // File handle self-test (requires mounted filesystem).
+        if let Err(e) = fs::handle::self_test() {
+            serial_println!("WARNING: File handle self-test failed: {:?}", e);
+        }
+        // io_ring file handle test (requires mounted /tmp).
+        if let Err(e) = ipc::io_ring::self_test_fh() {
+            serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
+        }
+        // Buffer cache self-test (validates caching, write-back, LRU).
+        if let Err(e) = fs::cache::self_test() {
+            serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
+        }
+        // Recycle bin self-test (trash, list, restore, empty).
+        if let Err(e) = fs::trash::self_test() {
+            serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
+        }
+        // Change notification self-test (watch, emit, read, close).
+        if let Err(e) = fs::notify::self_test() {
+            serial_println!("WARNING: Change notification self-test failed: {:?}", e);
+        }
+        // Change journal self-test (persistent change tracking).
+        if let Err(e) = fs::journal::self_test() {
+            serial_println!("WARNING: Change journal self-test failed: {:?}", e);
+        }
+        // ext4 self-test (reads directory listing and files if mounted).
+        if let Err(e) = fs::ext4::self_test() {
+            serial_println!("WARNING: ext4 self-test failed: {:?}", e);
+        }
+        // VFS-level self-test (symlinks, cross-mount resolution) — relies on
+        // the FAT root for cross-mount cases.
+        if let Err(e) = fs::vfs::self_test() {
+            serial_println!("WARNING: VFS self-test failed: {:?}", e);
+        }
+        // Flush buffer cache to disk so data survives power loss / QEMU kill.
+        if let Err(e) = fs::cache::flush_all() {
+            serial_println!("WARNING: Buffer cache flush failed: {:?}", e);
+        }
+    }
+
+    // --- Virtual filesystem self-tests (run on any root) ---
+    // These construct their own filesystem instances and do not depend on a
+    // real on-disk FAT root, so they run regardless of how "/" was mounted.
+    // In-memory filesystem self-test (standalone, doesn't touch VFS mount).
+    if let Err(e) = fs::memfs::self_test() {
+        serial_println!("WARNING: MemFs self-test failed: {:?}", e);
+    }
+    // devfs self-test (validates device file operations).
+    if let Err(e) = fs::devfs::self_test() {
+        serial_println!("WARNING: DevFs self-test failed: {:?}", e);
+    }
+    // sysfs self-test (validates kernel tunables, hostname, PCI).
+    if let Err(e) = fs::sysfs::self_test() {
+        serial_println!("WARNING: SysFs self-test failed: {:?}", e);
+    }
+
     boot_timing::mark(boot_timing::Milestone::Filesystem);
+
+    // ProcFs self-test — constructs its own `ProcFs::new()` and reads live
+    // scheduler/PCB state directly, so it needs no mounted backing store and
+    // must run unconditionally.  (It was previously gated behind a successful
+    // FAT mount on vda, which meant the boot-test — whose vda is a raw swap
+    // disk with no FAT — never exercised procfs at all.)
+    if let Err(e) = fs::procfs::self_test() {
+        serial_println!("WARNING: ProcFs self-test failed: {:?}", e);
+    }
 
     // Compression self-tests — pure in-memory, no mounted FS required.
     if let Err(e) = fs::compress::self_test() {

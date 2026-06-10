@@ -31540,7 +31540,22 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
         }
         // buf[off + n] is the NUL terminator (already zero).
     }
-    fill(&mut buf, 0, b"OuRoS");                    // sysname
+    // sysname / release are Linux-ABI-only surfaces: in our
+    // architecture native code uses native APIs, so the ONLY callers
+    // of uname(2) are Linux binaries that expect Linux values.
+    // Reporting "Linux" / "6.6.x" is therefore the faithful answer for
+    // this ABI, not a lie about what we are — it tells a Linux program
+    // exactly which Linux personality it is talking to.
+    //
+    // The release string MUST satisfy glibc's startup version gate
+    // (`__libc_start_main` → "FATAL: kernel too old" if the leading
+    // MAJOR.MINOR is below glibc's build-time minimum). glibc parses
+    // only the leading integer triple, so "6.6.0-ouros" reads as the
+    // 6.6.0 baseline kernel we faithfully implement (see §72
+    // "Version-surface policy" in roadmap-detailed.md) while the
+    // "-ouros" suffix still signals our build to anything that prints
+    // the full string.
+    fill(&mut buf, 0, b"Linux");                    // sysname
     // Batch 511: pure read of nameservice state — no substitution
     // layer.  Mirrors v6.6's `memcpy(&tmp, utsname(), sizeof(tmp))`.
     // If userspace cleared nodename via `sethostname("", 0)` or
@@ -31549,7 +31564,7 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     // as Linux's `newuname` would.
     let nodename = crate::fs::nameservice::get_hostname();
     fill(&mut buf, 1, nodename.as_bytes());
-    fill(&mut buf, 2, b"0.1.0-ouros");              // release
+    fill(&mut buf, 2, b"6.6.0-ouros");              // release
     fill(&mut buf, 3, b"#1 SMP");                   // version
     fill(&mut buf, 4, b"x86_64");                   // machine
     let domain = crate::fs::nameservice::get_domain();
@@ -46486,6 +46501,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let _ = crate::fs::nameservice::set_domain(&saved_dom);
             serial_println!(
                 "[syscall/linux]   uname pure-read contract — no \"\" -> \"localdomain\" / \"unknown\" -> \"localhost\" substitution (v6.6 kernel/sys.c::SYSCALL_DEFINE1(newuname): `memcpy(&tmp, utsname(), sizeof(tmp))`): OK"
+            );
+        }
+
+        // Batch 526: uname sysname / release report the Linux ABI
+        // personality, not our internal product name.  sysname and
+        // release are Linux-ABI-only surfaces — in our architecture
+        // native code uses native APIs, so the only callers of uname(2)
+        // are Linux binaries that expect Linux values.  Two invariants:
+        //   - sysname == "Linux" (was "OuRoS"): a Linux binary that
+        //     branches on `uname().sysname` must see "Linux".
+        //   - release leads with "6.6" (was "0.1.0-ouros"): glibc's
+        //     startup gate parses the leading MAJOR.MINOR and aborts
+        //     with "FATAL: kernel too old" if it is below its
+        //     build-time minimum.  6.6 is the baseline we faithfully
+        //     implement (roadmap-detailed.md §72 version-surface
+        //     policy).  The "-ouros" suffix is preserved for anything
+        //     printing the full string.
+        {
+            crate::fs::nameservice::init_defaults();
+            let mut uname_buf = [0xAAu8; 6 * 65];
+            let a = SyscallArgs {
+                arg0: uname_buf.as_mut_ptr() as u64,
+                arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            };
+            let r = dispatch_linux(nr::UNAME, &a).value;
+            if r != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: uname(buf) for sysname/release probe returned {} (want 0)",
+                    r,
+                );
+                return Err(KernelError::InternalError);
+            }
+            // sysname is field index 0 (offset 0, length 65).
+            #[allow(clippy::indexing_slicing)]
+            {
+                let want_sys = b"Linux";
+                for (i, &c) in want_sys.iter().enumerate() {
+                    if uname_buf[i] != c {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: uname sysname[{}] = 0x{:02x}, want 0x{:02x} (must report \"Linux\" for the Linux ABI)",
+                            i, uname_buf[i], c,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+                if uname_buf[want_sys.len()] != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: uname sysname missing NUL terminator after \"Linux\"",
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                // release is field index 2 (offset 2*65 = 130). Must
+                // lead with "6.6" so glibc's version gate reads 6.6.x.
+                let want_rel = b"6.6";
+                for (i, &c) in want_rel.iter().enumerate() {
+                    if uname_buf[2 * 65 + i] != c {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: uname release[{}] = 0x{:02x}, want 0x{:02x} (release must lead with \"6.6\" for glibc's kernel-version gate)",
+                            i, uname_buf[2 * 65 + i], c,
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+            }
+            serial_println!(
+                "[syscall/linux]   uname sysname==\"Linux\" / release leads \"6.6\" (Linux-ABI personality + glibc kernel-version gate): OK"
             );
         }
 

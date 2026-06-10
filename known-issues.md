@@ -372,6 +372,12 @@ separate crate, cannot reach `fs::pathutil`).
 
 Build clean; QEMU boot test green.
 
+**Kernel-wide sweep (2026-06-10):** grepped all of `kernel/src` for the
+`get(X.len()) == Some(&b'/')` idiom — the only matches are the six
+`fs/` files already accounted for above (plus `pathutil.rs`, the helper
+itself).  No sibling instances exist in `net`, `proc`, `ipc`, `mm`, or
+any other subsystem, so the footgun is fully contained and closed.
+
 ### TD2. Clippy `clippy::all` deny-level errors not yet zeroed — RESOLVED 2026-06-10
 
 **RESOLUTION (2026-06-10):** `cargo clippy -p kernel` now reports

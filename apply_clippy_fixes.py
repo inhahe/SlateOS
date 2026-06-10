@@ -19,15 +19,25 @@ import sys, json, collections, os
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
-def collect_suggestions(msg, out):
-    """Walk a diagnostic + its children, collecting MachineApplicable spans."""
+def collect_suggestions(msg, out, accept_maybe=False):
+    """Walk a diagnostic + its children, collecting applicable spans.
+
+    By default only MachineApplicable spans are collected. When
+    `accept_maybe` is True (used for a curated allowlist of purely
+    cosmetic doc-comment lints whose single-span suggestions are
+    mechanical leading-whitespace dedents), MaybeIncorrect spans are
+    also collected. We never auto-apply HasPlaceholders/Unspecified.
+    """
+    ok = {"MachineApplicable"}
+    if accept_maybe:
+        ok.add("MaybeIncorrect")
     for sp in msg.get("spans", []):
         rep = sp.get("suggested_replacement")
         app = sp.get("suggestion_applicability")
-        if rep is not None and app == "MachineApplicable":
+        if rep is not None and app in ok:
             out.append(sp)
     for child in msg.get("children", []):
-        collect_suggestions(child, out)
+        collect_suggestions(child, out, accept_maybe)
 
 
 def line_col_to_offset(line_starts, line, col):
@@ -44,6 +54,11 @@ def main():
     only = None
     if "--only" in sys.argv:
         only = set(sys.argv[sys.argv.index("--only") + 1].split(","))
+    # Lints whose MaybeIncorrect single-span suggestions are safe to apply
+    # (cosmetic doc-comment whitespace only; cannot affect compiled code).
+    also_maybe = set()
+    if "--also-maybe" in sys.argv:
+        also_maybe = set(sys.argv[sys.argv.index("--also-maybe") + 1].split(","))
 
     spans = []
     with open(json_path, "r", encoding="utf-8", errors="replace") as f:
@@ -62,7 +77,10 @@ def main():
             # intentional-by-design per the workspace config (TD2).
             if m.get("level") != "error":
                 continue
-            collect_suggestions(m, spans)
+            code = (m.get("code") or {}).get("code") or ""
+            if only is not None and code not in only:
+                continue
+            collect_suggestions(m, spans, accept_maybe=(code in also_maybe))
 
     by_file = collections.defaultdict(list)
     for sp in spans:

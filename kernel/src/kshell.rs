@@ -594,7 +594,7 @@ fn expand_vars(input: &str) -> String {
 ///   - `${NAME%%suffix}` — remove longest suffix match
 ///   - `${NAME#prefix}` — remove shortest prefix match
 ///   - `${NAME##prefix}` — remove longest prefix match
-/// Expand shell brace patterns: `{a,b,c}` and `{N..M}` ranges.
+///     Expand shell brace patterns: `{a,b,c}` and `{N..M}` ranges.
 ///
 /// Brace expansion is applied to each whitespace-delimited token in the input.
 /// A token like `prefix{a,b,c}suffix` expands to `prefixa suffix prefixbsuffix
@@ -70534,7 +70534,7 @@ fn cmd_xattr(args: &str) {
 ///
 /// Manage the recycle bin.  Without arguments, shows usage.
 /// - `trash FILE` — move FILE to the recycle bin
-/// Monitor filesystem changes on a directory (or file) in real time.
+///   Monitor filesystem changes on a directory (or file) in real time.
 ///
 /// Usage: `watch <path> [-r]`
 ///

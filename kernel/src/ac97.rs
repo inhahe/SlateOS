@@ -148,8 +148,8 @@ const BDL_SIZE: usize = 32;
 /// Layout:
 /// - `addr`: 32-bit physical address of audio data buffer
 /// - `samples_and_flags`: bits[15:0] = number of samples (16-bit, stereo = 4 bytes/sample)
-///                        bit[30] = BUP (buffer underrun policy: 0=last valid, 1=zero fill)
-///                        bit[31] = IOC (interrupt on completion)
+///   bit[30] = BUP (buffer underrun policy: 0=last valid, 1=zero fill)
+///   bit[31] = IOC (interrupt on completion)
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BdlEntry {

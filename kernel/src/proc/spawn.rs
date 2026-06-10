@@ -1385,7 +1385,7 @@ fn test_spawn_stack_growth() -> KernelResult<()> {
 /// 5. Yield to let the process run:
 ///    a. Process starts at the caller code.
 ///    b. SYSCALL(503) → kernel tears down old AS, loads target ELF, returns
-///       to the target's entry point via SYSRET.
+///    to the target's entry point via SYSRET.
 ///    c. Target code runs: SYS_EXIT(0) → process becomes zombie.
 /// 6. Verify clean exit.
 fn test_exec_process() -> KernelResult<()> {

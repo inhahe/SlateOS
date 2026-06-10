@@ -852,9 +852,9 @@ pub fn unregister_reclaimable(pml4_phys: u64, vaddr: u64) {
 /// 1. Start from the clock hand position.
 /// 2. For each active page:
 ///    a. If the page's ACCESSED bit is set in the PTE, clear it
-///       (give it a "second chance") and advance.
+///    (give it a "second chance") and advance.
 ///    b. If ACCESSED is clear, this page hasn't been touched recently
-///       → select it for eviction.
+///    → select it for eviction.
 /// 3. Evict the selected page via `swap_out_page()`.
 /// 4. Continue until `target` pages have been reclaimed or we've
 ///    scanned the entire list twice without finding a victim.

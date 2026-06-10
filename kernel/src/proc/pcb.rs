@@ -638,7 +638,7 @@ pub struct Process {
     /// * 0 = `PR_MCE_KILL_LATE`
     /// * 1 = `PR_MCE_KILL_EARLY`
     /// * 2 = `PR_MCE_KILL_DEFAULT`  — system policy applies
-    ///       (the documented default).
+    ///   (the documented default).
     ///
     /// On Linux this is encoded as a pair of bits in
     /// `task_struct::flags` (`PF_MCE_PROCESS` + `PF_MCE_EARLY`);

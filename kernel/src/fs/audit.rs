@@ -35,7 +35,7 @@
 //! Audit logging is optional and disabled by default.  When enabled,
 //! each audited operation adds ~100ns overhead (one lock acquisition
 //! + ring buffer write).  Path-prefix filtering avoids logging
-//! operations on uninteresting paths.
+//!   operations on uninteresting paths.
 //!
 //! ## Reference
 //!

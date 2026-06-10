@@ -12,11 +12,11 @@
 //!    code can execute while paging is being set up.
 //! 3. For each AP discovered in the MADT:
 //!    a. BSP patches the trampoline data area with the AP's stack, PML4,
-//!       entry point, and CPU index.
+//!    entry point, and CPU index.
 //!    b. BSP sends INIT IPI → 10 ms delay → SIPI → 200 µs → SIPI.
 //!    c. BSP spins waiting for the AP to set its "started" flag.
 //!    d. AP executes trampoline: real → protected → long mode, jumps
-//!       to `ap_entry()` in the kernel.
+//!    to `ap_entry()` in the kernel.
 //!    e. AP loads GDT, IDT, enables APIC timer, enters scheduler.
 //! 4. BSP removes the identity mapping and updates the scheduler with
 //!    the actual CPU count.

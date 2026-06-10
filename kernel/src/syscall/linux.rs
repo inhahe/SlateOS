@@ -2635,7 +2635,7 @@ fn dispatch_memfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 ///   * value == 0                 → counter unchanged, returns 8.
 ///   * O_NONBLOCK + would overflow → EAGAIN.
 ///   * blocking + would overflow  → block until a read drains room.
-/// Returns 8 on success.
+///     Returns 8 on success.
 fn dispatch_eventfd_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
     if len < 8 {
         return linux_err(errno::EINVAL);
@@ -4965,13 +4965,13 @@ fn sys_rt_sigaction(args: &SyscallArgs) -> SyscallResult {
 ///   1. `sigsetsize != sizeof(sigset_t)` -> `-EINVAL` (8 bytes on x86_64).
 ///   2. Snapshot `current->blocked` into `old_set`.
 ///   3. If `nset` non-NULL:
-///        a. `copy_from_user(&new_set, nset, 8)` -> `-EFAULT` on bad range.
-///        b. Strip `SIGKILL` / `SIGSTOP` from `new_set`.
-///        c. `sigprocmask(how, &new_set, NULL)` — switch on `how`:
-///             - `SIG_BLOCK` (0):   `blocked |= new_set`.
-///             - `SIG_UNBLOCK` (1): `blocked &= ~new_set`.
-///             - `SIG_SETMASK` (2): `blocked = new_set`.
-///             - default:           `-EINVAL`.
+///      a. `copy_from_user(&new_set, nset, 8)` -> `-EFAULT` on bad range.
+///      b. Strip `SIGKILL` / `SIGSTOP` from `new_set`.
+///      c. `sigprocmask(how, &new_set, NULL)` — switch on `how`:
+///      - `SIG_BLOCK` (0):   `blocked |= new_set`.
+///      - `SIG_UNBLOCK` (1): `blocked &= ~new_set`.
+///      - `SIG_SETMASK` (2): `blocked = new_set`.
+///      - default:           `-EINVAL`.
 ///   4. If `oset` non-NULL: `copy_to_user(oset, &old_set, 8)` -> `-EFAULT`.
 ///
 /// `how` is declared `int`, so x86_64 register truncation drops the
@@ -10542,11 +10542,11 @@ fn sys_munlock(args: &SyscallArgs) -> SyscallResult {
 ///   * `flags == 0`               — no operation requested.
 ///   * `flags & ~MCL_ALL`         — unknown bits set.
 ///   * `flags == MCL_ONFAULT`     — ONFAULT alone is meaningless: it's
-///                                  a *modifier* that says "treat the
-///                                  page as resident on first fault
-///                                  rather than pre-populating", and
-///                                  needs CURRENT or FUTURE to say
-///                                  *which* set of pages.
+///     a *modifier* that says "treat the
+///     page as resident on first fault
+///     rather than pre-populating", and
+///     needs CURRENT or FUTURE to say
+///     *which* set of pages.
 ///
 /// Pre-batch we omitted the MCL_ONFAULT-alone check, so
 /// `mlockall(MCL_ONFAULT)` silently succeeded where Linux returns
@@ -10796,11 +10796,11 @@ fn sys_msync(args: &SyscallArgs) -> SyscallResult {
 ///   * EBADF       → "fd was closed under me, abort the prefetch loop"
 ///   * ESPIPE      → "this is a pipe/socket, skip readahead entirely"
 ///   * EINVAL      → "kernel doesn't know this advice value or backing
-///                    has no page cache; emit the manual prefetch"
-/// Surfacing EINVAL where Linux returns EBADF or ESPIPE wedges the
-/// caller into the manual-prefetch path on already-closed or
-/// pipe-typed fds, where the prefetch then itself fails / is
-/// meaningless.
+///     has no page cache; emit the manual prefetch"
+///     Surfacing EINVAL where Linux returns EBADF or ESPIPE wedges the
+///     caller into the manual-prefetch path on already-closed or
+///     pipe-typed fds, where the prefetch then itself fails / is
+///     meaningless.
 ///
 /// ### Why the band-aid is dropped
 ///
@@ -10912,9 +10912,9 @@ fn sys_fadvise64(args: &SyscallArgs) -> SyscallResult {
 /// In our HandleKind model:
 ///   * `File`    — VFS-backed regular file → accept (gate 2 pass).
 ///   * `MemFd`   — anonymous file in the memfd table; Linux memfd is
-///                 backed by tmpfs / a regular-file-like inode and
-///                 readahead is technically valid (no-op on a fully-
-///                 in-memory file but not an error) → accept.
+///     backed by tmpfs / a regular-file-like inode and
+///     readahead is technically valid (no-op on a fully-
+///     in-memory file but not an error) → accept.
 ///   * `Console` — char device equivalent → -EINVAL (gate 2 fail).
 ///   * `Pipe`    — pipe endpoint → -EINVAL.
 ///   * `EventFd` — pseudo-file with no a_ops → -EINVAL.
@@ -11826,10 +11826,10 @@ fn sys_adjtimex(args: &SyscallArgs) -> SyscallResult {
 ///   * returns `-EFAULT` on bad pointer (`strncpy_from_user` short read),
 ///   * returns `-ENOENT` on the empty string `""`,
 ///   * returns `-ENAMETOOLONG` when no NUL appears within `PATH_MAX`.
-/// `user_path_at` then runs path resolution which surfaces `-ENOENT`
-/// (missing component), `-ENOTDIR` (non-directory component), `-ELOOP`
-/// (symlink cycle), and so on — all BEFORE the terminal `-EPERM`
-/// capability check.
+///     `user_path_at` then runs path resolution which surfaces `-ENOENT`
+///     (missing component), `-ENOTDIR` (non-directory component), `-ELOOP`
+///     (symlink cycle), and so on — all BEFORE the terminal `-EPERM`
+///     capability check.
 ///
 /// ## Gate-ladder divergence from pre-batch (batch 446)
 ///
@@ -13280,10 +13280,10 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
 /// `os.Readlink`, and CPython's `os.path.realpath` all distinguish
 /// between three errnos:
 ///   * -EINVAL  → "not a symlink, fall through to plain-file
-///                handling" or "your bufsiz is bogus, drop the
-///                whole probe".
+///     handling" or "your bufsiz is bogus, drop the
+///     whole probe".
 ///   * -EFAULT  → "your buffer pointer was bad" (programmer error,
-///                aborts iteration).
+///     aborts iteration).
 ///   * -ENOENT  → "path does not exist" (advances iterator).
 ///
 /// Pre-batch our EFAULT-on-NULL-buf path made callers running
@@ -13638,7 +13638,7 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
 ///   2. `pathname == NULL`                            -> EFAULT (getname)
 ///   3. `read_user_cstr(pathname)`                    -> EFAULT / ENAMETOOLONG
 ///   4. `canonicalize_path(cwd, path)`                -> ENOENT (empty) /
-///        EINVAL (embedded NUL) / ENAMETOOLONG
+///      EINVAL (embedded NUL) / ENAMETOOLONG
 ///   5. `Vfs::stat(canonicalized)`:
 ///        - `NotFound`                                -> ENOENT
 ///        - `EntryType::Directory`                    -> EISDIR
@@ -17001,11 +17001,11 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
 ///   * `Console`/`PidFd` — no kernel resource, the FdEntry copy is
 ///     all that's needed.
 ///   * `File`           — `fs::handle::dup_shared` bumps the open-file
-///                        refcount; the new fd shares offset + flags
-///                        with the target's fd.
+///     refcount; the new fd shares offset + flags
+///     with the target's fd.
 ///   * `Pipe`           — `ipc::pipe::dup` bumps the per-end refcount.
 ///   * `EventFd`        — `ipc::eventfd::dup` bumps the counter
-///                        refcount.
+///     refcount.
 ///
 /// Linux defaults the new fd to `FD_CLOEXEC` regardless of the
 /// target's setting; we mirror that.
@@ -17013,12 +17013,12 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
 /// Errors:
 ///   * `EINVAL` — `flags != 0`.
 ///   * `EBADF`  — `pidfd` closed / not a PidFd, `targetfd` < 0, or
-///                kernel-context invocation (no caller PCB).
+///     kernel-context invocation (no caller PCB).
 ///   * `ESRCH`  — target process no longer exists.
 ///   * `EBADF`  — target's fd table does not contain `targetfd`
-///                (Linux returns EBADF here as well).
+///     (Linux returns EBADF here as well).
 ///   * `EMFILE` — caller's fd table is full
-///                (propagated from `linux_fd_install`).
+///     (propagated from `linux_fd_install`).
 fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
     // flags reserved.  Linux declares `unsigned int flags`; the
     // x86_64 ABI truncates args.arg2 to 32 bits before the body runs.
@@ -18393,8 +18393,8 @@ fn sys_mount(args: &SyscallArgs) -> SyscallResult {
 /// Pre-batch we ran:
 ///   * flags & !VALID_FLAGS                  -> EINVAL  (matches Linux)
 ///   * args.arg0 == 0                        -> EFAULT  (WRONG — Linux
-///                                                       runs gate 2
-///                                                       first)
+///     runs gate 2
+///     first)
 ///   * validate_user_read(args.arg0, 1)      -> EFAULT  (WRONG)
 ///   * then EPERM.
 ///
@@ -18498,7 +18498,7 @@ fn sys_pivot_root(_args: &SyscallArgs) -> SyscallResult {
 ///   * `SWAP_FLAG_DISCARD   = 0x10000`
 ///   * `SWAP_FLAG_DISCARD_ONCE  = 0x20000`
 ///   * `SWAP_FLAG_DISCARD_PAGES = 0x40000`
-/// Union = `0x7_FFFF` (`SWAP_FLAGS_VALID`).
+///     Union = `0x7_FFFF` (`SWAP_FLAGS_VALID`).
 fn sys_swapon(args: &SyscallArgs) -> SyscallResult {
     const SWAP_FLAGS_VALID: u64 = 0x7_FFFF;
     // Linux gate order (mm/swapfile.c::SYSCALL_DEFINE2(swapon)):
@@ -18801,19 +18801,19 @@ fn sys_shmdt(_args: &SyscallArgs) -> SyscallResult {
 /// ipc/util.c::ipcget -> newary):
 ///
 ///   1. SYSCALL_DEFINE3 top:
-///        if (nsems < 0 || nsems > ns->sc_semmsl) return -EINVAL;
+///      if (nsems < 0 || nsems > ns->sc_semmsl) return -EINVAL;
 ///   2. ipcget:
-///        if (key == IPC_PRIVATE) {
-///            newary -> if (!nsems) return -EINVAL;
-///                      [our stub: ENOSYS terminal]
-///        } else {
-///            ipcget_public -> ipc_findkey(key)
-///                if (!found) {
-///                    if (!(semflg & IPC_CREAT)) return -ENOENT;
-///                    newary -> if (!nsems) return -EINVAL;
-///                              [our stub: ENOSYS]
-///                } else { return existing id (no nsems check here); }
-///        }
+///      if (key == IPC_PRIVATE) {
+///      newary -> if (!nsems) return -EINVAL;
+///      [our stub: ENOSYS terminal]
+///      } else {
+///      ipcget_public -> ipc_findkey(key)
+///      if (!found) {
+///      if (!(semflg & IPC_CREAT)) return -ENOENT;
+///      newary -> if (!nsems) return -EINVAL;
+///      [our stub: ENOSYS]
+///      } else { return existing id (no nsems check here); }
+///      }
 ///
 /// `sc_semmsl` defaults to `SEMMSL = 32000`.  nsems == 0 is allowed
 /// by the top gate (it's only rejected inside newary, which Linux
@@ -19022,7 +19022,7 @@ fn sys_semctl(args: &SyscallArgs) -> SyscallResult {
 ///      a. `nsops < 1 || semid < 0` -> EINVAL.
 ///      b. `nsops > sc_semopm` -> E2BIG.
 ///      c. If timeout: `tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1e9`
-///         -> EINVAL.
+///      -> EINVAL.
 ///
 /// Pre-batch we did nsops/semid first and never validated the
 /// timespec content.  A probe passing
@@ -19146,7 +19146,7 @@ fn sys_msgget(args: &SyscallArgs) -> SyscallResult {
 ///      msgp (8 bytes at offset 0 must be readable).
 ///   2. `do_msgsnd`:
 ///      a. `msgsz > ns->msg_ctlmax || (long) msgsz < 0 || msqid < 0`
-///         -> EINVAL.
+///      -> EINVAL.
 ///      b. `mtype < 1` -> EINVAL.
 ///   3. `load_msg(mtext, msgsz)` -> EFAULT on unreadable payload.
 ///
@@ -19318,16 +19318,16 @@ fn sys_msgctl(args: &SyscallArgs) -> SyscallResult {
 /// do_mq_open -> getname):
 ///
 ///   1. SYSCALL_DEFINE4 top:
-///        if (u_attr && copy_from_user(&attr, u_attr, 64))
-///            return -EFAULT;
+///      if (u_attr && copy_from_user(&attr, u_attr, 64))
+///      return -EFAULT;
 ///   2. do_mq_open -> getname(u_name):
-///        a. NULL or unreadable u_name -> EFAULT
-///           (strncpy_from_user returns -EFAULT).
-///        b. empty name (first byte '\0') -> ENOENT
-///           (getname_flags: `if (!len && !(flags & LOOKUP_EMPTY))
+///      a. NULL or unreadable u_name -> EFAULT
+///      (strncpy_from_user returns -EFAULT).
+///      b. empty name (first byte '\0') -> ENOENT
+///      (getname_flags: `if (!len && !(flags & LOOKUP_EMPTY))
 ///            return ERR_PTR(-ENOENT);` — mq_open does NOT pass
-///           LOOKUP_EMPTY).
-///        c. name > PATH_MAX-1 (4095) without NUL -> ENAMETOOLONG.
+///      LOOKUP_EMPTY).
+///      c. name > PATH_MAX-1 (4095) without NUL -> ENAMETOOLONG.
 ///   3. We have no POSIX mq backing -> terminal ENOSYS.
 ///
 /// Pre-batch divergences:
@@ -19866,8 +19866,8 @@ fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
 ///   * positive  — total deadline in milliseconds.
 ///   * 0         — no wait, instantaneous check.
 ///   * negative  — wait forever (here implemented by re-polling
-///                 indefinitely; callers can break the wait by
-///                 changing the polled fd's state from another task).
+///     indefinitely; callers can break the wait by
+///     changing the polled fd's state from another task).
 fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     use alloc::{vec, vec::Vec};
 
@@ -19983,12 +19983,12 @@ fn sys_poll(args: &SyscallArgs) -> SyscallResult {
 ///      poll_select_set_timeout (tv_sec<0 or tv_nsec out-of-range)
 ///      -> EINVAL.
 ///   2. set_user_sigmask(sigmask, sigsetsize):
-///        a. sigmask == NULL -> skip (sigsetsize is IGNORED).
-///        b. sigsetsize != sizeof(sigset_t) -> EINVAL.
-///        c. copy_from_user(sigmask, 8) -> EFAULT.
+///      a. sigmask == NULL -> skip (sigsetsize is IGNORED).
+///      b. sigsetsize != sizeof(sigset_t) -> EINVAL.
+///      c. copy_from_user(sigmask, 8) -> EFAULT.
 ///   3. do_sys_poll:
-///        a. nfds > rlimit(RLIMIT_NOFILE) (we cap at 1<<20) -> EINVAL.
-///        b. nfds > 0: validate ufds.
+///      a. nfds > rlimit(RLIMIT_NOFILE) (we cap at 1<<20) -> EINVAL.
+///      b. nfds > 0: validate ufds.
 ///
 /// Pre-batch we ran the nfds/fds gates first, then sigsetsize, then
 /// sigmask, then tsp.  The sigsetsize check also fired when
@@ -20902,15 +20902,15 @@ fn sys_execveat(args: &SyscallArgs) -> SyscallResult {
 /// order:
 ///
 ///   1. flags & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH | AT_HANDLE_FID |
-///                AT_HANDLE_MNT_ID_UNIQUE | AT_HANDLE_CONNECTABLE)
-///                                                       -> -EINVAL
+///      AT_HANDLE_MNT_ID_UNIQUE | AT_HANDLE_CONNECTABLE)
+///      -> -EINVAL
 ///   2. (flags & AT_HANDLE_CONNECTABLE) &&
 ///      (flags & AT_HANDLE_FID)                          -> -EINVAL
 ///      (a connectable file handle and a FID-only handle are
 ///      semantically incompatible — Linux rejects the combination
 ///      before any path resolution runs.)
 ///   3. user_path_at / handle_to_path / put_handle_at  -> -EFAULT,
-///                                                       -ENOENT, etc.
+///      -ENOENT, etc.
 ///   4. EOPNOTSUPP at the terminal in this kernel (no fs export
 ///      persistent handles).
 fn sys_name_to_handle_at(args: &SyscallArgs) -> SyscallResult {
@@ -21133,11 +21133,11 @@ fn sys_fsopen(_args: &SyscallArgs) -> SyscallResult {
 ///   * `SET_STRING`      : need _key; need _value; aux == 0.
 ///   * `SET_BINARY`      : need _key; need _value; 0 < aux <= 1 MiB.
 ///   * `SET_PATH` / `SET_PATH_EMPTY`: need _key; need _value; aux is
-///                         either AT_FDCWD (-100) or a non-negative fd.
+///     either AT_FDCWD (-100) or a non-negative fd.
 ///   * `SET_FD`          : need _key; _value must be NULL; aux >= 0.
 ///   * `CMD_CREATE` / `CMD_RECONFIGURE` / `CMD_CREATE_EXCL`:
-///                         _key, _value, and aux must all be 0 — these
-///                         are unparameterised commands.
+///     _key, _value, and aux must all be 0 — these
+///     are unparameterised commands.
 fn sys_fsconfig(args: &SyscallArgs) -> SyscallResult {
     const FSCONFIG_SET_FLAG: i32 = 0;
     const FSCONFIG_SET_STRING: i32 = 1;
@@ -22520,8 +22520,8 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
 /// Our `struct sched_attr` mirrors the v0 layout (48 bytes):
 ///   * u32 size
 ///   * u32 sched_policy           — SCHED_OTHER (0), FIFO (1), RR (2),
-///                                  BATCH (3), IDLE (5), DEADLINE (6),
-///                                  EXT (7).
+///     BATCH (3), IDLE (5), DEADLINE (6),
+///     EXT (7).
 ///   * u64 sched_flags            — always 0 (no reset_on_fork / etc.).
 ///   * s32 sched_nice             — 0 (we don't track nice values).
 ///   * u32 sched_priority         — RT policies only; 0 otherwise.
@@ -23010,9 +23010,9 @@ fn sys_landlock_restrict_self(args: &SyscallArgs) -> SyscallResult {
 ///   * `KCMP_IO`          (5) — same I/O context (block-layer)?
 ///   * `KCMP_SYSVSEM`     (6) — same System-V semaphore undo list?
 ///   * `KCMP_EPOLL_TFD`   (7) — `idx2` points at a `kcmp_epoll_slot`
-///                              naming the (epfd, target_fd, target_off)
-///                              triple; we have no epoll, so answer is
-///                              "not comparable".
+///     naming the (epfd, target_fd, target_off)
+///     triple; we have no epoll, so answer is
+///     "not comparable".
 ///
 /// Return value is a comparator, not a boolean:
 ///   *  0 — equal (same kernel object / shared resource)
@@ -23756,8 +23756,8 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
 ///      c. Stored ptr != rseq -> EINVAL.
 ///      d. Stored len != rseq_len -> EINVAL.
 ///      e. Stored sig != sig -> **EPERM** (not EINVAL — discriminates
-///         "tried to unregister someone else's rseq" from "wrong
-///         syscall args").
+///      "tried to unregister someone else's rseq" from "wrong
+///      syscall args").
 ///      f. Reset, return 0.
 ///   2. Register path (UNREGISTER bit clear):
 ///      a. Any flag bit -> EINVAL.
@@ -23765,8 +23765,8 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
 ///         - ptr/len mismatch -> EINVAL.
 ///         - sig mismatch    -> EPERM.
 ///         - else            -> EBUSY.
-///      c. Validate len/ptr/alignment/access_ok.
-///      d. Store registration, initialise kernel-owned runtime fields.
+///           c. Validate len/ptr/alignment/access_ok.
+///           d. Store registration, initialise kernel-owned runtime fields.
 ///
 /// Pre-batch we both returned EINVAL on sig mismatch for unregister
 /// (Linux: EPERM) and returned EBUSY unconditionally on any second
@@ -24070,9 +24070,9 @@ fn sys_process_madvise(args: &SyscallArgs) -> SyscallResult {
 ///   * `nr_dirty`            — pages in cache that are dirty
 ///   * `nr_writeback`        — pages currently being written back
 ///   * `nr_evicted`          — pages evicted from cache (with workingset
-///                             tracking)
+///     tracking)
 ///   * `nr_recently_evicted` — pages recently evicted (last refault
-///                             interval)
+///     interval)
 ///
 /// We have no page cache: every write is written through to the
 /// backing store synchronously and reads come straight off the
@@ -24385,10 +24385,10 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
 ///   3. if `uts != NULL`: `get_timespec64(uts)`  -> EFAULT
 ///      (copy_from_user 16 bytes; no value check here)
 ///   4. `do_sigtimedwait`:
-///        a. `timespec64_valid(&ts)`             -> EINVAL
-///        b. schedule_timeout / dequeue_signal
-///        c. signal arrived: `copy_siginfo_to_user(uinfo)` -> EFAULT
-///        d. timeout fired                        -> EAGAIN
+///      a. `timespec64_valid(&ts)`             -> EINVAL
+///      b. schedule_timeout / dequeue_signal
+///      c. signal arrived: `copy_siginfo_to_user(uinfo)` -> EFAULT
+///      d. timeout fired                        -> EAGAIN
 ///
 /// Critical: `uinfo` is NEVER validated upfront. Linux only touches
 /// the user info buffer inside `do_sigtimedwait` *after* a signal has
@@ -25317,10 +25317,10 @@ fn sys_socket(args: &SyscallArgs) -> SyscallResult {
 /// Linux gate order (net/socket.c::__sys_socketpair):
 ///   1. type-flag bits (same as socket)              -> -EINVAL
 ///   2. sock_create(family, ...) -> __sock_create:
-///        family unknown                             -> -EAFNOSUPPORT
-///        type out of range                          -> -EINVAL
+///      family unknown                             -> -EAFNOSUPPORT
+///      type out of range                          -> -EINVAL
 ///   3. sock_create succeeds but sock->ops->socketpair == NULL
-///        (e.g. AF_INET, AF_INET6, AF_PACKET, AF_NETLINK)  -> -EOPNOTSUPP
+///      (e.g. AF_INET, AF_INET6, AF_PACKET, AF_NETLINK)  -> -EOPNOTSUPP
 ///   4. usockvec validation                          -> -EFAULT
 ///
 /// Pre-batch divergences fixed here:
@@ -26993,10 +26993,10 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
 ///       if (!mm->context.ldt) { retval = 0; goto out_unlock; }
 ///       ```
 ///       With no LDT installed (our case — every process), the
-///       fast path returns 0 unconditionally, WITHOUT touching
-///       ptr.  Pre-batch validated ptr first and returned EFAULT
-///       for NULL/bad ptr.  Probe `modify_ldt(0, NULL, 10)`:
-///       Linux returns 0; pre-batch returned EFAULT.
+///     fast path returns 0 unconditionally, WITHOUT touching
+///     ptr.  Pre-batch validated ptr first and returned EFAULT
+///     for NULL/bad ptr.  Probe `modify_ldt(0, NULL, 10)`:
+///     Linux returns 0; pre-batch returned EFAULT.
 ///
 ///   * `write_ldt(ptr, bytecount, oldmode)`:
 ///       ```
@@ -27008,8 +27008,8 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
 ///           goto out;
 ///       ```
 ///       bytecount MUST EQUAL 16 exactly; > 16 also yields EINVAL.
-///       Pre-batch used `bytecount < 16 -> EINVAL`, so a probe
-///       with bytecount=20 leaked past the gate.
+///     Pre-batch used `bytecount < 16 -> EINVAL`, so a probe
+///     with bytecount=20 leaked past the gate.
 ///
 ///   * `read_default_ldt(ptr, bytecount)`:
 ///       ```
@@ -27019,9 +27019,9 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
 ///       return bytecount;
 ///       ```
 ///       Returns `min(bytecount, 128)` after zero-filling ptr.
-///       bytecount==0 -> success(0) without touching ptr.
-///       Pre-batch validated ptr and then returned ENOSYS, never
-///       returning the byte count.
+///     bytecount==0 -> success(0) without touching ptr.
+///     Pre-batch validated ptr and then returned ENOSYS, never
+///     returning the byte count.
 ///
 /// Batch 373 implements the full Linux-shape gate sequence,
 /// modulo the architectural directive that we have no LDT
@@ -27229,8 +27229,8 @@ fn sys_ioperm(args: &SyscallArgs) -> SyscallResult {
 /// Concrete divergences fixed:
 ///   * set_thread_area(NULL)    Linux: ENOSYS  Pre: EFAULT.
 ///   * set_thread_area(0xDEAD)  Linux: ENOSYS  Pre: EFAULT
-///                              (validate_user_read fails on the
-///                               unmapped pointer).
+///     (validate_user_read fails on the
+///     unmapped pointer).
 ///   * get_thread_area(NULL)    Linux: ENOSYS  Pre: EFAULT.
 ///   * get_thread_area(0xDEAD)  Linux: ENOSYS  Pre: EFAULT.
 ///
@@ -27393,11 +27393,11 @@ fn sys_kexec_file_load(_args: &SyscallArgs) -> SyscallResult {
 ///   1. `if (flags) return -EINVAL;` — runs first, ahead of any
 ///      pointer touch.
 ///   2. `copy_mnt_id_req(req, &kreq)`:
-///        a. `get_user(usize, &req->size)` -> -EFAULT on bad req.
-///        b. `usize > PAGE_SIZE` -> -E2BIG.
-///        c. `usize < MNT_ID_REQ_SIZE_VER0 (24)` -> -EINVAL.
-///        d. `copy_struct_from_user` -> -EFAULT.
-///        e. `kreq.spare != 0` -> -EINVAL.
+///      a. `get_user(usize, &req->size)` -> -EFAULT on bad req.
+///      b. `usize > PAGE_SIZE` -> -E2BIG.
+///      c. `usize < MNT_ID_REQ_SIZE_VER0 (24)` -> -EINVAL.
+///      d. `copy_struct_from_user` -> -EFAULT.
+///      e. `kreq.spare != 0` -> -EINVAL.
 ///   3. `do_statmount` -> -ENOENT for an unknown mnt_id.
 ///
 /// Pre-batch we ran `req == 0 || buf == 0 -> EFAULT` ahead of the
@@ -27499,11 +27499,11 @@ fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
 /// (mirrors statmount but allows the LISTMOUNT_REVERSE bit in flags):
 ///   1. `if (flags & ~LISTMOUNT_REVERSE)` -> -EINVAL.
 ///   2. `copy_mnt_id_req(req, &kreq)`:
-///        a. `get_user(usize, &req->size)`               -> -EFAULT
-///        b. `usize > PAGE_SIZE`                         -> -E2BIG
-///        c. `usize < MNT_ID_REQ_SIZE_VER0 (24)`         -> -EINVAL
-///        d. `copy_struct_from_user`                     -> -EFAULT
-///        e. `kreq.spare != 0`                           -> -EINVAL
+///      a. `get_user(usize, &req->size)`               -> -EFAULT
+///      b. `usize > PAGE_SIZE`                         -> -E2BIG
+///      c. `usize < MNT_ID_REQ_SIZE_VER0 (24)`         -> -EINVAL
+///      d. `copy_struct_from_user`                     -> -EFAULT
+///      e. `kreq.spare != 0`                           -> -EINVAL
 ///   3. `do_listmount` -> -ENOENT for an unknown mnt_id.
 ///
 /// Pre-batch we ran EFAULT pointer + validate_user_read gates ahead
@@ -27511,7 +27511,7 @@ fn sys_statmount(args: &SyscallArgs) -> SyscallResult {
 ///   * (req=NULL, flags=1)                  -> -EFAULT vs Linux -EINVAL.
 ///   * (req->size=8192)                     -> -ENOENT vs Linux -E2BIG.
 ///   * (req->size=16)                       -> -ENOENT vs Linux -EINVAL.
-/// Reorder to match.
+///     Reorder to match.
 fn sys_listmount(args: &SyscallArgs) -> SyscallResult {
     const MNT_ID_REQ_SIZE_VER0: u32 = 24;
     const LINUX_PAGE_SIZE: u32 = 4096;
@@ -28264,8 +28264,8 @@ fn sys_acct(_args: &SyscallArgs) -> SyscallResult {
 ///
 ///   * ustat(dev=99, NULL)       — Linux: EINVAL.  Pre-batch: EFAULT.
 ///   * ustat(dev=99, 0xDEAD)     — Linux: EINVAL.  Pre-batch: EFAULT
-///                                  (or EINVAL via validate, but the
-///                                  wrong cause).
+///     (or EINVAL via validate, but the
+///     wrong cause).
 ///   * ustat(dev=99, &valid_buf) — Linux: EINVAL.  Pre-batch: ENOSYS.
 ///
 /// ENOSYS was particularly misleading: ustat IS supported on Linux
@@ -28988,10 +28988,10 @@ fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
 /// Errors:
 ///   - EBADF   — fd not open, or it's a console/pipe fd.
 ///   - EINVAL  — malformed op (mutually exclusive type bits, or unknown
-///                bits set).
+///     bits set).
 ///   - EWOULDBLOCK — conflicting lock held by another owner.  Returned
-///                regardless of whether LOCK_NB was set; see the limitation
-///                below.
+///     regardless of whether LOCK_NB was set; see the limitation
+///     below.
 ///
 /// Limitation: real Linux blocks (sleeps) on a contended lock when
 /// LOCK_NB is absent.  Our IPC layer doesn't yet expose a wait queue
@@ -30142,7 +30142,7 @@ fn sys_remap_file_pages(args: &SyscallArgs) -> SyscallResult {
 /// when both fail):
 ///
 ///   * `which = 99, class = RT, data = 0`            ours: -EINVAL (which gate)
-///                                                   Linux: -EPERM (class gate first)
+///     Linux: -EPERM (class gate first)
 ///
 /// Why it matters: ionice(1), util-linux's `chrt -i`, fio's `ioprio`
 /// option, and systemd's `IOSchedulingClass=` directive all probe
@@ -30941,22 +30941,22 @@ fn sys_uselib(_args: &SyscallArgs) -> SyscallResult {
 /// are:
 ///
 ///   * option=1 (fs_index, lookup-by-name):
-///       getname(arg1) first → EFAULT for NULL/bad ptr.
-///       Empty registry → no strcmp match → `err = -EINVAL` at the
-///       trailing `read_unlock; putname; return err;`.  Note that
-///       fs_index returns EINVAL for "not found", NOT ENOENT.
+///     getname(arg1) first → EFAULT for NULL/bad ptr.
+///     Empty registry → no strcmp match → `err = -EINVAL` at the
+///     trailing `read_unlock; putname; return err;`.  Note that
+///     fs_index returns EINVAL for "not found", NOT ENOENT.
 ///   * option=2 (fs_name, lookup-by-index):
-///       Walks file_systems list `arg1` times; `!tmp` after the walk
-///       (index out of range — always, since the list is empty) sets
-///       `res = -EINVAL` BEFORE the copy_to_user call.  Therefore
-///       sysfs(2) NEVER touches the output buffer when the index is
-///       out of range — no EFAULT can be returned by this path in our
-///       environment.
+///     Walks file_systems list `arg1` times; `!tmp` after the walk
+///     (index out of range — always, since the list is empty) sets
+///     `res = -EINVAL` BEFORE the copy_to_user call.  Therefore
+///     sysfs(2) NEVER touches the output buffer when the index is
+///     out of range — no EFAULT can be returned by this path in our
+///     environment.
 ///   * option=3 (fs_maxindex):
-///       Returns the count of registered filesystems as a non-negative
-///       integer.  Zero registered → 0.  No userspace touch.
+///     Returns the count of registered filesystems as a non-negative
+///     integer.  Zero registered → 0.  No userspace touch.
 ///   * any other option:
-///       `retval = -EINVAL` initializer is never overwritten → EINVAL.
+///     `retval = -EINVAL` initializer is never overwritten → EINVAL.
 ///
 /// The most important divergence is option=3 returning ENOSYS pre-
 /// batch: a userspace caller probing for "how many filesystems does
@@ -31229,11 +31229,11 @@ fn sys_futimesat(args: &SyscallArgs) -> SyscallResult {
 /// Pre-batch returned:
 ///   * futex_requeue(NULL, 0, 0, 0)        Linux: EINVAL  Pre: EFAULT
 ///   * futex_requeue(NULL, 1, 0, 0)        Linux: EINVAL  Pre: EFAULT
-///                                         (NULL check fired before
-///                                          flag-mask check.)
+///     (NULL check fired before
+///     flag-mask check.)
 ///   * futex_requeue(waiters, 0, -1, -1)   Linux: 0 (or ENOSYS via
-///                                                 our terminal)
-///                                         Pre:   EINVAL
+///     our terminal)
+///     Pre:   EINVAL
 ///
 /// We don't have futex_requeue plumbed through ipc::futex yet, so
 /// the terminal stays at ENOSYS.  That's a known limitation, not a
@@ -33018,10 +33018,10 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `flags` validation matches Linux:
 ///   - `GRND_NONBLOCK` (0x0001) — we never block, so it's effectively
-///                                a no-op, but the flag is accepted.
+///     a no-op, but the flag is accepted.
 ///   - `GRND_RANDOM`   (0x0002) — we don't distinguish urandom vs
-///                                 random sources; same CSPRNG either
-///                                 way.
+///     random sources; same CSPRNG either
+///     way.
 ///   - `GRND_INSECURE` (0x0004) — accepted for API compatibility.
 ///   - `GRND_RANDOM | GRND_INSECURE` together is rejected with EINVAL
 ///     because those flags request mutually-exclusive entropy sources

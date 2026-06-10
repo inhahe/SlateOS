@@ -1875,8 +1875,8 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 /// `arg2`: packed `(offset << 32) | count`.
 ///   - Bits 63..32: offset (0-based index of first entry to return).
 ///   - Bits 31..0:  count  (maximum number of entries to return).
-/// `arg3`: pointer to output buffer for serialized entries.
-/// `arg4`: output buffer capacity in bytes.
+///     `arg3`: pointer to output buffer for serialized entries.
+///     `arg4`: output buffer capacity in bytes.
 ///
 /// Each entry is serialized as:
 ///   `u8 entry_type | u32 name_len | u8[name_len] name | u64 size`

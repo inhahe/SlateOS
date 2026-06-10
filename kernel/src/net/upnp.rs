@@ -14,7 +14,7 @@
 //!
 //! - **UPnP IGD** (Internet Gateway Device): SSDP multicast discovery
 //!   + SOAP/XML control.  More complex but more widely supported
-//!   (most consumer routers enable UPnP by default).
+//!     (most consumer routers enable UPnP by default).
 //!
 //! We try NAT-PMP first (simpler, faster), then fall back to UPnP IGD.
 //!

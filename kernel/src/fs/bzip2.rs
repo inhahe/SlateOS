@@ -416,23 +416,23 @@ fn rle_decode(data: &[u8]) -> Vec<u8> {
 // RUNA/RUNB zero-run decoding
 // ---------------------------------------------------------------------------
 
-/// Decode RUNA/RUNB encoded runs into the MTF symbol stream.
-///
-/// Bzip2 encodes runs of zeros (MTF symbol 0) using a bijective
-/// base-2 encoding with symbols RUNA (0) and RUNB (1):
-///   RUNA          → 1 zero
-///   RUNB          → 2 zeros
-///   RUNA RUNA     → 1 + 2 = 3 zeros
-///   RUNB RUNA     → 2 + 2 = 4 zeros
-///   RUNA RUNB     → 1 + 4 = 5 zeros
-///   RUNB RUNB     → 2 + 4 = 6 zeros
-///   ...
-/// The formula: count += (symbol+1) * 2^position
-///
-/// Returns the decoded symbols (with runs expanded to literal 0s)
-/// and everything else shifted by -1 (since RUNA=0 and RUNB=1 are
-/// the run symbols, the actual MTF values start at 2 for symbol
-/// index 1, etc.).
+// Decode RUNA/RUNB encoded runs into the MTF symbol stream.
+//
+// Bzip2 encodes runs of zeros (MTF symbol 0) using a bijective
+// base-2 encoding with symbols RUNA (0) and RUNB (1):
+//   RUNA          → 1 zero
+//   RUNB          → 2 zeros
+//   RUNA RUNA     → 1 + 2 = 3 zeros
+//   RUNB RUNA     → 2 + 2 = 4 zeros
+//   RUNA RUNB     → 1 + 4 = 5 zeros
+//   RUNB RUNB     → 2 + 4 = 6 zeros
+//   ...
+// The formula: count += (symbol+1) * 2^position
+//
+// Returns the decoded symbols (with runs expanded to literal 0s)
+// and everything else shifted by -1 (since RUNA=0 and RUNB=1 are
+// the run symbols, the actual MTF values start at 2 for symbol
+// index 1, etc.).
 
 // ---------------------------------------------------------------------------
 // Main decompression entry point

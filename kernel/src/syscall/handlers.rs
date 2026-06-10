@@ -2915,8 +2915,8 @@ fn write_reaped_pid(out_ptr: u64, child_pid: crate::proc::pcb::ProcessId) {
 ///   - `> 0`: wait for that specific child.
 ///   - `<= 0`: wait for *any* child (POSIX `waitpid(-1)`; process groups
 ///     are not yet implemented, so `0` and `< -1` also mean "any child").
-/// `arg1`: optional user `*mut i32` that receives the reaped child PID
-///   (0 = don't report).  The exit code is returned in `rax`.
+///     `arg1`: optional user `*mut i32` that receives the reaped child PID
+///     (0 = don't report).  The exit code is returned in `rax`.
 ///
 /// If no child is ready, blocks the calling task until one exits.
 /// Returns the exit code on success, or a negative error

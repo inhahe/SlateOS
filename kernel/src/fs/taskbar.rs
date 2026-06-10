@@ -9,13 +9,13 @@
 //!
 //! design.txt lines 708-713:
 //! - "can pin apps to taskbar on the left, all launched applications go
-//!    to the right of those, with a small space and a divider between the
-//!    two sections"
+//!   to the right of those, with a small space and a divider between the
+//!   two sections"
 //! - "option to show app name along with app icon in taskbar"
 //! - "taskbar and/or window titlebars support blurry transparency"
 //! - "optional icons on taskbar like Windows: clock, wifi, ..."
 //! - "can drag and reorder icons in pinned section and currently running
-//!    apps section"
+//!   apps section"
 //!
 //! ## Architecture
 //!

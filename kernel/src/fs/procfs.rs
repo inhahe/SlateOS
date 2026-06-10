@@ -549,6 +549,7 @@ const PID_FILES: &[&str] = &[
     "comm",
     "statm",
     "limits",
+    "environ",
 ];
 
 // ---------------------------------------------------------------------------
@@ -1783,19 +1784,48 @@ fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(s.into_bytes())
 }
 
-/// `/proc/<pid>/cmdline` — process command name.
+/// `/proc/<pid>/cmdline` — full command line, Linux-exact format.
 ///
-/// Returns the process name as a null-terminated string (matching
-/// Linux's `/proc/<pid>/cmdline` format for simple cases).
+/// Linux emits the process's argv as a sequence of NUL-terminated
+/// strings concatenated together (each argument followed by a `\0`,
+/// including the last).  We serve this from the persistent `proc_argv`
+/// snapshot captured at spawn (see `pcb::set_initial_args`).
+///
+/// Fallbacks, in order:
+///   1. persistent argv snapshot (the normal case for spawned programs);
+///   2. the process name as a single argument (kernel-spawned tasks and
+///      any process started without an explicit argv) — matches the
+///      effect of Linux's single-arg cmdline;
+///   3. the scheduler task name for bare tasks with no PCB.
+///
+/// Known limitation: like every other consumer of the snapshot, this
+/// does not reflect a process rewriting its own `argv[]` at runtime
+/// (`setproctitle`); it reports the argv as captured at spawn.
 fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
-    // Try process name first.
+    // 1. Full argv from the persistent snapshot.
+    if let Some(argv) = crate::proc::pcb::get_proc_argv(task_id) {
+        if !argv.is_empty() {
+            // Sum lengths + one NUL per argument for an exact allocation.
+            let cap = argv.iter().map(|a| a.len().saturating_add(1)).sum();
+            let mut data = Vec::with_capacity(cap);
+            for arg in &argv {
+                data.extend_from_slice(arg);
+                data.push(0); // NUL terminator after each arg, Linux-style.
+            }
+            return Ok(data);
+        }
+        // argv snapshot empty (spawned without args): fall through to
+        // the process-name single-argument form below.
+    }
+
+    // 2. Process name as a single NUL-terminated argument.
     if let Some(name) = crate::proc::pcb::name(task_id) {
         let mut data = name.into_bytes();
-        data.push(0); // Null-terminated like Linux.
+        data.push(0);
         return Ok(data);
     }
 
-    // Fall back to task name from the scheduler.
+    // 3. Fall back to task name from the scheduler.
     let tasks = crate::sched::task_list();
     let task = tasks.iter().find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
@@ -1804,6 +1834,30 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
         .unwrap_or("???");
     let mut data = name.as_bytes().to_vec();
     data.push(0);
+    Ok(data)
+}
+
+/// `/proc/<pid>/environ` — process environment, Linux-exact format.
+///
+/// Like `cmdline`, Linux emits the environment as NUL-terminated
+/// `KEY=value` strings concatenated together (each entry followed by a
+/// `\0`).  Served from the persistent `proc_envp` snapshot captured at
+/// spawn.
+///
+/// Returns an empty file (not an error) for a process that was spawned
+/// without an environment — Linux's `/proc/<pid>/environ` is likewise
+/// empty for such processes.  Returns `NotFound` only if the task id
+/// resolves to no process at all (a bare scheduler task carries no
+/// environment).
+fn gen_pid_environ(task_id: u64) -> KernelResult<Vec<u8>> {
+    let envp = crate::proc::pcb::get_proc_envp(task_id)
+        .ok_or(KernelError::NotFound)?;
+    let cap = envp.iter().map(|e| e.len().saturating_add(1)).sum();
+    let mut data = Vec::with_capacity(cap);
+    for entry in &envp {
+        data.extend_from_slice(entry);
+        data.push(0); // NUL terminator after each entry.
+    }
     Ok(data)
 }
 
@@ -2111,6 +2165,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "comm" => gen_pid_comm(task_id),
         "statm" => gen_pid_statm(task_id),
         "limits" => gen_pid_limits(task_id),
+        "environ" => gen_pid_environ(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11024,6 +11079,48 @@ pub fn self_test() -> KernelResult<()> {
         }
         Err(e) => {
             serial_println!("[procfs]   FAIL: statm unexpected error {:?}", e);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // /proc/<pid>/cmdline — always succeeds for a live task: full argv from
+    // the persistent snapshot, or the process/task name as a single
+    // NUL-terminated argument.  Must be non-empty and NUL-terminated.
+    let cmdline_data = fs.read_file(&format!("/{current_tid}/cmdline"))?;
+    if cmdline_data.is_empty() || cmdline_data.last() != Some(&0) {
+        serial_println!(
+            "[procfs]   FAIL: cmdline malformed (len={}, last={:?})",
+            cmdline_data.len(), cmdline_data.last()
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   {}/cmdline: {} bytes OK", current_tid, cmdline_data.len());
+
+    // /proc/<pid>/environ — served from the persistent envp snapshot.  Like
+    // statm, only real processes carry an environment, so a bare scheduler
+    // task legitimately returns NotFound.  When it succeeds it is either
+    // empty (spawned without env) or a run of NUL-terminated entries.
+    match fs.read_file(&format!("/{current_tid}/environ")) {
+        Ok(environ_data) => {
+            if !environ_data.is_empty() && environ_data.last() != Some(&0) {
+                serial_println!(
+                    "[procfs]   FAIL: environ not NUL-terminated (len={})",
+                    environ_data.len()
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[procfs]   {}/environ: {} bytes OK", current_tid, environ_data.len()
+            );
+        }
+        Err(KernelError::NotFound) => {
+            serial_println!(
+                "[procfs]   {}/environ: NotFound (bare task, no env) OK",
+                current_tid
+            );
+        }
+        Err(e) => {
+            serial_println!("[procfs]   FAIL: environ unexpected error {:?}", e);
             return Err(KernelError::InternalError);
         }
     }

@@ -293,6 +293,23 @@ pub struct Process {
     /// Same format as `initial_argv` — each element is one `KEY=value`
     /// byte string.
     pub initial_envp: Vec<Vec<u8>>,
+    /// Persistent snapshot of the process's argv, kept for the whole
+    /// process lifetime to back `/proc/<pid>/cmdline`.
+    ///
+    /// Distinct from [`Self::initial_argv`]: that field is the one-shot
+    /// startup channel the child drains via `SYS_PROCESS_GET_ARGS`,
+    /// whereas this snapshot is never cleared, mirroring Linux's
+    /// `/proc/<pid>/cmdline` which stays readable as long as the process
+    /// lives.  Set (by cloning) in [`set_initial_args`]; inherited from
+    /// the parent across `fork_create` (a forked child shares the
+    /// parent's cmdline until it `execve`s).  Empty for processes
+    /// spawned without argv (e.g. the initial kernel-spawned task), in
+    /// which case `/proc/<pid>/cmdline` falls back to the process name.
+    pub proc_argv: Vec<Vec<u8>>,
+    /// Persistent snapshot of the process's environment, kept for the
+    /// whole process lifetime to back `/proc/<pid>/environ`.  Same
+    /// lifecycle as [`Self::proc_argv`].
+    pub proc_envp: Vec<Vec<u8>>,
     /// Syscall ABI the process speaks.
     ///
     /// [`AbiMode::Native`] (the default) routes `syscall` instructions
@@ -927,6 +944,10 @@ impl Process {
             initial_fds: Vec::new(),
             initial_argv: Vec::new(),
             initial_envp: Vec::new(),
+            // Persistent /proc snapshots — populated by set_initial_args
+            // once the parent supplies argv/envp.
+            proc_argv: Vec::new(),
+            proc_envp: Vec::new(),
             abi_mode: AbiMode::Native,
             linux_fd_table: None,
             // Every process starts at the filesystem root.  `chdir`
@@ -1169,6 +1190,8 @@ pub fn fork_create(
         linux_securebits,
         linux_cap_bset,
         linux_ioprio,
+        proc_argv,
+        proc_envp,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1210,6 +1233,10 @@ pub fn fork_create(
             parent.linux_securebits,
             parent.linux_cap_bset,
             parent.linux_ioprio,
+            // A forked child shares the parent's cmdline/environ until
+            // it execve's (Linux semantics).
+            parent.proc_argv.clone(),
+            parent.proc_envp.clone(),
         )
     };
 
@@ -1267,6 +1294,11 @@ pub fn fork_create(
         // vector already lives in its copy-on-write userspace memory.
         initial_argv: Vec::new(),
         initial_envp: Vec::new(),
+        // The persistent /proc snapshots, however, are inherited from
+        // the parent so `/proc/<child>/cmdline` and `/environ` reflect
+        // the shared argv/environ until the child execve's.
+        proc_argv,
+        proc_envp,
         // Linux/native ABI is a property of the loaded binary, so a
         // forked child speaks the same ABI as its parent.
         abi_mode,
@@ -3351,12 +3383,41 @@ pub fn set_initial_args(
 
     let mut table = PROCESS_TABLE.lock();
     if let Some(proc) = table.get_mut(&pid) {
+        // Persistent /proc snapshots: keep a copy for the process
+        // lifetime (cloned before the one-shot move below) so
+        // `/proc/<pid>/cmdline` and `/proc/<pid>/environ` stay readable
+        // after the child drains `initial_argv`/`initial_envp` at
+        // startup.  This is the only extra cost — bounded by
+        // `MAX_ARGS_BYTES` and freed when the process exits.
+        proc.proc_argv = argv.clone();
+        proc.proc_envp = envp.clone();
         proc.initial_argv = argv;
         proc.initial_envp = envp;
         Ok(())
     } else {
         Err(KernelError::NoSuchProcess)
     }
+}
+
+/// Read a clone of the persistent argv snapshot for `/proc/<pid>/cmdline`.
+///
+/// Returns `None` if `pid` is unknown.  Returns an empty vec for a
+/// process that was spawned without argv (the caller should fall back to
+/// the process name, matching Linux's behaviour for kernel threads whose
+/// `cmdline` is empty).
+#[must_use]
+pub fn get_proc_argv(pid: ProcessId) -> Option<Vec<Vec<u8>>> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.proc_argv.clone())
+}
+
+/// Read a clone of the persistent environ snapshot for
+/// `/proc/<pid>/environ`.
+///
+/// Returns `None` if `pid` is unknown.  Returns an empty vec for a
+/// process spawned without an environment.
+#[must_use]
+pub fn get_proc_envp(pid: ProcessId) -> Option<Vec<Vec<u8>>> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.proc_envp.clone())
 }
 
 /// Take (move out) the initial argv/envp from a process's PCB.

@@ -311,12 +311,35 @@ Two deny-errors that were authored as part of the /proc work
 `procfs.rs` `gen_pid_statm` doc list (`doc_overindented_list_items`) and
 `pcb.rs` `set_exe_path` (`manual_contains` → `slice.contains`).
 
+**Tooling caveat (verified 2026-06-10):** `cargo clippy --fix` does
+**not work** in this environment — it recompiles, reports the count of
+machine-applicable suggestions (e.g. "to apply 176 suggestions"), but
+writes **zero** changes to disk.  Tried four ways:
+`cargo clippy -p kernel --fix --allow-dirty`;
+`… --bin kernel … --no-deps`;
+`… -- --force-warn clippy::all` (to defeat the deny-as-error so the
+verify-recompile would pass); and with the workspace
+`clippy::all` level temporarily flipped to `warn` in `Cargo.toml`.
+All four no-op'd (0 `.rs` files modified, ~4 min each).  The kernel
+targets the built-in `x86_64-unknown-none` with no build-std, so this
+is not a custom-target issue; it looks like `cargo fix`'s
+write-back/verify phase failing silently on this Windows toolchain.
+**Do not burn build cycles retrying `--fix` — remediation must be by
+hand (or with a non-cargo rewrite tool).**
+
 **Proper fix / remediation plan:**
-1. `cargo clippy -p kernel --fix --allow-dirty` to clear the
-   machine-applicable bulk (the ~158 doc lints + the manual-idiom
-   families).  Re-run boot-test afterward — these rewrites are
-   semantics-preserving (`manual_memcpy` → `copy_from_slice`,
-   `vec_init_then_push` → `vec![…]`, etc.) but a boot test confirms it.
+1. Hand-fix the machine-applicable bulk in reviewable batches, grouped
+   by lint family so each diff is easy to verify: start with the ~158
+   doc-formatting lints (`doc_overindented_list_items`,
+   `doc_lazy_continuation` — pure comment edits, zero risk), then the
+   manual-idiom families (`unwrap_or_default`, `manual_strip`,
+   `manual_slice_fill`, `vec_init_then_push`, `manual_memcpy`,
+   `manual_clamp`, `assign_op_pattern`, `manual_div_ceil`, …).  These
+   rewrites are semantics-preserving (`manual_memcpy` →
+   `copy_from_slice`, `vec_init_then_push` → `vec![…]`, etc.).  Land
+   `linux.rs` (200 of the 451) as its own commit(s) since it is the
+   hottest file and the largest single chunk.  Boot-test after each
+   batch.
 2. Hand-fix the judgment tail: dedupe the `#![allow(dead_code)]`
    attributes, extract `type_complexity` aliases, inspect every
    `if_same_then_else` for an actual logic bug before collapsing it,

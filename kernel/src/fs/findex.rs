@@ -299,15 +299,18 @@ pub fn columns_for_dir(dir_path: &str) -> Vec<FieldStat> {
     let mut field_counts: Vec<(String, String, usize)> = Vec::new();
 
     for entry in index.iter() {
-        if entry.path != prefix.as_str()
-            && !(entry.path.starts_with(prefix.as_str())
-                 && entry.path.as_bytes().get(prefix.len()) == Some(&b'/'))
-        {
+        // `prefix` always ends in '/' (built above), so a child is any
+        // indexed path strictly under it.  The previous inline boundary
+        // check `get(prefix.len()) == Some('/')` was wrong for a
+        // trailing-slash prefix — it looked one byte past the slash and so
+        // matched nothing, making this function always return empty.  See
+        // fs::pathutil for the canonical predicate.
+        if !crate::fs::pathutil::path_strictly_under(entry.path.as_str(), prefix.as_str()) {
             continue;
         }
         // Only direct children (no subdirectories).
         let rest = &entry.path[prefix.len()..];
-        if rest.contains('/') {
+        if rest.is_empty() || rest.contains('/') {
             continue;
         }
 

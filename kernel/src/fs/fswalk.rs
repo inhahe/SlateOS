@@ -559,19 +559,15 @@ fn matches_filter(entry: &WalkEntry, opts: &WalkOptions) -> bool {
 
 /// Check if a path should be excluded.
 fn is_excluded(path: &str, opts: &WalkOptions) -> bool {
+    // Canonical subtree predicate tolerates a trailing slash on the exclude
+    // entries. See fs::pathutil.
     for prefix in DEFAULT_EXCLUDES {
-        if path == *prefix
-            || (path.starts_with(prefix)
-                && path.as_bytes().get(prefix.len()) == Some(&b'/'))
-        {
+        if crate::fs::pathutil::path_in_subtree(path, prefix) {
             return true;
         }
     }
     for prefix in &opts.excludes {
-        if path == prefix.as_str()
-            || (path.starts_with(prefix.as_str())
-                && path.as_bytes().get(prefix.len()) == Some(&b'/'))
-        {
+        if crate::fs::pathutil::path_in_subtree(path, prefix.as_str()) {
             return true;
         }
     }

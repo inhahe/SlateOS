@@ -355,25 +355,19 @@ pub fn clear() {
 /// `/protected` and `/protected/secret` but never `/protectedX`.
 ///
 /// Callers register prefixes with a trailing slash (e.g. `/protected/`),
-/// but a trailing slash is not required: we normalise it away before the
+/// but a trailing slash is not required: it is normalised away before the
 /// boundary check so both forms behave identically.  The previous inline
 /// matcher applied the `byte-after-prefix == '/'` boundary check against
 /// a prefix that *already* carried the trailing slash, so it only ever
 /// matched double-slash paths (`/protected//x`) — meaning every real deny
 /// handler registered with a trailing slash silently failed open.
+///
+/// This is a thin wrapper over [`crate::fs::pathutil::path_in_subtree`], the
+/// single canonical subtree predicate; the wrapper is retained for the
+/// descriptive name at the deny-check call sites and the bug-history note.
+#[inline]
 fn path_matches_prefix(path: &str, prefix: &str) -> bool {
-    if prefix.is_empty() {
-        return true;
-    }
-    // Normalise away a single trailing slash so the boundary check is
-    // uniform whether or not the registrant supplied one.
-    let dir = prefix.strip_suffix('/').unwrap_or(prefix);
-    if dir.is_empty() {
-        // prefix was exactly "/" — the root, which contains everything.
-        return true;
-    }
-    path == dir
-        || (path.starts_with(dir) && path.as_bytes().get(dir.len()) == Some(&b'/'))
+    crate::fs::pathutil::path_in_subtree(path, prefix)
 }
 
 /// Check all interceptors before a filesystem operation.

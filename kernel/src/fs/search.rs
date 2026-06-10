@@ -328,12 +328,10 @@ fn search_recursive(
         return;
     }
 
-    // Check exclude prefixes (with path-boundary check).
+    // Check exclude prefixes (canonical subtree predicate tolerates a
+    // trailing slash on the exclude entry). See fs::pathutil.
     for excl in &query.exclude_prefixes {
-        if path == excl.as_str()
-            || (path.starts_with(excl.as_str())
-                && path.as_bytes().get(excl.len()) == Some(&b'/'))
-        {
+        if crate::fs::pathutil::path_in_subtree(path, excl.as_str()) {
             return;
         }
     }

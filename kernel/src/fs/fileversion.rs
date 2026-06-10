@@ -162,13 +162,10 @@ pub fn capture_version(path: &str, data: &[u8], uid: u32) -> KernelResult<u64> {
             return Err(KernelError::NotSupported);
         }
 
-        // Check if path is covered by a watched path.
+        // Check if path is covered by a watched path (canonical subtree
+        // predicate; see fs::pathutil).
         let policy = state.watched_paths.iter()
-            .find(|w| {
-                path == w.path
-                    || (path.starts_with(&w.path)
-                        && path.as_bytes().get(w.path.len()) == Some(&b'/'))
-            })
+            .find(|w| crate::fs::pathutil::path_in_subtree(path, w.path.as_str()))
             .map(|w| w.policy)
             .unwrap_or(state.default_policy);
 
@@ -177,11 +174,9 @@ pub fn capture_version(path: &str, data: &[u8], uid: u32) -> KernelResult<u64> {
         }
 
         // Check for max version size.
-        if let Some(wp) = state.watched_paths.iter().find(|w| {
-            path == w.path
-                || (path.starts_with(&w.path)
-                    && path.as_bytes().get(w.path.len()) == Some(&b'/'))
-        }) {
+        if let Some(wp) = state.watched_paths.iter()
+            .find(|w| crate::fs::pathutil::path_in_subtree(path, w.path.as_str()))
+        {
             if wp.max_version_size > 0 && data.len() as u64 > wp.max_version_size {
                 return Err(KernelError::FileTooLarge);
             }

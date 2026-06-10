@@ -253,9 +253,11 @@ fn walk_directory(
         return;
     }
 
-    // Check if this directory should be excluded.
+    // Check if this directory should be excluded (canonical subtree
+    // predicate tolerates a trailing slash on the exclude entry). See
+    // fs::pathutil.
     for excl in &config.exclude_dirs {
-        if path == excl.as_str() || path.starts_with(excl.as_str()) && path.as_bytes().get(excl.len()) == Some(&b'/') {
+        if crate::fs::pathutil::path_in_subtree(path, excl.as_str()) {
             return;
         }
     }
@@ -423,11 +425,7 @@ pub fn remove_entry(prefix: &str) -> usize {
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| {
-            e.path == prefix
-                || (e.path.starts_with(prefix)
-                    && e.path.as_bytes().get(prefix.len()) == Some(&b'/'))
-        })
+        .filter(|(_, e)| crate::fs::pathutil::path_in_subtree(e.path.as_str(), prefix))
         .map(|(i, _)| i)
         .collect();
 
@@ -670,23 +668,17 @@ fn is_watched(path: &str) -> bool {
         return false;
     }
 
-    // Check exclusions first.  Use path-boundary check to avoid
-    // /sys matching /system — require exact match or separator at boundary.
+    // Check exclusions first.  The canonical subtree predicate avoids
+    // /sys matching /system and tolerates a trailing slash. See fs::pathutil.
     for excl in &idx.config.exclude_dirs {
-        if path == excl.as_str()
-            || (path.starts_with(excl.as_str())
-                && path.as_bytes().get(excl.len()) == Some(&b'/'))
-        {
+        if crate::fs::pathutil::path_in_subtree(path, excl.as_str()) {
             return false;
         }
     }
 
     // Check if within any watch dir.
     for dir in &idx.config.watch_dirs {
-        if path == dir.as_str()
-            || (path.starts_with(dir.as_str())
-                && path.as_bytes().get(dir.len()) == Some(&b'/'))
-        {
+        if crate::fs::pathutil::path_in_subtree(path, dir.as_str()) {
             return true;
         }
     }

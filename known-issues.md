@@ -316,9 +316,9 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD3. Prefix-boundary subtree checks: audit every site for trailing-slash correctness — open 2026-06-10
+### TD3. Prefix-boundary subtree checks: audit every site for trailing-slash correctness — RESOLVED 2026-06-10
 
-**What:** The "is `path` inside directory subtree `prefix`" check is
+**What:** The "is `path` inside directory subtree `prefix`" check was
 written inline at ~30 sites as
 `path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')`
 (sometimes with a leading `path == prefix ||`).  This idiom is **only
@@ -330,33 +330,47 @@ the slash and therefore only matches *double-slash* paths
 fails (open for deny handlers, or simply never fires for "missing file"
 / exclusion logic).
 
-**Confirmed-buggy and already fixed:**
-- `kernel/src/fs/integrity.rs` baseline-paths filter (commit `22a8098f`)
-  — prefix carried a trailing slash; `verify_dir` never reported missing
-  files.
-- `kernel/src/fs/intercept.rs` `pre_check` interceptor filter — prefixes
-  registered with trailing slashes (`/protected/`) so every deny handler
-  failed open.  Fixed by extracting `path_matches_prefix()` which
-  normalises away a trailing slash before the boundary check (so it is
-  correct for *both* prefix forms).
+**RESOLUTION (2026-06-10):** Created a single canonical helper module
+`kernel/src/fs/pathutil.rs` exposing `path_in_subtree(path, dir)` and
+`path_strictly_under(path, dir)`.  Both normalise away an optional
+trailing slash (`dir.strip_suffix('/')`) before the component-boundary
+check, so they are correct whether or not the caller's prefix carries a
+trailing slash.  Five `#[cfg(test)]` unit tests pin the contract
+(basic boundary, trailing-slash equivalence, empty/root-matches-all,
+strictly-under-excludes-self, strictly-under-root).  Every real subtree
+check now routes through this helper; the footgun idiom is gone from the
+fs subsystem.
 
-**Where the rest live (need per-site verification of whether the prefix
-carries a trailing slash):** `vfs.rs` (1185, 1275, 2152, 2368, 2386,
-3279), `undelete.rs:259`, `search.rs:335`, `queryable.rs:690`,
-`overlay.rs:169`, `index.rs` (258, 429, 678, 688), `fswalk.rs`
-(565, 573), `freeze.rs:264`, `findex.rs:304`, `fileversion.rs` (170,
-183), `fcomment.rs` (199, 223, 259), `directio.rs:301`, `dedup.rs:330`,
-`changetrack.rs` (445, 456), `atime.rs:163`, `apps/defrag/src/main.rs:659`.
-Many of these very likely use slash-free prefixes (mount paths, exclude
-dirs) and are therefore correct — but each must be confirmed, not
-assumed.  `notify.rs:304` has an explanatory comment about the idiom.
+**Confirmed-buggy (silent failures), now fixed via the helper:**
+- `integrity.rs` baseline-paths filter (earlier commit `22a8098f`) —
+  prefix carried a trailing slash; `verify_dir` never reported missing
+  files.  Now also routed through `path_in_subtree` (removed the
+  per-iteration `format!("{excl}/")` allocation in the exclude-dir scan).
+- `intercept.rs` `pre_check` interceptor filter — prefixes registered
+  with trailing slashes (`/protected/`) so every deny handler failed
+  open.  `path_matches_prefix()` is now a thin `#[inline]` wrapper over
+  `path_in_subtree` (kept for the descriptive call-site name + bug note).
+- `findex.rs:304` `columns_for_dir` — built `prefix` *with* a trailing
+  slash, so the old boundary check matched nothing and column discovery
+  always returned empty.  Now routed through `path_strictly_under`.
 
-**Proper fix:** Promote `intercept::path_matches_prefix()` (or an
-equivalent in a shared `fs::pathutil`) to a single canonical helper and
-route every subtree check through it, eliminating the per-site
-trailing-slash footgun entirely.  Until then, audit each listed site:
-where the prefix is built with a trailing slash, the boundary check is
-wrong and must be normalised.
+**Routed through the helper for robustness (prefix-source could carry a
+trailing slash; uniform now):** `undelete.rs` (scan filter), `search.rs`
+(exclude prefixes), `queryable.rs` (root filter), `dedup.rs` (exclude
+prefixes), `directio.rs` (`is_dio_path`), `index.rs` (exclude/remove/
+is_watched ×3), `fswalk.rs` (`is_excluded`, both default + opts),
+`fcomment.rs` (search/list/remove_under ×3), `changetrack.rs` (path +
+old_path prefix filter), `fileversion.rs` (policy + max-size lookups).
+
+**Verified correct, left as-is (slash-free prefixes by construction):**
+`vfs.rs` (mount paths), `freeze.rs:264` (mountpoint), `atime.rs:163`
+(mount_path), `overlay.rs:169` (already-normalised `is_under`),
+`notify.rs` `path_matches` (distinct `strip_prefix` impl with
+recursive/non-recursive semantics the helper does not model),
+`apps/defrag/src/main.rs:659` (`/*` glob with the slash already stripped;
+separate crate, cannot reach `fs::pathutil`).
+
+Build clean; QEMU boot test green.
 
 ### TD2. Clippy `clippy::all` deny-level errors not yet zeroed — RESOLVED 2026-06-10
 

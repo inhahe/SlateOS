@@ -436,25 +436,17 @@ fn matches_filter(entry: &JournalEntry, filter: &ChangeFilter) -> bool {
 
     // Check path prefix filter.
     if !filter.path_prefixes.is_empty() {
+        // Canonical subtree predicate; see fs::pathutil.
         let path_matches = filter
             .path_prefixes
             .iter()
-            .any(|pfx| {
-                entry.path == pfx.as_str()
-                    || (entry.path.starts_with(pfx.as_str())
-                        && entry.path.as_bytes().get(pfx.len()) == Some(&b'/'))
-            });
+            .any(|pfx| crate::fs::pathutil::path_in_subtree(entry.path.as_str(), pfx.as_str()));
         if !path_matches {
             // For renames, also check old_path.
             if !entry.old_path.is_empty() {
-                let old_matches = filter
-                    .path_prefixes
-                    .iter()
-                    .any(|pfx| {
-                        entry.old_path == pfx.as_str()
-                            || (entry.old_path.starts_with(pfx.as_str())
-                                && entry.old_path.as_bytes().get(pfx.len()) == Some(&b'/'))
-                    });
+                let old_matches = filter.path_prefixes.iter().any(|pfx| {
+                    crate::fs::pathutil::path_in_subtree(entry.old_path.as_str(), pfx.as_str())
+                });
                 if !old_matches {
                     return false;
                 }

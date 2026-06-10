@@ -682,13 +682,11 @@ pub fn query(
     let mut results = Vec::new();
 
     for file in &store.files {
-        // Skip files not under root_path.  Use path-boundary check
-        // to avoid /tmp matching /tmpfile.
+        // Skip files not under root_path.  The canonical subtree predicate
+        // avoids /tmp matching /tmpfile and tolerates a trailing slash on
+        // `root`. See fs::pathutil.
         if let Some(root) = root_path {
-            if file.path != root
-                && !(file.path.starts_with(root)
-                     && file.path.as_bytes().get(root.len()) == Some(&b'/'))
-            {
+            if !crate::fs::pathutil::path_in_subtree(file.path.as_str(), root) {
                 continue;
             }
         }

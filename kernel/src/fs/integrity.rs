@@ -260,9 +260,12 @@ pub fn baseline_dir(dir: &str) -> KernelResult<u64> {
 
     while let Some(current_dir) = dirs_to_visit.pop() {
         // Check excluded directories.
-        let skip = config.exclude_dirs.iter().any(|excl| {
-            current_dir == *excl || current_dir.starts_with(&alloc::format!("{}/", excl))
-        });
+        // Canonical subtree predicate; see fs::pathutil.  (Avoids a per-iter
+        // `format!("{excl}/")` allocation the previous hand-rolled check made.)
+        let skip = config
+            .exclude_dirs
+            .iter()
+            .any(|excl| crate::fs::pathutil::path_in_subtree(current_dir.as_str(), excl.as_str()));
         if skip {
             continue;
         }
@@ -360,10 +363,8 @@ pub fn list_entries(prefix: Option<&str>, max: usize) -> (Vec<(String, Hash256, 
 
     for (path, entry) in inner.baseline.iter() {
         if let Some(pfx) = prefix {
-            if path != pfx
-                && !(path.starts_with(pfx)
-                     && path.as_bytes().get(pfx.len()) == Some(&b'/'))
-            {
+            // Canonical subtree predicate; see fs::pathutil.
+            if !crate::fs::pathutil::path_in_subtree(path.as_str(), pfx) {
                 continue;
             }
         }
@@ -446,25 +447,17 @@ pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
     let mut results = Vec::new();
     let mut summary = VerifySummary::new();
 
-    // Snapshot the baseline entries under this prefix.
+    // Snapshot the baseline entries under this prefix.  The canonical
+    // subtree predicate enforces the directory boundary (so a sibling like
+    // "/tmp/dirX/.." never matches "/tmp/dir") and treats `dir == "/"` as
+    // the whole tree.  A previous hand-rolled `byte-at-prefix.len() == '/'`
+    // check was wrong against a trailing-slash prefix — it only matched
+    // double-slash paths, so no real file was ever included and "missing"
+    // detection in verify_dir silently never fired.  See fs::pathutil.
     let inner = INTEGRITY.lock();
-    let prefix = if dir == "/" { String::from("/") } else { alloc::format!("{}/", dir) };
     let baseline_paths: Vec<(String, Hash256, u64)> = inner.baseline
         .iter()
-        .filter(|(p, _)| {
-            if dir == "/" {
-                true // All paths under root.
-            } else {
-                // `prefix` already ends with '/', so `starts_with(&prefix)`
-                // alone enforces the directory boundary (it won't match a
-                // sibling like "/tmp/dirX/..").  A previous extra check that
-                // the byte *at* prefix.len() was another '/' was wrong — it
-                // only matched double-slash paths, so no real file under the
-                // directory was ever included and "missing" detection in
-                // verify_dir silently never fired.
-                *p == dir || p.starts_with(&prefix)
-            }
-        })
+        .filter(|(p, _)| crate::fs::pathutil::path_in_subtree(p.as_str(), dir))
         .map(|(p, e)| (p.clone(), e.hash, e.size))
         .collect();
     let config = inner.config.clone();
@@ -479,9 +472,12 @@ pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
 
     while let Some(current_dir) = dirs_to_visit.pop() {
         // Check excluded directories.
-        let skip = config.exclude_dirs.iter().any(|excl| {
-            current_dir == *excl || current_dir.starts_with(&alloc::format!("{}/", excl))
-        });
+        // Canonical subtree predicate; see fs::pathutil.  (Avoids a per-iter
+        // `format!("{excl}/")` allocation the previous hand-rolled check made.)
+        let skip = config
+            .exclude_dirs
+            .iter()
+            .any(|excl| crate::fs::pathutil::path_in_subtree(current_dir.as_str(), excl.as_str()));
         if skip {
             continue;
         }

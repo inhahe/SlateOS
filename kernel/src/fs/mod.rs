@@ -279,6 +279,7 @@ pub mod partmgr;
 pub mod pagecache;
 pub mod pagestat;
 pub mod pathbar;
+pub mod pathutil;
 pub mod peninput;
 pub mod perfmon;
 pub mod pftrack;

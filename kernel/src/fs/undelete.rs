@@ -254,10 +254,9 @@ pub fn recover(original_path: &str, dest: Option<&str>) -> KernelResult<Recovery
 
 fn matches_filter(path: &str, filter: &ScanFilter) -> bool {
     if let Some(ref prefix) = filter.path_prefix {
-        if path != prefix.as_str()
-            && !(path.starts_with(prefix.as_str())
-                 && path.as_bytes().get(prefix.len()) == Some(&b'/'))
-        {
+        // Route through the canonical subtree predicate so a prefix with or
+        // without a trailing slash behaves identically. See fs::pathutil.
+        if !crate::fs::pathutil::path_in_subtree(path, prefix.as_str()) {
             return false;
         }
     }

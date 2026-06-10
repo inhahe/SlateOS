@@ -1875,10 +1875,21 @@ fn gen_pid_environ(task_id: u64) -> KernelResult<Vec<u8>> {
 
 /// `/proc/<pid>/stat` — single-line task statistics (Linux-compatible format).
 ///
-/// Format: `pid (name) state ppid prio nice threads cpu_ticks`
+/// Emits the full 52-field `/proc/[pid]/stat` line in the exact field
+/// order defined by Linux `fs/proc/array.c` / `proc(5)`, so positional
+/// parsers (`ps`, `top`, `htop`, glibc `sysconf`, WINE's `server/process.c`)
+/// read it correctly.  The fields we have real data for are populated from
+/// the scheduler task and the process control block; fields the native
+/// kernel does not track (per-field fault counters, signal masks, code/stack
+/// segment bounds, etc.) are reported as `0`, which is the same thing a real
+/// Linux kernel does for a freshly-created task with no such activity —
+/// these are genuinely-zero values, not placeholders.
 ///
-/// This simplified format provides the essential fields that tools
-/// like `top` and `ps` parse.
+/// Time fields (`utime`) are in clock ticks at `USER_HZ = 100`; the native
+/// timer runs at [`crate::apic::TICK_RATE_HZ`] `= 100`, so `total_ticks`
+/// already matches the ABI unit one-to-one (no rescale needed).  Memory
+/// sizes use the Linux ABI page size of 4096 bytes (see [`gen_pid_statm`]),
+/// not the native 16 KiB frame size.
 fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     use crate::sched::task::TaskState;
 
@@ -1898,14 +1909,56 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     };
 
     let ppid = crate::proc::pcb::parent(task_id).unwrap_or(0);
-    let threads = crate::proc::pcb::get_threads(task_id)
+    let num_threads = crate::proc::pcb::get_threads(task_id)
         .map_or(1, |t| t.len());
 
-    // Format: pid (name) state ppid prio nice threads cpu_ticks sched_count
+    // utime: clock ticks consumed.  USER_HZ == TICK_RATE_HZ == 100, so the
+    // raw timer-tick count is already in ABI units.
+    let utime = task.total_ticks;
+
+    // Virtual size (bytes) and resident pages, in Linux ABI page units.
+    // Bare scheduler tasks (no process / address-space charge) report 0,
+    // exactly as Linux does for kernel threads.
+    const ABI_PAGE_SIZE: u64 = 4096;
+    let vsize = crate::proc::pcb::linux_as_used(task_id).unwrap_or(0);
+    let rss_pages = vsize / ABI_PAGE_SIZE;
+
+    // rsslim: RLIMIT_RSS hard limit (resource index 5).  Default unlimited.
+    let rsslim = crate::proc::pcb::get_rlimit(task_id, 5)
+        .map_or(crate::proc::pcb::RLIM_INFINITY, |(_soft, hard)| hard);
+
+    // exit_code is only meaningful once the task is a zombie; Linux encodes
+    // it the same way `wait()` does (status << 8).  We store the raw exit
+    // code, so shift it into the wait-status high byte to match the ABI.
+    let exit_code = crate::proc::pcb::exit_code(task_id)
+        .map_or(0i64, |c| (i64::from(c) & 0xff) << 8);
+
+    // priority: Linux reports the kernel-internal priority; for normal tasks
+    // this is in the 0..39 range.  nice is 0 (native scheduler has no nice).
+    let priority = i64::from(task.priority);
+
+    // Field order matches proc(5) / Linux fs/proc/array.c do_task_stat().
+    // 1:pid 2:comm 3:state 4:ppid 5:pgrp 6:session 7:tty_nr 8:tpgid 9:flags
+    // 10:minflt 11:cminflt 12:majflt 13:cmajflt 14:utime 15:stime 16:cutime
+    // 17:cstime 18:priority 19:nice 20:num_threads 21:itrealvalue
+    // 22:starttime 23:vsize 24:rss 25:rsslim 26:startcode 27:endcode
+    // 28:startstack 29:kstkesp 30:kstkeip 31:signal 32:blocked 33:sigignore
+    // 34:sigcatch 35:wchan 36:nswap 37:cnswap 38:exit_signal 39:processor
+    // 40:rt_priority 41:policy 42:delayacct_blkio_ticks 43:guest_time
+    // 44:cguest_time 45:start_data 46:end_data 47:start_brk 48:arg_start
+    // 49:arg_end 50:env_start 51:env_end 52:exit_code
+    // One space between every field, terminated by a single newline.
+    // Placeholders left-to-right: pid comm state ppid <pgrp..flags=0/0/0/-1/0>
+    // <minflt..cmajflt=0> utime <stime..cstime=0> priority nice=0 num_threads
+    // itrealvalue=0 starttime=0 vsize rss rsslim <startcode..wchan=0>
+    // <nswap/cnswap=0> exit_signal=17 <processor..env_end=0> exit_code.
     let text = format!(
-        "{} ({}) {} {} {} 0 {} {} {}\n",
+        "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} 0 0 0 {} 0 {} 0 0 {} {} {} \
+         0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         task.id, name, state_char, ppid,
-        task.priority, threads, task.total_ticks, task.schedule_count,
+        utime, priority, num_threads,
+        vsize, rss_pages, rsslim,
+        exit_code,
     );
     Ok(text.into_bytes())
 }
@@ -11281,6 +11334,67 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+
+    // /proc/<pid>/stat — the full Linux 52-field single line.  Positional
+    // parsers (ps/top/htop/glibc/WINE) depend on the exact field count and
+    // order, so verify: exactly 52 whitespace-separated fields, the comm in
+    // parentheses at field 2, field 1 == pid, a valid state char at field 3,
+    // and that every non-comm field is a parseable integer (comm may hold
+    // arbitrary bytes so it is exempt).  Note: the comm itself can contain
+    // spaces, so split on the *last* ')' to isolate the post-comm fields the
+    // way real /proc parsers do.
+    let stat_data = fs.read_file(&format!("/{current_tid}/stat"))?;
+    let stat_text = core::str::from_utf8(&stat_data)
+        .map_err(|_| KernelError::InternalError)?;
+    let stat_line = stat_text.strip_suffix('\n').unwrap_or(stat_text);
+    // Field 1 (pid) and field 2 (comm) come before the last ')'.
+    let close = stat_line.rfind(')').ok_or_else(|| {
+        serial_println!("[procfs]   FAIL: stat has no comm ')' delimiter");
+        KernelError::InternalError
+    })?;
+    let (head, tail) = stat_line.split_at(close);
+    // head == "<pid> (<comm>", tail == ") <field3> <field4> ...".
+    let open = head.find('(').ok_or_else(|| {
+        serial_println!("[procfs]   FAIL: stat has no comm '(' delimiter");
+        KernelError::InternalError
+    })?;
+    let pid_field = head.get(..open).map(str::trim).unwrap_or("");
+    if pid_field.parse::<u64>() != Ok(current_tid) {
+        serial_println!(
+            "[procfs]   FAIL: stat field 1 = {:?}, expected pid {}",
+            pid_field, current_tid
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Remaining fields are everything after ") ": fields 3..=52 (50 fields).
+    let rest = tail.strip_prefix(')').unwrap_or(tail).trim_start();
+    let rest_fields: Vec<&str> = rest.split(' ').filter(|s| !s.is_empty()).collect();
+    // 1 (pid) + 1 (comm) + 50 (rest) == 52.
+    if rest_fields.len() != 50 {
+        serial_println!(
+            "[procfs]   FAIL: stat has {} post-comm fields, expected 50 (total != 52)",
+            rest_fields.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Field 3 (first of rest) must be a single state char R/S/D/T/Z.
+    if !matches!(rest_fields.first(), Some(&("R" | "S" | "D" | "T" | "Z"))) {
+        serial_println!(
+            "[procfs]   FAIL: stat state field = {:?}, expected R/S/D/T/Z",
+            rest_fields.first()
+        );
+        return Err(KernelError::InternalError);
+    }
+    // All fields after the state char (4..=52) are integers.  Most are
+    // signed (tpgid is -1), but rsslim can be RLIM_INFINITY == u64::MAX,
+    // which overflows i64 — accept either signed or unsigned.
+    if !rest_fields.iter().skip(1)
+        .all(|f| f.parse::<i64>().is_ok() || f.parse::<u64>().is_ok())
+    {
+        serial_println!("[procfs]   FAIL: stat has a non-integer numeric field");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   {}/stat: 52 fields OK", current_tid);
 
     serial_println!("[procfs] Self-test PASSED");
     Ok(())

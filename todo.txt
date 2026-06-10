@@ -1,7 +1,4 @@
 
-Let me find the next int-truncation candidate. The sys_rt_sigprocmask wrapper has structural issues beyond truncation — I'll leave that for a dedicated batch. Let me check other syscalls.
-
-
 ## SESSION PREFERENCE (user, 2026-06-06): autonomous-loop pacing
 ## At the end of each `<<autonomous-loop-dynamic>>` tick, call
 ## ScheduleWakeup with `delaySeconds = 60` (the runtime's hard
@@ -51,7 +48,6 @@ Let me find the next int-truncation candidate. The sys_rt_sigprocmask wrapper ha
 ## to match what Linux's kernel sees.  It does not touch native
 ## code.  Future batches must hold to the same discipline.
 
-The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 
 ## FLAKY TEST (noticed+FIXED 2026-06-04): ktrace::self_test "Read back"
 ##   assertion `assert_eq!(last.category(), Category::General as u8)`
@@ -47498,3 +47494,56 @@ the actual timerfd.c / ntp.c bodies.
 
 Build (post-revert): clean.
 Boot test (post-revert): PASS @ 24s.
+
+================================================================
+Batch 518 — memfd_create over-long name returns EINVAL (not
+ENAMETOOLONG), matching Linux v6.6 mm/memfd.c
+================================================================
+
+Verified against the actual v6.6 source
+(raw.githubusercontent.com/torvalds/linux/v6.6/mm/memfd.c):
+
+    #define MFD_NAME_PREFIX "memfd:"
+    #define MFD_NAME_PREFIX_LEN (sizeof(MFD_NAME_PREFIX) - 1)   // 6
+    #define MFD_NAME_MAX_LEN (NAME_MAX - MFD_NAME_PREFIX_LEN)   // 249
+
+    len = strnlen_user(uname, MFD_NAME_MAX_LEN + 1);  // count = 250
+    if (len <= 0)
+        return -EFAULT;
+    if (len > MFD_NAME_MAX_LEN + 1)   // len INCLUDES the NUL
+        return -EINVAL;
+
+So Linux accepts a label of up to 249 chars (len 250 incl NUL,
+not > 250) and rejects 250+ chars with EINVAL.
+
+Pre-batch: sys_memfd_create called the shared
+`read_user_cstr(ptr, 249)` helper, which returns ENAMETOOLONG
+when the string overruns the cap.  The length BOUNDARY was
+already correct (249 accepted, 250 rejected), but the error CODE
+diverged: a probe with a 250-char name saw ENAMETOOLONG where
+Linux returns EINVAL.
+
+`read_user_cstr` is shared with path syscalls (open et al.) where
+ENAMETOOLONG IS the correct Linux code, so the fix lives in
+sys_memfd_create, not the helper:
+
+    let name = match read_user_cstr(args.arg0, 249) {
+        Ok(v) => v,
+        Err(errno::ENAMETOOLONG) => return linux_err(errno::EINVAL),
+        Err(e) => return linux_err(e),
+    };
+
+This mirrors the same ENAMETOOLONG->EINVAL remap already used by
+sibling syscalls in this file (~lines 16295, 16478).  EFAULT
+(NULL / unmapped) still passes through, matching strnlen_user's
+`len <= 0 -> EFAULT`.  Stale doc comment (claimed ENAMETOOLONG)
+updated to EINVAL.
+
+No runtime self-test probe added: the kernel self-test runs from
+a task with no Linux fd table and no user memory, so a 250-byte
+user-buffer probe isn't reachable there (same reason the existing
+self-test probes only cover cases that need no user memory).
+Fix rests on the source-verified gate.
+
+Build: clean (`bash scripts/boot-test.sh`, 2m05s).
+Boot test: PASS @ 27s.

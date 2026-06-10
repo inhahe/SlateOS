@@ -16609,9 +16609,11 @@ fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Errors:
 ///   * `EFAULT` — `name` is NULL or unreadable.
-///   * `EINVAL` — unknown flag bits set.
-///   * `ENAMETOOLONG` — name longer than 249 bytes (NAME_MAX 255 minus
-///     the "memfd:" prefix's 6 chars).
+///   * `EINVAL` — unknown flag bits set, MFD_EXEC + MFD_NOEXEC_SEAL both
+///     set, OR the name is longer than 249 bytes (NAME_MAX 255 minus the
+///     "memfd:" prefix's 6 chars).  Linux v6.6 returns EINVAL — not
+///     ENAMETOOLONG — for the over-long name (mm/memfd.c
+///     `len > MFD_NAME_MAX_LEN + 1`); see batch 518.
 ///   * `EBADF` — kernel-context invocation (no caller PCB).
 ///   * `EMFILE` — caller's Linux fd table is full.
 fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
@@ -16677,9 +16679,26 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
         None => return linux_err(errno::EBADF),
     };
     // NAME_MAX (255) minus the "memfd:" prefix (6 chars) leaves 249
-    // bytes for the caller-supplied label.  Linux uses the same cap.
+    // bytes for the caller-supplied label.  Linux uses the same cap
+    // (MFD_NAME_MAX_LEN = NAME_MAX - MFD_NAME_PREFIX_LEN = 255 - 6).
+    //
+    // Linux v6.6 mm/memfd.c name-length gate (batch 518):
+    //
+    //   len = strnlen_user(uname, MFD_NAME_MAX_LEN + 1);  // count 250
+    //   if (len <= 0)
+    //       return -EFAULT;
+    //   if (len > MFD_NAME_MAX_LEN + 1)   // len includes the NUL
+    //       return -EINVAL;
+    //
+    // i.e. a name of >249 chars is rejected with EINVAL, NOT
+    // ENAMETOOLONG.  Our shared `read_user_cstr` returns ENAMETOOLONG
+    // when the string overruns the cap — correct for path syscalls
+    // (open et al.) but wrong here — so remap it to EINVAL to match
+    // the literal v6.6 gate.  EFAULT (NULL / unmapped) passes through
+    // unchanged, matching strnlen_user's `len <= 0 -> EFAULT`.
     let name = match read_user_cstr(args.arg0, 249) {
         Ok(v) => v,
+        Err(errno::ENAMETOOLONG) => return linux_err(errno::EINVAL),
         Err(e) => return linux_err(e),
     };
 

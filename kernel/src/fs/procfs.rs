@@ -1979,13 +1979,24 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
 /// `/proc/<pid>/statm` — memory usage in pages (Linux-compatible).
 ///
 /// Linux emits seven space-separated integers, each a count of pages of
-/// `getpagesize()` bytes (16 KiB here):
+/// `getpagesize()` bytes:
 ///   `size resident shared text lib data dt`
+///
+/// CRITICAL — page-size unit: statm counts are in units of the page
+/// size *visible to userspace* via `sysconf(_SC_PAGESIZE)`.  Our Linux
+/// ABI advertises **4096** (4 KiB) to Linux programs even though the
+/// native kernel uses 16 KiB frames — see
+/// `kernel/src/syscall/linux.rs`'s `ABI_PAGE_SIZE` (the same 4 KiB unit
+/// `mmap`/`mprotect`/`msync`/`mremap` already use at the boundary).
+/// We MUST report statm in that same 4 KiB unit: a Linux app reading
+/// statm multiplies each count by `getpagesize()` (4096) to recover
+/// bytes, so dividing by the 16 KiB frame size here would make every
+/// process appear to use a quarter of its true address space.
 ///
 /// We track a single Linux address-space charge per process
 /// (`linux_as_used`, the sum of Linux-ABI `mmap` sizes) rather than a
 /// full VMA breakdown, so we report:
-///   - `size`     = total address-space charge / page size
+///   - `size`     = total address-space charge / 4 KiB
 ///   - `resident` = same value (we do not track RSS separately; this is
 ///                  an upper bound, which is the safe direction for the
 ///                  callers that read statm — they treat it as "at most
@@ -2001,10 +2012,13 @@ fn gen_pid_statm(task_id: u64) -> KernelResult<Vec<u8>> {
     // bare scheduler tasks.
     let as_bytes = crate::proc::pcb::linux_as_used(task_id)
         .ok_or(KernelError::NotFound)?;
-    let page = crate::mm::frame::FRAME_SIZE as u64;
-    // page is a non-zero compile-time constant, so this division is
-    // always safe; round up so a partial page still counts as one.
-    let pages = as_bytes.div_ceil(page);
+    // Linux ABI page size (sysconf(_SC_PAGESIZE)), NOT the kernel's
+    // 16 KiB frame size — see the doc comment above.
+    const ABI_PAGE_SIZE: u64 = 4096;
+    // ABI_PAGE_SIZE is a non-zero compile-time constant, so this
+    // division is always safe; round up so a partial page still counts
+    // as one.
+    let pages = as_bytes.div_ceil(ABI_PAGE_SIZE);
     // size resident shared text lib data dt
     let text = format!("{pages} {pages} 0 0 0 0 0\n");
     Ok(text.into_bytes())

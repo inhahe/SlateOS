@@ -22948,37 +22948,30 @@ fn sys_landlock_add_rule(args: &SyscallArgs) -> SyscallResult {
 
 /// `landlock_restrict_self(ruleset_fd, flags)`.
 ///
-/// `flags` carries optional logging-control bits introduced over the
-/// 6.10 → 6.12 series:
-///   * `LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF`     = `1 << 0` (6.10)
-///   * `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`       = `1 << 1` (6.10)
-///   * `LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF`    = `1 << 2` (6.12)
+/// Batch 524: v6.6 accepts NO flags — `security/landlock/syscalls.c`
+/// gates with a literal `/* No flag for now. */ if (flags) return
+/// -EINVAL;`.  The `LANDLOCK_RESTRICT_SELF_LOG_*` logging-control bits
+/// are later additions and must NOT be accepted here:
+///   * `LOG_SAME_EXEC_OFF` = `1 << 0` — Linux 6.10
+///   * `LOG_NEW_EXEC_ON`   = `1 << 1` — Linux 6.10
+///   * `LOG_SUBDOMAINS_OFF`= `1 << 2` — Linux 6.12
 ///
-/// Pre-batch we rejected any non-zero `flags`, which made
-/// `landlock_restrict_self(fd, LANDLOCK_RESTRICT_SELF_LOG_*)` fail with
-/// `EINVAL` on a kernel that ought to accept the bit, masking a runtime
-/// behavioural difference behind a parse error.  Now we accept the
-/// documented bits and reject only undefined ones, surfacing the
-/// terminal `EBADF` (no real ruleset fd ever exists) for any well-
-/// formed call.
+/// A prior batch wrongly accepted these three bits (its own comment
+/// attributed them to 6.10/6.12), the same version-attribution bug
+/// class fixed in batches 519/521/522/523.  In v6.6 the only valid
+/// `flags` value is 0; any non-zero value returns `EINVAL` before the
+/// (modelled-EOPNOTSUPP) terminal.
 fn sys_landlock_restrict_self(args: &SyscallArgs) -> SyscallResult {
     // Linux ABI: `int landlock_restrict_self(int ruleset_fd,
     // __u32 flags)`.  SYSCALL_DEFINE2(landlock_restrict_self, ...,
     // __u32, flags) narrows the second parameter to (__u32) on entry;
-    // the mask check `flags & ~LANDLOCK_RESTRICT_SELF_FLAGS` in
-    // security/landlock/syscalls.c runs at 32-bit width.  Pre-batch we
-    // held flags as u64 and ran the mask check at 64-bit width, so the
-    // AMD64 syscall ABI's high-half garbage (the kernel does not zero-
-    // extend int args before issuing the syscall) leaked into the mask
-    // and returned spurious EINVAL where Linux returns EBADF (no
-    // landlock ruleset fd ever exists in our kernel).  Thirteenth
-    // instance of the int/unsigned-int truncation pattern after batches
-    // 308-319.
-    const LANDLOCK_RESTRICT_SELF_FLAGS: u32 =
-        (1 << 0) | (1 << 1) | (1 << 2);
+    // the AMD64 syscall ABI does not zero-extend int args before
+    // issuing the syscall, so we mask to 32 bits before the `!= 0`
+    // test — high-half register garbage must be ignored (13th instance
+    // of the int/unsigned-int truncation pattern, batches 308-320).
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg1 as u32;
-    if flags & !LANDLOCK_RESTRICT_SELF_FLAGS != 0 {
+    if flags != 0 {
         return linux_err(errno::EINVAL);
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -59688,80 +59681,86 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: landlock_restrict_self valid not EOPNOTSUPP");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self LOG_SAME_EXEC_OFF=0x1 -> EOPNOTSUPP
-        // (well-formed; Linux 6.10).
+        // Batch 524: the LANDLOCK_RESTRICT_SELF_LOG_* bits do NOT exist
+        // in v6.6 (LOG_SAME_EXEC_OFF/LOG_NEW_EXEC_ON = 6.10,
+        // LOG_SUBDOMAINS_OFF = 6.12).  v6.6 gates `if (flags) return
+        // -EINVAL;`, so each of these must now return EINVAL.
+        // flags=0x1 (6.10 LOG_SAME_EXEC_OFF) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_SAME_EXEC_OFF not EOPNOTSUPP");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self flags=0x1 (6.10) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self LOG_NEW_EXEC_ON=0x2 -> EOPNOTSUPP (Linux 6.10).
+        // flags=0x2 (6.10 LOG_NEW_EXEC_ON) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_NEW_EXEC_ON not EOPNOTSUPP");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self flags=0x2 (6.10) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self LOG_SUBDOMAINS_OFF=0x4 -> EOPNOTSUPP (Linux 6.12).
+        // flags=0x4 (6.12 LOG_SUBDOMAINS_OFF) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 4, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self LOG_SUBDOMAINS_OFF not EOPNOTSUPP");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self flags=0x4 (6.12) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self all three log flags (0x7) -> EOPNOTSUPP.
+        // flags=0x7 (all three post-6.6 log bits) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 7, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EOPNOTSUPP) {
-            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self all log flags not EOPNOTSUPP");
+        if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: landlock_restrict_self flags=0x7 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // landlock_restrict_self LOG_SAME_EXEC_OFF + undef high bit
-        // (0x101) -> EINVAL (mask is bit-precise).
+        // flags=0x101 (undefined high bit) -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0x101, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: landlock_restrict_self high bit not EINVAL");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[syscall/linux]   landlock_restrict_self log flags: OK");
+        serial_println!("[syscall/linux]   landlock_restrict_self flags!=0 -> EINVAL (v6.6: no flags): OK");
 
         // Batch 320: landlock_restrict_self unsigned-int truncation —
         // high-half register garbage must be stripped before the
         // LANDLOCK_RESTRICT_SELF_FLAGS mask check.
         //
         // Linux signature: `int landlock_restrict_self(int ruleset_fd,
-        // __u32 flags)`.  flags is C __u32 → low 32 bits only.  Pre-
-        // batch we held flags as u64 and ran the mask check at 64-bit
-        // width, so high-half garbage returned spurious EINVAL where
-        // Linux returns EBADF (no landlock ruleset fd in our kernel).
+        // __u32 flags)`.  flags is C __u32 → low 32 bits only.  The
+        // AMD64 syscall ABI does not zero-extend int args, so high-half
+        // garbage must be stripped before the `flags != 0` test.  The
+        // key truncation probe is (c): a value whose LOW half is zero
+        // must reach the EOPNOTSUPP terminal — proving the high half is
+        // ignored.  (a)/(b)/(d) carry non-zero low halves and therefore
+        // hit the v6.6 `if (flags) return -EINVAL;` gate (batch 524).
         //
-        // (a) landlock_restrict_self(0, 0x1_0000_0001) → EOPNOTSUPP
-        //     (batch 396 terminal; high|LOG_SAME_EXEC_OFF truncates to
-        //     1, mask passes, fd check passes in kernel context).
+        // (a) landlock_restrict_self(0, 0x1_0000_0001) → EINVAL
+        //     (truncates to 1; non-zero -> EINVAL).
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0001, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-        if v != -i64::from(errno::EOPNOTSUPP) {
+        if v != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock_restrict_self(high|LOG_SAME_EXEC_OFF) -> {} (expected -EOPNOTSUPP)",
+                "[syscall/linux]   FAIL: landlock_restrict_self(high|0x1) -> {} (expected -EINVAL)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
-        // (b) landlock_restrict_self(0, 0x1_0000_0007) → EOPNOTSUPP
-        //     (high|all-valid 0x7; truncates to 7, mask passes).
+        // (b) landlock_restrict_self(0, 0x1_0000_0007) → EINVAL
+        //     (truncates to 7; non-zero -> EINVAL).
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0007, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
-        if v != -i64::from(errno::EOPNOTSUPP) {
+        if v != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: landlock_restrict_self(high|all-valid) -> {} (expected -EOPNOTSUPP)",
+                "[syscall/linux]   FAIL: landlock_restrict_self(high|0x7) -> {} (expected -EINVAL)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
         // (c) landlock_restrict_self(0, 0x1_0000_0000) → EOPNOTSUPP
-        //     (high-half only, low half zero; truncates to 0, mask
-        //     passes).
+        //     (high-half only, low half zero; truncates to 0, flag gate
+        //     passes, modelled terminal EOPNOTSUPP).  This is the probe
+        //     that proves the high half is stripped — if it weren't,
+        //     0x1_0000_0000 != 0 would yield EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0000, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;
@@ -59774,10 +59773,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         // (d) landlock_restrict_self(0, 0x1_0000_0008) → EINVAL
-        //     (high|bad-low 0x8; truncates to 0x8, mask rejects bit
-        //     outside LANDLOCK_RESTRICT_SELF_FLAGS=0x7; verifies mask
-        //     gate still rejects invalid bits after the high half is
-        //     stripped).
+        //     (truncates to 0x8; non-zero -> EINVAL).
         let a = SyscallArgs { arg0: 0, arg1: 0x1_0000_0008, arg2: 0,
             arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::LANDLOCK_RESTRICT_SELF, &a).value;

@@ -47804,3 +47804,54 @@ Self-test:
 
 Build: clean (`bash scripts/boot-test.sh`).
 Boot test: PASS @ 28s.
+
+================================================================
+Batch 524 — landlock_restrict_self: reject all flags (v6.6 has
+no flags; LOG_* bits are 6.10/6.12 additions)
+================================================================
+
+sys_landlock_restrict_self (~line 22964) accepted three flag bits as
+valid: LANDLOCK_RESTRICT_SELF_FLAGS = (1<<0)|(1<<1)|(1<<2).  Its own
+doc comment attributed them to post-6.6 kernels — the same version-
+attribution bug shape as batches 519/521/522/523:
+
+  * LOG_SAME_EXEC_OFF  (1<<0) — Linux 6.10
+  * LOG_NEW_EXEC_ON    (1<<1) — Linux 6.10
+  * LOG_SUBDOMAINS_OFF (1<<2) — Linux 6.12
+
+Verified against the authoritative v6.6 source
+(gh api repos/torvalds/linux/contents/security/landlock/syscalls.c
+?ref=v6.6).  SYSCALL_DEFINE2(landlock_restrict_self) gates:
+
+    if (!landlock_initialized)            return -EOPNOTSUPP;
+    if (!task_no_new_privs(...) && !CAP)  return -EPERM;
+    /* No flag for now. */
+    if (flags)                            return -EINVAL;
+
+v6.6's only valid flags value is 0.  The prior "accept the LOG bits"
+change was itself the bug — the behaviour it called "pre-batch"
+(reject any non-zero flags) was the v6.6-correct behaviour.
+
+Fix:
+  * Replaced `const LANDLOCK_RESTRICT_SELF_FLAGS` + the
+    `flags & ~FLAGS != 0` mask check with the v6.6 `if flags != 0 {
+    return EINVAL }`.  Kept the `args.arg1 as u32` truncation (AMD64
+    int args are not zero-extended) so high-half garbage is stripped
+    before the != 0 test.
+  * Doc comment rewritten to state v6.6 has no flags and to call out
+    the LOG_* bits as 6.10/6.12 additions that must be rejected.
+  * Terminal unchanged: EOPNOTSUPP (batch-384/396 !landlock_initialized
+    hybrid model — flags=0 reaches the modelled terminal).
+
+Self-test:
+  * flags 0x1/0x2/0x4/0x7 probes (were EOPNOTSUPP "valid LOG flags")
+    flipped to EINVAL with comments naming the introducing kernel.
+  * Truncation probes: (a) 0x1_0000_0001 and (b) 0x1_0000_0007 flipped
+    to EINVAL (low half non-zero).  (c) 0x1_0000_0000 unchanged
+    (EOPNOTSUPP) — this is now the sole probe proving the high half is
+    stripped (low=0 reaches the terminal; an un-truncated value would
+    be non-zero -> EINVAL).  (d) 0x1_0000_0008 unchanged (EINVAL).
+  * Reworded the section success line.
+
+Build: clean (`bash scripts/boot-test.sh`).
+Boot test: PASS @ 27s.

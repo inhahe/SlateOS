@@ -47646,3 +47646,51 @@ probe still passes.  Updated its comment to reflect the new order.
 
 Build: clean (`bash scripts/boot-test.sh`).
 Boot test: PASS @ 25s.
+
+================================================================
+Batch 521 — pidfd_send_signal takes NO flags in v6.6: any non-zero
+flags value -> EINVAL (revert the 6.7 scope-flag handling)
+================================================================
+
+sys_pidfd_send_signal (~line 16892) accepted three signal-scope
+flags — PIDFD_SIGNAL_THREAD (1), PIDFD_SIGNAL_THREAD_GROUP (2),
+PIDFD_SIGNAL_PROCESS_GROUP (4) — with a `flags & ~MASK` + single-bit
+`hweight32(flags) > 1` gate (added in batch 391, citing "Linux 6.7").
+
+That is correct for 6.7+ but WRONG for our v6.6 fidelity target.
+Verified against the authoritative v6.6 source:
+
+  * include/uapi/linux/pidfd.h (v6.6) defines ONLY:
+        #define PIDFD_NONBLOCK O_NONBLOCK
+    — no PIDFD_SIGNAL_THREAD / _THREAD_GROUP / _PROCESS_GROUP and no
+    PIDFD_SEND_SIGNAL_FLAGS.  (WebFetch of the raw v6.6 header.)
+
+  * kernel/signal.c (v6.6) SYSCALL_DEFINE4(pidfd_send_signal),
+    lines 3890-3892 (gh api repos/torvalds/linux/contents/
+    kernel/signal.c?ref=v6.6):
+        /* Enforce flags be set to 0 until we add an extension. */
+        if (flags)
+            return -EINVAL;
+
+So in v6.6 ANY non-zero flags value — including the would-be scope
+bits 1/2/4 — returns EINVAL at the top gate, BEFORE fdget.  This is
+the same version-attribution error class that batch 519 fixed for
+pidfd_open's PIDFD_THREAD (a Linux 6.9 flag).
+
+Fix:
+  * Replace the two-stage flag gate with `if flags != 0 -> EINVAL`,
+    keeping the u32 truncation so flags=0x1_0000_0000 truncates to 0
+    and falls through to fdget (EBADF in kernel ctx), matching the
+    ABI behaviour already documented.
+  * Remove the now-dead PIDFD_SIGNAL_PROCESS_GROUP post-fdget EINVAL
+    check (flags is guaranteed 0 by that point) and the three scope
+    consts.
+  * Self-test: the three scope-flag probes (flags=1/2/4 + bad fd)
+    previously asserted EBADF (fall-through to fdget); flip them to
+    EINVAL (top gate fires first).  unknown-flag (0x100) and multi-bit
+    (3) probes already expected EINVAL — comments updated to cite the
+    v6.6 single gate rather than the 6.7 mask/hweight gates.  flags=0
+    probes (bad sig, bad sig+info, valid-args kernel-ctx) unchanged.
+
+Build: clean (`bash scripts/boot-test.sh`).
+Boot test: PASS @ 30s.

@@ -47902,3 +47902,74 @@ Self-test:
 
 Build: clean (`bash scripts/boot-test.sh`).
 Boot test: PASS @ 26s.
+
+================================================================
+Batch 526 — v6.6 attribution-comment cleanup (swapon / seccomp /
+fanotify) + forward-compat-feature policy question (F_DUPFD_QUERY)
+================================================================
+
+Comment-only fixes (values were already v6.6-correct; only the doc
+labels said "Linux 6.10", which risked misleading a future session
+into thinking the masks include post-6.6 bits):
+
+  * sys_swapon: SWAP_FLAGS_VALID = 0x7_FFFF.  Verified against
+    include/linux/swap.h@v6.6 — the five PRIO/PREFER/DISCARD* bits are
+    unchanged since Linux 3.x; no post-6.6 swap flag exists to exclude.
+    Relabelled "Linux 6.10" -> "v6.6" with source citation.
+  * sys_seccomp: SECCOMP_FILTER_FLAG_MASK = 0x3f.  Verified against
+    include/uapi/linux/seccomp.h@v6.6 — exactly six filter flags
+    (TSYNC..WAIT_KILLABLE_RECV, bit 5 highest, last added in 5.19); no
+    7th bit in v6.6.  Relabelled.
+  * sys_fanotify_init / sys_fanotify_mark: FANOTIFY_INIT_FLAGS tops out
+    at FAN_REPORT_TARGET_FID (0x1000) — FAN_REPORT_FD_ERROR (0x2000) is
+    a 6.11 addition, correctly absent; FANOTIFY_MARK_FLAGS = 0x7ff (all
+    11 v6.6 mark bits).  Verified against include/uapi/linux/fanotify.h
+    @v6.6.  Relabelled four "Linux 6.10" comments to "v6.6".
+
+Commits: 8b148396 (swapon/seccomp), 5ef57a57 (fanotify).
+Both boot-tested PASS (26s / 27s).
+
+------------------------------------------------------------------
+## Judgment Call / POLICY QUESTION (2026-06-10, needs human):
+   forward-compat WHOLE FEATURES vs strict v6.6 fidelity
+------------------------------------------------------------------
+
+The recent ABI-fidelity sweep removed post-6.6 *flag bits* from masks
+inside syscalls that DO exist in v6.6 (landlock ERRATA 6.10 → batch
+523; RWF 6.9/6.11/6.14 → batch 525; etc.).  That is unambiguous: a
+v6.6 syscall must not silently accept a newer flag.
+
+A DIFFERENT category exists that the sweep has NOT touched: whole
+commands/syscalls that don't exist in v6.6 at all but which we
+deliberately *implemented* as forward-compat.  Two sub-cases:
+
+  (a) Returns ENOSYS/EINVAL = same as real v6.6.  NO conflict.
+      Example: futex2 (futex_wake/wait/requeue, 6.7+) returns ENOSYS,
+      which is exactly what a v6.6 kernel returns for an absent
+      syscall.  Keep as-is — it's both forward-safe AND v6.6-faithful.
+
+  (b) Actually ANSWERS where v6.6 would reject.  REAL divergence.
+      Example: fcntl(F_DUPFD_QUERY = 1027), a Linux 6.10 addition
+      (batch 94, linux.rs ~line 43029 + handler).  We compute the
+      real same-open-file-description answer; real v6.6 fcntl returns
+      EINVAL for unknown cmd 1027.  So a program probing "does this
+      kernel support F_DUPFD_QUERY?" concludes YES on our OS but NO on
+      v6.6 — a forward-compat divergence from the stated fidelity
+      target.
+
+The question for the human: for category (b), do we want
+  (i) STRICT v6.6 fidelity — make F_DUPFD_QUERY (and any future
+      category-(b) feature) return the v6.6 errno (EINVAL), matching
+      what a real 6.6 kernel does; or
+ (ii) PRAGMATIC forward-compat — keep useful, correctly-implemented
+      newer features even though they diverge from bare v6.6?
+
+I did NOT change F_DUPFD_QUERY autonomously: it is working, tested,
+and useful (io_uring fd-table validation, profiler introspection,
+runtimes sharing fds), and removing a feature is a behavioral-policy
+decision, not a mechanical mask fix.  Flagging for an explicit call.
+If (i) is chosen, the fix is a one-line route of cmd 1027 to the
+fcntl catch-all (EINVAL) plus flipping the batch-94 self-test probe.
+If (ii), add a short "forward-compat features intentionally retained"
+note to the Linux Compatibility Boundary section so future sweeps
+don't re-flag it.

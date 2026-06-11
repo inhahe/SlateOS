@@ -2567,6 +2567,21 @@
 ##     8-CPU/4-core/2-thread fixture directly into STATE to exercise the accessors
 ##     with exact expectations, then resets STATE to None (residue-free start+end).
 ##     boot-test PASSED (29s). No fabricated procfs data.
+##     SWEEP PROGRESS 2026-06-11 (*stat.rs family audit): systematically read
+##     init_defaults() for ALL 32 *stat.rs modules. CLEAN (honest empty-init —
+##     empty Vecs/arrays + zero counters, no fabricated observations): acpistat,
+##     aiostat, bpfstat, budstat, cgiostat, compstat, cpustat, diskstat, dmastat,
+##     epollstat, futexstat, inodestat, irqstat, ksmstat, migstat, mmapstat,
+##     numastat, pipestat, pmcstat, rcustat, rqstat, slabstat, thpstat, tlbstat,
+##     wqstat, zramstat (26 confirmed this pass) — plus the previously-audited
+##     ratestat, ttystat, powerstat, procstat, pidstat (root-ns structural default),
+##     pagestat (case c, zeroed MAX_ORDER buckets). CONCLUSION: the entire *stat.rs
+##     metric-module family is free of the fabricated-procfs-data anti-pattern; they
+##     all start empty and accumulate via real record/update entry points. No code
+##     changes needed. The fabricators found so far were all in DEVICE/SETTINGS-shaped
+##     modules (battery, webcam, cputopo, monitors, ipcns, ioport, hwrng), NOT the
+##     stat family. REMAINING to sample: non-stat fs diagnostic modules not yet
+##     covered (e.g. *info, *mgr, *mon, *dev naming patterns).
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

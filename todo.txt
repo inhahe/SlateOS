@@ -249,8 +249,18 @@
 ##                    Already had a full real API — open/close/set_state/
 ##                    record_traffic/record_retransmit — so the fix only emptied
 ##                    init_defaults and rebuilt the self_test; no new API needed.)
-## Confirmed STILL FABRICATING (audited, not yet fixed): none currently — audit
-## the remaining *stat/*latency/*stats siblings next (see below).
+##   - slabstat.rs   (fixed 2026-06-11; was: 5 fake caches task_struct/
+##                    inode_cache/dentry_cache/buffer_head/kmalloc-64,
+##                    total_allocs 1_350_500. Full real API create_cache/alloc/
+##                    free/reclaim already present; fix emptied init_defaults and
+##                    rebuilt self_test.)
+## Confirmed STILL FABRICATING (audited 2026-06-11, not yet fixed):
+##   - futexstat.rs  (fake futex addrs 0x7FFF_0000_1000 with waits 500000,
+##                    total_wait_ns 50_000_000_000; fake per-proc rows pid 1/100;
+##                    aggregate total_waits 600000. Real API record_wait/
+##                    record_wake/record_timeout/record_requeue, zero production
+##                    callers — fix next, same recipe.)
+## Audit the remaining *stat/*latency/*stats siblings after futexstat (see below).
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

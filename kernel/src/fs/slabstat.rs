@@ -90,20 +90,30 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** slab-cache table.
+///
+/// Seeds NO cache rows and zero totals.  Real slab accounting is wired
+/// through [`create_cache`] plus [`alloc`]/[`free`]/[`reclaim`]; until those
+/// are called the table is genuinely empty, so the `/proc/slabstat` file and
+/// the `slabstat` kshell command report zeros rather than fabricated numbers
+/// — the kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded five fictional caches ("task_struct",
+/// "inode_cache", "dentry_cache", "buffer_head", "kmalloc-64") with invented
+/// object/alloc/free counts (e.g. total_allocs 1_350_500), which
+/// `/proc/slabstat` then displayed as if they were real allocator
+/// statistics.  That demo data was removed; the self-test now builds its own
+/// fixtures explicitly via the real API (see [`self_test`]).  The kernel slab
+/// allocator is expected to call [`create_cache`] when a cache is created and
+/// [`alloc`]/[`free`] on each object operation.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        caches: alloc::vec![
-            SlabCache { name: String::from("task_struct"), object_size: 4096, objects_per_slab: 4, total_objects: 256, active_objects: 45, total_slabs: 64, active_slabs: 12, total_allocs: 500, total_frees: 455, high_watermark: 60, align: 64, reclaim_count: 0 },
-            SlabCache { name: String::from("inode_cache"), object_size: 512, objects_per_slab: 16, total_objects: 2048, active_objects: 1200, total_slabs: 128, active_slabs: 80, total_allocs: 50000, total_frees: 48800, high_watermark: 1500, align: 64, reclaim_count: 5 },
-            SlabCache { name: String::from("dentry_cache"), object_size: 256, objects_per_slab: 32, total_objects: 4096, active_objects: 2500, total_slabs: 128, active_slabs: 85, total_allocs: 100000, total_frees: 97500, high_watermark: 3000, align: 64, reclaim_count: 10 },
-            SlabCache { name: String::from("buffer_head"), object_size: 128, objects_per_slab: 64, total_objects: 8192, active_objects: 3000, total_slabs: 128, active_slabs: 50, total_allocs: 200000, total_frees: 197000, high_watermark: 5000, align: 32, reclaim_count: 20 },
-            SlabCache { name: String::from("kmalloc-64"), object_size: 64, objects_per_slab: 128, total_objects: 16384, active_objects: 800, total_slabs: 128, active_slabs: 10, total_allocs: 1000000, total_frees: 999200, high_watermark: 2000, align: 8, reclaim_count: 50 },
-        ],
-        total_allocs: 1350500,
-        total_frees: 1342955,
-        total_reclaims: 85,
+        caches: Vec::new(),
+        total_allocs: 0,
+        total_frees: 0,
+        total_reclaims: 0,
         ops: 0,
     });
 }
@@ -203,25 +213,35 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("slabstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/slabstat must never surface).
+    // Resetting first clears any residue from a prior `slabstat test` run so
+    // the totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 5);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated rows.
+    assert_eq!(list().len(), 0);
+    let (count0, allocs0, frees0, reclaims0, _o0) = stats();
+    assert_eq!((count0, allocs0, frees0, reclaims0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Get cache.
+    // 2: Create caches; duplicate rejected.
+    create_cache("inode_cache", 512, 64).expect("create inode");
+    create_cache("test_cache", 128, 16).expect("create test");
+    assert_eq!(list().len(), 2);
+    assert!(create_cache("test_cache", 128, 16).is_err());
+    crate::serial_println!("  [2/8] create: OK");
+
+    // 3: A fresh cache starts empty (zero utilization, no objects).
     let c = get("inode_cache").expect("get");
     assert_eq!(c.object_size, 512);
-    assert!(c.utilization_pct() > 0);
-    crate::serial_println!("  [2/8] get: OK");
+    assert_eq!(c.active_objects, 0);
+    assert_eq!(c.utilization_pct(), 0);
+    crate::serial_println!("  [3/8] get: OK");
 
-    // 3: Create cache.
-    create_cache("test_cache", 128, 16).expect("create");
-    assert_eq!(list().len(), 6);
-    assert!(create_cache("test_cache", 128, 16).is_err());
-    crate::serial_println!("  [3/8] create: OK");
-
-    // 4: Alloc.
+    // 4: Alloc bumps active + total counts exactly.
     alloc("test_cache").expect("alloc");
     alloc("test_cache").expect("alloc2");
     let c = get("test_cache").expect("get2");
@@ -229,30 +249,39 @@ pub fn self_test() {
     assert_eq!(c.total_allocs, 2);
     crate::serial_println!("  [4/8] alloc: OK");
 
-    // 5: Free.
+    // 5: Free drops active, bumps total_frees; freeing an empty cache fails.
     free("test_cache").expect("free");
     let c = get("test_cache").expect("get3");
     assert_eq!(c.active_objects, 1);
     assert_eq!(c.total_frees, 1);
+    assert!(alloc("missing_cache").is_err()); // NotFound on unknown cache
     crate::serial_println!("  [5/8] free: OK");
 
-    // 6: High watermark.
+    // 6: High watermark records the peak active count (2).
     assert_eq!(c.high_watermark, 2);
     crate::serial_println!("  [6/8] watermark: OK");
 
-    // 7: Top active.
+    // 7: Top active ordering — test_cache (1 active) ahead of empty inode_cache.
     let top = top_active(3);
-    assert_eq!(top.len(), 3);
+    assert_eq!(top.len(), 2); // only two caches exist
+    assert_eq!(top[0].name, "test_cache");
+    assert_eq!(top[0].active_objects, 1);
     crate::serial_println!("  [7/8] top active: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (count, allocs, frees, reclaims, ops) = stats();
-    assert_eq!(count, 6);
-    assert!(allocs > 1350500);
-    assert!(frees > 1342955);
-    let _ = reclaims;
+    assert_eq!(count, 2);
+    assert_eq!(allocs, 2);
+    assert_eq!(frees, 1);
+    assert_eq!(reclaims, 0);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/slabstat table with its fixtures.  Reset to the uninitialised
+    // state so production reads report an empty table until the slab
+    // allocator wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("slabstat::self_test() — all 8 tests passed");
 }

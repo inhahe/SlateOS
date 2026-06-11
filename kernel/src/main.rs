@@ -1515,6 +1515,17 @@ extern "C" fn kernel_main() -> ! {
     // builds its fixtures via the real API with exact assertions and resets the
     // table afterward, so it is safe at boot.
     fs::vmzone::self_test();
+    // vmballoon backs /proc/vmballoon (VM memory-balloon status: current/target/
+    // max pages, inflate/deflate counts and page totals, OOM events, free-page
+    // hints).  Its init_defaults() previously seeded a fictional balloon — 100k
+    // current/target pages, 1M max, 500 inflates / 300 deflates, 5M/4.9M
+    // inflate/deflate page totals, 2 OOM events, 10k free-page hints; that demo
+    // data was removed (the balloon driver advertises its capacity via the new
+    // configure() API on attach, and counters advance only on real inflate/
+    // deflate/record_oom/record_free_hint calls).  The residue-free self_test
+    // builds its fixtures via the real API with exact assertions and resets the
+    // status afterward, so it is safe at boot.
+    fs::vmballoon::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

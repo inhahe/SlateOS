@@ -801,6 +801,22 @@
 ##                    fns. Wired into boot. /proc/vmzone now 84 bytes. NOTE: when
 ##                    the page allocator is wired to publish real zones, it should
 ##                    call vmzone::register for each real zone at mm init.)
+##   - vmballoon.rs  (fixed 2026-06-11; was: fictional VM-balloon status —
+##                    100k current/target pages, 1M max, 500 inflates / 300
+##                    deflates, 5M/4.9M inflate/deflate page totals, 2 OOM events,
+##                    10k free-page hints — shown via /proc/vmballoon and the
+##                    vmballoon kshell command as a real balloon driver. The
+##                    singleton had no way to set the balloon's CAPACITY except
+##                    the seed, so per "add registration APIs rather than seeding"
+##                    added configure(max_pages) (called by the balloon driver on
+##                    attach; resets to a clean fully-deflated state). Emptied
+##                    init_defaults (no balloon attached, all 0) and rebuilt
+##                    self_test residue-free with exact assertions incl. inflate/
+##                    deflate page accounting, target+OOM, free-hint accumulation,
+##                    and inflate capping at configured max. Wired into boot.
+##                    /proc/vmballoon now 101 bytes (all zero). NOTE: when a real
+##                    VM balloon driver is added it should call
+##                    vmballoon::configure(max) on attach.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -813,15 +829,15 @@
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
-##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone (just fixed)
-##     were sixteen. Next ticks: work through the remaining candidates ONE PER
-##     TICK, auditing each before acting. The 52-file list includes both
-##     STATISTICS modules (fix: empty / zero-counters) AND SETTINGS or structural
-##     modules that seed LEGITIMATE config defaults or real topology (LEAVE
-##     ALONE). Verify each is a statistics module fabricating observed numbers
-##     surfaced via /proc before emptying it. Next candidate: vmballoon. Remaining
-##     flagged names incl.:
-##     vmballoon, softirq, timerq,
+##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
+##     (just fixed) were seventeen. Next ticks: work through the remaining
+##     candidates ONE PER TICK, auditing each before acting. The 52-file list
+##     includes both STATISTICS modules (fix: empty / zero-counters) AND SETTINGS
+##     or structural modules that seed LEGITIMATE config defaults or real topology
+##     (LEAVE ALONE). Verify each is a statistics module fabricating observed
+##     numbers surfaced via /proc before emptying it. Next candidate: softirq.
+##     Remaining flagged names incl.:
+##     softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,

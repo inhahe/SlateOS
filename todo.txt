@@ -1588,6 +1588,36 @@
 ##                    truthful). No PROPER FIX DEFERRED: timings are real HPET
 ##                    deltas; a real boot profile accrues when the boot sequence
 ##                    calls begin_stage/end_stage/record_boot for each stage.
+##   - eyeprotect (2026-06-11): AUDITED — LEGITIMATE settings module, default
+##                    profiles LEFT ALONE; only made self_test residue-free (the
+##                    logrotate/gamemode precedent). Eye-strain / 20-20-20 break
+##                    reminder, surfaced via /proc/eyeprotect (state /
+##                    active_profile / profile_count / total_breaks / total_snoozes
+##                    / total_skips) and the `eyeprotect` (alias `eye`) kshell
+##                    command. init_defaults seeds TWO break-reminder PROFILES
+##                    ("20-20-20" interval 20min/break 20s/Notification, "Hourly"
+##                    interval 60min/break 300s/DimOverlay, disabled) — but these
+##                    are CONFIG (shipped reminder presets, the analogue of default
+##                    settings), NOT fabricated observations: every activity
+##                    counter (total_breaks/snoozes/skips) starts at 0 and
+##                    last_break_ns/break_start_ns are 0, so /proc/eyeprotect
+##                    honestly reports "2 profiles, 0 breaks". Default profiles
+##                    deliberately KEPT (settings, like logrotate's default rotation
+##                    rules). The PROBLEM was the self_test: it ran start_break (x2)
+##                    + snooze + skip (bumping the activity counters to 2/1/1) and
+##                    set_interval(1, 30) (mutating the shipped 20-20-20 profile's
+##                    interval from 20 to 30), and never cleared STATE, so the
+##                    kshell `eyeprotect test` subcommand (line 45044) would leak
+##                    fabricated break activity into /proc/eyeprotect AND corrupt
+##                    the default profile. Rebuilt self_test residue-free (clears
+##                    STATE at start AND restores the clean default profiles at end)
+##                    with EXACT assertions (default profiles + zeroed activity,
+##                    break/snooze/skip transitions, interval change, final 2
+##                    profiles / 2 breaks / 1 snooze / 1 skip). Wired into the boot
+##                    self-test path. /proc/eyeprotect 108 bytes (2 profiles, 0
+##                    breaks — truthful). No PROPER FIX DEFERRED: break activity
+##                    accrues through real check_break/start_break/etc. calls
+##                    driven by the timer subsystem.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1607,7 +1637,7 @@
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     eyeprotect. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     fnotify. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1631,12 +1661,12 @@
 ##     residue-free. screentime audited 2026-06-11: LEGITIMATE tracker — no
 ##     fabrication, only made self_test residue-free + tightened assertions.
 ##     startupopt audited 2026-06-11: LEGITIMATE boot profiler — no fabrication,
-##     only made self_test residue-free + tightened assertions.)
+##     only made self_test residue-free + tightened assertions. eyeprotect
+##     audited 2026-06-11: LEGITIMATE settings module — default break profiles
+##     left alone, only made self_test residue-free.)
 ##     Remaining flagged
 ##     names incl.:
-##     eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
-##     set (eyeprotect) likely seed
-##     legitimate config — audit carefully, do not blind-empty. memlayout was
+##     fnotify, memlayout. memlayout was
 ##     newly discovered during the memdiag tick: its init_defaults() seeds
 ##     hardcoded memory regions (~1 GiB "Main memory" etc.) so total_ram() is
 ##     fabricated, not a real limine map — audit/fix when reached.)

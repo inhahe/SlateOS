@@ -1958,6 +1958,19 @@ extern "C" fn kernel_main() -> ! {
     // (stage counts, 0 suggestions for sub-second stages, boot/analysis totals)
     // are exercised at boot.
     fs::startupopt::self_test();
+    // Eye-protection self-test.  Like logrotate/gamemode, eyeprotect is a
+    // legitimate SETTINGS module: its init_defaults seeds two break-reminder
+    // PROFILES (the 20-20-20 rule and an Hourly preset) — the analogue of shipped
+    // default config — with ZEROED activity counters (total_breaks/snoozes/skips
+    // all 0), so /proc/eyeprotect honestly reports no break activity at boot.  The
+    // default profiles are deliberately KEPT.  The self_test, however, runs
+    // breaks/snooze/skip (bumping the activity counters) and changes the 20-20-20
+    // profile's interval, and never cleared STATE — so the kshell `eyeprotect
+    // test` subcommand would leak fabricated break activity into /proc/eyeprotect
+    // AND corrupt the shipped default profile.  It is now residue-free (clears
+    // STATE and restores the clean default profiles at the end) and wired here so
+    // its exact assertions are exercised at boot.
+    fs::eyeprotect::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

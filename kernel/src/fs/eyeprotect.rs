@@ -319,14 +319,25 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("eyeprotect::self_test() — running tests...");
+    // Start from a clean, freshly-defaulted state so the assertions below are
+    // exact and the break/snooze/skip activity counters and the interval change
+    // this test makes do not leak into the live /proc/eyeprotect table afterward
+    // (the kshell `eyeprotect test` subcommand calls this directly, and a leak
+    // would both report fabricated break activity and corrupt the shipped
+    // 20-20-20 default profile's interval).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default profiles.
+    // 1: Default profiles — these are CONFIGURATION (shipped break-reminder
+    //    presets), not fabricated observations: their activity counters
+    //    (total_breaks/snoozes/skips) all start at 0.
     let profiles = list_profiles();
     assert_eq!(profiles.len(), 2);
     assert_eq!(profiles[0].name, "20-20-20");
     assert_eq!(profiles[0].interval_mins, 20);
-    crate::serial_println!("  [1/8] default profiles: OK");
+    let (_, b0, sn0, sk0, _) = stats();
+    assert_eq!((b0, sn0, sk0), (0, 0, 0));
+    crate::serial_println!("  [1/8] default profiles (zeroed activity): OK");
 
     // 2: Active profile.
     let active = get_active().expect("active");
@@ -361,14 +372,15 @@ pub fn self_test() {
     assert_eq!(p.interval_mins, 30);
     crate::serial_println!("  [7/8] set interval: OK");
 
-    // 8: Stats.
+    // 8: Stats — 2 breaks started, 1 snooze, 1 skip.
     let (profiles, breaks, snoozes, skips, ops) = stats();
-    assert_eq!(profiles, 2);
-    assert_eq!(breaks, 2);
-    assert_eq!(snoozes, 1);
-    assert_eq!(skips, 1);
+    assert_eq!((profiles, breaks, snoozes, skips), (2, 2, 1, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Restore the clean default config/state so no test fixtures (break activity
+    // counters, the mutated 20-20-20 interval) leak into the live module.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("eyeprotect::self_test() — all 8 tests passed");
 }

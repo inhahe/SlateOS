@@ -2624,10 +2624,19 @@
 ##           loader. Until then services show Running with pid 0 (honest "active in
 ##           the manager's model, no real process yet"), never a fake PID. boot-test
 ##           PASSED (27s).
-##         - pkgmgr: seeds repos (packages.example.os placeholder URLs) + "base
-##           system packages" (kernel/coreutils) as Installed with fabricated sizes —
-##           presents a package DB that isn't real. FIX: empty-init / read-through a
-##           real content-addressed store once one exists.
+##         - pkgmgr: FIXED 2026-06-11 (empty-init, case a). init_defaults() seeded
+##           3 phantom "Installed" packages (kernel/coreutils/libc with invented
+##           sizes, total_installed:3) + 2 repos pointing at placeholder URLs
+##           (packages.example.os/main + /community), surfaced via /proc and the
+##           `pkgmgr` shell command as a real package database. FIX: database starts
+##           EMPTY (packages/repos Vec::new, all counters 0); packages added via the
+##           real install() entry point, repos via add_repo(). self_test rewritten
+##           residue-free (reset STATE None start+end, assert empty db, build the
+##           kernel/coreutils/libc + main/community fixtures via install()/add_repo()
+##           then run the original 11 tests). DEFERRED PROPER FIX: read the installed
+##           set through the real content-addressed store / generations DB once pkg/
+##           exposes a query API, and load repo config from its on-disk config.
+##           boot-test PASSED (25s).
 ##         - groupmgr: seeds root/wheel/users/daemon. System GIDs are a legitimate
 ##           /etc/group skeleton, BUT member lists [0,1000]/[1000,1001] presume
 ##           fabricated user UIDs. FIX: keep standard system groups (structural

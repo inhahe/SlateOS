@@ -172,63 +172,33 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Initialise package manager with default repos and base packages.
+/// Initialise the package manager with an EMPTY database.
+///
+/// We never fabricate an installed-package list or repository set. The previous
+/// implementation seeded phantom "Installed" packages (kernel/coreutils/libc)
+/// with invented sizes plus two repositories pointing at placeholder URLs
+/// (`packages.example.os`), which `/proc` and the `pkgmgr` shell command
+/// surfaced as a real package database. Neither corresponds to anything the
+/// system actually tracks.
+///
+/// The real installed set is owned by the content-addressed package store
+/// (`pkg/`), and repositories are configuration supplied by the installer or
+/// the user. So the database starts empty: packages are added via `install()`
+/// and repositories via `add_repo()`.
+///
+/// DEFERRED PROPER FIX: read the installed-package set through the real
+/// content-addressed store / generations database once `pkg/` exposes a query
+/// API, and load repository configuration from its on-disk config.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {
         return;
     }
 
-    let repos = alloc::vec![
-        Repository {
-            name: String::from("main"),
-            url: String::from("https://packages.example.os/main"),
-            enabled: true,
-            package_count: 0,
-        },
-        Repository {
-            name: String::from("community"),
-            url: String::from("https://packages.example.os/community"),
-            enabled: true,
-            package_count: 0,
-        },
-    ];
-
-    // Seed with some base system packages.
-    let packages = alloc::vec![
-        Package {
-            name: String::from("kernel"), version: String::from("0.1.0"),
-            available_version: String::from("0.1.0"),
-            description: String::from("OS kernel"),
-            section: PkgSection::System, status: PkgStatus::Installed,
-            installed_size: 4 * 1024 * 1024, download_size: 2 * 1024 * 1024,
-            depends: Vec::new(), rdepends: Vec::new(),
-            repo: String::from("main"), auto_installed: false,
-        },
-        Package {
-            name: String::from("coreutils"), version: String::from("1.0.0"),
-            available_version: String::from("1.0.0"),
-            description: String::from("Core system utilities"),
-            section: PkgSection::System, status: PkgStatus::Installed,
-            installed_size: 2 * 1024 * 1024, download_size: 1024 * 1024,
-            depends: Vec::new(), rdepends: Vec::new(),
-            repo: String::from("main"), auto_installed: false,
-        },
-        Package {
-            name: String::from("libc"), version: String::from("1.0.0"),
-            available_version: String::from("1.0.0"),
-            description: String::from("C standard library"),
-            section: PkgSection::Libraries, status: PkgStatus::Installed,
-            installed_size: 8 * 1024 * 1024, download_size: 3 * 1024 * 1024,
-            depends: Vec::new(), rdepends: alloc::vec![String::from("coreutils")],
-            repo: String::from("main"), auto_installed: false,
-        },
-    ];
-
     *guard = Some(State {
-        packages,
-        repos,
-        total_installed: 3,
+        packages: Vec::new(),
+        repos: Vec::new(),
+        total_installed: 0,
         total_removed: 0,
         total_upgraded: 0,
         ops: 0,
@@ -453,12 +423,27 @@ pub fn stats() -> (usize, usize, usize, usize, u64) {
 pub fn self_test() {
     crate::serial_println!("pkgmgr::self_test() — running tests...");
 
+    // Residue-free: start from a known-empty database.
+    *STATE.lock() = None;
     init_defaults();
 
-    // Test 1: Default packages installed.
-    let installed = list_installed();
-    assert!(installed.len() >= 3);
-    crate::serial_println!("  [1/11] default packages: OK");
+    // Test 1: the database starts EMPTY — no fabricated packages or repos.
+    assert_eq!(list_installed().len(), 0);
+    assert_eq!(list_repos().len(), 0);
+    let (i0, _a0, _u0, r0, _o0) = stats();
+    assert_eq!(i0, 0);
+    assert_eq!(r0, 0);
+
+    // Build deterministic fixtures via the real entry points: two repos and the
+    // base packages the old fabricated default invented (now installed
+    // explicitly inside the test rather than at boot).
+    add_repo("main", "https://packages.example.os/main").expect("add main repo");
+    add_repo("community", "https://packages.example.os/community").expect("add community repo");
+    install("kernel", "0.1.0", "OS kernel", PkgSection::System, 4 * 1024 * 1024).expect("install kernel");
+    install("coreutils", "1.0.0", "Core system utilities", PkgSection::System, 2 * 1024 * 1024).expect("install coreutils");
+    install("libc", "1.0.0", "C standard library", PkgSection::Libraries, 8 * 1024 * 1024).expect("install libc");
+    assert_eq!(list_installed().len(), 3);
+    crate::serial_println!("  [1/11] empty db + base fixtures: OK");
 
     // Test 2: Install new package.
     install("editor", "2.0.0", "Text editor", PkgSection::Editors, 5 * 1024 * 1024).expect("install");
@@ -521,6 +506,9 @@ pub fn self_test() {
     assert_eq!(repos, 2);
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
+
+    // Residue-free: leave no fixtures behind.
+    *STATE.lock() = None;
 
     crate::serial_println!("pkgmgr::self_test() — all 11 tests passed");
 }

@@ -93,20 +93,32 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the MSI-vector statistics state.
+///
+/// Starts with no devices and zero vector/interrupt/alloc/free totals. The
+/// `/proc/msivec` generator and the `msivec` kshell command surface this
+/// per-device table (and `per_device`) as if it reflects the real set of
+/// MSI/MSI-X vector allocations, so seeding it with phantom devices would
+/// be fabricated procfs data — it would claim interrupt vectors are
+/// allocated to PCIe devices that nothing actually programmed. Vectors are
+/// allocated through [`alloc_vectors`] when a device's MSI capability is
+/// configured and released through [`free_vectors`]; the interrupt counters
+/// advance only through real [`record_interrupt`] calls.
+///
+/// (Previously this seeded four fictional devices — "nvme0" (8 MSI-X
+/// vectors, 50M interrupts), "eth0" (4 MSI-X vectors, 100M interrupts),
+/// "gpu0" (1 MSI vector, 5M interrupts), and "ahci0" (1 MSI vector, 10M
+/// interrupts) — plus totals of 14 vectors, 165M interrupts, 100 allocs,
+/// and 86 frees.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        devices: alloc::vec![
-            DeviceMsi { device: String::from("nvme0"), msi_type: MsiType::MsiX, vectors_allocated: 8, vectors_active: 8, interrupts: 50_000_000, target_cpu: 0 },
-            DeviceMsi { device: String::from("eth0"), msi_type: MsiType::MsiX, vectors_allocated: 4, vectors_active: 4, interrupts: 100_000_000, target_cpu: 1 },
-            DeviceMsi { device: String::from("gpu0"), msi_type: MsiType::Msi, vectors_allocated: 1, vectors_active: 1, interrupts: 5_000_000, target_cpu: 0 },
-            DeviceMsi { device: String::from("ahci0"), msi_type: MsiType::Msi, vectors_allocated: 1, vectors_active: 1, interrupts: 10_000_000, target_cpu: 2 },
-        ],
-        total_vectors: 14,
-        total_interrupts: 165_000_000,
-        alloc_count: 100,
-        free_count: 86,
+        devices: Vec::new(),
+        total_vectors: 0,
+        total_interrupts: 0,
+        alloc_count: 0,
+        free_count: 0,
         ops: 0,
     });
 }
@@ -180,54 +192,70 @@ pub fn stats() -> (usize, u32, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("msivec::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live MSI-vector table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_device().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom devices, zero totals.
+    assert_eq!(per_device().len(), 0);
+    let (d0, v0, i0, a0, f0, _) = stats();
+    assert_eq!((d0, v0, i0, a0, f0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Alloc.
+    // 2: Alloc — device appears with its vectors; totals advance; duplicate is
+    //    AlreadyExists.
     alloc_vectors("test_dev", MsiType::MsiX, 4, 0).expect("alloc");
-    assert_eq!(per_device().len(), 5);
+    let devs = per_device();
+    assert_eq!(devs.len(), 1);
+    let d = devs.iter().find(|d| d.device == "test_dev").expect("find");
+    assert_eq!((d.vectors_allocated, d.vectors_active, d.interrupts, d.target_cpu), (4, 4, 0, 0));
+    assert_eq!(d.msi_type, MsiType::MsiX);
+    let (_, vecs, _, allocs, _, _) = stats();
+    assert_eq!((vecs, allocs), (4, 1));
     assert!(alloc_vectors("test_dev", MsiType::Msi, 1, 0).is_err());
     crate::serial_println!("  [2/8] alloc: OK");
 
-    // 3: Interrupt.
+    // 3: Interrupt — per-device and global interrupt counters advance.
     record_interrupt("test_dev").expect("interrupt");
-    let d = per_device().iter().find(|d| d.device == "test_dev").cloned().unwrap();
+    let d = per_device().into_iter().find(|d| d.device == "test_dev").expect("p3");
     assert_eq!(d.interrupts, 1);
+    assert_eq!(stats().2, 1); // total_interrupts
     crate::serial_println!("  [3/8] interrupt: OK");
 
-    // 4: Target CPU.
+    // 4: Target CPU — retargeting updates the device's affinity.
     set_target_cpu("test_dev", 3).expect("target");
-    let d = per_device().iter().find(|d| d.device == "test_dev").cloned().unwrap();
+    let d = per_device().into_iter().find(|d| d.device == "test_dev").expect("p4");
     assert_eq!(d.target_cpu, 3);
     crate::serial_println!("  [4/8] target cpu: OK");
 
-    // 5: Free.
+    // 5: Free — device disappears; total_vectors drops; free_count advances;
+    //    double free is NotFound.
     free_vectors("test_dev").expect("free");
-    assert_eq!(per_device().len(), 4);
+    assert_eq!(per_device().len(), 0);
+    let (_, vecs, _, _, frees, _) = stats();
+    assert_eq!((vecs, frees), (0, 1));
     assert!(free_vectors("test_dev").is_err());
     crate::serial_println!("  [5/8] free: OK");
 
-    // 6: Vector count.
-    let (_, vecs, _, _, _, _) = stats();
-    assert_eq!(vecs, 14); // back to default after free
+    // 6: Vector count back to zero after the device is freed.
+    assert_eq!(stats().1, 0);
     crate::serial_println!("  [6/8] vector count: OK");
 
-    // 7: Not found.
+    // 7: Not found — interrupt/retarget/free on an unknown device all error.
     assert!(record_interrupt("nonexist").is_err());
+    assert!(set_target_cpu("nonexist", 0).is_err());
+    assert!(free_vectors("nonexist").is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above. total_interrupts is
+    //    cumulative (not decremented on free): 1 interrupt, 1 alloc, 1 free.
     let (devs, vecs, ints, allocs, frees, ops) = stats();
-    assert_eq!(devs, 4);
-    assert_eq!(vecs, 14);
-    assert!(ints > 165_000_000);
-    assert!(allocs > 100);
-    assert!(frees > 86);
+    assert_eq!((devs, vecs, ints, allocs, frees), (0, 0, 1, 1, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("msivec::self_test() — all 8 tests passed");
 }

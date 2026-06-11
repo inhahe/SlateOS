@@ -964,6 +964,24 @@
 ##                    4 frees / 1 drop / 5916 bytes). NOTE: sockbuf was NOT
 ##                    previously wired into the boot self-test path — now added.
 ##                    /proc/sockbuf now 77 bytes.)
+##   - msivec.rs     (fixed 2026-06-11; fs/msivec.rs statistics module backing
+##                    /proc/msivec and the `msivec` kshell command; was: four
+##                    fictional PCIe devices — nvme0 (8 MSI-X vectors, 50M
+##                    interrupts), eth0 (4 MSI-X, 100M), gpu0 (1 MSI, 5M) and
+##                    ahci0 (1 MSI, 10M) — plus totals of 14 vectors / 165M
+##                    interrupts / 100 allocs / 86 frees, surfaced as if real MSI
+##                    vectors had been programmed into hardware. Case (a): the
+##                    alloc_vectors/free_vectors/record_interrupt/set_target_cpu
+##                    API already exists, so init_defaults was simply emptied (no
+##                    seeded devices, all totals 0). Rebuilt self_test residue-free
+##                    with exact assertions: alloc adds a device + advances
+##                    vector/alloc totals, duplicate AlreadyExists, interrupt
+##                    counting, retarget, free drops the device + total_vectors and
+##                    advances free_count, cumulative interrupt total NOT
+##                    decremented on free, unknown-device interrupt/retarget/free
+##                    all NotFound, final totals (0 devs / 0 vecs / 1 int / 1 alloc
+##                    / 1 free). NOTE: msivec was NOT previously wired into the boot
+##                    self-test path — now added. /proc/msivec now 105 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -977,14 +995,13 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf (just fixed) were twenty-six. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec (just fixed) were twenty-seven. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     msivec. Remaining flagged names incl.:
-##     msivec,
+##     clocksrc. Remaining flagged names incl.:
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,

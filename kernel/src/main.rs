@@ -1643,6 +1643,20 @@ extern "C" fn kernel_main() -> ! {
     // cumulative byte accounting) and resets the table afterward, so it is safe
     // at boot.
     fs::sockbuf::self_test();
+    // msivec backs /proc/msivec (MSI/MSI-X interrupt-vector diagnostics:
+    // per-device allocated/active vector counts, delivered-interrupt counts and
+    // target CPU, plus global vector/interrupt/alloc/free totals).  Its
+    // init_defaults() previously seeded four fictional PCIe devices — nvme0
+    // (8 MSI-X vectors, 50M interrupts), eth0 (4 MSI-X, 100M), gpu0 (1 MSI, 5M)
+    // and ahci0 (1 MSI, 10M) — plus totals of 14 vectors / 165M interrupts /
+    // 100 allocs / 86 frees, all surfaced as if real MSI vectors had been
+    // programmed into hardware.  That demo data was removed; the device list now
+    // starts empty and fills only when a driver actually configures an MSI
+    // capability via alloc_vectors().  The residue-free self_test builds its
+    // fixtures via the real API with exact assertions (incl. cumulative
+    // interrupt accounting that is not decremented on free) and resets the table
+    // afterward, so it is safe at boot.
+    fs::msivec::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

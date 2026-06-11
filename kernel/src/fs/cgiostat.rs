@@ -83,21 +83,37 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** cgroup I/O statistics table.
+///
+/// Seeds NO cgroups and zero totals.  Real per-cgroup I/O accounting is wired
+/// through [`create_cgroup`] (one row per cgroup the controller creates) and
+/// the `record_read`/`record_write`/`record_throttle`/`record_io_wait`
+/// functions; until those are called the table is genuinely empty, so the
+/// `/proc/cgiostat` file and the `cgiostat` kshell command report zeros rather
+/// than fabricated numbers — the kernel's hard "never invent data in procfs"
+/// rule.
+///
+/// NOTE: this previously seeded three fictional cgroups ("root" read 50GB /
+/// write 30GB; "system.slice" read 20GB / write 15GB / 500 throttles;
+/// "user.slice" read 10GB / write 8GB / 200 throttles) plus invented aggregate
+/// totals (total_read_bytes 80GB, total_write_bytes 53GB, total_read_ios 8M,
+/// total_write_ios 5.3M, total_throttles 700), which `/proc/cgiostat` then
+/// displayed as if they were real per-cgroup I/O measurements.  That demo data
+/// was removed; the self-test now builds its own fixtures explicitly via the
+/// real API (see [`self_test`]).  The cgroup I/O controller is expected to call
+/// [`create_cgroup`] when a cgroup is created and the record_* functions as I/O
+/// flows through it.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        cgroups: alloc::vec![
-            CgroupIoStats { cg_id: 1, name: String::from("root"), read_bytes: 50_000_000_000, write_bytes: 30_000_000_000, read_ios: 5_000_000, write_ios: 3_000_000, throttle_count: 0, io_wait_ns: 100_000_000_000, bw_limit_bps: 0, iops_limit: 0 },
-            CgroupIoStats { cg_id: 2, name: String::from("system.slice"), read_bytes: 20_000_000_000, write_bytes: 15_000_000_000, read_ios: 2_000_000, write_ios: 1_500_000, throttle_count: 500, io_wait_ns: 50_000_000_000, bw_limit_bps: 100_000_000, iops_limit: 10000 },
-            CgroupIoStats { cg_id: 3, name: String::from("user.slice"), read_bytes: 10_000_000_000, write_bytes: 8_000_000_000, read_ios: 1_000_000, write_ios: 800_000, throttle_count: 200, io_wait_ns: 30_000_000_000, bw_limit_bps: 200_000_000, iops_limit: 20000 },
-        ],
-        next_id: 4,
-        total_read_bytes: 80_000_000_000,
-        total_write_bytes: 53_000_000_000,
-        total_read_ios: 8_000_000,
-        total_write_ios: 5_300_000,
-        total_throttles: 700,
+        cgroups: Vec::new(),
+        next_id: 1,
+        total_read_bytes: 0,
+        total_write_bytes: 0,
+        total_read_ios: 0,
+        total_write_ios: 0,
+        total_throttles: 0,
         ops: 0,
     });
 }
@@ -204,58 +220,79 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("cgiostat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/cgiostat must never surface).
+    // Resetting first clears any residue from a prior `cgiostat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_cgroup().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated cgroups or totals.
+    assert_eq!(per_cgroup().len(), 0);
+    let (c0, rb0, wb0, t0, _o0) = stats();
+    assert_eq!((c0, rb0, wb0, t0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Create.
-    let id = create_cgroup("test", 50_000_000, 5000).expect("create");
-    assert!(id >= 4);
-    assert_eq!(per_cgroup().len(), 4);
+    // 2: Create cgroups — ids start at 1 and increment; limits preserved.
+    let id1 = create_cgroup("test", 50_000_000, 5000).expect("create1");
+    let id2 = create_cgroup("other", 0, 0).expect("create2");
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    assert_eq!(per_cgroup().len(), 2);
+    let cg = per_cgroup().iter().find(|c| c.cg_id == id1).cloned().expect("cg");
+    assert_eq!(cg.bw_limit_bps, 50_000_000);
+    assert_eq!(cg.iops_limit, 5000);
+    assert_eq!(cg.read_bytes, 0);
     crate::serial_println!("  [2/8] create: OK");
 
-    // 3: Read.
-    record_read(id, 4096).expect("read");
-    let cg = per_cgroup().iter().find(|c| c.cg_id == id).cloned().unwrap();
+    // 3: Read records bytes + IO count exactly from zero.
+    record_read(id1, 4096).expect("read");
+    let cg = per_cgroup().iter().find(|c| c.cg_id == id1).cloned().expect("cg");
     assert_eq!(cg.read_bytes, 4096);
     assert_eq!(cg.read_ios, 1);
+    assert!(record_read(9999, 1).is_err()); // unknown cgroup
     crate::serial_println!("  [3/8] read: OK");
 
-    // 4: Write.
-    record_write(id, 8192).expect("write");
-    let cg = per_cgroup().iter().find(|c| c.cg_id == id).cloned().unwrap();
+    // 4: Write records bytes + IO count exactly from zero.
+    record_write(id1, 8192).expect("write");
+    let cg = per_cgroup().iter().find(|c| c.cg_id == id1).cloned().expect("cg");
     assert_eq!(cg.write_bytes, 8192);
     assert_eq!(cg.write_ios, 1);
     crate::serial_println!("  [4/8] write: OK");
 
-    // 5: Throttle.
-    record_throttle(id).expect("throttle");
-    let cg = per_cgroup().iter().find(|c| c.cg_id == id).cloned().unwrap();
+    // 5: Throttle increments exactly from zero.
+    record_throttle(id1).expect("throttle");
+    let cg = per_cgroup().iter().find(|c| c.cg_id == id1).cloned().expect("cg");
     assert_eq!(cg.throttle_count, 1);
     crate::serial_println!("  [5/8] throttle: OK");
 
-    // 6: I/O wait.
-    record_io_wait(id, 100_000).expect("io_wait");
-    let cg = per_cgroup().iter().find(|c| c.cg_id == id).cloned().unwrap();
+    // 6: I/O wait accumulates exactly from zero.
+    record_io_wait(id1, 100_000).expect("io_wait");
+    let cg = per_cgroup().iter().find(|c| c.cg_id == id1).cloned().expect("cg");
     assert_eq!(cg.io_wait_ns, 100_000);
     crate::serial_println!("  [6/8] io wait: OK");
 
-    // 7: Remove.
-    remove_cgroup(id).expect("remove");
-    assert_eq!(per_cgroup().len(), 3);
-    assert!(remove_cgroup(id).is_err());
+    // 7: Remove drops the cgroup; removing again fails with NotFound.
+    remove_cgroup(id1).expect("remove");
+    assert_eq!(per_cgroup().len(), 1);
+    assert!(remove_cgroup(id1).is_err());
     crate::serial_println!("  [7/8] remove: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (cgs, rbytes, wbytes, throttles, ops) = stats();
-    assert_eq!(cgs, 3);
-    assert!(rbytes > 80_000_000_000);
-    assert!(wbytes > 53_000_000_000);
-    assert!(throttles > 700);
+    assert_eq!(cgs, 1);
+    assert_eq!(rbytes, 4096);   // one read
+    assert_eq!(wbytes, 8192);   // one write
+    assert_eq!(throttles, 1);   // one throttle
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/cgiostat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the cgroup I/O controller
+    // wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("cgiostat::self_test() — all 8 tests passed");
 }

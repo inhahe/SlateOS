@@ -379,16 +379,25 @@
 ##                    record_split/record_coalesce API; just emptied
 ##                    init_defaults and rebuilt self_test with exact assertions,
 ##                    wired into boot.)
+##   - cgiostat.rs   (fixed 2026-06-11; was: three fake cgroups "root" (read
+##                    50GB/write 30GB), "system.slice" (read 20GB/write 15GB/500
+##                    throttles), "user.slice" (read 10GB/write 8GB/200
+##                    throttles); aggregates total_read_bytes 80GB,
+##                    total_write_bytes 53GB, total_throttles 700. Already had a
+##                    full create_cgroup/remove_cgroup/record_read/record_write/
+##                    record_throttle/record_io_wait API; just emptied
+##                    init_defaults (next_id reset to 1) and rebuilt self_test
+##                    with exact assertions, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): cgiostat,
-##     compstat, dmastat, inodestat, ksmstat, mmapstat, pagestat, pidstat,
-##     pmcstat, powerstat, procstat, ratestat, rqstat, schedlat, ttystat,
-##     zramstat. NOTE: some may be SETTINGS modules seeding legitimate config
-##     defaults — verify each is a STATISTICS module seeding fake OBSERVATIONS
-##     before emptying it.)
-## After budstat, continue auditing the remaining *stat/*latency/*stats siblings.
+##     by grep (init_defaults with alloc::vec!/String::from/push): compstat,
+##     dmastat, inodestat, ksmstat, mmapstat, pagestat, pidstat, pmcstat,
+##     powerstat, procstat, ratestat, rqstat, schedlat, ttystat, zramstat.
+##     NOTE: some may be SETTINGS modules seeding legitimate config defaults —
+##     verify each is a STATISTICS module seeding fake OBSERVATIONS before
+##     emptying it.)
+## After cgiostat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

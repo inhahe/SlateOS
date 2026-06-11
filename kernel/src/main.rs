@@ -1226,6 +1226,14 @@ extern "C" fn kernel_main() -> ! {
     // previously lacked (it was only reachable via the `budstat test` kshell
     // subcommand).
     fs::budstat::self_test();
+    // cgiostat backs /proc/cgiostat (per-cgroup disk I/O bytes, IOPS, throttle
+    // events, I/O wait); like its siblings the self-test now builds fixtures via
+    // the real create_cgroup/remove_cgroup/record_read/record_write/
+    // record_throttle/record_io_wait API and resets the table afterward
+    // (leaving no fabricated rows), so it is safe at boot and gives the module
+    // automated coverage it previously lacked (it was only reachable via the
+    // `cgiostat test` kshell subcommand).
+    fs::cgiostat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

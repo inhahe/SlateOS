@@ -13450,6 +13450,87 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[procfs]   {}/stat: 52 fields OK", current_tid);
 
+    // --- system-wide /proc/stat Linux layout ---
+    // gen_stat now emits the Linux fs/proc/stat.c show_stat() layout instead of
+    // the old custom "tasks:/running:" format.  Lock down the line structure so
+    // a future edit can't silently regress what top/htop/vmstat/glibc parse.
+    {
+        let data = fs.read_file("/stat")?;
+        let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
+
+        // The aggregate CPU line is first and uses the "cpu" label followed by
+        // TWO spaces (Linux quirk), then exactly 10 jiffy columns.
+        let first = text.lines().next().unwrap_or("");
+        if !first.starts_with("cpu  ") {
+            serial_println!("[procfs]   FAIL: /stat first line {:?}, want 'cpu  ...'", first);
+            return Err(KernelError::InternalError);
+        }
+        let cols: Vec<&str> = first.split(' ').filter(|s| !s.is_empty()).collect();
+        // "cpu" + 10 numeric columns = 11 tokens.
+        if cols.len() != 11 {
+            serial_println!(
+                "[procfs]   FAIL: /stat cpu line has {} tokens, want 11 (cpu + 10 cols)",
+                cols.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        if !cols.iter().skip(1).all(|c| c.parse::<u64>().is_ok()) {
+            serial_println!("[procfs]   FAIL: /stat cpu line has a non-numeric column");
+            return Err(KernelError::InternalError);
+        }
+        // user (col 1) and nice (col 2) are honestly 0 — we do not yet split
+        // user-vs-kernel CPU time, so these must never be fabricated non-zero.
+        if cols.get(1) != Some(&"0") || cols.get(2) != Some(&"0") {
+            serial_println!(
+                "[procfs]   FAIL: /stat user/nice cols = {:?}/{:?}, want 0/0 (untracked)",
+                cols.get(1), cols.get(2)
+            );
+            return Err(KernelError::InternalError);
+        }
+        // The mandatory summary keys every parser expects, each on its own line.
+        for key in ["\nintr ", "\nctxt ", "\nbtime ", "\nprocesses ",
+                    "\nprocs_running ", "\nprocs_blocked ", "\nsoftirq "] {
+            if !text.contains(key) {
+                serial_println!("[procfs]   FAIL: /stat missing line {:?}", key);
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   /stat: Linux show_stat layout OK ({} bytes)", data.len());
+    }
+
+    // --- system-wide /proc/uptime Linux layout ---
+    // gen_uptime now emits the Linux fs/proc/uptime.c two-field
+    // "<uptime> <idle>" centisecond format.  A strict two-field parser
+    // (sscanf "%lf %lf") must find exactly two decimal fields.
+    {
+        let data = fs.read_file("/uptime")?;
+        let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
+        let line = text.strip_suffix('\n').unwrap_or(text);
+        let fields: Vec<&str> = line.split(' ').filter(|s| !s.is_empty()).collect();
+        if fields.len() != 2 {
+            serial_println!(
+                "[procfs]   FAIL: /uptime has {} fields, want 2 (<uptime> <idle>)",
+                fields.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Each field is "<secs>.<centis>" — must split into two integer parts,
+        // and the centisecond part must be exactly 2 digits.
+        for f in &fields {
+            let mut parts = f.split('.');
+            let secs = parts.next().and_then(|s| s.parse::<u64>().ok());
+            let centis = parts.next();
+            let centis_ok = centis.is_some_and(|c| c.len() == 2 && c.parse::<u64>().is_ok());
+            if secs.is_none() || parts.next().is_some() || !centis_ok {
+                serial_println!(
+                    "[procfs]   FAIL: /uptime field {:?} not '<secs>.<2-digit-centis>'", f
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   /uptime: two-field Linux layout OK ({:?})", line);
+    }
+
     serial_println!("[procfs] Self-test PASSED");
     Ok(())
 }

@@ -554,6 +554,7 @@ const PID_FILES: &[&str] = &[
     "cgroup",
     "oom_score",
     "oom_score_adj",
+    "schedstat",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -2266,6 +2267,48 @@ fn gen_pid_oom_score_adj(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(render_oom_score_adj(adj))
 }
 
+/// Render `/proc/<pid>/schedstat` — scheduler statistics, Linux-format.
+///
+/// Pure helper (no scheduler lock access) so it can be unit-tested in
+/// kernel context.  Linux's `/proc/<pid>/schedstat` is three
+/// space-separated integers on one line (`fs/proc/base.c`
+/// `proc_pid_schedstat`):
+///
+/// ```text
+/// <cpu_time_ns> <run_delay_ns> <timeslices>
+/// ```
+///
+/// 1. time spent running on the CPU, in nanoseconds;
+/// 2. time spent waiting on a run queue, in nanoseconds;
+/// 3. number of times the task was scheduled (timeslices run).
+///
+/// All three come from real per-task accounting (TSC cycles, run-queue
+/// wait ticks, and the dispatch counter); none are placeholders.
+fn render_schedstat(cpu_ns: u64, run_delay_ns: u64, timeslices: u64) -> Vec<u8> {
+    format!("{cpu_ns} {run_delay_ns} {timeslices}\n").into_bytes()
+}
+
+/// `/proc/<pid>/schedstat` — per-task scheduler statistics.
+///
+/// Available for any live scheduler task (including kernel threads with
+/// no PCB), matching Linux which serves `schedstat` for every task.
+/// CPU time uses the TSC-based `total_cycles` accounting (nanosecond
+/// precision, consistent with but finer than the 10 ms `utime` ticks in
+/// `/proc/<pid>/stat`); run delay uses the cumulative run-queue wait
+/// ticks at `USER_HZ = TICK_RATE_HZ = 100` (10 ms/tick).
+fn gen_pid_schedstat(task_id: u64) -> KernelResult<Vec<u8>> {
+    /// Nanoseconds per scheduler tick (USER_HZ == TICK_RATE_HZ == 100).
+    const NS_PER_TICK: u64 = 1_000_000_000 / 100;
+
+    let tasks = crate::sched::task_list();
+    let task = tasks.iter().find(|t| t.id == task_id)
+        .ok_or(KernelError::NotFound)?;
+
+    let cpu_ns = crate::bench::cycles_to_ns(task.total_cycles);
+    let run_delay_ns = task.total_wait_ticks.saturating_mul(NS_PER_TICK);
+    Ok(render_schedstat(cpu_ns, run_delay_ns, task.schedule_count))
+}
+
 /// `/proc/<pid>/caps` — capability table listing.
 ///
 /// Shows the count and types of capabilities granted to this process,
@@ -2497,6 +2540,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "cgroup" => gen_pid_cgroup(task_id),
         "oom_score" => gen_pid_oom_score(task_id),
         "oom_score_adj" => gen_pid_oom_score_adj(task_id),
+        "schedstat" => gen_pid_schedstat(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11669,6 +11713,23 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   oom_score/oom_score_adj render: {} cases OK", cases.len());
     }
 
+    // --- /proc/<pid>/schedstat rendering ---
+    // Pure formatter: three space-separated integers (cpu_ns run_delay_ns
+    // timeslices) on one line, newline-terminated.
+    {
+        let rendered = render_schedstat(12_500_000, 3_000_000, 7);
+        let sched_text = core::str::from_utf8(&rendered)
+            .map_err(|_| KernelError::InternalError)?;
+        if sched_text != "12500000 3000000 7\n" {
+            serial_println!(
+                "[procfs]   FAIL: schedstat render {:?} != \"12500000 3000000 7\\n\"",
+                sched_text
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   schedstat render: OK");
+    }
+
     // --- New per-PID files: comm, statm, limits ---
 
     // /proc/<pid>/comm — non-empty, newline-terminated, <= 16 bytes
@@ -11825,6 +11886,33 @@ pub fn self_test() -> KernelResult<()> {
                 serial_println!("[procfs]   FAIL: {} unexpected error {:?}", name, e);
                 return Err(KernelError::InternalError);
             }
+        }
+    }
+
+    // /proc/<pid>/schedstat — served for any live scheduler task.  Must be
+    // exactly three space-separated integers, newline-terminated.
+    match fs.read_file(&format!("/{current_tid}/schedstat")) {
+        Ok(sched_data) => {
+            let sched_text = core::str::from_utf8(&sched_data)
+                .map_err(|_| KernelError::InternalError)?;
+            let trimmed = sched_text.strip_suffix('\n').unwrap_or(sched_text);
+            let fields: Vec<&str> = trimmed.split(' ').collect();
+            if fields.len() != 3 || !fields.iter().all(|f| f.parse::<u64>().is_ok()) {
+                serial_println!(
+                    "[procfs]   FAIL: schedstat not 3 integers ({:?})", trimmed
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!("[procfs]   {}/schedstat: 3 fields OK", current_tid);
+        }
+        Err(KernelError::NotFound) => {
+            serial_println!(
+                "[procfs]   {}/schedstat: NotFound (no scheduler task) OK", current_tid
+            );
+        }
+        Err(e) => {
+            serial_println!("[procfs]   FAIL: schedstat unexpected error {:?}", e);
+            return Err(KernelError::InternalError);
         }
     }
 

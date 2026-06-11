@@ -1590,6 +1590,19 @@ extern "C" fn kernel_main() -> ! {
     // self_test builds its fixtures via the real API with exact assertions and
     // resets the list afterward, so it is safe at boot.
     fs::kthread::self_test();
+    // kstack backs /proc/kstack (kernel-stack diagnostics: per-CPU stack size,
+    // current/high-water usage, overflow + guard-page-hit counts, and usage
+    // samples, plus global overflow/guard/sample totals).  Its init_defaults()
+    // previously seeded four fictional CPUs — cpu 0..3 with 16KiB stacks,
+    // invented current/high-water usage, 1,000,000 samples each and
+    // total_used_samples in the billions, plus 1 overflow and 3 guard hits;
+    // that demo data was removed.  Per-CPU stack stats are dynamic so the table
+    // starts empty, with CPUs added as they come online via the existing
+    // register_cpu() API and counters advancing only on real record_usage/
+    // record_overflow/record_guard_hit calls.  The residue-free self_test builds
+    // its fixtures via the real API with exact assertions and resets the table
+    // afterward, so it is safe at boot.
+    fs::kstack::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

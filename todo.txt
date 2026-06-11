@@ -900,6 +900,22 @@
 ##                    cpu-time accumulation, on_cpu filtering, unregister removal +
 ##                    double/unknown NotFound, final totals 2 created / 1 exited.
 ##                    Wired into boot. /proc/kthread now 70 bytes.)
+##   - kstack.rs     (fixed 2026-06-11; fs/kstack.rs statistics module backing
+##                    /proc/kstack and the `kstack` kshell command — DISTINCT from
+##                    the real kernel-stack allocator subsystem (which has its own
+##                    [kstack] self-test that also passes). Was: four fictional
+##                    CPUs — cpu 0..3 with 16KiB stacks, invented current/high-
+##                    water usage, 1,000,000 samples each and total_used_samples in
+##                    the billions, plus 1 overflow and 3 guard hits, with matching
+##                    global totals. Pure statistics module, per-CPU stack stats
+##                    are dynamic with a register_cpu API already present (case a)
+##                    → emptied init_defaults (no CPUs, totals 0). Rebuilt self_test
+##                    residue-free with exact assertions: duplicate-register
+##                    AlreadyExists, current/high-water/sample accounting, high-
+##                    water holds on drop, per-CPU+global overflow/guard counters,
+##                    unregistered-CPU NotFound, final totals (1 cpu / 1 overflow /
+##                    1 guard / 2 samples). Wired into boot. /proc/kstack now 94
+##                    bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -913,14 +929,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread (just fixed) were twenty-two. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack (just fixed) were twenty-three. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     kstack. Remaining flagged names incl.:
-##     kstack, kprobes, ftrace, sockbuf, msivec,
+##     kprobes. Remaining flagged names incl.:
+##     kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,

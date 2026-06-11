@@ -22,27 +22,29 @@
 ## ld.so/WINE read /proc/self/auxv at startup.  Deferred because it
 ## touches the process-launch critical path (risky to land unattended).
 ##
-## PARTIALLY DONE (2026-06-10): /proc/<pid>/task/<tid>/ thread directory
+## DONE (2026-06-10): /proc/<pid>/task/<tid>/ thread directory
 ## Nested-dir support is implemented (kernel/src/fs/procfs.rs):
 ## ProcPath::PidTaskDir/PidTaskTidDir/PidTaskFile variants, classify_path
 ## routes the `task/` subtree, every PID dir now lists a `task` subdir,
 ## and readdir/read_file/stat handle the three levels. thread_belongs()
 ## gates each path on get_threads(pid).contains(tid). Files served per
-## thread: comm + schedstat + stat (TASK_FILES) via
+## thread: comm + schedstat + stat + status (TASK_FILES) via
 ## generate_task(pid,tid,name). comm/schedstat key purely on the scheduler
 ## task id; stat is served via gen_thread_stat(pid,tid) which splits the
 ## 52-field line into thread fields (field1=tid, comm, state, utime,
 ## priority, exit_code — from the scheduler task `tid`) and process-wide
 ## fields (ppid, pgrp/session, num_threads, vsize, rss, rsslim — from the
-## owning `pid`). build_pid_stat(task, proc_id) is the shared core; the
-## process's own /proc/<pid>/stat calls it with proc_id==task.id so the two
-## id sources coincide. Self-tested (8 classify cases + live gating + live
-## thread-stat: bogus tid -> NotFound, field1==probe).
-## REMAINING: add `status` to TASK_FILES. Same approach as stat: a
-## thread-aware gen_thread_status(pid,tid) that takes the Tgid/Ppid/Threads
-## and other process-wide lines from `pid` while the per-thread Pid/Name/
-## State come from `tid`. Omitted for now only to keep this commit to one
-## logical change; the stat refactor (build_pid_stat split) is the template.
+## owning `pid`). status is served via gen_thread_status(pid,tid) with the
+## same split: thread fields (Name, State, Pid=tid, ctxt switches) from
+## `tid`, process-wide (Tgid=pid, PPid, Umask, Uid/Gid/Groups, Vm*, Threads)
+## from `pid`. build_pid_stat / build_pid_status are the shared cores; each
+## process's own /proc/<pid>/{stat,status} calls them with proc_id==task.id
+## so the id sources coincide and that output is unchanged. Self-tested
+## (9 classify cases + live gating + live thread-stat field1==probe and
+## thread-status Pid/Tgid==probe, both rejecting a bogus tid with NotFound).
+## DONE — no per-thread files remain outstanding. (Linux also exposes
+## task/<tid>/{maps,statm,limits,…}; those are address-space-wide and
+## identical to the process files, so add them only if a tool needs them.)
 ##
 ## DONE (2026-06-10): writable /proc/<pid>/oom_score_adj
 ## /proc/<pid>/oom_score_adj now accepts writes (kernel/src/fs/procfs.rs:

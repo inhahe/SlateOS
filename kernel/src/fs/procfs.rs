@@ -589,7 +589,7 @@ const PID_LINKS: &[&str] = &["cwd", "root", "exe"];
 /// either fabricate those fields or require threading the owner pid
 /// through the per-thread generators — tracked as a follow-up in
 /// `todo.txt` rather than shipped wrong.
-const TASK_FILES: &[&str] = &["comm", "schedstat", "stat"];
+const TASK_FILES: &[&str] = &["comm", "schedstat", "stat", "status"];
 
 // ---------------------------------------------------------------------------
 // Content generators
@@ -1769,18 +1769,46 @@ fn gen_security() -> Vec<u8> {
 /// and `Tgid`/`Pid` values are kept consistent with [`gen_pid_stat`] and
 /// the `getpid`/`getuid`/`getpgid` syscalls so the files never disagree.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
-    use crate::sched::task::TaskState;
-    use core::fmt::Write as _;
-
     let tasks = crate::sched::task_list();
     let task = tasks.iter().find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
+    Ok(build_pid_status(task, task_id))
+}
+
+/// `/proc/<pid>/task/<tid>/status` — per-thread status.
+///
+/// Same key/value layout as [`gen_pid_status`], but the thread-specific
+/// fields (Name, State, Pid, context switches) come from the thread's
+/// scheduler task `tid`, while the process-wide fields (Tgid, PPid, Umask,
+/// Uid/Gid/Groups, Vm*, Threads) come from the owning process `proc_id`.
+/// This matches Linux's `task/<tid>/status` (Pid != Tgid for non-leader
+/// threads) and is strictly more correct than serving `gen_pid_status(tid)`
+/// (which would key the process-wide fields off the non-process tid).
+fn gen_thread_status(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
+    let tasks = crate::sched::task_list();
+    let task = tasks.iter().find(|t| t.id == tid)
+        .ok_or(KernelError::NotFound)?;
+    Ok(build_pid_status(task, proc_id))
+}
+
+/// Build a Linux `/proc/<pid>/status` body.
+///
+/// Thread-specific fields come from `task` (Name, State, Pid = `task.id`,
+/// context switches); process-wide fields come from `proc_id` (Tgid, PPid,
+/// Umask, Uid/Gid/Groups, Vm*, Threads).  For a process's own
+/// `/proc/<pid>/status`, the caller passes `proc_id == task.id` so Pid ==
+/// Tgid and the two id sources coincide; for a thread's `task/<tid>/status`
+/// they differ (`task.id == tid`, `proc_id == owning pid`), so Pid is the
+/// thread id while Tgid is the process id — exactly as Linux reports.
+fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
+    use crate::sched::task::TaskState;
+    use core::fmt::Write as _;
 
     let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
         .unwrap_or("???");
 
     // Linux `State:` is "<char> (<word>)".  Mirror exactly the single-char
-    // mapping used by /proc/<pid>/stat (see gen_pid_stat) so the two files
+    // mapping used by /proc/<pid>/stat (see build_pid_stat) so the two files
     // never disagree about a task's state.
     let state = match task.state {
         TaskState::Running | TaskState::Ready => "R (running)", // Ready == runnable
@@ -1789,9 +1817,9 @@ fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
         TaskState::Dead => "Z (zombie)",
     };
 
-    let ppid = crate::proc::pcb::parent(task_id).unwrap_or(0);
-    let num_threads = crate::proc::pcb::get_threads(task_id).map_or(1, |t| t.len());
-    let creds = crate::proc::pcb::get_credentials(task_id);
+    let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
+    let num_threads = crate::proc::pcb::get_threads(proc_id).map_or(1, |t| t.len());
+    let creds = crate::proc::pcb::get_credentials(proc_id);
     let (uid, gid) = creds.as_ref().map_or((0, 0), |c| (c.uid, c.gid));
 
     // Field names and order follow Linux fs/proc/array.c proc_pid_status()
@@ -1804,14 +1832,15 @@ fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     // `write!` into a String is infallible; the Result is ignored on purpose.
     let _ = writeln!(s, "Name:\t{name}");
     // Umask: per-process file-creation mask, octal.  Bare scheduler tasks
-    // (no PCB) inherit the kernel default 022.
-    let umask = crate::proc::pcb::get_umask(task_id).unwrap_or(0o022);
+    // (no PCB) inherit the kernel default 022.  Process-wide → proc_id.
+    let umask = crate::proc::pcb::get_umask(proc_id).unwrap_or(0o022);
     let _ = writeln!(s, "Umask:\t{umask:04o}");
     let _ = writeln!(s, "State:\t{state}");
-    // Tgid == Pid: we have no separate thread-group object, so the task id
-    // serves as both pid and (for the leader) tgid — consistent with
-    // getpid()/gettid() returning the same value for a single-threaded task.
-    let _ = writeln!(s, "Tgid:\t{}", task.id);
+    // Tgid is the thread-group (process) id; Pid is this thread's id.  For a
+    // single-threaded process / the leader they coincide, matching getpid()
+    // == gettid(); for a non-leader thread Tgid == owning pid while Pid ==
+    // tid, exactly as Linux reports under task/<tid>/.
+    let _ = writeln!(s, "Tgid:\t{proc_id}");
     let _ = writeln!(s, "Ngid:\t0");
     let _ = writeln!(s, "Pid:\t{}", task.id);
     let _ = writeln!(s, "PPid:\t{ppid}");
@@ -1840,8 +1869,9 @@ fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     // exactly (Linux keeps VmSize == statm.size * pagesize): pages =
     // ceil(bytes / 4096), VmSize_kB = pages * 4.  VmRSS mirrors VmSize
     // because we do not track resident pages separately — an upper bound,
-    // which is the safe direction for callers (see gen_pid_statm).
-    if let Some(as_bytes) = crate::proc::pcb::linux_as_used(task_id) {
+    // which is the safe direction for callers (see gen_pid_statm).  Threads
+    // share the owning process's address space, so this is process-wide.
+    if let Some(as_bytes) = crate::proc::pcb::linux_as_used(proc_id) {
         if as_bytes > 0 {
             const ABI_PAGE_SIZE: u64 = 4096;
             let kb = as_bytes.div_ceil(ABI_PAGE_SIZE).saturating_mul(4);
@@ -1854,11 +1884,11 @@ fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     // not Linux's voluntary/nonvoluntary split.  A preemptive round-robin
     // scheduler drives almost all switches as involuntary preemptions, so the
     // total is reported under nonvoluntary; voluntary is left 0.  Tools that
-    // sum both columns still get the right total.
+    // sum both columns still get the right total.  Per-thread → task.
     let _ = writeln!(s, "voluntary_ctxt_switches:\t0");
     let _ = writeln!(s, "nonvoluntary_ctxt_switches:\t{}", task.schedule_count);
 
-    Ok(s.into_bytes())
+    s.into_bytes()
 }
 
 /// `/proc/<pid>/cmdline` — full command line, Linux-exact format.
@@ -2727,15 +2757,17 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
 /// `schedstat` are rendered purely from the scheduler task (the underlying
 /// `gen_pid_*` helpers key on the task id, not the process id), so passing
 /// the thread's tid yields that thread's own data with no process/thread
-/// field mixing.  `stat` needs both ids: thread-specific fields come from
-/// `tid` while the process-wide fields (ppid, num_threads, vsize, …) come
-/// from `pid` — see [`gen_thread_stat`].  The caller must already have
-/// verified the tid belongs to the process via [`thread_belongs`].
+/// field mixing.  `stat` and `status` need both ids: thread-specific fields
+/// come from `tid` while the process-wide fields (ppid, num_threads, vsize,
+/// Tgid, credentials, …) come from `pid` — see [`gen_thread_stat`] and
+/// [`gen_thread_status`].  The caller must already have verified the tid
+/// belongs to the process via [`thread_belongs`].
 fn generate_task(pid: u64, tid: u64, file_name: &str) -> KernelResult<Vec<u8>> {
     match file_name {
         "comm" => gen_pid_comm(tid),
         "schedstat" => gen_pid_schedstat(tid),
         "stat" => gen_thread_stat(pid, tid),
+        "status" => gen_thread_status(pid, tid),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11828,6 +11860,7 @@ pub fn self_test() -> KernelResult<()> {
             ("5/task/7/comm", "file"),
             ("5/task/7/schedstat", "file"),
             ("5/task/7/stat", "file"),       // stat is a thread file too
+            ("5/task/7/status", "file"),     // status is a thread file too
             ("5/task/7/maps", "notfound"),   // maps not in TASK_FILES
             ("5/task/abc", "notfound"),      // non-numeric tid
             ("5/task/7/comm/x", "notfound"), // nested beyond a thread file
@@ -11922,6 +11955,37 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   thread stat: field1=={} OK", probe);
+
+        // gen_thread_status: same id-space rules.  Bogus tid -> NotFound; for
+        // the probe (proc_id == tid) the Pid: line must report the probe id,
+        // and Tgid: must equal proc_id (here also the probe).
+        match gen_thread_status(probe, 999999) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!(
+                    "[procfs]   FAIL: gen_thread_status bogus tid = {:?}, want NotFound",
+                    other.map(|d| d.len())
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        let status = gen_thread_status(probe, probe)?;
+        let stext = core::str::from_utf8(&status).unwrap_or("");
+        let want_pid = format!("Pid:\t{probe}");
+        let want_tgid = format!("Tgid:\t{probe}");
+        if !stext.lines().any(|l| l == want_pid) {
+            serial_println!(
+                "[procfs]   FAIL: thread status missing {:?}", want_pid
+            );
+            return Err(KernelError::InternalError);
+        }
+        if !stext.lines().any(|l| l == want_tgid) {
+            serial_println!(
+                "[procfs]   FAIL: thread status missing {:?}", want_tgid
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   thread status: Pid/Tgid=={} OK", probe);
     }
 
     // --- Per-PID directory tests ---

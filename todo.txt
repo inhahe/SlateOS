@@ -2502,6 +2502,20 @@
 ##     "Monthly Cap" limit (added in test 6) + Metered config lingered in the live
 ##     /proc/datausage view. Now resets STATE to None at END too. boot-test PASSED
 ##     (27s). No fabricated procfs data.
+##     SWEEP PROGRESS 2026-06-11: verified ALREADY-CLEAN (no change needed) this
+##     pass — netusage, hwmonitor, disksmart, diskhealth, audiodevice, procstat.
+##     All six have honest empty/zeroed init_defaults() (real entry points:
+##     record_traffic / add_sensor+update_sensor / register_drive+set_* /
+##     add_disk+update_attrs / add_device / register+update_*), and their
+##     self_tests already reset STATE to None (or clear_all) at BOTH start and end
+##     so no fixtures leak into the live /proc view. Prior sessions already
+##     de-fabricated the disk/sensor/usage/process-metric category (several carry
+##     an explicit "init_defaults no longer seeds fabricated …" comment). NEXT
+##     UNAUDITED categories to sample: settings modules (webcam, touchpad,
+##     mousesettings, systemsounds, cursorsettings, brightness, colorpicker) and
+##     remaining *stat.rs metric modules (zramstat, ttystat, ratestat, ksmstat,
+##     inodestat, cgiostat, budstat, pidstat, powerstat, pmcstat) — check whether
+##     any seed NONZERO fabricated observed values vs a legitimate zeroed taxonomy.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

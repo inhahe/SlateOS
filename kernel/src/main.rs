@@ -1603,6 +1603,19 @@ extern "C" fn kernel_main() -> ! {
     // its fixtures via the real API with exact assertions and resets the table
     // afterward, so it is safe at boot.
     fs::kstack::self_test();
+    // kprobes backs /proc/kprobes (dynamic-instrumentation diagnostics: per-probe
+    // id/type/name/address/hits/misses/enabled/overhead plus global hit/miss/
+    // overhead totals).  Its init_defaults() previously seeded three fictional
+    // probes — a "do_page_fault" kprobe (500k hits), a "sys_read" kretprobe (2M
+    // hits, 100 misses), and a "sched:sched_switch" tracepoint (10M hits) — plus
+    // totals of 12.5M hits / 100 misses / 625ms overhead; that phantom data was
+    // removed.  Probes are dynamic so the list starts empty, with probes
+    // installed via the existing register()/unregister() API and counters
+    // advancing only on real record_hit calls.  The residue-free self_test builds
+    // its fixtures via the real API with exact assertions (incl. disabled-probe
+    // miss counting and by_type filtering) and resets the list afterward, so it
+    // is safe at boot.
+    fs::kprobes::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

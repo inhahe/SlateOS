@@ -102,20 +102,30 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the kernel-probes state.
+///
+/// Starts with no registered probes and zero hit/miss/overhead totals. The
+/// `/proc/kprobes` generator and the `kprobes` kshell command surface this
+/// list (and `by_type`) as if it reflects the real set of installed dynamic
+/// instrumentation points, so seeding it with phantom probes would be
+/// fabricated procfs data — it would claim probes are attached to kernel
+/// functions that nothing actually instrumented. Probes are installed
+/// through [`register`] and removed through [`unregister`]; hit/miss/
+/// overhead counters advance only through real [`record_hit`] calls.
+///
+/// (Previously this seeded three fictional probes — a "do_page_fault"
+/// kprobe (500k hits), a "sys_read" kretprobe (2M hits, 100 misses), and a
+/// "sched:sched_switch" tracepoint (10M hits) — plus totals of 12.5M hits,
+/// 100 misses, and 625ms of overhead.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        probes: alloc::vec![
-            Probe { id: 1, probe_type: ProbeType::Kprobe, name: String::from("do_page_fault"), address: 0xFFFF_8000_0010_0000, hits: 500000, misses: 0, enabled: true, overhead_ns: 25_000_000, registered_ns: now },
-            Probe { id: 2, probe_type: ProbeType::Kretprobe, name: String::from("sys_read"), address: 0xFFFF_8000_0020_0000, hits: 2_000_000, misses: 100, enabled: true, overhead_ns: 100_000_000, registered_ns: now },
-            Probe { id: 3, probe_type: ProbeType::Tracepoint, name: String::from("sched:sched_switch"), address: 0, hits: 10_000_000, misses: 0, enabled: true, overhead_ns: 500_000_000, registered_ns: now },
-        ],
-        next_id: 4,
-        total_hits: 12_500_000,
-        total_misses: 100,
-        total_overhead_ns: 625_000_000,
+        probes: Vec::new(),
+        next_id: 1,
+        total_hits: 0,
+        total_misses: 0,
+        total_overhead_ns: 0,
         ops: 0,
     });
 }
@@ -201,59 +211,70 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("kprobes::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live probe list afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom probes, zero totals.
+    assert_eq!(list().len(), 0);
+    let (p0, h0, m0, o0, _) = stats();
+    assert_eq!((p0, h0, m0, o0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
+    // 2: Register — id starts at 1; probe begins enabled with zeroed counters.
     let id = register(ProbeType::Kprobe, "test_func", 0xDEAD_0000).expect("register");
-    assert!(id >= 4);
-    assert_eq!(list().len(), 4);
+    assert_eq!(id, 1);
+    assert_eq!(list().len(), 1);
+    let p = list().into_iter().find(|p| p.id == id).expect("find");
+    assert!(p.enabled);
+    assert_eq!((p.hits, p.misses, p.overhead_ns), (0, 0, 0));
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Record hit.
+    // 3: Record hit — enabled probe accrues hit + overhead; globals follow.
     record_hit(id, 50).expect("hit");
-    let p = list().iter().find(|p| p.id == id).cloned().unwrap();
-    assert_eq!(p.hits, 1);
-    assert_eq!(p.overhead_ns, 50);
+    let p = list().into_iter().find(|p| p.id == id).expect("p3");
+    assert_eq!((p.hits, p.overhead_ns), (1, 50));
+    let (_, hits, _, overhead, _) = stats();
+    assert_eq!((hits, overhead), (1, 50));
     crate::serial_println!("  [3/8] hit: OK");
 
-    // 4: Disable/enable.
+    // 4: Disabled probe counts a miss, not a hit; overhead unchanged.
     set_enabled(id, false).expect("disable");
-    record_hit(id, 0).expect("hit_disabled");
-    let p = list().iter().find(|p| p.id == id).cloned().unwrap();
-    assert_eq!(p.hits, 1); // Unchanged (disabled).
-    assert_eq!(p.misses, 1);
+    record_hit(id, 999).expect("hit_disabled");
+    let p = list().into_iter().find(|p| p.id == id).expect("p4");
+    assert_eq!((p.hits, p.misses, p.overhead_ns), (1, 1, 50));
+    assert_eq!(stats().2, 1); // total_misses
     set_enabled(id, true).expect("enable");
     crate::serial_println!("  [4/8] enable/disable: OK");
 
-    // 5: Unregister.
-    unregister(id).expect("unregister");
-    assert_eq!(list().len(), 3);
-    assert!(unregister(id).is_err());
-    crate::serial_println!("  [5/8] unregister: OK");
+    // 5: Register a second probe of a different type for the by_type test.
+    let id2 = register(ProbeType::Tracepoint, "test_tp", 0).expect("register2");
+    assert_eq!(id2, 2);
+    assert_eq!(list().len(), 2);
+    crate::serial_println!("  [5/8] register2: OK");
 
-    // 6: By type.
-    let kprobes = by_type(ProbeType::Kprobe);
-    assert!(!kprobes.is_empty());
-    let tp = by_type(ProbeType::Tracepoint);
-    assert_eq!(tp.len(), 1);
+    // 6: by_type filters by probe type.
+    assert_eq!(by_type(ProbeType::Kprobe).len(), 1);
+    assert_eq!(by_type(ProbeType::Tracepoint).len(), 1);
+    assert_eq!(by_type(ProbeType::Uprobe).len(), 0);
     crate::serial_println!("  [6/8] by type: OK");
 
-    // 7: Not found.
+    // 7: Unregister removes a probe; double/unknown ops are NotFound.
+    unregister(id).expect("unregister");
+    assert_eq!(list().len(), 1); // id2 remains
+    assert!(unregister(id).is_err());
     assert!(record_hit(999, 0).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above. (Global hit/miss/
+    //    overhead totals are cumulative and not decremented on unregister.)
     let (probes, hits, misses, overhead, ops) = stats();
-    assert_eq!(probes, 3);
-    assert!(hits > 12_500_000);
-    assert!(misses > 100);
-    assert!(overhead > 625_000_000);
+    assert_eq!((probes, hits, misses, overhead), (1, 1, 1, 50));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("kprobes::self_test() — all 8 tests passed");
 }

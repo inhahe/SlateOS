@@ -2533,6 +2533,19 @@
 ##     and pidstat (seeds only the root PID namespace ns_id=0 with ALL counters
 ##     zeroed — a legitimate structural default like loopback, not a fabricated
 ##     observation).
+##     SWEEP PROGRESS 2026-06-11 (settings/device pass): verified ALREADY-CLEAN
+##     (no change) — iotdevice, mousesettings, systemsounds, touchpad, ttystat,
+##     ratestat (all honest: empty device/entry lists + zeroed counters; the
+##     settings modules seed only UNIVERSAL config defaults — mouse button map,
+##     touchpad gesture bindings, Default/Silent sound schemes — which are
+##     legitimate, not observations). devicemgr is EXEMPLARY: init_defaults() does
+##     a real READ-THROUGH of the PCI bus via crate::pci::scan_bus0(), describing
+##     each ACTUAL device through pciids with honest Unknown/NoDriver status — the
+##     gold-standard pattern (compare monitors' framebuffer read-through). Only
+##     webcam (fixed above) seeded a phantom device in this category. REMAINING to
+##     sample next: the bulk *stat.rs metric modules (ksmstat, inodestat, budstat,
+##     cgiostat, compstat, numastat, diskstat, cpustat, pagestat, etc.) — spot
+##     pattern so far is honest empty-init; confirm none seed nonzero observations.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

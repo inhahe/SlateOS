@@ -276,14 +276,26 @@
 ##                    total_overflows 600. Real API create_ring/destroy_ring/
 ##                    submit/complete/overflow already present; fix emptied
 ##                    init_defaults and rebuilt self_test, wired into boot.)
+##   - netlat.rs     (fixed 2026-06-11; was: fake ifaces eth0/lo, rtt_samples
+##                    5_000_000, rtt_total_ns 500_000_000_000, fabricated
+##                    histograms; aggregate total_rtt_samples 6_000_000,
+##                    total_proc_samples 12_000_000. Real API register_iface/
+##                    record_rtt/record_processing already present; fix emptied
+##                    init_defaults and rebuilt self_test, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - netlat.rs     (fake ifaces eth0/lo, rtt_samples 5_000_000, rtt_total_ns
-##                    500_000_000_000, fabricated histograms; aggregate
-##                    total_rtt_samples 6_000_000, total_proc_samples 12_000_000.
-##                    Real API register_iface/record_rtt already present — fix
+##   - migstat.rs    (fake per-CPU migration counts cpu0..3 migrations_in
+##                    500_000 etc.; fake tasks pid 1 "init"/pid 100 "shell";
+##                    aggregate total_migrations 1_600_000, total_numa_crosses
+##                    39_000, reason_counts seeded. Verify real API then fix
 ##                    next, same recipe: empty init_defaults, rebuild self_test.)
-## Audit the remaining *stat/*latency/*stats siblings after netlat (rcustat,
-## migstat, tlbstat, …).
+##   - rcustat.rs    (per-CPU: fake callbacks_invoked 1000+, quiescent_states
+##                    50000+, current_gp_id 100, total_callbacks 6000. NOTE:
+##                    per-CPU rows MAY legitimately be created at boot but with
+##                    ZERO counters — judgment call: empty, or register per-CPU
+##                    zero rows via a real API.)
+##   - tlbstat.rs    (per-CPU: fake hits 5_000_000+, misses 50_000+, shootdowns,
+##                    walk_cycles; aggregate total_hits 26_000_000. Same per-CPU
+##                    zero-row judgment as rcustat.)
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

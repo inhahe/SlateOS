@@ -110,26 +110,30 @@ fn bucket_index(ns: u64) -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** network-latency table.
+///
+/// Seeds NO interface rows and zero totals.  Real latency accounting is wired
+/// through [`register_iface`]/[`record_rtt`]/[`record_processing`]; until those
+/// are called the table is genuinely empty, so the `/proc/netlat` file and the
+/// `netlat` kshell command report zeros rather than fabricated numbers — the
+/// kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional interfaces (eth0 with rtt_samples
+/// 5_000_000, rtt_total_ns 500_000_000_000 and fabricated histogram buckets;
+/// lo with rtt_samples 1_000_000) plus invented aggregate totals
+/// (total_rtt_samples 6_000_000, total_proc_samples 12_000_000), which
+/// `/proc/netlat` then displayed as if they were real per-interface latency
+/// measurements.  That demo data was removed; the self-test now builds its own
+/// fixtures explicitly via the real API (see [`self_test`]).  The network stack
+/// is expected to call [`register_iface`] on interface bring-up and
+/// [`record_rtt`]/[`record_processing`] as packets flow.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        ifaces: alloc::vec![
-            IfaceLatency {
-                name: String::from("eth0"),
-                rtt_samples: 5_000_000, rtt_total_ns: 500_000_000_000, rtt_min_ns: 100_000, rtt_max_ns: 50_000_000,
-                proc_samples: 10_000_000, proc_total_ns: 100_000_000_000, proc_max_ns: 5_000_000,
-                rtt_histogram: [100_000, 500_000, 1_000_000, 2_000_000, 800_000, 400_000, 150_000, 50_000],
-            },
-            IfaceLatency {
-                name: String::from("lo"),
-                rtt_samples: 1_000_000, rtt_total_ns: 10_000_000_000, rtt_min_ns: 1_000, rtt_max_ns: 1_000_000,
-                proc_samples: 2_000_000, proc_total_ns: 4_000_000_000, proc_max_ns: 100_000,
-                rtt_histogram: [800_000, 150_000, 30_000, 15_000, 3_000, 1_500, 400, 100],
-            },
-        ],
-        total_rtt_samples: 6_000_000,
-        total_proc_samples: 12_000_000,
+        ifaces: Vec::new(),
+        total_rtt_samples: 0,
+        total_proc_samples: 0,
         ops: 0,
     });
 }
@@ -202,57 +206,73 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("netlat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/netlat must never surface).
+    // Resetting first clears any residue from a prior `netlat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_interface().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated interfaces.
+    assert_eq!(per_interface().len(), 0);
+    let (c0, r0, p0, _o0) = stats();
+    assert_eq!((c0, r0, p0), (0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register; duplicate registration fails.
     register_iface("wlan0").expect("register");
-    assert_eq!(per_interface().len(), 3);
+    assert_eq!(per_interface().len(), 1);
     assert!(register_iface("wlan0").is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: RTT.
+    // 3: First RTT sample seeds min/max exactly (from the empty min sentinel).
     record_rtt("wlan0", Protocol::Tcp, 50_000).expect("rtt"); // 50us
-    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().unwrap();
+    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().expect("iface");
     assert_eq!(i.rtt_samples, 1);
     assert_eq!(i.rtt_min_ns, 50_000);
     assert_eq!(i.rtt_max_ns, 50_000);
+    assert_eq!(i.rtt_total_ns, 50_000);
     crate::serial_println!("  [3/8] rtt: OK");
 
-    // 4: Histogram.
-    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().unwrap();
-    assert_eq!(i.rtt_histogram[2], 1); // 50us goes to <100us bucket
+    // 4: Histogram bucketing is exact (50us → <100us bucket, index 2).
+    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().expect("iface");
+    assert_eq!(i.rtt_histogram[2], 1);
     crate::serial_println!("  [4/8] histogram: OK");
 
-    // 5: Min/max.
+    // 5: Min/max track across samples.
     record_rtt("wlan0", Protocol::Udp, 10_000).expect("rtt2");
     record_rtt("wlan0", Protocol::Icmp, 200_000).expect("rtt3");
-    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().unwrap();
+    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().expect("iface");
+    assert_eq!(i.rtt_samples, 3);
     assert_eq!(i.rtt_min_ns, 10_000);
     assert_eq!(i.rtt_max_ns, 200_000);
     crate::serial_println!("  [5/8] min/max: OK");
 
-    // 6: Processing.
+    // 6: Processing latency recorded exactly.
     record_processing("wlan0", 5000).expect("proc");
-    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().unwrap();
+    let i = per_interface().iter().find(|i| i.name == "wlan0").cloned().expect("iface");
     assert_eq!(i.proc_samples, 1);
     assert_eq!(i.proc_max_ns, 5000);
     crate::serial_println!("  [6/8] processing: OK");
 
-    // 7: Not found.
+    // 7: Recording on an unknown interface fails with NotFound.
     assert!(record_rtt("nonexist", Protocol::Tcp, 100).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (ifaces, rtt, proc_s, ops) = stats();
-    assert!(ifaces >= 3);
-    assert!(rtt > 6_000_000);
-    assert!(proc_s > 12_000_000);
+    assert_eq!(ifaces, 1); // wlan0
+    assert_eq!(rtt, 3); // three record_rtt calls
+    assert_eq!(proc_s, 1); // one record_processing call
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/netlat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the network stack wires
+    // real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("netlat::self_test() — all 8 tests passed");
 }

@@ -12226,6 +12226,70 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   build_pid_stat: synthetic starttime+processor OK");
     }
 
+    // --- stat <-> status State-char consistency (deterministic) ---
+    // build_pid_stat (stat field 3) and build_pid_status (the `State:` line)
+    // map TaskState -> single char via two INDEPENDENT match blocks.  Their
+    // comments claim they never disagree; if a future edit changes one and not
+    // the other, ps (reads stat) and htop (reads status) would report
+    // different states for the same task.  Drive both with the same synthetic
+    // task across every TaskState and assert the chars match.
+    {
+        use crate::sched::task::TaskState;
+        let states = [
+            TaskState::Running,
+            TaskState::Ready,
+            TaskState::Blocked,
+            TaskState::Suspended,
+            TaskState::Dead,
+        ];
+        for st in states {
+            let mut name = [0u8; 32];
+            name[..4].copy_from_slice(b"stcc");
+            let synth = crate::sched::TaskInfo {
+                id: 5151,
+                name,
+                name_len: 4,
+                state: st,
+                priority: 20,
+                total_ticks: 0,
+                total_cycles: 0,
+                schedule_count: 0,
+                start_tick: 0,
+                last_cpu: 0,
+                cpu_quota_pct: 0,
+                throttled: false,
+                total_wait_ticks: 0,
+                max_wait_ticks: 0,
+                stack_used: None,
+                stack_pct: None,
+            };
+            // stat field 3 is the first token after the `(comm) ` prefix.  The
+            // synthetic comm has no parens, so `") "` locates the boundary.
+            let stat = build_pid_stat(&synth, 999_999);
+            let stat_text = core::str::from_utf8(&stat).unwrap_or("");
+            let stat_char = stat_text
+                .rfind(") ")
+                .and_then(|p| stat_text.get(p.saturating_add(2)..))
+                .and_then(|s| s.chars().next());
+            // status: the char immediately after `State:\t` (7 bytes).
+            let status = build_pid_status(&synth, 999_999);
+            let status_text = core::str::from_utf8(&status).unwrap_or("");
+            let status_char = status_text
+                .find("State:\t")
+                .and_then(|p| status_text.get(p.saturating_add(7)..))
+                .and_then(|s| s.chars().next());
+            if stat_char.is_none() || stat_char != status_char {
+                serial_println!(
+                    "[procfs]   FAIL: stat/status State disagree: stat={:?} status={:?}",
+                    stat_char,
+                    status_char
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   stat/status State char: consistent across all states OK");
+    }
+
     // --- comm truncation consistency (stat field 2 vs comm) ---
     // A name longer than TASK_COMM_LEN-1 (15) must be truncated identically in
     // build_pid_stat's `(comm)` token and in gen_pid_comm.  Drive both with a

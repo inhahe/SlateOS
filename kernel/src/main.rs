@@ -370,6 +370,14 @@ extern "C" fn kernel_main() -> ! {
     boot_timing::mark(boot_timing::Milestone::Heap);
     console::boot_step_update(console::BootStatus::Ok, "Memory manager");
 
+    // Install the REAL physical memory map into the memlayout diagnostic table
+    // straight from the Limine memmap response (needs the heap, just brought
+    // up). This is the single source of truth for /proc/memlayout, total_ram()
+    // and the `memlayout` kshell command — without it those would report a
+    // fabricated layout. Done here, right after the heap, so the table reflects
+    // the machine's actual RAM as early as possible.
+    fs::memlayout::populate_from_memmap(boot_info.memory_map);
+
     // Load kernel symbol table from ELF .symtab for backtrace resolution.
     // Needs heap (Vec allocation).  Best done early so symbols are available
     // for any crash during the rest of boot.
@@ -1984,6 +1992,17 @@ extern "C" fn kernel_main() -> ! {
     // record_event / drain_events with exact assertions and restores the zeroed
     // baseline afterward.
     fs::fnotify::self_test();
+    // memlayout previously seeded a FABRICATED physical memory layout in
+    // init_defaults() — a hand-invented ~1 GiB "Main memory" block plus fixed
+    // kernel/heap/APIC ranges — so /proc/memlayout, total_ram() and the
+    // `memlayout` kshell command reported RAM totals with NO relation to the
+    // machine's actual memory.  It is now populated from the REAL Limine memmap
+    // response via populate_from_memmap() (called right after the heap during
+    // boot, above).  This residue-free self_test snapshots the live (real) map,
+    // exercises populate_from_memmap / add_region / the totals with exact
+    // assertions against a synthetic map, then restores the real map so no test
+    // fixtures leak into the live /proc/memlayout table.
+    fs::memlayout::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

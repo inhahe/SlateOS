@@ -1650,6 +1650,32 @@
 ##                    record_event per delivered event — wire when filesystem
 ##                    change-notification is implemented. Until then it correctly
 ##                    reports no watches and no events.
+##   - memlayout (2026-06-11): FIXED — fabrication, but with the PROPER FIX (wired
+##                    to the real data source, NOT just emptied). Physical/virtual
+##                    memory region table, surfaced via /proc/memlayout and the
+##                    `memlayout` kshell command. init_defaults() FABRICATED a
+##                    hand-invented layout — a fixed ~1 GiB "Main memory" block at
+##                    0x0040_0000 (size 0x3FC0_0000) plus hardcoded low-memory,
+##                    kernel, kernel-heap, IOAPIC and Local-APIC ranges — so
+##                    total_ram() ALWAYS reported ~1 GiB and list_regions() returned
+##                    a region table matching NO real bootloader memory map,
+##                    regardless of the machine's actual RAM. PROPER FIX: the kernel
+##                    already has the real Limine memmap response (boot_info.
+##                    memory_map: &[&MemmapEntry]). init_defaults() now seeds an
+##                    EMPTY/zeroed table, and a new populate_from_memmap(entries) maps
+##                    the Limine memmap types onto the RegionType taxonomy
+##                    (USABLE→Usable, EXECUTABLE_AND_MODULES→KernelCode, etc.) and
+##                    installs the REAL regions. main.rs calls it right after the heap
+##                    is up (so /proc/memlayout reflects actual RAM as early as
+##                    possible). self_test rewritten residue-free: snapshots the live
+##                    (real) map, exercises populate_from_memmap/add_region/totals
+##                    against a synthetic 4-entry map with EXACT assertions
+##                    (region_count 4, total_ram = 1 MiB + 1 GiB, total_kernel/reserved
+##                    = one page each, 2 usable + 1 kernel-code by type, add_region
+##                    grows RAM exactly, final 5 regions), then RESTORES the real map
+##                    so no fixtures leak. /proc/memlayout 141 bytes (now reflects the
+##                    real QEMU memory map). No deferral — memlayout is fully wired to
+##                    its real data source.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1663,13 +1689,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify (just fixed) were forty-four. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout (just fixed) were forty-five. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     memlayout. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     none currently flagged — re-run the seeded-init_defaults grep to find the
+##     next batch. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1697,13 +1724,14 @@
 ##     audited 2026-06-11: LEGITIMATE settings module — default break profiles
 ##     left alone, only made self_test residue-free. fnotify fixed 2026-06-11:
 ##     case (c) — kept inotify/fanotify/dnotify taxonomy + capacity limits,
-##     zeroed 15.1M fabricated events / all activity counters.)
+##     zeroed 15.1M fabricated events / all activity counters. memlayout fixed
+##     2026-06-11: PROPER FIX — was fabricating a fixed ~1 GiB layout in
+##     init_defaults(); now populated from the REAL Limine memmap via
+##     populate_from_memmap(), called from main.rs after heap init.)
 ##     Remaining flagged
-##     names incl.:
-##     memlayout. memlayout was
-##     newly discovered during the memdiag tick: its init_defaults() seeds
-##     hardcoded memory regions (~1 GiB "Main memory" etc.) so total_ram() is
-##     fabricated, not a real limine map — audit/fix when reached.)
+##     names incl.: (none — all previously-flagged candidates resolved. Re-run the
+##     `fn init_defaults` + large-numeric-literal grep over kernel/src/fs/*.rs to
+##     surface the next batch of candidates for auditing.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

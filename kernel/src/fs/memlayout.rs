@@ -132,28 +132,41 @@ fn recalculate_totals(state: &mut State) {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an EMPTY, honest memory-layout table.
+///
+/// The REAL physical memory map is installed by [`populate_from_memmap`] during
+/// boot, straight from the Limine memmap response. This function only seeds an
+/// empty region table with zeroed totals so that, before the real map is
+/// installed (or in any context where it never is), `/proc/memlayout`,
+/// [`total_ram`] and the `memlayout` kshell command report an honest *unknown*
+/// (zero) rather than a fabricated value.
+///
+/// (Previously this seeded a hand-invented layout — a fixed ~1 GiB "Main memory"
+/// block at `0x0040_0000`, plus hardcoded low-memory / kernel / kernel-heap /
+/// IOAPIC / Local-APIC ranges — so `total_ram()` always reported ~1 GiB with NO
+/// relation to the machine's actual RAM, and `list_regions()` returned a region
+/// table that matched no real bootloader memory map. That was fabricated procfs
+/// data: the numbers looked authoritative but were never measured.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
+    *guard = Some(State {
+        regions: Vec::new(),
+        total_ram: 0,
+        total_reserved: 0,
+        total_kernel: 0,
+        total_queries: 0,
+        ops: 0,
+    });
+}
+
+/// Install a region table directly, recomputing the derived totals.
+///
+/// Shared by [`populate_from_memmap`] and the self-test's snapshot/restore so
+/// the totals always stay consistent with `regions`.
+fn install_regions(regions: Vec<MemRegion>) {
     let mut state = State {
-        regions: alloc::vec![
-            MemRegion { start: 0x0000_0000, size: 0x0009_FC00,
-                region_type: RegionType::Usable, description: String::from("Low memory") },
-            MemRegion { start: 0x0009_FC00, size: 0x0000_0400,
-                region_type: RegionType::Reserved, description: String::from("Extended BIOS data") },
-            MemRegion { start: 0x000A_0000, size: 0x0006_0000,
-                region_type: RegionType::Reserved, description: String::from("Video memory + ROM") },
-            MemRegion { start: 0x0010_0000, size: 0x0020_0000,
-                region_type: RegionType::KernelCode, description: String::from("Kernel") },
-            MemRegion { start: 0x0030_0000, size: 0x0010_0000,
-                region_type: RegionType::KernelHeap, description: String::from("Kernel heap") },
-            MemRegion { start: 0x0040_0000, size: 0x3FC0_0000,
-                region_type: RegionType::Usable, description: String::from("Main memory") },
-            MemRegion { start: 0xFEC0_0000, size: 0x0000_1000,
-                region_type: RegionType::Mmio, description: String::from("IOAPIC") },
-            MemRegion { start: 0xFEE0_0000, size: 0x0000_1000,
-                region_type: RegionType::Mmio, description: String::from("Local APIC") },
-        ],
+        regions,
         total_ram: 0,
         total_reserved: 0,
         total_kernel: 0,
@@ -161,7 +174,41 @@ pub fn init_defaults() {
         ops: 0,
     };
     recalculate_totals(&mut state);
-    *guard = Some(state);
+    *STATE.lock() = Some(state);
+}
+
+/// Install the REAL physical memory map from the Limine memmap response.
+///
+/// Called once during boot (after the heap is available) so that
+/// `/proc/memlayout`, [`total_ram`] and the `memlayout` kshell command report
+/// the machine's actual memory rather than fabricated values. Replaces any
+/// existing region table. Limine memory-map types are mapped onto our finer
+/// [`RegionType`] taxonomy (Limine does not distinguish kernel code/data/heap or
+/// page tables, so EXECUTABLE_AND_MODULES maps to [`RegionType::KernelCode`]).
+pub fn populate_from_memmap(entries: &[&crate::limine::MemmapEntry]) {
+    use crate::limine::memmap_type;
+    let mut regions: Vec<MemRegion> = Vec::new();
+    for e in entries {
+        if regions.len() >= MAX_REGIONS { break; }
+        let (region_type, desc) = match e.type_ {
+            memmap_type::USABLE => (RegionType::Usable, "Usable RAM"),
+            memmap_type::RESERVED => (RegionType::Reserved, "Reserved"),
+            memmap_type::ACPI_RECLAIMABLE => (RegionType::AcpiReclaimable, "ACPI reclaimable"),
+            memmap_type::ACPI_NVS => (RegionType::AcpiNvs, "ACPI NVS"),
+            memmap_type::BAD_MEMORY => (RegionType::BadMemory, "Bad memory"),
+            memmap_type::BOOTLOADER_RECLAIMABLE => (RegionType::BootloaderData, "Bootloader reclaimable"),
+            memmap_type::EXECUTABLE_AND_MODULES => (RegionType::KernelCode, "Kernel + modules"),
+            memmap_type::FRAMEBUFFER => (RegionType::Framebuffer, "Framebuffer"),
+            _ => (RegionType::Reserved, "Unknown"),
+        };
+        regions.push(MemRegion {
+            start: e.base,
+            size: e.length,
+            region_type,
+            description: String::from(desc),
+        });
+    }
+    install_regions(regions);
 }
 
 /// Add a memory region.
@@ -237,57 +284,80 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("memlayout::self_test() — running tests...");
-    init_defaults();
+    use crate::limine::{memmap_type, MemmapEntry};
 
-    // 1: Default regions.
+    // Snapshot the LIVE region table first. This self_test is reachable from
+    // the kshell `memlayout` command at any time, and the real Limine-derived
+    // map is already installed by boot — the synthetic fixtures below must NOT
+    // leak into /proc/memlayout or wipe the real map, so we restore the
+    // snapshot at the end.
+    let saved: Option<Vec<MemRegion>> =
+        STATE.lock().as_ref().map(|s| s.regions.clone());
+
+    // Install a synthetic memory map through the real populate path. Two usable
+    // blocks (1 MiB + 1 GiB), one reserved page, one kernel+modules page.
+    let entries_owned = [
+        MemmapEntry { base: 0x0000_0000, length: 0x0010_0000, type_: memmap_type::USABLE },
+        MemmapEntry { base: 0x0010_0000, length: 0x0000_1000, type_: memmap_type::RESERVED },
+        MemmapEntry { base: 0x0020_0000, length: 0x4000_0000, type_: memmap_type::USABLE },
+        MemmapEntry { base: 0xFEE0_0000, length: 0x0000_1000, type_: memmap_type::EXECUTABLE_AND_MODULES },
+    ];
+    let entries: [&MemmapEntry; 4] =
+        [&entries_owned[0], &entries_owned[1], &entries_owned[2], &entries_owned[3]];
+    populate_from_memmap(&entries);
+
+    // 1: Region count matches the installed map exactly.
     let regions = list_regions();
-    assert!(regions.len() >= 8);
-    crate::serial_println!("  [1/8] defaults: OK");
+    assert_eq!(regions.len(), 4);
+    crate::serial_println!("  [1/8] populate from memmap: OK");
 
-    // 2: Total RAM.
+    // 2: Total RAM = sum of the two usable blocks (1 MiB + 1 GiB), exact.
     let ram = total_ram();
-    assert!(ram > 0);
+    assert_eq!(ram, 0x0010_0000 + 0x4000_0000);
     crate::serial_println!("  [2/8] total ram: OK");
 
-    // 3: Total kernel.
-    let kernel = total_kernel();
-    assert!(kernel > 0);
-    crate::serial_println!("  [3/8] total kernel: OK");
+    // 3: Total kernel = the single EXECUTABLE_AND_MODULES page (mapped to
+    //    KernelCode); total reserved = the single reserved page. Both exact.
+    assert_eq!(total_kernel(), 0x0000_1000);
+    assert_eq!(total_reserved(), 0x0000_1000);
+    crate::serial_println!("  [3/8] kernel/reserved totals: OK");
 
-    // 4: Sorted by address.
-    let regions = list_regions();
+    // 4: list_regions() is sorted ascending by start address.
     for i in 1..regions.len() {
         assert!(regions[i].start >= regions[i - 1].start);
     }
     crate::serial_println!("  [4/8] sorted: OK");
 
-    // 5: Filter by type.
-    let usable = list_type(RegionType::Usable);
-    assert!(!usable.is_empty());
-    let mmio = list_type(RegionType::Mmio);
-    assert!(!mmio.is_empty());
+    // 5: Filter by type — exactly two usable, one kernel-code region.
+    assert_eq!(list_type(RegionType::Usable).len(), 2);
+    assert_eq!(list_type(RegionType::KernelCode).len(), 1);
     crate::serial_println!("  [5/8] filter: OK");
 
-    // 6: Add region.
+    // 6: Add a region — RAM grows by exactly the added block.
     add_region(0x1_0000_0000, 0x4000_0000, RegionType::Usable, "Extra RAM").expect("add");
-    let new_ram = total_ram();
-    assert!(new_ram > ram);
+    assert_eq!(total_ram(), ram + 0x4000_0000);
     crate::serial_println!("  [6/8] add region: OK");
 
-    // 7: Format size.
+    // 7: Human-readable size formatting.
     assert_eq!(format_size(1_073_741_824), "1.0 GiB");
     assert_eq!(format_size(1_048_576), "1.0 MiB");
     assert_eq!(format_size(4096), "4 KiB");
     crate::serial_println!("  [7/8] format: OK");
 
-    // 8: Stats.
+    // 8: Stats — 5 regions now (4 installed + 1 added), exact totals.
     let (count, tr, tres, tk, _queries, ops) = stats();
-    assert!(count >= 9);
-    assert!(tr > 0);
-    let _ = tres;
-    assert!(tk > 0);
+    assert_eq!(count, 5);
+    assert_eq!(tr, ram + 0x4000_0000);
+    assert_eq!(tres, 0x0000_1000);
+    assert_eq!(tk, 0x0000_1000);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Restore the real, boot-installed memory map so no synthetic fixtures leak
+    // into the live /proc/memlayout table.
+    match saved {
+        Some(regions) => install_regions(regions),
+        None => { *STATE.lock() = None; }
+    }
     crate::serial_println!("memlayout::self_test() — all 8 tests passed");
 }

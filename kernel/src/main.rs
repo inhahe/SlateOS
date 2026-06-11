@@ -1280,6 +1280,14 @@ extern "C" fn kernel_main() -> ! {
     // coverage it previously lacked (it was only reachable via the `pagestat
     // test` kshell subcommand).
     fs::pagestat::self_test();
+    // pidstat backs /proc/pidstat (per-PID-namespace allocation counts, reuse
+    // rate, high-watermark); like its siblings the self-test now builds fixtures
+    // via the real alloc_pid/free_pid/create_ns API and resets the table
+    // afterward (leaving only the structural root namespace with zeroed
+    // counters, no fabricated activity), so it is safe at boot and gives the
+    // module automated coverage it previously lacked (it was only reachable via
+    // the `pidstat test` kshell subcommand).
+    fs::pidstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

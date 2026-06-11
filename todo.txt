@@ -455,14 +455,25 @@
 ##                    counts; emptied init_defaults and rebuilt self_test with
 ##                    exact assertions (incl. an alloc-failure path that bumps
 ##                    fail counters without phantom allocation), wired into boot.)
+##   - pidstat.rs    (fixed 2026-06-11; was: root namespace ns_id 0 seeded with
+##                    fabricated OBSERVED counters active_pids 150, allocated
+##                    500k, freed 499_850, high_watermark 2048; plus invented
+##                    aggregates total_allocated 500k, total_freed 499_850,
+##                    total_reuses 450k. The root PID namespace is REAL STRUCTURE
+##                    (always exists) so its row + the max_pid config default
+##                    (32768, now a named DEFAULT_MAX_PID const) were KEPT, but
+##                    all activity counters zeroed; alloc_pid/free_pid/create_ns
+##                    already existed. Rebuilt self_test with exact assertions
+##                    (incl. that total_reuses stays 0 unless allocating into a
+##                    namespace that has freed a PID), wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): pidstat,
-##     pmcstat, powerstat, procstat, ratestat, rqstat, schedlat, ttystat,
-##     zramstat. NOTE: some may be SETTINGS modules seeding legitimate config
-##     defaults — verify each is a STATISTICS module seeding fake OBSERVATIONS
-##     before emptying it.)
+##     by grep (init_defaults with alloc::vec!/String::from/push): pmcstat,
+##     powerstat, procstat, ratestat, rqstat, schedlat, ttystat, zramstat.
+##     NOTE: some may be SETTINGS modules seeding legitimate config defaults —
+##     verify each is a STATISTICS module seeding fake OBSERVATIONS before
+##     emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

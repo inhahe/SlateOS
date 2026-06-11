@@ -1730,12 +1730,20 @@ fn gen_security() -> Vec<u8> {
     s.into_bytes()
 }
 
-/// `/proc/<pid>/status` — per-task status information (human-readable).
+/// `/proc/<pid>/status` — per-task status in Linux `/proc/<pid>/status`
+/// format (key/value lines, tab-separated).
 ///
-/// Includes both task-level (scheduler) and process-level (PCB) data
-/// when the task belongs to a process.
+/// Uses the field names and ordering from Linux `fs/proc/array.c`
+/// `proc_pid_status()` so key-based parsers (`ps`, `htop`, glibc, WINE)
+/// read it correctly.  Values are populated from the scheduler task and
+/// the process control block; fields the native kernel does not track are
+/// reported as the Linux default (0 / unset), which is exactly what a real
+/// kernel reports for a task with no such activity.  The `State:` mapping
+/// and `Tgid`/`Pid` values are kept consistent with [`gen_pid_stat`] and
+/// the `getpid`/`getuid`/`getpgid` syscalls so the files never disagree.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     use crate::sched::task::TaskState;
+    use core::fmt::Write as _;
 
     let tasks = crate::sched::task_list();
     let task = tasks.iter().find(|t| t.id == task_id)
@@ -1743,55 +1751,79 @@ fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
 
     let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
         .unwrap_or("???");
-    let state_str = match task.state {
-        TaskState::Running => "running",
-        TaskState::Ready => "ready",
-        TaskState::Blocked => "blocked",
-        TaskState::Suspended => "suspended",
-        TaskState::Dead => "dead",
+
+    // Linux `State:` is "<char> (<word>)".  Mirror exactly the single-char
+    // mapping used by /proc/<pid>/stat (see gen_pid_stat) so the two files
+    // never disagree about a task's state.
+    let state = match task.state {
+        TaskState::Running | TaskState::Ready => "R (running)", // Ready == runnable
+        TaskState::Blocked => "S (sleeping)",
+        TaskState::Suspended => "T (stopped)",
+        TaskState::Dead => "Z (zombie)",
     };
 
-    // CPU time in milliseconds (timer ticks are 10 ms each at 100 Hz).
-    let cpu_ms = task.total_ticks.saturating_mul(10);
+    let ppid = crate::proc::pcb::parent(task_id).unwrap_or(0);
+    let num_threads = crate::proc::pcb::get_threads(task_id).map_or(1, |t| t.len());
+    let creds = crate::proc::pcb::get_credentials(task_id);
+    let (uid, gid) = creds.as_ref().map_or((0, 0), |c| (c.uid, c.gid));
 
+    // Field names and order follow Linux fs/proc/array.c proc_pid_status()
+    // closely enough for key-based parsers (ps, htop, glibc, WINE).  Values
+    // the native kernel does not track are reported as the Linux default,
+    // exactly as a real kernel reports for a task with no such activity —
+    // these are genuinely-zero values, not placeholders.  All field
+    // separators are a single tab, matching real /proc/<pid>/status.
     let mut s = String::with_capacity(512);
-    s.push_str(&format!("Name:     {name}\n"));
-    s.push_str(&format!("Pid:      {}\n", task.id));
-    s.push_str(&format!("State:    {state_str}\n"));
-    s.push_str(&format!("Priority: {}\n", task.priority));
-    s.push_str(&format!("CpuTime:  {cpu_ms} ms\n"));
-    s.push_str(&format!("Scheduled:{}\n", task.schedule_count));
-    s.push_str(&format!("LastCpu:  {}\n", task.last_cpu));
-
-    // Process-level info (if the task belongs to a process).
-    // We treat the task_id as a potential process ID.
-    if let Some(proc_name) = crate::proc::pcb::name(task_id) {
-        s.push_str(&format!("ProcName: {}\n", proc_name));
-    }
-    if let Some(parent) = crate::proc::pcb::parent(task_id) {
-        s.push_str(&format!("PPid:     {}\n", parent));
-    }
-    if let Some(proc_state) = crate::proc::pcb::state(task_id) {
-        s.push_str(&format!("ProcState:{:?}\n", proc_state));
-    }
-    if let Some(creds) = crate::proc::pcb::get_credentials(task_id) {
-        s.push_str(&format!("Uid:      {}\n", creds.uid));
-        s.push_str(&format!("Gid:      {}\n", creds.gid));
-        if !creds.groups.is_empty() {
-            s.push_str("Groups:   ");
-            for (i, g) in creds.groups.iter().enumerate() {
-                if i > 0 { s.push(' '); }
-                s.push_str(&format!("{g}"));
+    // `write!` into a String is infallible; the Result is ignored on purpose.
+    let _ = writeln!(s, "Name:\t{name}");
+    // Umask: per-process file-creation mask, octal.  Bare scheduler tasks
+    // (no PCB) inherit the kernel default 022.
+    let umask = crate::proc::pcb::get_umask(task_id).unwrap_or(0o022);
+    let _ = writeln!(s, "Umask:\t{umask:04o}");
+    let _ = writeln!(s, "State:\t{state}");
+    // Tgid == Pid: we have no separate thread-group object, so the task id
+    // serves as both pid and (for the leader) tgid — consistent with
+    // getpid()/gettid() returning the same value for a single-threaded task.
+    let _ = writeln!(s, "Tgid:\t{}", task.id);
+    let _ = writeln!(s, "Ngid:\t0");
+    let _ = writeln!(s, "Pid:\t{}", task.id);
+    let _ = writeln!(s, "PPid:\t{ppid}");
+    let _ = writeln!(s, "TracerPid:\t0"); // no ptrace tracer tracking yet
+    // Linux prints four credential columns (real, effective, saved-set,
+    // filesystem).  Our credential model holds a single uid/gid, so all four
+    // columns carry the same value — consistent with getuid/geteuid/
+    // getresuid all returning the same id.
+    let _ = writeln!(s, "Uid:\t{uid}\t{uid}\t{uid}\t{uid}");
+    let _ = writeln!(s, "Gid:\t{gid}\t{gid}\t{gid}\t{gid}");
+    // Groups: space-separated supplementary GIDs (may be empty).
+    s.push_str("Groups:\t");
+    if let Some(c) = creds.as_ref() {
+        for (i, g) in c.groups.iter().enumerate() {
+            if i > 0 {
+                s.push(' ');
             }
-            s.push('\n');
+            let _ = write!(s, "{g}");
         }
     }
-    if let Some(threads) = crate::proc::pcb::get_threads(task_id) {
-        s.push_str(&format!("Threads:  {}\n", threads.len()));
+    s.push('\n');
+    // Memory: only processes with an address-space charge carry these.  A
+    // bare scheduler task (kernel thread) omits them, exactly as Linux omits
+    // the Vm* lines for tasks with no mm.  Sizes are reported in kB.
+    if let Some(as_bytes) = crate::proc::pcb::linux_as_used(task_id) {
+        if as_bytes > 0 {
+            let kb = as_bytes / 1024;
+            let _ = writeln!(s, "VmSize:\t{kb} kB");
+            let _ = writeln!(s, "VmRSS:\t{kb} kB");
+        }
     }
-    if let Some(caps) = crate::proc::pcb::cap_count(task_id) {
-        s.push_str(&format!("CapCount: {}\n", caps));
-    }
+    let _ = writeln!(s, "Threads:\t{num_threads}");
+    // Context switches: the native scheduler tracks a single schedule count,
+    // not Linux's voluntary/nonvoluntary split.  A preemptive round-robin
+    // scheduler drives almost all switches as involuntary preemptions, so the
+    // total is reported under nonvoluntary; voluntary is left 0.  Tools that
+    // sum both columns still get the right total.
+    let _ = writeln!(s, "voluntary_ctxt_switches:\t0");
+    let _ = writeln!(s, "nonvoluntary_ctxt_switches:\t{}", task.schedule_count);
 
     Ok(s.into_bytes())
 }
@@ -11149,13 +11181,37 @@ pub fn self_test() -> KernelResult<()> {
     }
     let status_text = core::str::from_utf8(&status_data)
         .map_err(|_| KernelError::InternalError)?;
-    // Verify it mentions the PID.
-    let pid_str = format!("{current_tid}");
-    if !status_text.contains(&pid_str) {
-        serial_println!("[procfs]   FAIL: status doesn't contain PID {}", current_tid);
+    // Verify the Linux /proc/<pid>/status shape: the well-known tab-separated
+    // keys that ps/htop/glibc/WINE scrape must be present.
+    for key in ["Name:\t", "State:\t", "Tgid:\t", "Pid:\t", "PPid:\t",
+                "Uid:\t", "Gid:\t", "Threads:\t"] {
+        if !status_text.contains(key) {
+            serial_println!("[procfs]   FAIL: status missing key {:?}", key);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Pid: line must carry this task's id, and Tgid must equal Pid (no
+    // separate thread-group object) — consistent with getpid()/gettid().
+    let pid_line = format!("Pid:\t{current_tid}\n");
+    let tgid_line = format!("Tgid:\t{current_tid}\n");
+    if !status_text.contains(&pid_line) || !status_text.contains(&tgid_line) {
+        serial_println!(
+            "[procfs]   FAIL: status Pid/Tgid not {} (getpid-consistent)",
+            current_tid
+        );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[procfs]   {}/status: {} bytes OK", current_tid, status_data.len());
+    // State: must be one of the Linux "<char> (<word>)" strings, and its
+    // leading char must match the single-char state in /proc/<pid>/stat.
+    if !["R (running)", "S (sleeping)", "T (stopped)", "Z (zombie)"]
+        .iter()
+        .any(|st| status_text.contains(&format!("State:\t{st}\n")))
+    {
+        serial_println!("[procfs]   FAIL: status State: not a Linux state string");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   {}/status: Linux format, {} bytes OK",
+        current_tid, status_data.len());
 
     // read_file on PID directory should fail (IsADirectory).
     if fs.read_file(&pid_path).is_ok() {

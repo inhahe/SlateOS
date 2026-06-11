@@ -1110,6 +1110,35 @@
 ##                    page-table allocator and TLB-shootdown paths should call
 ##                    pgtable::record_alloc/free/walk/tlb_flush — wire that when
 ##                    those paths are instrumented.)
+##   - memdiag (2026-06-11): FIXED — milder than the rest. Memory diagnostics
+##                    (RAM-test log + ECC-error tracking, surfaced by the
+##                    `memdiag` kshell command). Its tests/ecc_errors vectors and
+##                    all counters already started empty/zeroed; the ONLY
+##                    fabrication was total_memory_kb: 1_048_576 (a hardcoded 1 GB
+##                    placeholder), so `memdiag show` always printed "Total
+##                    memory: 1048576 KB (1024 MB)" regardless of the machine's
+##                    real RAM. Changed the default to 0 ("unknown until
+##                    detected"); it now advances only on a real set_total_memory()
+##                    call. NOTE on memlayout: I checked whether memdiag could be
+##                    wired to memlayout::total_ram() instead — it CANNOT, because
+##                    memlayout's own init_defaults() ALSO seeds hardcoded regions
+##                    (a ~1 GiB "Main memory" region etc.), so total_ram() is
+##                    itself fabricated, not a real limine map. (memlayout added
+##                    to the flagged-candidates list below.) Rebuilt self_test
+##                    residue-free (was 11 steps, not residue-free): clears STATE
+##                    at start/end, asserts the empty default size is 0, exercises
+##                    set_total_memory(2 GB) and asserts that value in step 8.
+##                    NOTE: memdiag was NOT previously wired into the boot
+##                    self-test path — now added. /proc has no memdiag generator;
+##                    surfaced only via kshell, which now prints "0 KB (0 MB)"
+##                    until detection runs. PROPER FIX DEFERRED: real RAM
+##                    detection (the limine memory map consumer) should call
+##                    memdiag::set_total_memory() with the actual installed size,
+##                    and ECC-capable platforms should call set_ecc_supported(true)
+##                    + record_ecc_error() from the MCA/EDAC path. Also run_test()
+##                    is still simulated ("all tests pass") — a real RAM test
+##                    (walking-bits/address-line patterns over a reserved range)
+##                    is deferred until a safe scratch-mapping path exists.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1123,19 +1152,22 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable (just fixed) were thirty-three. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag (just fixed) were thirty-four. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     memdiag. Remaining flagged names incl.:
-##     memdiag, sysuptime,
+##     sysuptime. Remaining flagged names incl.:
+##     sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
-##     startupopt, eyeprotect, fnotify. SETTINGS-looking names in that set
-##     (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
-##     legitimate config — audit carefully, do not blind-empty.)
+##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
+##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
+##     legitimate config — audit carefully, do not blind-empty. memlayout was
+##     newly discovered during the memdiag tick: its init_defaults() seeds
+##     hardcoded memory regions (~1 GiB "Main memory" etc.) so total_ram() is
+##     fabricated, not a real limine map — audit/fix when reached.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

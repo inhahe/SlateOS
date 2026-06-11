@@ -1748,6 +1748,19 @@ extern "C" fn kernel_main() -> ! {
     // walks, per-scope flush counts) and resets the table afterward, so it is
     // safe at boot.
     fs::pgtable::self_test();
+    // Memory diagnostics self-test (memdiag) — exercises the RAM-test log and
+    // ECC-error tracking surfaced by the `memdiag` kshell command (test runs
+    // with pass/fail results, correctable/uncorrectable ECC error counts, and
+    // a memory-health summary).  Its init_defaults() previously seeded a
+    // hardcoded total_memory_kb of 1,048,576 (a 1 GB placeholder), so
+    // `memdiag show` always reported "Total memory: 1024 MB" regardless of the
+    // machine's actual RAM.  The size now starts at 0 ("unknown until
+    // detected") and advances only on a real set_total_memory() call by RAM
+    // detection.  The residue-free self_test builds its fixtures via the real
+    // API with exact assertions (test pass/fail accounting, ECC correctable/
+    // uncorrectable counts, and a 2 GB size set explicitly via
+    // set_total_memory) and resets the table afterward, so it is safe at boot.
+    fs::memdiag::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

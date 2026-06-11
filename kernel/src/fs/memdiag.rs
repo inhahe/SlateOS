@@ -182,6 +182,21 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the memory-diagnostics state.
+///
+/// Starts with no test runs, no ECC error events, all counters zeroed, and a
+/// total memory size of `0` (i.e. "unknown until detected"). Tests are added
+/// only through real [`run_test`] calls, ECC events only through real
+/// [`record_ecc_error`] calls, and the system memory size only through a real
+/// [`set_total_memory`] call by whatever code performs actual RAM detection.
+/// The `memdiag` kshell command surfaces [`get_health`] (including
+/// `total_memory_kb`) as if it reflects the real installed RAM, so seeding a
+/// fixed size here would be a fabricated hardware claim — it would report a
+/// memory size the kernel never measured.
+///
+/// (Previously this seeded a `total_memory_kb` of 1,048,576 — a hardcoded 1 GB
+/// placeholder — so `memdiag show` always printed "Total memory: 1048576 KB
+/// (1024 MB)" regardless of the machine's actual RAM.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
@@ -189,7 +204,7 @@ pub fn init_defaults() {
         tests: Vec::new(),
         ecc_errors: Vec::new(),
         next_id: 1,
-        total_memory_kb: 1_048_576, // 1 GB default.
+        total_memory_kb: 0,
         tested_memory_kb: 0,
         ecc_supported: false,
         correctable_count: 0,
@@ -311,10 +326,19 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("memdiag::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and no
+    // fixtures leak into the live health report afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Empty initial.
+    // 1: Empty initial — no test runs, no ECC events, and an honest unknown
+    //    total memory size (0, not a fabricated 1 GB placeholder).
     assert!(list_tests().is_empty());
+    assert!(list_ecc_errors(10).is_empty());
+    let h0 = get_health();
+    assert_eq!(h0.total_memory_kb, 0);
+    assert_eq!(h0.tested_memory_kb, 0);
+    assert_eq!(h0.last_test_result, TestResult::NotRun);
     crate::serial_println!("  [1/11] empty initial: OK");
 
     // 2: Run quick test.
@@ -354,9 +378,11 @@ pub fn self_test() {
     assert_eq!(health.uncorrectable_errors, 1);
     crate::serial_println!("  [7/11] uncorrectable ECC: OK");
 
-    // 8: Memory health.
+    // 8: Memory health — total size reflects only an explicit set_total_memory
+    //    call (real RAM detection), never a baked-in default.
+    set_total_memory(2_097_152); // 2 GB, as if detected by the memory map.
     let health = get_health();
-    assert_eq!(health.total_memory_kb, 1_048_576);
+    assert_eq!(health.total_memory_kb, 2_097_152);
     assert_eq!(health.last_test_result, TestResult::Fail);
     crate::serial_println!("  [8/11] health summary: OK");
 
@@ -381,5 +407,7 @@ pub fn self_test() {
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("memdiag::self_test() — all 11 tests passed");
 }

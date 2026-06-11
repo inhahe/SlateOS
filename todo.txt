@@ -725,6 +725,21 @@
 ##                    disabled-rule non-matching, chain filtering, and the full
 ##                    conntrack lifecycle. Wired into boot. /proc/netfilter now
 ##                    81 bytes.)
+##   - mempress.rs   (fixed 2026-06-11; was: PSI-style memory-pressure view
+##                    seeded with fictional pressure — level Low, some_total_ns
+##                    5s / full_total_ns 0.5s / total_stall_ns 5.5s, 10M reclaim
+##                    pages, 100k stall events, 50k reclaim events, OOM proximity
+##                    15, 5000 level changes — surfaced via the /proc/pressure/
+##                    memory-style view and kshell as real stall data. The real
+##                    API (record_stall/record_reclaim/update_level/
+##                    set_oom_proximity) already existed and operates on the
+##                    singleton, so no registration API was needed. Emptied
+##                    init_defaults (level None, all counters 0) and rebuilt
+##                    self_test residue-free with exact assertions incl. some-vs-
+##                    full stall accrual, exact reclaim accounting, level-change
+##                    transition counting (idempotent on same level), and OOM
+##                    proximity clamp to 100. Wired into boot. /proc/mempress now
+##                    129 bytes (fixed-format PSI rows, all values zero).)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -737,14 +752,14 @@
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
-##     + netfilter (just fixed) were eleven. Next ticks: work through the
-##     remaining candidates ONE PER TICK, auditing each before acting. The
+##     + netfilter + mempress (just fixed) were twelve. Next ticks: work through
+##     the remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module
 ##     fabricating observed numbers surfaced via /proc before emptying it. Next
-##     candidate: mempress. Remaining flagged names incl.:
-##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
+##     candidate: devfreq. Remaining flagged names incl.:
+##     devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,

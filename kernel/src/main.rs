@@ -1461,6 +1461,16 @@ extern "C" fn kernel_main() -> ! {
     // self_test builds its fixtures via the real API with exact assertions and
     // resets the table afterward, so it is safe at boot.
     fs::netfilter::self_test();
+    // mempress backs the PSI-style /proc/pressure/memory view (memory stall
+    // times, reclaim activity, OOM proximity).  Its init_defaults() previously
+    // seeded fictional pressure — level Low, 5.5s total stall, 10M reclaim
+    // pages, 100k stall events, 50k reclaim events, OOM proximity 15, 5000 level
+    // changes; that demo data was removed (the state now starts at level None
+    // with all counters zero, advanced only by real record_stall/record_reclaim/
+    // update_level/set_oom_proximity calls from the reclaim/OOM paths).  The
+    // residue-free self_test builds its fixtures via the real API with exact
+    // assertions and resets the table afterward, so it is safe at boot.
+    fs::mempress::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -111,19 +111,33 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the memory-pressure (PSI) statistics state.
+///
+/// Starts with no observed pressure: level `None`, all stall/reclaim
+/// times and event counters at zero, and OOM proximity 0. The
+/// `/proc/pressure/memory`-style generator and the kshell view surface
+/// this state as if it reflects real kernel memory-pressure activity, so
+/// seeding it with invented stall times would be fabricated procfs data.
+/// The counters are advanced only by real [`record_stall`],
+/// [`record_reclaim`], [`update_level`], and [`set_oom_proximity`] calls
+/// from the reclaim / OOM paths.
+///
+/// (Previously this seeded level `Low`, 5.5s total stall (5s some / 0.5s
+/// full), 10M reclaim pages, 100k stall events, 50k reclaim events, OOM
+/// proximity 15, and 5000 level changes — all fictional.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        level: PressureLevel::Low,
-        some_total_ns: 5_000_000_000,
-        full_total_ns: 500_000_000,
-        total_stall_ns: 5_500_000_000,
-        total_reclaim_pages: 10_000_000,
-        stall_events: 100_000,
-        reclaim_events: 50_000,
-        oom_proximity: 15,
-        level_changes: 5_000,
+        level: PressureLevel::None,
+        some_total_ns: 0,
+        full_total_ns: 0,
+        total_stall_ns: 0,
+        total_reclaim_pages: 0,
+        stall_events: 0,
+        reclaim_events: 0,
+        oom_proximity: 0,
+        level_changes: 0,
         ops: 0,
     });
 }
@@ -203,61 +217,77 @@ pub fn stats() -> (u64, u64, u64, u64, u64, u32, u64) {
 
 pub fn self_test() {
     crate::serial_println!("mempress::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live pressure table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
+    // 1: Empty defaults — no observed pressure.
     let c = current();
-    assert_eq!(c.level, PressureLevel::Low);
-    crate::serial_println!("  [1/8] defaults: OK");
+    assert_eq!(c.level, PressureLevel::None);
+    assert_eq!(c.total_stall_ns, 0);
+    assert_eq!(c.total_reclaim_pages, 0);
+    assert_eq!(c.oom_proximity, 0);
+    let (stalls0, reclaims0, ns0, pages0, changes0, oom0, _) = stats();
+    assert_eq!((stalls0, reclaims0, ns0, pages0, changes0, oom0), (0, 0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Record stall.
-    let (before, _, _, _, _, _, _) = stats();
+    // 2: "some" stall (not full) — counts a stall event and accrues time.
     record_stall(false, 1_000_000).expect("stall");
-    let (after, _, _, _, _, _, _) = stats();
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [2/8] stall: OK");
+    let (stalls, _, stall_ns, _, _, _, _) = stats();
+    assert_eq!(stalls, 1);
+    assert_eq!(stall_ns, 1_000_000);
+    crate::serial_println!("  [2/8] some stall: OK");
 
-    // 3: Full stall.
+    // 3: Full stall accrues both some+full totals; total stall is exact sum.
     record_stall(true, 5_000_000).expect("full_stall");
-    let (_, _, stall_ns, _, _, _, _) = stats();
-    assert!(stall_ns > 5_500_000_000);
+    let (stalls, _, stall_ns, _, _, _, _) = stats();
+    assert_eq!(stalls, 2);
+    assert_eq!(stall_ns, 6_000_000);
     crate::serial_println!("  [3/8] full stall: OK");
 
-    // 4: Reclaim.
+    // 4: Reclaim accounting is exact.
     record_reclaim(1000).expect("reclaim");
+    record_reclaim(500).expect("reclaim2");
     let (_, reclaims, _, pages, _, _, _) = stats();
-    assert!(reclaims > 50_000);
-    assert!(pages > 10_000_000);
+    assert_eq!(reclaims, 2);
+    assert_eq!(pages, 1500);
     crate::serial_println!("  [4/8] reclaim: OK");
 
-    // 5: Level change.
+    // 5: Level change updates current level and counts the transition.
     update_level(PressureLevel::High).expect("level");
     let c = current();
     assert_eq!(c.level, PressureLevel::High);
+    let (_, _, _, _, changes, _, _) = stats();
+    assert_eq!(changes, 1);
     crate::serial_println!("  [5/8] level: OK");
 
-    // 6: OOM proximity.
-    set_oom_proximity(75).expect("oom");
-    let c = current();
-    assert_eq!(c.oom_proximity, 75);
-    crate::serial_println!("  [6/8] oom proximity: OK");
-
-    // 7: Level changes counter.
-    update_level(PressureLevel::Critical).expect("critical");
+    // 6: Re-setting the same level does NOT count as a change.
+    update_level(PressureLevel::High).expect("level same");
     let (_, _, _, _, changes, _, _) = stats();
-    assert!(changes > 5_000);
-    crate::serial_println!("  [7/8] level changes: OK");
+    assert_eq!(changes, 1);
+    crate::serial_println!("  [6/8] idempotent level: OK");
 
-    // 8: Stats.
+    // 7: OOM proximity clamps to 100.
+    set_oom_proximity(75).expect("oom");
+    assert_eq!(current().oom_proximity, 75);
+    set_oom_proximity(250).expect("oom clamp");
+    assert_eq!(current().oom_proximity, 100);
+    crate::serial_println!("  [7/8] oom proximity: OK");
+
+    // 8: Final stats reflect only the real activity above.
+    update_level(PressureLevel::Critical).expect("critical");
     let (stalls, reclaims, stall_ns, pages, changes, oom, ops) = stats();
-    assert!(stalls > 100_000);
-    assert!(reclaims > 50_000);
-    assert!(stall_ns > 5_500_000_000);
-    assert!(pages > 10_000_000);
-    assert!(changes > 5_000);
-    assert_eq!(oom, 75);
+    assert_eq!(stalls, 2);
+    assert_eq!(reclaims, 2);
+    assert_eq!(stall_ns, 6_000_000);
+    assert_eq!(pages, 1500);
+    assert_eq!(changes, 2);
+    assert_eq!(oom, 100);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("mempress::self_test() — all 8 tests passed");
 }

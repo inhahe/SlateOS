@@ -2483,6 +2483,17 @@
 ##     EXACT stats: count==2, pct==50, "Discharging"). DEFERRED PROPER FIX: wire
 ##     register_source()/update_status() to a real ACPI battery driver
 ##     (_BIF/_BST) once one exists. boot-test PASSED (28s). No fabricated data.
+##     bluetooth audited 2026-06-11: NOT a fabricator — init_defaults() is honest
+##     (devices empty, scan_results empty, zero scan/pair counters, adapter Off,
+##     enabled false). The config defaults (adapter_name "My Computer", bt_version
+##     "5.3", discoverable_timeout 120, auto_connect true) are legitimate settings
+##     defaults, not observations. pair()/connect()/add_scan_result() are the
+##     honest entry points and the self_test exercises them. Contrast battery,
+##     which DID seed a fabricated phantom cell (fixed above). Only fix: made
+##     self_test residue-free — it reset STATE to None at START but left a paired
+##     "My Headphones" (connected, trusted) + a scan result in the live
+##     /proc/bluetooth view afterward. Now resets STATE to None at END too.
+##     boot-test PASSED (28s). No fabricated procfs data.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

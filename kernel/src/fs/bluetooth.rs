@@ -820,5 +820,11 @@ pub fn self_test() {
     }
     serial_println!("[bluetooth] 11/11 queries OK");
 
+    // Leave no residue for later callers / the live /proc/bluetooth view: the
+    // test paired "My Headphones" (connected), trusted it, and added a scan
+    // result — none of which represents real hardware. Reset to None so the
+    // procfs view and `bluetooth` shell command report an empty adapter.
+    *STATE.lock() = None;
+
     serial_println!("[bluetooth] All self-tests passed.");
 }

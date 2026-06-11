@@ -130,20 +130,18 @@ where
 // ---------------------------------------------------------------------------
 
 pub fn init_defaults() {
+    // Start with no profiles. A VPN profile is user-specific configuration —
+    // a server address, protocol, port, and credentials the user entered.
+    // There is no sensible "default" VPN, so seeding a "Work VPN" pointing at
+    // vpn.work.example.com would surface a fabricated, never-created profile
+    // (a privacy/security surface) through /proc and the `vpn` shell command as
+    // if the user had configured it. Profiles appear only via create_profile().
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        profiles: alloc::vec![
-            VpnProfile {
-                id: 1, name: String::from("Work VPN"), protocol: VpnProtocol::WireGuard,
-                server: String::from("vpn.work.example.com"), port: 51820,
-                state: ConnectionState::Disconnected, auto_connect: false,
-                kill_switch: true, dns_override: Some(String::from("10.0.0.1")),
-                bytes_sent: 0, bytes_received: 0, connected_ns: 0, total_connections: 0,
-            },
-        ],
-        next_id: 2,
-        total_created: 1,
+        profiles: Vec::new(),
+        next_id: 1,
+        total_created: 0,
         total_connects: 0,
         total_disconnects: 0,
         total_errors: 0,
@@ -261,15 +259,19 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("vpnprofile::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default profile.
-    assert_eq!(list_profiles().len(), 1);
+    // 1: Empty defaults — no profiles until the user creates one.
+    assert_eq!(list_profiles().len(), 0);
     crate::serial_println!("  [1/8] defaults: OK");
 
-    // 2: Create profile.
+    // 2: Create profile via the real API.
     let id = create_profile("Home VPN", VpnProtocol::OpenVpn, "home.vpn.net", 1194).expect("create");
-    assert_eq!(list_profiles().len(), 2);
+    assert_eq!(list_profiles().len(), 1);
     crate::serial_println!("  [2/8] create: OK");
 
     // 3: Connect.
@@ -300,18 +302,21 @@ pub fn self_test() {
     assert!(p.auto_connect);
     crate::serial_println!("  [6/8] settings: OK");
 
-    // 7: Delete.
+    // 7: Delete — back to an empty profile set.
     delete_profile(id).expect("delete");
-    assert_eq!(list_profiles().len(), 1);
+    assert_eq!(list_profiles().len(), 0);
     crate::serial_println!("  [7/8] delete: OK");
 
     // 8: Stats.
     let (count, connects, disconnects, _errors, ops) = stats();
-    assert_eq!(count, 1);
+    assert_eq!(count, 0);
     assert_eq!(connects, 1);
     assert_eq!(disconnects, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     crate::serial_println!("vpnprofile::self_test() — all 8 tests passed");
 }

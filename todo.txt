@@ -2303,6 +2303,16 @@
 ##     the real audio-driver stack. A PCI scan finds audio CONTROLLERS (class
 ##     0x04) but not endpoint-level volume/sample-rate/channels, so endpoint
 ##     registration must come from the driver, not a fabricated PCI read-through.
+##     vpnprofile fixed 2026-06-11: case (a) empty-init, privacy surface. init_
+##     defaults seeded 1 fabricated VPN profile ("Work VPN" -> WireGuard ->
+##     vpn.work.example.com:51820, kill_switch on, dns 10.0.0.1) plus
+##     total_created: 1 — surfaced through /proc and the `vpn` shell command as
+##     if the user had configured it. A VPN profile is user-specific config with
+##     no sensible system default, so emptied profiles to Vec::new() (next_id 1,
+##     total_created 0); create_profile() is the honest entry point. self_test
+##     rewritten residue-free: resets STATE None at start AND end, asserts empty
+##     defaults, builds the fixture via create_profile, exact stats (0 profiles
+##     after delete, 1 connect, 1 disconnect). boot-test PASSED (27s).
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

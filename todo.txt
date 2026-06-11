@@ -6,6 +6,18 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## DONE (2026-06-10): /proc/<pid>/status Name: now truncated to 15 bytes
+## Same bug class as the stat-comm fix below: build_pid_status emitted the
+## FULL untruncated task name (up to 32 bytes) in the `Name:` line, but
+## Linux sources `Name:` from get_task_comm() (the 16-byte comm field), so
+## it is capped at TASK_COMM_LEN-1 = 15 bytes — identical to /proc/<pid>/comm
+## and /proc/<pid>/stat field 2.  A tool cross-referencing Name: against comm
+## would have seen disagreeing strings for names >15 chars.  Fixed by routing
+## the Name: source through the shared comm_truncate() helper.  Extended the
+## comm-truncation self-test to assert the status Name: field matches the
+## 15-byte truncation.  Boot test PASSED; serial shows "Name truncated to 15
+## bytes OK".
+
 ## DONE (2026-06-10): /proc/<pid>/stat comm (field 2) now truncated to 15 bytes
 ## gen_pid_comm correctly capped /proc/<pid>/comm to TASK_COMM_LEN-1 (15
 ## bytes), but build_pid_stat emitted the FULL untruncated task name (up to

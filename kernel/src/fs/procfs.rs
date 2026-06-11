@@ -1804,8 +1804,14 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     use crate::sched::task::TaskState;
     use core::fmt::Write as _;
 
-    let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
+    // Linux's `Name:` is sourced from get_task_comm() — the 16-byte `comm`
+    // field — so it is truncated to TASK_COMM_LEN-1 (15 bytes), exactly like
+    // /proc/<pid>/comm and /proc/<pid>/stat field 2.  Use the shared helper so
+    // all three surfaces agree (a tool cross-referencing Name: against comm
+    // must see the same string).
+    let full_name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
         .unwrap_or("???");
+    let name = comm_truncate(full_name);
 
     // Linux `State:` is "<char> (<word>)".  Mirror exactly the single-char
     // mapping used by /proc/<pid>/stat (see build_pid_stat) so the two files
@@ -12132,6 +12138,21 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   build_pid_stat: comm truncated to 15 bytes OK");
+
+        // /proc/<pid>/status `Name:` is sourced from comm too, so it must
+        // carry the SAME 15-byte truncation.  Parse the first line.
+        let sdata = build_pid_status(&synth, 999_999);
+        let stext = core::str::from_utf8(&sdata).unwrap_or("");
+        let name_line = stext.lines().next().unwrap_or("");
+        let status_name = name_line.strip_prefix("Name:\t").unwrap_or("");
+        if status_name != cut {
+            serial_println!(
+                "[procfs]   FAIL: status Name: field = {:?}, want truncated {:?}",
+                status_name, cut
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   build_pid_status: Name truncated to 15 bytes OK");
     }
 
     // --- Per-PID directory tests ---

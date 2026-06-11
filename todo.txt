@@ -2017,6 +2017,50 @@
 ##                    deliberately rather than guessed. Do as a focused task once a
 ##                    process-enumeration hook is exposed. Until then the empty table
 ##                    is honest.
+##   - sysprofiler (2026-06-11): FIXED via READ-THROUGH (proper fix, not empty-init)
+##                    — unlike every other fabricator in this sweep, REAL sources
+##                    exist. Detailed hardware/software inventory behind
+##                    /proc/sysprofiler and the `sysprofiler` kshell command.
+##                    init_defaults() FABRICATED entire hardware specs: CPU "x86_64
+##                    processor" / 4 cores / 8 threads / 3.60 GHz / L1 256 KB / L2 1 MB
+##                    / L3 8 MB; Memory 8192 MB DDR4 3200 MHz / "2 / 4" slots; Storage
+##                    "NVMe SSD 512 GB" / PCIe 4.0 x4 / ext4; Graphics "Integrated
+##                    Graphics" / 512 MB shared / kernel modesetting; Firmware UEFI /
+##                    Secure Boot Disabled / 64-bit — none measured, all placeholders
+##                    that the `sysprofiler all`/`summary`/`section` kshell views
+##                    displayed as if this machine's real hardware. (Note procfs
+##                    gen_sysprofiler only emits stats() counts, so /proc/sysprofiler
+##                    itself showed section_count:0 while uninitialised — the
+##                    fabrication surfaced through kshell after `sysprofiler init`/
+##                    `test`.) Fixed: init_defaults() now builds the CPU section from
+##                    LIVE CPUID + topology detection — crate::cpu::vendor_string /
+##                    brand_string / cpu_family_model_stepping / cache_topology and
+##                    crate::smp::cpu_count / crate::cpu_topology::num_physical_cores /
+##                    smt_active (all run in early boot before fs init) — and the
+##                    Memory section from the real buddy-allocator total
+##                    (crate::mm::frame::stats().total_frames × FRAME_SIZE + page size).
+##                    These are static boot-time facts, so a cached snapshot is
+##                    accurate. Device-dependent sections (Storage, Graphics, Network,
+##                    Audio, USB, Firmware, Software, Display) are left ABSENT rather
+##                    than fabricated. Also: the self_test was NEVER wired into boot
+##                    (sysprofiler had no init_defaults/self_test call in main.rs at
+##                    all, so /proc showed zeros) AND asserted the 5 fabricated sections
+##                    / Cores=="4" with no end-reset. Rewrote it residue-free (clears
+##                    STATE at start, rebuilds the REAL snapshot at end) with the
+##                    environment-independent assertions that fit real data (exactly
+##                    CPU+Memory after init, CPU has Logical CPUs, Memory has a non-empty
+##                    Total, update/add-section, exactly 3 sections / 4 queries / 1
+##                    refresh after the test sequence) and WIRED it into the boot self-
+##                    test path. /proc/sysprofiler now reports 2 real sections.
+##                    DEFERRED PROPER FIX: add the remaining sections as their backing
+##                    subsystems expose enumeration — Storage from the block layer
+##                    (device list, model, capacity, interface, filesystem), Graphics
+##                    from the GPU/DRM driver (adapter, VRAM, driver), Network from the
+##                    NIC stack (interface list, MAC, link), Firmware from the
+##                    boot/limine info (UEFI vs BIOS, secure-boot status). Also memory
+##                    speed/type (DDR4/3200 MHz) needs SMBIOS/SPD parsing the kernel
+##                    does not do yet. Wire each section's builder to the real source as
+##                    that subsystem lands; until then those sections stay absent.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -2030,7 +2074,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog + telemetry + fdtable (just fixed) were fifty-six. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog + telemetry + fdtable were fifty-six; sysprofiler (just fixed via read-through to real CPUID/topology/buddy-allocator sources, NOT empty-init) makes fifty-seven. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

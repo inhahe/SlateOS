@@ -2139,6 +2139,26 @@ extern "C" fn kernel_main() -> ! {
     // builds its own fixtures via the real API with exact assertions and resets
     // STATE afterward so nothing leaks into /proc/fdtable.
     fs::fdtable::self_test();
+    // sysprofiler is the detailed hardware/software inventory behind
+    // /proc/sysprofiler and the `sysprofiler` kshell command.  Its
+    // init_defaults() previously seeded entirely FABRICATED hardware specs — a
+    // "4-core / 8-thread 3.60 GHz" CPU with invented 256 KB / 1 MB / 8 MB
+    // caches, "8192 MB DDR4 3200 MHz" memory in "2 / 4" slots, an "NVMe SSD
+    // 512 GB / PCIe 4.0 x4" drive, "Integrated Graphics / 512 MB shared", and
+    // "UEFI / Secure Boot Disabled" firmware — none measured, which the
+    // `sysprofiler all`/`summary`/`section` views displayed as if real.  Unlike
+    // the other procfs fabricators in this sweep, REAL sources exist: the CPU
+    // section is now built from live CPUID + topology (crate::cpu /
+    // crate::cpu_topology — vendor/brand/family/cache + logical/physical/SMT
+    // counts) and the Memory section from the real buddy-allocator total
+    // (crate::mm::frame::stats).  Device-dependent sections (Storage, Graphics,
+    // Firmware, …) are left ABSENT rather than fabricated until those
+    // subsystems expose enumeration (see the DEFERRED PROPER FIX note in
+    // todo.txt).  This self_test (never wired before, and whose old version
+    // relied on the fabricated defaults with no end-reset) exercises the real
+    // builders, then rebuilds the real snapshot so /proc/sysprofiler reflects
+    // actual CPU + Memory and not its scratch entries.
+    fs::sysprofiler::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

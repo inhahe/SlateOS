@@ -1101,6 +1101,12 @@ extern "C" fn kernel_main() -> ! {
     // gives the module automated coverage it previously lacked (it was only
     // reachable via the `iolatency test` kshell subcommand).
     fs::iolatency::self_test();
+    // netsock backs /proc/netsock; like taskstats/iolatency its self-test now
+    // builds fixtures via the real open/close/record API and resets the table
+    // afterward (leaving no fabricated sockets), so it is safe at boot and
+    // gives the module automated coverage it previously lacked (it was only
+    // reachable via the `netsock test` kshell subcommand).
+    fs::netsock::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -142,22 +142,34 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** socket table.
+///
+/// Seeds NO sockets and zero totals.  Real socket tracking is wired through
+/// [`open`]/[`close`]/[`set_state`]/[`record_traffic`]/[`record_retransmit`];
+/// until those are called the table is genuinely empty, so the
+/// `/proc/netsock` file and the `netsock` kshell command report zeros rather
+/// than fabricated numbers — the kernel's hard "never invent data in procfs"
+/// rule.
+///
+/// NOTE: this previously seeded three fictional sockets (e.g. pid 100 →
+/// 93.184.216.34:443 ESTABLISHED with rx_bytes 50_000_000, retransmits 25)
+/// plus invented aggregate totals (total_opened 5000, total_rx 500_000_000),
+/// which `/proc/netsock` then displayed as if they were real connection
+/// statistics.  That demo data was removed; the self-test now builds its own
+/// fixtures explicitly via the real API (see [`self_test`]).  The network
+/// stack is expected to call [`open`] when a socket is created and the
+/// `record_*` functions as traffic flows.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        sockets: alloc::vec![
-            Socket { id: 1, pid: 1, proto: SockProto::Tcp, local_addr: String::from("0.0.0.0"), local_port: 80, remote_addr: String::from("0.0.0.0"), remote_port: 0, state: TcpState::Listen, rx_bytes: 0, tx_bytes: 0, retransmits: 0, backlog: 128, opened_ns: now },
-            Socket { id: 2, pid: 100, proto: SockProto::Tcp, local_addr: String::from("10.0.0.1"), local_port: 45000, remote_addr: String::from("93.184.216.34"), remote_port: 443, state: TcpState::Established, rx_bytes: 50_000_000, tx_bytes: 5_000_000, retransmits: 25, backlog: 0, opened_ns: now },
-            Socket { id: 3, pid: 100, proto: SockProto::Udp, local_addr: String::from("10.0.0.1"), local_port: 55000, remote_addr: String::from("8.8.8.8"), remote_port: 53, state: TcpState::Established, rx_bytes: 10_000, tx_bytes: 5_000, retransmits: 0, backlog: 0, opened_ns: now },
-        ],
-        next_id: 4,
-        total_opened: 5000,
-        total_closed: 4997,
-        total_rx: 500_000_000,
-        total_tx: 100_000_000,
-        total_retransmits: 1500,
+        sockets: Vec::new(),
+        next_id: 1,
+        total_opened: 0,
+        total_closed: 0,
+        total_rx: 0,
+        total_tx: 0,
+        total_retransmits: 0,
         ops: 0,
     });
 }
@@ -266,59 +278,77 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("netsock::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/netsock must never surface).
+    // Resetting first clears any residue from a prior `netsock test` run so
+    // the totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated rows.
+    assert_eq!(list().len(), 0);
+    let (socks0, opened0, closed0, rx0, tx0, retr0, _o0) = stats();
+    assert_eq!((socks0, opened0, closed0, rx0, tx0, retr0), (0, 0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Open socket.
+    // 2: Open a socket (ids start at 1; total_opened increments).
     let id = open(200, SockProto::Tcp, "127.0.0.1", 8080).expect("open");
-    assert!(id >= 4);
-    assert_eq!(list().len(), 4);
+    assert_eq!(id, 1);
+    assert_eq!(list().len(), 1);
     crate::serial_println!("  [2/8] open: OK");
 
     // 3: Set state.
     set_state(id, TcpState::Listen).expect("state");
-    let s = list().iter().find(|s| s.id == id).cloned().unwrap();
+    let s = list().iter().find(|s| s.id == id).cloned().expect("sock");
     assert_eq!(s.state, TcpState::Listen);
     crate::serial_println!("  [3/8] state: OK");
 
-    // 4: Record traffic.
+    // 4: Record traffic (exact, from zero).
     record_traffic(id, 1000, 500).expect("traffic");
-    let s = list().iter().find(|s| s.id == id).cloned().unwrap();
+    let s = list().iter().find(|s| s.id == id).cloned().expect("sock");
     assert_eq!(s.rx_bytes, 1000);
     assert_eq!(s.tx_bytes, 500);
     crate::serial_println!("  [4/8] traffic: OK");
 
     // 5: Retransmit.
     record_retransmit(id).expect("retransmit");
-    let s = list().iter().find(|s| s.id == id).cloned().unwrap();
+    let s = list().iter().find(|s| s.id == id).cloned().expect("sock");
     assert_eq!(s.retransmits, 1);
     crate::serial_println!("  [5/8] retransmit: OK");
 
-    // 6: Filter by proto/state/pid.
-    assert!(by_proto(SockProto::Tcp).len() >= 3);
-    assert!(!by_state(TcpState::Listen).is_empty());
-    assert!(!by_pid(200).is_empty());
+    // 6: Open a UDP socket for a second pid; filters reflect exact membership.
+    let udp = open(201, SockProto::Udp, "0.0.0.0", 5353).expect("open udp");
+    assert_eq!(by_proto(SockProto::Tcp).len(), 1);
+    assert_eq!(by_proto(SockProto::Udp).len(), 1);
+    assert_eq!(by_state(TcpState::Listen).len(), 1);
+    assert_eq!(by_pid(200).len(), 1);
+    assert_eq!(by_pid(201).len(), 1);
     crate::serial_println!("  [6/8] filters: OK");
 
-    // 7: Close socket.
+    // 7: Close the TCP socket; total stays consistent, double-close fails.
     close(id).expect("close");
-    assert_eq!(list().len(), 3);
+    assert_eq!(list().len(), 1); // only the UDP socket remains
     assert!(close(id).is_err());
+    let _ = udp;
     crate::serial_println!("  [7/8] close: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (socks, opened, closed, rx, tx, retrans, ops) = stats();
-    assert_eq!(socks, 3);
-    assert!(opened > 5000);
-    assert!(closed > 4997);
-    assert!(rx > 500_000_000);
-    assert!(tx > 100_000_000);
-    assert!(retrans > 1500);
+    assert_eq!(socks, 1); // the UDP socket
+    assert_eq!(opened, 2); // one TCP + one UDP opened
+    assert_eq!(closed, 1); // one TCP closed
+    assert_eq!(rx, 1000);
+    assert_eq!(tx, 500);
+    assert_eq!(retrans, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/netsock table with its fixtures.  Reset to the uninitialised
+    // state so production reads report an empty table until the network stack
+    // wires real socket tracking.
+    *STATE.lock() = None;
 
     crate::serial_println!("netsock::self_test() — all 8 tests passed");
 }

@@ -243,10 +243,14 @@
 ##   - taskstats.rs  (fixed; was: pid 1/100 with read_bytes 1_073_741_824 etc.)
 ##   - iolatency.rs  (fixed 2026-06-11; was: sda/nvme0n1, total_ios 37_000_000,
 ##                    total_slow 302000, fabricated histograms)
-## Confirmed STILL FABRICATING (audited, not yet fixed):
-##   - netsock.rs    (fake sockets: pid 100 → 93.184.216.34:443 ESTABLISHED with
-##                    rx_bytes 50_000_000, retransmits 25; total_opened 5000,
-##                    total_rx 500_000_000 — all invented)
+##   - netsock.rs    (fixed 2026-06-11; was: fake sockets, pid 100 →
+##                    93.184.216.34:443 ESTABLISHED rx_bytes 50_000_000,
+##                    retransmits 25; total_opened 5000, total_rx 500_000_000.
+##                    Already had a full real API — open/close/set_state/
+##                    record_traffic/record_retransmit — so the fix only emptied
+##                    init_defaults and rebuilt the self_test; no new API needed.)
+## Confirmed STILL FABRICATING (audited, not yet fixed): none currently — audit
+## the remaining *stat/*latency/*stats siblings next (see below).
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

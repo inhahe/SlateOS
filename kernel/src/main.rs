@@ -1946,6 +1946,18 @@ extern "C" fn kernel_main() -> ! {
     // table.  It is now residue-free (clears STATE and restores clean defaults
     // at the end) and wired here so its exact assertions are exercised at boot.
     fs::screentime::self_test();
+    // Startup-optimization self-test.  startupopt is a boot PROFILER, not a
+    // fabricator: its init_defaults seeds NO boot profile (stages/suggestions
+    // empty, all counters 0, fastest_boot_ms a u64::MAX sentinel reported as 0),
+    // so /proc/startupopt honestly reports 0 boots at boot.  The self_test,
+    // however, records boot stages, runs record_boot() (boot_count → 1) and
+    // analyze() (total_analyses → 1), and never cleared STATE — so the kshell
+    // `startupopt test` subcommand would leak a fabricated boot profile into the
+    // live /proc/startupopt table.  It is now residue-free (clears STATE and
+    // restores clean defaults at the end) and wired here so its exact assertions
+    // (stage counts, 0 suggestions for sub-second stages, boot/analysis totals)
+    // are exercised at boot.
+    fs::startupopt::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

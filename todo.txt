@@ -1562,6 +1562,32 @@
 ##                    add_active_time already measure real time via HPET; real data
 ##                    accrues when the compositor reports focus changes and the
 ##                    idle detector feeds add_active_time (reads real apps).
+##   - startupopt (2026-06-11): AUDITED — LEGITIMATE boot profiler, NOT
+##                    fabricating; only made self_test residue-free (the
+##                    screentime/usagetime precedent). Boot-timing profiler /
+##                    startup-optimization advisor, surfaced via /proc/startupopt
+##                    (boot_count / last_boot_ms / fastest_boot_ms / stages +
+##                    per-stage durations + suggestions + total_analyses) and the
+##                    `startupopt` (alias `sopt`) kshell command. init_defaults
+##                    seeds NO boot profile — stages empty, suggestions empty, all
+##                    counters 0, fastest_boot_ms a u64::MAX sentinel reported as 0
+##                    — so /proc/startupopt honestly reports 0 boots. begin_stage/
+##                    end_stage measure REAL HPET timings. The PROBLEM was the
+##                    self_test: it recorded boot stages, ran record_boot()
+##                    (boot_count → 1) and analyze() (total_analyses → 1), and
+##                    never cleared STATE (clear_stages clears only stages, not the
+##                    boot/analysis counters or suggestions), so the kshell
+##                    `startupopt test` subcommand (line 46994) would leak a
+##                    fabricated boot profile into the live /proc/startupopt.
+##                    Rebuilt self_test residue-free (clears STATE at start AND
+##                    restores clean defaults at end) and TIGHTENED loose
+##                    `let _ = …` checks to EXACT (analyze returns 0 suggestions
+##                    for sub-second stages with no autostart/excess services,
+##                    final 0 stages / 1 boot / 1 analysis). Wired into the boot
+##                    self-test path. /proc/startupopt 113 bytes (0 boots —
+##                    truthful). No PROPER FIX DEFERRED: timings are real HPET
+##                    deltas; a real boot profile accrues when the boot sequence
+##                    calls begin_stage/end_stage/record_boot for each stage.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1581,7 +1607,7 @@
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     startupopt. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     eyeprotect. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1603,11 +1629,13 @@
 ##     left alone, only made self_test residue-free. usagetime audited
 ##     2026-06-11: LEGITIMATE tracker — no fabrication, only made self_test
 ##     residue-free. screentime audited 2026-06-11: LEGITIMATE tracker — no
-##     fabrication, only made self_test residue-free + tightened assertions.)
+##     fabrication, only made self_test residue-free + tightened assertions.
+##     startupopt audited 2026-06-11: LEGITIMATE boot profiler — no fabrication,
+##     only made self_test residue-free + tightened assertions.)
 ##     Remaining flagged
 ##     names incl.:
-##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
-##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
+##     eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
+##     set (eyeprotect) likely seed
 ##     legitimate config — audit carefully, do not blind-empty. memlayout was
 ##     newly discovered during the memdiag tick: its init_defaults() seeds
 ##     hardcoded memory regions (~1 GiB "Main memory" etc.) so total_ram() is

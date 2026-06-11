@@ -345,13 +345,23 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("startupopt::self_test() — running tests...");
+    // Start from a clean, freshly-defaulted state so the assertions below are
+    // exact and the boot-stage / suggestion / boot-count fixtures this test
+    // creates do not leak into the live /proc/startupopt table afterward (the
+    // kshell `startupopt test` subcommand calls this directly, and
+    // /proc/startupopt reports boot_count / total_analyses — leaked fixtures
+    // would look like a real boot profile).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: No stages initially.
+    // 1: No stages initially, zeroed counters — init_defaults seeds NO
+    //    fabricated boot profile (stages/suggestions empty, all counters 0).
     assert_eq!(get_stages_by_duration().len(), 0);
-    crate::serial_println!("  [1/8] empty: OK");
+    let (st0, b0, lm0, fm0, an0, _) = stats();
+    assert_eq!((st0, b0, lm0, fm0, an0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Begin/end stages.
+    // 2: Begin/end stages — two completed stages recorded.
     begin_stage("kernel_init", StageCategory::KernelEarly).expect("begin1");
     end_stage("kernel_init").expect("end1");
     begin_stage("drivers", StageCategory::Drivers).expect("begin2");
@@ -359,27 +369,28 @@ pub fn self_test() {
     assert_eq!(get_stages_by_duration().len(), 2);
     crate::serial_println!("  [2/8] stages: OK");
 
-    // 3: Can't begin duplicate active stage.
+    // 3: Can't begin a duplicate active stage (AlreadyExists until it ends).
     begin_stage("test_stage", StageCategory::Services).expect("begin3");
     assert!(begin_stage("test_stage", StageCategory::Services).is_err());
     end_stage("test_stage").expect("end3");
     crate::serial_println!("  [3/8] no duplicates: OK");
 
-    // 4: Record boot.
-    let total = record_boot().expect("boot");
-    let _ = total; // u64, always >= 0; just verify it returns
+    // 4: Record boot — returns the summed duration of all 3 completed stages
+    //    (timing-dependent, so just verify it succeeds) and bumps boot_count.
+    record_boot().expect("boot");
     crate::serial_println!("  [4/8] record boot: OK");
 
-    // 5: Stages by category.
+    // 5: Stages by category — exactly one KernelEarly stage (kernel_init).
     let kernel_stages = get_stages_by_category(StageCategory::KernelEarly);
     assert_eq!(kernel_stages.len(), 1);
     assert_eq!(kernel_stages[0].name, "kernel_init");
     crate::serial_println!("  [5/8] by category: OK");
 
-    // 6: Analyze (may produce suggestions or not depending on timing).
-    let count = analyze().expect("analyze");
-    // Just verify it doesn't crash.
-    let _ = count;
+    // 6: Analyze — the three test stages are sub-second, there are no AutoStart
+    //    stages and only one Services stage, so NONE of the slow-stage / too-many-
+    //    autostart / too-many-services heuristics fire: exactly 0 suggestions.
+    assert_eq!(analyze().expect("analyze"), 0);
+    assert_eq!(get_suggestions().len(), 0);
     crate::serial_println!("  [6/8] analyze: OK");
 
     // 7: Clear stages.
@@ -387,13 +398,15 @@ pub fn self_test() {
     assert_eq!(get_stages_by_duration().len(), 0);
     crate::serial_println!("  [7/8] clear: OK");
 
-    // 8: Stats.
+    // 8: Stats — stages cleared, exactly 1 boot recorded, 1 analysis run.
     let (stages, boots, _last_ms, _fastest_ms, analyses, ops) = stats();
-    assert_eq!(stages, 0); // Cleared.
-    assert_eq!(boots, 1);
-    assert_eq!(analyses, 1);
+    assert_eq!((stages, boots, analyses), (0, 1, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Restore the clean default state so no test fixtures (boot count, analyses,
+    // any stages/suggestions) leak into the live module.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("startupopt::self_test() — all 8 tests passed");
 }

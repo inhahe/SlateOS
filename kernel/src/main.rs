@@ -1195,6 +1195,14 @@ extern "C" fn kernel_main() -> ! {
     // previously lacked (it was only reachable via the `irqstat test` kshell
     // subcommand).
     fs::irqstat::self_test();
+    // diskstat backs /proc/diskstat (per-block-device read/write IOPS, bytes,
+    // latency, queue depth, merges); like its siblings the self-test now builds
+    // fixtures via the real register/record_read/record_write/record_discard/
+    // record_flush/record_merge API and resets the table afterward (leaving no
+    // fabricated rows), so it is safe at boot and gives the module automated
+    // coverage it previously lacked (it was only reachable via the
+    // `diskstat test` kshell subcommand).
+    fs::diskstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

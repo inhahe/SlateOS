@@ -84,18 +84,34 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** disk statistics table.
+///
+/// Seeds NO devices and zero totals.  Real block-device I/O accounting is wired
+/// through [`register`] (one row per discovered block device, zeroed) and the
+/// `record_read`/`record_write`/`record_discard`/`record_flush`/`record_merge`
+/// functions; until those are called the table is genuinely empty, so the
+/// `/proc/diskstat` file and the `diskstat` kshell command report zeros rather
+/// than fabricated numbers — the kernel's hard "never invent data in procfs"
+/// rule.
+///
+/// NOTE: this previously seeded two fictional devices ("sda" with 50M reads /
+/// 200GB read / 30M writes / 120GB written; "nvme0n1" with 100M reads / 500GB
+/// read / 80M writes / 400GB written) plus invented aggregate totals
+/// (total_reads 150M, total_writes 110M, total_read_bytes 700GB,
+/// total_write_bytes 520GB), which `/proc/diskstat` then displayed as if they
+/// were real per-device I/O throughput measurements.  That demo data was
+/// removed; the self-test now builds its own fixtures explicitly via the real
+/// API (see [`self_test`]).  The block layer is expected to call [`register`]
+/// when a device is discovered and the record_* functions as I/O completes.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        devices: alloc::vec![
-            DevDiskStats { name: String::from("sda"), reads: 50_000_000, read_bytes: 200_000_000_000, read_ns: 500_000_000_000, writes: 30_000_000, write_bytes: 120_000_000_000, write_ns: 900_000_000_000, discards: 100_000, flushes: 50_000, merges_read: 5_000_000, merges_write: 3_000_000, queue_depth: 32, max_queue_depth: 128 },
-            DevDiskStats { name: String::from("nvme0n1"), reads: 100_000_000, read_bytes: 500_000_000_000, read_ns: 200_000_000_000, writes: 80_000_000, write_bytes: 400_000_000_000, write_ns: 300_000_000_000, discards: 500_000, flushes: 200_000, merges_read: 10_000_000, merges_write: 8_000_000, queue_depth: 64, max_queue_depth: 1024 },
-        ],
-        total_reads: 150_000_000,
-        total_writes: 110_000_000,
-        total_read_bytes: 700_000_000_000,
-        total_write_bytes: 520_000_000_000,
+        devices: Vec::new(),
+        total_reads: 0,
+        total_writes: 0,
+        total_read_bytes: 0,
+        total_write_bytes: 0,
         ops: 0,
     });
 }
@@ -192,60 +208,81 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("diskstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/diskstat must never surface).
+    // Resetting first clears any residue from a prior `diskstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_device().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated devices or totals.
+    assert_eq!(per_device().len(), 0);
+    let (c0, r0, w0, rb0, wb0, _o0) = stats();
+    assert_eq!((c0, r0, w0, rb0, wb0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register a device (zeroed); duplicate name fails.
     register("test_disk").expect("register");
-    assert_eq!(per_device().len(), 3);
+    assert_eq!(per_device().len(), 1);
     assert!(register("test_disk").is_err());
+    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
+    assert_eq!(d.reads, 0);
+    assert_eq!(d.read_bytes, 0);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Read.
+    // 3: Read records count + bytes exactly from zero.
     record_read("test_disk", 4096, 1000).expect("read");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().unwrap();
+    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
     assert_eq!(d.reads, 1);
     assert_eq!(d.read_bytes, 4096);
+    assert_eq!(d.read_ns, 1000);
     crate::serial_println!("  [3/8] read: OK");
 
-    // 4: Write.
+    // 4: Write records count + bytes exactly from zero.
     record_write("test_disk", 8192, 2000).expect("write");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().unwrap();
+    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
     assert_eq!(d.writes, 1);
     assert_eq!(d.write_bytes, 8192);
+    assert_eq!(d.write_ns, 2000);
     crate::serial_println!("  [4/8] write: OK");
 
-    // 5: Discard.
+    // 5: Discard + flush increment exactly from zero.
     record_discard("test_disk").expect("discard");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().unwrap();
-    assert_eq!(d.discards, 1);
-    crate::serial_println!("  [5/8] discard: OK");
-
-    // 6: Flush.
     record_flush("test_disk").expect("flush");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().unwrap();
+    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
+    assert_eq!(d.discards, 1);
     assert_eq!(d.flushes, 1);
-    crate::serial_println!("  [6/8] flush: OK");
+    crate::serial_println!("  [5/8] discard/flush: OK");
 
-    // 7: Merge.
+    // 6: Merge counters split read vs write exactly.
     record_merge("test_disk", false).expect("merge_r");
     record_merge("test_disk", true).expect("merge_w");
-    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().unwrap();
+    let d = per_device().iter().find(|d| d.name == "test_disk").cloned().expect("dev");
     assert_eq!(d.merges_read, 1);
     assert_eq!(d.merges_write, 1);
-    crate::serial_println!("  [7/8] merge: OK");
+    crate::serial_println!("  [6/8] merge: OK");
 
-    // 8: Stats.
-    let (devs, reads, writes, rb, _wb, ops) = stats();
-    assert!(devs >= 3);
-    assert!(reads > 150_000_000);
-    assert!(writes > 110_000_000);
-    assert!(rb > 700_000_000_000);
+    // 7: Operations on an unregistered device fail with NotFound.
+    assert!(record_read("nonesuch", 1, 1).is_err());
+    assert!(record_write("nonesuch", 1, 1).is_err());
+    crate::serial_println!("  [7/8] not found: OK");
+
+    // 8: Aggregate totals equal the exact sums of the operations above.
+    let (devs, reads, writes, rb, wb, ops) = stats();
+    assert_eq!(devs, 1);
+    assert_eq!(reads, 1);
+    assert_eq!(writes, 1);
+    assert_eq!(rb, 4096);
+    assert_eq!(wb, 8192);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/diskstat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the block layer wires
+    // real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("diskstat::self_test() — all 8 tests passed");
 }

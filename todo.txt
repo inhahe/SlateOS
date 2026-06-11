@@ -6,6 +6,23 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## FOLLOW-UP (2026-06-11): /proc/<pid>/status Cpus_allowed + Cpus_allowed_list
+## We DO have genuine backing — sched::get_cpu_affinity(task.id) returns the
+## per-thread u64 affinity mask (affinity is a thread property in Linux, so
+## key off task.id, not proc_id).  Deferred because correct Linux formatting
+## is fiddly and a half-correct version would MISLEAD parsers:
+##   - Cpus_allowed: bitmap printed in comma-separated 32-bit groups, sized to
+##     the ONLINE cpu count (an 8-CPU box prints "ff", NOT "ffffffff,ffffffff").
+##     Needs an nr_online_cpus accessor to size the field; printing the raw
+##     64-bit mask always would be wrong on smaller machines.
+##   - Cpus_allowed_list: range-compressed form, e.g. "0-3,5,7-8".
+## Proper fix: add a mask->grouped-hex formatter and a mask->range-list
+## formatter (both pure, unit-testable with synthetic masks + a CPU count),
+## query online cpu count, emit both lines after Seccomp (Linux field order),
+## and self-test several masks/counts (full, single-cpu, sparse, >32 cpus).
+## Low value relative to risk (most affinity tools use sched_getaffinity(2),
+## not /proc parsing), hence deferred rather than shipped half-right.
+
 ## DONE (2026-06-11): /proc/<pid>/status now reports NoNewPrivs and Seccomp
 ## Linux always prints `NoNewPrivs:` (PR_SET_NO_NEW_PRIVS state) and
 ## `Seccomp:` (SECCOMP_MODE_* — 0 disabled / 1 strict / 2 filter) in

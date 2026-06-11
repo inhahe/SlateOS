@@ -2376,6 +2376,30 @@
 ##     fabrication. DEFERRED PROPER FIX: wire add_interface()/set_link_state()/
 ##     set_router_info() to the real network driver + DHCP client so this panel
 ##     reflects genuine NICs, links, gateway reachability, and live scan results.
+##     monitors fixed 2026-06-11: READ-THROUGH (proper fix, not empty-init).
+##     init_defaults() FABRICATED a "Built-in Display" with invented EDID the
+##     kernel never had: connector Internal/eDP-1, manufacturer "Generic", serial
+##     "0000000001", physical size 344x194mm, and a 5-entry mode list (incl. a
+##     144Hz mode) at 1920x1080@60 — surfaced through /proc/monitors
+##     (gen_monitors) and the `monitors list/stats` shell commands as if a real
+##     panel had been probed. The kernel DOES have one genuine display: the
+##     Limine framebuffer the text console draws to, exposed via
+##     console::framebuffer_info() -> (addr,width,height,pitch). Rewrote
+##     init_defaults to seed ONE monitor from the REAL framebuffer geometry
+##     (name "Framebuffer", output fb0, connector Virtual) and leave every
+##     EDID-derived field honestly empty/zero (refresh 0, manufacturer/serial
+##     empty, physical 0, modes = just the active mode). If no framebuffer,
+##     seeds zero monitors; real monitors arrive via add_monitor() from DRM
+##     hotplug. NOTE: init_defaults is NOT boot-wired (only the `monitors init`/
+##     `monitors test` kshell commands call it), so /proc/monitors is empty at
+##     boot — honest. self_test rewritten: test 1 now verifies the read-through
+##     against the live console::framebuffer_info() (asserting EDID fields stay
+##     empty), tests 2-11 run against a deterministic directly-installed 1920x1080
+##     fixture (independent of real fb geometry), and it now resets STATE to None
+##     at the END too (was leaving the fabricated monitor as residue). boot-test
+##     PASSED (26s). DEFERRED PROPER FIX: enumerate monitors + parse real EDID
+##     (connector/refresh/manufacturer/serial/physical size/modes) from the
+##     DRM-KMS driver instead of approximating a single framebuffer monitor.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

@@ -197,45 +197,64 @@ where
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Initialize the multi-monitor subsystem.
+/// Initialize the multi-monitor subsystem from the real boot framebuffer.
+///
+/// Rather than fabricating a "Built-in Display" with invented EDID data — a
+/// phantom eDP-1 panel, manufacturer "Generic", serial "0000000001", a
+/// 344x194 mm physical size, and a five-entry mode list (including a 144 Hz
+/// mode) — none of which the kernel actually knows, this reads the one
+/// display the kernel genuinely has: the framebuffer Limine handed us, which
+/// the text console is actively drawing to. We honestly fill only what the
+/// framebuffer reports (width/height and the single active mode) and leave
+/// every EDID-derived field empty/zero, because Limine gives us no connector
+/// type, refresh rate, manufacturer, serial, or physical dimensions.
+///
+/// If no framebuffer is available, no monitors are seeded. Real monitors then
+/// arrive via add_monitor() from DRM/compositor hotplug enumeration, which
+/// parses genuine EDID.
+///
+/// DEFERRED PROPER FIX: enumerate monitors (and parse real EDID for connector/
+/// refresh/manufacturer/serial/physical size/mode list) from the DRM-KMS
+/// driver instead of approximating a single framebuffer monitor.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {
         return;
     }
 
-    // Default: one internal display.
-    let internal = Monitor {
-        id: 1,
-        name: String::from("Built-in Display"),
-        connector: ConnectorType::Internal,
-        output: String::from("eDP-1"),
-        primary: true,
-        enabled: true,
-        width: 1920,
-        height: 1080,
-        refresh_hz: 60,
-        x: 0,
-        y: 0,
-        scale_pct: 100,
-        rotation: Rotation::Normal,
-        modes: alloc::vec![
-            DisplayMode { width: 1920, height: 1080, refresh_hz: 60 },
-            DisplayMode { width: 1920, height: 1080, refresh_hz: 144 },
-            DisplayMode { width: 1680, height: 1050, refresh_hz: 60 },
-            DisplayMode { width: 1600, height: 900, refresh_hz: 60 },
-            DisplayMode { width: 1280, height: 720, refresh_hz: 60 },
-        ],
-        width_mm: 344,
-        height_mm: 194,
-        manufacturer: String::from("Generic"),
-        serial: String::from("0000000001"),
-    };
+    let mut monitors = Vec::new();
+    let mut next_id: u32 = 1;
+    if let Some((_addr, width, height, _pitch)) = crate::console::framebuffer_info() {
+        monitors.push(Monitor {
+            id: 1,
+            name: String::from("Framebuffer"),
+            // Limine does not report the physical connector; "Virtual" honestly
+            // marks this as the bootloader framebuffer, not a probed port.
+            connector: ConnectorType::Virtual,
+            output: String::from("fb0"),
+            primary: true,
+            enabled: true,
+            width,
+            height,
+            refresh_hz: 0, // Unknown — Limine reports no refresh rate.
+            x: 0,
+            y: 0,
+            scale_pct: 100,
+            rotation: Rotation::Normal,
+            // The only mode we know is the one the framebuffer is using now.
+            modes: alloc::vec![DisplayMode { width, height, refresh_hz: 0 }],
+            width_mm: 0, // Unknown — no EDID.
+            height_mm: 0,
+            manufacturer: String::new(),
+            serial: String::new(),
+        });
+        next_id = 2;
+    }
 
     *guard = Some(MonitorState {
-        monitors: alloc::vec![internal],
+        monitors,
         layout_mode: LayoutMode::Extend,
-        next_id: 2,
+        next_id,
         ops: 0,
     });
 }
@@ -526,20 +545,62 @@ pub fn self_test() {
 
     serial_println!("[monitors] Running self-tests...");
 
+    // Test 1: init_defaults reads the REAL boot framebuffer (no fabricated
+    // EDID). Whatever it produces must match console::framebuffer_info()
+    // exactly, with every EDID-derived field left empty/zero — never invented.
     *STATE.lock() = None;
     init_defaults();
-
-    // Test 1: initial state (one internal display).
     {
         let monitors = list_monitors();
-        assert_eq!(monitors.len(), 1);
-        let primary = primary_monitor().unwrap();
-        assert_eq!(primary.name, "Built-in Display");
-        assert!(primary.primary);
-        assert_eq!(primary.width, 1920);
-        assert_eq!(primary.height, 1080);
+        match crate::console::framebuffer_info() {
+            Some((_addr, w, h, _pitch)) => {
+                assert_eq!(monitors.len(), 1);
+                let m = &monitors[0];
+                assert_eq!(m.width, w);
+                assert_eq!(m.height, h);
+                assert_eq!(m.refresh_hz, 0); // unknown, not fabricated
+                assert!(m.manufacturer.is_empty()); // no invented EDID
+                assert!(m.serial.is_empty());
+                assert_eq!(m.width_mm, 0);
+                assert_eq!(m.height_mm, 0);
+                assert!(m.primary);
+            }
+            None => {
+                assert_eq!(monitors.len(), 0);
+            }
+        }
     }
-    serial_println!("[monitors]  1/11 initial state OK");
+    serial_println!("[monitors]  1/11 framebuffer read-through OK");
+
+    // Tests 2–11 exercise the management API against a DETERMINISTIC fixture
+    // installed directly, so they don't depend on the real framebuffer
+    // geometry: a single 1920x1080 primary monitor at the origin.
+    *STATE.lock() = Some(MonitorState {
+        monitors: alloc::vec![Monitor {
+            id: 1,
+            name: String::from("Primary"),
+            connector: ConnectorType::Virtual,
+            output: String::from("fb0"),
+            primary: true,
+            enabled: true,
+            width: 1920,
+            height: 1080,
+            refresh_hz: 60,
+            x: 0,
+            y: 0,
+            scale_pct: 100,
+            rotation: Rotation::Normal,
+            modes: alloc::vec![DisplayMode { width: 1920, height: 1080, refresh_hz: 60 }],
+            width_mm: 0,
+            height_mm: 0,
+            manufacturer: String::new(),
+            serial: String::new(),
+        }],
+        layout_mode: LayoutMode::Extend,
+        next_id: 2,
+        ops: 0,
+    });
+    assert_eq!(list_monitors().len(), 1);
 
     // Test 2: add monitor.
     {
@@ -642,6 +703,9 @@ pub fn self_test() {
         assert!(list_monitors().first().unwrap().primary);
     }
     serial_println!("[monitors] 11/11 remove monitor OK");
+
+    // Leave no residue for later callers / the live /proc/monitors view.
+    *STATE.lock() = None;
 
     serial_println!("[monitors] All self-tests passed.");
 }

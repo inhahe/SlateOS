@@ -375,50 +375,38 @@ pub fn render_settings() -> RenderSettings {
 // Init / stats
 // ---------------------------------------------------------------------------
 
-fn add_system_font(state: &mut State, family: &str, style: FontStyle, format: FontFormat,
-    category: FontCategory, path: &str, glyphs: u32)
-{
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    state.fonts.push(FontInfo {
-        id,
-        family: String::from(family),
-        style,
-        format,
-        category,
-        path: String::from(path),
-        version: String::from("1.0"),
-        system: true,
-        enabled: true,
-        glyph_count: glyphs,
-        unicode_range_count: 4,
-    });
-}
-
-/// Initialise with system fonts.
+/// Initialise font configuration defaults.
+///
+/// This seeds only CONFIGURATION — the preferred default font family per role
+/// and the global render settings (size, hinting, antialiasing, DPI). These are
+/// legitimate compiled-in policy defaults, analogous to a default fontconfig:
+/// they express what the OS WANTS to use, not an observation of what is present.
+///
+/// It deliberately seeds NO font records. A FontInfo carries OBSERVED metadata —
+/// `glyph_count`, `unicode_range_count`, `version`, and an on-disk `path` that is
+/// assumed to exist — none of which can be known without parsing the actual
+/// `.ttf`/`.otf` file. The previous implementation fabricated nine "system"
+/// fonts (Noto Sans/Serif, JetBrains Mono, Noto Color Emoji) with invented glyph
+/// counts (3500/3200/800/3600), a placeholder version "1.0", and paths under
+/// `/usr/share/fonts/...` that the kernel never verifies. `fontpreview` did the
+/// same with DIFFERENT invented numbers for the same families (Inter 2548,
+/// JetBrains Mono 1086, Noto Serif 3400) — proof these were made up, not read.
+/// The `fontmgr` shell command and any `/proc` view surfaced those as REAL
+/// installed fonts. So the registry now starts EMPTY; real fonts are added via
+/// `install_font()` or a font-directory scanner once one exists.
+///
+/// DEFERRED PROPER FIX: add a font-directory scanner that walks the real font
+/// path, parses each face (TrueType/OpenType tables) for its actual glyph count,
+/// Unicode coverage, version, and family/style, and registers it as a system
+/// font. Until that parser exists there is no honest source for the observed
+/// metadata, so no fonts are seeded. NOTE (tech debt): `fontpreview` keeps its
+/// OWN parallel, conflicting fabricated font list — the two should be unified so
+/// `fontpreview` reads through to `fontmgr` as the single source of truth rather
+/// than maintaining a second registry.
 pub fn init_defaults() {
     let mut state = STATE.lock();
-    if !state.fonts.is_empty() {
-        return;
-    }
 
-    // System sans-serif family (Noto Sans — good Unicode coverage).
-    add_system_font(&mut state, "Noto Sans", FontStyle::Regular, FontFormat::TrueType, FontCategory::SansSerif, "/usr/share/fonts/noto/NotoSans-Regular.ttf", 3500);
-    add_system_font(&mut state, "Noto Sans", FontStyle::Bold, FontFormat::TrueType, FontCategory::SansSerif, "/usr/share/fonts/noto/NotoSans-Bold.ttf", 3500);
-    add_system_font(&mut state, "Noto Sans", FontStyle::Italic, FontFormat::TrueType, FontCategory::SansSerif, "/usr/share/fonts/noto/NotoSans-Italic.ttf", 3500);
-    add_system_font(&mut state, "Noto Sans", FontStyle::BoldItalic, FontFormat::TrueType, FontCategory::SansSerif, "/usr/share/fonts/noto/NotoSans-BoldItalic.ttf", 3500);
-
-    // System serif family.
-    add_system_font(&mut state, "Noto Serif", FontStyle::Regular, FontFormat::TrueType, FontCategory::Serif, "/usr/share/fonts/noto/NotoSerif-Regular.ttf", 3200);
-    add_system_font(&mut state, "Noto Serif", FontStyle::Bold, FontFormat::TrueType, FontCategory::Serif, "/usr/share/fonts/noto/NotoSerif-Bold.ttf", 3200);
-
-    // System monospace family.
-    add_system_font(&mut state, "JetBrains Mono", FontStyle::Regular, FontFormat::TrueType, FontCategory::Monospace, "/usr/share/fonts/jetbrains/JetBrainsMono-Regular.ttf", 800);
-    add_system_font(&mut state, "JetBrains Mono", FontStyle::Bold, FontFormat::TrueType, FontCategory::Monospace, "/usr/share/fonts/jetbrains/JetBrainsMono-Bold.ttf", 800);
-
-    // Emoji/symbol font.
-    add_system_font(&mut state, "Noto Color Emoji", FontStyle::Regular, FontFormat::OpenType, FontCategory::Symbol, "/usr/share/fonts/noto/NotoColorEmoji.ttf", 3600);
-
-    // Set defaults.
+    // Preferred default family per role (config policy, not an observation).
     state.defaults = DefaultFonts {
         ui: String::from("Noto Sans"),
         document: String::from("Noto Serif"),
@@ -427,6 +415,7 @@ pub fn init_defaults() {
         fallback: String::from("Noto Color Emoji"),
     };
 
+    // Global render settings (config defaults).
     state.render = RenderSettings {
         global_size_pt: 10,
         hint_mode: HintMode::Slight,
@@ -543,17 +532,49 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("fontmgr::self_test 7: uninstall");
     uninstall_font(f3)?;
     assert_eq!(list_fonts(None).len(), 2);
-    // Test init_defaults creates system fonts that can't be removed.
+
+    // Test 8: init_defaults seeds CONFIG ONLY, never fabricated font records.
+    // After init the registry must be EMPTY (no fonts are invented), while the
+    // policy defaults and render settings are populated.
+    serial_println!("fontmgr::self_test 8: init_defaults seeds config, no fonts");
     clear_all();
     init_defaults();
-    let (total, _, system, _) = stats();
-    assert!(total >= 9);
-    assert!(system >= 9);
-    // System font cannot be uninstalled.
-    let first = list_fonts(None)[0].id;
-    assert!(uninstall_font(first).is_err());
+    let (total, families, system, _) = stats();
+    assert_eq!(total, 0);
+    assert_eq!(families, 0);
+    assert_eq!(system, 0);
+    let defs = default_fonts();
+    assert_eq!(defs.ui, "Noto Sans");
+    assert_eq!(defs.monospace, "JetBrains Mono");
+    let rs = render_settings();
+    assert_eq!(rs.global_size_pt, 10);
+    assert_eq!(rs.dpi, 96);
+
+    // Test 9: system fonts are uninstall-protected. There is no public API to
+    // create one yet (a real font-directory scanner will, once it exists), so
+    // install a deterministic system-font fixture directly into STATE to verify
+    // the protection path still rejects the removal.
+    serial_println!("fontmgr::self_test 9: system font uninstall protection");
+    let sys_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut state = STATE.lock();
+        state.fonts.push(FontInfo {
+            id: sys_id,
+            family: String::from("FixtureSystem"),
+            style: FontStyle::Regular,
+            format: FontFormat::TrueType,
+            category: FontCategory::SansSerif,
+            path: String::from("/fixture/system.ttf"),
+            version: String::from("0.0"),
+            system: true,
+            enabled: true,
+            glyph_count: 0,
+            unicode_range_count: 0,
+        });
+    }
+    assert!(uninstall_font(sys_id).is_err());
 
     clear_all();
-    serial_println!("fontmgr::self_test: all 7 tests passed");
+    serial_println!("fontmgr::self_test: all 9 tests passed");
     Ok(())
 }

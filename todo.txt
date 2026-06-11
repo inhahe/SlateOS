@@ -2652,12 +2652,32 @@
 ##           groupmgr lacks). Two group databases = a design inconsistency that should
 ##           be unified into a single source of truth (groupmgr) with useracct
 ##           referencing it. DEFERRED: wire groupmgr membership to useracct.
-##         - fontmgr: seeds Noto Sans/Serif/JetBrains Mono/Noto Color Emoji with
-##           paths + fabricated glyph counts (3500/3200/800/3600). If these fonts
-##           genuinely ship in the base image the family list is a legitimate
-##           manifest, but the glyph counts are observed metadata that must come from
-##           parsing the actual files. FIX: either read-through a real font scan, or
-##           keep the bundled-font manifest with glyph_count 0 until a parser exists.
+##         - fontmgr: FIXED 2026-06-11 (case a — empty-init, keep config). The old
+##           init_defaults() seeded NINE "system" fonts (Noto Sans/Serif ×4/×2,
+##           JetBrains Mono ×2, Noto Color Emoji) with fabricated glyph counts
+##           (3500/3200/800/3600), placeholder version "1.0", unicode_range_count 4,
+##           and /usr/share/fonts/... paths the kernel never verifies — all surfaced
+##           via the `fontmgr` shell command / /proc as REAL installed fonts. Decided
+##           against a bundled-font manifest because the OS has NO font parser and does
+##           NOT bundle these files: proof — fontpreview independently fabricates the
+##           SAME families with DIFFERENT invented numbers (Inter 2548, JetBrains Mono
+##           1086, Noto Serif 3400), so neither is reading real metadata. init_defaults
+##           now seeds CONFIG ONLY (DefaultFonts policy per role + RenderSettings —
+##           legitimate fontconfig-style defaults) and ZERO font records; the registry
+##           is populated by install_font() / a future scanner. Removed the
+##           add_system_font helper (the only thing that set system:true). self_test
+##           reworked: new test 8 asserts init_defaults yields total/families/system==0
+##           with defaults+render populated; test 9 pushes a system-font fixture
+##           directly into STATE to keep coverage of the uninstall-protection path
+##           (no public API creates a system font yet). boot-test PASSED (26s).
+##           DEFERRED: add a font-directory scanner that parses real TrueType/OpenType
+##           tables for actual glyph count / Unicode coverage / version and registers
+##           system fonts. TECH DEBT: fontpreview keeps its OWN parallel fabricated
+##           font list (Inter/JetBrains Mono/Noto Serif with invented glyph counts +
+##           version strings) — STILL TO FIX; it should read through to fontmgr as the
+##           single source of truth rather than maintaining a second registry.
+##           This completes the *mgr-family fabricator list. fontpreview is the next
+##           font-subsystem fabricator to address.
 ##         BORDERLINE-LEGITIMATE (built-in virtuals / app manifest — likely keep):
 ##         printmgr (Print-to-PDF + File virtual printers are software constructs that
 ##         truly exist, like loopback); progmgr (core bundled apps manifest — File

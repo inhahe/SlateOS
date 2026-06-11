@@ -478,56 +478,15 @@ pub fn list_third_party() -> Vec<ThirdPartyVpn> {
 
 /// Initialise with example profiles.
 pub fn init_defaults() {
-    let mut state = STATE.lock();
-    if !state.profiles.is_empty() {
-        return;
-    }
-
-    let id1 = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    state.profiles.push(VpnProfile {
-        id: id1,
-        name: String::from("Home OpenVPN"),
-        protocol: VpnProtocol::OpenVpn,
-        server: String::from("vpn.example.com"),
-        port: 1194,
-        transport: Transport::Udp,
-        auth: AuthMethod::Certificate,
-        username: String::new(),
-        cert_path: String::from("/etc/vpn/client.crt"),
-        key_path: String::from("/etc/vpn/client.key"),
-        ca_path: String::from("/etc/vpn/ca.crt"),
-        dns_servers: Vec::new(),
-        route_all: true,
-        kill_switch: false,
-        auto_connect: false,
-        auto_reconnect: true,
-        reconnect_delay_s: 5,
-        system: true,
-    });
-
-    let id2 = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    state.profiles.push(VpnProfile {
-        id: id2,
-        name: String::from("Work WireGuard"),
-        protocol: VpnProtocol::WireGuard,
-        server: String::from("wg.corp.example.com"),
-        port: 51820,
-        transport: Transport::Udp,
-        auth: AuthMethod::PreSharedKey,
-        username: String::new(),
-        cert_path: String::new(),
-        key_path: String::from("/etc/wireguard/wg0.key"),
-        ca_path: String::new(),
-        dns_servers: Vec::new(),
-        route_all: false,
-        kill_switch: true,
-        auto_connect: true,
-        auto_reconnect: true,
-        reconnect_delay_s: 3,
-        system: true,
-    });
-
-    state.changes += 1;
+    // No default VPN profiles. A VPN profile is user-specific configuration —
+    // a server address, protocol, port, and credentials/cert paths the user
+    // supplies. The OS ships none. Seeding "Home OpenVPN"/"Work WireGuard"
+    // pointing at example.com with /etc/vpn cert paths and system: true would
+    // surface fabricated, never-created profiles (a privacy/security surface)
+    // through /proc and the `vpn` shell command as if the user had configured
+    // them. The static STATE already starts empty; profiles appear only via
+    // create_profile(). This stays a documented no-op so the `vpn init` shell
+    // command and existing call sites remain valid.
 }
 
 /// Return (profile_count, connected, third_party_count, ops).
@@ -614,16 +573,16 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(tp.len(), 1);
     assert!(tp[0].connected);
 
-    // Test 6: init defaults.
+    // Test 6: init_defaults seeds NO fabricated profiles.
     serial_println!("vpn::self_test 6: init defaults");
     clear_all();
     init_defaults();
-    assert!(list_profiles().len() >= 2);
+    assert_eq!(list_profiles().len(), 0);
 
-    // Test 7: status snapshot.
+    // Test 7: status snapshot after a user-created profile connects.
     serial_println!("vpn::self_test 7: status");
-    let profiles = list_profiles();
-    connect(profiles[0].id)?;
+    let pid = create_profile("StatusTest", VpnProtocol::OpenVpn, "vpn.status.test", 1194)?;
+    connect(pid)?;
     let s = status();
     assert_eq!(s.state, VpnState::Connected);
     assert!(!s.connected_server.is_empty());

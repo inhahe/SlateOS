@@ -2313,6 +2313,18 @@
 ##     rewritten residue-free: resets STATE None at start AND end, asserts empty
 ##     defaults, builds the fixture via create_profile, exact stats (0 profiles
 ##     after delete, 1 connect, 1 disconnect). boot-test PASSED (27s).
+##     vpn fixed 2026-06-11: case (a) empty-init, privacy surface (sibling of
+##     vpnprofile). init_defaults seeded 2 fabricated system VPN profiles ("Home
+##     OpenVPN" -> vpn.example.com:1194 with /etc/vpn/{client.crt,client.key,
+##     ca.crt}, "Work WireGuard" -> wg.corp.example.com:51820 with
+##     /etc/wireguard/wg0.key), both system: true — surfaced through /proc and
+##     the `vpn` shell command as if the user had configured them. The OS ships
+##     no default VPN; the static STATE already starts empty, so made
+##     init_defaults a documented no-op (kept for `vpn init` call-site
+##     compatibility). create_profile() is the honest entry point. self_test
+##     uses clear_all at start+end (non-Option Mutex<State>); rewrote test 6 to
+##     assert init_defaults adds zero profiles and test 7 to connect a user-
+##     created profile. boot-test PASSED (26s).
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

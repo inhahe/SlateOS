@@ -1089,6 +1089,27 @@
 ##                    FIX DEFERRED: LAPIC/IOAPIC/HPET/BAR mapping code should call
 ##                    iomem::register() when it maps each MMIO region — wire that
 ##                    when those mappings are centralised.)
+##   - pgtable.rs    (fixed 2026-06-11; fs/pgtable.rs statistics module backing
+##                    /proc/pgtable and the `pgtable` kshell command; was:
+##                    fabricated paging activity — per-level allocs [1, 512, 50K,
+##                    2M] / frees [0, 10, 5K, 500K], 100,000,000 page walks
+##                    summing 350,000,000 levels, TLB flushes of 50M single / 1M
+##                    range / 500K full / 100K global, and 1,550,503 active
+##                    page-table pages — surfaced as if real paging activity had
+##                    been measured. The four levels (PML4/PDPT/PD/PT) are a fixed
+##                    dimension ([u64;4] counter arrays, not structure), so case
+##                    (a)/(c): record_alloc/free/walk/tlb_flush already exist →
+##                    all counters zeroed. Rebuilt self_test residue-free with
+##                    exact assertions: per-level alloc/free/active accounting,
+##                    active-page total tracking (3 allocs - 1 free = 2), 3 walks
+##                    summing 11 levels → avg depth 366 (×100, integer div),
+##                    per-scope flush counts (1,1,1,1), final stats (2 pages / 3
+##                    walks / 4 flushes / 366 avg). NOTE: pgtable was NOT
+##                    previously wired into the boot self-test path — now added.
+##                    /proc/pgtable now 148 bytes. PROPER FIX DEFERRED: the VM /
+##                    page-table allocator and TLB-shootdown paths should call
+##                    pgtable::record_alloc/free/walk/tlb_flush — wire that when
+##                    those paths are instrumented.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1102,14 +1123,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem (just fixed) were thirty-two. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable (just fixed) were thirty-three. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     pgtable. Remaining flagged names incl.:
-##     pgtable, memdiag, sysuptime,
+##     memdiag. Remaining flagged names incl.:
+##     memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify. SETTINGS-looking names in that set

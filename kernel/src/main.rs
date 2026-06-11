@@ -1732,6 +1732,22 @@ extern "C" fn kernel_main() -> ! {
     // cumulative totals not decremented on unregister) and resets the table
     // afterward, so it is safe at boot.
     fs::iomem::self_test();
+    // pgtable backs /proc/pgtable (page-table diagnostics: per-level (PML4/PDPT/
+    // PD/PT) allocated/freed/active page-table page counts, page-walk count and
+    // average depth, TLB-flush counts by scope (single/range/full/global), plus
+    // the active page-table-page total).  Its init_defaults() previously seeded
+    // fabricated activity — per-level allocs [1, 512, 50K, 2M] / frees
+    // [0, 10, 5K, 500K], 100,000,000 page walks summing 350,000,000 levels, TLB
+    // flushes of 50M single / 1M range / 500K full / 100K global, and 1,550,503
+    // active pages — surfaced as if real paging activity had been measured.  The
+    // four levels are a fixed dimension so per_level always returns four rows,
+    // but with ZEROED counters; they advance only on real record_alloc/free/
+    // walk/tlb_flush calls.  The residue-free self_test builds its fixtures via
+    // the real API with exact assertions (per-level alloc/free/active accounting,
+    // active-page total tracking, average walk depth 366 from 11 levels / 3
+    // walks, per-scope flush counts) and resets the table afterward, so it is
+    // safe at boot.
+    fs::pgtable::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -124,19 +124,36 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the page-table statistics state.
+///
+/// Starts with all per-level allocation/free counters, page-walk counters,
+/// TLB-flush counters and the active-page total at zero. The four page-table
+/// levels (PML4, PDPT, PD, PT) are a fixed dimension so [`per_level`] always
+/// returns four rows, but with zeroed counters; they advance only through real
+/// [`record_alloc`] / [`record_free`] / [`record_walk`] / [`record_tlb_flush`]
+/// calls. The `/proc/pgtable` generator and the `pgtable` kshell command
+/// surface this table (and [`per_level`] / [`flush_stats`] /
+/// [`avg_walk_depth_x100`]) as if it reflects real page-table activity, so
+/// seeding it with invented counts would be fabricated procfs data.
+///
+/// (Previously this seeded fabricated activity — per-level allocs of
+/// [1, 512, 50,000, 2,000,000] and frees of [0, 10, 5,000, 500,000],
+/// 100,000,000 page walks summing 350,000,000 levels, TLB flushes of
+/// 50,000,000 single / 1,000,000 range / 500,000 full / 100,000 global, and
+/// 1,550,503 active page-table pages.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        level_allocs: [1, 512, 50_000, 2_000_000],
-        level_frees: [0, 10, 5_000, 500_000],
-        walks: 100_000_000,
-        walk_levels_total: 350_000_000,
-        flush_single: 50_000_000,
-        flush_range: 1_000_000,
-        flush_full: 500_000,
-        flush_global: 100_000,
-        total_pages_used: 1_550_503,
+        level_allocs: [0; 4],
+        level_frees: [0; 4],
+        walks: 0,
+        walk_levels_total: 0,
+        flush_single: 0,
+        flush_range: 0,
+        flush_full: 0,
+        flush_global: 0,
+        total_pages_used: 0,
         ops: 0,
     });
 }
@@ -232,61 +249,77 @@ pub fn stats() -> (u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("pgtable::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live page-table stats afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_level().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — four zeroed level rows, zero totals, zero avg depth.
+    let levels = per_level();
+    assert_eq!(levels.len(), 4);
+    for l in &levels {
+        assert_eq!((l.allocated, l.freed, l.active), (0, 0, 0));
+    }
+    let (p0, w0, f0, a0, _) = stats();
+    assert_eq!((p0, w0, f0, a0), (0, 0, 0, 0));
+    assert_eq!(flush_stats(), (0, 0, 0, 0));
+    assert_eq!(avg_walk_depth_x100(), 0);
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Alloc.
-    let before = per_level()[3].allocated;
-    record_alloc(PtLevel::Pt).expect("alloc");
-    let after = per_level()[3].allocated;
-    assert_eq!(after, before + 1);
+    // 2: Alloc — two PT allocs and one PD alloc advance per-level counters and
+    //    the active-page total.
+    record_alloc(PtLevel::Pt).expect("alloc_pt1");
+    record_alloc(PtLevel::Pt).expect("alloc_pt2");
+    record_alloc(PtLevel::Pd).expect("alloc_pd");
+    assert_eq!(per_level()[PtLevel::Pt.index()].allocated, 2);
+    assert_eq!(per_level()[PtLevel::Pd.index()].allocated, 1);
+    assert_eq!(stats().0, 3); // total_pages_used
     crate::serial_println!("  [2/8] alloc: OK");
 
-    // 3: Free.
-    let before = per_level()[3].freed;
+    // 3: Free — one PT free advances the free counter and drops the active total.
     record_free(PtLevel::Pt).expect("free");
-    let after = per_level()[3].freed;
-    assert_eq!(after, before + 1);
+    assert_eq!(per_level()[PtLevel::Pt.index()].freed, 1);
+    assert_eq!(stats().0, 2); // total_pages_used (3 allocs - 1 free)
     crate::serial_println!("  [3/8] free: OK");
 
-    // 4: Walk.
-    let (_, walks_before, _, _, _) = stats();
-    record_walk(4).expect("walk");
-    let (_, walks_after, _, _, _) = stats();
-    assert_eq!(walks_after, walks_before + 1);
+    // 4: Walk — three walks summing 11 levels (4 + 4 + 3).
+    record_walk(4).expect("walk1");
+    record_walk(4).expect("walk2");
+    record_walk(3).expect("walk3");
+    assert_eq!(stats().1, 3); // walks
     crate::serial_println!("  [4/8] walk: OK");
 
-    // 5: TLB flush.
-    let (s_before, _, _, _) = flush_stats();
-    record_tlb_flush(FlushScope::Single).expect("flush");
-    let (s_after, _, _, _) = flush_stats();
-    assert_eq!(s_after, s_before + 1);
+    // 5: TLB flush — one of each scope.
+    record_tlb_flush(FlushScope::Single).expect("f_single");
+    record_tlb_flush(FlushScope::Range).expect("f_range");
+    record_tlb_flush(FlushScope::Full).expect("f_full");
+    record_tlb_flush(FlushScope::Global).expect("f_global");
+    assert_eq!(flush_stats(), (1, 1, 1, 1));
     crate::serial_println!("  [5/8] tlb flush: OK");
 
-    // 6: Active pages.
+    // 6: Active pages — per level, active == allocated - freed (PT: 2-1=1,
+    //    PD: 1-0=1, others 0).
     let levels = per_level();
     for l in &levels {
         assert!(l.allocated >= l.freed);
         assert_eq!(l.active, l.allocated - l.freed);
     }
+    assert_eq!(per_level()[PtLevel::Pt.index()].active, 1);
+    assert_eq!(per_level()[PtLevel::Pd.index()].active, 1);
     crate::serial_println!("  [6/8] active pages: OK");
 
-    // 7: Average walk depth.
-    let avg = avg_walk_depth_x100();
-    assert!(avg > 0);
+    // 7: Average walk depth — 11 levels / 3 walks → 366 (×100, integer div).
+    assert_eq!(avg_walk_depth_x100(), 366);
     crate::serial_println!("  [7/8] avg depth: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above: 2 active pages,
+    //    3 walks, 4 flushes, avg depth 366.
     let (pages, walks, flushes, avg, ops) = stats();
-    assert!(pages > 1_000_000);
-    assert!(walks > 100_000_000);
-    assert!(flushes > 50_000_000);
-    assert!(avg > 0);
+    assert_eq!((pages, walks, flushes, avg), (2, 3, 4, 366));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("pgtable::self_test() — all 8 tests passed");
 }

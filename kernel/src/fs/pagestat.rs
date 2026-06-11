@@ -113,31 +113,93 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** page-allocator statistics table.
+///
+/// Seeds NO memory zones and zero global counters.  The per-order histogram is
+/// initialised to its real fixed structure — one bucket per allocation order
+/// `0..MAX_ORDER` with all counters zeroed (the buddy allocator always has
+/// these order buckets; the *counts* are what must start at zero).  Real
+/// per-zone accounting is wired through [`register_zone`] (one row per memory
+/// zone the physical allocator brings online, with its true `total_pages`) and
+/// the `record_alloc`/`record_free`/`record_reclaim` functions; [`set_hugepages`]
+/// declares a zone's huge-page pool.  Until those are called the zone table is
+/// genuinely empty, so `/proc/pagestat` and the `pagestat` kshell command report
+/// zeros rather than fabricated numbers — the kernel's hard "never invent data
+/// in procfs" rule.
+///
+/// NOTE: this previously seeded four fictional zones (DMA: total 4096 / free
+/// 1024 / allocated 100k; DMA32: total 64k / allocated 500k / hugepages 32;
+/// Normal: total 1M / allocated 10M / hugepages 512; Movable: total 512k /
+/// allocated 2M / hugepages 256) plus a fabricated order histogram (allocs
+/// 1_000_000 >> order, frees 95% of that) and invented aggregate totals
+/// (total_allocs 12.6M, total_frees 11_977_000, total_reclaims 255500,
+/// total_fails 65), which `/proc/pagestat` then displayed as if they were real
+/// measured allocator activity.  That demo data was removed; the self-test now
+/// builds its own fixtures explicitly via the real API (see [`self_test`]).
+/// The physical page allocator is expected to call [`register_zone`] as it
+/// brings each zone online and the record functions on every page alloc/free.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let zones = alloc::vec![
-        ZoneStats { zone: Zone::Dma, total_pages: 4096, free_pages: 1024, allocated: 100000, freed: 97000, reclaimed: 500, failed: 0, hugepages_total: 0, hugepages_free: 0, hugepages_reserved: 0, fragmentation_pct: 5 },
-        ZoneStats { zone: Zone::Dma32, total_pages: 65536, free_pages: 16384, allocated: 500000, freed: 480000, reclaimed: 5000, failed: 10, hugepages_total: 32, hugepages_free: 8, hugepages_reserved: 4, fragmentation_pct: 12 },
-        ZoneStats { zone: Zone::Normal, total_pages: 1048576, free_pages: 262144, allocated: 10_000_000, freed: 9_500_000, reclaimed: 200000, failed: 50, hugepages_total: 512, hugepages_free: 128, hugepages_reserved: 64, fragmentation_pct: 18 },
-        ZoneStats { zone: Zone::Movable, total_pages: 524288, free_pages: 131072, allocated: 2_000_000, freed: 1_900_000, reclaimed: 50000, failed: 5, hugepages_total: 256, hugepages_free: 64, hugepages_reserved: 32, fragmentation_pct: 8 },
-    ];
+    // The order histogram has one bucket per buddy-allocator order; this is real
+    // structure, so create all MAX_ORDER buckets but with zeroed counters.
     let mut order_stats = Vec::new();
     for o in 0..MAX_ORDER as u32 {
-        let base = 1_000_000u64 >> o;
-        order_stats.push(OrderStats {
-            order: o, allocs: base, frees: base * 95 / 100, fails: if o > 8 { 10 } else { 0 },
-        });
+        order_stats.push(OrderStats { order: o, allocs: 0, frees: 0, fails: 0 });
     }
     *guard = Some(State {
-        zones,
+        zones: Vec::new(),
         order_stats,
-        total_allocs: 12_600_000,
-        total_frees: 11_977_000,
-        total_reclaims: 255500,
-        total_fails: 65,
+        total_allocs: 0,
+        total_frees: 0,
+        total_reclaims: 0,
+        total_fails: 0,
         ops: 0,
     });
+}
+
+/// Register a memory zone the physical allocator has brought online.
+///
+/// `total_pages` is the zone's real page count; the zone starts fully free
+/// (`free_pages == total_pages`) with all activity counters zeroed.  Returns
+/// [`KernelError::AlreadyExists`] if the zone is already registered and
+/// [`KernelError::ResourceExhausted`] once five zones (one per [`Zone`] variant)
+/// exist.
+pub fn register_zone(zone: Zone, total_pages: u64) -> KernelResult<()> {
+    with_state(|state| {
+        if state.zones.iter().any(|z| z.zone == zone) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.zones.len() >= 5 {
+            return Err(KernelError::ResourceExhausted);
+        }
+        state.zones.push(ZoneStats {
+            zone,
+            total_pages,
+            free_pages: total_pages,
+            allocated: 0,
+            freed: 0,
+            reclaimed: 0,
+            failed: 0,
+            hugepages_total: 0,
+            hugepages_free: 0,
+            hugepages_reserved: 0,
+            fragmentation_pct: 0,
+        });
+        Ok(())
+    })
+}
+
+/// Declare a zone's huge-page pool: total, free, and reserved counts.
+pub fn set_hugepages(zone: Zone, total: u64, free: u64, reserved: u64) -> KernelResult<()> {
+    with_state(|state| {
+        let zs = state.zones.iter_mut().find(|z| z.zone == zone)
+            .ok_or(KernelError::NotFound)?;
+        zs.hugepages_total = total;
+        zs.hugepages_free = free;
+        zs.hugepages_reserved = reserved;
+        Ok(())
+    })
 }
 
 /// Record a page allocation.
@@ -221,58 +283,90 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("pagestat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/pagestat must never surface).
+    // Resetting first clears any residue from a prior `pagestat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(zone_stats().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated zones or totals; histogram is the real
+    //    fixed 12-bucket structure but every count starts at zero.
+    assert_eq!(zone_stats().len(), 0);
+    let (z0, a0, f0, r0, fa0, _o0) = stats();
+    assert_eq!((z0, a0, f0, r0, fa0), (0, 0, 0, 0, 0));
+    let hist0 = order_histogram();
+    assert_eq!(hist0.len(), 12);
+    assert!(hist0.iter().all(|o| o.allocs == 0 && o.frees == 0 && o.fails == 0));
+    assert_eq!(hugepage_info(), (0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Record alloc.
-    let before = zone_stats().iter().find(|z| z.zone == Zone::Normal).unwrap().allocated;
-    record_alloc(Zone::Normal, 0).expect("alloc");
-    let after = zone_stats().iter().find(|z| z.zone == Zone::Normal).unwrap().allocated;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [2/8] alloc: OK");
+    // 2: Register zones — fully free, zeroed counters; dup fails.
+    register_zone(Zone::Normal, 1000).expect("reg normal");
+    register_zone(Zone::Dma, 256).expect("reg dma");
+    assert!(register_zone(Zone::Normal, 1).is_err()); // AlreadyExists
+    assert_eq!(zone_stats().len(), 2);
+    let normal = zone_stats().iter().find(|z| z.zone == Zone::Normal).cloned().expect("normal");
+    assert_eq!((normal.total_pages, normal.free_pages, normal.allocated), (1000, 1000, 0));
+    crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Record free.
-    let before = zone_stats().iter().find(|z| z.zone == Zone::Normal).unwrap().freed;
-    record_free(Zone::Normal, 0).expect("free");
-    let after = zone_stats().iter().find(|z| z.zone == Zone::Normal).unwrap().freed;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [3/8] free: OK");
+    // 3: Alloc — allocated up, free_pages down by 2^order, histogram bucket up.
+    record_alloc(Zone::Normal, 0).expect("alloc o0"); // 1 page
+    record_alloc(Zone::Normal, 2).expect("alloc o2"); // 4 pages
+    let normal = zone_stats().iter().find(|z| z.zone == Zone::Normal).cloned().expect("normal");
+    assert_eq!(normal.allocated, 2);
+    assert_eq!(normal.free_pages, 1000 - 1 - 4);
+    assert_eq!(order_histogram()[0].allocs, 1);
+    assert_eq!(order_histogram()[2].allocs, 1);
+    crate::serial_println!("  [3/8] alloc: OK");
 
-    // 4: Record reclaim.
-    let before = zone_stats().iter().find(|z| z.zone == Zone::Dma).unwrap().reclaimed;
+    // 4: Free — freed up, free_pages restored, histogram free bucket up.
+    record_free(Zone::Normal, 0).expect("free o0");
+    let normal = zone_stats().iter().find(|z| z.zone == Zone::Normal).cloned().expect("normal");
+    assert_eq!(normal.freed, 1);
+    assert_eq!(normal.free_pages, 1000 - 4); // freed the 1-page alloc back
+    assert_eq!(order_histogram()[0].frees, 1);
+    crate::serial_println!("  [4/8] free: OK");
+
+    // 5: Reclaim adds pages back to the zone exactly.
     record_reclaim(Zone::Dma, 100).expect("reclaim");
-    let after = zone_stats().iter().find(|z| z.zone == Zone::Dma).unwrap().reclaimed;
-    assert_eq!(after, before + 100);
-    crate::serial_println!("  [4/8] reclaim: OK");
+    let dma = zone_stats().iter().find(|z| z.zone == Zone::Dma).cloned().expect("dma");
+    assert_eq!(dma.reclaimed, 100);
+    assert_eq!(dma.free_pages, 256 + 100);
+    crate::serial_println!("  [5/8] reclaim: OK");
 
-    // 5: Order histogram.
-    let hist = order_histogram();
-    assert_eq!(hist.len(), 12);
-    assert!(hist[0].allocs > hist[5].allocs); // Lower orders have more allocs.
-    crate::serial_println!("  [5/8] order histogram: OK");
+    // 6: Alloc failure when the zone lacks free pages — fail counters bump, no
+    //    OOM phantom allocation.
+    register_zone(Zone::Dma32, 1).expect("reg dma32");
+    assert!(record_alloc(Zone::Dma32, 5).is_err()); // needs 32 pages, only 1 free
+    let dma32 = zone_stats().iter().find(|z| z.zone == Zone::Dma32).cloned().expect("dma32");
+    assert_eq!(dma32.failed, 1);
+    assert_eq!(dma32.allocated, 0);
+    crate::serial_println!("  [6/8] alloc fail: OK");
 
-    // 6: Huge page info.
-    let (total, free, reserved) = hugepage_info();
-    assert!(total > 0);
-    assert!(free <= total);
-    assert!(reserved <= total);
-    crate::serial_println!("  [6/8] hugepages: OK");
-
-    // 7: Not found zone.
+    // 7: Hugepages set + reported; unregistered zone → NotFound.
+    set_hugepages(Zone::Normal, 8, 6, 2).expect("hugepages");
+    assert_eq!(hugepage_info(), (8, 6, 2));
     assert!(record_alloc(Zone::HighMem, 0).is_err());
-    crate::serial_println!("  [7/8] not found: OK");
+    assert!(set_hugepages(Zone::HighMem, 1, 1, 0).is_err());
+    crate::serial_println!("  [7/8] hugepages + not found: OK");
 
-    // 8: Stats.
-    let (zones, allocs, frees, reclaims, _fails, ops) = stats();
-    assert_eq!(zones, 4);
-    assert!(allocs > 12_600_000);
-    assert!(frees > 11_977_000);
-    assert!(reclaims > 255500);
+    // 8: Aggregate totals equal the exact sums of the operations above.
+    let (zones, allocs, frees, reclaims, fails, ops) = stats();
+    assert_eq!(zones, 3);
+    assert_eq!(allocs, 2);     // 2 successful allocs
+    assert_eq!(frees, 1);      // 1 free
+    assert_eq!(reclaims, 100); // 100 pages reclaimed
+    assert_eq!(fails, 1);      // 1 failed alloc
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/pagestat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the page allocator wires
+    // real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("pagestat::self_test() — all 8 tests passed");
 }

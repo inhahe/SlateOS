@@ -440,14 +440,29 @@
 ##                    record_unmap/record_protect API; just emptied init_defaults
 ##                    (all counters/type_counts zeroed) and rebuilt self_test with
 ##                    exact assertions, wired into boot.)
+##   - pagestat.rs   (fixed 2026-06-11; was: four fake zones DMA (total 4096 /
+##                    free 1024 / allocated 100k), DMA32 (total 64k / allocated
+##                    500k / hugepages 32), Normal (total 1M / allocated 10M /
+##                    hugepages 512), Movable (total 512k / allocated 2M /
+##                    hugepages 256); plus a fabricated order histogram (allocs
+##                    1_000_000>>order, frees 95%) and aggregates total_allocs
+##                    12.6M, total_frees 11_977_000, total_reclaims 255500,
+##                    total_fails 65. record_alloc returned NotFound for an
+##                    unregistered zone and there was NO registration API, so
+##                    added register_zone(zone, total_pages) (zone starts fully
+##                    free) + set_hugepages(zone, total, free, reserved); kept the
+##                    real 12-bucket order histogram structure but zeroed its
+##                    counts; emptied init_defaults and rebuilt self_test with
+##                    exact assertions (incl. an alloc-failure path that bumps
+##                    fail counters without phantom allocation), wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): pagestat,
-##     pidstat, pmcstat, powerstat, procstat, ratestat, rqstat, schedlat,
-##     ttystat, zramstat. NOTE: some may be SETTINGS modules seeding legitimate
-##     config defaults — verify each is a STATISTICS module seeding fake
-##     OBSERVATIONS before emptying it.)
+##     by grep (init_defaults with alloc::vec!/String::from/push): pidstat,
+##     pmcstat, powerstat, procstat, ratestat, rqstat, schedlat, ttystat,
+##     zramstat. NOTE: some may be SETTINGS modules seeding legitimate config
+##     defaults — verify each is a STATISTICS module seeding fake OBSERVATIONS
+##     before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

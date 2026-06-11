@@ -1272,6 +1272,14 @@ extern "C" fn kernel_main() -> ! {
     // previously lacked (it was only reachable via the `mmapstat test` kshell
     // subcommand).
     fs::mmapstat::self_test();
+    // pagestat backs /proc/pagestat (per-zone page allocator stats, per-order
+    // histogram, huge-page pools); like its siblings the self-test now builds
+    // fixtures via the real register_zone/record_alloc/record_free/
+    // record_reclaim/set_hugepages API and resets the table afterward (leaving no
+    // fabricated rows), so it is safe at boot and gives the module automated
+    // coverage it previously lacked (it was only reachable via the `pagestat
+    // test` kshell subcommand).
+    fs::pagestat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

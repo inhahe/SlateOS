@@ -6,6 +6,21 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## DONE (2026-06-11): /proc/<pid>/status now reports NoNewPrivs and Seccomp
+## Linux always prints `NoNewPrivs:` (PR_SET_NO_NEW_PRIVS state) and
+## `Seccomp:` (SECCOMP_MODE_* — 0 disabled / 1 strict / 2 filter) in
+## /proc/<pid>/status; systemd, WINE, and container/seccomp tooling read
+## them to confirm a sandbox took effect.  We track both with real data:
+## NoNewPrivs from pcb::get_no_new_privs(), Seccomp from scfilter::has_filter()
+## (our allow/deny filter is filter-mode semantics → 2; absence → 0; we have
+## no strict mode).  Added both lines to build_pid_status in Linux field order
+## (after Threads, before the ctxt-switch lines).  Process-wide → keyed off
+## proc_id, so thread status (task/<tid>/status) reports the owning process's
+## values.  Extended the synthetic self-test to assert both lines exist,
+## default to 0 for a PCB-less proc_id, and preserve the
+## Threads<NoNewPrivs<voluntary_ctxt_switches ordering.  Boot test PASSED;
+## serial shows "NoNewPrivs/Seccomp present and ordered OK".
+
 ## DONE (2026-06-10): /proc/<pid>/status Name: now truncated to 15 bytes
 ## Same bug class as the stat-comm fix below: build_pid_status emitted the
 ## FULL untruncated task name (up to 32 bytes) in the `Name:` line, but

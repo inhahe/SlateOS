@@ -1886,6 +1886,19 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         }
     }
     let _ = writeln!(s, "Threads:\t{num_threads}");
+    // NoNewPrivs (PR_SET_NO_NEW_PRIVS): 1 once a task has irreversibly opted
+    // out of privilege-gaining execs, else 0.  systemd, WINE, and container
+    // runtimes read this to confirm a sandbox took effect.  Real per-process
+    // state; a bare task with no PCB has set no such flag, so 0 is truthful.
+    // Linux prints this line for every task (process-wide → proc_id).
+    let no_new_privs = crate::proc::pcb::get_no_new_privs(proc_id).unwrap_or(0);
+    let _ = writeln!(s, "NoNewPrivs:\t{no_new_privs}");
+    // Seccomp mode, matching Linux's SECCOMP_MODE_* encoding: 0 = disabled,
+    // 1 = strict, 2 = filter.  Our scfilter is an allow/deny syscall filter
+    // (the filter-mode semantics), and we have no strict mode, so an installed
+    // filter maps to 2 and its absence to 0.  seccomp-aware tools read this.
+    let seccomp = if crate::scfilter::has_filter(proc_id) { 2 } else { 0 };
+    let _ = writeln!(s, "Seccomp:\t{seccomp}");
     // Context switches: the native scheduler tracks a single schedule count,
     // not Linux's voluntary/nonvoluntary split.  A preemptive round-robin
     // scheduler drives almost all switches as involuntary preemptions, so the
@@ -12164,6 +12177,30 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   build_pid_status: Name truncated to 15 bytes OK");
+
+        // NoNewPrivs and Seccomp must be present (Linux always prints them) and,
+        // for this synthetic proc_id with no PCB / no installed filter, both
+        // default to 0.  Key-based parsers (systemd, WINE) grep these labels.
+        if !stext.contains("\nNoNewPrivs:\t0\n") {
+            serial_println!("[procfs]   FAIL: status missing 'NoNewPrivs:\\t0' line");
+            return Err(KernelError::InternalError);
+        }
+        if !stext.contains("\nSeccomp:\t0\n") {
+            serial_println!("[procfs]   FAIL: status missing 'Seccomp:\\t0' line");
+            return Err(KernelError::InternalError);
+        }
+        // Linux orders NoNewPrivs/Seccomp after Threads and before the
+        // ctxt-switch lines; verify that relative ordering holds.
+        let p_threads = stext.find("\nThreads:\t");
+        let p_nnp = stext.find("\nNoNewPrivs:\t");
+        let p_vctx = stext.find("\nvoluntary_ctxt_switches:\t");
+        if !(p_threads < p_nnp && p_nnp < p_vctx) {
+            serial_println!(
+                "[procfs]   FAIL: status field order Threads<NoNewPrivs<voluntary_ctxt_switches violated"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   build_pid_status: NoNewPrivs/Seccomp present and ordered OK");
     }
 
     // --- Per-PID directory tests ---

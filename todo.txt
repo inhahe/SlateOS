@@ -931,6 +931,24 @@
 ##                    removal + double/unknown NotFound, final totals (1 probe / 1
 ##                    hit / 1 miss / 50ns overhead). Wired into boot. /proc/kprobes
 ##                    now 68 bytes.)
+##   - ftrace.rs     (fixed 2026-06-11; fs/ftrace.rs statistics module backing
+##                    /proc/ftrace and the `ftrace` kshell command; was: four
+##                    fictional probes — "schedule" (50M hits), "do_page_fault"
+##                    (10M hits, 100 misses), "sys_read" (30M hits), "tcp_sendmsg"
+##                    (5M hits, 50 misses, disabled) — plus totals of 95M hits /
+##                    150 misses / 1.1s overhead with global tracing enabled. Pure
+##                    statistics module, probes are dynamic with a full add_probe/
+##                    remove_probe/record_hit/set_enabled/set_global_enabled API
+##                    already present (case a) → emptied init_defaults (no probes,
+##                    totals 0, trace_enabled FALSE — the honest default since
+##                    nothing is being traced). Rebuilt self_test residue-free with
+##                    exact assertions: duplicate-add AlreadyExists, enabled-probe
+##                    hit+total_ns+max_ns accrual, disabled-probe miss counting,
+##                    max-ns rise on larger duration, remove + double/unknown
+##                    NotFound, global toggle from off, final totals (0 probes / 2
+##                    hits / 1 miss / 300ns). NOTE: ftrace was NOT previously wired
+##                    into the boot self-test path — now added. /proc/ftrace now
+##                    106 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -944,14 +962,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes (just fixed) were twenty-four. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace (just fixed) were twenty-five. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     ftrace. Remaining flagged names incl.:
-##     ftrace, sockbuf, msivec,
+##     sockbuf. Remaining flagged names incl.:
+##     sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,

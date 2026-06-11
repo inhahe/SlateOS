@@ -98,20 +98,31 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the function-trace statistics state.
+///
+/// Starts with no probes, zero hit/miss/overhead totals, and global
+/// tracing OFF (the honest default — nothing is being traced until a
+/// subsystem installs a probe and enables tracing). The `/proc/ftrace`
+/// generator and the `ftrace` kshell command surface the probe list (and
+/// `per_probe`) as if it reflects real installed function-trace probes, so
+/// seeding it with phantom probes would be fabricated procfs data. Probes
+/// are installed through [`add_probe`] and removed through [`remove_probe`];
+/// the hit/miss/overhead counters advance only through real [`record_hit`]
+/// calls.
+///
+/// (Previously this seeded four fictional probes — "schedule" (50M hits),
+/// "do_page_fault" (10M hits, 100 misses), "sys_read" (30M hits), and
+/// "tcp_sendmsg" (5M hits, 50 misses, disabled) — plus totals of 95M hits,
+/// 150 misses, and 1.1s of overhead, with global tracing enabled.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        probes: alloc::vec![
-            ProbeStats { func_name: String::from("schedule"), kind: ProbeKind::Function, hits: 50_000_000, misses: 0, total_ns: 500_000_000, max_ns: 10_000, enabled: true },
-            ProbeStats { func_name: String::from("do_page_fault"), kind: ProbeKind::Function, hits: 10_000_000, misses: 100, total_ns: 200_000_000, max_ns: 50_000, enabled: true },
-            ProbeStats { func_name: String::from("sys_read"), kind: ProbeKind::ReturnProbe, hits: 30_000_000, misses: 0, total_ns: 300_000_000, max_ns: 5_000, enabled: true },
-            ProbeStats { func_name: String::from("tcp_sendmsg"), kind: ProbeKind::TracePoint, hits: 5_000_000, misses: 50, total_ns: 100_000_000, max_ns: 20_000, enabled: false },
-        ],
-        total_hits: 95_000_000,
-        total_misses: 150,
-        total_overhead_ns: 1_100_000_000,
-        trace_enabled: true,
+        probes: Vec::new(),
+        total_hits: 0,
+        total_misses: 0,
+        total_overhead_ns: 0,
+        trace_enabled: false,
         ops: 0,
     });
 }
@@ -203,62 +214,73 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("ftrace::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live probe list afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_probe().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom probes, zero totals, tracing off.
+    assert_eq!(per_probe().len(), 0);
+    let (p0, h0, m0, o0, _) = stats();
+    assert_eq!((p0, h0, m0, o0), (0, 0, 0, 0));
+    assert!(!is_enabled());
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Add probe.
+    // 2: Add probe — appears once; duplicate (name+kind) is AlreadyExists.
     add_probe("test_fn", ProbeKind::Function).expect("add");
-    assert_eq!(per_probe().len(), 5);
+    assert_eq!(per_probe().len(), 1);
     assert!(add_probe("test_fn", ProbeKind::Function).is_err());
+    let p = per_probe().into_iter().find(|p| p.func_name == "test_fn").expect("find");
+    assert_eq!((p.hits, p.misses, p.total_ns, p.max_ns), (0, 0, 0, 0));
+    assert!(p.enabled);
     crate::serial_println!("  [2/8] add probe: OK");
 
-    // 3: Hit.
+    // 3: Hit — enabled probe accrues hit, total_ns, max_ns; globals follow.
     record_hit("test_fn", 100).expect("hit");
-    let p = per_probe().iter().find(|p| p.func_name == "test_fn").cloned().unwrap();
-    assert_eq!(p.hits, 1);
-    assert_eq!(p.total_ns, 100);
+    let p = per_probe().into_iter().find(|p| p.func_name == "test_fn").expect("p3");
+    assert_eq!((p.hits, p.total_ns, p.max_ns), (1, 100, 100));
+    let (_, hits, _, overhead, _) = stats();
+    assert_eq!((hits, overhead), (1, 100));
     crate::serial_println!("  [3/8] hit: OK");
 
-    // 4: Disable.
+    // 4: Disabled probe counts a miss, not a hit; total_ns unchanged.
     set_enabled("test_fn", false).expect("disable");
     record_hit("test_fn", 50).expect("miss");
-    let p = per_probe().iter().find(|p| p.func_name == "test_fn").cloned().unwrap();
-    assert_eq!(p.hits, 1); // didn't increment
-    assert_eq!(p.misses, 1);
+    let p = per_probe().into_iter().find(|p| p.func_name == "test_fn").expect("p4");
+    assert_eq!((p.hits, p.misses, p.total_ns), (1, 1, 100));
+    assert_eq!(stats().2, 1); // total_misses
     crate::serial_println!("  [4/8] disable: OK");
 
-    // 5: Re-enable.
+    // 5: Re-enable — hit accrues again; max_ns rises to the larger duration.
     set_enabled("test_fn", true).expect("enable");
     record_hit("test_fn", 200).expect("hit2");
-    let p = per_probe().iter().find(|p| p.func_name == "test_fn").cloned().unwrap();
-    assert_eq!(p.hits, 2);
-    assert_eq!(p.max_ns, 200);
+    let p = per_probe().into_iter().find(|p| p.func_name == "test_fn").expect("p5");
+    assert_eq!((p.hits, p.max_ns, p.total_ns), (2, 200, 300));
     crate::serial_println!("  [5/8] re-enable: OK");
 
-    // 6: Remove.
+    // 6: Remove — list empties; double/unknown remove + unknown hit are NotFound.
     remove_probe("test_fn").expect("remove");
-    assert_eq!(per_probe().len(), 4);
+    assert_eq!(per_probe().len(), 0);
     assert!(remove_probe("test_fn").is_err());
+    assert!(record_hit("nope", 0).is_err());
     crate::serial_println!("  [6/8] remove: OK");
 
-    // 7: Global toggle.
+    // 7: Global tracing toggles from the off default.
+    assert!(!is_enabled());
+    set_global_enabled(true).expect("global on");
     assert!(is_enabled());
     set_global_enabled(false).expect("global off");
     assert!(!is_enabled());
-    set_global_enabled(true).expect("global on");
     crate::serial_println!("  [7/8] global toggle: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above. (Global hit/miss/
+    //    overhead totals are cumulative and not decremented on remove.)
     let (probes, hits, misses, overhead, ops) = stats();
-    assert_eq!(probes, 4);
-    assert!(hits > 95_000_000);
-    assert!(misses > 150);
-    assert!(overhead > 1_100_000_000);
+    assert_eq!((probes, hits, misses, overhead), (0, 2, 1, 300));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("ftrace::self_test() — all 8 tests passed");
 }

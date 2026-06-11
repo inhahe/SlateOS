@@ -1616,6 +1616,20 @@ extern "C" fn kernel_main() -> ! {
     // miss counting and by_type filtering) and resets the list afterward, so it
     // is safe at boot.
     fs::kprobes::self_test();
+    // ftrace backs /proc/ftrace (function-trace diagnostics: per-probe func name/
+    // kind/hits/misses/total-ns/max-ns/enabled plus global hit/miss/overhead
+    // totals and a global tracing on/off flag).  Its init_defaults() previously
+    // seeded four fictional probes — "schedule" (50M hits), "do_page_fault" (10M
+    // hits, 100 misses), "sys_read" (30M hits), and "tcp_sendmsg" (5M hits, 50
+    // misses, disabled) — plus totals of 95M hits / 150 misses / 1.1s overhead
+    // with tracing enabled; that phantom data was removed.  Probes are dynamic so
+    // the list starts empty and global tracing starts OFF (the honest default),
+    // with probes installed via the existing add_probe()/remove_probe() API and
+    // counters advancing only on real record_hit calls.  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions (incl.
+    // disabled-probe miss counting, max-ns tracking, and the global toggle) and
+    // resets the list afterward, so it is safe at boot.
+    fs::ftrace::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -251,12 +251,32 @@ pub fn unregister_rseq(task_id: TaskId) -> Option<(u64, u32, u32)> {
 ///   2. Wakes one waiter on the futex at `ctid` so a `pthread_join`
 ///      caller spinning on it observes the zero and proceeds.
 pub fn on_thread_exit_hook(task_id: TaskId) {
-    // Drop any robust-list registration so the table does not grow
-    // across thread lifetimes.  We do NOT walk the list and wake its
-    // futexes here — that is documented as a known gap (see todo.txt
-    // entry for batch 59).  Removal happens unconditionally, before
-    // the CLEAR_CHILD_TID handling, because robust-list cleanup is
-    // independent of CLONE_CHILD_CLEARTID.
+    // Robust-mutex + PI-owner cleanup for the dying thread.  CR3 still
+    // points at this thread's address space, so the userspace futex words
+    // resolve.  Two independent recovery passes run (see
+    // `ipc::futex` for the full rationale):
+    //
+    //   1. Hand off every PI mutex the thread still owns to its
+    //      highest-priority kernel-blocked waiter, setting FUTEX_OWNER_DIED.
+    //      Without this a `FUTEX_LOCK_PI` waiter on a mutex whose owner
+    //      died would hang forever.
+    //   2. Walk the thread's registered userspace robust list (the
+    //      PTHREAD_MUTEX_ROBUST protocol) and set FUTEX_OWNER_DIED on every
+    //      lock it still holds, waking one waiter per non-PI mutex.
+    //
+    // Order matters: the PI handoff runs first so its authoritative
+    // ownership transfer is not clobbered by the robust walk (which, seeing
+    // a freshly-transferred live owner, leaves that word untouched).
+    crate::ipc::futex::exit_pi_owned_futexes(task_id);
+    let robust_head = ROBUST_LIST.lock().get(&task_id).map(|&(head, _len)| head);
+    if let Some(head) = robust_head {
+        crate::ipc::futex::exit_robust_list(head, task_id);
+    }
+
+    // Drop the robust-list registration so the table does not grow across
+    // thread lifetimes.  Removal happens before the CLEAR_CHILD_TID
+    // handling, because robust-list cleanup is independent of
+    // CLONE_CHILD_CLEARTID.
     ROBUST_LIST.lock().remove(&task_id);
 
     // Drop any rseq registration.  Linux does not zero the userspace

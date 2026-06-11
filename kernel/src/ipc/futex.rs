@@ -46,6 +46,7 @@
 
 use alloc::collections::VecDeque;
 use crate::error::{KernelError, KernelResult};
+use crate::mm::user::{read_user, validate_user_write};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -805,11 +806,12 @@ const FUTEX_WAITERS_BIT: u32 = 1 << 31;
 
 /// Bit flag indicating the owner died while holding the lock (bit 30).
 ///
-/// Matches Linux's `FUTEX_OWNER_DIED` (`0x4000_0000`).  We do not yet run
-/// robust-list cleanup that would set this, but the constant reserves the
-/// bit so it is never mistaken for part of the owner TID and so future
-/// robust-futex support slots in without a layout change.
-#[allow(dead_code)]
+/// Matches Linux's `FUTEX_OWNER_DIED` (`0x4000_0000`).  Set by the
+/// thread-exit cleanup ([`exit_robust_list`] / [`exit_pi_owned_futexes`])
+/// on every futex the dying thread still owned, so the next acquirer of a
+/// `PTHREAD_MUTEX_ROBUST` lock observes the death and can recover the
+/// protected state (`pthread_mutex_consistent`).  Kept distinct from the
+/// owner-TID bits so it is never mistaken for part of the TID.
 const FUTEX_OWNER_DIED_BIT: u32 = 1 << 30;
 
 /// A task waiting on a PI futex address.
@@ -1019,6 +1021,42 @@ pub fn futex_lock_pi_timeout(addr: u64, timeout_ns: u64) -> KernelResult<()> {
     lock_pi_inner(addr, Some(timeout_ns))
 }
 
+/// Try to claim an *ownerless* PI futex word for `current_tid`.
+///
+/// A word is ownerless when its owner-TID bits are clear — either a fully
+/// zero word (normal uncontended lock) or a dead-owner word where
+/// `FUTEX_OWNER_DIED` is set but no successor TID was written (left by
+/// robust / PI exit cleanup with no waiter to inherit).  The CAS preserves
+/// the `FUTEX_OWNER_DIED` and `FUTEX_WAITERS` bits so userspace robust
+/// recovery (the `EOWNERDEAD` path) still sees the death.
+///
+/// Returns `true` if the word was claimed; `false` if a live owner holds it.
+///
+/// # Safety contract
+///
+/// `atomic` must reference a valid, aligned user/kernel `AtomicU32`.
+fn try_acquire_ownerless(atomic: &AtomicU32, current_tid: u32) -> bool {
+    loop {
+        let w = atomic.load(Ordering::Acquire);
+        if w & FUTEX_TID_MASK != 0 {
+            return false; // a live owner holds it
+        }
+        let preserved = w & (FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT);
+        if atomic
+            .compare_exchange(
+                w,
+                current_tid | preserved,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return true;
+        }
+        // Raced with another CAS on the word; loop re-reads and retries.
+    }
+}
+
 /// Shared implementation of PI lock acquisition.
 ///
 /// `timeout_ns`:
@@ -1050,19 +1088,19 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     // SAFETY: Caller guarantees addr is valid and aligned.
     let atomic = unsafe { &*(addr as *const AtomicU32) };
 
-    // Fast path: CAS 0 → our tid (uncontended acquisition).
-    if atomic
-        .compare_exchange(0, current_tid, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
+    // Fast path: claim an ownerless word.  This covers the uncontended
+    // case (word == 0) and the dead-owner case (FUTEX_OWNER_DIED set with
+    // no TID) that robust/PI exit cleanup leaves behind, preserving the
+    // OWNER_DIED bit so userspace robust recovery (EOWNERDEAD) still works.
+    if try_acquire_ownerless(atomic, current_tid) {
         register_pi_owner(addr, addr_space, current_id);
         return Ok(());
     }
 
     // Slow (contended) path.
     //
-    // Read the owner from the futex word.  Retry the CAS once if the
-    // lock appears to have been released between our first CAS and this
+    // Read the owner from the futex word.  Retry the claim if the lock
+    // appears to have become ownerless between our first attempt and this
     // read (race window on SMP; harmless retry on single-CPU).
     let owner_id = {
         let word = atomic.load(Ordering::Acquire);
@@ -1072,11 +1110,8 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
             return Err(KernelError::Deadlock); // Caller already owns it.
         }
         if oid == 0 {
-            // Lock was released between CAS and load — retry.
-            if atomic
-                .compare_exchange(0, current_tid, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            // Lock became ownerless between attempts — retry the claim.
+            if try_acquire_ownerless(atomic, current_tid) {
                 register_pi_owner(addr, addr_space, current_id);
                 return Ok(());
             }
@@ -1380,6 +1415,346 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
     sched::set_inherited_priority(current_id, recalc_priority);
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Thread-exit cleanup: robust-mutex list + owned PI futexes
+// ---------------------------------------------------------------------------
+//
+// When a thread dies (cleanly or abruptly) it may still hold mutexes.  Two
+// independent recovery paths run from the thread-exit hook, both while the
+// dying thread's address space is still active (CR3 unchanged), so the
+// userspace futex words resolve:
+//
+//   * `exit_robust_list` walks the thread's registered userspace robust
+//     list (the `PTHREAD_MUTEX_ROBUST` protocol).  For every lock the
+//     thread still owns it sets `FUTEX_OWNER_DIED` and, for *non-PI*
+//     mutexes with waiters, wakes one so the next acquirer observes the
+//     death.  This mirrors Linux's `exit_robust_list` /
+//     `handle_futex_death` (kernel/futex/core.c).
+//
+//   * `exit_pi_owned_futexes` walks the *kernel* PI ownership records for
+//     the dying thread and hands each held PI mutex to its highest-priority
+//     blocked waiter (or clears it), setting `FUTEX_OWNER_DIED` so the new
+//     owner knows it inherited a dead-owner lock.  This mirrors Linux's
+//     `exit_pi_state_list`: without it, a thread blocked in `FUTEX_LOCK_PI`
+//     on a mutex whose owner died would hang forever.
+//
+// Both must run: the robust-list walk handles the userspace-visible flag
+// and non-PI wakeups; the PI-state walk unblocks kernel-parked PI waiters.
+
+/// Maximum robust-list entries to walk before giving up.
+///
+/// Matches Linux's `ROBUST_LIST_LIMIT` (kernel/futex/core.c).  The list is
+/// userspace-controlled and may be circular or corrupt; this bound
+/// guarantees the exit path terminates regardless of what the (possibly
+/// hostile) program put there.
+const ROBUST_LIST_LIMIT: u32 = 2048;
+
+/// Split a raw robust-list `next` pointer into `(masked_pointer, is_pi)`.
+///
+/// The glibc protocol overloads the low bit of every link as the PI flag,
+/// so the real pointer is the value with bit 0 cleared.  Pure (no memory
+/// access) so the masking is unit-testable.
+fn split_robust_ptr(raw: u64) -> (u64, bool) {
+    (raw & !1u64, raw & 1 != 0)
+}
+
+/// Read one robust-list `next` pointer from user memory and split off its
+/// PI flag bit.
+///
+/// Returns `(masked_pointer, is_pi)`, or `None` if the user read faults
+/// (which aborts the walk, exactly as Linux's `fetch_robust_entry` does).
+fn fetch_robust_entry(ptr: u64) -> Option<(u64, bool)> {
+    // SAFETY: `read_user` validates the range is user-space and mapped
+    // before dereferencing; a fault returns `Err`, never UB.
+    let raw = unsafe { read_user::<u64>(ptr) }.ok()?;
+    Some(split_robust_ptr(raw))
+}
+
+/// The action the dead-owner protocol takes for a given futex word.
+#[derive(Debug, PartialEq, Eq)]
+enum RobustDeath {
+    /// The dying thread does not own this lock — leave it untouched.
+    Leave,
+    /// The (non-PI, list-op-pending) word is already 0: just wake a waiter
+    /// so a contender does not sleep on an unowned lock.
+    WakeOnly,
+    /// Store `new` into the word (OWNER_DIED set, WAITERS preserved, TID
+    /// cleared); `wake` says whether to wake one waiter afterwards.
+    SetDied { new: u32, wake: bool },
+}
+
+/// Pure decision for the robust dead-owner protocol given the current futex
+/// `uval`.  Mirrors Linux's `handle_futex_death` (kernel/futex/core.c)
+/// without any memory access, so the bit logic is unit-testable.
+fn robust_death_transition(uval: u32, dying_tid: u32, pi: bool, pending_op: bool) -> RobustDeath {
+    // Corner case: the thread died right after a userspace lock CAS but
+    // before the word reflected ownership (word == 0).  Only the
+    // list-op-pending, non-PI entry can legitimately be in this state.
+    if pending_op && !pi && uval == 0 {
+        return RobustDeath::WakeOnly;
+    }
+    // Only act on locks the dying thread actually owns.
+    if uval & FUTEX_TID_MASK != dying_tid {
+        return RobustDeath::Leave;
+    }
+    // Set OWNER_DIED, preserve WAITERS, drop the owner TID.  For non-PI
+    // mutexes with waiters, wake one; PI mutexes are handed off by the
+    // PI-state walk instead (matching Linux, which only wakes the `!pi`
+    // case here).
+    let new = (uval & FUTEX_WAITERS_BIT) | FUTEX_OWNER_DIED_BIT;
+    let wake = !pi && uval & FUTEX_WAITERS_BIT != 0;
+    RobustDeath::SetDied { new, wake }
+}
+
+/// Apply the dead-owner protocol to a single futex word in user memory.
+///
+/// Validates `futex_addr` (the offset comes from an attacker-controlled
+/// robust list, so the resulting address may point anywhere) and then
+/// applies [`robust_death_transition`] with a CAS so a concurrent acquirer
+/// cannot be clobbered.
+fn handle_futex_death(futex_addr: u64, dying_tid: u32, pi: bool, pending_op: bool) {
+    // A malformed offset can yield a null or misaligned address; skip it
+    // but keep walking (it cannot be one of our locks).
+    #[allow(clippy::arithmetic_side_effects)]
+    if futex_addr == 0 || futex_addr & 3 != 0 {
+        return;
+    }
+    // The word must be a writable user address.  If it is not (page torn
+    // down already, or a hostile offset pointing outside the mapping),
+    // skip it — we cannot touch it, but the walk continues.
+    if validate_user_write(futex_addr, 4).is_err() {
+        return;
+    }
+
+    // SAFETY: validated as a writable, mapped, 4-byte-aligned user address
+    // just above; the dying thread's address space is still active.
+    let atomic = unsafe { &*(futex_addr as *const AtomicU32) };
+
+    loop {
+        let uval = atomic.load(Ordering::Acquire);
+        match robust_death_transition(uval, dying_tid, pi, pending_op) {
+            RobustDeath::Leave => return,
+            RobustDeath::WakeOnly => {
+                let _ = futex_wake(futex_addr, 1);
+                return;
+            }
+            RobustDeath::SetDied { new, wake } => {
+                if atomic
+                    .compare_exchange(uval, new, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    if wake {
+                        let _ = futex_wake(futex_addr, 1);
+                    }
+                    return;
+                }
+                // Raced with a concurrent CAS on the word; loop re-reads.
+            }
+        }
+    }
+}
+
+/// Walk a dying thread's userspace robust-mutex list and apply the
+/// dead-owner protocol to every lock it still holds.
+///
+/// `head_ptr` is the `struct robust_list_head*` the thread registered via
+/// `set_robust_list(2)`; `dying_task` is its TID.  Must be called from the
+/// dying thread's context so the user reads resolve.
+///
+/// All user pointers are validated before access (the list is
+/// attacker-controlled) and the walk is bounded by [`ROBUST_LIST_LIMIT`],
+/// so a corrupt or circular list cannot hang or corrupt the kernel.
+pub fn exit_robust_list(head_ptr: u64, dying_task: TaskId) {
+    if head_ptr == 0 {
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let dying_tid = (dying_task as u32) & FUTEX_TID_MASK;
+    // A TID of 0 can never appear as a futex owner (the boot thread does
+    // not use robust mutexes), so there is nothing to clean up and the
+    // compare below would spuriously match free words.
+    if dying_tid == 0 {
+        return;
+    }
+
+    // struct robust_list_head {
+    //     struct robust_list *list;          // offset 0  (circular anchor)
+    //     long                futex_offset;   // offset 8  (signed)
+    //     struct robust_list *list_op_pending;// offset 16
+    // };
+    // `head->list.next` is at offset 0 (robust_list has a single `next`).
+    let (mut entry, mut pi) = match fetch_robust_entry(head_ptr) {
+        Some(v) => v,
+        None => return,
+    };
+    // SAFETY: read_user validates the address.
+    let futex_offset = match unsafe { read_user::<i64>(head_ptr.wrapping_add(8)) } {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let (pending, pending_pi) =
+        fetch_robust_entry(head_ptr.wrapping_add(16)).unwrap_or((0, false));
+
+    let mut limit = ROBUST_LIST_LIMIT;
+    // The list is circular: it terminates when we loop back to the anchor
+    // (`&head->list`, whose address is `head_ptr`).
+    while entry != head_ptr {
+        // Fetch the next link BEFORE touching this entry's futex — once
+        // OWNER_DIED is set, a waking thread may unlink and free the node.
+        let next = fetch_robust_entry(entry);
+
+        if entry != pending {
+            let futex_addr = (entry as i64).wrapping_add(futex_offset) as u64;
+            handle_futex_death(futex_addr, dying_tid, pi, false);
+        }
+
+        match next {
+            Some((n, n_pi)) => {
+                entry = n;
+                pi = n_pi;
+            }
+            // Could not read the next link: stop (the rest is unreachable).
+            None => return,
+        }
+
+        limit = limit.saturating_sub(1);
+        if limit == 0 {
+            break;
+        }
+    }
+
+    // Finally, the list-op-pending entry (a lock mid acquire/release when
+    // the thread died), if any.
+    if pending != 0 {
+        let futex_addr = (pending as i64).wrapping_add(futex_offset) as u64;
+        handle_futex_death(futex_addr, dying_tid, pending_pi, true);
+    }
+}
+
+/// Hand off every PI futex owned by a dying thread to its highest-priority
+/// blocked waiter (or clear it), setting `FUTEX_OWNER_DIED` on the new
+/// word.
+///
+/// Without this, a task blocked in `FUTEX_LOCK_PI` on a mutex whose owner
+/// died (e.g. crashed, or exited holding a non-robust PI mutex) would never
+/// be woken — `futex_unlock_pi` is the only other path that transfers
+/// ownership, and a dead thread never calls it.
+///
+/// Runs from the dying thread's context.  The futex-word store is
+/// best-effort (the page may already be unmapped); the authoritative state
+/// is the kernel ownership record plus the `sched::wake`, which the woken
+/// waiter re-checks under the table lock before returning from
+/// `futex_lock_pi`.
+pub fn exit_pi_owned_futexes(dying_task: TaskId) {
+    // Process one owned mutex per iteration.  Each transfer mutates the
+    // owners/waiters tables, so we re-scan from scratch until no ownership
+    // record for the dying task remains.  The number of held mutexes is
+    // small in practice and bounded by the number of registered owners.
+    loop {
+        // Collected under the PI table lock, applied after release to honour
+        // the PI_FUTEX_TABLE → SCHED lock ordering.
+        struct Handoff {
+            addr: u64,
+            new_owner: Option<TaskId>,
+            has_more: bool,
+        }
+
+        let handoff = {
+            let mut table = PI_FUTEX_TABLE.lock();
+
+            // Find one ownership record for the dying task.
+            let mut found: Option<(u64, u64)> = None;
+            'scan: for bucket in &table.owners {
+                for o in bucket {
+                    if o.owner_id == dying_task {
+                        found = Some((o.addr, o.addr_space));
+                        break 'scan;
+                    }
+                }
+            }
+            let (addr, addr_space) = match found {
+                Some(v) => v,
+                None => break, // no more owned PI mutexes
+            };
+
+            // Drop the dead owner's record.
+            unregister_pi_owner(&mut table, addr, addr_space, dying_task);
+
+            // Pick the highest-priority (lowest number) waiter for this addr.
+            let idx = FutexTable::bucket_index(addr, addr_space);
+            let mut best_idx: Option<usize> = None;
+            let mut best_prio: u8 = u8::MAX;
+            // SAFETY: idx is masked to NUM_BUCKETS - 1 by bucket_index.
+            #[allow(clippy::indexing_slicing)]
+            for (i, w) in table.waiters[idx].iter().enumerate() {
+                if w.addr == addr && w.addr_space == addr_space && w.priority < best_prio {
+                    best_prio = w.priority;
+                    best_idx = Some(i);
+                }
+            }
+            // SAFETY: idx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            let new_owner = best_idx
+                .and_then(|bi| table.waiters[idx].remove(bi))
+                .map(|w| w.task_id);
+
+            // Any waiters still queued after we removed the chosen one?
+            // SAFETY: idx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            let has_more = table.waiters[idx]
+                .iter()
+                .any(|w| w.addr == addr && w.addr_space == addr_space);
+
+            // Register the new owner while still holding the lock so a
+            // concurrent locker cannot race in between.
+            if let Some(new_id) = new_owner {
+                // SAFETY: idx is masked to NUM_BUCKETS - 1.
+                #[allow(clippy::indexing_slicing)]
+                table.owners[idx].push_back(PiOwner {
+                    addr,
+                    addr_space,
+                    owner_id: new_id,
+                });
+            }
+
+            Handoff {
+                addr,
+                new_owner,
+                has_more,
+            }
+        };
+
+        // Apply the userspace word + wake outside the table lock.
+        // The word lives in the dying thread's (still-active) address space.
+        if validate_user_write(handoff.addr, 4).is_ok() {
+            // SAFETY: validated writable user address; AS still active.
+            let atomic = unsafe { &*(handoff.addr as *const AtomicU32) };
+            match handoff.new_owner {
+                Some(new_id) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let new_tid = (new_id as u32) & FUTEX_TID_MASK;
+                    let word = new_tid
+                        | FUTEX_OWNER_DIED_BIT
+                        | if handoff.has_more { FUTEX_WAITERS_BIT } else { 0 };
+                    atomic.store(word, Ordering::Release);
+                }
+                None => {
+                    // No waiter: leave OWNER_DIED so the next userspace
+                    // acquirer of a robust mutex still detects the death.
+                    atomic.store(FUTEX_OWNER_DIED_BIT, Ordering::Release);
+                }
+            }
+        }
+
+        // Wake the new owner — even if the word store above failed, the
+        // ownership record is registered, so the waiter returns Ok once it
+        // re-checks the owners table.
+        if let Some(new_id) = handoff.new_owner {
+            sched::wake(new_id);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1786,6 +2161,9 @@ pub fn futex_cmp_requeue_pi(
 /// 2. `futex_wake` with no waiters (returns 0).
 /// 3. Blocking wait + wake via spawned task.
 /// 4. Priority inheritance: high-prio task boosts low-prio lock holder.
+/// 5. Robust dead-owner protocol (pure bit logic + OWNER_DIED relock).
+/// 6. PI owner-death handoff: a blocked `FUTEX_LOCK_PI` waiter inherits a
+///    dead owner's mutex instead of hanging.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[futex] Running futex self-test...");
 
@@ -1796,6 +2174,9 @@ pub fn self_test() -> KernelResult<()> {
     test_wake_op()?;
     test_pi_trylock_deadlock()?;
     test_requeue_pi()?;
+    test_robust_transition()?;
+    test_owner_died_relock()?;
+    test_pi_owner_death_handoff()?;
     test_priority_inheritance()?;
 
     serial_println!("[futex] Futex self-test PASSED");
@@ -2029,6 +2410,267 @@ fn test_requeue_pi() -> KernelResult<()> {
     }
 
     serial_println!("[futex]   Requeue-PI (condvar → PI mutex handoff): OK");
+    Ok(())
+}
+
+// --- Robust-list / dead-owner cleanup tests ------------------------------
+
+/// Test: pure decision logic for the robust dead-owner protocol.
+///
+/// Exercises [`split_robust_ptr`] (PI-flag bit extraction) and every branch
+/// of [`robust_death_transition`].  No memory access, so it is a
+/// deterministic unit test of the bit arithmetic that drives
+/// `handle_futex_death` — the part that cannot be observed on the kernel
+/// test words used elsewhere (the userspace word store is gated behind
+/// `validate_user_write`, which rejects kernel addresses).
+fn test_robust_transition() -> KernelResult<()> {
+    // split_robust_ptr: bit 0 is the PI flag, the rest is the pointer.
+    if split_robust_ptr(0x1000) != (0x1000, false)
+        || split_robust_ptr(0x1001) != (0x1000, true)
+        || split_robust_ptr(0) != (0, false)
+    {
+        serial_println!("[futex]   FAIL: split_robust_ptr");
+        return Err(KernelError::InternalError);
+    }
+
+    let dying: u32 = 0x1234;
+
+    // Not owned by the dying thread → leave untouched.
+    if robust_death_transition(0x5678, dying, false, false) != RobustDeath::Leave {
+        serial_println!("[futex]   FAIL: robust transition (not owner) != Leave");
+        return Err(KernelError::InternalError);
+    }
+
+    // list-op-pending, non-PI, word still 0 (died mid-lock) → wake a waiter.
+    if robust_death_transition(0, dying, false, true) != RobustDeath::WakeOnly {
+        serial_println!("[futex]   FAIL: robust transition (pending op) != WakeOnly");
+        return Err(KernelError::InternalError);
+    }
+
+    // Owned non-PI mutex, no waiters → set OWNER_DIED, no wake.
+    match robust_death_transition(dying, dying, false, false) {
+        RobustDeath::SetDied { new, wake } if new == FUTEX_OWNER_DIED_BIT && !wake => {}
+        other => {
+            serial_println!("[futex]   FAIL: robust transition (owned, no waiters) {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Owned non-PI mutex with waiters → OWNER_DIED, preserve WAITERS, wake.
+    match robust_death_transition(dying | FUTEX_WAITERS_BIT, dying, false, false) {
+        RobustDeath::SetDied { new, wake }
+            if new == (FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT) && wake => {}
+        other => {
+            serial_println!("[futex]   FAIL: robust transition (non-PI waiters) {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Owned PI mutex with waiters → set the flag but do NOT wake here (the
+    // PI-state walk performs the authoritative kernel handoff instead).
+    match robust_death_transition(dying | FUTEX_WAITERS_BIT, dying, true, false) {
+        RobustDeath::SetDied { new, wake }
+            if new == (FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT) && !wake => {}
+        other => {
+            serial_println!("[futex]   FAIL: robust transition (PI waiters) {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[futex]   Robust death transition (pure logic): OK");
+    Ok(())
+}
+
+/// Test: [`try_acquire_ownerless`] recovers dead-owner words while
+/// preserving the recovery bits.
+///
+/// Deterministic (no scheduling): drives a local `AtomicU32` through the
+/// states the robust/PI exit cleanup can leave behind, verifying that a
+/// live owner blocks the claim and that `FUTEX_OWNER_DIED` / `FUTEX_WAITERS`
+/// survive the CAS so userspace `EOWNERDEAD` recovery still works.
+fn test_owner_died_relock() -> KernelResult<()> {
+    let me: u32 = 0x0042;
+
+    // Free word → claimed, owner stamped.
+    let w = AtomicU32::new(0);
+    if !try_acquire_ownerless(&w, me) || w.load(Ordering::SeqCst) != me {
+        serial_println!("[futex]   FAIL: relock free word");
+        return Err(KernelError::InternalError);
+    }
+
+    // Live owner → not claimed, word untouched.
+    let w = AtomicU32::new(0x99);
+    if try_acquire_ownerless(&w, me) || w.load(Ordering::SeqCst) != 0x99 {
+        serial_println!("[futex]   FAIL: relock live owner");
+        return Err(KernelError::InternalError);
+    }
+
+    // Dead owner (OWNER_DIED, no TID) → claimed, OWNER_DIED preserved.
+    let w = AtomicU32::new(FUTEX_OWNER_DIED_BIT);
+    if !try_acquire_ownerless(&w, me)
+        || w.load(Ordering::SeqCst) != (me | FUTEX_OWNER_DIED_BIT)
+    {
+        serial_println!("[futex]   FAIL: relock OWNER_DIED");
+        return Err(KernelError::InternalError);
+    }
+
+    // Dead owner with waiters → claimed, both recovery bits preserved.
+    let w = AtomicU32::new(FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT);
+    if !try_acquire_ownerless(&w, me)
+        || w.load(Ordering::SeqCst) != (me | FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT)
+    {
+        serial_println!("[futex]   FAIL: relock OWNER_DIED|WAITERS");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[futex]   OWNER_DIED relock (preserves recovery bits): OK");
+    Ok(())
+}
+
+// --- PI owner-death handoff test state -----------------------------------
+//
+// Statics (not stack words) so they stay live across the whole handoff: the
+// owner worker acquires the PI mutex, a waiter worker blocks on it, the
+// driver simulates the owner's death via `exit_pi_owned_futexes`, and the
+// waiter must inherit ownership instead of hanging.
+
+/// PI mutex word for the owner-death test (0 = free).
+static PID_PI: AtomicU32 = AtomicU32::new(0);
+/// Set to 1 once the owner worker holds the PI mutex (2 on acquire error).
+static PID_OWNED: AtomicU32 = AtomicU32::new(0);
+/// Incremented by the waiter just before it parks on `futex_lock_pi`.
+static PID_W_PARKED: AtomicU32 = AtomicU32::new(0);
+/// Set to 1 once the waiter inherits ownership and returns from the lock.
+static PID_RECOVERED: AtomicU32 = AtomicU32::new(0);
+/// Set to 1 by either worker on an unexpected error.
+static PID_FAIL: AtomicU32 = AtomicU32::new(0);
+/// Driver sets this to release the owner worker after the handoff.
+static PID_EXIT: AtomicU32 = AtomicU32::new(0);
+
+/// Owner worker: acquires the PI mutex, then spins until released.  It does
+/// NOT unlock — the driver simulates its death by transferring ownership
+/// away with `exit_pi_owned_futexes`, so by exit time it no longer owns the
+/// lock.
+extern "C" fn pi_death_owner(_arg: u64) {
+    let addr = (&raw const PID_PI) as u64;
+    if futex_lock_pi(addr).is_err() {
+        PID_FAIL.store(1, Ordering::SeqCst);
+        PID_OWNED.store(2, Ordering::SeqCst);
+        return;
+    }
+    PID_OWNED.store(1, Ordering::SeqCst);
+    // Bounded spin so a missed signal can never hang the self-test.
+    for _ in 0..100_000 {
+        if PID_EXIT.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        sched::yield_now();
+    }
+}
+
+/// Waiter worker: blocks on the PI mutex the owner holds.  When the owner
+/// "dies", the PI-state handoff must transfer ownership here so this returns
+/// `Ok` instead of hanging forever.
+#[allow(clippy::cast_possible_truncation)]
+extern "C" fn pi_death_waiter(_arg: u64) {
+    let addr = (&raw const PID_PI) as u64;
+    PID_W_PARKED.fetch_add(1, Ordering::SeqCst);
+    match futex_lock_pi(addr) {
+        Ok(()) => {
+            PID_RECOVERED.store(1, Ordering::SeqCst);
+            // The kernel-memory test word was not rewritten by the handoff
+            // (validate_user_write rejects kernel addresses), so stamp our
+            // ownership before releasing to keep the table tidy.
+            let me = (sched::current_task_id() as u32) & FUTEX_TID_MASK;
+            PID_PI.store(me, Ordering::SeqCst);
+            let _ = futex_unlock_pi(addr);
+        }
+        Err(_) => {
+            PID_FAIL.store(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Test: a `FUTEX_LOCK_PI` waiter inherits ownership when the owner dies.
+///
+/// Mirrors Linux's `exit_pi_state_list`: without the kernel-side handoff a
+/// task blocked on a PI mutex whose owner exited would hang forever.  The
+/// driver calls [`exit_pi_owned_futexes`] directly (the spawn-based kernel
+/// workers do not run the userspace thread-exit hook), then verifies the
+/// waiter recovered.
+fn test_pi_owner_death_handoff() -> KernelResult<()> {
+    PID_PI.store(0, Ordering::SeqCst);
+    PID_OWNED.store(0, Ordering::SeqCst);
+    PID_W_PARKED.store(0, Ordering::SeqCst);
+    PID_RECOVERED.store(0, Ordering::SeqCst);
+    PID_FAIL.store(0, Ordering::SeqCst);
+    PID_EXIT.store(0, Ordering::SeqCst);
+
+    let owner_id = sched::spawn(b"pi-death-own", 16, pi_death_owner, 0, 0)?;
+
+    // Let the owner acquire the PI mutex.
+    for _ in 0..50 {
+        if PID_OWNED.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        sched::yield_now();
+    }
+    if PID_OWNED.load(Ordering::SeqCst) != 1 {
+        serial_println!("[futex]   FAIL: PI-death owner never acquired");
+        return Err(KernelError::InternalError);
+    }
+
+    // Spawn the waiter; let it register as a PI waiter and block.
+    sched::spawn(b"pi-death-wait", 16, pi_death_waiter, 0, 0)?;
+    for _ in 0..50 {
+        if PID_W_PARKED.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        sched::yield_now();
+    }
+    // Extra yields so it is fully blocked inside futex_lock_pi (the WAITERS
+    // bit is set and the waiter record is registered) before we hand off.
+    sched::yield_now();
+    sched::yield_now();
+    sched::yield_now();
+
+    // Simulate the owner's death: transfer its held PI mutexes to the
+    // highest-priority blocked waiter.
+    exit_pi_owned_futexes(owner_id);
+
+    // Let the waiter wake and inherit ownership.
+    for _ in 0..200 {
+        if PID_RECOVERED.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        sched::yield_now();
+    }
+
+    // Release the owner worker and let it (and the waiter) finish.
+    PID_EXIT.store(1, Ordering::SeqCst);
+    for _ in 0..100 {
+        if PID_OWNED.load(Ordering::SeqCst) == 1
+            && PID_RECOVERED.load(Ordering::SeqCst) != 0
+        {
+            // Both progressed; a few more yields lets them return.
+        }
+        sched::yield_now();
+    }
+
+    let recovered = PID_RECOVERED.load(Ordering::SeqCst);
+    let fail = PID_FAIL.load(Ordering::SeqCst);
+    sched::reap_dead_tasks();
+
+    if recovered != 1 || fail != 0 {
+        serial_println!(
+            "[futex]   FAIL: PI owner-death handoff recovered={} fail={}",
+            recovered,
+            fail
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[futex]   PI owner-death handoff (waiter inherits): OK");
     Ok(())
 }
 

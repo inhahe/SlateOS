@@ -9123,21 +9123,65 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          trip via the storage layer, NULL re-register
 ##          clears the entry, cross-task get -> EPERM.
 ##
-##      Known limitations:
-##        - We do NOT walk the robust list on thread
-##          exit and wake its futexes.  That is the
-##          PTHREAD_MUTEX_ROBUST_NP cleanup protocol; a
-##          program that opts into robust mutexes today
-##          will see those mutexes stay locked when an
-##          owning thread dies abruptly.  Fix requires
-##          (a) a user-pointer-readable context at the
-##          point of on_thread_exit_hook and (b) the
-##          actual list walk + futex_wake loop, neither
-##          of which is hard but both of which need
-##          their own self-test for the walk's bounded-
-##          iteration guard.  We have no current
-##          consumer of robust mutexes, so it stays
-##          here as a documented gap.
+##      RESOLVED (Batch 353): robust-list walk + PI
+##      owner-death cleanup on thread exit now implemented.
+##        - kernel/src/ipc/futex.rs:
+##          * exit_robust_list(head, tid): walks the
+##            userspace robust_list_head the thread
+##            registered (set_robust_list), bounded by
+##            ROBUST_LIST_LIMIT=2048 (matches Linux), reads
+##            futex_offset, handles list_op_pending, and for
+##            every owned lock sets FUTEX_OWNER_DIED
+##            (preserving FUTEX_WAITERS, clearing the TID).
+##            For non-PI mutexes with waiters it wakes one
+##            (futex_wake). Mirrors Linux exit_robust_list /
+##            handle_futex_death (kernel/futex/core.c). Every
+##            user pointer goes through read_user /
+##            validate_user_write, so a hostile or circular
+##            list cannot fault or hang the kernel.
+##          * exit_pi_owned_futexes(tid): walks the *kernel*
+##            PI ownership records and hands each held PI
+##            mutex to its highest-priority blocked waiter
+##            (registering the new owner + sched::wake), or
+##            clears it (OWNER_DIED only) if none. Mirrors
+##            Linux exit_pi_state_list; without it a
+##            FUTEX_LOCK_PI waiter whose owner died would
+##            hang forever.
+##          * try_acquire_ownerless(): lock_pi fast path now
+##            reclaims dead-owner words (OWNER_DIED set, no
+##            TID), preserving OWNER_DIED/WAITERS so
+##            userspace EOWNERDEAD recovery still works.
+##        - kernel/src/proc/thread_clone.rs:
+##            on_thread_exit_hook calls exit_pi_owned_futexes
+##            FIRST (authoritative kernel handoff), then
+##            exit_robust_list (userspace-visible flag +
+##            non-PI wakes), then drops the ROBUST_LIST
+##            entry. PI-first ordering so the robust walk
+##            cannot clobber a transferred PI owner. The hook
+##            runs in the dying thread's context (CR3 still
+##            its own), so the user reads resolve.
+##        - Self-tests (futex.rs self_test): test_robust_
+##            transition (pure split_robust_ptr +
+##            robust_death_transition branches), test_owner_
+##            died_relock (deterministic try_acquire_owner-
+##            less on a local AtomicU32: free/live/OWNER_DIED/
+##            OWNER_DIED|WAITERS), test_pi_owner_death_handoff
+##            (spawn owner+waiter, driver calls exit_pi_owned_
+##            futexes directly — spawn workers don't run the
+##            userspace exit hook — and verifies the waiter
+##            inherits the mutex). All print OK in the boot
+##            test.
+##        - Testability note: handle_futex_death's userspace
+##            OWNER_DIED *word store* is gated behind
+##            validate_user_write, which rejects kernel
+##            addresses, so it cannot be observed on the
+##            kernel test words — that store path is verified
+##            by inspection. The pure bit logic
+##            (robust_death_transition), the ownerless relock
+##            (try_acquire_ownerless), and the kernel PI
+##            handoff (register owner + wake, which does NOT
+##            depend on the word store) ARE unit/integration
+##            tested above.
 ##        - EPERM for cross-task get_robust_list is
 ##          strictly stricter than Linux (Linux allows
 ##          it with PTRACE_MODE_READ_REALCREDS or

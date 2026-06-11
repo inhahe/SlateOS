@@ -1234,6 +1234,14 @@ extern "C" fn kernel_main() -> ! {
     // automated coverage it previously lacked (it was only reachable via the
     // `cgiostat test` kshell subcommand).
     fs::cgiostat::self_test();
+    // compstat backs /proc/compstat (per-zone memory compaction attempts, page
+    // migrations, scan activity, stalls); like its siblings the self-test now
+    // builds fixtures via the real register_zone/start_compaction/
+    // finish_compaction/record_stall API and resets the table afterward
+    // (leaving no fabricated rows), so it is safe at boot and gives the module
+    // automated coverage it previously lacked (it was only reachable via the
+    // `compstat test` kshell subcommand).
+    fs::compstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -388,16 +388,25 @@
 ##                    record_throttle/record_io_wait API; just emptied
 ##                    init_defaults (next_id reset to 1) and rebuilt self_test
 ##                    with exact assertions, wired into boot.)
+##   - compstat.rs   (fixed 2026-06-11; was: three fake zones DMA32 (attempts
+##                    50), Normal (attempts 500 / pages_migrated 80000), Movable
+##                    (attempts 100); aggregates total_attempts 650,
+##                    total_migrations 103000, total_stalls 25, total_stall_ns
+##                    500M. start_compaction required a pre-existing zone
+##                    (NotFound otherwise) but there was NO registration API, so
+##                    added register_zone(zone) for zeroed per-zone rows; emptied
+##                    init_defaults and rebuilt self_test with exact assertions
+##                    (incl. exact 66% success rate, exact migration/stall
+##                    totals), wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): compstat,
-##     dmastat, inodestat, ksmstat, mmapstat, pagestat, pidstat, pmcstat,
-##     powerstat, procstat, ratestat, rqstat, schedlat, ttystat, zramstat.
-##     NOTE: some may be SETTINGS modules seeding legitimate config defaults —
-##     verify each is a STATISTICS module seeding fake OBSERVATIONS before
-##     emptying it.)
-## After cgiostat, continue auditing the remaining *stat/*latency/*stats siblings.
+##     by grep (init_defaults with alloc::vec!/String::from/push): dmastat,
+##     inodestat, ksmstat, mmapstat, pagestat, pidstat, pmcstat, powerstat,
+##     procstat, ratestat, rqstat, schedlat, ttystat, zramstat. NOTE: some may
+##     be SETTINGS modules seeding legitimate config defaults — verify each is a
+##     STATISTICS module seeding fake OBSERVATIONS before emptying it.)
+## After compstat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

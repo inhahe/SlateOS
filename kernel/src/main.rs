@@ -2050,6 +2050,20 @@ extern "C" fn kernel_main() -> ! {
     // resets STATE afterward — the old test left `testapp`/`daemon` behind, which
     // would have leaked into /proc/taskmon now that it runs at boot.
     fs::taskmon::self_test();
+    // vmmap is the kernel-side VMA monitor behind /proc/vmmap and the `vmmap`
+    // kshell command.  Its init_defaults() previously seeded a FABRICATED pid-1
+    // address space — three invented VMAs ([text] r-x, [heap] rw, [stack] rw)
+    // with made-up resident/dirty page counts and totals — which /proc/vmmap and
+    // the `vmmap` command displayed as if pid 1 were a real process.  The
+    // authoritative per-process VMA list is crate::proc::pcb::list_vmas (already
+    // backing /proc/<pid>/maps).  vmmap now seeds an EMPTY table (VMAs arrive via
+    // create_vma / remove_vma once the memory manager wires mmap/munmap; see the
+    // DEFERRED PROPER FIX note in todo.txt for reading the aggregate view from
+    // pcb::list_vmas).  This self_test (never wired before, and whose old version
+    // relied on the fabricated pid 1 with no end-reset) builds its own fixtures
+    // via the real API with exact assertions and resets STATE afterward so
+    // nothing leaks into /proc/vmmap.
+    fs::vmmap::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

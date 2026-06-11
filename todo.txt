@@ -1812,6 +1812,40 @@
 ##                    diagnostic mutate the live scheduler?). Do as a focused dedicated
 ##                    task once per-process cpu/mem accounting and sched control hooks
 ##                    exist. Until then the empty registry is honest.
+##   - vmmap (2026-06-11): FIXED — fabrication case (a) (full create_vma/remove_vma
+##                    API already existed). Kernel-side VMA monitor behind
+##                    /proc/vmmap and the `vmmap` kshell command. init_defaults()
+##                    FABRICATED a pid-1 address space — three invented VMAs ([text]
+##                    0x400000-0x500000 r-x 64 resident, [heap] 0x600000-0x700000 rw
+##                    128 resident/32 dirty, [stack] 0x7FFF_FFFF_0000.. rw 4 pages)
+##                    plus invented totals (total_mapped 0x200000, total_resident
+##                    196, total_maps 3, total_vmas 3), which /proc/vmmap and the
+##                    `vmmap` command displayed as if pid 1 were a real process.
+##                    create_vma/remove_vma have NO real callers (the memory manager
+##                    never calls them); the module is entirely unwired. Fixed:
+##                    init_defaults() now seeds an EMPTY table (no processes, zero
+##                    totals). Also: the self_test was NEVER wired into boot AND
+##                    relied on the fabricated pid 1 (asserted procs[0].1==3) with no
+##                    end-reset — so wiring it would have leaked test VMAs into
+##                    /proc/vmmap. Rewrote it residue-free (clears STATE at start AND
+##                    end) with EXACT assertions (empty init, create→auto-create
+##                    process, second VMA, remove, second process, address_space
+##                    total_mapped 0x100000, perm labels, not-found, final 2 procs /
+##                    2 vmas / 3 maps / 1 unmap) and WIRED it into the boot self-test
+##                    path. /proc/vmmap now reports an empty table (truthful).
+##                    DEFERRED PROPER FIX: the authoritative per-process VMA list is
+##                    crate::proc::pcb::list_vmas(pid) -> Option<Vec<Vma>> (already
+##                    backing /proc/<pid>/maps). The proper fix is to make vmmap's
+##                    aggregate read paths (list_processes/list_vmas/address_space/
+##                    stats) a read-through that enumerates live processes and reads
+##                    pcb::list_vmas for each, mapping pcb::Vma → vmmap::Vma (perm +
+##                    VmaType). Deferred because: (1) it needs a live-process
+##                    enumeration entry point feeding pid → pcb::list_vmas, and (2)
+##                    pcb's Vma carries different fields (mapping kind / flags) than
+##                    vmmap's resident_pages/dirty_pages, so the VmaType + resident/
+##                    dirty mapping must be defined deliberately rather than guessed.
+##                    Do as a focused task once a process-enumeration hook is exposed.
+##                    Until then the empty table is honest.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1825,7 +1859,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon (just fixed) were fifty. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap (just fixed) were fifty-one. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

@@ -140,27 +140,32 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** VMA tracking table.
+///
+/// Seeds NO processes and zero totals.  Mappings are tracked through
+/// [`create_vma`] / [`remove_vma`] as the memory manager services mmap/munmap;
+/// until that wiring exists, `/proc/vmmap` and the `vmmap` kshell command report
+/// an empty table rather than a fabricated address space — the kernel's hard
+/// "never invent data in procfs" rule.
+///
+/// (Previously this seeded a fabricated process — pid 1 with three VMAs: `[text]`
+/// 0x400000–0x500000 r-x 64 resident pages, `[heap]` 0x600000–0x700000 rw 128
+/// resident / 32 dirty, `[stack]` 0x7FFF_FFFF_0000.. rw 4 pages — plus invented
+/// totals (total_mapped 0x200000, total_resident 196, total_maps 3, total_vmas
+/// 3), which `/proc/vmmap` and the `vmmap` kshell command then displayed as if
+/// they were a real process address space.  The authoritative per-process VMA
+/// list is [`crate::proc::pcb::list_vmas`] (already backing `/proc/<pid>/maps`);
+/// see the DEFERRED PROPER FIX note in todo.txt for wiring the aggregate view to
+/// it.  The self-test now builds its own fixtures via the real API — see
+/// [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        processes: alloc::vec![
-            ProcessAddrSpace {
-                pid: 1,
-                vmas: alloc::vec![
-                    Vma { start: 0x400000, end: 0x500000, perm: VmaPerm { read: true, write: false, exec: true, shared: false }, vma_type: VmaType::FileBacked, name: String::from("[text]"), resident_pages: 64, dirty_pages: 0 },
-                    Vma { start: 0x600000, end: 0x700000, perm: VmaPerm { read: true, write: true, exec: false, shared: false }, vma_type: VmaType::Heap, name: String::from("[heap]"), resident_pages: 128, dirty_pages: 32 },
-                    Vma { start: 0x7FFF_FFFF_0000, end: 0x7FFF_FFFF_FFFF, perm: VmaPerm { read: true, write: true, exec: false, shared: false }, vma_type: VmaType::Stack, name: String::from("[stack]"), resident_pages: 4, dirty_pages: 4 },
-                ],
-                total_mapped: 0x200000,
-                total_resident: 196,
-                maps_count: 3,
-                unmaps_count: 0,
-            },
-        ],
-        total_maps: 3,
+        processes: Vec::new(),
+        total_maps: 0,
         total_unmaps: 0,
-        total_vmas: 3,
+        total_vmas: 0,
         ops: 0,
     });
 }
@@ -243,57 +248,71 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("vmmap::self_test() — running tests...");
+    // Start from a clean slate so the fixtures built below can never leak into
+    // the live /proc/vmmap table (this self-test now runs at boot).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    let procs = list_processes();
-    assert_eq!(procs.len(), 1);
-    assert_eq!(procs[0].1, 3); // 3 VMAs for pid 1.
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated process address spaces.
+    assert_eq!(list_processes().len(), 0);
+    let (p0, v0, m0, u0, _ops0) = stats();
+    assert_eq!(p0, 0);
+    assert_eq!(v0, 0);
+    assert_eq!(m0, 0);
+    assert_eq!(u0, 0);
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Create VMA.
-    let perm = VmaPerm { read: true, write: true, exec: false, shared: false };
-    create_vma(1, 0x800000, 0x100000, perm, VmaType::Anonymous, "[anon]").expect("create");
-    assert_eq!(list_vmas(1).len(), 4);
+    // 2: Create VMA — auto-creates the owning process.
+    let rw = VmaPerm { read: true, write: true, exec: false, shared: false };
+    create_vma(1, 0x400000, 0x100000, rw, VmaType::Heap, "[heap]").expect("create");
+    assert_eq!(list_processes().len(), 1);
+    assert_eq!(list_vmas(1).len(), 1);
     crate::serial_println!("  [2/8] create vma: OK");
 
-    // 3: Remove VMA.
+    // 3: Second VMA on the same process.
+    create_vma(1, 0x800000, 0x100000, rw, VmaType::Anonymous, "[anon]").expect("create2");
+    assert_eq!(list_vmas(1).len(), 2);
+    crate::serial_println!("  [3/8] second vma: OK");
+
+    // 4: Remove VMA.
     remove_vma(1, 0x800000).expect("remove");
-    assert_eq!(list_vmas(1).len(), 3);
-    crate::serial_println!("  [3/8] remove vma: OK");
+    assert_eq!(list_vmas(1).len(), 1);
+    crate::serial_println!("  [4/8] remove vma: OK");
 
-    // 4: Auto-create process.
-    let perm = VmaPerm { read: true, write: false, exec: true, shared: false };
-    create_vma(500, 0x400000, 0x10000, perm, VmaType::FileBacked, "[text]").expect("auto_create");
+    // 5: Auto-create a second process.
+    let rx = VmaPerm { read: true, write: false, exec: true, shared: false };
+    create_vma(500, 0x10000, 0x10000, rx, VmaType::FileBacked, "[text]").expect("auto_create");
     assert_eq!(list_processes().len(), 2);
-    crate::serial_println!("  [4/8] auto-create process: OK");
+    crate::serial_println!("  [5/8] auto-create process: OK");
 
-    // 5: Address space.
+    // 6: Address space summary — exact mapped total for pid 1
+    //    (0x100000 mapped + 0x100000 mapped - 0x100000 unmapped).
     let space = address_space(1).expect("addr_space");
     assert_eq!(space.pid, 1);
-    assert!(space.total_mapped > 0);
-    crate::serial_println!("  [5/8] address space: OK");
+    assert_eq!(space.total_mapped, 0x100000);
+    crate::serial_println!("  [6/8] address space: OK");
 
-    // 6: VMA permissions.
+    // 7: Permission labels + not-found edge cases.
     let perm = VmaPerm { read: true, write: true, exec: true, shared: true };
     assert_eq!(perm.label(), "rwxs");
     let perm2 = VmaPerm { read: true, write: false, exec: false, shared: false };
     assert_eq!(perm2.label(), "r---");
-    crate::serial_println!("  [6/8] permissions: OK");
-
-    // 7: Remove not found.
     assert!(remove_vma(1, 0xDEAD).is_err());
     assert!(remove_vma(999, 0).is_err());
-    crate::serial_println!("  [7/8] not found: OK");
+    crate::serial_println!("  [7/8] permissions + not found: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact totals (3 created, 1 removed).
     let (procs, vmas, maps, unmaps, ops) = stats();
     assert_eq!(procs, 2);
-    assert!(vmas >= 4);
-    assert!(maps >= 5);
-    assert!(unmaps >= 1);
+    assert_eq!(vmas, 2);
+    assert_eq!(maps, 3);
+    assert_eq!(unmaps, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the boot self-test leaves no fixtures behind in /proc/vmmap.
+    *STATE.lock() = None;
+    init_defaults();
 
     crate::serial_println!("vmmap::self_test() — all 8 tests passed");
 }

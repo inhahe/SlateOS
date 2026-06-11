@@ -259,6 +259,12 @@ pub fn stats() -> (u64, usize, usize, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("sysresource::self_test() — running tests...");
+    // Start from a clean slate so the fixtures pushed below (sample snapshots,
+    // a Network alert) can never leak into the live /proc/sysresource view.
+    // sysresource::init_defaults is not wired into boot, so the natural state
+    // is uninitialised — running `sysresource test` from kshell must leave it
+    // that way rather than permanently injecting fabricated samples/alerts.
+    *STATE.lock() = None;
     init_defaults();
 
     // 1: Empty.
@@ -324,6 +330,10 @@ pub fn self_test() {
     assert_eq!(total_alerts, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the test leaves no fixtures (2 samples, 1 alert, a 5th
+    // threshold) behind in the live /proc/sysresource registry.
+    *STATE.lock() = None;
 
     crate::serial_println!("sysresource::self_test() — all 8 tests passed");
 }

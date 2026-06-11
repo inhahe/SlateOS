@@ -2112,7 +2112,19 @@
 ##     zeroed 15.1M fabricated events / all activity counters. memlayout fixed
 ##     2026-06-11: PROPER FIX — was fabricating a fixed ~1 GiB layout in
 ##     init_defaults(); now populated from the REAL Limine memmap via
-##     populate_from_memmap(), called from main.rs after heap init.)
+##     populate_from_memmap(), called from main.rs after heap init.
+##     sysprofiler fixed 2026-06-11: READ-THROUGH (proper fix, not empty-init) —
+##     CPU section now built from live CPUID/topology (crate::cpu /
+##     crate::cpu_topology), Memory from crate::mm::frame::stats; device sections
+##     left absent; self_test wired + made residue-free. sysresource audited
+##     2026-06-11: NOT a fabricator — init_defaults() seeds only alert-threshold
+##     CONFIGURATION (CPU 90/Mem 85/Swap 80/GPU 95) + empty history + zero
+##     counters; the big literals the grep flagged are in the self_test, not
+##     init_defaults (false positive). Neither init_defaults nor self_test is
+##     boot-wired, so /proc/sysresource is uninitialised at boot (no fabrication).
+##     Only fix: made self_test residue-free (resets STATE at start AND end) so the
+##     interactive `sysresource test` kshell command no longer permanently injects
+##     2 fake samples + a phantom alert into the live /proc/sysresource view.)
 ##     Remaining flagged
 ##     names incl.: (none — all previously-flagged candidates resolved. Re-run the
 ##     `fn init_defaults` + large-numeric-literal grep over kernel/src/fs/*.rs to

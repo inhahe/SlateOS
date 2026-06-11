@@ -1492,6 +1492,17 @@ extern "C" fn kernel_main() -> ! {
     // The residue-free self_test builds its fixtures via the real API with exact
     // assertions and resets the table afterward, so it is safe at boot.
     fs::memcg::self_test();
+    // cgmem backs /proc/cgmem (per-cgroup page-level memory stats: usage/RSS/
+    // cache/swap pages, charges, uncharges, OOM kills, high-watermark events).
+    // Its init_defaults() previously seeded three fictional cgroups — "root"
+    // 500k usage pages / 10M charges, "system" 1M limit / 5M charges / 2 OOM,
+    // "user" 2M limit / 20M charges / 5 OOM — plus invented totals (35M charges,
+    // 33.3M uncharges, 7 OOM kills); that demo data was removed (cgroups are
+    // created via create() and pages accounted only through real record_charge/
+    // record_uncharge calls).  The residue-free self_test builds its fixtures via
+    // the real API with exact assertions and resets the table afterward, so it is
+    // safe at boot.
+    fs::cgmem::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -82,19 +82,29 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the per-cgroup memory-statistics state.
+///
+/// Starts with no cgroups and all charge/uncharge/OOM totals at zero. The
+/// `/proc/cgmem` generator and the `cgmem` kshell command surface this
+/// table as if it reflects real per-cgroup page accounting, so seeding it
+/// with invented cgroups and charge counts would be fabricated procfs
+/// data. Cgroups are created at runtime through [`create`] and pages are
+/// accounted only through real [`record_charge`] / [`record_uncharge`]
+/// calls.
+///
+/// (Previously this seeded three fictional cgroups — "root" 500k usage
+/// pages / 10M charges; "system" 1M limit / 400k usage / 5M charges / 2
+/// OOM; "user" 2M limit / 800k usage / 20M charges / 5 OOM — plus invented
+/// totals (35M charges, 33.3M uncharges, 7 OOM kills).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        cgroups: alloc::vec![
-            CgroupMemStats { cg_id: 1, name: String::from("root"), limit_pages: u64::MAX, usage_pages: 500_000, rss_pages: 300_000, cache_pages: 150_000, swap_pages: 50_000, charges: 10_000_000, uncharges: 9_500_000, oom_kills: 0, high_events: 0 },
-            CgroupMemStats { cg_id: 2, name: String::from("system"), limit_pages: 1_000_000, usage_pages: 400_000, rss_pages: 250_000, cache_pages: 100_000, swap_pages: 50_000, charges: 5_000_000, uncharges: 4_600_000, oom_kills: 2, high_events: 100 },
-            CgroupMemStats { cg_id: 3, name: String::from("user"), limit_pages: 2_000_000, usage_pages: 800_000, rss_pages: 500_000, cache_pages: 200_000, swap_pages: 100_000, charges: 20_000_000, uncharges: 19_200_000, oom_kills: 5, high_events: 500 },
-        ],
-        next_id: 4,
-        total_charges: 35_000_000,
-        total_uncharges: 33_300_000,
-        total_oom_kills: 7,
+        cgroups: Vec::new(),
+        next_id: 1,
+        total_charges: 0,
+        total_uncharges: 0,
+        total_oom_kills: 0,
         ops: 0,
     });
 }
@@ -185,63 +195,74 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("cgmem::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live cgroup table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_cgroup().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated cgroups, all totals zero.
+    assert_eq!(per_cgroup().len(), 0);
+    let (cg0, charges0, uncharges0, ooms0, _) = stats();
+    assert_eq!((cg0, charges0, uncharges0, ooms0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Create.
-    let id = cgmem_create_helper();
-    assert!(id >= 4);
-    assert_eq!(per_cgroup().len(), 4);
+    // 2: Create — ids monotonic starting at 1; unknown-id charge errors.
+    let id = create("test_cg", 10_000).expect("create");
+    assert_eq!(id, 1);
+    assert_eq!(per_cgroup().len(), 1);
+    assert!(record_charge(99, 1, false).is_err());
     crate::serial_println!("  [2/8] create: OK");
 
-    // 3: Charge RSS.
+    // 3: Charge RSS — usage and rss tracked, cache untouched.
     record_charge(id, 100, false).expect("charge_rss");
-    let c = per_cgroup().iter().find(|c| c.cg_id == id).cloned().unwrap();
+    let c = per_cgroup().into_iter().find(|c| c.cg_id == id).expect("cg");
     assert_eq!(c.usage_pages, 100);
     assert_eq!(c.rss_pages, 100);
+    assert_eq!(c.cache_pages, 0);
     crate::serial_println!("  [3/8] charge rss: OK");
 
-    // 4: Charge cache.
+    // 4: Charge cache — separate bucket, usage is the sum.
     record_charge(id, 50, true).expect("charge_cache");
-    let c = per_cgroup().iter().find(|c| c.cg_id == id).cloned().unwrap();
+    let c = per_cgroup().into_iter().find(|c| c.cg_id == id).expect("cg");
     assert_eq!(c.cache_pages, 50);
     assert_eq!(c.usage_pages, 150);
     crate::serial_println!("  [4/8] charge cache: OK");
 
-    // 5: Uncharge.
+    // 5: Uncharge RSS — usage and rss drop, cache unaffected.
     record_uncharge(id, 30, false).expect("uncharge");
-    let c = per_cgroup().iter().find(|c| c.cg_id == id).cloned().unwrap();
+    let c = per_cgroup().into_iter().find(|c| c.cg_id == id).expect("cg");
     assert_eq!(c.rss_pages, 70);
+    assert_eq!(c.cache_pages, 50);
     assert_eq!(c.usage_pages, 120);
     crate::serial_println!("  [5/8] uncharge: OK");
 
-    // 6: OOM.
-    record_oom(id).expect("oom");
-    let c = per_cgroup().iter().find(|c| c.cg_id == id).cloned().unwrap();
-    assert_eq!(c.oom_kills, 1);
-    crate::serial_println!("  [6/8] oom: OK");
+    // 6: High-event detection when usage exceeds the page limit.
+    let id2 = create("small_cg", 10).expect("create2");
+    record_charge(id2, 25, false).expect("charge over limit");
+    let c = per_cgroup().into_iter().find(|c| c.cg_id == id2).expect("cg2");
+    assert_eq!(c.high_events, 1);
+    record_oom(id2).expect("oom");
+    assert_eq!(per_cgroup().into_iter().find(|c| c.cg_id == id2).expect("cg2").oom_kills, 1);
+    crate::serial_println!("  [6/8] high event + oom: OK");
 
-    // 7: Remove.
+    // 7: Remove — gone, and double-remove errors.
     remove(id).expect("remove");
-    assert_eq!(per_cgroup().len(), 3);
+    remove(id2).expect("remove2");
+    assert_eq!(per_cgroup().len(), 0);
     assert!(remove(id).is_err());
     crate::serial_println!("  [7/8] remove: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above (3 charges, 1
+    //    uncharge, 1 OOM; both cgroups removed).
     let (cgroups, charges, uncharges, ooms, ops) = stats();
-    assert_eq!(cgroups, 3);
-    assert!(charges > 35_000_000);
-    assert!(uncharges > 33_300_000);
-    assert!(ooms > 7);
+    assert_eq!(cgroups, 0);
+    assert_eq!(charges, 3);
+    assert_eq!(uncharges, 1);
+    assert_eq!(ooms, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("cgmem::self_test() — all 8 tests passed");
-}
-
-fn cgmem_create_helper() -> u32 {
-    create("test_cg", 10_000).expect("create")
 }

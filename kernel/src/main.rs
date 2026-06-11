@@ -1403,6 +1403,16 @@ extern "C" fn kernel_main() -> ! {
     // self_test builds its fixtures via the real API with exact assertions and
     // resets the table afterward, so it is safe at boot.
     fs::netqueue::self_test();
+    // pagecache backs /proc/pagecache (per-device file-cache hits/misses/
+    // evictions/readahead and derived hit-rate/readahead-rate).  Its
+    // init_defaults() previously seeded two fictional devices (sda/nvme0n1) with
+    // 600M fabricated hits and a conjured 97.5% hit rate; that demo data was
+    // removed (real devices are wired via register_device + the record_hit/
+    // record_miss/record_eviction/record_readahead functions).  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions
+    // (including hit_rate/readahead_rate) and resets the table afterward, so it
+    // is safe at boot.
+    fs::pagecache::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

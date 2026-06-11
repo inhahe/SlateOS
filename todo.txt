@@ -634,17 +634,32 @@
 ##                    emptied init_defaults and rebuilt self_test with exact
 ##                    assertions incl. RX-only NAPI polling and budget-exhausted
 ##                    tally, wired into boot. /proc/netqueue now 90 bytes.)
+##   - pagecache.rs  (fixed 2026-06-11; was: two fake devices "sda" (500k cached /
+##                    100M hits / 5M misses / 2M evictions / 10M readahead / 8M
+##                    useful) and "nvme0n1" (2M cached / 500M hits / 10M misses /
+##                    5M evictions / 50M readahead / 45M useful) plus invented
+##                    aggregates total_hits 600M / total_misses 15M /
+##                    total_evictions 7M / total_readahead 60M / readahead_useful
+##                    53M — surfaced via /proc/pagecache and the per_device/
+##                    hit_rate/readahead_rate views as a conjured 97.5% hit rate
+##                    and 88% readahead effectiveness. record_* returned NotFound
+##                    for unknown devices and there was no register API, so added
+##                    register_device(dev) (zeroed row, AlreadyExists/
+##                    ResourceExhausted checks). Emptied init_defaults and rebuilt
+##                    self_test with exact assertions incl. eviction saturating to
+##                    0, readahead_rate=8000 and hit_rate=5000, wired into boot.
+##                    /proc/pagecache now 101 bytes.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed. Broadened the SEEDED-module grep on 2026-06-11
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
-##     blkqueue + netqueue (just fixed) were five. Next ticks: work through the
-##     remaining candidates ONE PER TICK, auditing each before acting. The 52-file
-##     list includes both STATISTICS modules (fix: empty / zero-counters) AND
-##     SETTINGS or structural modules that seed LEGITIMATE config defaults or real
-##     topology (LEAVE ALONE). Verify each is a statistics module fabricating
-##     observed numbers surfaced via /proc before emptying it. Remaining flagged
-##     names incl.: pagecache, taskio, netspeed, diskhealth, netdev, netfilter,
+##     blkqueue + netqueue + pagecache (just fixed) were six. Next ticks: work
+##     through the remaining candidates ONE PER TICK, auditing each before acting.
+##     The 52-file list includes both STATISTICS modules (fix: empty /
+##     zero-counters) AND SETTINGS or structural modules that seed LEGITIMATE
+##     config defaults or real topology (LEAVE ALONE). Verify each is a statistics
+##     module fabricating observed numbers surfaced via /proc before emptying it.
+##     Remaining flagged names incl.: taskio, netspeed, diskhealth, netdev, netfilter,
 ##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,

@@ -105,21 +105,57 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** page-cache table.
+///
+/// Seeds NO devices and zero counters.  Real cache accounting is wired through
+/// [`register_device`] (one row per backing device the page cache tracks) and
+/// the `record_hit`/`record_miss`/`record_eviction`/`record_readahead`
+/// functions; until those are called the table is genuinely empty, so
+/// `/proc/pagecache` and the `pagecache` kshell command report zeros rather than
+/// fabricated numbers — the kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional devices ("sda": 500k cached pages /
+/// 100M hits / 5M misses / 2M evictions / 5000 dirty / 200 writeback / 10M
+/// readahead / 8M useful; "nvme0n1": 2M cached / 500M hits / 10M misses / 5M
+/// evictions / 2000 dirty / 50 writeback / 50M readahead / 45M useful) plus
+/// invented aggregate totals (total_hits 600M, total_misses 15M, total_evictions
+/// 7M, total_readahead 60M, total_readahead_useful 53M), which `/proc/pagecache`
+/// (and the `per_device`/`hit_rate`/`readahead_rate` views) then displayed as if
+/// they were real measured cache traffic — a 97.5% hit rate and 88% readahead
+/// effectiveness conjured from nothing.  That demo data was removed; the
+/// self-test now builds its own fixtures explicitly via the real API (see
+/// [`self_test`]).  The VFS/mm layer is expected to call [`register_device`] when
+/// a backing device is tracked and the record functions on every cache event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        devices: alloc::vec![
-            DeviceCacheStats { device: String::from("sda"), cached_pages: 500_000, hits: 100_000_000, misses: 5_000_000, evictions: 2_000_000, dirty_pages: 5000, writeback_pages: 200, readahead_pages: 10_000_000, readahead_useful: 8_000_000 },
-            DeviceCacheStats { device: String::from("nvme0n1"), cached_pages: 2_000_000, hits: 500_000_000, misses: 10_000_000, evictions: 5_000_000, dirty_pages: 2000, writeback_pages: 50, readahead_pages: 50_000_000, readahead_useful: 45_000_000 },
-        ],
-        total_hits: 600_000_000,
-        total_misses: 15_000_000,
-        total_evictions: 7_000_000,
-        total_readahead: 60_000_000,
-        total_readahead_useful: 53_000_000,
+        devices: Vec::new(),
+        total_hits: 0,
+        total_misses: 0,
+        total_evictions: 0,
+        total_readahead: 0,
+        total_readahead_useful: 0,
         ops: 0,
     });
+}
+
+/// Register a backing device for page-cache accounting.
+///
+/// Creates a zeroed [`DeviceCacheStats`] row.  Duplicate device names return
+/// [`KernelError::AlreadyExists`]; exceeding [`MAX_DEVICES`] returns
+/// [`KernelError::ResourceExhausted`].
+pub fn register_device(device: &str) -> KernelResult<()> {
+    with_state(|state| {
+        if state.devices.len() >= MAX_DEVICES { return Err(KernelError::ResourceExhausted); }
+        if state.devices.iter().any(|d| d.device == device) { return Err(KernelError::AlreadyExists); }
+        state.devices.push(DeviceCacheStats {
+            device: String::from(device), cached_pages: 0, hits: 0, misses: 0,
+            evictions: 0, dirty_pages: 0, writeback_pages: 0,
+            readahead_pages: 0, readahead_useful: 0,
+        });
+        Ok(())
+    })
 }
 
 /// Record a cache hit.
@@ -216,57 +252,81 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("pagecache::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/pagecache must never surface).  Resetting
+    // first clears any residue from a prior `pagecache test` run so the totals
+    // and rates asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_device().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated devices or counters; rates default to
+    // 0 with no traffic; record on an unregistered device fails.
+    assert_eq!(per_device().len(), 0);
+    let (c0, h0, m0, e0, r0, _o0) = stats();
+    assert_eq!((c0, h0, m0, e0, r0), (0, 0, 0, 0, 0));
+    assert_eq!(hit_rate(), 0);
+    assert_eq!(readahead_rate(), 0);
+    assert!(record_hit("sda").is_err()); // no phantom device exists yet
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Cache hit.
-    let before = per_device()[0].hits;
+    // 2: Register — zeroed counters; dup fails.
+    register_device("sda").expect("register");
+    let d = per_device().into_iter().find(|d| d.device == "sda").expect("find");
+    assert_eq!((d.hits, d.misses, d.evictions, d.cached_pages), (0, 0, 0, 0));
+    assert!(register_device("sda").is_err());
+    crate::serial_println!("  [2/8] register: OK");
+
+    // 3: Cache hit — per-device + total hits rise by one.
     record_hit("sda").expect("hit");
-    let after = per_device()[0].hits;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [2/8] hit: OK");
+    assert_eq!(per_device()[0].hits, 1);
+    crate::serial_println!("  [3/8] hit: OK");
 
-    // 3: Cache miss.
-    let before = per_device()[0].cached_pages;
+    // 4: Cache miss — miss caches the page (cached_pages +1).
     record_miss("sda").expect("miss");
-    let after = per_device()[0].cached_pages;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [3/8] miss: OK");
+    let d = &per_device()[0];
+    assert_eq!(d.misses, 1);
+    assert_eq!(d.cached_pages, 1);
+    crate::serial_println!("  [4/8] miss: OK");
 
-    // 4: Eviction.
-    let before = per_device()[0].cached_pages;
-    record_eviction("sda", 10).expect("evict");
-    let after = per_device()[0].cached_pages;
-    assert_eq!(after, before - 10);
-    crate::serial_println!("  [4/8] eviction: OK");
+    // 5: Eviction — cached_pages drops, saturating at 0 on over-eviction.
+    record_eviction("sda", 1).expect("evict");
+    assert_eq!(per_device()[0].cached_pages, 0);
+    record_eviction("sda", 100).expect("evict over"); // saturating_sub guard
+    assert_eq!(per_device()[0].cached_pages, 0);
+    crate::serial_println!("  [5/8] eviction: OK");
 
-    // 5: Readahead.
+    // 6: Readahead + rates — 100 readahead / 80 useful = 80% effectiveness;
+    // 1 hit / 1 miss = 50% hit rate (rates are pct*100 integer math).
     record_readahead("sda", 100, 80).expect("readahead");
-    let dev = per_device()[0].clone();
-    assert!(dev.readahead_pages > 10_000_000);
-    crate::serial_println!("  [5/8] readahead: OK");
+    let d = &per_device()[0];
+    assert_eq!(d.readahead_pages, 100);
+    assert_eq!(d.readahead_useful, 80);
+    assert_eq!(readahead_rate(), 8000); // 80 * 10000 / 100
+    assert_eq!(hit_rate(), 5000);       // 1 * 10000 / (1 + 1)
+    crate::serial_println!("  [6/8] readahead + rates: OK");
 
-    // 6: Hit rate.
-    let rate = hit_rate();
-    assert!(rate > 9000); // > 90%.
-    crate::serial_println!("  [6/8] hit rate: OK");
-
-    // 7: Not found.
+    // 7: Unknown device → NotFound on every record path.
     assert!(record_hit("fake").is_err());
+    assert!(record_miss("fake").is_err());
+    assert!(record_eviction("fake", 1).is_err());
+    assert!(record_readahead("fake", 1, 1).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals are exact: 1 hit, 1 miss, 101 evicted pages (1 + 100
+    // attempted; total counts all attempts), 100 readahead pages.
     let (devs, hits, misses, evictions, readahead, ops) = stats();
-    assert_eq!(devs, 2);
-    assert!(hits > 600_000_000);
-    assert!(misses > 15_000_000);
-    assert!(evictions > 7_000_000);
-    assert!(readahead > 60_000_000);
+    assert_eq!(devs, 1);
+    assert_eq!(hits, 1);
+    assert_eq!(misses, 1);
+    assert_eq!(evictions, 101);
+    assert_eq!(readahead, 100);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/pagecache table.
+    *STATE.lock() = None;
 
     crate::serial_println!("pagecache::self_test() — all 8 tests passed");
 }

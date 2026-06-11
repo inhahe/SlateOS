@@ -1808,10 +1808,16 @@ fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     s.push('\n');
     // Memory: only processes with an address-space charge carry these.  A
     // bare scheduler task (kernel thread) omits them, exactly as Linux omits
-    // the Vm* lines for tasks with no mm.  Sizes are reported in kB.
+    // the Vm* lines for tasks with no mm.  Derive the size from the SAME
+    // 4 KiB ABI-page accounting as /proc/<pid>/statm so the two files agree
+    // exactly (Linux keeps VmSize == statm.size * pagesize): pages =
+    // ceil(bytes / 4096), VmSize_kB = pages * 4.  VmRSS mirrors VmSize
+    // because we do not track resident pages separately — an upper bound,
+    // which is the safe direction for callers (see gen_pid_statm).
     if let Some(as_bytes) = crate::proc::pcb::linux_as_used(task_id) {
         if as_bytes > 0 {
-            let kb = as_bytes / 1024;
+            const ABI_PAGE_SIZE: u64 = 4096;
+            let kb = as_bytes.div_ceil(ABI_PAGE_SIZE).saturating_mul(4);
             let _ = writeln!(s, "VmSize:\t{kb} kB");
             let _ = writeln!(s, "VmRSS:\t{kb} kB");
         }

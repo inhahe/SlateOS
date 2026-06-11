@@ -635,5 +635,12 @@ pub fn self_test() {
     }
     serial_println!("[datausage] 11/11 reset OK");
 
+    // Leave no residue for later callers / the live /proc/datausage view:
+    // reset_usage() clears per-app totals but the "Monthly Cap" limit added in
+    // test 6 persists, and these are test fixtures, not real recorded usage.
+    // Reset to None so the procfs view and `datausage` shell command report an
+    // empty, never-measured state.
+    *STATE.lock() = None;
+
     serial_println!("[datausage] All self-tests passed.");
 }

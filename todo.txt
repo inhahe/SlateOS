@@ -2494,6 +2494,14 @@
 ##     "My Headphones" (connected, trusted) + a scan result in the live
 ##     /proc/bluetooth view afterward. Now resets STATE to None at END too.
 ##     boot-test PASSED (28s). No fabricated procfs data.
+##     datausage audited 2026-06-11: NOT a fabricator — init_defaults() is honest
+##     (apps/daily/limits empty, total_rx/tx 0, MeteredStatus::Unmetered).
+##     record_usage() is the honest entry point (called by the network stack per
+##     packet batch). Only fix: made self_test residue-free — it reset STATE to
+##     None at START but test 11's reset_usage() only clears per-app totals, so a
+##     "Monthly Cap" limit (added in test 6) + Metered config lingered in the live
+##     /proc/datausage view. Now resets STATE to None at END too. boot-test PASSED
+##     (27s). No fabricated procfs data.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

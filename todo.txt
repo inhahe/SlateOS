@@ -2606,9 +2606,24 @@
 ##       EMPTY with deferred note — already honest); tracemon (FIXED TAXONOMY of 6
 ##       tracepoint DEFINITIONS, all disabled + hit_count 0 — case c, legitimate).
 ##       FABRICATORS STILL TO FIX (seed fake observed entries surfaced as real):
-##         - servicemgr: seeds network/audio/... services as Running with fake PIDs
-##           (100/101) — presents running daemons that don't exist. FIX: empty-init;
-##           services registered via a real service-manager entry point.
+##         - servicemgr: FIXED 2026-06-11. init_defaults() seeded network/audio/
+##           display/logging as Running with phantom PIDs 100-103 (+ total_starts:4),
+##           surfaced via /proc and the `services` shell command as real running
+##           daemons with real process IDs. Worse, start_service()/restart_service()
+##           also INVENTED PIDs (1000+id) with no real process behind them — the
+##           fabrication was structural, not just at boot. FIX: kept the 5 core-
+##           service DEFINITIONS (legitimate compiled-in manifest — names/desc/startup
+##           types are config, not observations) but all start Stopped/pid 0/
+##           total_starts 0; start_service/restart_service now record pid 0 (sentinel
+##           for "no backing process") instead of a fabricated PID. self_test updated
+##           (0 running by default; started services pid 0; stats running==1).
+##           svcstart/sockact self_tests unaffected. DEFERRED PROPER FIX (structural,
+##           blocked on missing dependency): wire start_service to the process/ELF
+##           loader to spawn the real service binary and record its actual PID —
+##           blocked until the core service binaries are launchable via the process
+##           loader. Until then services show Running with pid 0 (honest "active in
+##           the manager's model, no real process yet"), never a fake PID. boot-test
+##           PASSED (27s).
 ##         - pkgmgr: seeds repos (packages.example.os placeholder URLs) + "base
 ##           system packages" (kernel/coreutils) as Installed with fabricated sizes —
 ##           presents a package DB that isn't real. FIX: empty-init / read-through a

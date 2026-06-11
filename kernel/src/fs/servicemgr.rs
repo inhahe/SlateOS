@@ -163,104 +163,65 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Initialise the service manager with default system services.
+/// Initialise the service manager with the core system-service DEFINITIONS.
 ///
-/// Registers five core services:
-/// - `network`  (NetworkManager, Automatic, Running)
-/// - `audio`    (Audio Server, Automatic, Running)
-/// - `display`  (Display Server, Automatic, Running)
-/// - `logging`  (System Logger, Automatic, Running)
-/// - `cron`     (Task Scheduler, Manual, Stopped)
+/// Registers five core services as a compiled-in manifest of the services this
+/// OS manages (analogous to shipped systemd unit/preset files). The definitions
+/// — names, display names, descriptions, startup types — are configuration, not
+/// observations, so they are legitimate defaults.
+///
+/// Crucially, all services start in the **Stopped** state with **pid 0**: we
+/// never fabricate runtime state. A service only becomes `Running` when the
+/// init/boot sequence (`svcstart::boot_services`) or an explicit request calls
+/// `start_service`. At that point no real OS process is launched yet, so the
+/// recorded pid stays 0 (see the DEFERRED note on `start_service`).
+///
+/// - `network`  (NetworkManager, Automatic)
+/// - `audio`    (Audio Server, Automatic)
+/// - `display`  (Display Server, Automatic)
+/// - `logging`  (System Logger, Automatic)
+/// - `cron`     (Task Scheduler, Manual)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {
         return;
     }
 
-    let now = crate::hpet::elapsed_ns();
+    let def = |id: u32, name: &str, display_name: &str, description: &str,
+               startup_type: StartupType, auto_restart: bool| ServiceInfo {
+        id,
+        name: String::from(name),
+        display_name: String::from(display_name),
+        description: String::from(description),
+        // Honest initial state: the manager has not started anything yet.
+        state: ServiceState::Stopped,
+        startup_type,
+        pid: 0,
+        depends_on: Vec::new(),
+        depended_by: Vec::new(),
+        restart_count: 0,
+        last_start_ns: 0,
+        last_stop_ns: 0,
+        auto_restart,
+    };
 
     let services = alloc::vec![
-        ServiceInfo {
-            id: 1,
-            name: String::from("network"),
-            display_name: String::from("NetworkManager"),
-            description: String::from("Manages network interfaces and connections"),
-            state: ServiceState::Running,
-            startup_type: StartupType::Automatic,
-            pid: 100,
-            depends_on: Vec::new(),
-            depended_by: Vec::new(),
-            restart_count: 0,
-            last_start_ns: now,
-            last_stop_ns: 0,
-            auto_restart: true,
-        },
-        ServiceInfo {
-            id: 2,
-            name: String::from("audio"),
-            display_name: String::from("Audio Server"),
-            description: String::from("Audio mixing and output routing"),
-            state: ServiceState::Running,
-            startup_type: StartupType::Automatic,
-            pid: 101,
-            depends_on: Vec::new(),
-            depended_by: Vec::new(),
-            restart_count: 0,
-            last_start_ns: now,
-            last_stop_ns: 0,
-            auto_restart: true,
-        },
-        ServiceInfo {
-            id: 3,
-            name: String::from("display"),
-            display_name: String::from("Display Server"),
-            description: String::from("Compositor and display output management"),
-            state: ServiceState::Running,
-            startup_type: StartupType::Automatic,
-            pid: 102,
-            depends_on: Vec::new(),
-            depended_by: Vec::new(),
-            restart_count: 0,
-            last_start_ns: now,
-            last_stop_ns: 0,
-            auto_restart: true,
-        },
-        ServiceInfo {
-            id: 4,
-            name: String::from("logging"),
-            display_name: String::from("System Logger"),
-            description: String::from("Structured logging and log aggregation"),
-            state: ServiceState::Running,
-            startup_type: StartupType::Automatic,
-            pid: 103,
-            depends_on: Vec::new(),
-            depended_by: Vec::new(),
-            restart_count: 0,
-            last_start_ns: now,
-            last_stop_ns: 0,
-            auto_restart: true,
-        },
-        ServiceInfo {
-            id: 5,
-            name: String::from("cron"),
-            display_name: String::from("Task Scheduler"),
-            description: String::from("Periodic and scheduled task execution"),
-            state: ServiceState::Stopped,
-            startup_type: StartupType::Manual,
-            pid: 0,
-            depends_on: Vec::new(),
-            depended_by: Vec::new(),
-            restart_count: 0,
-            last_start_ns: 0,
-            last_stop_ns: 0,
-            auto_restart: false,
-        },
+        def(1, "network", "NetworkManager",
+            "Manages network interfaces and connections", StartupType::Automatic, true),
+        def(2, "audio", "Audio Server",
+            "Audio mixing and output routing", StartupType::Automatic, true),
+        def(3, "display", "Display Server",
+            "Compositor and display output management", StartupType::Automatic, true),
+        def(4, "logging", "System Logger",
+            "Structured logging and log aggregation", StartupType::Automatic, true),
+        def(5, "cron", "Task Scheduler",
+            "Periodic and scheduled task execution", StartupType::Manual, false),
     ];
 
     *guard = Some(State {
         services,
         next_id: 6,
-        total_starts: 4, // four services started during init
+        total_starts: 0,
         total_stops: 0,
         total_failures: 0,
         ops: 0,
@@ -310,7 +271,16 @@ pub fn register_service(
     })
 }
 
-/// Start a service by ID. Sets state to Running and assigns a simulated PID.
+/// Start a service by ID. Marks the service `Running`.
+///
+/// DEFERRED PROPER FIX: this marks the service active in the manager's model
+/// but does not yet launch a real OS process — the userspace service binaries
+/// and the process/ELF spawn path that would record a real PID are not wired
+/// to this manager. Until then the recorded `pid` stays 0 (the established
+/// sentinel for "no backing process"); we never fabricate a plausible-looking
+/// PID, because procfs would surface it as a real process ID. Trigger to do
+/// this properly: when the core service binaries are launchable via the
+/// process loader, spawn them here and store the actual PID.
 pub fn start_service(id: u32) -> KernelResult<()> {
     with_state(|st| {
         let svc = st.services.iter_mut()
@@ -328,9 +298,8 @@ pub fn start_service(id: u32) -> KernelResult<()> {
         }
 
         let now = crate::hpet::elapsed_ns();
-        // Simulated PID: base 1000 + service id to stay deterministic yet
-        // distinguishable from the default-service PIDs (100-103).
-        svc.pid = 1000 + id;
+        // No real process is spawned yet (see DEFERRED note above): pid 0.
+        svc.pid = 0;
         svc.state = ServiceState::Running;
         svc.last_start_ns = now;
         st.total_starts += 1;
@@ -378,9 +347,10 @@ pub fn restart_service(id: u32) -> KernelResult<()> {
             return Err(KernelError::NotSupported);
         }
 
-        // Start.
+        // Start. No real process is spawned yet (see start_service DEFERRED
+        // note): pid stays 0 rather than a fabricated value.
         let now = crate::hpet::elapsed_ns();
-        svc.pid = 1000 + svc.id;
+        svc.pid = 0;
         svc.state = ServiceState::Running;
         svc.last_start_ns = now;
         svc.restart_count = svc.restart_count.saturating_add(1);
@@ -535,18 +505,20 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[servicemgr] test 1 passed: init_defaults registers 5 services");
     }
 
-    // Test 2: default running services.
+    // Test 2: no services run by default — the manager never fabricates
+    // runtime state; everything starts Stopped until explicitly started.
     {
         let running = list_running();
-        assert_eq!(running.len(), 4);
-        serial_println!("[servicemgr] test 2 passed: 4 default running services");
+        assert_eq!(running.len(), 0);
+        serial_println!("[servicemgr] test 2 passed: 0 services running by default");
     }
 
-    // Test 3: find_by_name.
+    // Test 3: find_by_name. All defaults are Stopped at init.
     {
         let net = find_by_name("network")?;
         assert_eq!(net.display_name, "NetworkManager");
-        assert_eq!(net.state, ServiceState::Running);
+        assert_eq!(net.state, ServiceState::Stopped);
+        assert_eq!(net.pid, 0);
 
         let cron = find_by_name("cron")?;
         assert_eq!(cron.state, ServiceState::Stopped);
@@ -576,12 +548,13 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[servicemgr] test 5 passed: register_service");
     }
 
-    // Test 6: start_service.
+    // Test 6: start_service. State becomes Running; pid stays 0 because no
+    // real process is spawned yet (DEFERRED: wire to the process loader).
     {
         start_service(6)?;
         let svc = get_service(6)?;
         assert_eq!(svc.state, ServiceState::Running);
-        assert!(svc.pid != 0);
+        assert_eq!(svc.pid, 0);
         assert!(svc.last_start_ns > 0);
         serial_println!("[servicemgr] test 6 passed: start_service");
     }
@@ -626,9 +599,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 11: stats.
     {
+        // Only the test-svc (id 6) was started; the five defaults stay Stopped.
         let (total, running, starts, stops, _failures, ops) = stats();
         assert_eq!(total, 6);
-        assert!(running >= 4);
+        assert_eq!(running, 1);
         assert!(starts > 0);
         assert!(stops > 0);
         assert!(ops > 0);

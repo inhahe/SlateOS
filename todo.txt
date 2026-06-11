@@ -1004,6 +1004,29 @@
 ##                    timekeeping subsystem should call clocksrc::register() for
 ##                    each calibrated source (TSC/HPET/ACPI PM) once it probes
 ##                    them at boot — wire that when timekeeping init exists.)
+##   - cpuidle.rs    (fixed 2026-06-11; fs/cpuidle.rs statistics module backing
+##                    /proc/cpuidle and the `cpuidle` kshell command; was: four
+##                    fictional CPUs with invented C-state entry counts (e.g.
+##                    CPU0 with 1M C1 / 500K C1E / 100K C3 / 10K C6 entries) and
+##                    multi-second residency times scaled per core, plus a global
+##                    total of 6,480,000 transitions — surfaced as if real C-state
+##                    residency had been measured. CPUs are DISCOVERED HARDWARE
+##                    (not a fixed taxonomy) and there was NO register API, so
+##                    case (b): added register_cpu(cpu_id) (checks AlreadyExists /
+##                    ResourceExhausted, starts the core in C0 with zeroed
+##                    counters) and emptied init_defaults (no CPUs, zero totals).
+##                    enter_state/exit_state already exist. Rebuilt self_test
+##                    residue-free with exact assertions: register adds a zeroed
+##                    CPU in C0, duplicate AlreadyExists, enter increments the
+##                    entry counter at the C-state depth + records a transition,
+##                    exit returns to C0, deep-state C6 entry counter, idle_pct
+##                    range + unregistered-CPU 0, unknown-CPU enter/exit NotFound,
+##                    final totals (2 CPUs / 4 transitions). Residency durations
+##                    depend on the HPET clock so are not asserted exactly. NOTE:
+##                    cpuidle was NOT previously wired into the boot self-test path
+##                    — now added. /proc/cpuidle now 53 bytes. PROPER FIX DEFERRED:
+##                    SMP bringup should call cpuidle::register_cpu() for each core
+##                    as it comes online — wire that when SMP CPU onlining exists.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1017,14 +1040,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc (just fixed) were twenty-eight. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle (just fixed) were twenty-nine. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     cpuidle. Remaining flagged names incl.:
-##     cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
+##     cpucache. Remaining flagged names incl.:
+##     cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify. SETTINGS-looking names in that set

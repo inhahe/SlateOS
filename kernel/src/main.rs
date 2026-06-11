@@ -1672,6 +1672,21 @@ extern "C" fn kernel_main() -> ! {
     // accumulation and latest-latency tracking) and resets the table afterward,
     // so it is safe at boot.
     fs::clocksrc::self_test();
+    // cpuidle backs /proc/cpuidle (CPU idle / C-state diagnostics: per-CPU
+    // current C-state, per-C-state entry counts and residency times, total
+    // idle/active time, plus global transition/idle totals).  Its
+    // init_defaults() previously seeded four fictional CPUs with invented
+    // C-state entry counts (e.g. CPU0 with 1M C1 / 500K C1E / 100K C3 / 10K C6
+    // entries) and multi-second residency times scaled per core, plus a global
+    // total of 6,480,000 transitions — surfaced as if real C-state residency
+    // had been measured.  CPUs are discovered hardware, so that demo data was
+    // removed; a new register_cpu() API adds each core as SMP brings it online,
+    // and the per-CPU table fills only through real enter_state/exit_state
+    // calls.  The residue-free self_test builds its fixtures via the real API
+    // with exact assertions (entry-counter increments by C-state depth,
+    // transition counting) and resets the table afterward, so it is safe at
+    // boot.
+    fs::cpuidle::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

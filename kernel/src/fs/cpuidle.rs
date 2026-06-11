@@ -125,37 +125,52 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the CPU-idle statistics state.
+///
+/// Starts with no CPUs and zero transition/idle totals. CPUs are discovered
+/// hardware brought online at SMP startup; each online CPU is added through
+/// [`register_cpu`], and its C-state entry/residency counters advance only
+/// through real [`enter_state`] / [`exit_state`] calls. The `/proc/cpuidle`
+/// generator and the `cpuidle` kshell command surface the per-CPU table (and
+/// [`per_cpu`] / [`idle_pct`]) as if it reflects real C-state residency, so
+/// seeding it with phantom CPUs would be fabricated procfs data — it would
+/// claim idle-state residency on cores that nothing actually measured.
+///
+/// (Previously this seeded four fictional CPUs with invented C-state entry
+/// counts — e.g. CPU0 with 1,000,000 C1 entries, 500,000 C1E, 100,000 C3,
+/// 10,000 C6 — and multi-second residency times scaled per core, plus a
+/// global total of 6,480,000 transitions.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let mut cpu_states = Vec::new();
-    for i in 0..4u32 {
-        let mut entries = [0u64; 7];
-        entries[0] = 0; // C0 is active, not counted.
-        entries[1] = 1_000_000 + i as u64 * 200_000;
-        entries[2] = 500_000 + i as u64 * 100_000;
-        entries[3] = 100_000 + i as u64 * 20_000;
-        entries[4] = 10_000 + i as u64 * 2_000;
-        let mut residency_ns = [0u64; 7];
-        residency_ns[1] = 5_000_000_000 + i as u64 * 1_000_000_000;
-        residency_ns[2] = 10_000_000_000 + i as u64 * 2_000_000_000;
-        residency_ns[3] = 20_000_000_000 + i as u64 * 4_000_000_000;
-        residency_ns[4] = 5_000_000_000 + i as u64 * 1_000_000_000;
-        let total_idle: u64 = residency_ns.iter().sum();
-        cpu_states.push(CpuIdleState {
-            cpu_id: i, current_state: CState::C0,
-            entries, residency_ns, total_idle_ns: total_idle,
-            total_active_ns: 100_000_000_000 - total_idle,
-            last_entry_ns: 0,
-        });
-    }
-    let total_idle: u64 = cpu_states.iter().map(|c| c.total_idle_ns).sum();
     *guard = Some(State {
-        cpu_states,
-        total_transitions: 6_480_000,
-        total_idle_ns: total_idle,
+        cpu_states: Vec::new(),
+        total_transitions: 0,
+        total_idle_ns: 0,
         ops: 0,
     });
+}
+
+/// Register a CPU as it is brought online at SMP startup.
+///
+/// The CPU begins in the active state (C0) with all per-C-state entry and
+/// residency counters zeroed; they advance only through real
+/// [`enter_state`] / [`exit_state`] calls. Returns [`KernelError::AlreadyExists`]
+/// if the CPU id is already registered and [`KernelError::ResourceExhausted`]
+/// if the maximum CPU count is reached.
+pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
+        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
+        state.cpu_states.push(CpuIdleState {
+            cpu_id, current_state: CState::C0,
+            entries: [0u64; 7], residency_ns: [0u64; 7],
+            total_idle_ns: 0, total_active_ns: 0, last_entry_ns: 0,
+        });
+        Ok(())
+    })
 }
 
 /// Enter an idle state.
@@ -220,53 +235,73 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("cpuidle::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live per-CPU table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_cpu().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom CPUs, zero totals.
+    assert_eq!(per_cpu().len(), 0);
+    let (c0, t0, i0, _) = stats();
+    assert_eq!((c0, t0, i0), (0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Enter state.
+    // 2: Register CPU — appears in C0 with all counters zeroed; duplicate is
+    //    AlreadyExists.
+    register_cpu(0).expect("register0");
+    let cs = per_cpu();
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].current_state, CState::C0);
+    assert_eq!((cs[0].entries, cs[0].residency_ns), ([0u64; 7], [0u64; 7]));
+    assert_eq!((cs[0].total_idle_ns, cs[0].total_active_ns), (0, 0));
+    assert!(register_cpu(0).is_err());
+    crate::serial_println!("  [2/8] register: OK");
+
+    // 3: Enter state — current_state updates; the C1 (depth 1) entry counter
+    //    increments; a transition is recorded.
     enter_state(0, CState::C1).expect("enter");
     let cs = per_cpu();
     assert_eq!(cs[0].current_state, CState::C1);
-    crate::serial_println!("  [2/8] enter: OK");
+    assert_eq!(cs[0].entries[CState::C1.depth() as usize], 1);
+    crate::serial_println!("  [3/8] enter: OK");
 
-    // 3: Exit state.
-    let dur = exit_state(0).expect("exit");
+    // 4: Exit state — returns to C0 and records a second transition. Residency
+    //    duration depends on the HPET clock so it is not asserted exactly.
+    let _dur = exit_state(0).expect("exit");
     let cs = per_cpu();
     assert_eq!(cs[0].current_state, CState::C0);
-    let _ = dur; // Duration depends on timing.
-    crate::serial_println!("  [3/8] exit: OK");
+    assert_eq!(cs[0].entries[CState::C1.depth() as usize], 1); // unchanged by exit
+    crate::serial_println!("  [4/8] exit: OK");
 
-    // 4: Deep state.
+    // 5: Deep state on a second CPU — C6 (depth 4) entry counter increments.
+    register_cpu(1).expect("register1");
     enter_state(1, CState::C6).expect("enter_deep");
     let cs = per_cpu();
-    assert_eq!(cs[1].current_state, CState::C6);
+    let c1 = cs.iter().find(|c| c.cpu_id == 1).expect("cpu1");
+    assert_eq!(c1.current_state, CState::C6);
+    assert_eq!(c1.entries[CState::C6.depth() as usize], 1);
     exit_state(1).expect("exit_deep");
-    crate::serial_println!("  [4/8] deep state: OK");
+    crate::serial_println!("  [5/8] deep state: OK");
 
-    // 5: Idle percentage.
-    let pct = idle_pct(0);
-    assert!(pct > 0 && pct < 100);
-    crate::serial_println!("  [5/8] idle pct: OK ({}%)", pct);
+    // 6: Idle percentage — unregistered CPU reports 0; a registered CPU reports
+    //    a value within range (0..=100).
+    assert_eq!(idle_pct(99), 0);
+    assert!(idle_pct(0) <= 100);
+    crate::serial_println!("  [6/8] idle pct: OK");
 
-    // 6: Entry counts.
-    let cs = per_cpu();
-    assert!(cs[0].entries[1] > 1_000_000); // C1 entries from defaults + test.
-    crate::serial_println!("  [6/8] entry counts: OK");
-
-    // 7: Not found.
+    // 7: Not found — enter/exit on an unregistered CPU both error.
     assert!(enter_state(99, CState::C1).is_err());
+    assert!(exit_state(99).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
-    let (cpus, transitions, idle_ns, ops) = stats();
-    assert_eq!(cpus, 4);
-    assert!(transitions > 6_480_000);
-    assert!(idle_ns > 0);
+    // 8: Final stats reflect only the real activity above: 2 CPUs and 4
+    //    transitions (2 enters + 2 exits).
+    let (cpus, transitions, _idle_ns, ops) = stats();
+    assert_eq!((cpus, transitions), (2, 4));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("cpuidle::self_test() — all 8 tests passed");
 }

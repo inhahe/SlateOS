@@ -2715,6 +2715,33 @@
 ##           is measured; real value set via set_size()). boot-test PASSED (25s).
 ##           DEFERRED: app installer/loader should measure and set the true on-disk
 ##           size when these apps are staged into the rootfs.
+##     SWEEP COMPLETE 2026-06-11 (final pass): with printmgr/progmgr resolved and
+##     fontmgr/fontpreview fixed, every category of fs diagnostic module has now been
+##     audited for the fabricated-procfs-data anti-pattern:
+##       - *stat.rs family (32 modules): all honest empty-init, no changes needed.
+##       - hardware-observation modules (webcam, battery, wifiscan, bluetooth,
+##         audiodevice, hwmonitor, disksmart, diskhealth, monitors, cputopo, usbmgr,
+##         devicemgr): all fixed or confirmed clean/read-through.
+##       - *mgr/*mon/*info/*dev modules: all resolved (see lists above).
+##       - security modules (certmgr, authbroker, secmod, binfmt, recoverypart, hwrng,
+##         ioport, ipcns): all fixed.
+##       - observation-shaped diagnostics (eventlog, syslog, telemetry, ipclog, fdtable,
+##         netusage, sysprofiler, sysresource, sysdiag, vmmap, pftrack, vmfrag,
+##         memlayout, fnotify): all fixed or confirmed clean. Final spot-checks this
+##         pass: syslog = LEGITIMATE (seeds ONE real self-referential event, "System
+##         log initialized", with a real hpet timestamp at the actual moment of init —
+##         not a fabricated historical observation); sysdiag = CLEAN (empty issues/
+##         history, zero counters).
+##       - remaining ~140 modules are SETTINGS-shaped (touchpad, mousesettings,
+##         kbsettings, nightlight, brightness, soundmixer, timezone, appdefaults,
+##         gestures, colorblind, etc.) seeding legitimate compiled-in CONFIG defaults,
+##         not observations — not in scope for the fabrication sweep.
+##     OUTSTANDING (deferred, not fabrications — tracked above): the read-through
+##     unifications (fontpreview->fontmgr single registry; groupmgr<->useracct group
+##     DB; servicemgr real PID via process loader; pkgmgr read content-addressed store;
+##     cputopo CPUID caches/brand-string/SRAT; font-directory scanner for real glyph
+##     metadata; app installer measuring real binary sizes). Each is blocked on a
+##     subsystem that does not exist yet and is documented with its trigger condition.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

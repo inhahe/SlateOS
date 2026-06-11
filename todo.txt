@@ -2120,7 +2120,19 @@
 ##     scan's other high-hit files (mmtune/schedtune/fstune/locale/timezone/
 ##     defaultapps/netsettings/pkgmgr/useracct/fontmgr/bootcfg/autostart/etc.)
 ##     are SETTINGS modules seeding LEGITIMATE config defaults — left alone.
-##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     UPDATE 2026-06-11: disksmart was another String-seeded fabricator the
+##     large-literal filter missed: init_defaults seeded a fake /dev/sda
+##     "Virtual SATA SSD 512GB" with invented SMART telemetry (4380 power-on
+##     hours, 1200 power cycles, 37C, 12% wear, "PASSED" self-test, serial
+##     VSSD-001, 5 fabricated SMART attributes), surfaced via /proc/disksmart,
+##     the disksmart list view, and Settings > Storage > Health as a real
+##     drive. FIXED via empty-init (case a): no drives until a real storage
+##     driver registers them via the existing register_drive/set_temperature/
+##     set_reallocated/set_wear_level API (SMART comes from the NVMe health log
+##     / SATA SMART READ DATA, a userspace driver not yet wired). Kept the
+##     AlertConfig::default() thresholds (legitimate alerting config, not data).
+##     self_test rebuilt via the real API, exact totals, residue-free. makes
+##     sixty. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional

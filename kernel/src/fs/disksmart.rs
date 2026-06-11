@@ -213,41 +213,33 @@ fn evaluate_health(drive: &SmartDrive) -> HealthStatus {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** S.M.A.R.T. monitor — no drives.
+///
+/// Seeds an empty drive list with the default [`AlertConfig`] (legitimate
+/// alerting *configuration* — temperature/wear/reallocated thresholds and the
+/// check interval, not observed data).  Drives appear only when a real storage
+/// driver registers them via [`register_drive`] and feeds health data via
+/// [`set_temperature`]/[`set_reallocated`]/[`set_wear_level`]; until that wiring
+/// exists, `/proc/disksmart`, the `disksmart` kshell command, and Settings →
+/// Storage → Health report zero drives rather than a fabricated one — the
+/// kernel's hard "never invent data in procfs" rule.
+///
+/// (Previously this seeded a FABRICATED `/dev/sda` "Virtual SATA SSD 512GB"
+/// drive with invented SMART data — 4380 power-on hours, 1200 power cycles,
+/// 37 °C, 12 % wear, a "PASSED" self-test, serial "VSSD-001", and five
+/// fabricated SMART attributes (Raw Read Error Rate, Reallocated Sector Count,
+/// Power-On Hours, Temperature, Current Pending Sector) — which the procfs
+/// node, the drive-list view, and the health summary then displayed as if they
+/// were a real drive's real SMART telemetry.  S.M.A.R.T. data comes from the
+/// storage driver (NVMe health log / SATA SMART READ DATA), a userspace driver
+/// under the microkernel design that is not yet wired.  The self-test now
+/// builds its own fixtures via the real API; see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
 
-    let default_attrs = alloc::vec![
-        SmartAttribute { id: 1, name: String::from("Raw Read Error Rate"), current: 200, worst: 200, threshold: 51, raw_value: 0, pre_fail: true },
-        SmartAttribute { id: 5, name: String::from("Reallocated Sector Count"), current: 200, worst: 200, threshold: 140, raw_value: 0, pre_fail: true },
-        SmartAttribute { id: 9, name: String::from("Power-On Hours"), current: 98, worst: 98, threshold: 0, raw_value: 4380, pre_fail: false },
-        SmartAttribute { id: 194, name: String::from("Temperature"), current: 113, worst: 100, threshold: 0, raw_value: 37, pre_fail: false },
-        SmartAttribute { id: 197, name: String::from("Current Pending Sector"), current: 200, worst: 200, threshold: 0, raw_value: 0, pre_fail: false },
-    ];
-
-    let drives = alloc::vec![
-        SmartDrive {
-            device: String::from("/dev/sda"),
-            model: String::from("Virtual SATA SSD 512GB"),
-            serial: String::from("VSSD-001"),
-            firmware: String::from("1.0.0"),
-            interface: DriveInterface::Sata,
-            capacity_bytes: 512 * 1024 * 1024 * 1024,
-            health: HealthStatus::Good,
-            temperature_c: 37,
-            power_on_hours: 4380,
-            power_cycles: 1200,
-            reallocated_sectors: 0,
-            pending_sectors: 0,
-            wear_level_pct: 12,
-            attributes: default_attrs,
-            self_test_running: false,
-            last_test_result: String::from("PASSED"),
-        },
-    ];
-
     *guard = Some(State {
-        drives,
+        drives: Vec::new(),
         config: AlertConfig::default(),
         total_checks: 0,
         total_alerts: 0,
@@ -396,51 +388,59 @@ pub fn stats() -> (usize, usize, usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("disksmart::self_test() — running tests...");
+    // Reset to a clean, EMPTY monitor and build every fixture via the real
+    // register_drive/set_* API.  init_defaults no longer seeds a fabricated
+    // drive, so the test constructs its own; resetting first guarantees the
+    // counts asserted below are exact and that a `disksmart test` run never
+    // leaves a fixture resident in the live /proc/disksmart registry.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default drive exists.
-    let drives = list_drives();
-    assert_eq!(drives.len(), 1);
-    assert_eq!(drives[0].device, "/dev/sda");
-    crate::serial_println!("  [1/11] default drive: OK");
+    // 1: Empty after init — no fabricated drive.
+    assert_eq!(list_drives().len(), 0);
+    let (d0, g0, w0, c0, a0, _o0) = stats();
+    assert_eq!((d0, g0, w0, c0, a0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/11] empty init: OK");
 
-    // 2: Default health is good.
-    let d = get_drive("/dev/sda").expect("get sda");
-    assert_eq!(d.health, HealthStatus::Good);
-    crate::serial_println!("  [2/11] default health good: OK");
+    // 2: Register a drive — starts with Unknown health (no telemetry yet).
+    register_drive("/dev/sda", "Test SSD 512GB", "T-001", DriveInterface::Sata, 512 * 1024 * 1024 * 1024).expect("register sda");
+    assert_eq!(list_drives().len(), 1);
+    assert_eq!(get_drive("/dev/sda").expect("get sda").health, HealthStatus::Unknown);
+    crate::serial_println!("  [2/11] register + unknown health: OK");
 
-    // 3: Register new drive.
-    register_drive("/dev/nvme0n1", "Test NVMe 1TB", "NV-001", DriveInterface::Nvme, 1024 * 1024 * 1024 * 1024).expect("register");
+    // 3: Register a second drive.
+    register_drive("/dev/nvme0n1", "Test NVMe 1TB", "NV-001", DriveInterface::Nvme, 1024 * 1024 * 1024 * 1024).expect("register nvme");
     assert_eq!(list_drives().len(), 2);
     crate::serial_println!("  [3/11] register drive: OK");
 
     // 4: Duplicate rejected.
-    let r = register_drive("/dev/nvme0n1", "Dup", "Dup", DriveInterface::Nvme, 0);
+    let r = register_drive("/dev/sda", "Dup", "Dup", DriveInterface::Sata, 0);
     assert!(r.is_err());
     crate::serial_println!("  [4/11] duplicate rejected: OK");
 
-    // 5: Temperature update.
+    // 5: Temperature update — 55 °C → Caution (>50, not >60), no sector issues.
     set_temperature("/dev/sda", 55).expect("set temp");
     let d = get_drive("/dev/sda").expect("get sda");
     assert_eq!(d.temperature_c, 55);
     assert_eq!(d.health, HealthStatus::Caution);
-    crate::serial_println!("  [5/11] temperature warning: OK");
+    crate::serial_println!("  [5/11] temperature caution: OK");
 
-    // 6: Reallocated sectors.
+    // 6: Reallocated sectors — 15 (>10) → Warning.
     set_reallocated("/dev/sda", 15).expect("set realloc");
-    let d = get_drive("/dev/sda").expect("get sda");
-    assert_eq!(d.health, HealthStatus::Warning);
+    assert_eq!(get_drive("/dev/sda").expect("get sda").health, HealthStatus::Warning);
     crate::serial_println!("  [6/11] reallocated sectors: OK");
 
-    // 7: Wear level.
+    // 7: Wear level — 50 % on the NVMe drive (still Good: <60, temp 0).
     set_wear_level("/dev/nvme0n1", 50).expect("set wear");
     let d = get_drive("/dev/nvme0n1").expect("get nvme");
     assert_eq!(d.wear_level_pct, 50);
+    assert_eq!(d.health, HealthStatus::Good);
     crate::serial_println!("  [7/11] wear level: OK");
 
-    // 8: Check thresholds.
+    // 8: Check thresholds — sda fires temp(55>=50) + realloc(15>=10) = 2 alerts;
+    //    nvme is below all thresholds.
     let alerts = check_thresholds();
-    assert!(alerts >= 1); // At least temp warning on sda.
+    assert_eq!(alerts, 2);
     crate::serial_println!("  [8/11] check thresholds: OK");
 
     // 9: Unregister drive.
@@ -449,17 +449,22 @@ pub fn self_test() {
     crate::serial_println!("  [9/11] unregister: OK");
 
     // 10: Not-found error.
-    let r = get_drive("/dev/nonexistent");
-    assert!(r.is_err());
+    assert!(get_drive("/dev/nonexistent").is_err());
     crate::serial_println!("  [10/11] not found error: OK");
 
-    // 11: Stats.
+    // 11: Stats — exact: 1 drive (sda, Warning), 0 good, 1 warn, 1 check, 2 alerts.
     let (total, good, warn, checks, alerts, ops) = stats();
     assert_eq!(total, 1);
-    assert!(checks >= 1);
+    assert_eq!(good, 0);
+    assert_eq!(warn, 1);
+    assert_eq!(checks, 1);
+    assert_eq!(alerts, 2);
     assert!(ops > 0);
-    let _ = (good, warn, alerts);
     crate::serial_println!("  [11/11] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves a fixture resident in the live /proc/disksmart registry.
+    *STATE.lock() = None;
 
     crate::serial_println!("disksmart::self_test() — all 11 tests passed");
 }

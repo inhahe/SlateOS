@@ -115,6 +115,24 @@
 ## "FAIL:"/"WARNING:"), ALWAYS grep build/serial-test.txt for FAIL/WARNING
 ## after a boot test — do not rely on "Boot test PASSED" alone.
 ##
+## FOLLOW-UP (2026-06-11): real /proc/<pid>/io — do NOT back it with taskstats
+## /proc/<pid>/io (rchar/wchar/syscr/syscw/read_bytes/write_bytes/
+## cancelled_write_bytes) is intentionally NOT served.  WARNING for any future
+## session: the obvious-looking backing source crate::fs::taskstats (it has a
+## get(pid)->TaskAccounting with read_bytes/write_bytes/read_syscalls/
+## write_syscalls) is DEMO-ONLY.  Verified 2026-06-11: taskstats::update_io,
+## update_cpu and register have ZERO callers outside taskstats.rs itself — the
+## table is populated solely by init_defaults() with fabricated numbers
+## (kernel/src/fs/taskstats.rs:133-145, e.g. read_bytes: 1_073_741_824).  So
+## taskstats::get() returns invented data, and wiring /proc/<pid>/io to it
+## would violate the hard "never invent data in procfs" rule.  Proper fix is
+## structural: add real per-process IO byte/syscall counters to the PCB (or
+## make taskstats real), increment them from the VFS read/write syscall path
+## (kernel/src/syscall/ read/write/pread/pwrite handlers) and register tasks at
+## process creation, THEN serve /proc/<pid>/io from those genuine counters.
+## Deferred because it touches the hot read/write syscall path (perf-sensitive,
+## risky to land unattended).  glibc/top/iotop read this file.
+##
 ## FOLLOW-UP (2026-06-10): real /proc/<pid>/auxv + kernel-side saved_auxv
 ## /proc/<pid>/auxv is NOT yet served.  Implementing it properly requires
 ## the same kernel-side auxv storage that PR_GET_AUXV is already waiting

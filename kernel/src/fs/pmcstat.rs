@@ -114,21 +114,59 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** PMC (hardware performance counter) statistics table.
+///
+/// Seeds NO CPUs, NO enabled events, and zero counters.  Real PMC accounting is
+/// wired through [`register_cpu`] (one row per CPU the perfmon layer brings
+/// online), [`configure_event`] (which hardware events the layer programs into
+/// the counters), and `record_sample`/`record_multiplex`; until those are
+/// called the table is genuinely empty, so `/proc/pmcstat` and the `pmcstat`
+/// kshell command report zeros rather than fabricated numbers — the kernel's
+/// hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded four fictional CPUs with trillions of fabricated
+/// counter values (cpu0: cycles 3e12 / instructions 2.5e12 / cache-misses 50M /
+/// samples 100k; cpu1–3 with similarly invented magnitudes) plus an enabled-event
+/// mask claiming six events were live, and aggregate totals (total_samples 335k,
+/// multiplex_switches 10k), which `/proc/pmcstat` then displayed as if they were
+/// real measured microarchitectural samples — including computed IPC and
+/// cache-miss-rate derived from the fake counters.  That demo data was removed;
+/// the self-test now builds its own fixtures explicitly via the real API (see
+/// [`self_test`]).  The perfmon layer is expected to call [`register_cpu`] per
+/// online CPU, [`configure_event`] to program counters, and `record_sample` as
+/// the PMU overflows/samples fire.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        cpus: alloc::vec![
-            CpuCounters { cpu_id: 0, counters: [3_000_000_000_000, 2_500_000_000_000, 50_000_000, 2_000_000_000, 10_000_000, 500_000_000, 1_000_000_000, 200_000_000], samples: 100_000 },
-            CpuCounters { cpu_id: 1, counters: [2_800_000_000_000, 2_300_000_000_000, 45_000_000, 1_800_000_000, 9_000_000, 450_000_000, 900_000_000, 180_000_000], samples: 95_000 },
-            CpuCounters { cpu_id: 2, counters: [2_000_000_000_000, 1_600_000_000_000, 30_000_000, 1_200_000_000, 6_000_000, 300_000_000, 700_000_000, 150_000_000], samples: 80_000 },
-            CpuCounters { cpu_id: 3, counters: [1_500_000_000_000, 1_200_000_000_000, 20_000_000, 800_000_000, 4_000_000, 200_000_000, 500_000_000, 100_000_000], samples: 60_000 },
-        ],
-        enabled_events: [true, true, true, true, true, true, false, false],
-        total_samples: 335_000,
-        multiplex_switches: 10_000,
+        cpus: Vec::new(),
+        enabled_events: [false; NUM_EVENTS],
+        total_samples: 0,
+        multiplex_switches: 0,
         ops: 0,
     });
+}
+
+/// Register a CPU the perfmon layer has brought online for PMC sampling.
+///
+/// The CPU starts with all counters and its sample count zeroed.  Returns
+/// [`KernelError::AlreadyExists`] if the CPU is already registered and
+/// [`KernelError::ResourceExhausted`] once [`MAX_CPUS`] CPUs exist.
+pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
+        if state.cpus.len() >= MAX_CPUS {
+            return Err(KernelError::ResourceExhausted);
+        }
+        state.cpus.push(CpuCounters {
+            cpu_id,
+            counters: [0; NUM_EVENTS],
+            samples: 0,
+        });
+        Ok(())
+    })
 }
 
 /// Record a counter sample.
@@ -204,53 +242,71 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("pmcstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/pmcstat must never surface).
+    // Resetting first clears any residue from a prior `pmcstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_cpu().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated CPUs, samples, or derived metrics.
+    assert_eq!(per_cpu().len(), 0);
+    let (c0, s0, mx0, ipc0, _o0) = stats();
+    assert_eq!((c0, s0, mx0, ipc0), (0, 0, 0, 0));
+    assert_eq!(ipc_x100(), 0); // no cycles → 0, not a divide-by-zero
+    assert_eq!(cache_miss_rate_x10000(), 0);
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Record sample.
-    let before = per_cpu()[0].counters[0];
+    // 2: Register CPUs — zeroed counters; dup id fails.
+    register_cpu(0).expect("reg0");
+    register_cpu(1).expect("reg1");
+    assert!(register_cpu(0).is_err()); // AlreadyExists
+    assert_eq!(per_cpu().len(), 2);
+    assert_eq!(per_cpu()[0].counters, [0; NUM_EVENTS]);
+    crate::serial_println!("  [2/8] register: OK");
+
+    // 3: Record sample accumulates into the right event slot + sample count.
     record_sample(0, PmcEvent::Cycles, 1000).expect("sample");
-    let after = per_cpu()[0].counters[0];
-    assert_eq!(after, before + 1000);
-    crate::serial_println!("  [2/8] sample: OK");
+    let cpu0 = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    assert_eq!(cpu0.counters[PmcEvent::Cycles.index()], 1000);
+    assert_eq!(cpu0.samples, 1);
+    crate::serial_println!("  [3/8] sample: OK");
 
-    // 3: Configure event.
+    // 4: Configure event flips the enabled mask (config, not observation).
     configure_event(PmcEvent::BusCycles, true).expect("configure");
-    crate::serial_println!("  [3/8] configure: OK");
+    crate::serial_println!("  [4/8] configure: OK");
 
-    // 4: IPC.
-    let ipc = ipc_x100();
-    assert!(ipc > 0);
-    assert!(ipc < 200); // IPC should be 0-2x, so ×100 = 0-200
-    crate::serial_println!("  [4/8] ipc: OK");
+    // 5: IPC computed exactly from recorded counters (500 insns / 1000 cycles).
+    record_sample(0, PmcEvent::Instructions, 500).expect("insns");
+    assert_eq!(ipc_x100(), 50); // 500 * 100 / 1000
+    crate::serial_println!("  [5/8] ipc: OK");
 
-    // 5: Cache miss rate.
-    let cmr = cache_miss_rate_x10000();
-    assert!(cmr > 0);
-    crate::serial_println!("  [5/8] cache miss rate: OK");
+    // 6: Cache miss rate computed exactly (50 misses / 1000 refs = 500/10000).
+    record_sample(1, PmcEvent::CacheReferences, 1000).expect("refs");
+    record_sample(1, PmcEvent::CacheMisses, 50).expect("misses");
+    assert_eq!(cache_miss_rate_x10000(), 500);
+    crate::serial_println!("  [6/8] cache miss rate: OK");
 
-    // 6: Multiplex.
-    let (_, _, mx_before, _, _) = stats();
+    // 7: Multiplex increments; unknown CPU → NotFound.
     record_multiplex().expect("multiplex");
-    let (_, _, mx_after, _, _) = stats();
-    assert_eq!(mx_after, mx_before + 1);
-    crate::serial_println!("  [6/8] multiplex: OK");
-
-    // 7: Not found.
+    let (_, _, mx, _, _) = stats();
+    assert_eq!(mx, 1);
     assert!(record_sample(99, PmcEvent::Cycles, 0).is_err());
-    crate::serial_println!("  [7/8] not found: OK");
+    crate::serial_println!("  [7/8] multiplex + not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate stats equal the exact sums of the operations above.
     let (cpus, samples, mx, ipc, ops) = stats();
-    assert_eq!(cpus, 4);
-    assert!(samples > 335_000);
-    assert!(mx > 10_000);
-    assert!(ipc > 0);
+    assert_eq!(cpus, 2);
+    assert_eq!(samples, 4); // 2 on cpu0 (cycles, insns) + 2 on cpu1 (refs, misses)
+    assert_eq!(mx, 1);
+    assert_eq!(ipc, 50);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/pmcstat table.
+    *STATE.lock() = None;
 
     crate::serial_println!("pmcstat::self_test() — all 8 tests passed");
 }

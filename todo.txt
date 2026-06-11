@@ -466,14 +466,26 @@
 ##                    already existed. Rebuilt self_test with exact assertions
 ##                    (incl. that total_reuses stays 0 unless allocating into a
 ##                    namespace that has freed a PID), wired into boot.)
+##   - pmcstat.rs    (fixed 2026-06-11; was: four fake CPUs with trillions of
+##                    fabricated counter values (cpu0 cycles 3e12 / instructions
+##                    2.5e12 / cache-misses 50M / samples 100k; cpu1-3 similar)
+##                    plus an enabled-event mask claiming six events live, and
+##                    aggregates total_samples 335k, multiplex_switches 10k —
+##                    procfs even showed IPC + cache-miss-rate DERIVED from the
+##                    fake counters. record_sample returned NotFound for an
+##                    unregistered CPU and there was NO registration API, so added
+##                    register_cpu(cpu_id) (zeroed counters); events now start all
+##                    disabled (perfmon enables via configure_event); emptied
+##                    init_defaults and rebuilt self_test with exact assertions
+##                    (incl. exact IPC=50 and cache-miss-rate=500 from recorded
+##                    samples), wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): pmcstat,
-##     powerstat, procstat, ratestat, rqstat, schedlat, ttystat, zramstat.
-##     NOTE: some may be SETTINGS modules seeding legitimate config defaults —
-##     verify each is a STATISTICS module seeding fake OBSERVATIONS before
-##     emptying it.)
+##     by grep (init_defaults with alloc::vec!/String::from/push): powerstat,
+##     procstat, ratestat, rqstat, schedlat, ttystat, zramstat. NOTE: some may
+##     be SETTINGS modules seeding legitimate config defaults — verify each is a
+##     STATISTICS module seeding fake OBSERVATIONS before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

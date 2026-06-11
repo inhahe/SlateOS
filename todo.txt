@@ -2340,6 +2340,19 @@
 ##     but fs/sysinfo reports OS version "1.0.0" (MintOS 1.0.0). One is stale;
 ##     pick a single canonical version constant and source both from it. Low
 ##     priority — not a fabrication, just a duplicated/divergent literal.
+##     shmem fixed 2026-06-11: case (a) empty-init. init_defaults seeded 2
+##     fabricated shared-memory regions (/shm/compositor_fb 8.29MB attached to
+##     pids 1+200, /shm/audio_buffer 64KB attached to pids 50+200) plus
+##     fabricated totals (created 2, attaches 4, bytes 8_359_936) — surfaced
+##     through /proc and the `shmem` shell command as if those PIDs had really
+##     mapped those segments. Emptied regions to Vec::new() with all totals 0
+##     (next_id 1); create()/attach() are the honest entry points. self_test
+##     rewritten residue-free: resets STATE None at start AND end, asserts empty
+##     defaults, builds the fixture via create/attach, exercises attach/detach/
+##     auto-delete with EXACT stats (1 region, 2 created, 1 deleted, 4 attaches,
+##     2 detaches, 8_294_400 bytes). boot-test PASSED (28s). DEFERRED PROPER
+##     FIX: wire this diagnostic view to the real kernel shared-memory/IPC
+##     subsystem so /proc/shmem reflects genuinely mapped segments.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

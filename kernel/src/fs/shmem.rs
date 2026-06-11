@@ -108,30 +108,26 @@ where
 // ---------------------------------------------------------------------------
 
 pub fn init_defaults() {
+    // Start with no shared-memory regions. A region records real IPC state —
+    // which named/anonymous segments exist, their sizes, and which live PIDs
+    // are attached. Seeding "/shm/compositor_fb" and "/shm/audio_buffer" with
+    // invented owner/attached PIDs (1, 50, 200) and fabricated created/attach/
+    // byte totals would surface phantom IPC regions through /proc and the
+    // `shmem` shell command as if those processes had really mapped them.
+    // Regions appear only when a process creates one via create().
+    //
+    // DEFERRED PROPER FIX: wire this diagnostic view to the real kernel shared-
+    // memory / IPC subsystem so /proc/shmem reflects genuinely mapped segments.
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        regions: alloc::vec![
-            ShmRegion {
-                id: 1, name: String::from("/shm/compositor_fb"), size: 8_294_400,
-                permission: ShmPermission::ReadWrite, owner_pid: 1,
-                attached_pids: alloc::vec![1, 200], created_ns: now,
-                last_access_ns: now, persistent: true,
-            },
-            ShmRegion {
-                id: 2, name: String::from("/shm/audio_buffer"), size: 65536,
-                permission: ShmPermission::ReadWrite, owner_pid: 50,
-                attached_pids: alloc::vec![50, 200], created_ns: now,
-                last_access_ns: now, persistent: false,
-            },
-        ],
-        next_id: 3,
-        total_created: 2,
+        regions: Vec::new(),
+        next_id: 1,
+        total_created: 0,
         total_deleted: 0,
-        total_attaches: 4,
+        total_attaches: 0,
         total_detaches: 0,
-        total_bytes: 8_359_936,
+        total_bytes: 0,
         ops: 0,
     });
 }
@@ -244,15 +240,22 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("shmem::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_regions().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults, then build a fixture through the real create()/attach()
+    //    API: a persistent region owned by pid 1, also mapped by pid 200.
+    assert_eq!(list_regions().len(), 0);
+    let fb = create("/shm/compositor_fb", 8_294_400, ShmPermission::ReadWrite, 1, true).expect("fb");
+    attach(fb, 200).expect("attach fb 200");
+    assert_eq!(list_regions().len(), 1);
+    crate::serial_println!("  [1/8] defaults+fixture: OK");
 
     // 2: Create region.
     let id = create("/shm/test", 4096, ShmPermission::ReadWrite, 100, false).expect("create");
-    assert!(id >= 3);
     assert!(create("/shm/test", 4096, ShmPermission::ReadWrite, 100, false).is_err());
     assert!(create("/shm/zero", 0, ShmPermission::ReadOnly, 1, false).is_err());
     crate::serial_println!("  [2/8] create: OK");
@@ -271,9 +274,9 @@ pub fn self_test() {
     assert!(attach(id, 200).is_err()); // Duplicate.
     crate::serial_println!("  [4/8] attach: OK");
 
-    // 5: Regions for PID.
+    // 5: Regions for PID — pid 200 is attached to fb + test.
     let regs = regions_for_pid(200);
-    assert!(regs.len() >= 2); // compositor_fb + test.
+    assert_eq!(regs.len(), 2);
     crate::serial_println!("  [5/8] pid regions: OK");
 
     // 6: Detach.
@@ -282,21 +285,25 @@ pub fn self_test() {
     assert_eq!(r.attached_pids.len(), 1);
     crate::serial_println!("  [6/8] detach: OK");
 
-    // 7: Auto-delete non-persistent.
+    // 7: Auto-delete non-persistent on last detach.
     detach(id, 100).expect("detach2");
     assert!(get_region(id).is_none()); // Auto-deleted.
     crate::serial_println!("  [7/8] auto-delete: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact: 1 region left (fb), 2 created, 1 deleted, 4 attaches,
+    //    2 detaches, 8_294_400 bytes (fb only after test auto-deleted).
     let (regions, created, deleted, attaches, detaches, bytes, ops) = stats();
-    assert_eq!(regions, 2);
-    assert!(created >= 3);
-    assert!(deleted >= 1);
-    assert!(attaches >= 5);
-    assert!(detaches >= 2);
-    assert!(bytes > 0);
+    assert_eq!(regions, 1);
+    assert_eq!(created, 2);
+    assert_eq!(deleted, 1);
+    assert_eq!(attaches, 4);
+    assert_eq!(detaches, 2);
+    assert_eq!(bytes, 8_294_400);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     crate::serial_println!("shmem::self_test() — all 8 tests passed");
 }

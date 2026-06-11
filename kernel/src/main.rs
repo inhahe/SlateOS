@@ -1847,6 +1847,20 @@ extern "C" fn kernel_main() -> ! {
     // real API with exact assertions (store/authenticate/lockout/unlock/grant/
     // revoke) and clears the state afterward, so it is safe at boot.
     fs::authbroker::self_test();
+    // Security-module (LSM) statistics self-test.  secmod previously seeded two
+    // fictional modules into init_defaults — "capability" (88.8M checks /
+    // 168,700 denials / 50K audits) and "apparmor" (71.93M checks / 338,500
+    // denials / 100K audits), with fabricated per-hook check/denial arrays and
+    // global totals of 160,730,000 checks / 507,200 denials / 150,000 audits.
+    // /proc/secmod and the secmod kshell command surface the module list as the
+    // real security-enforcement activity, so seeding hundreds of millions of
+    // policy checks that never happened is fabricated procfs data.  init_defaults
+    // now starts with NO modules and zeroed totals; a module enters only through
+    // a real register_module and its counters advance via record_check/
+    // record_deny/record_audit on the security-hook path.  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions
+    // (register/check/deny/audit/enable) and clears the state afterward.
+    fs::secmod::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

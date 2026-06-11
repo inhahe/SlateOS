@@ -119,33 +119,34 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the security-module statistics state.
+///
+/// Starts with NO registered security modules and zero check/denial/audit
+/// totals. A module is added through [`register_module`] when an LSM-like
+/// security module is actually loaded, and its per-hook check/denial/audit
+/// counters advance only through real [`record_check`] / [`record_deny`] /
+/// [`record_audit`] calls on the security-hook path. The `/proc/secmod`
+/// generator and the `secmod` kshell command surface the module list (and
+/// [`per_module`] / [`stats`]) as if it reflects the real security-enforcement
+/// activity, so seeding it with phantom modules and access counts would be
+/// fabricated procfs data — it would claim hundreds of millions of policy
+/// checks and hundreds of thousands of denials that never happened.
+///
+/// (Previously this seeded two fictional modules — "capability" (per-hook
+/// checks [50M, 30M, 5M, 2M, 1M, 100K, 500K, 200K], denials [100K, 50K, 10K,
+/// 5K, 2K, 500, 1K, 200], 88.8M checks / 168,700 denials / 50K audits) and
+/// "apparmor" (checks [40M, 25M, 4M, 1.5M, 800K, 80K, 400K, 150K], denials
+/// [200K, 100K, 20K, 10K, 5K, 1K, 2K, 500], 71.93M checks / 338,500 denials /
+/// 100K audits) — plus global totals of 160,730,000 checks / 507,200 denials /
+/// 150,000 audits.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        modules: alloc::vec![
-            ModuleStats {
-                name: String::from("capability"),
-                enabled: true,
-                checks: [50_000_000, 30_000_000, 5_000_000, 2_000_000, 1_000_000, 100_000, 500_000, 200_000],
-                denials: [100_000, 50_000, 10_000, 5_000, 2_000, 500, 1_000, 200],
-                total_checks: 88_800_000,
-                total_denials: 168_700,
-                audit_events: 50_000,
-            },
-            ModuleStats {
-                name: String::from("apparmor"),
-                enabled: true,
-                checks: [40_000_000, 25_000_000, 4_000_000, 1_500_000, 800_000, 80_000, 400_000, 150_000],
-                denials: [200_000, 100_000, 20_000, 10_000, 5_000, 1_000, 2_000, 500],
-                total_checks: 71_930_000,
-                total_denials: 338_500,
-                audit_events: 100_000,
-            },
-        ],
-        total_checks: 160_730_000,
-        total_denials: 507_200,
-        total_audits: 150_000,
+        modules: Vec::new(),
+        total_checks: 0,
+        total_denials: 0,
+        total_audits: 0,
         ops: 0,
     });
 }
@@ -232,56 +233,67 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("secmod::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and no
+    // fixtures leak into the live module table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_module().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom modules, zero totals.
+    assert_eq!(per_module().len(), 0);
+    let (m0, c0, d0, a0, _) = stats();
+    assert_eq!((m0, c0, d0, a0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
+    // 2: Register — module appears zeroed; a duplicate is AlreadyExists.
     register_module("test_mod").expect("register");
     assert!(register_module("test_mod").is_err());
-    assert_eq!(per_module().len(), 3);
+    assert_eq!(per_module().len(), 1);
+    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("find");
+    assert_eq!((m.total_checks, m.total_denials, m.audit_events), (0, 0, 0));
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Check.
+    // 3: Check — per-hook + per-module + global check counters advance.
     record_check("test_mod", HookType::FileOpen).expect("check");
-    let m = per_module().iter().find(|m| m.name == "test_mod").cloned().unwrap();
-    assert_eq!(m.total_checks, 1);
-    assert_eq!(m.checks[0], 1);
+    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("p3");
+    assert_eq!((m.total_checks, m.checks[0]), (1, 1));
+    assert_eq!(stats().1, 1); // total_checks
     crate::serial_println!("  [3/8] check: OK");
 
-    // 4: Deny.
+    // 4: Deny — a denial also counts as a check (both per-hook arrays advance).
     record_deny("test_mod", HookType::FileOpen).expect("deny");
-    let m = per_module().iter().find(|m| m.name == "test_mod").cloned().unwrap();
-    assert_eq!(m.total_denials, 1);
-    assert_eq!(m.denials[0], 1);
+    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("p4");
+    assert_eq!((m.total_denials, m.denials[0]), (1, 1));
+    assert_eq!((m.total_checks, m.checks[0]), (2, 2)); // deny bumps checks too
+    assert_eq!(stats().2, 1); // total_denials
     crate::serial_println!("  [4/8] deny: OK");
 
-    // 5: Audit.
+    // 5: Audit — per-module and global audit counters advance.
     record_audit("test_mod").expect("audit");
-    let m = per_module().iter().find(|m| m.name == "test_mod").cloned().unwrap();
+    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("p5");
     assert_eq!(m.audit_events, 1);
+    assert_eq!(stats().3, 1); // total_audits
     crate::serial_println!("  [5/8] audit: OK");
 
-    // 6: Enable/disable.
+    // 6: Enable/disable — toggling the module's enabled flag.
     set_enabled("test_mod", false).expect("disable");
-    let m = per_module().iter().find(|m| m.name == "test_mod").cloned().unwrap();
+    let m = per_module().into_iter().find(|m| m.name == "test_mod").expect("p6");
     assert!(!m.enabled);
     crate::serial_println!("  [6/8] enable/disable: OK");
 
-    // 7: Not found.
+    // 7: Not found — recording into an unregistered module errors.
     assert!(record_check("nonexist", HookType::FileOpen).is_err());
+    assert!(record_deny("nonexist", HookType::FileOpen).is_err());
+    assert!(record_audit("nonexist").is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above: 1 module, 2 checks
+    //    (1 check + 1 deny), 1 denial, 1 audit.
     let (mods, checks, denials, audits, ops) = stats();
-    assert_eq!(mods, 3);
-    assert!(checks > 160_000_000);
-    assert!(denials > 507_000);
-    assert!(audits > 150_000);
+    assert_eq!((mods, checks, denials, audits), (1, 2, 1, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("secmod::self_test() — all 8 tests passed");
 }

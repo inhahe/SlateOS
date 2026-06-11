@@ -753,6 +753,22 @@
 ##                    incl. monotonic ids, cur=min default, transition counting,
 ##                    [min,max] clamping both directions, and exact total. Wired
 ##                    into boot. /proc/devfreq now 67 bytes.)
+##   - memcg.rs      (fixed 2026-06-11; was: three fictional memory cgroups —
+##                    "/" 2GiB usage / 3GB max / 500k charges / 490k uncharges /
+##                    50 procs; "/system" 512MiB usage / 1GiB limit / 100k
+##                    charges / 15 procs; "/user" 1GiB usage / 4GiB limit /
+##                    128MiB swap / 300k charges / 2 failcnt / 30 procs — plus
+##                    invented totals (900k charges, 865k uncharges, 2 failures),
+##                    shown via /proc/memcg and the memcg kshell command as real
+##                    cgroup memory accounting. The create/charge/uncharge/
+##                    set_limit/set_soft_limit/record_oom API already existed, so
+##                    no new API was needed. Emptied init_defaults (no groups, all
+##                    totals 0) and rebuilt self_test residue-free with exact
+##                    assertions incl. duplicate-create rejection, charge accrual +
+##                    max-usage watermark stickiness across uncharge, hard-limit
+##                    failcnt enforcement (rejected charge not counted), soft-limit
+##                    detection, and OOM accounting. Wired into boot. /proc/memcg
+##                    now 84 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -765,14 +781,14 @@
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
-##     + netfilter + mempress + devfreq (just fixed) were thirteen. Next ticks:
-##     work through the remaining candidates ONE PER TICK, auditing each before
-##     acting. The 52-file list includes both STATISTICS modules (fix: empty /
-##     zero-counters) AND SETTINGS or structural modules that seed LEGITIMATE
-##     config defaults or real topology (LEAVE ALONE). Verify each is a
+##     + netfilter + mempress + devfreq + memcg (just fixed) were fourteen. Next
+##     ticks: work through the remaining candidates ONE PER TICK, auditing each
+##     before acting. The 52-file list includes both STATISTICS modules (fix:
+##     empty / zero-counters) AND SETTINGS or structural modules that seed
+##     LEGITIMATE config defaults or real topology (LEAVE ALONE). Verify each is a
 ##     statistics module fabricating observed numbers surfaced via /proc before
-##     emptying it. Next candidate: memcg. Remaining flagged names incl.:
-##     memcg, cgmem, vmzone, vmballoon, softirq, timerq,
+##     emptying it. Next candidate: cgmem. Remaining flagged names incl.:
+##     cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,

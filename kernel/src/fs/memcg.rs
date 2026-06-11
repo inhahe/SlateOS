@@ -83,33 +83,29 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the memory-cgroup accounting state.
+///
+/// Starts with no cgroups and all charge/uncharge/failure/OOM totals at
+/// zero. The `/proc/memcg` generator and the `memcg` kshell command
+/// surface this table as if it reflects real per-cgroup memory usage, so
+/// seeding it with invented cgroups and usage figures would be fabricated
+/// procfs data. The cgroup hierarchy is built at runtime through
+/// [`create`] by the cgroupfs subsystem, and usage is accounted only
+/// through real [`charge`] / [`uncharge`] calls.
+///
+/// (Previously this seeded three fictional cgroups — "/" 2GiB usage / 3GB
+/// max / 500k charges; "/system" 512MiB usage / 1GiB limit / 100k
+/// charges; "/user" 1GiB usage / 4GiB limit / 128MiB swap / 300k charges /
+/// 2 failcnt — plus invented totals (900k charges, 865k uncharges, 2
+/// failures).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        groups: alloc::vec![
-            MemCgroup {
-                path: String::from("/"), usage_bytes: 2_147_483_648, limit_bytes: 0,
-                soft_limit_bytes: 0, swap_usage: 0, swap_limit: 0,
-                max_usage: 3_000_000_000, failcnt: 0, oom_kills: 0,
-                charge_count: 500000, uncharge_count: 490000, processes: 50,
-            },
-            MemCgroup {
-                path: String::from("/system"), usage_bytes: 536_870_912, limit_bytes: 1_073_741_824,
-                soft_limit_bytes: 805_306_368, swap_usage: 0, swap_limit: 268_435_456,
-                max_usage: 600_000_000, failcnt: 0, oom_kills: 0,
-                charge_count: 100000, uncharge_count: 95000, processes: 15,
-            },
-            MemCgroup {
-                path: String::from("/user"), usage_bytes: 1_073_741_824, limit_bytes: 4_294_967_296,
-                soft_limit_bytes: 2_147_483_648, swap_usage: 134_217_728, swap_limit: 1_073_741_824,
-                max_usage: 1_500_000_000, failcnt: 2, oom_kills: 0,
-                charge_count: 300000, uncharge_count: 280000, processes: 30,
-            },
-        ],
-        total_charges: 900000,
-        total_uncharges: 865000,
-        total_failures: 2,
+        groups: Vec::new(),
+        total_charges: 0,
+        total_uncharges: 0,
+        total_failures: 0,
         total_oom: 0,
         ops: 0,
     });
@@ -226,58 +222,75 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("memcg::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live cgroup table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated cgroups, all totals zero.
+    assert_eq!(list().len(), 0);
+    let (count0, charges0, uncharges0, failures0, oom0, _) = stats();
+    assert_eq!((count0, charges0, uncharges0, failures0, oom0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Charge.
+    // 2: Create cgroups; charging an unknown cgroup errors.
+    create("/system").expect("create system");
+    assert!(create("/system").is_err()); // duplicate
+    assert!(charge("/unknown", 1).is_err()); // NotFound
+    assert_eq!(get("/system").expect("get").usage_bytes, 0);
+    crate::serial_println!("  [2/8] create: OK");
+
+    // 3: Charge accrues usage, max-usage watermark, and counts.
     charge("/system", 4096).expect("charge");
-    let g = get("/system").expect("get");
-    assert_eq!(g.usage_bytes, 536_870_912 + 4096);
-    crate::serial_println!("  [2/8] charge: OK");
-
-    // 3: Uncharge.
-    uncharge("/system", 4096).expect("uncharge");
     let g = get("/system").expect("get2");
-    assert_eq!(g.usage_bytes, 536_870_912);
-    crate::serial_println!("  [3/8] uncharge: OK");
+    assert_eq!(g.usage_bytes, 4096);
+    assert_eq!(g.max_usage, 4096);
+    assert_eq!(g.charge_count, 1);
+    crate::serial_println!("  [3/8] charge: OK");
 
-    // 4: Limit enforcement.
-    set_limit("/system", 536_870_912 + 1000).expect("limit");
-    assert!(charge("/system", 2000).is_err()); // Over limit.
-    crate::serial_println!("  [4/8] limit: OK");
+    // 4: Uncharge drops usage but leaves the max-usage watermark intact.
+    uncharge("/system", 4096).expect("uncharge");
+    let g = get("/system").expect("get3");
+    assert_eq!(g.usage_bytes, 0);
+    assert_eq!(g.max_usage, 4096); // watermark sticks
+    assert_eq!(g.uncharge_count, 1);
+    crate::serial_println!("  [4/8] uncharge: OK");
 
-    // 5: Create.
-    create("/test").expect("create");
-    assert_eq!(list().len(), 4);
-    assert!(create("/test").is_err());
-    crate::serial_println!("  [5/8] create: OK");
+    // 5: Hard-limit enforcement bumps failcnt and rejects the charge.
+    set_limit("/system", 1000).expect("limit");
+    assert!(charge("/system", 2000).is_err()); // over limit
+    let g = get("/system").expect("get4");
+    assert_eq!(g.usage_bytes, 0); // rejected charge did not apply
+    assert_eq!(g.failcnt, 1);
+    crate::serial_println!("  [5/8] limit: OK");
 
-    // 6: Soft limit check.
-    charge("/test", 100).expect("charge2"); // Set some usage first.
-    set_limit("/test", 0).expect("unlimit"); // Unlimited hard limit.
+    // 6: Soft-limit detection.
+    create("/test").expect("create test");
+    charge("/test", 100).expect("charge test");
     set_soft_limit("/test", 50).expect("soft");
     let over = over_soft_limit();
     assert!(over.iter().any(|g| g.path == "/test"));
+    assert!(!over.iter().any(|g| g.path == "/system")); // no soft limit set
     crate::serial_println!("  [6/8] soft limit: OK");
 
-    // 7: OOM.
+    // 7: OOM accounting.
     record_oom("/test").expect("oom");
-    let g = get("/test").expect("get3");
-    assert_eq!(g.oom_kills, 1);
+    assert_eq!(get("/test").expect("get5").oom_kills, 1);
     crate::serial_println!("  [7/8] oom: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above.
+    //    charges: 4096 (test3) + 100 (test6) = 2 successful; the over-limit
+    //    charge in test 5 failed and is NOT counted as a charge.
     let (count, charges, uncharges, failures, oom, ops) = stats();
-    assert_eq!(count, 4);
-    assert!(charges > 900000);
-    assert!(uncharges > 865000);
-    assert!(failures >= 3);
-    assert!(oom >= 1);
+    assert_eq!(count, 2);
+    assert_eq!(charges, 2);
+    assert_eq!(uncharges, 1);
+    assert_eq!(failures, 1);
+    assert_eq!(oom, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("memcg::self_test() — all 8 tests passed");
 }

@@ -1482,6 +1482,16 @@ extern "C" fn kernel_main() -> ! {
     // with exact assertions and resets the table afterward, so it is safe at
     // boot.
     fs::devfreq::self_test();
+    // memcg backs /proc/memcg (per-cgroup memory usage, limits, swap, failcnt,
+    // OOM kills, charge/uncharge counts).  Its init_defaults() previously seeded
+    // three fictional cgroups — "/" 2GiB usage / 500k charges, "/system" 512MiB
+    // usage / 1GiB limit, "/user" 1GiB usage / 4GiB limit / 128MiB swap — plus
+    // invented totals (900k charges, 865k uncharges, 2 failures); that demo data
+    // was removed (the cgroup hierarchy is built via create() by the cgroupfs
+    // subsystem and usage is accounted only through real charge/uncharge calls).
+    // The residue-free self_test builds its fixtures via the real API with exact
+    // assertions and resets the table afterward, so it is safe at boot.
+    fs::memcg::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

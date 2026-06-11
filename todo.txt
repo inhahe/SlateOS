@@ -2457,6 +2457,17 @@
 ##     DEFERRED PROPER FIX: register displays + assignments from the real display/
 ##     monitors enumeration so /proc/displaycolor reflects genuine connected
 ##     displays and their bound profiles.
+##     wifiscan audited 2026-06-11: NOT a fabricator — init_defaults() already
+##     seeds an honest empty state (no networks, no saved, zero counters,
+##     Disconnected, connected_ssid None). discover() is the honest scan entry
+##     point and the self_test builds its fixture through it (3 networks via
+##     discover, connect/forget/disconnect exercised, EXACT stats). Contrast with
+##     netsettings, which DID seed fabricated scanned_wifi entries (fixed earlier).
+##     Only fix: made self_test residue-free — it called init_defaults() without
+##     first resetting STATE (so it would run against dirty state if prior
+##     `wifiscan` kshell activity had populated it) and left 3 networks + a
+##     connection in the live /proc/wifiscan view afterward. Now resets STATE to
+##     None at start AND end. boot-test PASSED (27s). No fabricated procfs data.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

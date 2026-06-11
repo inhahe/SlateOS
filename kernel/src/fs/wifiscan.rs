@@ -309,6 +309,11 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("wifiscan::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity (init_defaults early-returns
+    // when STATE is already populated).
+    *STATE.lock() = None;
     init_defaults();
 
     // 1: Empty initially.
@@ -363,6 +368,9 @@ pub fn self_test() {
     assert_eq!(connections, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave no residue for later callers / the live /proc/wifiscan view.
+    *STATE.lock() = None;
 
     crate::serial_println!("wifiscan::self_test() — all 8 tests passed");
 }

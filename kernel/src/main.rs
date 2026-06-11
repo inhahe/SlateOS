@@ -1834,6 +1834,19 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::certmgr::self_test() {
         serial_println!("WARNING: Certificate manager self-test failed: {:?}", e);
     }
+    // Auth-broker self-test.  authbroker previously seeded three fictional
+    // credentials into init_defaults — "root" (Password), "admin" (PublicKey)
+    // and "service_acct" (Token), each with a placeholder hash/key and no real
+    // provisioned account behind it.  /proc/authbroker and the authbroker kshell
+    // command surface the credential list as the real credential store, so
+    // presenting phantom verified credentials for privileged principals is a
+    // dangerous fabrication on a security surface.  init_defaults now starts
+    // with an EMPTY credential store; credentials enter only through a real
+    // store_credential (account provisioning) and grants through
+    // grant_capability.  The residue-free self_test builds its fixtures via the
+    // real API with exact assertions (store/authenticate/lockout/unlock/grant/
+    // revoke) and clears the state afterward, so it is safe at boot.
+    fs::authbroker::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

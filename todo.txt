@@ -1298,6 +1298,38 @@
 ##                    and real validity windows read from the certificate) at boot.
 ##                    Until then the trust store correctly reports empty rather than
 ##                    fabricating trusted roots.
+##   - authbroker (2026-06-11): FIXED — fabrication case (a) (full real API
+##                    exists, just emptied init_defaults). Plan-9-Factotum-style
+##                    auth broker / credential store, surfaced via /proc/authbroker
+##                    and the `authbroker` kshell command. init_defaults seeded
+##                    THREE fictional credentials — "root" (Password, placeholder
+##                    $argon2id$… hash, lock after 5 failures), "admin" (PublicKey,
+##                    placeholder ssh-ed25519 AAAAC3… key, lock after 10) and
+##                    "service_acct" (Token, placeholder bearer:hashed_token_abc123,
+##                    24h expiry) — none backed by a real provisioned account or
+##                    verified secret. /proc/authbroker lists each credential by
+##                    principal/method/failed-attempts, so presenting phantom
+##                    verified credentials for privileged principals is a dangerous
+##                    lie on a security surface (claims the OS holds credentials it
+##                    never provisioned). Emptied init_defaults to an EMPTY
+##                    credential store (no creds, no grants, all auth/grant/deny/
+##                    revoke totals 0; next_cred_id/next_grant_id = 1). The existing
+##                    store_credential / grant_capability / authenticate /
+##                    record_failure / revoke_grant API is the real registration
+##                    path (case a). Rebuilt self_test residue-free (clears STATE
+##                    at start AND end) with EXACT assertions — store gives id 1,
+##                    authenticate Granted/Denied, 5-failure lockout, unlock,
+##                    second cred id 2, grant id 1, revoke + double-revoke error,
+##                    final stats (2 creds, 1 grant, 4 attempts, 2 granted, 7
+##                    denied, 1 revoked) — instead of the old `>=` assertions over
+##                    the seeded baseline. Wired into the boot self-test path (was
+##                    kshell-only). /proc/authbroker now 76 bytes (truthful empty
+##                    store). PROPER FIX DEFERRED: real account provisioning (the
+##                    login / user-management subsystem) should call
+##                    store_credential when an account is created and
+##                    authenticate/record_failure on real login attempts so the
+##                    store reflects genuine credentials — wire when user accounts
+##                    are provisioned. Until then the store correctly reports empty.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1311,21 +1343,23 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr (just fixed) were thirty-eight. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker (just fixed) were thirty-nine. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     authbroker. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     secmod. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
 ##     namespaces / port regions, case (a). hwrng fixed 2026-06-11: zeroed fake
 ##     entropy activity, kept 6-source dimension + pool capacity, case (c). See
 ##     audit notes above. certmgr fixed 2026-06-11: emptied 5 fabricated root CAs
-##     to an empty trust store, case (a) — security surface.) Remaining flagged
-##     names incl.: authbroker, secmod, binfmt,
+##     to an empty trust store, case (a) — security surface. authbroker fixed
+##     2026-06-11: emptied 3 fabricated credentials to an empty store, case (a) —
+##     security surface.) Remaining flagged
+##     names incl.: secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed

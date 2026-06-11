@@ -142,33 +142,35 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the auth-broker state.
+///
+/// Starts with NO stored credentials and NO capability grants (all auth/grant/
+/// deny/revoke totals zero). A credential is added through [`store_credential`]
+/// when an account is actually provisioned, and a capability grant through
+/// [`grant_capability`]; the per-principal counters advance only through real
+/// [`authenticate`] / [`record_failure`] / [`revoke_grant`] calls. The
+/// `/proc/authbroker` generator and the `authbroker` kshell command surface the
+/// credential list (and [`list_credentials`] / [`list_grants`] / [`stats`]) as
+/// if it reflects the real credential store, so seeding it with phantom accounts
+/// would be fabricated procfs data — and uniquely dangerous on a security
+/// surface, because it would claim the OS holds verified credentials for
+/// privileged principals (root, admin, a service account) that nobody ever
+/// provisioned. A real credential store is legitimate, but it must be populated
+/// by actual account provisioning through [`store_credential`], not invented
+/// here.
+///
+/// (Previously this seeded three fictional credentials — "root" (Password, a
+/// placeholder `$argon2id$…` hash, lock after 5 failures), "admin" (PublicKey,
+/// a placeholder `ssh-ed25519 AAAAC3…` key, lock after 10) and "service_acct"
+/// (Token, a placeholder `bearer:hashed_token_abc123`, 24h expiry) — none
+/// backed by a real provisioned account or verified secret.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        credentials: alloc::vec![
-            Credential {
-                id: 1, principal: String::from("root"), method: AuthMethod::Password,
-                hash: String::from("$argon2id$v=19$m=65536,t=3,p=4$..."),
-                created_ns: now, expires_ns: 0, locked: false,
-                failed_attempts: 0, max_failures: 5,
-            },
-            Credential {
-                id: 2, principal: String::from("admin"), method: AuthMethod::PublicKey,
-                hash: String::from("ssh-ed25519 AAAAC3..."),
-                created_ns: now, expires_ns: 0, locked: false,
-                failed_attempts: 0, max_failures: 10,
-            },
-            Credential {
-                id: 3, principal: String::from("service_acct"), method: AuthMethod::Token,
-                hash: String::from("bearer:hashed_token_abc123"),
-                created_ns: now, expires_ns: now + 86_400_000_000_000, // 24h.
-                locked: false, failed_attempts: 0, max_failures: 0,
-            },
-        ],
+        credentials: Vec::new(),
         grants: Vec::new(),
-        next_cred_id: 4,
+        next_cred_id: 1,
         next_grant_id: 1,
         total_auth_attempts: 0,
         total_granted: 0,
@@ -323,59 +325,70 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("authbroker::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and no
+    // fixtures leak into the live credential store afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_credentials(None).len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom credentials or grants, zero totals.
+    assert_eq!(list_credentials(None).len(), 0);
+    assert_eq!(list_grants(None).len(), 0);
+    let (c0, g0, at0, gr0, dn0, rv0, _) = stats();
+    assert_eq!((c0, g0, at0, gr0, dn0, rv0), (0, 0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Authenticate.
-    let r = authenticate("root", AuthMethod::Password).expect("auth");
-    assert_eq!(r, AuthResult::Granted);
-    let r = authenticate("nobody", AuthMethod::Password).expect("auth2");
-    assert_eq!(r, AuthResult::Denied);
-    crate::serial_println!("  [2/8] authenticate: OK");
+    // 2: Store + authenticate — first credential gets id 1; auth of a stored
+    //    principal is Granted, auth of an unknown principal is Denied.
+    let uid = store_credential("alice", AuthMethod::Password, "hash_a").expect("store");
+    assert_eq!(uid, 1);
+    assert_eq!(list_credentials(Some("alice")).len(), 1);
+    assert_eq!(authenticate("alice", AuthMethod::Password).expect("auth"), AuthResult::Granted);
+    assert_eq!(authenticate("nobody", AuthMethod::Password).expect("auth2"), AuthResult::Denied);
+    crate::serial_println!("  [2/8] store + authenticate: OK");
 
-    // 3: Failed attempts + lock.
+    // 3: Failed attempts + lock — alice has max_failures=5 (the store default),
+    //    so the fifth failure locks the account.
     for _ in 0..5 {
-        record_failure("root", AuthMethod::Password).expect("fail");
+        record_failure("alice", AuthMethod::Password).expect("fail");
     }
-    let r = authenticate("root", AuthMethod::Password).expect("auth3");
-    assert_eq!(r, AuthResult::Locked);
+    assert_eq!(authenticate("alice", AuthMethod::Password).expect("auth3"), AuthResult::Locked);
     crate::serial_println!("  [3/8] lockout: OK");
 
-    // 4: Unlock.
-    unlock("root").expect("unlock");
-    let r = authenticate("root", AuthMethod::Password).expect("auth4");
-    assert_eq!(r, AuthResult::Granted);
+    // 4: Unlock — clears the lock and the failure counter; auth succeeds again.
+    unlock("alice").expect("unlock");
+    assert_eq!(authenticate("alice", AuthMethod::Password).expect("auth4"), AuthResult::Granted);
     crate::serial_println!("  [4/8] unlock: OK");
 
-    // 5: Store credential.
-    let id = store_credential("testuser", AuthMethod::Token, "hash123").expect("store");
-    assert!(id >= 4);
-    assert_eq!(list_credentials(Some("testuser")).len(), 1);
-    crate::serial_println!("  [5/8] store: OK");
+    // 5: Second credential — gets id 2; per-principal listing is exact.
+    let bid = store_credential("bob", AuthMethod::Token, "hash_b").expect("store2");
+    assert_eq!(bid, 2);
+    assert_eq!(list_credentials(None).len(), 2);
+    assert_eq!(list_credentials(Some("bob")).len(), 1);
+    crate::serial_println!("  [5/8] second credential: OK");
 
-    // 6: Grant capability.
-    let gid = grant_capability("root", "/dev/sda", 0).expect("grant");
-    assert_eq!(list_grants(Some("root")).len(), 1);
+    // 6: Grant capability — first grant gets id 1; active-grant listing is exact.
+    let gid = grant_capability("alice", "/dev/sda", 0).expect("grant");
+    assert_eq!(gid, 1);
+    assert_eq!(list_grants(Some("alice")).len(), 1);
     crate::serial_println!("  [6/8] grant: OK");
 
-    // 7: Revoke.
+    // 7: Revoke — the grant drops out of the active listing; double revoke errors.
     revoke_grant(gid).expect("revoke");
-    assert_eq!(list_grants(Some("root")).len(), 0);
+    assert_eq!(list_grants(Some("alice")).len(), 0);
+    assert!(revoke_grant(gid).is_err());
     crate::serial_println!("  [7/8] revoke: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above: 2 credentials, 1
+    //    grant slot, and the auth/grant/deny/revoke counters from this test.
+    //    attempts = 4 auths (alice granted, nobody denied, locked, granted);
+    //    granted = 2; denied = 1 (nobody) + 5 (record_failure) + 1 (locked) = 7;
+    //    revoked = 1.
     let (creds, grants, attempts, granted, denied, revoked, ops) = stats();
-    assert!(creds >= 4);
-    let _ = grants;
-    assert!(attempts >= 4);
-    assert!(granted >= 3);
-    assert!(denied >= 1);
-    assert!(revoked >= 1);
+    assert_eq!((creds, grants, attempts, granted, denied, revoked), (2, 1, 4, 2, 7, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("authbroker::self_test() — all 8 tests passed");
 }

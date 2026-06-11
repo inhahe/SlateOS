@@ -132,20 +132,58 @@ fn error_index(e: LoadError) -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the binary-format loader statistics state.
+///
+/// Starts with NO registered formats and zero load/error totals (the per-error
+/// breakdown array is all zeros too). A format handler is added through
+/// [`register_format`] when the kernel actually registers a binary-format
+/// loader (the ELF64/ELF32 loader, the script/shebang handler, …), and its
+/// per-format load/error/timing counters advance only through real
+/// [`record_load`] / [`record_error`] calls on the `exec` path. The
+/// `/proc/binfmt` generator and the `binfmt` kshell command surface the format
+/// list (and [`format_stats`] / [`error_breakdown`] / [`stats`]) as if it
+/// reflects the real loader activity, so seeding it with phantom formats and
+/// load counts would be fabricated procfs data — it would claim hundreds of
+/// thousands of executions that never happened.
+///
+/// (Previously this seeded three fictional formats — Elf64 (500,000 loads /
+/// 1,000 errors / 500s total / 1ms avg / 50ms max), Script (100,000 / 5,000 /
+/// 20s / 200µs / 10ms) and Elf32 (10,000 / 200 / 5s / 500µs / 20ms) — plus an
+/// error breakdown of [3000, 500, 200, 1500, 800, 200] and global totals of
+/// 610,000 loads / 6,200 errors.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        formats: alloc::vec![
-            FormatStats { format: BinFormat::Elf64, loads: 500_000, errors: 1000, total_load_ns: 500_000_000_000, avg_load_ns: 1_000_000, max_load_ns: 50_000_000 },
-            FormatStats { format: BinFormat::Script, loads: 100_000, errors: 5000, total_load_ns: 20_000_000_000, avg_load_ns: 200_000, max_load_ns: 10_000_000 },
-            FormatStats { format: BinFormat::Elf32, loads: 10_000, errors: 200, total_load_ns: 5_000_000_000, avg_load_ns: 500_000, max_load_ns: 20_000_000 },
-        ],
-        error_counts: [3000, 500, 200, 1500, 800, 200],
-        total_loads: 610_000,
-        total_errors: 6200,
+        formats: Vec::new(),
+        error_counts: [0; 6],
+        total_loads: 0,
+        total_errors: 0,
         ops: 0,
     });
+}
+
+/// Register a binary-format handler.
+///
+/// The real format loaders (ELF64/ELF32, script/shebang, flat binary, WASM)
+/// call this when they install themselves so that subsequent [`record_load`] /
+/// [`record_error`] calls have a per-format row to accumulate into. Returns
+/// [`KernelError::AlreadyExists`] if the format is already registered.
+pub fn register_format(bin_format: BinFormat) -> KernelResult<()> {
+    with_state(|state| {
+        if state.formats.iter().any(|f| f.format == bin_format) {
+            return Err(KernelError::AlreadyExists);
+        }
+        state.formats.push(FormatStats {
+            format: bin_format,
+            loads: 0,
+            errors: 0,
+            total_load_ns: 0,
+            avg_load_ns: 0,
+            max_load_ns: 0,
+        });
+        Ok(())
+    })
 }
 
 /// Record a successful binary load.
@@ -211,52 +249,69 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("binfmt::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and no
+    // fixtures leak into the live format table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(format_stats().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom formats, zeroed error breakdown and totals.
+    assert_eq!(format_stats().len(), 0);
+    let (f0, l0, e0, _) = stats();
+    assert_eq!((f0, l0, e0), (0, 0, 0));
+    for (_, count) in error_breakdown() {
+        assert_eq!(count, 0);
+    }
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Record load.
-    let before = format_stats()[0].loads;
-    record_load(BinFormat::Elf64, 500_000).expect("load");
-    let after = format_stats()[0].loads;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [2/8] load: OK");
+    // 2: Register — Elf64 appears zeroed; a duplicate is AlreadyExists.
+    register_format(BinFormat::Elf64).expect("register");
+    assert!(register_format(BinFormat::Elf64).is_err());
+    assert_eq!(format_stats().len(), 1);
+    let f = format_stats().into_iter().find(|f| f.format == BinFormat::Elf64).expect("find");
+    assert_eq!((f.loads, f.errors, f.total_load_ns, f.avg_load_ns, f.max_load_ns), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Average updated.
-    let f = format_stats()[0].clone();
-    assert!(f.avg_load_ns > 0);
-    crate::serial_println!("  [3/8] average: OK");
+    // 3: Record load — per-format load count, total time, and running average.
+    record_load(BinFormat::Elf64, 400_000).expect("load");
+    let f = format_stats().into_iter().find(|f| f.format == BinFormat::Elf64).expect("p3");
+    assert_eq!((f.loads, f.total_load_ns, f.avg_load_ns), (1, 400_000, 400_000));
+    assert_eq!(stats().1, 1); // total_loads
+    crate::serial_println!("  [3/8] load + average: OK");
 
-    // 4: Max updated.
+    // 4: Max + average — a second, larger load updates max and recomputes avg.
     record_load(BinFormat::Elf64, 100_000_000).expect("big_load");
-    let f = format_stats()[0].clone();
+    let f = format_stats().into_iter().find(|f| f.format == BinFormat::Elf64).expect("p4");
     assert_eq!(f.max_load_ns, 100_000_000);
-    crate::serial_println!("  [4/8] max: OK");
+    assert_eq!(f.avg_load_ns, (400_000 + 100_000_000) / 2);
+    crate::serial_println!("  [4/8] max + average: OK");
 
-    // 5: Record error.
+    // 5: Record error — bumps the registered format's error count, the per-error
+    //    breakdown slot, and the global error total.
+    register_format(BinFormat::Script).expect("register2");
     record_error(BinFormat::Script, LoadError::MissingInterpreter).expect("error");
-    let f = format_stats().iter().find(|f| f.format == BinFormat::Script).cloned().unwrap();
-    assert!(f.errors > 5000);
+    let f = format_stats().into_iter().find(|f| f.format == BinFormat::Script).expect("p5");
+    assert_eq!(f.errors, 1);
+    assert_eq!(stats().2, 1); // total_errors
     crate::serial_println!("  [5/8] error: OK");
 
-    // 6: Error breakdown.
+    // 6: Error breakdown — exactly one MissingInterpreter, all other slots zero.
     let breakdown = error_breakdown();
-    assert!(breakdown[3].1 > 1500); // MissingInterpreter.
+    assert_eq!(breakdown[3].1, 1); // MissingInterpreter
+    assert_eq!(breakdown[0].1 + breakdown[1].1 + breakdown[2].1 + breakdown[4].1 + breakdown[5].1, 0);
     crate::serial_println!("  [6/8] breakdown: OK");
 
-    // 7: Not found.
+    // 7: Not found — loading an unregistered format errors.
     assert!(record_load(BinFormat::Unknown, 0).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above: 2 formats, 2 loads,
+    //    1 error.
     let (fmts, loads, errors, ops) = stats();
-    assert_eq!(fmts, 3);
-    assert!(loads > 610_000);
-    assert!(errors > 6200);
+    assert_eq!((fmts, loads, errors), (2, 2, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("binfmt::self_test() — all 8 tests passed");
 }

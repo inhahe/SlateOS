@@ -1355,6 +1355,36 @@
 ##                    loaded module and call record_check/record_deny/record_audit
 ##                    on the actual security-hook path so the stats reflect genuine
 ##                    enforcement — wire when the LSM framework is implemented.
+##   - binfmt (2026-06-11): FIXED — fabrication case (b) (added the missing
+##                    register_format API + emptied init_defaults). Binary-format
+##                    loader statistics (per-format ELF/script load counts, errors,
+##                    load timings), surfaced via /proc/binfmt and the `binfmt`
+##                    kshell command. init_defaults seeded THREE fictional formats —
+##                    Elf64 (500K loads / 1K errors / 500s total / 1ms avg / 50ms
+##                    max), Script (100K / 5K / 20s / 200µs / 10ms) and Elf32 (10K /
+##                    200 / 5s / 500µs / 20ms) — plus an error breakdown
+##                    [3000, 500, 200, 1500, 800, 200] and global totals of 610,000
+##                    loads / 6,200 errors. Surfaced as the real loader activity, so
+##                    it claimed hundreds of thousands of executions that never
+##                    happened. The module doc referenced binfmt::register_format
+##                    but NO such function existed (record_load returns NotFound for
+##                    unregistered formats), so this was case (b): added
+##                    register_format(BinFormat) (dedups, returns AlreadyExists) and
+##                    emptied init_defaults to NO formats, a zeroed [u64;6] error
+##                    breakdown, and zeroed totals. Rebuilt self_test residue-free
+##                    (clears STATE at start AND end) with EXACT assertions —
+##                    register (+duplicate error), load (count/total/running avg),
+##                    second load updates max + recomputes avg, error bumps
+##                    per-format + breakdown slot + global, breakdown has exactly 1
+##                    MissingInterpreter, not-found, final stats (2 formats, 2
+##                    loads, 1 error) — instead of the old `>` assertions over the
+##                    seeded baseline. Wired into the boot self-test path (was
+##                    kshell-only). /proc/binfmt now 49 bytes (truthful empty).
+##                    PROPER FIX DEFERRED: the real ELF/script/flat/WASM loaders
+##                    should call register_format when they install themselves and
+##                    record_load/record_error on the exec path so the stats
+##                    reflect genuine executions — wire when the exec/loader path
+##                    is instrumented.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1368,13 +1398,13 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod (just fixed) were forty. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt (just fixed) were forty-one. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     binfmt. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     recoverypart. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1384,9 +1414,10 @@
 ##     to an empty trust store, case (a) — security surface. authbroker fixed
 ##     2026-06-11: emptied 3 fabricated credentials to an empty store, case (a) —
 ##     security surface. secmod fixed 2026-06-11: emptied 2 fabricated LSM
-##     modules (~160M checks) to no modules, case (a).) Remaining flagged
-##     names incl.: binfmt,
-##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
+##     modules (~160M checks) to no modules, case (a). binfmt fixed 2026-06-11:
+##     added missing register_format API + emptied 3 fabricated formats (610K
+##     loads), case (b).) Remaining flagged
+##     names incl.: recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
 ##     legitimate config — audit carefully, do not blind-empty. memlayout was

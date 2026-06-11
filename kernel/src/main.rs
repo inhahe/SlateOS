@@ -1861,6 +1861,20 @@ extern "C" fn kernel_main() -> ! {
     // self_test builds its fixtures via the real API with exact assertions
     // (register/check/deny/audit/enable) and clears the state afterward.
     fs::secmod::self_test();
+    // Binary-format loader statistics self-test.  binfmt previously seeded three
+    // fictional formats into init_defaults — Elf64 (500K loads / 1K errors),
+    // Script (100K / 5K) and Elf32 (10K / 200) — plus an error breakdown
+    // [3000, 500, 200, 1500, 800, 200] and global totals of 610,000 loads /
+    // 6,200 errors.  /proc/binfmt and the binfmt kshell command surface the
+    // format list as the real loader activity, so claiming hundreds of thousands
+    // of executions that never happened is fabricated procfs data.  init_defaults
+    // now starts with NO formats and zeroed totals; a format enters only through
+    // the new register_format API (the real ELF/script/etc. loaders call it) and
+    // its counters advance via record_load/record_error on the exec path.  The
+    // residue-free self_test builds its fixtures via the real API with exact
+    // assertions (register/load/average/max/error/breakdown) and clears the
+    // state afterward.
+    fs::binfmt::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

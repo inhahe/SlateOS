@@ -2124,6 +2124,21 @@ extern "C" fn kernel_main() -> ! {
     // real API with exact assertions and resets STATE afterward so nothing leaks
     // into /proc/telemetry.
     fs::telemetry::self_test();
+    // fdtable is the kernel-side FD-table tracker behind /proc/fdtable and the
+    // `fdtable` kshell command.  Its init_defaults() previously seeded two
+    // FABRICATED process FD tables — pid 1 (/dev/console ×3 + /etc/init.conf) and
+    // pid 100 (pipe ×2, /dev/null, socket, /var/log/sshd.log) — plus an invented
+    // total_opens of 9, which /proc/fdtable and the list_tables view displayed as
+    // if real open file descriptors.  The authoritative per-process FD table is the
+    // PCB's linux_fd_table (crate::proc::linux_fd::KernelFdTable); open/close/dup
+    // have NO real callers — the VFS does not call this parallel tracker — so it is
+    // entirely unwired.  fdtable now seeds an EMPTY table (FDs arrive via open/dup
+    // once the VFS wires it; see the DEFERRED PROPER FIX note in todo.txt for
+    // reading the aggregate view from the PCB).  This self_test (never wired before,
+    // and whose old version relied on the fabricated tables with no end-reset)
+    // builds its own fixtures via the real API with exact assertions and resets
+    // STATE afterward so nothing leaks into /proc/fdtable.
+    fs::fdtable::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

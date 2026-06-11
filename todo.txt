@@ -1983,6 +1983,40 @@
 ##                    source (cpu% needs delta sampling, etc.) that isn't centrally
 ##                    exposed. Do as a focused task once a collector task and the
 ##                    per-source sampling exist. Until then the empty registry is honest.
+##   - fdtable (2026-06-11): FIXED — fabrication case (a) (full open/close/dup/
+##                    set_max_fds API already existed). Kernel-side FD-table tracker
+##                    behind /proc/fdtable and the `fdtable` kshell command.
+##                    init_defaults() FABRICATED two process FD tables — pid 1 with 4
+##                    FDs (/dev/console ×3 as stdin/out/err + /etc/init.conf) and pid
+##                    100 with 5 (pipe:[1234] ×2, /dev/null, socket:[5678],
+##                    /var/log/sshd.log) — plus an invented total_opens of 9, which
+##                    /proc/fdtable and list_tables displayed as if real open FDs.
+##                    open/close/dup have NO real callers (the VFS does not call this
+##                    parallel tracker); procfs/kshell only read or run interactive
+##                    subcommands. Fixed: init_defaults() now seeds an EMPTY table (no
+##                    process tables, zero totals). Also: the self_test was NEVER wired
+##                    into boot AND relied on the fabricated tables (asserted len==2,
+##                    pid 1 has 4 fds, fd 0 == /dev/console) with no end-reset — so
+##                    wiring it would have leaked fixtures into /proc/fdtable. Rewrote
+##                    it residue-free (clears STATE at start AND end) with EXACT
+##                    assertions (empty init, open→auto-create fd 0, close, dup clears
+##                    cloexec, second process, get round-trip, fd-limit enforcement,
+##                    final 3 tables / 5 opens / 1 close / 1 dup) and WIRED it into the
+##                    boot self-test path. /proc/fdtable now reports an empty table
+##                    (truthful).
+##                    DEFERRED PROPER FIX: the authoritative per-process FD table is
+##                    the PCB's linux_fd_table (Option<Box<crate::proc::linux_fd::
+##                    KernelFdTable>>, used by the POSIX layer). The proper fix is to
+##                    make fdtable's read paths (list/get/list_tables/stats) a
+##                    read-through that enumerates live processes and reads each PCB's
+##                    KernelFdTable, mapping its entries → fdtable::FdEntry (fd, type,
+##                    path, flags, offset). Deferred because: (1) it needs a live-
+##                    process enumeration entry point feeding pid → linux_fd_table, and
+##                    (2) KernelFdTable stores handles/types differently than this
+##                    module's FdType/FdFlags/path, so the mapping must be defined
+##                    deliberately rather than guessed. Do as a focused task once a
+##                    process-enumeration hook is exposed. Until then the empty table
+##                    is honest.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1996,7 +2030,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog + telemetry (just fixed) were fifty-five. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog + telemetry + fdtable (just fixed) were fifty-six. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

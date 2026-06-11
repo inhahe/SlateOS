@@ -138,34 +138,31 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** FD-table tracker.
+///
+/// Seeds NO process tables and zero totals.  FDs are tracked through
+/// [`open`] / [`close`] / [`dup`] as the VFS/syscall layer services them; until
+/// that wiring exists, `/proc/fdtable` and the `fdtable` kshell command report an
+/// empty table rather than fabricated open files — the kernel's hard "never invent
+/// data in procfs" rule.
+///
+/// (Previously this seeded two fabricated process FD tables — pid 1 with four FDs
+/// (`/dev/console` ×3 as stdin/out/err plus `/etc/init.conf`) and pid 100 with
+/// five (`pipe:[1234]` ×2, `/dev/null`, `socket:[5678]`, `/var/log/sshd.log`) —
+/// plus an invented total_opens of 9, which `/proc/fdtable` and the `list_tables`
+/// view then displayed as if they were real open file descriptors.  The
+/// authoritative per-process FD table is the PCB's `linux_fd_table`
+/// (`crate::proc::linux_fd::KernelFdTable`, used by the POSIX layer); none of
+/// [`open`]/[`close`]/[`dup`]'s callers are real — the VFS does not call them — so
+/// this parallel tracker is entirely unwired.  See the DEFERRED PROPER FIX note in
+/// todo.txt for reading the aggregate view from the PCB.  The self-test now builds
+/// its own fixtures via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
-    let default_flags = FdFlags { read: true, write: true, append: false, nonblock: false, cloexec: false };
     *guard = Some(State {
-        tables: alloc::vec![
-            ProcessFdTable {
-                pid: 1, next_fd: 4, max_fds: DEFAULT_MAX_FDS,
-                entries: alloc::vec![
-                    FdEntry { fd: 0, fd_type: FdType::Device, path: String::from("/dev/console"), flags: FdFlags { read: true, write: false, append: false, nonblock: false, cloexec: false }, offset: 0, ref_count: 1, opened_ns: now },
-                    FdEntry { fd: 1, fd_type: FdType::Device, path: String::from("/dev/console"), flags: FdFlags { read: false, write: true, append: false, nonblock: false, cloexec: false }, offset: 0, ref_count: 1, opened_ns: now },
-                    FdEntry { fd: 2, fd_type: FdType::Device, path: String::from("/dev/console"), flags: FdFlags { read: false, write: true, append: false, nonblock: false, cloexec: false }, offset: 0, ref_count: 1, opened_ns: now },
-                    FdEntry { fd: 3, fd_type: FdType::RegularFile, path: String::from("/etc/init.conf"), flags: FdFlags { read: true, write: false, append: false, nonblock: false, cloexec: true }, offset: 0, ref_count: 1, opened_ns: now },
-                ],
-            },
-            ProcessFdTable {
-                pid: 100, next_fd: 5, max_fds: DEFAULT_MAX_FDS,
-                entries: alloc::vec![
-                    FdEntry { fd: 0, fd_type: FdType::Pipe, path: String::from("pipe:[1234]"), flags: FdFlags { read: true, write: false, append: false, nonblock: false, cloexec: false }, offset: 0, ref_count: 1, opened_ns: now },
-                    FdEntry { fd: 1, fd_type: FdType::Pipe, path: String::from("pipe:[1234]"), flags: FdFlags { read: false, write: true, append: false, nonblock: false, cloexec: false }, offset: 0, ref_count: 1, opened_ns: now },
-                    FdEntry { fd: 2, fd_type: FdType::Device, path: String::from("/dev/null"), flags: default_flags, offset: 0, ref_count: 1, opened_ns: now },
-                    FdEntry { fd: 3, fd_type: FdType::Socket, path: String::from("socket:[5678]"), flags: FdFlags { read: true, write: true, append: false, nonblock: true, cloexec: true }, offset: 0, ref_count: 1, opened_ns: now },
-                    FdEntry { fd: 4, fd_type: FdType::RegularFile, path: String::from("/var/log/sshd.log"), flags: FdFlags { read: false, write: true, append: true, nonblock: false, cloexec: true }, offset: 2048, ref_count: 1, opened_ns: now },
-                ],
-            },
-        ],
-        total_opens: 9,
+        tables: Vec::new(),
+        total_opens: 0,
         total_closes: 0,
         total_dups: 0,
         ops: 0,
@@ -277,62 +274,74 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("fdtable::self_test() — running tests...");
+    // Start from a clean slate so the fixtures built below can never leak into
+    // the live /proc/fdtable table (this self-test now runs at boot).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    let tables = list_tables();
-    assert_eq!(tables.len(), 2);
-    assert_eq!(list(1).len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated FD tables.
+    assert_eq!(list_tables().len(), 0);
+    assert_eq!(list(1).len(), 0);
+    let (t0, o0, c0, d0, _ops0) = stats();
+    assert_eq!((t0, o0, c0, d0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Open.
-    let flags = FdFlags { read: true, write: false, append: false, nonblock: false, cloexec: false };
-    let fd = open(1, "/tmp/test.txt", FdType::RegularFile, flags).expect("open");
-    assert_eq!(fd, 4);
-    assert_eq!(list(1).len(), 5);
+    // 2: Open — auto-creates the process table; first fd is 0.
+    let rdonly = FdFlags { read: true, write: false, append: false, nonblock: false, cloexec: false };
+    let fd = open(1, "/tmp/test.txt", FdType::RegularFile, rdonly).expect("open");
+    assert_eq!(fd, 0);
+    assert_eq!(list(1).len(), 1);
+    assert_eq!(list_tables().len(), 1);
     crate::serial_println!("  [2/8] open: OK");
 
-    // 3: Close.
+    // 3: Close — a second fd is allocated, then the first is closed.
+    let fd1 = open(1, "/tmp/two.txt", FdType::RegularFile, rdonly).expect("open_b");
+    assert_eq!(fd1, 1);
     close(1, fd).expect("close");
-    assert_eq!(list(1).len(), 4);
+    assert_eq!(list(1).len(), 1);
     assert!(close(1, 999).is_err());
     crate::serial_println!("  [3/8] close: OK");
 
-    // 4: Dup.
-    let new_fd = dup(100, 3).expect("dup");
-    assert!(new_fd >= 5);
+    // 4: Dup — clears cloexec and copies the path.
+    let sock_flags = FdFlags { read: true, write: true, append: false, nonblock: true, cloexec: true };
+    let sock_fd = open(100, "socket:[5678]", FdType::Socket, sock_flags).expect("open_sock");
+    let new_fd = dup(100, sock_fd).expect("dup");
+    assert!(new_fd > sock_fd);
     let entry = get(100, new_fd).expect("get");
     assert!(!entry.flags.cloexec); // dup clears cloexec.
     assert_eq!(entry.path, "socket:[5678]");
     crate::serial_println!("  [4/8] dup: OK");
 
-    // 5: Auto-create table.
-    let flags2 = FdFlags { read: true, write: true, append: false, nonblock: false, cloexec: false };
-    let fd2 = open(999, "/tmp/new_proc.txt", FdType::RegularFile, flags2).expect("open2");
+    // 5: Auto-create another table.
+    let rw = FdFlags { read: true, write: true, append: false, nonblock: false, cloexec: false };
+    let fd2 = open(999, "/tmp/new_proc.txt", FdType::RegularFile, rw).expect("open2");
     assert_eq!(fd2, 0);
-    assert_eq!(list_tables().len(), 3);
+    assert_eq!(list_tables().len(), 3); // pid 1, 100, 999.
     crate::serial_println!("  [5/8] auto-create: OK");
 
-    // 6: Get.
-    let entry = get(1, 0).expect("get2");
-    assert_eq!(entry.fd_type, FdType::Device);
-    assert_eq!(entry.path, "/dev/console");
+    // 6: Get — type and path round-trip.
+    let entry = get(1, fd1).expect("get2");
+    assert_eq!(entry.fd_type, FdType::RegularFile);
+    assert_eq!(entry.path, "/tmp/two.txt");
     crate::serial_println!("  [6/8] get: OK");
 
-    // 7: FD limit.
+    // 7: FD limit — pid 999 holds 1 fd; cap at 2 admits one more, then errors.
     set_max_fds(999, 2).expect("limit");
-    open(999, "/tmp/a", FdType::RegularFile, flags2).expect("open3");
-    assert!(open(999, "/tmp/b", FdType::RegularFile, flags2).is_err());
+    open(999, "/tmp/a", FdType::RegularFile, rw).expect("open3");
+    assert!(open(999, "/tmp/b", FdType::RegularFile, rw).is_err());
     crate::serial_println!("  [7/8] fd limit: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact totals (3 tables, 5 opens, 1 close, 1 dup).
     let (tables, opens, closes, dups, ops) = stats();
     assert_eq!(tables, 3);
-    assert!(opens >= 12);
-    assert!(closes >= 1);
-    assert!(dups >= 1);
+    assert_eq!(opens, 5);
+    assert_eq!(closes, 1);
+    assert_eq!(dups, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the boot self-test leaves no fixtures behind in /proc/fdtable.
+    *STATE.lock() = None;
 
     crate::serial_println!("fdtable::self_test() — all 8 tests passed");
 }

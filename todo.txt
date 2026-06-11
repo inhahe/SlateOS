@@ -1774,6 +1774,44 @@
 ##                    PROPER FIX DEFERRED: the network stack must call add_interface
 ##                    on NIC discovery and record_traffic/record_connection as app
 ##                    traffic flows — wire when per-app socket accounting exists.
+##   - taskmon (2026-06-11): FIXED — fabrication case (a) (full register/kill/
+##                    suspend/resume/update API already existed). Kernel-side process
+##                    registry behind /proc/taskmon and the `taskmon` kshell command.
+##                    init_defaults() FABRICATED three bootstrap tasks — kernel pid 0
+##                    (Idle/RealTime/1024 KiB), init pid 1 (Running/High/0.50% CPU/
+##                    2048 KiB/2 threads), kshell pid 2 (Running/Normal/1.00% CPU/
+##                    4096 KiB/2 threads) — plus an invented SystemResources snapshot
+##                    (total_cpu 100%, used 64 MiB of 1 GiB, 3 procs, 5 threads),
+##                    which the `taskmon` kshell command displayed as if they were
+##                    real processes. register_task/update_task_usage/update_resources
+##                    have NO real callers (proc/sched never call them); the module is
+##                    entirely unwired. Fixed: init_defaults() now seeds an EMPTY
+##                    registry with zeroed resources (next_pid 1). Also: the self_test
+##                    was NEVER wired into boot AND left its `testapp`/`daemon`
+##                    fixtures in STATE (no end-reset) — so wiring it would have leaked
+##                    test tasks into /proc/taskmon. Rewrote it residue-free (clears
+##                    STATE at start AND end) with EXACT assertions (empty init,
+##                    register→pid 1, kill→Zombie, can't kill/suspend pid 0, suspend/
+##                    resume, set_priority, update_task_usage 2500/8192, resources
+##                    0→exact, final 2 tasks / 2 created / 1 killed / 1 suspended) and
+##                    WIRED it into the boot self-test path. /proc/taskmon 73 bytes
+##                    (all zeros — truthful, no leaked fixtures).
+##                    DEFERRED PROPER FIX: taskmon duplicates the authoritative live
+##                    process list crate::sched::task_list() (rich TaskInfo: name,
+##                    state, priority, total_ticks/cycles, schedule_count, start_tick,
+##                    last_cpu, …, already backing /proc/processes + ps). The proper
+##                    fix is to make taskmon's read paths (list_tasks/get_task/
+##                    get_resources/stats) a read-through over sched::task_list() +
+##                    crate::mm (memory) rather than a parallel registry, mapping
+##                    sched::TaskState→taskmon::TaskState and deriving cpu_percent from
+##                    tick deltas. Deferred because: (1) per-task cpu_percent needs
+##                    delta sampling and per-task memory_kb needs proc/mm per-process
+##                    accounting that isn't exposed yet, and (2) the kshell mutation
+##                    subcommands (kill/suspend/resume/setprio) would need to forward
+##                    to real scheduler control, which is a semantic decision (should a
+##                    diagnostic mutate the live scheduler?). Do as a focused dedicated
+##                    task once per-process cpu/mem accounting and sched control hooks
+##                    exist. Until then the empty registry is honest.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1787,7 +1825,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage (just fixed) were forty-nine. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon (just fixed) were fifty. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

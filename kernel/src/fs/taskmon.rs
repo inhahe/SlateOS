@@ -38,7 +38,6 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -194,72 +193,43 @@ where
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Initialize the task monitor with default kernel tasks.
+/// Initialize the task monitor with an **empty** registry.
 ///
-/// Creates three bootstrap tasks:
-/// - **kernel** (pid 0) — idle/kernel thread, `RealTime` priority
-/// - **init** (pid 1) — first userspace process, `High` priority
-/// - **kshell** (pid 2) — kernel debug shell, `Normal` priority
+/// Seeds NO tasks and zeroed system resources.  Real tasks are tracked through
+/// [`register_task`] / [`kill_task`] / [`update_task_usage`] as `proc::spawn`
+/// and the scheduler accounting path report process lifecycle and usage; until
+/// that wiring exists, `/proc/taskmon` and the `taskmon` kshell command report
+/// an empty table and zeroed resources rather than fabricated processes — the
+/// kernel's hard "never invent data in procfs" rule.
+///
+/// (Previously this seeded three FABRICATED bootstrap tasks — `kernel` pid 0
+/// idle/RealTime 1024 KiB, `init` pid 1 Running/High 0.50% CPU 2048 KiB 2
+/// threads, `kshell` pid 2 Running/Normal 1.00% CPU 4096 KiB 2 threads — plus an
+/// invented [`SystemResources`] snapshot (100% CPU, 64 MiB used of 1 GiB,
+/// 3 processes, 5 threads), which the `taskmon` kshell command then displayed as
+/// if they were real running processes.  The authoritative live process list is
+/// [`crate::sched::task_list`]; see the DEFERRED PROPER FIX note in todo.txt for
+/// wiring taskmon to read it.  The self-test now builds its own fixtures via the
+/// real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {
         return;
     }
 
-    let now = crate::hpet::elapsed_ns();
-
-    let tasks = vec![
-        TaskInfo {
-            pid: 0,
-            name: String::from("kernel"),
-            state: TaskState::Idle,
-            priority: TaskPriority::RealTime,
-            cpu_percent: 0,
-            memory_kb: 1024,
-            threads: 1,
-            parent_pid: 0,
-            user: String::from("root"),
-            started_ns: now,
-        },
-        TaskInfo {
-            pid: 1,
-            name: String::from("init"),
-            state: TaskState::Running,
-            priority: TaskPriority::High,
-            cpu_percent: 50,
-            memory_kb: 2048,
-            threads: 2,
-            parent_pid: 0,
-            user: String::from("root"),
-            started_ns: now,
-        },
-        TaskInfo {
-            pid: 2,
-            name: String::from("kshell"),
-            state: TaskState::Running,
-            priority: TaskPriority::Normal,
-            cpu_percent: 100,
-            memory_kb: 4096,
-            threads: 2,
-            parent_pid: 1,
-            user: String::from("root"),
-            started_ns: now,
-        },
-    ];
-
     *guard = Some(State {
-        tasks,
-        next_pid: 3,
-        total_created: 3,
+        tasks: Vec::new(),
+        next_pid: 1,
+        total_created: 0,
         total_killed: 0,
         total_suspended: 0,
         ops: 0,
         system_resources: SystemResources {
-            total_cpu_percent: 10000,
-            used_memory_kb: 65536,
-            total_memory_kb: 1_048_576,
-            process_count: 3,
-            thread_count: 5,
+            total_cpu_percent: 0,
+            used_memory_kb: 0,
+            total_memory_kb: 0,
+            process_count: 0,
+            thread_count: 0,
         },
     });
 }
@@ -487,46 +457,49 @@ pub fn self_test() {
 
     serial_println!("[taskmon] Running self-tests...");
 
-    // Reset state for testing.
+    // Residue-free: begin from a clean EMPTY registry and build every fixture
+    // via the real API so the assertions are exact and no test tasks leak into
+    // the live /proc/taskmon table (the kshell `taskmon test` subcommand calls
+    // this directly).
     *STATE.lock() = None;
     init_defaults();
 
-    // Test 1: default tasks exist
+    // Test 1: empty after init — no fabricated tasks, zeroed resources.
     {
-        let tasks = list_tasks();
-        assert_eq!(tasks.len(), 3);
-        let kernel = get_task(0).expect("kernel task");
-        assert_eq!(kernel.name, "kernel");
-        assert_eq!(kernel.priority, TaskPriority::RealTime);
-        assert_eq!(kernel.state, TaskState::Idle);
-        assert_eq!(kernel.cpu_percent, 0);
-        assert_eq!(kernel.memory_kb, 1024);
-        serial_println!("[taskmon]   1. Default tasks present — OK");
+        assert_eq!(list_tasks().len(), 0);
+        let res = get_resources();
+        assert_eq!(res.process_count, 0);
+        assert_eq!(res.total_memory_kb, 0);
+        assert_eq!(res.used_memory_kb, 0);
+        let (count, created, killed, suspended, _ops) = stats();
+        assert_eq!((count, created, killed, suspended), (0, 0, 0, 0));
+        serial_println!("[taskmon]   1. Empty init — OK");
     }
 
-    // Test 2: register a new task
-    {
+    // Test 2: register a new task (PIDs start at 1).
+    let testapp_pid = {
         let pid = register_task("testapp", TaskPriority::Normal, 1, "alice")
             .expect("register testapp");
-        assert_eq!(pid, 3);
+        assert_eq!(pid, 1);
         let task = get_task(pid).expect("get testapp");
         assert_eq!(task.name, "testapp");
         assert_eq!(task.state, TaskState::Running);
         assert_eq!(task.parent_pid, 1);
         assert_eq!(task.user, "alice");
         serial_println!("[taskmon]   2. Register new task — OK");
-    }
+        pid
+    };
 
     // Test 3: kill a task sets Zombie
     {
-        kill_task(3).expect("kill testapp");
-        let task = get_task(3).expect("get killed task");
+        kill_task(testapp_pid).expect("kill testapp");
+        let task = get_task(testapp_pid).expect("get killed task");
         assert_eq!(task.state, TaskState::Zombie);
         assert_eq!(task.cpu_percent, 0);
         serial_println!("[taskmon]   3. Kill task sets Zombie — OK");
     }
 
-    // Test 4: cannot kill pid 0
+    // Test 4: cannot kill pid 0 (the kernel task, even when not registered)
     {
         let result = kill_task(0);
         assert!(result.is_err());
@@ -534,7 +507,7 @@ pub fn self_test() {
     }
 
     // Test 5: suspend and resume
-    {
+    let daemon_pid = {
         let pid = register_task("daemon", TaskPriority::High, 1, "root")
             .expect("register daemon");
         suspend_task(pid).expect("suspend daemon");
@@ -545,7 +518,8 @@ pub fn self_test() {
         let task = get_task(pid).expect("get resumed");
         assert_eq!(task.state, TaskState::Running);
         serial_println!("[taskmon]   5. Suspend and resume — OK");
-    }
+        pid
+    };
 
     // Test 6: cannot suspend pid 0
     {
@@ -556,26 +530,26 @@ pub fn self_test() {
 
     // Test 7: set priority
     {
-        set_priority(4, TaskPriority::Low).expect("set priority");
-        let task = get_task(4).expect("get reprioritized");
+        set_priority(daemon_pid, TaskPriority::Low).expect("set priority");
+        let task = get_task(daemon_pid).expect("get reprioritized");
         assert_eq!(task.priority, TaskPriority::Low);
         serial_println!("[taskmon]   7. Set priority — OK");
     }
 
     // Test 8: update task usage
     {
-        update_task_usage(4, 2500, 8192).expect("update usage");
-        let task = get_task(4).expect("get updated usage");
+        update_task_usage(daemon_pid, 2500, 8192).expect("update usage");
+        let task = get_task(daemon_pid).expect("get updated usage");
         assert_eq!(task.cpu_percent, 2500);
         assert_eq!(task.memory_kb, 8192);
         serial_println!("[taskmon]   8. Update task usage — OK");
     }
 
-    // Test 9: system resources
+    // Test 9: system resources — start zeroed, then update to exact values.
     {
         let res = get_resources();
-        assert_eq!(res.total_memory_kb, 1_048_576);
-        assert_eq!(res.used_memory_kb, 65536);
+        assert_eq!(res.total_memory_kb, 0);
+        assert_eq!(res.used_memory_kb, 0);
 
         update_resources(5000, 131_072, 2_097_152);
         let res = get_resources();
@@ -585,13 +559,13 @@ pub fn self_test() {
         serial_println!("[taskmon]   9. System resources update — OK");
     }
 
-    // Test 10: stats counters
+    // Test 10: stats counters reflect exactly the operations above.
     {
         let (count, created, killed, suspended, ops) = stats();
-        assert!(count >= 4);      // 3 defaults + daemon (testapp is zombie but still tracked)
-        assert!(created >= 5);    // 3 defaults + testapp + daemon
-        assert!(killed >= 1);     // testapp
-        assert!(suspended >= 1);  // daemon was suspended once
+        assert_eq!(count, 2);      // testapp (zombie, still tracked) + daemon
+        assert_eq!(created, 2);    // testapp + daemon
+        assert_eq!(killed, 1);     // testapp
+        assert_eq!(suspended, 1);  // daemon was suspended once
         assert!(ops > 0);
         serial_println!("[taskmon]  10. Stats counters — OK");
     }
@@ -613,5 +587,11 @@ pub fn self_test() {
         serial_println!("[taskmon]  11. Enum label methods — OK");
     }
 
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/taskmon table with its fixtures (the original test left `testapp`
+    // and `daemon` in STATE).  Reset to the uninitialised state so production
+    // reads report an empty table until proc::spawn / scheduler accounting wire
+    // real task tracking.
+    *STATE.lock() = None;
     serial_println!("[taskmon] All 11 self-tests passed.");
 }

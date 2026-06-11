@@ -2037,6 +2037,19 @@ extern "C" fn kernel_main() -> ! {
     // (including the cap-warning counter, which the old test asserted loosely)
     // and resets to empty afterward so nothing leaks into /proc/netusage.
     fs::netusage::self_test();
+    // taskmon is the kernel-side process registry behind /proc/taskmon and the
+    // `taskmon` kshell command.  Its init_defaults() previously seeded three
+    // FABRICATED bootstrap tasks (kernel/init/kshell with invented CPU%, memory,
+    // and thread counts) plus an invented SystemResources snapshot (100% CPU,
+    // 64 MiB used of 1 GiB), which the `taskmon` command displayed as if they
+    // were real processes — while the authoritative live process list is
+    // crate::sched::task_list().  taskmon now seeds an EMPTY registry (tasks
+    // arrive via register_task as proc::spawn / scheduler accounting wire it; see
+    // the DEFERRED PROPER FIX note in todo.txt).  This self_test (never wired
+    // before) builds its own fixtures via the real API with exact assertions and
+    // resets STATE afterward — the old test left `testapp`/`daemon` behind, which
+    // would have leaked into /proc/taskmon now that it runs at boot.
+    fs::taskmon::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

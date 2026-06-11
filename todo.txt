@@ -48132,3 +48132,80 @@ section.  Key consequences for future sweeps:
     ERRATA, RWF mask, etc.) remain correct: those were flags we do
     NOT implement, so rejecting them is the honest answer, fully
     consistent with option (ii).
+
+================================================================
+SIBLING-CONSISTENCY GAP (identified 2026-06-10): CLONE_PIDFD
+================================================================
+
+Status: DEFERRED with plan (NOT yet implemented).  Found while
+auditing the pidfd syscall family for sibling consistency after the
+futex/robust-list batch.
+
+The gap:
+  * pidfd_open(2) (434), pidfd_send_signal(2) (424), pidfd_getfd(2)
+    (438) all WORK — they install/consume HandleKind::PidFd entries
+    (FdEntry::pidfd in kernel/src/proc/linux_fd.rs:225).
+  * But clone3(CLONE_PIDFD) returns EINVAL (validate_clone3_args,
+    kernel/src/syscall/linux.rs ~line 1406) and legacy clone(CLONE_PIDFD)
+    SILENTLY IGNORES the flag (the bit is in neither THREAD_BITS nor
+    UNSUPPORTED_BITS in linux_clone_inner, so it falls through to a
+    plain fork and never writes a pidfd).
+  * CLONE_PIDFD is the canonical race-free way to obtain a pidfd for a
+    child you just created; a program that uses pidfd_open would
+    reasonably assume clone3(CLONE_PIDFD) also yields one.  This is
+    exactly the cross-feature inference surprise the option-(ii)
+    sibling-consistency obligation is meant to prevent.
+
+A stale/false comment was the tell: linux.rs:1238 used to say
+"CLONE_PIDFD — we don't have a pidfd HandleKind yet."  That is wrong
+(pidfd_open proves the HandleKind exists).  Fixed the comment to state
+the real blocker (below) in this batch.
+
+v6.6 semantics to implement (verified against kernel/fork.c@v6.6
+copy_process + copy_clone_args_from_user):
+  * Gates: CLONE_PIDFD combined with CLONE_THREAD or CLONE_DETACHED
+    -> EINVAL (v6.6: "CLONE_THREAD is blocked until someone needs it";
+    CLONE_DETACHED reserved).  PIDFD_THREAD (the 6.9 flag that relaxes
+    the CLONE_THREAD restriction) does NOT exist in v6.6.
+  * clone3: the pidfd is written to the int at *clone_args.pidfd
+    (offset 8, currently parsed into the discarded `_pidfd_out`,
+    linux.rs:1380).  legacy clone(2): the pidfd overloads the
+    parent_tid slot (frame.arg2).
+  * The pidfd file is O_RDWR | O_CLOEXEC (set entry.fd_flags =
+    crate::proc::linux_fd::FD_CLOEXEC).  It refers to the CHILD pid and
+    is installed in the PARENT (caller) fd table.
+
+Implementation plan:
+  1. validate_clone3_args: stop early-rejecting CLONE_PIDFD; add the
+     CLONE_PIDFD & (CLONE_THREAD|CLONE_DETACHED) -> EINVAL gate; carry
+     pidfd_out (buf[1]) in ClonedArgs.  For legacy clone(), add the
+     same gate in linux_clone_inner and treat arg2 as the pidfd ptr.
+  2. All-or-nothing ordering (the real engineering content): Linux
+     reserves the pidfd BEFORE the point of no return.  Our fork path
+     creates the child first, so we must either (a) reserve a parent
+     fd slot + validate_user_write(pidfd_ptr, 4) BEFORE forking and
+     fill in the child pid after, or (b) at minimum pre-validate
+     writability + fd-table capacity before fork and install after,
+     documenting the tiny TOCTOU.  Prefer (a) if linux_fd exposes a
+     reserve-then-fill primitive; otherwise add one.
+  3. On fork success: install FdEntry::pidfd(child_pid, O_RDWR) with
+     FD_CLOEXEC into the caller table, copy_to_user the fd to the
+     pidfd ptr, return child pid.  On any pre-fork failure: EFAULT /
+     EMFILE with NO child created.
+
+TESTING BLOCKER (why this isn't a quick win): the happy path forks a
+real userspace child and installs a pidfd in a process fd table.
+sys_pidfd_open already returns EBADF in kernel context ("no caller
+PCB"), and the futex-style boot self-test harness runs in kernel
+context — so it CANNOT exercise CLONE_PIDFD's success path the way the
+futex PI tests (which touch only raw words + the PI table) could.
+Only the negative gates (CLONE_PIDFD|CLONE_THREAD -> EINVAL, bad
+pidfd ptr -> EFAULT) are kernel-context-testable.  Properly satisfying
+"ship nothing untested" for the install/write-back path needs a
+userspace integration-test harness for fork/exec/fd-table syscalls,
+which does not exist yet.  That harness is itself a prerequisite for
+honestly testing this whole class of category-(b) process/fd features
+(CLONE_PIDFD, CLONE_INTO_CGROUP, pidfd_getfd round-trips, etc.) and is
+the reason CLONE_PIDFD is deferred rather than implemented blind.
+TRIGGER to implement: once a userspace syscall integration-test
+harness exists (or alongside building one).

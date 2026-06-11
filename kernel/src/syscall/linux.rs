@@ -1235,7 +1235,20 @@ pub fn dispatch_linux_with_frame(
 /// must already support — glibc's `__clone3_internal` always has a
 /// `__clone_wrapper` shim).
 ///
-///   * `CLONE_PIDFD` — we don't have a pidfd HandleKind yet.
+///   * `CLONE_PIDFD` — deferred, NOT for lack of a pidfd object
+///     (`HandleKind::PidFd` / `FdEntry::pidfd` already back the working
+///     `pidfd_open(2)`).  The blocker is the all-or-nothing ordering:
+///     Linux's `copy_process` reserves the pidfd via `pidfd_prepare`
+///     *before* the point of no return, so a full fd table or an
+///     unwritable `args->pidfd` fails the whole clone with no child.
+///     Our fork path creates the child first (`linux_fork`) and could
+///     only install the pidfd afterwards, which inverts that invariant.
+///     Doing it correctly needs a pre-fork fd-slot reservation +
+///     write-validation, and — critically — its happy path can only be
+///     verified from a real userspace process context (the boot
+///     self-test runs in kernel context, where pidfd install returns
+///     EBADF), so it needs a userspace integration-test harness first.
+///     Tracked in todo.txt ("CLONE_PIDFD sibling-consistency gap").
 ///   * `CLONE_INTO_CGROUP` or `cgroup != 0` — no cgroup subsystem.
 ///   * `set_tid_size > 0` — we don't honour manual TID assignment.
 ///   * `CLONE_CLEAR_SIGHAND` — our signal-handler model doesn't yet

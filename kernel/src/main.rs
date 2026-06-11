@@ -1249,6 +1249,13 @@ extern "C" fn kernel_main() -> ! {
     // at boot and gives the module automated coverage it previously lacked (it
     // was only reachable via the `dmastat test` kshell subcommand).
     fs::dmastat::self_test();
+    // inodestat backs /proc/inodestat (per-filesystem inode counts + dcache
+    // hit/miss); like its siblings the self-test now builds fixtures via the
+    // real register_fs/alloc_inode/free_inode/evict/dcache_lookup API and resets
+    // the table afterward (leaving no fabricated rows), so it is safe at boot and
+    // gives the module automated coverage it previously lacked (it was only
+    // reachable via the `inodestat test` kshell subcommand).
+    fs::inodestat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

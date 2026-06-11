@@ -407,14 +407,26 @@
 ##                    record_transfer/record_fault API; just emptied
 ##                    init_defaults and rebuilt self_test with exact assertions,
 ##                    wired into boot.)
+##   - inodestat.rs  (fixed 2026-06-11; was: three fake filesystems ext4 on "/"
+##                    (allocated 500k / freed 200k / active 300k / evicted 50k /
+##                    dirty 1000), tmpfs on "/tmp" (10k/8k/2k/500), procfs on
+##                    "/proc" (5k/3k/2k); plus a fabricated dcache (entries 200k,
+##                    lookups 50M, hits 47.5M, misses 2.5M, evictions 100k,
+##                    negative 10k) and aggregates total_allocs 515k,
+##                    total_frees 211k, total_evictions 50.5k. alloc_inode/evict
+##                    returned NotFound for unregistered fs and there was NO
+##                    registration API, so added register_fs(fs_type, mount_point)
+##                    for zeroed per-fs rows; emptied init_defaults (dcache zeroed)
+##                    and rebuilt self_test with exact assertions (incl. exact
+##                    75% dcache hit rate), wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): inodestat,
-##     ksmstat, mmapstat, pagestat, pidstat, pmcstat, powerstat, procstat,
-##     ratestat, rqstat, schedlat, ttystat, zramstat. NOTE: some may be SETTINGS
-##     modules seeding legitimate config defaults — verify each is a STATISTICS
-##     module seeding fake OBSERVATIONS before emptying it.)
+##     by grep (init_defaults with alloc::vec!/String::from/push): ksmstat,
+##     mmapstat, pagestat, pidstat, pmcstat, powerstat, procstat, ratestat,
+##     rqstat, schedlat, ttystat, zramstat. NOTE: some may be SETTINGS modules
+##     seeding legitimate config defaults — verify each is a STATISTICS module
+##     seeding fake OBSERVATIONS before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

@@ -1657,6 +1657,21 @@ extern "C" fn kernel_main() -> ! {
     // interrupt accounting that is not decremented on free) and resets the table
     // afterward, so it is safe at boot.
     fs::msivec::self_test();
+    // clocksrc backs /proc/clocksrc (clock-source diagnostics: per-source
+    // frequency, quality rating, current flag, read count, skew corrections,
+    // total/max skew and read latency, plus global read/skew totals).  Its
+    // init_defaults() previously seeded three fictional clock sources — tsc
+    // (3GHz, Ideal, current, 1B reads, 100 skew corrections), hpet (14.3MHz,
+    // Good, 500K reads) and acpi_pm (3.58MHz, Medium, 10K reads, 200 skews) —
+    // plus totals of 1,000,510,000 reads / 350 skew corrections, surfaced as if
+    // real timekeeping hardware had been calibrated and read.  Clock sources are
+    // discovered hardware, so that demo data was removed; the list now starts
+    // empty and fills only when the timekeeping subsystem actually registers a
+    // calibrated source via register().  The residue-free self_test builds its
+    // fixtures via the real API with exact assertions (incl. total/max skew
+    // accumulation and latest-latency tracking) and resets the table afterward,
+    // so it is safe at boot.
+    fs::clocksrc::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

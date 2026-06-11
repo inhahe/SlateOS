@@ -111,18 +111,31 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the clock-source statistics state.
+///
+/// Starts with no clock sources and zero read/skew totals. Clock sources are
+/// discovered hardware (TSC, HPET, ACPI PM timer, …) that the timekeeping
+/// subsystem registers through [`register`] once it has probed and calibrated
+/// them; the per-source read and skew counters advance only through real
+/// [`record_read`] / [`record_skew`] calls. The `/proc/clocksrc` generator and
+/// the `clocksrc` kshell command surface this list (and [`list`] / [`current`])
+/// as if it reflects the real set of calibrated clock sources, so seeding it
+/// with phantom sources would be fabricated procfs data — it would claim
+/// timekeeping hardware is registered and has been read when nothing actually
+/// programmed it.
+///
+/// (Previously this seeded three fictional sources — "tsc" (3GHz, Ideal,
+/// current, 1B reads, 100 skew corrections), "hpet" (14.3MHz, Good, 500K reads,
+/// 50 skews) and "acpi_pm" (3.58MHz, Medium, 10K reads, 200 skews) — plus
+/// totals of 1,000,510,000 reads and 350 skew corrections.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        sources: alloc::vec![
-            ClockSource { id: 1, name: String::from("tsc"), freq_hz: 3_000_000_000, rating: ClockRating::Ideal, is_current: true, reads: 1_000_000_000, skew_corrections: 100, total_skew_ns: 50_000, max_skew_ns: 1000, read_latency_ns: 20 },
-            ClockSource { id: 2, name: String::from("hpet"), freq_hz: 14_318_180, rating: ClockRating::Good, is_current: false, reads: 500_000, skew_corrections: 50, total_skew_ns: 25_000, max_skew_ns: 500, read_latency_ns: 300 },
-            ClockSource { id: 3, name: String::from("acpi_pm"), freq_hz: 3_579_545, rating: ClockRating::Medium, is_current: false, reads: 10_000, skew_corrections: 200, total_skew_ns: 500_000, max_skew_ns: 5000, read_latency_ns: 800 },
-        ],
-        next_id: 4,
-        total_reads: 1_000_510_000,
-        total_skew_corrections: 350,
+        sources: Vec::new(),
+        next_id: 1,
+        total_reads: 0,
+        total_skew_corrections: 0,
         ops: 0,
     });
 }
@@ -202,55 +215,68 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("clocksrc::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live clock-source list afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom sources, zero totals.
+    assert_eq!(list().len(), 0);
+    let (c0, r0, s0, _) = stats();
+    assert_eq!((c0, r0, s0), (0, 0, 0));
+    assert!(current().is_none());
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
+    // 2: Register — source appears with monotonic id and zeroed counters.
     let id = register("test_clk", 1_000_000, ClockRating::Low).expect("register");
-    assert!(id >= 4);
-    assert_eq!(list().len(), 4);
+    assert_eq!(id, 1);
+    assert_eq!(list().len(), 1);
+    let s = list().into_iter().find(|s| s.id == id).expect("find");
+    assert_eq!((s.reads, s.skew_corrections, s.total_skew_ns, s.max_skew_ns), (0, 0, 0, 0));
+    assert!(!s.is_current);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Set current.
+    // 3: Set current — the registered source becomes the active one.
     set_current(id).expect("set_current");
-    let cur = current().unwrap();
+    let cur = current().expect("current");
     assert_eq!(cur.id, id);
     crate::serial_println!("  [3/8] set current: OK");
 
-    // 4: Record read.
+    // 4: Record read — per-source reads + latest latency and global total advance.
     record_read(id, 50).expect("read");
-    let s = list().iter().find(|s| s.id == id).cloned().unwrap();
-    assert_eq!(s.reads, 1);
-    assert_eq!(s.read_latency_ns, 50);
+    let s = list().into_iter().find(|s| s.id == id).expect("p4");
+    assert_eq!((s.reads, s.read_latency_ns), (1, 50));
+    assert_eq!(stats().1, 1); // total_reads
     crate::serial_println!("  [4/8] read: OK");
 
-    // 5: Record skew.
+    // 5: Record skew — corrections, total and max-skew accrue; global total too.
     record_skew(id, 200).expect("skew");
-    let s = list().iter().find(|s| s.id == id).cloned().unwrap();
-    assert_eq!(s.skew_corrections, 1);
-    assert_eq!(s.max_skew_ns, 200);
+    record_skew(id, 80).expect("skew2");
+    let s = list().into_iter().find(|s| s.id == id).expect("p5");
+    assert_eq!((s.skew_corrections, s.total_skew_ns, s.max_skew_ns), (2, 280, 200));
+    assert_eq!(stats().2, 2); // total_skew_corrections
     crate::serial_println!("  [5/8] skew: OK");
 
-    // 6: Rating ordering.
+    // 6: Rating ordering holds across the quality ladder.
     assert!(ClockRating::Ideal > ClockRating::Good);
     assert!(ClockRating::Good > ClockRating::Medium);
+    assert!(ClockRating::Medium > ClockRating::Low);
     crate::serial_println!("  [6/8] rating order: OK");
 
-    // 7: Not found.
+    // 7: Not found — set_current/record_read/record_skew on unknown id all error.
     assert!(set_current(99).is_err());
     assert!(record_read(99, 0).is_err());
+    assert!(record_skew(99, 0).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above: 1 source, 1 read,
+    //    2 skew corrections.
     let (sources, reads, skews, ops) = stats();
-    assert_eq!(sources, 4);
-    assert!(reads > 1_000_000_000);
-    assert!(skews > 350);
+    assert_eq!((sources, reads, skews), (1, 1, 2));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("clocksrc::self_test() — all 8 tests passed");
 }

@@ -982,6 +982,28 @@
 ##                    all NotFound, final totals (0 devs / 0 vecs / 1 int / 1 alloc
 ##                    / 1 free). NOTE: msivec was NOT previously wired into the boot
 ##                    self-test path — now added. /proc/msivec now 105 bytes.)
+##   - clocksrc.rs   (fixed 2026-06-11; fs/clocksrc.rs statistics module backing
+##                    /proc/clocksrc and the `clocksrc` kshell command; was:
+##                    three fictional clock sources — tsc (3GHz, Ideal, current,
+##                    1B reads, 100 skew corrections), hpet (14.3MHz, Good, 500K
+##                    reads) and acpi_pm (3.58MHz, Medium, 10K reads, 200 skews) —
+##                    plus totals of 1,000,510,000 reads / 350 skew corrections,
+##                    surfaced as if real timekeeping hardware had been calibrated
+##                    and read. Clock sources are DISCOVERED HARDWARE (not a fixed
+##                    taxonomy), so case (a): register/set_current/record_read/
+##                    record_skew already exist → init_defaults simply emptied
+##                    (empty list, next_id 1, zero totals). Rebuilt self_test
+##                    residue-free with exact assertions: register adds a source
+##                    with monotonic id + zeroed counters, set_current activates
+##                    it, read advances reads + latest latency, skew accrues
+##                    corrections/total/max + global total, rating ordering,
+##                    unknown-id set_current/read/skew all NotFound, final totals
+##                    (1 source / 1 read / 2 skews). NOTE: clocksrc was NOT
+##                    previously wired into the boot self-test path — now added.
+##                    /proc/clocksrc now 78 bytes. PROPER FIX DEFERRED: the
+##                    timekeeping subsystem should call clocksrc::register() for
+##                    each calibrated source (TSC/HPET/ACPI PM) once it probes
+##                    them at boot — wire that when timekeeping init exists.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -995,14 +1017,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec (just fixed) were twenty-seven. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc (just fixed) were twenty-eight. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     clocksrc. Remaining flagged names incl.:
-##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
+##     cpuidle. Remaining flagged names incl.:
+##     cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify. SETTINGS-looking names in that set

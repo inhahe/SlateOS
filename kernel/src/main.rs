@@ -1395,6 +1395,14 @@ extern "C" fn kernel_main() -> ! {
     // self_test builds its fixtures via the real API with exact assertions and
     // resets the table afterward, so it is safe at boot.
     fs::blkqueue::self_test();
+    // netqueue backs /proc/netqueue (per-NIC-queue TX/RX packets, drops, NAPI
+    // poll/budget-exhaustion).  Its init_defaults() previously seeded four
+    // fictional eth0 queues with 190M/150M fabricated RX/TX packets; that demo
+    // data was removed (real queues are wired via register_queue + the
+    // record_packets/record_drop/record_napi_poll functions).  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions and
+    // resets the table afterward, so it is safe at boot.
+    fs::netqueue::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -621,17 +621,30 @@
 ##                    assertions incl. complete underflow saturating to 0 and
 ##                    idempotent plug/unplug (double plug counts once), wired
 ##                    into boot. /proc/blkqueue now 87 bytes.)
+##   - netqueue.rs   (fixed 2026-06-11; was: four fake NIC queues (eth0 q0 RX:
+##                    100M packets / 60GB / 1000 drops / 5M NAPI polls / 50k
+##                    budget-exhausted; eth0 q0 TX: 80M / 40GB / 500 drops; eth0
+##                    q1 RX: 90M / 55GB / 800 drops / 4.5M polls / 40k exhausted;
+##                    eth0 q1 TX: 70M / 35GB / 300 drops) plus invented aggregates
+##                    total_rx_packets 190M / total_tx_packets 150M /
+##                    total_napi_polls 9.5M / total_drops 2600, shown via
+##                    /proc/netqueue and the per_queue/for_iface views as real
+##                    network traffic. Full register_queue/record_packets/
+##                    record_drop/record_napi_poll API already existed, so just
+##                    emptied init_defaults and rebuilt self_test with exact
+##                    assertions incl. RX-only NAPI polling and budget-exhausted
+##                    tally, wired into boot. /proc/netqueue now 90 bytes.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed. Broadened the SEEDED-module grep on 2026-06-11
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
-##     blkqueue (just fixed) were four. Next ticks: work through the remaining
-##     candidates ONE PER TICK, auditing each before acting. The 52-file list
-##     includes both STATISTICS modules (fix: empty / zero-counters) AND SETTINGS
-##     or structural modules that seed LEGITIMATE config defaults or real topology
-##     (LEAVE ALONE). Verify each is a statistics module fabricating observed
-##     numbers surfaced via /proc before emptying it. Remaining flagged names
-##     incl.: netqueue, pagecache, taskio, netspeed, diskhealth, netdev, netfilter,
+##     blkqueue + netqueue (just fixed) were five. Next ticks: work through the
+##     remaining candidates ONE PER TICK, auditing each before acting. The 52-file
+##     list includes both STATISTICS modules (fix: empty / zero-counters) AND
+##     SETTINGS or structural modules that seed LEGITIMATE config defaults or real
+##     topology (LEAVE ALONE). Verify each is a statistics module fabricating
+##     observed numbers surfaced via /proc before emptying it. Remaining flagged
+##     names incl.: pagecache, taskio, netspeed, diskhealth, netdev, netfilter,
 ##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,

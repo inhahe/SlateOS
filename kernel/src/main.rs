@@ -1119,6 +1119,12 @@ extern "C" fn kernel_main() -> ! {
     // safe at boot and gives the module automated coverage it previously
     // lacked (it was only reachable via the `futexstat test` kshell subcommand).
     fs::futexstat::self_test();
+    // pipestat backs /proc/pipestat; like its siblings the self-test now
+    // builds fixtures via the real create/destroy/record_write/record_read API
+    // and resets the table afterward (leaving no fabricated pipes), so it is
+    // safe at boot and gives the module automated coverage it previously
+    // lacked (it was only reachable via the `pipestat test` kshell subcommand).
+    fs::pipestat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

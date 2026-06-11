@@ -98,20 +98,32 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** pipe table.
+///
+/// Seeds NO pipe rows and zero totals.  Real pipe accounting is wired through
+/// [`create`]/[`destroy`]/[`record_write`]/[`record_read`]; until those are
+/// called the table is genuinely empty, so the `/proc/pipestat` file and the
+/// `pipestat` kshell command report zeros rather than fabricated numbers —
+/// the kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional pipes (an anonymous pipe with
+/// bytes_written 500_000_000, and a named pipe) plus invented aggregate
+/// totals (total_created 50_000, total_bytes 1_199_996_000), which
+/// `/proc/pipestat` then displayed as if they were real IPC throughput
+/// statistics.  That demo data was removed; the self-test now builds its own
+/// fixtures explicitly via the real API (see [`self_test`]).  The pipe/FIFO
+/// syscall path is expected to call [`create`] when a pipe is made and the
+/// `record_*` functions as data flows.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        pipes: alloc::vec![
-            Pipe { id: 1, pipe_type: PipeType::Anonymous, reader_pid: 100, writer_pid: 1, buffer_size: 65536, buffered_bytes: 4096, bytes_written: 500_000_000, bytes_read: 499_996_000, write_blocks: 10_000, read_blocks: 5_000, created_ns: now },
-            Pipe { id: 2, pipe_type: PipeType::Named, reader_pid: 200, writer_pid: 100, buffer_size: 65536, buffered_bytes: 0, bytes_written: 100_000_000, bytes_read: 100_000_000, write_blocks: 2_000, read_blocks: 1_000, created_ns: now },
-        ],
-        next_id: 3,
-        total_created: 50_000,
-        total_destroyed: 49_998,
-        total_bytes: 1_199_996_000,
-        total_blocks: 18_000,
+        pipes: Vec::new(),
+        next_id: 1,
+        total_created: 0,
+        total_destroyed: 0,
+        total_bytes: 0,
+        total_blocks: 0,
         ops: 0,
     });
 }
@@ -197,58 +209,76 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("pipestat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/pipestat must never surface).
+    // Resetting first clears any residue from a prior `pipestat test` run so
+    // the totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated rows.
+    assert_eq!(list().len(), 0);
+    let (a0, c0, d0, b0, bl0, _o0) = stats();
+    assert_eq!((a0, c0, d0, b0, bl0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Create.
+    // 2: Create (ids start at 1).
     let id = create(300, 200, PipeType::Anonymous, 65536).expect("create");
-    assert!(id >= 3);
-    assert_eq!(list().len(), 3);
+    assert_eq!(id, 1);
+    assert_eq!(list().len(), 1);
     crate::serial_println!("  [2/8] create: OK");
 
-    // 3: Write.
+    // 3: Write (exact, from zero; buffered tracks bytes in flight).
     record_write(id, 1024, false).expect("write");
-    let p = list().iter().find(|p| p.id == id).cloned().unwrap();
+    let p = list().iter().find(|p| p.id == id).cloned().expect("pipe");
     assert_eq!(p.bytes_written, 1024);
     assert_eq!(p.buffered_bytes, 1024);
     crate::serial_println!("  [3/8] write: OK");
 
-    // 4: Read.
+    // 4: Read drains the buffer.
     record_read(id, 512, false).expect("read");
-    let p = list().iter().find(|p| p.id == id).cloned().unwrap();
+    let p = list().iter().find(|p| p.id == id).cloned().expect("pipe");
     assert_eq!(p.bytes_read, 512);
     assert_eq!(p.buffered_bytes, 512);
     crate::serial_println!("  [4/8] read: OK");
 
-    // 5: Blocking.
+    // 5: A blocked write bumps write_blocks; recording on an unknown id fails.
     record_write(id, 100, true).expect("block_write");
-    let p = list().iter().find(|p| p.id == id).cloned().unwrap();
+    let p = list().iter().find(|p| p.id == id).cloned().expect("pipe");
     assert_eq!(p.write_blocks, 1);
+    assert!(record_write(9999, 1, false).is_err()); // NotFound
     crate::serial_println!("  [5/8] blocking: OK");
 
-    // 6: By PID.
-    let pipes = by_pid(200);
-    assert!(pipes.len() >= 2); // Writer on pipe 2, reader on new pipe.
+    // 6: A second pipe; by_pid reflects exact membership (pid 200 is reader on
+    //    pipe 1 and writer on pipe 2).
+    let id2 = create(100, 200, PipeType::Named, 65536).expect("create2");
+    assert_eq!(by_pid(200).len(), 2);
+    assert_eq!(by_pid(300).len(), 1); // only writer of pipe 1
     crate::serial_println!("  [6/8] by pid: OK");
 
-    // 7: Destroy.
+    // 7: Destroy; double-destroy fails.
     destroy(id).expect("destroy");
-    assert_eq!(list().len(), 2);
+    assert_eq!(list().len(), 1); // only pipe 2 remains
     assert!(destroy(id).is_err());
+    let _ = id2;
     crate::serial_println!("  [7/8] destroy: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (active, created, destroyed, bytes, blocks, ops) = stats();
-    assert_eq!(active, 2);
-    assert!(created > 50_000);
-    assert!(destroyed > 49_998);
-    assert!(bytes > 1_199_996_000);
-    assert!(blocks > 18_000);
+    assert_eq!(active, 1); // pipe 2
+    assert_eq!(created, 2); // two creates
+    assert_eq!(destroyed, 1); // one destroy
+    assert_eq!(bytes, 1636); // 1024 write + 512 read + 100 write
+    assert_eq!(blocks, 1); // one blocked write
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/pipestat table with its fixtures.  Reset to the uninitialised
+    // state so production reads report an empty table until the pipe syscall
+    // path wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("pipestat::self_test() — all 8 tests passed");
 }

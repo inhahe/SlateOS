@@ -1876,6 +1876,17 @@ pub const DEFAULT_RLIMITS: [(u64, u64); 16] = [
 /// the syscall layer with `EINVAL`.
 pub const NUM_RLIMITS: u32 = 16;
 
+// Compile-time invariant: `NUM_RLIMITS` is the bound checked by
+// `get_rlimit`/`set_rlimit` before they index `DEFAULT_RLIMITS` and the
+// per-process `rlimits` array (e.g. `p.rlimits[resource as usize]`).  The
+// `rlimits` field length is already compile-linked to `DEFAULT_RLIMITS` via
+// the `rlimits: DEFAULT_RLIMITS` initializer, so guarding `DEFAULT_RLIMITS`
+// against `NUM_RLIMITS` here makes the whole chain consistent.  Without this,
+// bumping `NUM_RLIMITS` to add a new RLIMIT_* without extending the tables
+// would turn those indexed accesses into runtime out-of-bounds panics (a DoS
+// in this kernel's threat model) instead of a build failure.
+const _: () = assert!(DEFAULT_RLIMITS.len() == NUM_RLIMITS as usize);
+
 /// Read the current `(rlim_cur, rlim_max)` for `pid`'s `resource`.
 ///
 /// Returns `None` if `pid` is unknown or `resource >= NUM_RLIMITS`.

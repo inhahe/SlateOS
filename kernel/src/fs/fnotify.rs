@@ -143,29 +143,48 @@ fn event_index(k: EventKind) -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the file-notification statistics.
+///
+/// Seeds the real three-type taxonomy (inotify / fanotify / dnotify) and their
+/// CAPACITY limits (`max_watches` and `max_queue_depth` — sysctl-style
+/// configuration, the analogue of `/proc/sys/fs/inotify/max_user_watches`) with
+/// ALL ACTIVITY COUNTERS ZEROED: no live watches, no events, no overflows, empty
+/// queues and zeroed per-event-kind breakdowns. The `/proc/fnotify` generator
+/// and the `fnotify` kshell command surface these counters AS IF REAL, so
+/// seeding observed watch/event/overflow totals would be fabricated procfs data
+/// — it would claim millions of filesystem-notification events had been
+/// delivered when the inotify/fanotify/dnotify subsystems are not even
+/// implemented yet. Real watches and events are recorded through [`add_watch`]
+/// and [`record_event`] when a notification backend exists.
+///
+/// (Previously this seeded fabricated activity — inotify 500 watches /
+/// 10,000,000 events / 5 overflows, fanotify 50 watches / 5,000,000 events,
+/// dnotify 10 watches / 100,000 events, totalling 15,100,000 phantom events with
+/// invented per-event-kind breakdowns — none backed by a real notification
+/// subsystem.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
         types: [
             TypeStats {
-                notify_type: NotifyType::Inotify, watches: 500, max_watches: 8192,
-                events: 10_000_000, overflows: 5, queue_depth: 128, max_queue_depth: 4096,
-                event_counts: [2_000_000, 500_000, 4_000_000, 1_000_000, 500_000, 300_000, 300_000, 800_000, 600_000],
+                notify_type: NotifyType::Inotify, watches: 0, max_watches: 8192,
+                events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 4096,
+                event_counts: [0; 9],
             },
             TypeStats {
-                notify_type: NotifyType::Fanotify, watches: 50, max_watches: 1024,
-                events: 5_000_000, overflows: 0, queue_depth: 64, max_queue_depth: 2048,
-                event_counts: [1_000_000, 200_000, 2_000_000, 500_000, 200_000, 100_000, 100_000, 500_000, 400_000],
+                notify_type: NotifyType::Fanotify, watches: 0, max_watches: 1024,
+                events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 2048,
+                event_counts: [0; 9],
             },
             TypeStats {
-                notify_type: NotifyType::Dnotify, watches: 10, max_watches: 256,
-                events: 100_000, overflows: 0, queue_depth: 8, max_queue_depth: 512,
-                event_counts: [20_000, 5_000, 40_000, 10_000, 5_000, 3_000, 3_000, 8_000, 6_000],
+                notify_type: NotifyType::Dnotify, watches: 0, max_watches: 256,
+                events: 0, overflows: 0, queue_depth: 0, max_queue_depth: 512,
+                event_counts: [0; 9],
             },
         ],
-        total_events: 15_100_000,
-        total_overflows: 5,
+        total_events: 0,
+        total_overflows: 0,
         ops: 0,
     });
 }
@@ -247,55 +266,68 @@ pub fn stats() -> (u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("fnotify::self_test() — running tests...");
+    // Start from a clean, freshly-defaulted state so the assertions below are
+    // exact and the watch/event fixtures this test creates do not leak into the
+    // live /proc/fnotify table afterward (the kshell `fnotify test` subcommand
+    // calls this directly, and /proc/fnotify reports watch/event/overflow totals
+    // — leaked fixtures would look like real notification activity).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
+    // 1: Defaults — the three-type taxonomy with CAPACITY limits kept but ALL
+    //    activity ZEROED (no fabricated watches/events/overflows).
     let types = per_type();
-    assert_eq!(types[0].watches, 500);
-    crate::serial_println!("  [1/8] defaults: OK");
+    assert_eq!((types[0].watches, types[0].events, types[0].max_watches), (0, 0, 8192));
+    assert_eq!((types[1].watches, types[1].max_watches), (0, 1024));
+    assert_eq!((types[2].watches, types[2].max_watches), (0, 256));
+    let (w0, e0, o0, _) = stats();
+    assert_eq!((w0, e0, o0), (0, 0, 0)); // watches/events/overflows all 0
+    crate::serial_println!("  [1/8] zeroed defaults: OK");
 
-    // 2: Add watch.
-    add_watch(NotifyType::Inotify).expect("add");
-    let types = per_type();
-    assert_eq!(types[0].watches, 501);
+    // 2: Add watches — three inotify watches.
+    for _ in 0..3 { add_watch(NotifyType::Inotify).expect("add"); }
+    assert_eq!(per_type()[0].watches, 3);
     crate::serial_println!("  [2/8] add watch: OK");
 
-    // 3: Remove watch.
+    // 3: Remove watch — back down to two.
     remove_watch(NotifyType::Inotify).expect("remove");
-    let types = per_type();
-    assert_eq!(types[0].watches, 500);
+    assert_eq!(per_type()[0].watches, 2);
     crate::serial_println!("  [3/8] remove watch: OK");
 
-    // 4: Record event.
+    // 4: Record event — first inotify Create event.
     record_event(NotifyType::Inotify, EventKind::Create).expect("event");
     let types = per_type();
-    assert_eq!(types[0].events, 10_000_001);
+    assert_eq!(types[0].events, 1);
+    assert_eq!(types[0].queue_depth, 1);
     crate::serial_println!("  [4/8] record event: OK");
 
-    // 5: Event counts.
+    // 5: Event counts — two Modify events accumulate at index 2; Create stays 1.
+    record_event(NotifyType::Inotify, EventKind::Modify).expect("ev2");
+    record_event(NotifyType::Inotify, EventKind::Modify).expect("ev3");
     let types = per_type();
-    assert_eq!(types[0].event_counts[0], 2_000_001); // Create index 0
+    assert_eq!(types[0].event_counts[0], 1); // Create
+    assert_eq!(types[0].event_counts[2], 2); // Modify
+    assert_eq!(types[0].events, 3);
     crate::serial_println!("  [5/8] event counts: OK");
 
-    // 6: Drain.
-    drain_events(NotifyType::Inotify, 10).expect("drain");
-    let types = per_type();
-    assert_eq!(types[0].queue_depth, 119); // 128 + 1 - 10
+    // 6: Drain — three queued events minus two drained leaves one.
+    drain_events(NotifyType::Inotify, 2).expect("drain");
+    assert_eq!(per_type()[0].queue_depth, 1);
     crate::serial_println!("  [6/8] drain: OK");
 
-    // 7: Empty remove fails.
-    // dnotify has 10 watches, remove them all
-    for _ in 0..10 { remove_watch(NotifyType::Dnotify).expect("rm dnotify"); }
+    // 7: Empty remove fails — dnotify has no watches.
     assert!(remove_watch(NotifyType::Dnotify).is_err());
     crate::serial_println!("  [7/8] empty remove: OK");
 
-    // 8: Stats.
+    // 8: Stats — 2 live watches, 3 events recorded, no overflows.
     let (watches, events, overflows, ops) = stats();
-    assert!(watches > 0);
-    assert!(events > 15_100_000);
-    assert!(overflows >= 5);
+    assert_eq!((watches, events, overflows), (2, 3, 0));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Restore the clean zeroed baseline so no test fixtures leak into the live
+    // module's /proc/fnotify table.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("fnotify::self_test() — all 8 tests passed");
 }

@@ -1618,6 +1618,38 @@
 ##                    breaks — truthful). No PROPER FIX DEFERRED: break activity
 ##                    accrues through real check_break/start_break/etc. calls
 ##                    driven by the timer subsystem.
+##   - fnotify (2026-06-11): FIXED — fabrication case (c) (kept the real fixed
+##                    taxonomy + capacity limits, ZEROED all activity counters).
+##                    File-notification (inotify/fanotify/dnotify) statistics,
+##                    surfaced via /proc/fnotify and the `fnotify` kshell command.
+##                    init_defaults FABRICATED observed activity — inotify 500
+##                    watches / 10,000,000 events / 5 overflows / queue 128,
+##                    fanotify 50 watches / 5,000,000 events, dnotify 10 watches /
+##                    100,000 events — totalling 15,100,000 phantom events with
+##                    invented per-event-kind breakdowns (event_counts arrays),
+##                    total_events 15,100,000 / total_overflows 5, none backed by a
+##                    real notification subsystem (inotify/fanotify/dnotify are not
+##                    implemented). /proc/fnotify printed these as if real
+##                    ("Watches: 560  Events: 15100000 ..."). Case (c): the
+##                    three-type taxonomy is real STRUCTURE and the max_watches
+##                    (8192/1024/256) and max_queue_depth (4096/2048/512) are
+##                    sysctl-style CAPACITY config (the analogue of
+##                    /proc/sys/fs/inotify/max_user_watches) — both KEPT — but the
+##                    activity counters (watches, events, overflows, queue_depth,
+##                    event_counts, total_events, total_overflows) were all ZEROED.
+##                    Rebuilt self_test residue-free (clears STATE at start AND
+##                    restores the zeroed baseline at end) with EXACT assertions
+##                    against zero (zeroed defaults + capacity kept, add 3 inotify
+##                    watches, remove 1 → 2, record Create + 2 Modify → events 3 /
+##                    event_counts[0]=1 / [2]=2, drain 2 of 3 → queue 1, empty
+##                    dnotify remove errors, final 2 watches / 3 events / 0
+##                    overflows). Wired into the boot self-test path. /proc/fnotify
+##                    243 bytes (3 types, capacity limits, 0 watches / 0 events —
+##                    truthful). PROPER FIX DEFERRED: a real inotify/fanotify/
+##                    dnotify backend must call add_watch on watch creation and
+##                    record_event per delivered event — wire when filesystem
+##                    change-notification is implemented. Until then it correctly
+##                    reports no watches and no events.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1631,13 +1663,13 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean (just fixed) were forty-three. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify (just fixed) were forty-four. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     fnotify. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     memlayout. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1663,10 +1695,12 @@
 ##     startupopt audited 2026-06-11: LEGITIMATE boot profiler — no fabrication,
 ##     only made self_test residue-free + tightened assertions. eyeprotect
 ##     audited 2026-06-11: LEGITIMATE settings module — default break profiles
-##     left alone, only made self_test residue-free.)
+##     left alone, only made self_test residue-free. fnotify fixed 2026-06-11:
+##     case (c) — kept inotify/fanotify/dnotify taxonomy + capacity limits,
+##     zeroed 15.1M fabricated events / all activity counters.)
 ##     Remaining flagged
 ##     names incl.:
-##     fnotify, memlayout. memlayout was
+##     memlayout. memlayout was
 ##     newly discovered during the memdiag tick: its init_defaults() seeds
 ##     hardcoded memory regions (~1 GiB "Main memory" etc.) so total_ram() is
 ##     fabricated, not a real limine map — audit/fix when reached.)

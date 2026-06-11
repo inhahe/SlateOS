@@ -1971,6 +1971,19 @@ extern "C" fn kernel_main() -> ! {
     // STATE and restores the clean default profiles at the end) and wired here so
     // its exact assertions are exercised at boot.
     fs::eyeprotect::self_test();
+    // File-notification statistics self-test.  fnotify's init_defaults used to
+    // fabricate observed activity — inotify 500 watches / 10,000,000 events / 5
+    // overflows, fanotify 50 watches / 5,000,000 events, dnotify 10 watches /
+    // 100,000 events (15,100,000 phantom events total, with invented per-event-
+    // kind breakdowns) — surfaced via /proc/fnotify and the `fnotify` kshell
+    // command AS IF REAL, when the inotify/fanotify/dnotify subsystems are not
+    // even implemented.  It now seeds only the real three-type taxonomy and the
+    // sysctl-style CAPACITY limits (max_watches / max_queue_depth) with ALL
+    // activity counters ZEROED (case c), so /proc/fnotify honestly reports 0
+    // watches / 0 events.  The residue-free self_test exercises add_watch /
+    // record_event / drain_events with exact assertions and restores the zeroed
+    // baseline afterward.
+    fs::fnotify::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

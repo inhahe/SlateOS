@@ -110,24 +110,39 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the scheduler-class statistics state.
+///
+/// Starts with no tracked tasks and all per-class counters at zero. The
+/// five `class_stats` rows (RealTime, Deadline, Normal, Batch, Idle) are a
+/// fixed scheduler-class taxonomy, so they are always present — but with
+/// zeroed task counts, context switches, runtime, slices, and migrations.
+/// The `/proc/schedclass` generator and the `schedclass` kshell command
+/// surface this table (and `list_tasks` / `class_stats`) as if it reflects
+/// the real set of scheduled tasks, so seeding it with phantom tasks and
+/// invented switch/runtime/migration totals would be fabricated procfs
+/// data. Tasks are registered through [`register_task`] and the counters
+/// advance only through real [`record_switch`] / [`record_slice`] /
+/// [`record_migration`] calls.
+///
+/// (Previously this seeded three fictional tasks — pid 0 Idle (50s runtime,
+/// 100k switches), pid 1 Normal (10s runtime, 500k switches, 1000
+/// migrations), pid 2 RealTime (1s runtime, 200k switches, 50 migrations) —
+/// with matching invented per-class stats and totals of 800000 switches /
+/// 1050 migrations.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        tasks: alloc::vec![
-            TaskSchedInfo { pid: 0, class: SchedClass::Idle, priority: 0, nice: 19, runtime_ns: 50_000_000_000, switches: 100000, migrations: 0 },
-            TaskSchedInfo { pid: 1, class: SchedClass::Normal, priority: 120, nice: 0, runtime_ns: 10_000_000_000, switches: 500000, migrations: 1000 },
-            TaskSchedInfo { pid: 2, class: SchedClass::RealTime, priority: 99, nice: 0, runtime_ns: 1_000_000_000, switches: 200000, migrations: 50 },
-        ],
+        tasks: Vec::new(),
         class_stats: alloc::vec![
-            ClassStats { class: SchedClass::RealTime, task_count: 1, context_switches: 200000, total_runtime_ns: 1_000_000_000, total_slices: 200000, avg_slice_ns: 5000, migrations: 50 },
+            ClassStats { class: SchedClass::RealTime, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
             ClassStats { class: SchedClass::Deadline, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
-            ClassStats { class: SchedClass::Normal, task_count: 1, context_switches: 500000, total_runtime_ns: 10_000_000_000, total_slices: 500000, avg_slice_ns: 20000, migrations: 1000 },
+            ClassStats { class: SchedClass::Normal, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
             ClassStats { class: SchedClass::Batch, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
-            ClassStats { class: SchedClass::Idle, task_count: 1, context_switches: 100000, total_runtime_ns: 50_000_000_000, total_slices: 100000, avg_slice_ns: 500000, migrations: 0 },
+            ClassStats { class: SchedClass::Idle, task_count: 0, context_switches: 0, total_runtime_ns: 0, total_slices: 0, avg_slice_ns: 0, migrations: 0 },
         ],
-        total_switches: 800000,
-        total_migrations: 1050,
+        total_switches: 0,
+        total_migrations: 0,
         ops: 0,
     });
 }
@@ -231,57 +246,82 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("schedclass::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live scheduler-class tables afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_tasks().len(), 3);
-    assert_eq!(class_stats().len(), 5);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // Helper: fetch a class row by class.
+    fn class_of(class: SchedClass) -> ClassStats {
+        class_stats().into_iter().find(|c| c.class == class).expect("class row")
+    }
 
-    // 2: Register task.
+    // 1: Empty defaults — no tasks, five zeroed class rows, zero totals.
+    assert_eq!(list_tasks().len(), 0);
+    assert_eq!(class_stats().len(), 5);
+    for c in class_stats() {
+        assert_eq!(c.task_count, 0);
+        assert_eq!(c.context_switches, 0);
+        assert_eq!(c.total_runtime_ns, 0);
+        assert_eq!(c.total_slices, 0);
+        assert_eq!(c.migrations, 0);
+    }
+    let (t0, c0, sw0, mig0, _) = stats();
+    assert_eq!((t0, c0, sw0, mig0), (0, 5, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
+
+    // 2: Register a task — appears in the task list and bumps its class count.
     register_task(100, SchedClass::Normal, 120, 0).expect("register");
-    assert_eq!(list_tasks().len(), 4);
+    assert_eq!(list_tasks().len(), 1);
+    assert_eq!(class_of(SchedClass::Normal).task_count, 1);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Context switch.
-    let before = list_tasks().iter().find(|t| t.pid == 100).unwrap().switches;
+    // 3: Context switch — task + class + global counters advance by one.
     record_switch(100).expect("switch");
-    let after = list_tasks().iter().find(|t| t.pid == 100).unwrap().switches;
-    assert_eq!(after, before + 1);
+    assert_eq!(task_info(100).expect("t").switches, 1);
+    assert_eq!(class_of(SchedClass::Normal).context_switches, 1);
+    assert_eq!(stats().2, 1); // total_switches
     crate::serial_println!("  [3/8] switch: OK");
 
-    // 4: Time slice.
-    record_slice(100, 10000).expect("slice");
+    // 4: Time slice — runtime and avg-slice accounting are exact.
+    record_slice(100, 10_000).expect("slice");
     let t = task_info(100).expect("info");
-    assert_eq!(t.runtime_ns, 10000);
+    assert_eq!(t.runtime_ns, 10_000);
+    let n = class_of(SchedClass::Normal);
+    assert_eq!(n.total_runtime_ns, 10_000);
+    assert_eq!(n.total_slices, 1);
+    assert_eq!(n.avg_slice_ns, 10_000);
     crate::serial_println!("  [4/8] slice: OK");
 
-    // 5: Migration.
+    // 5: Migration — task, class, and global migration counters advance.
     record_migration(100).expect("migrate");
-    let t = task_info(100).expect("info2");
-    assert_eq!(t.migrations, 1);
+    assert_eq!(task_info(100).expect("info2").migrations, 1);
+    assert_eq!(class_of(SchedClass::Normal).migrations, 1);
+    assert_eq!(stats().3, 1); // total_migrations
     crate::serial_println!("  [5/8] migration: OK");
 
-    // 6: Class change.
+    // 6: Class change — task moves Normal→RealTime; class task_counts follow.
     register_task(100, SchedClass::RealTime, 50, 0).expect("reclass");
-    let t = task_info(100).expect("info3");
-    assert_eq!(t.class, SchedClass::RealTime);
+    assert_eq!(task_info(100).expect("info3").class, SchedClass::RealTime);
+    assert_eq!(class_of(SchedClass::Normal).task_count, 0);
+    assert_eq!(class_of(SchedClass::RealTime).task_count, 1);
     crate::serial_println!("  [6/8] class change: OK");
 
-    // 7: Class stats.
-    let cs = class_stats();
-    let rt = cs.iter().find(|c| c.class == SchedClass::RealTime).unwrap();
-    assert!(rt.task_count >= 2);
-    crate::serial_println!("  [7/8] class stats: OK");
+    // 7: Recording a slice for an unknown pid is NotFound (no phantom rows).
+    assert!(record_slice(9999, 100).is_err());
+    assert_eq!(list_tasks().len(), 1);
+    crate::serial_println!("  [7/8] unknown pid: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above.
     let (tasks, classes, switches, migrations, ops) = stats();
-    assert_eq!(tasks, 4);
+    assert_eq!(tasks, 1);
     assert_eq!(classes, 5);
-    assert!(switches > 800000);
-    assert!(migrations > 1050);
+    assert_eq!(switches, 1);
+    assert_eq!(migrations, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("schedclass::self_test() — all 8 tests passed");
 }

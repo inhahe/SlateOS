@@ -1551,6 +1551,21 @@ extern "C" fn kernel_main() -> ! {
     // future periodic deadline so fire_expired is deterministic) and resets the
     // queue afterward, so it is safe at boot.
     fs::timerq::self_test();
+    // schedclass backs /proc/schedclass (scheduler-class diagnostics: per-task
+    // pid/class/priority/runtime/switches/migrations and per-class task counts,
+    // context switches, runtime, slices, and migrations).  Its init_defaults()
+    // previously seeded three fictional tasks — pid 0 Idle (50s runtime, 100k
+    // switches), pid 1 Normal (10s runtime, 500k switches, 1000 migrations),
+    // pid 2 RealTime (1s runtime, 200k switches, 50 migrations) — with matching
+    // invented per-class stats and totals of 800000 switches / 1050 migrations;
+    // that phantom data was removed.  The five scheduler-class rows (RealTime/
+    // Deadline/Normal/Batch/Idle) are a fixed taxonomy so they are kept with
+    // ZEROED counters, while tasks are tracked as they register via the existing
+    // register_task() API and counters advance only on real record_switch/
+    // record_slice/record_migration calls.  The residue-free self_test builds
+    // its fixtures via the real API with exact assertions and resets the tables
+    // afterward, so it is safe at boot.
+    fs::schedclass::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -854,6 +854,23 @@
 ##                    deadline one-shot, cleanup retains only Pending/Active, and
 ##                    final totals created 4 / fired 3 / cancelled 1 / overruns 0.
 ##                    Wired into boot. /proc/timerq now 73 bytes.)
+##   - schedclass.rs (fixed 2026-06-11; fs/schedclass.rs statistics module backing
+##                    /proc/schedclass and the `schedclass` kshell command; was:
+##                    three fictional tasks — pid 0 Idle (50s runtime, 100k
+##                    switches), pid 1 Normal (10s runtime, 500k switches, 1000
+##                    migrations), pid 2 RealTime (1s runtime, 200k switches, 50
+##                    migrations) — with matching invented per-class stats and
+##                    totals of 800000 switches / 1050 migrations. MIXED structure:
+##                    the five scheduler-class rows (RealTime/Deadline/Normal/Batch/
+##                    Idle) are a fixed taxonomy → KEPT with ZEROED counters (case
+##                    c); the tasks Vec was fabricated → emptied, with the full
+##                    register_task/record_switch/record_slice/record_migration API
+##                    already present (case a). Rebuilt self_test residue-free with
+##                    exact assertions: register bumps class task_count, switch/
+##                    slice/migration advance task+class+global counters, avg-slice
+##                    math, class change moves task_count Normal→RealTime, unknown-
+##                    pid slice is NotFound, final totals 1 switch / 1 migration.
+##                    Wired into boot. /proc/schedclass now 65 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -867,14 +884,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq (just fixed) were nineteen. Next ticks: work through the
+##     + softirq + timerq + schedclass (just fixed) were twenty. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     schedclass. Remaining flagged names incl.:
-##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
+##     schedwait. Remaining flagged names incl.:
+##     schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,

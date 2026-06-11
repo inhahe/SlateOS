@@ -2158,7 +2158,24 @@
 ##     and USB/ACPI/I2C/platform devices are absent until those buses gain real
 ##     enumerators that call register_device on detection (USB driver, ACPI
 ##     parser). When they exist, wire them so /proc/devicemgr is a complete,
-##     truthful device tree rather than PCI-only. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     truthful device tree rather than PCI-only.
+##     tracemon audited 2026-06-11: NOT a fabricator — init_defaults() seeds only
+##     a legitimate fixed taxonomy of six standard kernel tracepoints (sys_enter,
+##     sys_exit, sched_switch, irq_handler, vfs_read, page_fault), all
+##     enabled:false with hit_count:0 and zero total_events/total_dropped, so
+##     /proc/tracemon honestly shows "these probes exist, none have fired" (case
+##     (c), already correct). tracemon is NOT boot-wired — the kshell commands
+##     lazily init_defaults() per call, so the natural state is uninitialised. The
+##     ONLY defect was a residue-leaking self_test: it enabled global tracing,
+##     registered a custom_probe, switched to OneShot buffer mode, and recorded
+##     events without resetting, so `tracemon test` permanently armed global
+##     tracing + a phantom 7th tracepoint in the live /proc/tracemon view. FIXED:
+##     self_test now resets STATE to None at start AND end and tightened the loose
+##     `total >= 2` to exact (total==2, dropped==0). DEFERRED: the six tracepoints
+##     are declared but not yet wired to real probe sites (nothing calls record()
+##     from kernel hot paths yet), so hit counts stay zero — honest, but wire them
+##     to the syscall/sched/irq/vfs/page-fault paths when tracing is productised.
+##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional

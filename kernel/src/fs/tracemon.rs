@@ -299,9 +299,16 @@ pub fn stats() -> (usize, usize, u64, u64, bool, u64) {
 
 pub fn self_test() {
     crate::serial_println!("tracemon::self_test() — running tests...");
+    // Start from a clean slate so the mutations below (enabling global tracing,
+    // registering a custom_probe, switching to OneShot buffer mode, recording
+    // events) can never leak into the live /proc/tracemon view.  tracemon is not
+    // boot-wired — the kshell commands lazily init_defaults() on first use — so
+    // the natural state is uninitialised; `tracemon test` must leave it that way
+    // rather than permanently arming global tracing and a phantom tracepoint.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
+    // 1: Defaults — six standard tracepoints, all disabled, zero hits.
     assert_eq!(list_tracepoints().len(), 6);
     let (_, _, _, _, enabled, _) = stats();
     assert!(!enabled);
@@ -349,15 +356,21 @@ pub fn self_test() {
     assert_eq!(read_buffer(10).len(), 0);
     crate::serial_println!("  [7/8] clear: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact totals: 7 tracepoints (6 default + custom_probe), buffer
+    // cleared, exactly 2 events recorded (pid-1 and pid-42; the filtered pid-1
+    // record returned before counting), nothing dropped, global tracing on.
     let (tp_count, ev_count, total, dropped, global, ops) = stats();
     assert_eq!(tp_count, 7);
     assert_eq!(ev_count, 0); // Cleared.
-    assert!(total >= 2);
-    let _ = dropped;
+    assert_eq!(total, 2);
+    assert_eq!(dropped, 0);
     assert!(global);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the test leaves no fixtures (custom_probe, global-enabled,
+    // OneShot mode) behind in the live /proc/tracemon registry.
+    *STATE.lock() = None;
 
     crate::serial_println!("tracemon::self_test() — all 8 tests passed");
 }

@@ -196,6 +196,17 @@
 ## process creation, THEN serve /proc/<pid>/io from those genuine counters.
 ## Deferred because it touches the hot read/write syscall path (perf-sensitive,
 ## risky to land unattended).  glibc/top/iotop read this file.
+## TESTING BLOCKER (the deeper reason, same class as CLONE_PIDFD below): the
+## VALUE here is that the byte/syscall counts are REAL, but the boot self-test
+## harness runs in KERNEL context and cannot drive a real userspace process
+## through read/write to observe its per-process counters incrementing.  Only
+## the pure render_io(counter values) formatter would be self-testable; the
+## actual accounting wiring (the part that matters) would ship UNTESTED,
+## violating "ship nothing untested".  So this is blocked on the SAME missing
+## userspace syscall integration-test harness as CLONE_PIDFD — implement them
+## together, or build that harness first.  Do NOT land render_io + counter
+## wiring just because the formatter passes a synthetic test; that would give a
+## false sense of coverage over the untested hot-path increments.
 ##
 ## FOLLOW-UP (2026-06-10): real /proc/<pid>/auxv + kernel-side saved_auxv
 ## /proc/<pid>/auxv is NOT yet served.  Implementing it properly requires

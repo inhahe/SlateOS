@@ -552,6 +552,8 @@ const PID_FILES: &[&str] = &[
     "environ",
     "mountinfo",
     "cgroup",
+    "oom_score",
+    "oom_score_adj",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -2209,6 +2211,61 @@ fn gen_pid_cgroup(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(render_cgroup(task_id, &groups))
 }
 
+/// Render `/proc/<pid>/oom_score` — the current OOM badness, Linux-format.
+///
+/// Pure helper (no oomkiller lock access) so it can be unit-tested in
+/// kernel context.  Linux's `oom_score` is a single integer clamped to
+/// `0..=1000` that folds the user adjustment into the base badness; the
+/// OOM killer ranks victims by `(score + adj).max(0)` (see
+/// [`crate::fs::oomkiller`]), so we report exactly that, capped at the
+/// Linux ceiling of 1000.
+fn render_oom_score(base: i32, adj: i32) -> Vec<u8> {
+    let eff = base.saturating_add(adj).clamp(0, 1000);
+    format!("{eff}\n").into_bytes()
+}
+
+/// Render `/proc/<pid>/oom_score_adj` — the user OOM adjustment.
+///
+/// Pure helper.  Linux's `oom_score_adj` is a single integer in
+/// `-1000..=1000`; we report the stored adjustment verbatim.
+fn render_oom_score_adj(adj: i32) -> Vec<u8> {
+    format!("{adj}\n").into_bytes()
+}
+
+/// `/proc/<pid>/oom_score` — current OOM-killer badness for the process.
+///
+/// Reflects the live oomkiller score when the process is registered;
+/// processes the OOM killer has never scored report `0`, matching the
+/// Linux default for a task with no accumulated badness.  Gated on
+/// process existence so bare scheduler tasks return `NotFound`.
+fn gen_pid_oom_score(task_id: u64) -> KernelResult<Vec<u8>> {
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    let (base, adj) = u32::try_from(task_id)
+        .ok()
+        .and_then(crate::fs::oomkiller::get_score)
+        .map_or((0, 0), |s| (s.score, s.adj));
+    Ok(render_oom_score(base, adj))
+}
+
+/// `/proc/<pid>/oom_score_adj` — user OOM adjustment for the process.
+///
+/// Read-only for now: the procfs `write_file` path is `NotSupported`
+/// globally, so user writes to tune the adjustment are a separate
+/// follow-up (tracked in `todo.txt`).  Unregistered processes report the
+/// Linux default of `0`.  Gated on process existence.
+fn gen_pid_oom_score_adj(task_id: u64) -> KernelResult<Vec<u8>> {
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    let adj = u32::try_from(task_id)
+        .ok()
+        .and_then(crate::fs::oomkiller::get_score)
+        .map_or(0, |s| s.adj);
+    Ok(render_oom_score_adj(adj))
+}
+
 /// `/proc/<pid>/caps` — capability table listing.
 ///
 /// Shows the count and types of capabilities granted to this process,
@@ -2438,6 +2495,8 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "environ" => gen_pid_environ(task_id),
         "mountinfo" => gen_pid_mountinfo(task_id),
         "cgroup" => gen_pid_cgroup(task_id),
+        "oom_score" => gen_pid_oom_score(task_id),
+        "oom_score_adj" => gen_pid_oom_score_adj(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11586,6 +11645,30 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   cgroup render: assigned + root fallback OK");
     }
 
+    // --- /proc/<pid>/oom_score{,_adj} rendering ---
+    // Pure formatters: oom_score folds adj into the base badness and
+    // clamps to 0..=1000; oom_score_adj echoes the adjustment verbatim.
+    {
+        let cases = [
+            (render_oom_score(500, 0), "500\n"),
+            (render_oom_score(800, 200), "1000\n"),   // capped at 1000
+            (render_oom_score(100, -500), "0\n"),     // floored at 0
+            (render_oom_score_adj(-1000), "-1000\n"),
+            (render_oom_score_adj(200), "200\n"),
+        ];
+        for (got, want) in &cases {
+            let got_text = core::str::from_utf8(got)
+                .map_err(|_| KernelError::InternalError)?;
+            if got_text != *want {
+                serial_println!(
+                    "[procfs]   FAIL: oom render {:?} != {:?}", got_text, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   oom_score/oom_score_adj render: {} cases OK", cases.len());
+    }
+
     // --- New per-PID files: comm, statm, limits ---
 
     // /proc/<pid>/comm — non-empty, newline-terminated, <= 16 bytes
@@ -11709,6 +11792,39 @@ pub fn self_test() -> KernelResult<()> {
         Err(e) => {
             serial_println!("[procfs]   FAIL: cgroup unexpected error {:?}", e);
             return Err(KernelError::InternalError);
+        }
+    }
+
+    // /proc/<pid>/oom_score and oom_score_adj — process-only.  When they
+    // succeed, each must be a single integer line within Linux's ranges
+    // (oom_score 0..=1000, oom_score_adj -1000..=1000).
+    for (name, lo, hi) in [("oom_score", 0i32, 1000i32), ("oom_score_adj", -1000, 1000)] {
+        match fs.read_file(&format!("/{current_tid}/{name}")) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data)
+                    .map_err(|_| KernelError::InternalError)?;
+                let trimmed = text.strip_suffix('\n').unwrap_or(text);
+                match trimmed.parse::<i32>() {
+                    Ok(v) if (lo..=hi).contains(&v) => {
+                        serial_println!("[procfs]   {}/{}: {} OK", current_tid, name, v);
+                    }
+                    _ => {
+                        serial_println!(
+                            "[procfs]   FAIL: {} out of range/parse ({:?})", name, trimmed
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+            }
+            Err(KernelError::NotFound) => {
+                serial_println!(
+                    "[procfs]   {}/{}: NotFound (bare task, no PCB) OK", current_tid, name
+                );
+            }
+            Err(e) => {
+                serial_println!("[procfs]   FAIL: {} unexpected error {:?}", name, e);
+                return Err(KernelError::InternalError);
+            }
         }
     }
 

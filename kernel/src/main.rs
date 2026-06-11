@@ -1440,6 +1440,15 @@ extern "C" fn kernel_main() -> ! {
     // exercises the compute_health grading (Excellent/Poor/Critical) with exact
     // assertions, and resets the table afterward, so it is safe at boot.
     fs::diskhealth::self_test();
+    // netdev backs /proc/netdev (per-NIC packet/byte/error/drop counters + link
+    // state, like Linux /proc/net/dev).  Its init_defaults() previously seeded
+    // three fictional interfaces (lo/eth0/wlan0) with 51GB/11GB fabricated rx/tx
+    // bytes and invented error/drop totals; that demo data was removed (real
+    // interfaces are wired via register_iface + the record_rx/record_tx/
+    // record_error/record_drop functions).  The residue-free self_test builds its
+    // fixtures via the real API with exact assertions and resets the table
+    // afterward, so it is safe at boot.
+    fs::netdev::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

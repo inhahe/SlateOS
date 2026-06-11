@@ -1357,6 +1357,16 @@ extern "C" fn kernel_main() -> ! {
     // module automated coverage it previously lacked (it was only reachable via
     // the `zramstat test` kshell subcommand).
     fs::zramstat::self_test();
+    // thpstat backs /proc/thpstat (transparent-huge-page promotion/demotion/
+    // split/compaction/khugepaged stats per size class). The two size-class rows
+    // (PMD 2MiB, PUD 1GiB) are real fixed structure kept with zeroed counters; the
+    // self-test now builds fixtures via record_promotion/record_demotion/
+    // record_split/record_alloc_failure/record_compaction/record_khugepaged_scan
+    // with exact byte-credit assertions and resets the table afterward (leaving no
+    // fabricated activity), so it is safe at boot and gives the module automated
+    // coverage it previously lacked (it was only reachable via the `thpstat test`
+    // kshell subcommand).
+    fs::thpstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -565,15 +565,37 @@
 ##                    just emptied init_defaults (next_id 0) and rebuilt self_test
 ##                    with exact size/ratio assertions incl. saturating mem_used on
 ##                    over-discard, wired into boot.)
+##   - thpstat.rs    (fixed 2026-06-11; was: fabricated transparent-huge-page
+##                    activity — PMD 500k promotions / 10k demotions / 50k splits /
+##                    600k alloc attempts / 100k failures / ~1TiB promoted; PUD 100
+##                    promotions / ~100GiB promoted; compaction 200k success / 50k
+##                    failed / 30k deferred / 100k skipped; khugepaged 1M scans /
+##                    400k collapses; totals 500,100 promotions / 10,005 demotions,
+##                    shown via /proc/thpstat and the per_size/compaction_stats
+##                    views as real huge-page activity. The two size-class rows
+##                    (PMD/PUD) are real fixed structure (record fns index them, no
+##                    NotFound), so kept-with-zeroed-counters rather than emptied to
+##                    a Vec; rebuilt self_test with exact byte-credit assertions
+##                    (2MiB per PMD promo, 1GiB per PUD promo), wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - (none currently confirmed. The five grep-flagged candidates from the
-##     2026-06-11 sweep — ratestat, rqstat, schedlat, ttystat, zramstat — are ALL
-##     now fixed. Next tick: re-run the SEEDED-module grep heuristic across
-##     kernel/src/fs/*.rs (init_defaults bodies containing alloc::vec!/
-##     String::from/push) to find any remaining statistics modules seeding fake
-##     OBSERVATIONS. Remember: SETTINGS modules seeding legitimate config defaults
-##     are LEGITIMATE — only empty STATISTICS modules that fabricate observed
-##     numbers surfaced via /proc.)
+##   - (none currently confirmed. Broadened the SEEDED-module grep on 2026-06-11
+##     to `fn init_defaults` bodies containing a large numeric literal
+##     (..._000_000): 52 candidate fs/*.rs files. thpstat (just fixed) was one.
+##     Next ticks: work through the remaining candidates ONE PER TICK, auditing
+##     each before acting. The 52-file list includes both STATISTICS modules
+##     (fix: empty / zero-counters) AND SETTINGS or structural modules that seed
+##     LEGITIMATE config defaults or real topology (LEAVE ALONE). Verify each is a
+##     statistics module fabricating observed numbers surfaced via /proc before
+##     emptying it. Remaining flagged names incl.: swapact, writeback, blkqueue,
+##     netqueue, pagecache, taskio, netspeed, diskhealth, netdev, netfilter,
+##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
+##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
+##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
+##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
+##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
+##     startupopt, eyeprotect, fnotify. SETTINGS-looking names in that set
+##     (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
+##     legitimate config — audit carefully, do not blind-empty.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

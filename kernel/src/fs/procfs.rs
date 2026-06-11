@@ -572,6 +572,25 @@ const PID_FILES: &[&str] = &[
 ///   binary, in which case the link reports `NotFound`).
 const PID_LINKS: &[&str] = &["cwd", "root", "exe"];
 
+/// Files exposed inside each `/proc/<pid>/task/<tid>/` thread directory.
+///
+/// Linux's per-thread directory mirrors most of the per-process file set,
+/// but we expose only the files we can render **truthfully per-thread**
+/// from the scheduler task alone, with no process/thread field mixing:
+///
+/// - `comm` — the thread's name (threads may differ from the process and
+///   from each other; `prctl(PR_SET_NAME)` is per-thread).
+/// - `schedstat` — the thread's own CPU time, run-queue wait, and dispatch
+///   count, all from real per-task accounting.
+///
+/// `stat`/`status` are intentionally omitted for now: their `ppid`,
+/// `tgid`, and `num_threads` fields need the owning process's context
+/// (a thread tid is not a process-table key), so serving them here would
+/// either fabricate those fields or require threading the owner pid
+/// through the per-thread generators — tracked as a follow-up in
+/// `todo.txt` rather than shipped wrong.
+const TASK_FILES: &[&str] = &["comm", "schedstat"];
+
 // ---------------------------------------------------------------------------
 // Content generators
 //
@@ -2668,6 +2687,22 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "schedstat" => gen_pid_schedstat(task_id),
         "loginuid" => gen_pid_loginuid(task_id),
         "sessionid" => gen_pid_sessionid(task_id),
+        _ => Err(KernelError::NotFound),
+    }
+}
+
+/// Generate the contents of a `/proc/<pid>/task/<tid>/<file>` thread file.
+///
+/// `tid` is the scheduler task id of the thread.  Only the files in
+/// [`TASK_FILES`] are served, and each is rendered purely from the
+/// scheduler task (the underlying `gen_pid_*` helpers key on the task id,
+/// not the process id), so passing the thread's tid yields that thread's
+/// own data with no process/thread field mixing.  The caller must already
+/// have verified the tid belongs to the process via [`thread_belongs`].
+fn generate_task(tid: u64, file_name: &str) -> KernelResult<Vec<u8>> {
+    match file_name {
+        "comm" => gen_pid_comm(tid),
+        "schedstat" => gen_pid_schedstat(tid),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11152,7 +11187,23 @@ enum ProcPath<'a> {
     /// pid; `readlink` resolves it.  A path *under* self (e.g. `self/status`)
     /// is resolved to the current pid's file/link instead, not this variant.
     SelfLink,
+    /// The `/proc/<pid>/task` directory listing the process's thread tids.
+    PidTaskDir(u64),
+    /// A `/proc/<pid>/task/<tid>` thread directory.
+    PidTaskTidDir(u64, u64),
+    /// A file inside a thread directory, e.g. `/proc/<pid>/task/<tid>/comm`.
+    PidTaskFile(u64, u64, &'a str),
     NotFound,
+}
+
+/// True if `tid` is a live thread of process `pid`.
+///
+/// Threads are tracked in the process record's thread list (`get_threads`);
+/// a tid that has exited has already been removed, so membership here also
+/// implies the thread is live.  Used to gate every `task/<tid>/` path so a
+/// bogus or stale tid returns `NotFound`.
+fn thread_belongs(pid: u64, tid: u64) -> bool {
+    crate::proc::pcb::get_threads(pid).is_some_and(|ts| ts.contains(&tid))
 }
 
 fn classify_path(rel: &str) -> ProcPath<'_> {
@@ -11205,6 +11256,31 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
     // Symlink inside PID directory (cwd, root).
     if !rest.contains('/') && PID_LINKS.contains(&rest) {
         return ProcPath::PidLink(pid, rest);
+    }
+
+    // The `task/` subtree: `<pid>/task`, `<pid>/task/<tid>`, and
+    // `<pid>/task/<tid>/<file>` (the only nested directories in procfs).
+    if rest == "task" {
+        return ProcPath::PidTaskDir(pid);
+    }
+    if let Some(sub) = rest.strip_prefix("task/") {
+        // `sub` is `<tid>` or `<tid>/<file>`.
+        let (tid_str, file) = match sub.find('/') {
+            Some(pos) => {
+                let (a, b) = sub.split_at(pos);
+                (a, b.get(1..).unwrap_or(""))
+            }
+            None => (sub, ""),
+        };
+        if let Ok(tid) = tid_str.parse::<u64>() {
+            if file.is_empty() {
+                return ProcPath::PidTaskTidDir(pid, tid);
+            }
+            if !file.contains('/') && TASK_FILES.contains(&file) {
+                return ProcPath::PidTaskFile(pid, tid, file);
+            }
+        }
+        return ProcPath::NotFound;
     }
 
     ProcPath::NotFound
@@ -11279,10 +11355,50 @@ impl FileSystem for ProcFs {
                         size: 0,
                     });
                 }
+                // The `task/` subdirectory (per-thread view).
+                entries.push(DirEntry {
+                    name: String::from("task"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                });
+                Ok(entries)
+            }
+            ProcPath::PidTaskDir(pid) => {
+                // `/proc/<pid>/task` — one subdirectory per live thread tid.
+                let threads = crate::proc::pcb::get_threads(pid)
+                    .ok_or(KernelError::NotFound)?;
+                let entries = threads
+                    .iter()
+                    .map(|tid| DirEntry {
+                        name: format!("{tid}"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    })
+                    .collect();
+                Ok(entries)
+            }
+            ProcPath::PidTaskTidDir(pid, tid) => {
+                // `/proc/<pid>/task/<tid>` — the per-thread file set.
+                if !thread_belongs(pid, tid) {
+                    return Err(KernelError::NotFound);
+                }
+                let entries = TASK_FILES
+                    .iter()
+                    .map(|name| {
+                        let size = generate_task(tid, name)
+                            .map_or(0, |d| d.len() as u64);
+                        DirEntry {
+                            name: String::from(*name),
+                            entry_type: EntryType::File,
+                            size,
+                        }
+                    })
+                    .collect();
                 Ok(entries)
             }
             ProcPath::RootFile(_) | ProcPath::PidFile(_, _)
-            | ProcPath::PidLink(_, _) | ProcPath::SelfLink => {
+            | ProcPath::PidLink(_, _) | ProcPath::SelfLink
+            | ProcPath::PidTaskFile(_, _, _) => {
                 Err(KernelError::NotADirectory)
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
@@ -11293,7 +11409,8 @@ impl FileSystem for ProcFs {
         let rel = strip_root(path);
 
         match classify_path(rel) {
-            ProcPath::Root | ProcPath::PidDir(_) => {
+            ProcPath::Root | ProcPath::PidDir(_)
+            | ProcPath::PidTaskDir(_) | ProcPath::PidTaskTidDir(_, _) => {
                 Err(KernelError::IsADirectory)
             }
             ProcPath::RootFile(name) => generate(name),
@@ -11302,6 +11419,12 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 generate_pid(pid, file_name)
+            }
+            ProcPath::PidTaskFile(pid, tid, file_name) => {
+                if !thread_belongs(pid, tid) {
+                    return Err(KernelError::NotFound);
+                }
+                generate_task(tid, file_name)
             }
             // Reading a symlink's bytes directly is invalid; the VFS follows
             // it via readlink instead.  Mirrors Linux read() → EINVAL on a
@@ -11386,6 +11509,37 @@ impl FileSystem for ProcFs {
                 entry_type: EntryType::Symlink,
                 size: 0,
             }),
+            ProcPath::PidTaskDir(pid) => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                Ok(DirEntry {
+                    name: String::from("task"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                })
+            }
+            ProcPath::PidTaskTidDir(pid, tid) => {
+                if !thread_belongs(pid, tid) {
+                    return Err(KernelError::NotFound);
+                }
+                Ok(DirEntry {
+                    name: format!("{tid}"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                })
+            }
+            ProcPath::PidTaskFile(pid, tid, file_name) => {
+                if !thread_belongs(pid, tid) {
+                    return Err(KernelError::NotFound);
+                }
+                let size = generate_task(tid, file_name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    name: String::from(file_name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -11628,6 +11782,83 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
         serial_println!("[procfs]   oom_score_adj write: end-to-end VFS routing OK");
+    }
+
+    // --- task/<tid>/ path classification ---
+    // classify_path is the single router for every procfs path; verify the
+    // new nested `task/` subtree resolves to the right typed variants and
+    // that malformed / unsupported thread paths fall through to NotFound.
+    {
+        let cases: &[(&str, &str)] = &[
+            ("5/task", "taskdir"),
+            ("5/task/7", "tiddir"),
+            ("5/task/7/comm", "file"),
+            ("5/task/7/schedstat", "file"),
+            ("5/task/7/stat", "notfound"),   // stat not in TASK_FILES
+            ("5/task/abc", "notfound"),      // non-numeric tid
+            ("5/task/7/comm/x", "notfound"), // nested beyond a thread file
+        ];
+        for (path, want) in cases {
+            let got = match classify_path(path) {
+                ProcPath::PidTaskDir(5) => "taskdir",
+                ProcPath::PidTaskTidDir(5, 7) => "tiddir",
+                ProcPath::PidTaskFile(5, 7, _) => "file",
+                ProcPath::NotFound => "notfound",
+                _ => "other",
+            };
+            if got != *want {
+                serial_println!(
+                    "[procfs]   FAIL: classify_path({:?}) = {}, want {}",
+                    path, got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   task/ classify: {} cases OK", cases.len());
+    }
+
+    // --- task/ directory, live ---
+    // Every PID directory now lists a `task` subdirectory.  For the bare
+    // scheduler task running the self-test (no PCB, no thread list),
+    // reading `task/` itself returns NotFound, and any thread file under a
+    // bogus tid is NotFound — exercising the gating without depending on a
+    // live multi-threaded process existing at self-test time.
+    {
+        let probe = crate::sched::current_task_id();
+        let dir_entries = fs.readdir(&format!("/{probe}"))?;
+        if !dir_entries.iter().any(|e| {
+            e.name == "task" && e.entry_type == EntryType::Directory
+        }) {
+            serial_println!(
+                "[procfs]   FAIL: /{}/ missing `task` subdirectory", probe
+            );
+            return Err(KernelError::InternalError);
+        }
+        // A non-existent thread under any pid must be NotFound.
+        match fs.read_file(&format!("/{probe}/task/999999/comm")) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!(
+                    "[procfs]   FAIL: bogus thread file = {:?}, want NotFound", other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Listing task/ for the bare task (no thread list) is NotFound;
+        // for a real process it would enumerate tids.  Tolerate both.
+        match fs.readdir(&format!("/{probe}/task")) {
+            Ok(tids) => serial_println!(
+                "[procfs]   /{}/task: {} thread(s) OK", probe, tids.len()
+            ),
+            Err(KernelError::NotFound) => serial_println!(
+                "[procfs]   /{}/task: NotFound (bare task, no thread list) OK", probe
+            ),
+            Err(e) => {
+                serial_println!("[procfs]   FAIL: /task readdir error {:?}", e);
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   task/ directory: gating OK");
     }
 
     // --- Per-PID directory tests ---

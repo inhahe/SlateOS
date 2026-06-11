@@ -22,16 +22,22 @@
 ## ld.so/WINE read /proc/self/auxv at startup.  Deferred because it
 ## touches the process-launch critical path (risky to land unattended).
 ##
-## FOLLOW-UP (2026-06-10): /proc/<pid>/task/<tid>/ thread directory
-## procfs classify_path (kernel/src/fs/procfs.rs ~11031) only supports
-## one level under a PID dir ("no nested subdirs").  A task/ thread
-## directory (htop thread view, ps -L) needs nested-dir support across
-## classify_path, readdir, stat, read_file, and readlink.  get_threads(pid)
-## already enumerates a process's threads, so the data exists.  Proper
-## fix: add ProcPath::PidTaskDir(pid)/PidTaskTidDir(pid,tid)/
-## PidTaskFile(pid,tid,name) variants and route them to the existing
-## per-PID generators keyed by tid.  Deferred: structural change, larger
-## than a single autonomous tick warrants without review.
+## PARTIALLY DONE (2026-06-10): /proc/<pid>/task/<tid>/ thread directory
+## Nested-dir support is implemented (kernel/src/fs/procfs.rs):
+## ProcPath::PidTaskDir/PidTaskTidDir/PidTaskFile variants, classify_path
+## routes the `task/` subtree, every PID dir now lists a `task` subdir,
+## and readdir/read_file/stat handle the three levels. thread_belongs()
+## gates each path on get_threads(pid).contains(tid). Files served per
+## thread: comm + schedstat (TASK_FILES) via generate_task(tid,name) — both
+## gen_pid_comm/gen_pid_schedstat key on the scheduler task id (not the
+## process id), so passing the thread tid yields that thread's own data
+## with no field mixing. Self-tested (7 classify cases + live gating).
+## REMAINING: add stat/status to TASK_FILES. They are omitted because their
+## ppid/tgid/num_threads fields need the OWNING process's context (a thread
+## tid is not a process-table key), so serving them via gen_pid_stat(tid)
+## would report ppid=0/num_threads=1 for non-main threads. Proper fix:
+## thread-aware variants gen_thread_stat(pid,tid)/gen_thread_status(pid,tid)
+## that take process fields from `pid` and thread fields from `tid`.
 ##
 ## DONE (2026-06-10): writable /proc/<pid>/oom_score_adj
 ## /proc/<pid>/oom_score_adj now accepts writes (kernel/src/fs/procfs.rs:

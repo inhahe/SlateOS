@@ -85,6 +85,16 @@ fn current_addr_space() -> u64 {
 // Waiter and hash table
 // ---------------------------------------------------------------------------
 
+/// Linux `FUTEX_BITSET_MATCH_ANY` — the wildcard bitset used by plain
+/// `FUTEX_WAIT`/`FUTEX_WAKE`.
+///
+/// A waiter registered with this value matches every `FUTEX_WAKE_BITSET`
+/// mask, and a `FUTEX_WAKE_BITSET` performed with this value wakes every
+/// waiter regardless of the waiter's stored bitset.  Plain `FUTEX_WAIT`
+/// and `FUTEX_WAKE` are exactly the bitset variants with this wildcard,
+/// so routing them through the bitset path preserves their semantics.
+pub const FUTEX_BITSET_MATCH_ANY: u32 = 0xffff_ffff;
+
 /// A task waiting on a futex address.
 struct Waiter {
     /// The virtual address being waited on.
@@ -101,6 +111,14 @@ struct Waiter {
     addr_space: u64,
     /// The blocked task's ID.
     task_id: TaskId,
+    /// The 32-bit wakeup bitset this waiter registered with
+    /// (`FUTEX_WAIT_BITSET`'s `val3`).  A `FUTEX_WAKE_BITSET(mask)` wakes
+    /// this waiter only when `self.bitset & mask != 0`.  Plain
+    /// `FUTEX_WAIT` stores [`FUTEX_BITSET_MATCH_ANY`], so it is woken by
+    /// any wake.  A requeued waiter keeps its bitset (Linux requeue does
+    /// not alter it); the requeue wake phase itself uses the wildcard, so
+    /// the stored value only gates direct `FUTEX_WAKE_BITSET` calls.
+    bitset: u32,
 }
 
 /// Global futex wait table.
@@ -168,6 +186,28 @@ impl FutexTable {
 /// is implemented, the kernel must validate the pointer against the
 /// caller's address space.
 pub fn futex_wait(addr: u64, expected: u32) -> KernelResult<bool> {
+    // Plain FUTEX_WAIT is the bitset wait with the wildcard mask: it is
+    // woken by any FUTEX_WAKE / FUTEX_WAKE_BITSET.
+    futex_wait_bitset(addr, expected, FUTEX_BITSET_MATCH_ANY)
+}
+
+/// Block the current task if `*addr == expected`, recording `bitset` as
+/// the waiter's wakeup mask (Linux `FUTEX_WAIT_BITSET`).
+///
+/// Identical to [`futex_wait`] except the registered waiter is only woken
+/// by a [`futex_wake_bitset`] whose mask shares at least one bit with
+/// `bitset`.  `bitset` must be non-zero — a zero mask can never be matched
+/// and the syscall layer rejects it with `EINVAL` before reaching here; as
+/// a defensive measure we also reject it with [`KernelError::InvalidArgument`].
+///
+/// # Returns
+///
+/// - `Ok(true)` — the task was blocked and then woken.
+/// - `Ok(false)` — the value didn't match; no blocking occurred.
+/// - `Err(InvalidAddress)` — `addr` is null.
+/// - `Err(BadAlignment)` — `addr` is not 4-byte aligned.
+/// - `Err(InvalidArgument)` — `bitset` is zero.
+pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<bool> {
     if addr == 0 {
         return Err(KernelError::InvalidAddress);
     }
@@ -176,6 +216,10 @@ pub fn futex_wait(addr: u64, expected: u32) -> KernelResult<bool> {
     #[allow(clippy::arithmetic_side_effects)]
     if addr & 3 != 0 {
         return Err(KernelError::BadAlignment);
+    }
+
+    if bitset == 0 {
+        return Err(KernelError::InvalidArgument);
     }
 
     let current_task = sched::current_task_id();
@@ -210,6 +254,7 @@ pub fn futex_wait(addr: u64, expected: u32) -> KernelResult<bool> {
             addr,
             addr_space,
             task_id: current_task,
+            bitset,
         });
 
         // Drop the table lock before blocking.
@@ -236,6 +281,22 @@ pub fn futex_wait(addr: u64, expected: u32) -> KernelResult<bool> {
 /// - `Err(TimedOut)` — timeout expired before a wake.
 /// - `Err(InvalidAddress)` / `Err(BadAlignment)` — bad pointer.
 pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelResult<bool> {
+    // Plain timed FUTEX_WAIT is the bitset timed wait with the wildcard.
+    futex_wait_bitset_timeout(addr, expected, timeout_ns, FUTEX_BITSET_MATCH_ANY)
+}
+
+/// Wait on a futex address with a timeout and a wakeup bitset
+/// (Linux `FUTEX_WAIT_BITSET` with a finite deadline).
+///
+/// Same as [`futex_wait_timeout`] but the registered waiter is only woken
+/// by a [`futex_wake_bitset`] whose mask shares a bit with `bitset`.
+/// `bitset` must be non-zero (`Err(InvalidArgument)` otherwise).
+pub fn futex_wait_bitset_timeout(
+    addr: u64,
+    expected: u32,
+    timeout_ns: u64,
+    bitset: u32,
+) -> KernelResult<bool> {
     if addr == 0 {
         return Err(KernelError::InvalidAddress);
     }
@@ -243,6 +304,10 @@ pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelRe
     #[allow(clippy::arithmetic_side_effects)]
     if addr & 3 != 0 {
         return Err(KernelError::BadAlignment);
+    }
+
+    if bitset == 0 {
+        return Err(KernelError::InvalidArgument);
     }
 
     let current_task = sched::current_task_id();
@@ -276,6 +341,7 @@ pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelRe
             addr,
             addr_space,
             task_id: current_task,
+            bitset,
         });
     }
 
@@ -362,7 +428,29 @@ pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelRe
 /// - `max_wake`: maximum number of tasks to wake (commonly 1 for
 ///   mutex unlock, `u32::MAX` for broadcast).
 pub fn futex_wake(addr: u64, max_wake: u32) -> u32 {
-    if addr == 0 || max_wake == 0 {
+    // Plain FUTEX_WAKE is the bitset wake with the wildcard mask: it wakes
+    // any waiter regardless of the bitset it registered with.
+    futex_wake_bitset(addr, max_wake, FUTEX_BITSET_MATCH_ANY)
+}
+
+/// Wake up to `max_wake` tasks blocked on `addr` whose registered bitset
+/// shares at least one bit with `bitset` (Linux `FUTEX_WAKE_BITSET`).
+///
+/// Returns the number of tasks actually woken.  A waiter matches when
+/// `waiter.bitset & bitset != 0`; since plain `FUTEX_WAIT` registers
+/// [`FUTEX_BITSET_MATCH_ANY`] and plain `FUTEX_WAKE` passes the same
+/// wildcard, the bitset gate is transparent to non-bitset callers.
+///
+/// `bitset == 0` matches nothing and returns 0 (the syscall layer rejects
+/// a zero mask with `EINVAL` before reaching here).
+///
+/// # Arguments
+///
+/// - `addr`: the virtual address to wake waiters on.
+/// - `max_wake`: maximum number of tasks to wake.
+/// - `bitset`: the wakeup mask; only waiters with an overlapping bit wake.
+pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
+    if addr == 0 || max_wake == 0 || bitset == 0 {
         return 0;
     }
 
@@ -382,13 +470,16 @@ pub fn futex_wake(addr: u64, max_wake: u32) -> u32 {
         let bucket = &mut table.buckets[idx];
 
         // Remove up to max_wake waiters with matching address AND
-        // address space.  This prevents cross-process wake: a process
-        // can only wake tasks that share the same address space mapping.
+        // address space AND an overlapping wakeup bitset.  This prevents
+        // cross-process wake (a process can only wake tasks that share the
+        // same address-space mapping) and honours FUTEX_WAKE_BITSET's
+        // selective wakeup.
         let mut i = 0;
         while i < bucket.len() && wake_count < max_wake as usize && wake_count < to_wake.len() {
             if let Some(waiter) = bucket.get(i)
                 && waiter.addr == addr
                 && waiter.addr_space == addr_space
+                && waiter.bitset & bitset != 0
                 && let Some(removed) = bucket.remove(i)
             {
                 if let Some(slot) = to_wake.get_mut(wake_count) {
@@ -2170,6 +2261,7 @@ pub fn self_test() -> KernelResult<()> {
     test_wait_value_mismatch()?;
     test_wake_no_waiters()?;
     test_blocking_wait_wake()?;
+    test_wake_bitset()?;
     test_requeue()?;
     test_wake_op()?;
     test_pi_trylock_deadlock()?;
@@ -2753,6 +2845,88 @@ fn test_blocking_wait_wake() -> KernelResult<()> {
     }
 
     serial_println!("[futex]   Blocking wait + wake: OK");
+    Ok(())
+}
+
+/// Bitset bits used by the `FUTEX_WAKE_BITSET` self-test.  Disjoint so a
+/// wake targeting one cannot accidentally match the other.
+const BITSET_TEST_A: u32 = 0x0000_0001;
+const BITSET_TEST_B: u32 = 0x0000_0002;
+
+/// Set to 1 by `bitset_waiter_task` when it is woken.
+static BITSET_WOKEN: AtomicU32 = AtomicU32::new(0);
+
+/// Waiter for the bitset test: parks on `addr` (value 1 at spawn) with
+/// wakeup bitset `BITSET_TEST_A`.  On wake, sets `BITSET_WOKEN`.
+extern "C" fn bitset_waiter_task(addr: u64) {
+    let _ = futex_wait_bitset(addr, 1, BITSET_TEST_A);
+    BITSET_WOKEN.store(1, Ordering::SeqCst);
+}
+
+/// Test: `FUTEX_WAKE_BITSET` selective matching.
+///
+/// Proves the per-waiter bitset gate in both directions: a waiter that
+/// registered with bitset A is *not* woken by a wake whose mask is the
+/// disjoint bitset B, but *is* woken by a wake whose mask overlaps A.
+/// Also checks the zero-bitset API guards (wait rejects with
+/// `InvalidArgument`, wake matches nothing).
+fn test_wake_bitset() -> KernelResult<()> {
+    // (a) API guards: a zero bitset is rejected on wait and wakes nobody.
+    let probe = AtomicU32::new(1);
+    let probe_addr = (&raw const probe) as u64;
+    match futex_wait_bitset(probe_addr, 1, 0) {
+        Err(KernelError::InvalidArgument) => {}
+        other => {
+            serial_println!("[futex]   FAIL: wait_bitset(mask=0) = {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+    if futex_wake_bitset(probe_addr, u32::MAX, 0) != 0 {
+        serial_println!("[futex]   FAIL: wake_bitset(mask=0) woke a waiter");
+        return Err(KernelError::InternalError);
+    }
+
+    // (b) Selective wake.
+    BITSET_WOKEN.store(0, Ordering::SeqCst);
+    let word = AtomicU32::new(1);
+    let addr = (&raw const word) as u64;
+    sched::spawn(b"futex-bs", 16, bitset_waiter_task, addr, 0)?;
+    // Let the waiter block.
+    sched::yield_now();
+    sched::yield_now();
+
+    // Non-overlapping mask (B) must wake nothing and leave the waiter parked.
+    let woken_b = futex_wake_bitset(addr, u32::MAX, BITSET_TEST_B);
+    if woken_b != 0 {
+        serial_println!(
+            "[futex]   FAIL: non-overlap wake woke {} (expected 0)",
+            woken_b
+        );
+        return Err(KernelError::InternalError);
+    }
+    sched::yield_now();
+    if BITSET_WOKEN.load(Ordering::SeqCst) != 0 {
+        serial_println!("[futex]   FAIL: waiter woke on a non-overlapping bitset");
+        return Err(KernelError::InternalError);
+    }
+
+    // Overlapping mask (A) must wake the waiter.
+    let woken_a = futex_wake_bitset(addr, u32::MAX, BITSET_TEST_A);
+    if woken_a != 1 {
+        serial_println!(
+            "[futex]   FAIL: overlap wake woke {} (expected 1)",
+            woken_a
+        );
+        return Err(KernelError::InternalError);
+    }
+    sched::yield_now();
+    sched::yield_now();
+    if BITSET_WOKEN.load(Ordering::SeqCst) != 1 {
+        serial_println!("[futex]   FAIL: waiter did not wake on an overlapping bitset");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[futex]   Wake bitset selective match: OK");
     Ok(())
 }
 

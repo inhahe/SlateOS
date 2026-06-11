@@ -30662,18 +30662,21 @@ fn sys_futex2_wake(args: &SyscallArgs) -> SyscallResult {
     // anything.  Clamp to 0 so the forwarded handler doesn't surprise
     // us with an unsigned-truncation-induced "wake u32::MAX" instead.
     let nr_clamped: u64 = if nr < 0 { 0 } else { nr as u64 };
-    // Forward to the legacy WAKE handler.  arg1 carries `nr` (count to
-    // wake) per `handlers::sys_futex_wake`'s ABI; mask is consumed
-    // here and dropped (see doc comment for the upgrade path).
+    // Forward to the bitset WAKE handler.  arg1 carries `nr` (count to
+    // wake), arg2 the wakeup bitset.  The futex2 `mask` is `unsigned long`
+    // but a SIZE_U32 futex's per-waiter bitset is 32-bit, so the handler
+    // truncates to the low 32 bits (matching Linux's `futex_q.bitset`).
+    #[allow(clippy::cast_possible_truncation)]
+    let mask_u32 = mask as u32;
     let a = SyscallArgs {
         arg0: uaddr2,
         arg1: nr_clamped,
-        arg2: 0,
+        arg2: u64::from(mask_u32),
         arg3: 0,
         arg4: 0,
         arg5: 0,
     };
-    linux_from_native(handlers::sys_futex_wake(&a))
+    linux_from_native(handlers::sys_futex_wake_bitset(&a))
 }
 
 /// `futex_wait(uaddr*, val, mask, flags, timespec*, clockid)` — futex2 wait (Linux 6.7+).
@@ -30821,11 +30824,18 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(uaddr, 4) {
         return linux_err(linux_errno_for(e));
     }
+    // The futex2 `mask` is `unsigned long`; a SIZE_U32 futex's per-waiter
+    // bitset is 32-bit, so truncate to the low 32 bits (matching Linux's
+    // `futex_q.bitset`).  `mask != 0` was enforced by gate 7a above.
+    #[allow(clippy::cast_possible_truncation)]
+    let mask_u32 = mask as u32;
     let native = if timespec == 0 {
+        // NULL timeout: wait indefinitely.  Bitset in arg2.
         let a = SyscallArgs {
-            arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+            arg0: uaddr, arg1: val, arg2: u64::from(mask_u32),
+            arg3: 0, arg4: 0, arg5: 0,
         };
-        handlers::sys_futex_wait(&a)
+        handlers::sys_futex_wait_bitset(&a)
     } else {
         let ts = match read_timespec(timespec) {
             Ok(t) => t,
@@ -30838,11 +30848,12 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
             crate::timekeeping::clock_monotonic()
         };
         let rel_ns = abs_ns.saturating_sub(now_ns);
+        // Bitset in arg3.
         let a = SyscallArgs {
             arg0: uaddr, arg1: val, arg2: rel_ns,
-            arg3: 0, arg4: 0, arg5: 0,
+            arg3: u64::from(mask_u32), arg4: 0, arg5: 0,
         };
-        handlers::sys_futex_wait_timeout(&a)
+        handlers::sys_futex_wait_bitset_timeout(&a)
     };
     linux_from_native(native)
 }
@@ -32368,14 +32379,13 @@ fn sys_time(args: &SyscallArgs) -> SyscallResult {
 ///   form heavily — pre-batch 119 they hit the `-ENOSYS` fallback in
 ///   every loop iteration and lost real condvar semantics.
 /// - `FUTEX_WAKE_BITSET` (10): like `FUTEX_WAKE` but with a non-zero
-///   bitmask in `val3`.  Our underlying queue does not store per-waiter
-///   masks, so the bit-set is **not honoured** for filtering — any
-///   waiter on the address may be woken.  POSIX permits spurious
-///   wakeups (callers must re-check their predicate), so this is
-///   compatible but slightly less efficient than real Linux for
-///   bitset-based dispatch (e.g. glibc's per-reader/per-writer mask).
-///   When per-waiter bitmask state is added to the futex layer this
-///   becomes a one-line change.
+///   bitmask in `val3`.  The futex queue stores each waiter's registered
+///   bitset, so a wake only matches waiters whose bitset shares a bit with
+///   `val3` (`waiter.bitset & val3 != 0`).  Plain `FUTEX_WAIT`/`FUTEX_WAKE`
+///   use the wildcard `FUTEX_BITSET_MATCH_ANY` (all ones), so they are
+///   unaffected.  This gives real Linux dispatch semantics — e.g. glibc's
+///   per-reader/per-writer condvar masks no longer cause spurious cross-
+///   wakeups.
 ///
 /// - `FUTEX_REQUEUE` (3): wake up to `val` waiters on `uaddr`, then
 ///   requeue up to `val2` (the overloaded `utime`/`timeout` argument
@@ -32574,10 +32584,13 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
             // CLOCK_MONOTONIC (default).  NULL timeout = wait
             // indefinitely.
             let native = if timeout_ptr == 0 {
+                // NULL timeout: wait indefinitely.  `mask` is carried in
+                // arg2 for the bitset wait handler.
                 let a = SyscallArgs {
-                    arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                    arg0: uaddr, arg1: val, arg2: u64::from(mask),
+                    arg3: 0, arg4: 0, arg5: 0,
                 };
-                handlers::sys_futex_wait(&a)
+                handlers::sys_futex_wait_bitset(&a)
             } else {
                 let ts = match read_timespec(timeout_ptr) {
                     Ok(t) => t,
@@ -32598,17 +32611,17 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                     crate::timekeeping::clock_monotonic()
                 };
                 // saturating_sub yields 0 when the deadline is already
-                // in the past; handlers::sys_futex_wait_timeout with
+                // in the past; sys_futex_wait_bitset_timeout with
                 // ns=0 performs the value compare and returns
                 // immediately (TimedOut → ETIMEDOUT on miss, or Ok(0)
                 // on value mismatch — see linux_from_native for the
-                // mapping).
+                // mapping).  `mask` is carried in arg3.
                 let rel_ns = abs_ns.saturating_sub(now_ns);
                 let a = SyscallArgs {
                     arg0: uaddr, arg1: val, arg2: rel_ns,
-                    arg3: 0, arg4: 0, arg5: 0,
+                    arg3: u64::from(mask), arg4: 0, arg5: 0,
                 };
-                handlers::sys_futex_wait_timeout(&a)
+                handlers::sys_futex_wait_bitset_timeout(&a)
             };
             linux_from_native(native)
         }
@@ -32619,15 +32632,14 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
             if mask == 0 {
                 return linux_err(errno::EINVAL);
             }
-            // We do not yet track per-waiter bitmasks in the futex
-            // queue, so any non-zero mask wakes any waiter on uaddr.
-            // POSIX/Linux permit spurious wakeups; correct callers
-            // re-check their predicate, so this is compatible.  See
-            // the doc comment for the upgrade path.
+            // Per-waiter bitsets are tracked in the futex queue: a waiter
+            // is woken only when its registered bitset shares a bit with
+            // `mask`.  `val` is the wake count, `mask` the wakeup bitset.
             let a = SyscallArgs {
-                arg0: uaddr, arg1: val, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+                arg0: uaddr, arg1: val, arg2: u64::from(mask),
+                arg3: 0, arg4: 0, arg5: 0,
             };
-            linux_from_native(handlers::sys_futex_wake(&a))
+            linux_from_native(handlers::sys_futex_wake_bitset(&a))
         }
         FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
             // Lock a PI futex.  The `utime` slot (arg3) is an *absolute*

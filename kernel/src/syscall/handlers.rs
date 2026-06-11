@@ -1468,6 +1468,82 @@ pub fn sys_futex_wait_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `FUTEX_WAIT_BITSET` backing (indefinite) — block if `*addr == expected`,
+/// recording a wakeup bitset so only a matching [`sys_futex_wake_bitset`]
+/// wakes us.  Used when the caller passed a NULL timeout (wait forever).
+///
+/// `arg0`: pointer to 32-bit futex word (4-byte aligned).
+/// `arg1`: expected value.
+/// `arg2`: the wakeup bitset (must be non-zero; the syscall layer rejects
+///         a zero mask with `EINVAL` before reaching here).
+///
+/// Returns: 1 if blocked and woken, 0 if value didn't match.
+pub fn sys_futex_wait_bitset(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let expected = args.arg1 as u32;
+    let bitset = args.arg2 as u32;
+
+    if let Err(e) = crate::mm::user::validate_user_read(addr, 4) {
+        return SyscallResult::err(e);
+    }
+
+    match futex::futex_wait_bitset(addr, expected, bitset) {
+        Ok(true) => SyscallResult::ok(1),
+        Ok(false) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `FUTEX_WAIT_BITSET` backing (timed) — like [`sys_futex_wait_bitset`] but
+/// with a relative nanosecond deadline.  Mirrors [`sys_futex_wait_timeout`]:
+/// a `timeout_ns` of `0` is a non-blocking value check (returns `TimedOut`
+/// on a value match), which is exactly the "absolute deadline already in
+/// the past" case the translator resolves to `rel_ns == 0`.
+///
+/// `arg0`: pointer to 32-bit futex word (4-byte aligned).
+/// `arg1`: expected value.
+/// `arg2`: relative timeout in nanoseconds (0 = non-blocking check).
+/// `arg3`: the wakeup bitset (non-zero; zero rejected upstream).
+///
+/// Returns: 1 if blocked and woken, 0 if value didn't match, `TimedOut`.
+pub fn sys_futex_wait_bitset_timeout(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let expected = args.arg1 as u32;
+    let timeout_ns = args.arg2;
+    let bitset = args.arg3 as u32;
+
+    if let Err(e) = crate::mm::user::validate_user_read(addr, 4) {
+        return SyscallResult::err(e);
+    }
+
+    match futex::futex_wait_bitset_timeout(addr, expected, timeout_ns, bitset) {
+        Ok(true) => SyscallResult::ok(1),
+        Ok(false) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `FUTEX_WAKE_BITSET` backing — wake up to `max_wake` waiters whose
+/// registered bitset shares a bit with `bitset`.
+///
+/// `arg0`: pointer to futex word.
+/// `arg1`: maximum number of tasks to wake.
+/// `arg2`: the wakeup bitset (non-zero; zero is rejected upstream).
+///
+/// Returns: number of tasks actually woken.
+pub fn sys_futex_wake_bitset(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let max_wake = args.arg1 as u32;
+    let bitset = args.arg2 as u32;
+
+    if let Err(e) = crate::mm::user::validate_user_ptr(addr) {
+        return SyscallResult::err(e);
+    }
+
+    let woken = futex::futex_wake_bitset(addr, max_wake, bitset);
+    SyscallResult::ok(i64::from(woken))
+}
+
 /// `SYS_FUTEX_REQUEUE` — wake N waiters on `addr1`, requeue M to `addr2`.
 ///
 /// `arg0`: source futex address (`addr1`).

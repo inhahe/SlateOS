@@ -13751,17 +13751,21 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        * Regression: FUTEX_WAIT with value mismatch -> 0.
 ##
 ##      Known limitations / documented for follow-on work:
-##        * Per-waiter bitmask filtering is not implemented.  The
-##          FUTEX_WAKE_BITSET mask is consulted only to reject 0; any
-##          non-zero mask is treated as MATCH_ANY at the queue layer.
-##          Real Linux walks the wait queue and skips waiters whose
-##          stored bitmask doesn't intersect.  Fixing this requires
-##          adding a `bitmask: u32` field to the Waiter struct in
-##          kernel/src/ipc/futex.rs and threading it through
-##          futex_wait_with_mask / futex_wake_with_mask.  Practical
-##          impact is bounded: callers see at-most-spurious wakeups,
-##          which they already handle for POSIX correctness.  This is
-##          a follow-up batch.
+##        * [RESOLVED 2026-06-10] Per-waiter bitmask filtering is now
+##          implemented.  Added a `bitset: u32` field to the Waiter
+##          struct in kernel/src/ipc/futex.rs and the bitset-aware
+##          primitives futex_wait_bitset / futex_wait_bitset_timeout /
+##          futex_wake_bitset.  Plain FUTEX_WAIT/FUTEX_WAKE route through
+##          these with FUTEX_BITSET_MATCH_ANY (0xffffffff), so their
+##          behaviour is unchanged; FUTEX_WAKE_BITSET now wakes a waiter
+##          only when waiter.bitset & val3 != 0.  Wired through the
+##          classic futex(2) WAIT_BITSET/WAKE_BITSET arms, the futex2
+##          sys_futex2_wake/sys_futex2_wait mask argument (previously
+##          dropped), and handler wrappers sys_futex_wait_bitset /
+##          sys_futex_wait_bitset_timeout / sys_futex_wake_bitset.
+##          Covered by the new test_wake_bitset() self-test (selective
+##          match in both directions + zero-bitset API guards), which
+##          prints "Wake bitset selective match: OK" in the boot log.
 ##        * Pre-existing translation gap: handlers::sys_futex_wait
 ##          returns Ok(false) (= SyscallResult::ok(0)) on value
 ##          mismatch, but Linux returns -EAGAIN for the same condition.
@@ -13896,10 +13900,10 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        * Validate uaddr is 4-byte readable; return EFAULT on miss.
 ##
 ##      futex2_wake forwarding: build a SyscallArgs with arg0=uaddr,
-##      arg1=nr (cast from i32, already validated >= 0), pass to
-##      handlers::sys_futex_wake.  Mask is consumed and dropped — same
-##      caveat as FUTEX_WAKE_BITSET from batch 119 (no per-waiter mask
-##      state in the queue).
+##      arg1=nr (cast from i32, already validated >= 0), and arg2=mask
+##      (truncated to u32), pass to handlers::sys_futex_wake_bitset.
+##      [UPDATED 2026-06-10] The mask is now honoured per-waiter (it was
+##      previously dropped); see the RESOLVED note below.
 ##
 ##      futex2_wait forwarding:
 ##        * clockid restricted to 0 (CLOCK_MONOTONIC) or 1
@@ -13941,10 +13945,14 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##             → 0.
 ##
 ##      Known limitations carried forward:
-##        * Per-waiter bitmask filtering: futex2_wake still wakes any
-##          waiter on uaddr regardless of mask.  Same upgrade path as
-##          FUTEX_WAKE_BITSET — adding per-waiter mask state in
-##          ipc::futex flips the behaviour with no callsite changes.
+##        * [RESOLVED 2026-06-10] Per-waiter bitmask filtering: the futex2
+##          mask is no longer dropped.  sys_futex2_wake/sys_futex2_wait
+##          truncate the unsigned-long mask to 32 bits (matching Linux's
+##          u32 futex_q.bitset for a SIZE_U32 futex) and forward it through
+##          sys_futex_wake_bitset / sys_futex_wait_bitset(_timeout), so a
+##          futex2 wake matches only waiters with an overlapping bitset.
+##          See the RESOLVED note under batch 119 for the queue-layer
+##          implementation.
 ##        * EAGAIN translation: value-mismatch on the WAIT path returns 0
 ##          to userspace instead of -EAGAIN.  Pre-existing, documented
 ##          in batch 119.

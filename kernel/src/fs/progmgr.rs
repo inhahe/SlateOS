@@ -733,6 +733,17 @@ pub fn init_defaults() {
     }
     let now = crate::hpet::elapsed_ns();
 
+    // The four entries below are the bundled core system apps that genuinely ship
+    // with the OS (File Explorer, Terminal, Text Editor, Settings). Their app_id,
+    // name, version, directories, capabilities, and notification configs are a
+    // legitimate compiled-in MANIFEST (config, not observation). Their `size_bytes`,
+    // however, is an OBSERVATION — the size of the installed binary on disk — which
+    // cannot be known without measuring the real file. The previous code fabricated
+    // round numbers (2_048_000 / 512_000 / 1_024_000 / 768_000); those are seeded as
+    // 0 (unknown) instead. The real value is recorded via `set_size()` once a binary
+    // is actually measured. DEFERRED: have the app installer/loader measure and set
+    // the true on-disk size when these apps are staged into the rootfs.
+
     // File explorer — always installed, core system app.
     state.programs.push(ProgramEntry {
         app_id: String::from("system.fileexplorer"),
@@ -765,7 +776,7 @@ pub fn init_defaults() {
             },
         ],
         installed_ns: now,
-        size_bytes: 2_048_000,
+        size_bytes: 0, // unknown until the installed binary is measured
         compilable: false,
         build: None,
         snapshots: Vec::new(),
@@ -789,7 +800,7 @@ pub fn init_defaults() {
         ],
         notifications: Vec::new(),
         installed_ns: now,
-        size_bytes: 512_000,
+        size_bytes: 0, // unknown until the installed binary is measured
         compilable: false,
         build: None,
         snapshots: Vec::new(),
@@ -818,7 +829,7 @@ pub fn init_defaults() {
             lock_screen: false,
         }],
         installed_ns: now,
-        size_bytes: 1_024_000,
+        size_bytes: 0, // unknown until the installed binary is measured
         compilable: false,
         build: None,
         snapshots: Vec::new(),
@@ -842,7 +853,7 @@ pub fn init_defaults() {
         ],
         notifications: Vec::new(),
         installed_ns: now,
-        size_bytes: 768_000,
+        size_bytes: 0, // unknown until the installed binary is measured
         compilable: false,
         build: None,
         snapshots: Vec::new(),

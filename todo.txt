@@ -2697,10 +2697,24 @@
 ##           mapping fontmgr::FontInfo <-> local FontEntry; deciding where preview_count
 ##           lives) deferred until the font subsystem is consolidated. Both registries
 ##           are now honestly empty in the meantime.
-##         BORDERLINE-LEGITIMATE (built-in virtuals / app manifest — likely keep):
-##         printmgr (Print-to-PDF + File virtual printers are software constructs that
-##         truly exist, like loopback); progmgr (core bundled apps manifest — File
-##         Explorer etc. that genuinely ship). Decide per-module on their own ticks.
+##         BORDERLINE-LEGITIMATE (built-in virtuals / app manifest) — RESOLVED:
+##         - printmgr: AUDITED 2026-06-11, LEGITIMATE, left as-is. init_defaults()
+##           seeds only two VIRTUAL printers ("Print to PDF", "Print to File") —
+##           software constructs that genuinely exist (like loopback), with status
+##           Ready, ZEROED counters (total_pages/total_jobs = 0), and empty job/
+##           history vecs. No fabricated observations; nothing to fix.
+##         - progmgr: AUDITED + minor FIX 2026-06-11. The 4 bundled core-app entries
+##           (File Explorer, Terminal, Text Editor, Settings) are a legitimate MANIFEST
+##           of apps that genuinely ship — app_id/name/version/dirs/capabilities/
+##           notifications are config and KEPT. The only fabricated field was
+##           `size_bytes` (invented round numbers 2_048_000/512_000/1_024_000/768_000),
+##           an OBSERVATION of the installed binary size. NOT surfaced in /proc
+##           (gen_progmgr shows name/version/status/prio/caps/snaps, not size) nor the
+##           shell, so it did not breach the procfs rule — but it is still invented
+##           data, so all four are now seeded `size_bytes: 0` (unknown until the binary
+##           is measured; real value set via set_size()). boot-test PASSED (25s).
+##           DEFERRED: app installer/loader should measure and set the true on-disk
+##           size when these apps are staged into the rootfs.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

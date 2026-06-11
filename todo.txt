@@ -675,6 +675,19 @@
 ##                    explanatory "not yet implemented" message. update_bandwidth/
 ##                    record_errors record REAL data and stay. Rebuilt self_test
 ##                    residue-free, wired into boot. /proc/netspeed now 74 bytes.)
+##   - diskhealth.rs (fixed 2026-06-11; was: two fictional disks with INVENTED
+##                    model/serial numbers presented as real hardware — "sda":
+##                    "WDC WD10EZEX" HDD / serial "WD-XXXX1234" / 1TB / Good / 35°C
+##                    / 12000 power-on hrs / 100% life; "nvme0": "Samsung 970 EVO"
+##                    NVMe / serial "S4XX1234" / 500GB / Excellent / 32°C / 5000
+##                    hrs / 95% life — surfaced via /proc/diskhealth and the
+##                    list_disks/get_disk/check_health views as genuine S.M.A.R.T.
+##                    readings. Full add_disk/remove_disk/check_health/update_attrs
+##                    API already existed, so just emptied init_defaults and
+##                    rebuilt self_test with exact assertions exercising the real
+##                    compute_health grading (Excellent/Poor/Critical) and the
+##                    warnings/failures-predicted counters, wired into boot.
+##                    /proc/diskhealth now 103 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -686,13 +699,13 @@
 ##   - (none currently confirmed. Broadened the SEEDED-module grep on 2026-06-11
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
-##     blkqueue + netqueue + pagecache + taskio + netspeed (just fixed) were
-##     eight. Next ticks: work through the remaining candidates ONE PER TICK,
-##     auditing each before acting. The 52-file list includes both STATISTICS
-##     modules (fix: empty / zero-counters) AND SETTINGS or structural modules
-##     that seed LEGITIMATE config defaults or real topology (LEAVE ALONE). Verify
-##     each is a statistics module fabricating observed numbers surfaced via /proc
-##     before emptying it. Remaining flagged names incl.: diskhealth, netdev, netfilter,
+##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth (just
+##     fixed) were nine. Next ticks: work through the remaining candidates ONE PER
+##     TICK, auditing each before acting. The 52-file list includes both
+##     STATISTICS modules (fix: empty / zero-counters) AND SETTINGS or structural
+##     modules that seed LEGITIMATE config defaults or real topology (LEAVE
+##     ALONE). Verify each is a statistics module fabricating observed numbers
+##     surfaced via /proc before emptying it. Remaining flagged names incl.: netdev, netfilter,
 ##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,

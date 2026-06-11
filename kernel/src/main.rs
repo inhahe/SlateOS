@@ -1431,6 +1431,15 @@ extern "C" fn kernel_main() -> ! {
     // now honestly returns NotSupported until a real measurement backend exists.
     // The residue-free self_test verifies both and resets the table afterward.
     fs::netspeed::self_test();
+    // diskhealth backs /proc/diskhealth (per-drive S.M.A.R.T. health, temp,
+    // error rates, failure prediction).  Its init_defaults() previously seeded
+    // two fictional disks with INVENTED model/serial numbers ("WDC WD10EZEX",
+    // "Samsung 970 EVO") presented as real attached hardware; that demo data was
+    // removed (real drives are wired via add_disk + update_attrs from the SMART
+    // layer).  The residue-free self_test builds its fixtures via the real API,
+    // exercises the compute_health grading (Excellent/Poor/Critical) with exact
+    // assertions, and resets the table afterward, so it is safe at boot.
+    fs::diskhealth::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

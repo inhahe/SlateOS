@@ -143,30 +143,31 @@ fn compute_health(disk: &DiskInfo) -> HealthGrade {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** disk-health table.
+///
+/// Seeds NO disks and zero counters.  Real disks are wired through [`add_disk`]
+/// (one row per storage device the SMART/storage layer enumerates) and their
+/// SMART attributes through [`update_attrs`]; until those are called the table is
+/// genuinely empty, so `/proc/diskhealth` and the `diskhealth` kshell command
+/// report nothing rather than fabricated numbers — the kernel's hard "never
+/// invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional disks with INVENTED model and
+/// serial numbers presented as real hardware ("sda": "WDC WD10EZEX" HDD / serial
+/// "WD-XXXX1234" / 1 TB / Good / 35°C / 12000 power-on hours / 100% life;
+/// "nvme0": "Samsung 970 EVO" NVMe / serial "S4XX1234" / 500 GB / Excellent /
+/// 32°C / 5000 hours / 95% life), which `/proc/diskhealth` (and the
+/// `list_disks`/`get_disk`/`check_health` views) then displayed as if they were
+/// genuine S.M.A.R.T. readings from attached drives.  That demo data was removed;
+/// the self-test now builds its own fixtures explicitly via the real API (see
+/// [`self_test`]).  The storage layer is expected to call [`add_disk`] when a
+/// drive is enumerated and [`update_attrs`] when SMART data is polled.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        disks: alloc::vec![
-            DiskInfo {
-                id: 1, device_name: String::from("sda"),
-                model: String::from("WDC WD10EZEX"), serial: String::from("WD-XXXX1234"),
-                disk_type: DiskType::Hdd, capacity_bytes: 1_000_000_000_000,
-                health: HealthGrade::Good, temperature_c: 35, power_on_hours: 12000,
-                read_error_rate: 0, write_error_rate: 0, reallocated_sectors: 0,
-                remaining_life_pct: 100, last_check_ns: now,
-            },
-            DiskInfo {
-                id: 2, device_name: String::from("nvme0"),
-                model: String::from("Samsung 970 EVO"), serial: String::from("S4XX1234"),
-                disk_type: DiskType::Nvme, capacity_bytes: 500_000_000_000,
-                health: HealthGrade::Excellent, temperature_c: 32, power_on_hours: 5000,
-                read_error_rate: 0, write_error_rate: 0, reallocated_sectors: 0,
-                remaining_life_pct: 95, last_check_ns: now,
-            },
-        ],
-        next_id: 3,
+        disks: Vec::new(),
+        next_id: 1,
         total_checks: 0,
         total_warnings: 0,
         total_failures_predicted: 0,
@@ -263,53 +264,74 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("diskhealth::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/diskhealth must never surface).  Resetting
+    // first clears any residue from a prior `diskhealth test` run so the totals
+    // asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default disks.
-    assert_eq!(list_disks().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated disks or counters; check on an
+    // unknown id fails.
+    assert_eq!(list_disks().len(), 0);
+    let (c0, chk0, w0, f0, _o0) = stats();
+    assert_eq!((c0, chk0, w0, f0), (0, 0, 0, 0));
+    assert!(check_health(1).is_err()); // no phantom disk exists yet
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Check healthy disk.
-    let grade = check_health(1).expect("check1");
-    assert!(grade == HealthGrade::Good || grade == HealthGrade::Excellent);
-    crate::serial_println!("  [2/8] healthy check: OK");
+    // 2: Add a disk — monotonic id, Unknown health until first check.
+    let id = add_disk("sdb", "TEST-MODEL", "TEST-SERIAL", DiskType::Hdd, 1_000_000_000_000).expect("add");
+    assert_eq!(list_disks().len(), 1);
+    let d = get_disk(id).expect("get");
+    assert_eq!(d.health, HealthGrade::Unknown);
+    assert_eq!(d.capacity_bytes, 1_000_000_000_000);
+    crate::serial_println!("  [2/8] add disk: OK");
 
-    // 3: Add new disk.
-    let id = add_disk("sdb", "Seagate ST1000", "SG-XXXX", DiskType::Hdd, 1_000_000_000_000).expect("add");
-    assert_eq!(list_disks().len(), 3);
-    crate::serial_println!("  [3/8] add disk: OK");
+    // 3: Healthy attrs → Excellent (no realloc, full life, cool).
+    update_attrs(id, 30, 100, 0, 0, 0, 100).expect("update healthy");
+    assert_eq!(check_health(id).expect("check healthy"), HealthGrade::Excellent);
+    crate::serial_println!("  [3/8] excellent health: OK");
 
-    // 4: Update with bad attributes.
-    update_attrs(id, 55, 50000, 100, 50, 30, 40).expect("update");
-    let grade = check_health(id).expect("check2");
-    assert_eq!(grade, HealthGrade::Poor);
+    // 4: Poor attrs (55°C, 30 realloc, 40% life) → Poor; bumps warnings.
+    update_attrs(id, 55, 50000, 100, 50, 30, 40).expect("update poor");
+    assert_eq!(check_health(id).expect("check poor"), HealthGrade::Poor);
     crate::serial_println!("  [4/8] poor health: OK");
 
-    // 5: Critical disk.
-    update_attrs(id, 65, 80000, 500, 200, 200, 3).expect("update2");
-    let grade = check_health(id).expect("check3");
-    assert_eq!(grade, HealthGrade::Critical);
+    // 5: Critical attrs (200 realloc, 3% life) → Critical; bumps warnings +
+    // failures-predicted.
+    update_attrs(id, 65, 80000, 500, 200, 200, 3).expect("update crit");
+    assert_eq!(check_health(id).expect("check crit"), HealthGrade::Critical);
     crate::serial_println!("  [5/8] critical health: OK");
 
-    // 6: Get disk info.
+    // 6: get_disk reflects the updated SMART attributes exactly.
     let info = get_disk(id).expect("get");
     assert_eq!(info.temperature_c, 65);
     assert_eq!(info.reallocated_sectors, 200);
+    assert_eq!(info.remaining_life_pct, 3);
     crate::serial_println!("  [6/8] disk info: OK");
 
-    // 7: Remove disk.
+    // 7: Remove — row gone; second remove + later check fail.
     remove_disk(id).expect("remove");
-    assert_eq!(list_disks().len(), 2);
-    crate::serial_println!("  [7/8] remove: OK");
+    assert_eq!(list_disks().len(), 0);
+    assert!(remove_disk(id).is_err());
+    assert!(check_health(id).is_err());
+    assert!(update_attrs(id, 0, 0, 0, 0, 0, 0).is_err());
+    crate::serial_println!("  [7/8] remove + not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals are exact: 3 checks (Excellent, Poor, Critical), 2
+    // warnings (Poor + Critical), 1 failure predicted (Critical only).
     let (count, checks, warnings, failures, ops) = stats();
-    assert_eq!(count, 2);
-    assert!(checks >= 3);
-    assert!(warnings >= 2);
-    assert!(failures >= 1);
+    assert_eq!(count, 0);
+    assert_eq!(checks, 3);
+    assert_eq!(warnings, 2);
+    assert_eq!(failures, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/diskhealth table.
+    *STATE.lock() = None;
 
     crate::serial_println!("diskhealth::self_test() — all 8 tests passed");
 }

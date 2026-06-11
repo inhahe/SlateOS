@@ -1786,6 +1786,22 @@ extern "C" fn kernel_main() -> ! {
     // decremented on destroy) and resets the table afterward, so it is safe at
     // boot and /proc/ipcns reads as a truthful empty table.
     fs::ipcns::self_test();
+    // I/O-port statistics self-test (ioport) — exercises the x86 port-I/O
+    // region table surfaced by /proc/ioport and the `ioport` kshell command
+    // (per-region in/out counts + byte totals, plus untracked-access counters).
+    // Its init_defaults() previously seeded five fictional regions — PIC
+    // (1M/500K), PIT (100K/50K), KBD (5M/1M), RTC (500K/200K) and COM1 (10M/8M)
+    // — plus global totals of 16.6M reads / 9.75M writes and 50K/20K untracked,
+    // claiming millions of port accesses that never happened (the kernel does
+    // not instrument in/out yet — nothing calls record_in/out or
+    // register_region outside the kshell).  init_defaults now starts empty;
+    // regions appear only on real register_region() calls and counters advance
+    // only on real record_in/out calls.  The residue-free self_test builds its
+    // fixtures via the real API with exact assertions (region registration,
+    // tracked vs untracked accounting, range-boundary matching at 0x103/0x104,
+    // cumulative totals) and resets the table afterward, so it is safe at boot
+    // and /proc/ioport reads as a truthful empty table.
+    fs::ioport::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

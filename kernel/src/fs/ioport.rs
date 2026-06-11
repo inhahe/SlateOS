@@ -78,21 +78,35 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the I/O-port statistics state.
+///
+/// Starts with no registered regions and zero read/write totals (tracked and
+/// untracked). A port region is added through [`register_region`] when the
+/// kernel actually claims a legacy port range (PIC, PIT, keyboard controller,
+/// RTC, a UART, …), and its access counters advance only through real
+/// [`record_in`] / [`record_out`] calls on the `in`/`out` instruction path.
+/// The `/proc/ioport` generator and the `ioport` kshell command surface the
+/// region list (and [`per_region`] / [`stats`]) as if it reflects the real
+/// port-I/O layout and access activity, so seeding it with phantom regions and
+/// access counts would be fabricated procfs data — it would claim millions of
+/// port accesses that never happened. (The well-known x86 port assignments
+/// below are real hardware, but nothing in the kernel registers them or
+/// instruments their accesses yet, so pre-seeding them with invented traffic
+/// is exactly the iomem-style fabrication this sweep removes.)
+///
+/// (Previously this seeded five fictional regions — PIC (0x20, 1M reads / 500K
+/// writes), PIT (0x40, 100K / 50K), KBD (0x60, 5M / 1M), RTC (0x70, 500K /
+/// 200K) and COM1 (0x3F8, 10M / 8M) — plus global totals of 16,600,000 reads /
+/// 9,750,000 writes and 50,000 / 20,000 untracked accesses.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        regions: alloc::vec![
-            PortRegion { name: String::from("PIC"), base: 0x20, length: 2, reads: 1_000_000, writes: 500_000, read_bytes: 1_000_000, write_bytes: 500_000 },
-            PortRegion { name: String::from("PIT"), base: 0x40, length: 4, reads: 100_000, writes: 50_000, read_bytes: 100_000, write_bytes: 50_000 },
-            PortRegion { name: String::from("KBD"), base: 0x60, length: 2, reads: 5_000_000, writes: 1_000_000, read_bytes: 5_000_000, write_bytes: 1_000_000 },
-            PortRegion { name: String::from("RTC"), base: 0x70, length: 2, reads: 500_000, writes: 200_000, read_bytes: 500_000, write_bytes: 200_000 },
-            PortRegion { name: String::from("COM1"), base: 0x3F8, length: 8, reads: 10_000_000, writes: 8_000_000, read_bytes: 10_000_000, write_bytes: 8_000_000 },
-        ],
-        total_reads: 16_600_000,
-        total_writes: 9_750_000,
-        untracked_reads: 50_000,
-        untracked_writes: 20_000,
+        regions: Vec::new(),
+        total_reads: 0,
+        total_writes: 0,
+        untracked_reads: 0,
+        untracked_writes: 0,
         ops: 0,
     });
 }
@@ -160,58 +174,72 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("ioport::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and no
+    // fixtures leak into the live region table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_region().len(), 5);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom regions, zero totals.
+    assert_eq!(per_region().len(), 0);
+    let (c0, r0, w0, ur0, uw0, _) = stats();
+    assert_eq!((c0, r0, w0, ur0, uw0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
+    // 2: Register — region TEST (ports 0x100..0x104) appears zeroed; a second
+    //    region at the same base is AlreadyExists.
     register_region("TEST", 0x100, 4).expect("register");
-    assert_eq!(per_region().len(), 6);
+    assert_eq!(per_region().len(), 1);
+    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("find");
+    assert_eq!((r.reads, r.writes, r.read_bytes, r.write_bytes), (0, 0, 0, 0));
     assert!(register_region("DUP", 0x100, 4).is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: In (tracked).
+    // 3: In (tracked) — per-region reads and the global total advance.
     record_in(0x100, 1).expect("in");
-    let r = per_region().iter().find(|r| r.base == 0x100).cloned().unwrap();
-    assert_eq!(r.reads, 1);
+    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("p3");
+    assert_eq!((r.reads, r.read_bytes), (1, 1));
+    assert_eq!(stats().1, 1); // total_reads
     crate::serial_println!("  [3/8] in tracked: OK");
 
-    // 4: Out (tracked).
+    // 4: Out (tracked) — per-region writes and the global total advance.
     record_out(0x101, 2).expect("out");
-    let r = per_region().iter().find(|r| r.base == 0x100).cloned().unwrap();
-    assert_eq!(r.writes, 1);
-    assert_eq!(r.write_bytes, 2);
+    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("p4");
+    assert_eq!((r.writes, r.write_bytes), (1, 2));
+    assert_eq!(stats().2, 1); // total_writes
     crate::serial_println!("  [4/8] out tracked: OK");
 
-    // 5: Untracked.
-    let (_, _, _, ur_before, _, _) = stats();
+    // 5: Untracked — a read outside any region bumps untracked_reads and the
+    //    global total, but no per-region counter.
     record_in(0xFFFF, 1).expect("untracked");
-    let (_, _, _, ur_after, _, _) = stats();
-    assert_eq!(ur_after, ur_before + 1);
+    assert_eq!(stats().3, 1); // untracked_reads
+    assert_eq!(stats().1, 2); // total_reads (1 tracked + 1 untracked)
     crate::serial_println!("  [5/8] untracked: OK");
 
-    // 6: Multiple accesses.
-    for _ in 0..100 { record_in(0x3F8, 1).expect("serial"); }
-    let r = per_region().iter().find(|r| r.name == "COM1").cloned().unwrap();
-    assert!(r.reads > 10_000_000);
+    // 6: Multiple accesses — 100 reads on the TEST region accrue exactly the
+    //    reads they receive (no fabricated baseline).
+    for _ in 0..100 { record_in(0x100, 1).expect("loop"); }
+    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("p6");
+    assert_eq!((r.reads, r.read_bytes), (101, 101)); // 1 + 100
     crate::serial_println!("  [6/8] multi access: OK");
 
-    // 7: Region boundaries.
-    record_in(0x103, 1).expect("boundary");
-    let r = per_region().iter().find(|r| r.base == 0x100).cloned().unwrap();
-    assert_eq!(r.reads, 2); // 0x100 and 0x103 both in range
+    // 7: Region boundaries — 0x103 is the last port in TEST (in range, counted);
+    //    0x104 is just past the end (untracked).
+    record_in(0x103, 1).expect("boundary_in");
+    record_in(0x104, 1).expect("boundary_out");
+    let r = per_region().into_iter().find(|r| r.base == 0x100).expect("p7");
+    assert_eq!(r.reads, 102); // 0x103 counted, 0x104 not
+    assert_eq!(stats().3, 2); // untracked_reads now 2 (0xFFFF + 0x104)
     crate::serial_println!("  [7/8] boundaries: OK");
 
-    // 8: Stats.
-    let (regions, reads, writes, ur, _uw, ops) = stats();
-    assert!(regions >= 6);
-    assert!(reads > 16_600_000);
-    assert!(writes > 9_750_000);
-    assert!(ur > 50_000);
+    // 8: Final stats reflect only the real activity above: 1 region, 104 reads
+    //    (102 tracked + 2 untracked), 1 write, 2 untracked reads, 0 untracked
+    //    writes.
+    let (regions, reads, writes, ur, uw, ops) = stats();
+    assert_eq!((regions, reads, writes, ur, uw), (1, 104, 1, 2, 0));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("ioport::self_test() — all 8 tests passed");
 }

@@ -1214,6 +1214,31 @@
 ##                    ipcns::create_ns on namespace creation and record_shm/sem/
 ##                    msg as segments/sets/queues are allocated — wire that when
 ##                    SysV IPC + container namespaces are implemented.
+##   - ioport (2026-06-11): FIXED — fabrication case (a), direct analog of iomem
+##                    (port I/O vs MMIO). x86 I/O-port access stats (per-region
+##                    in/out counts + byte totals, untracked-access counters),
+##                    surfaced via /proc/ioport and the `ioport` kshell command.
+##                    init_defaults() seeded five fictional regions — PIC (0x20,
+##                    1M/500K), PIT (0x40, 100K/50K), KBD (0x60, 5M/1M), RTC
+##                    (0x70, 500K/200K), COM1 (0x3F8, 10M/8M) — plus global totals
+##                    16.6M reads / 9.75M writes and 50K/20K untracked. The port
+##                    addresses are real x86 hardware, BUT nothing in the kernel
+##                    calls record_in/out or register_region (only the kshell), so
+##                    the traffic is pure fabrication — same call as iomem, where
+##                    the equally-real LAPIC/IOAPIC/etc. regions were emptied
+##                    because nothing actually registered them. Emptied
+##                    init_defaults (no regions, zeroed totals); register_region
+##                    (dedups on base → AlreadyExists) is the existing real API.
+##                    Rebuilt self_test residue-free with exact assertions
+##                    (register, tracked vs untracked accounting, range-boundary
+##                    match at 0x103 in / 0x104 out, final 1 region / 104 reads /
+##                    1 write / 2 untracked) and reset afterward. NOTE: ioport was
+##                    NOT previously wired into the boot self-test path — now
+##                    added. /proc/ioport now 108 bytes (truthful empty table).
+##                    PROPER FIX DEFERRED: the in/out instruction wrappers (and
+##                    driver port claims) should call ioport::register_region for
+##                    each claimed range and record_in/record_out on every access
+##                    — wire that when port I/O is instrumented for auditing.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1227,19 +1252,19 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns (just fixed) were thirty-five. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport (just fixed) were thirty-six. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     ioport. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     hwrng. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
-##     self_test residue-free. ipcns fixed 2026-06-11: emptied two fictional
-##     namespaces, case (a). See audit notes above.) Remaining flagged
-##     names incl.:
-##     ioport, hwrng, certmgr, authbroker, secmod, binfmt,
+##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
+##     namespaces / port regions, case (a). See audit notes above.) Remaining
+##     flagged names incl.:
+##     hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed

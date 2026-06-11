@@ -1193,6 +1193,27 @@
 ##                    invoke fstrim/findex/updatemgr/integrity-scan. Wire each
 ##                    TaskType to its real subsystem when those exist; until then
 ##                    run_task is a scheduler stub, not a real maintenance run.
+##   - ipcns (2026-06-11): FIXED — classic fabrication case (a). System V IPC
+##                    namespace stats (per-ns shared-memory / semaphore-set /
+##                    message-queue counts + byte totals), surfaced via
+##                    /proc/ipcns and the `ipcns` kshell command. init_defaults()
+##                    seeded two fictional namespaces — "init" (50 shm / 500 MB,
+##                    20 sem sets / 200 sems, 10 msg / 1 MB) and "container-1"
+##                    (10 shm / 100 MB, 5 sem / 50, 3 msg / 300 KB) — plus global
+##                    totals 60 shm / 25 sem / 13 msg, claiming containers and
+##                    shared memory existed when nothing created them. Full record
+##                    API already existed (create_ns/destroy_ns/record_shm/sem/
+##                    msg), so just emptied init_defaults (no namespaces, zeroed
+##                    totals, next_id=1). Rebuilt self_test residue-free with exact
+##                    assertions (first ns gets id 1, per-ns + global SHM/SEM/MSG
+##                    accounting, totals cumulative / not decremented on destroy)
+##                    and reset afterward. NOTE: ipcns was NOT previously wired
+##                    into the boot self-test path — now added. /proc/ipcns now
+##                    reads 75 bytes (truthful empty table). PROPER FIX DEFERRED:
+##                    a real System V IPC namespace subsystem should call
+##                    ipcns::create_ns on namespace creation and record_shm/sem/
+##                    msg as segments/sets/queues are allocated — wire that when
+##                    SysV IPC + container namespaces are implemented.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1206,18 +1227,19 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag (just fixed) were thirty-four. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns (just fixed) were thirty-five. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     ipcns. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     ioport. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
-##     self_test residue-free. See audit notes above.) Remaining flagged
+##     self_test residue-free. ipcns fixed 2026-06-11: emptied two fictional
+##     namespaces, case (a). See audit notes above.) Remaining flagged
 ##     names incl.:
-##     ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
+##     ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed

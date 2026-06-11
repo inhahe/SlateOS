@@ -1771,6 +1771,21 @@ extern "C" fn kernel_main() -> ! {
     // uncorrectable counts, and a 2 GB size set explicitly via
     // set_total_memory) and resets the table afterward, so it is safe at boot.
     fs::memdiag::self_test();
+    // IPC-namespace statistics self-test (ipcns) — exercises the System V IPC
+    // namespace table surfaced by /proc/ipcns and the `ipcns` kshell command
+    // (per-namespace shared-memory segment / semaphore-set / message-queue
+    // counts and byte totals).  Its init_defaults() previously seeded two
+    // fictional namespaces — "init" with 50 shm segments / 500 MB and
+    // "container-1" with 10 shm / 100 MB, plus global totals of 60 shm / 25 sem
+    // / 13 msg — claiming containers and shared memory existed when nothing
+    // created them.  init_defaults now starts empty; namespaces appear only on
+    // real create_ns() calls and their counters advance only on real
+    // record_shm/sem/msg calls.  The residue-free self_test builds its fixtures
+    // via the real API with exact assertions (first namespace gets id 1, per-
+    // namespace + global SHM/SEM/MSG accounting, cumulative totals not
+    // decremented on destroy) and resets the table afterward, so it is safe at
+    // boot and /proc/ipcns reads as a truthful empty table.
+    fs::ipcns::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

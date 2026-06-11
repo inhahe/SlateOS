@@ -81,19 +81,31 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the IPC-namespace statistics state.
+///
+/// Starts with no namespaces and zero SHM/SEM/MSG totals. A namespace is added
+/// through [`create_ns`] when the kernel actually creates a System V IPC
+/// namespace, removed through [`destroy_ns`], and its per-namespace resource
+/// counters advance only through real [`record_shm`] / [`record_sem`] /
+/// [`record_msg`] calls. The `/proc/ipcns` generator and the `ipcns` kshell
+/// command surface the namespace list (and [`ns_list`] / [`stats`]) as if it
+/// reflects the real IPC-namespace layout and resource usage, so seeding it
+/// with phantom namespaces would be fabricated procfs data — it would claim
+/// containers and shared-memory segments exist when nothing created them.
+///
+/// (Previously this seeded two fictional namespaces — "init" (ns 1) with 50
+/// shm segments / 500 MB, 20 sem sets / 200 sems, 10 msg queues / 1 MB, and
+/// "container-1" (ns 2) with 10 shm / 100 MB, 5 sem sets / 50 sems, 3 msg
+/// queues / 300 KB — plus global totals of 60 shm / 25 sem / 13 msg.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        namespaces: alloc::vec![
-            IpcNamespace { ns_id: 1, name: String::from("init"), shm_segments: 50, shm_bytes: 500_000_000, sem_sets: 20, sem_total: 200, msg_queues: 10, msg_bytes: 1_000_000, created_ns: now },
-            IpcNamespace { ns_id: 2, name: String::from("container-1"), shm_segments: 10, shm_bytes: 100_000_000, sem_sets: 5, sem_total: 50, msg_queues: 3, msg_bytes: 300_000, created_ns: now },
-        ],
-        next_id: 3,
-        total_shm: 60,
-        total_sem: 25,
-        total_msg: 13,
+        namespaces: Vec::new(),
+        next_id: 1,
+        total_shm: 0,
+        total_sem: 0,
+        total_msg: 0,
         ops: 0,
     });
 }
@@ -187,57 +199,67 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("ipcns::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and no
+    // fixtures leak into the live namespace table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(ns_list().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom namespaces, zero totals.
+    assert_eq!(ns_list().len(), 0);
+    let (c0, shm0, sem0, msg0, _) = stats();
+    assert_eq!((c0, shm0, sem0, msg0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Create.
+    // 2: Create — first namespace gets id 1 and appears zeroed.
     let id = create_ns("test-ns").expect("create");
-    assert!(id >= 3);
-    assert_eq!(ns_list().len(), 3);
+    assert_eq!(id, 1);
+    assert_eq!(ns_list().len(), 1);
+    let ns = ns_info(id).expect("info");
+    assert_eq!((ns.shm_segments, ns.shm_bytes, ns.sem_sets, ns.sem_total, ns.msg_queues, ns.msg_bytes), (0, 0, 0, 0, 0, 0));
     crate::serial_println!("  [2/8] create: OK");
 
-    // 3: Shm.
+    // 3: Shm — per-namespace and global SHM counters advance.
     record_shm(id, 4096).expect("shm");
-    let ns = ns_info(id).unwrap();
-    assert_eq!(ns.shm_segments, 1);
-    assert_eq!(ns.shm_bytes, 4096);
+    let ns = ns_info(id).expect("info3");
+    assert_eq!((ns.shm_segments, ns.shm_bytes), (1, 4096));
+    assert_eq!(stats().1, 1); // total_shm
     crate::serial_println!("  [3/8] shm: OK");
 
-    // 4: Sem.
+    // 4: Sem — per-namespace and global SEM counters advance.
     record_sem(id, 10).expect("sem");
-    let ns = ns_info(id).unwrap();
-    assert_eq!(ns.sem_sets, 1);
-    assert_eq!(ns.sem_total, 10);
+    let ns = ns_info(id).expect("info4");
+    assert_eq!((ns.sem_sets, ns.sem_total), (1, 10));
+    assert_eq!(stats().2, 1); // total_sem
     crate::serial_println!("  [4/8] sem: OK");
 
-    // 5: Msg.
+    // 5: Msg — per-namespace and global MSG counters advance.
     record_msg(id, 256).expect("msg");
-    let ns = ns_info(id).unwrap();
-    assert_eq!(ns.msg_queues, 1);
-    assert_eq!(ns.msg_bytes, 256);
+    let ns = ns_info(id).expect("info5");
+    assert_eq!((ns.msg_queues, ns.msg_bytes), (1, 256));
+    assert_eq!(stats().3, 1); // total_msg
     crate::serial_println!("  [5/8] msg: OK");
 
-    // 6: Destroy.
+    // 6: Destroy — namespace disappears; double destroy is NotFound.
     destroy_ns(id).expect("destroy");
-    assert_eq!(ns_list().len(), 2);
+    assert_eq!(ns_list().len(), 0);
     assert!(destroy_ns(id).is_err());
     crate::serial_println!("  [6/8] destroy: OK");
 
-    // 7: Not found.
+    // 7: Not found — recording into an unknown namespace errors.
     assert!(record_shm(999, 0).is_err());
+    assert!(record_sem(999, 0).is_err());
+    assert!(record_msg(999, 0).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above. Global totals are
+    //    cumulative and not decremented on destroy: 0 namespaces, 1 shm / 1 sem
+    //    / 1 msg recorded.
     let (nss, shm, sem, msg, ops) = stats();
-    assert_eq!(nss, 2);
-    assert!(shm > 60);
-    assert!(sem > 25);
-    assert!(msg > 13);
+    assert_eq!((nss, shm, sem, msg), (0, 1, 1, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("ipcns::self_test() — all 8 tests passed");
 }

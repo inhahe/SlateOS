@@ -80,18 +80,32 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** async-I/O ring table.
+///
+/// Seeds NO ring rows and zero totals.  Real ring accounting is wired through
+/// [`create_ring`]/[`destroy_ring`]/[`submit`]/[`complete`]/[`overflow`];
+/// until those are called the table is genuinely empty, so the
+/// `/proc/aiostat` file and the `aiostat` kshell command report zeros rather
+/// than fabricated numbers — the kernel's hard "never invent data in procfs"
+/// rule.
+///
+/// NOTE: this previously seeded two fictional io_uring rings (id 1/2 with
+/// submitted 50_000_000 / 200_000_000) plus invented aggregate totals
+/// (total_submitted 250_000_000), which `/proc/aiostat` then displayed as if
+/// they were real async-I/O throughput statistics.  That demo data was
+/// removed; the self-test now builds its own fixtures explicitly via the real
+/// API (see [`self_test`]).  The io_uring syscall path is expected to call
+/// [`create_ring`] on ring setup and [`submit`]/[`complete`] as SQEs/CQEs
+/// flow.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        rings: alloc::vec![
-            RingStats { ring_id: 1, pid: 1, sq_size: 256, cq_size: 512, sq_pending: 10, cq_pending: 5, submitted: 50_000_000, completed: 49_999_900, overflows: 100, sq_full_count: 5000 },
-            RingStats { ring_id: 2, pid: 100, sq_size: 1024, cq_size: 2048, sq_pending: 64, cq_pending: 32, submitted: 200_000_000, completed: 199_999_500, overflows: 500, sq_full_count: 20000 },
-        ],
-        next_id: 3,
-        total_submitted: 250_000_000,
-        total_completed: 249_999_400,
-        total_overflows: 600,
+        rings: Vec::new(),
+        next_id: 1,
+        total_submitted: 0,
+        total_completed: 0,
+        total_overflows: 0,
         ops: 0,
     });
 }
@@ -177,56 +191,76 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("aiostat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/aiostat must never surface).
+    // Resetting first clears any residue from a prior `aiostat test` run so
+    // the totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(ring_stats().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated rings.
+    assert_eq!(ring_stats().len(), 0);
+    let (rc0, s0, c0, o0, _ops0) = stats();
+    assert_eq!((rc0, s0, c0, o0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Create ring.
+    // 2: Create ring (ids start at 1).
     let id = create_ring(200, 128, 256).expect("create");
-    assert!(id >= 3);
-    assert_eq!(ring_stats().len(), 3);
+    assert_eq!(id, 1);
+    assert_eq!(ring_stats().len(), 1);
     crate::serial_println!("  [2/8] create: OK");
 
-    // 3: Submit.
+    // 3: Submit (exact, from zero; sq_pending tracks SQEs in flight).
     submit(id, 10).expect("submit");
-    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().unwrap();
+    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().expect("ring");
     assert_eq!(r.submitted, 10);
     assert_eq!(r.sq_pending, 10);
     crate::serial_println!("  [3/8] submit: OK");
 
-    // 4: Complete.
+    // 4: Complete drains the submission queue.
     complete(id, 5).expect("complete");
-    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().unwrap();
+    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().expect("ring");
     assert_eq!(r.completed, 5);
     assert_eq!(r.sq_pending, 5);
+    assert_eq!(r.cq_pending, 5);
     crate::serial_println!("  [4/8] complete: OK");
 
-    // 5: Overflow.
+    // 5: A CQ overflow bumps the overflow counter; submitting on an unknown id
+    //    fails with NotFound.
     overflow(id).expect("overflow");
-    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().unwrap();
+    let r = ring_stats().iter().find(|r| r.ring_id == id).cloned().expect("ring");
     assert_eq!(r.overflows, 1);
+    assert!(submit(9999, 1).is_err());
     crate::serial_println!("  [5/8] overflow: OK");
 
-    // 6: Destroy.
-    destroy_ring(id).expect("destroy");
+    // 6: A second ring; create returns the next id.
+    let id2 = create_ring(201, 64, 128).expect("create2");
+    assert_eq!(id2, 2);
     assert_eq!(ring_stats().len(), 2);
+    crate::serial_println!("  [6/8] second ring: OK");
+
+    // 7: Destroy; double-destroy fails.
+    destroy_ring(id).expect("destroy");
+    assert_eq!(ring_stats().len(), 1); // only ring 2 remains
     assert!(destroy_ring(id).is_err());
-    crate::serial_println!("  [6/8] destroy: OK");
+    let _ = id2;
+    crate::serial_println!("  [7/8] destroy: OK");
 
-    // 7: Not found.
-    assert!(submit(999, 1).is_err());
-    crate::serial_println!("  [7/8] not found: OK");
-
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (rings, submitted, completed, overflows, ops) = stats();
-    assert_eq!(rings, 2);
-    assert!(submitted > 250_000_000);
-    assert!(completed > 249_999_400);
-    assert!(overflows > 600);
+    assert_eq!(rings, 1); // ring 2
+    assert_eq!(submitted, 10); // one submit of 10
+    assert_eq!(completed, 5); // one complete of 5
+    assert_eq!(overflows, 1); // one overflow
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/aiostat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the io_uring syscall path
+    // wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("aiostat::self_test() — all 8 tests passed");
 }

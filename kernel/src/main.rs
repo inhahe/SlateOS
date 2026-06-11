@@ -1131,6 +1131,13 @@ extern "C" fn kernel_main() -> ! {
     // safe at boot and gives the module automated coverage it previously
     // lacked (it was only reachable via the `epollstat test` kshell subcommand).
     fs::epollstat::self_test();
+    // aiostat backs /proc/aiostat (io_uring-style submission-queue monitoring);
+    // like its siblings the self-test now builds fixtures via the real
+    // create_ring/submit/complete/overflow API and resets the table afterward
+    // (leaving no fabricated rings), so it is safe at boot and gives the module
+    // automated coverage it previously lacked (it was only reachable via the
+    // `aiostat test` kshell subcommand).
+    fs::aiostat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

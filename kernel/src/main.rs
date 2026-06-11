@@ -1718,6 +1718,20 @@ extern "C" fn kernel_main() -> ! {
     // global totals not decremented on unregister) and resets the table
     // afterward, so it is safe at boot.
     fs::userfault::self_test();
+    // iomem backs /proc/iomem (MMIO region diagnostics: per-region name, base,
+    // size, cacheable/prefetchable attributes and read/write access counts,
+    // plus global read/write totals).  Its init_defaults() previously seeded
+    // five fictional regions — LAPIC (50M reads / 10M writes), IOAPIC (1M /
+    // 500K), HPET (5M / 100K), GPU_FB (100M writes) and NVMe_BAR (20M / 15M) —
+    // plus global totals of 76,000,000 reads / 125,600,000 writes, surfaced as
+    // if device memory had been mapped and accessed.  That demo data was
+    // removed; the region list now fills only when the kernel actually maps an
+    // MMIO region via register().  The residue-free self_test builds its
+    // fixtures via the real API with exact assertions (attribute persistence,
+    // per-region + global read/write counting, duplicate-base AlreadyExists,
+    // cumulative totals not decremented on unregister) and resets the table
+    // afterward, so it is safe at boot.
+    fs::iomem::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

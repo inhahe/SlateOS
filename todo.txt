@@ -1069,6 +1069,26 @@
 ##                    1 copy / 1 zero). NOTE: userfault was NOT previously wired
 ##                    into the boot self-test path — now added. /proc/userfault now
 ##                    105 bytes.)
+##   - iomem.rs      (fixed 2026-06-11; fs/iomem.rs statistics module backing
+##                    /proc/iomem and the `iomem` kshell command; was: five
+##                    fictional MMIO regions — LAPIC (50M reads / 10M writes),
+##                    IOAPIC (1M / 500K), HPET (5M / 100K), GPU_FB (100M writes)
+##                    and NVMe_BAR (20M / 15M) — plus global totals of 76,000,000
+##                    reads / 125,600,000 writes, surfaced as if device memory had
+##                    been mapped and accessed. Case (a): register/unregister/
+##                    record_read/record_write already exist → init_defaults
+##                    simply emptied (no regions, zero totals). Rebuilt self_test
+##                    residue-free with exact assertions: register adds a zeroed
+##                    region with its attributes, duplicate base AlreadyExists,
+##                    per-region + global read/write counting, unregister empties +
+##                    double-unregister/unknown read/write NotFound, prefetchable
+##                    attribute persistence, 100-read accrual, cumulative totals
+##                    not decremented on unregister (1 region / 101 reads / 1
+##                    write). NOTE: iomem was NOT previously wired into the boot
+##                    self-test path — now added. /proc/iomem now 75 bytes. PROPER
+##                    FIX DEFERRED: LAPIC/IOAPIC/HPET/BAR mapping code should call
+##                    iomem::register() when it maps each MMIO region — wire that
+##                    when those mappings are centralised.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1082,14 +1102,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault (just fixed) were thirty-one. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem (just fixed) were thirty-two. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     iomem. Remaining flagged names incl.:
-##     iomem, pgtable, memdiag, sysuptime,
+##     pgtable. Remaining flagged names incl.:
+##     pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify. SETTINGS-looking names in that set

@@ -2277,6 +2277,20 @@
 ##     start AND end, asserts empty defaults, builds the fixture via
 ##     load_module, exercises load/dup/unload/ref-block/params with EXACT stats
 ##     (4 loads, 2 unloads, 2 live, 0 errors). boot-test PASSED (27s).
+##     kernparam fixed 2026-06-11: READ-THROUGH to the real bootloader cmdline.
+##     init_defaults seeded 5 fabricated boot params (root=/dev/sda1,
+##     console=ttyS0,115200, loglevel=6, quiet, mem=4G) plus an invented
+##     cmdline string — surfaced through /proc and the `kernparam` shell command
+##     as if it were the actual kernel command line. Added boot::kernel_cmdline()
+##     (reads the null-terminated cmdline from the Limine kernel-file descriptor,
+##     UTF-8 validated, no lossy conversion, 4 KiB scan cap, SAFETY-commented)
+##     as the single source of truth. init_defaults now reads the REAL cmdline
+##     and parses each whitespace-separated key[=value] token into a Bootloader-
+##     origin param via new parse_cmdline(). The default limine.conf sets no
+##     cmdline, so the honest result is an EMPTY param set — and it auto-adapts
+##     if a cmdline is ever configured. self_test rewritten residue-free: tests
+##     parse_cmdline as a pure fn, installs a known controlled State for the
+##     stateful API tests, ends with STATE = None. boot-test PASSED (26s).
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

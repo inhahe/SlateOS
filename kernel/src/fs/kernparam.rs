@@ -96,39 +96,47 @@ where
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
+
+    // Read the REAL kernel command line from the bootloader (Limine). We never
+    // fabricate boot parameters: if the bootloader passed no cmdline (as with
+    // the default limine.conf), the parameter set is genuinely empty. When a
+    // cmdline IS present, each whitespace-separated `key[=value]` token is
+    // parsed into a parameter with Bootloader origin, so /proc and the
+    // `kernparam` shell command always reflect what the machine actually
+    // booted with rather than an invented command line.
+    let cmdline = crate::boot::kernel_cmdline().unwrap_or("");
+    let params = parse_cmdline(cmdline);
+
     *guard = Some(State {
-        params: alloc::vec![
-            KernelParam {
-                key: String::from("root"), value: String::from("/dev/sda1"),
-                origin: ParamOrigin::Bootloader, consumed_by: Some(String::from("vfs")),
-                description: String::from("Root filesystem device"),
-            },
-            KernelParam {
-                key: String::from("console"), value: String::from("ttyS0,115200"),
-                origin: ParamOrigin::Bootloader, consumed_by: Some(String::from("serial")),
-                description: String::from("Console device"),
-            },
-            KernelParam {
-                key: String::from("loglevel"), value: String::from("6"),
-                origin: ParamOrigin::Default, consumed_by: Some(String::from("kernlog")),
-                description: String::from("Kernel log level"),
-            },
-            KernelParam {
-                key: String::from("quiet"), value: String::from(""),
-                origin: ParamOrigin::Bootloader, consumed_by: None,
-                description: String::from("Suppress boot messages"),
-            },
-            KernelParam {
-                key: String::from("mem"), value: String::from("4G"),
-                origin: ParamOrigin::Default, consumed_by: Some(String::from("mm")),
-                description: String::from("Memory limit"),
-            },
-        ],
-        cmdline: String::from("root=/dev/sda1 console=ttyS0,115200 loglevel=6 quiet mem=4G"),
+        params,
+        cmdline: String::from(cmdline),
         total_lookups: 0,
         total_sets: 0,
         ops: 0,
     });
+}
+
+/// Parse a boot command line into parameter entries.
+///
+/// Tokens are split on ASCII whitespace; each token is either `key=value` (split
+/// at the first `=`) or a bare `key` (treated as a present flag with an empty
+/// value). All parsed parameters carry [`ParamOrigin::Bootloader`].
+fn parse_cmdline(cmdline: &str) -> Vec<KernelParam> {
+    let mut params = Vec::new();
+    for token in cmdline.split_ascii_whitespace() {
+        if token.is_empty() {
+            continue;
+        }
+        let (key, value) = token.split_once('=').unwrap_or((token, ""));
+        params.push(KernelParam {
+            key: String::from(key),
+            value: String::from(value),
+            origin: ParamOrigin::Bootloader,
+            consumed_by: None,
+            description: String::new(),
+        });
+    }
+    params
 }
 
 /// Get a parameter value.
@@ -221,15 +229,31 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
 
 pub fn self_test() {
     crate::serial_println!("kernparam::self_test() — running tests...");
-    init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_params().len(), 5);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: parse_cmdline — the pure parser over the real boot cmdline format.
+    let parsed = parse_cmdline("root=/dev/vda1 console=ttyS0,115200 quiet loglevel=6");
+    assert_eq!(parsed.len(), 4);
+    assert_eq!(parsed[0].key, "root");
+    assert_eq!(parsed[0].value, "/dev/vda1");
+    let quiet = parsed.iter().find(|p| p.key == "quiet").expect("quiet");
+    assert_eq!(quiet.value, ""); // bare flag → empty value.
+    assert!(parsed.iter().all(|p| p.origin == ParamOrigin::Bootloader));
+    crate::serial_println!("  [1/8] parse_cmdline: OK");
+
+    // Residue-free: install a known, controlled State for the stateful tests so
+    // assertions hold regardless of the cmdline this machine actually booted
+    // with (and regardless of prior kshell/procfs activity).
+    let fixture = "root=/dev/vda1 console=ttyS0,115200 quiet loglevel=6 mem=512M";
+    *STATE.lock() = Some(State {
+        params: parse_cmdline(fixture),
+        cmdline: String::from(fixture),
+        total_lookups: 0,
+        total_sets: 0,
+        ops: 0,
+    });
 
     // 2: Get parameter.
-    let val = get("root").expect("get");
-    assert_eq!(val, "/dev/sda1");
+    assert_eq!(get("root").expect("get"), "/dev/vda1");
     crate::serial_println!("  [2/8] get: OK");
 
     // 3: Boolean check.
@@ -237,13 +261,13 @@ pub fn self_test() {
     assert!(!is_set("nonexistent"));
     crate::serial_println!("  [3/8] is_set: OK");
 
-    // 4: Set new parameter.
+    // 4: Set new parameter (runtime origin).
     set("debug", "1").expect("set");
     assert_eq!(get("debug").expect("get2"), "1");
     assert!(is_set("debug"));
     crate::serial_println!("  [4/8] set: OK");
 
-    // 5: Override.
+    // 5: Override (origin flips to Runtime).
     set("loglevel", "7").expect("override");
     let p = list_params().iter().find(|p| p.key == "loglevel").expect("find").clone();
     assert_eq!(p.value, "7");
@@ -251,23 +275,26 @@ pub fn self_test() {
     crate::serial_println!("  [5/8] override: OK");
 
     // 6: Consume.
-    let val = consume("debug", "test_subsys").expect("consume");
-    assert_eq!(val, "1");
+    assert_eq!(consume("debug", "test_subsys").expect("consume"), "1");
     crate::serial_println!("  [6/8] consume: OK");
 
-    // 7: Unconsumed.
+    // 7: Unconsumed — the 5 Bootloader params remain unconsumed (debug now is).
     let uncon = unconsumed();
     assert!(uncon.iter().all(|p| p.consumed_by.is_none()));
+    assert!(uncon.iter().any(|p| p.key == "root"));
     crate::serial_println!("  [7/8] unconsumed: OK");
 
-    // 8: Stats.
+    // 8: Stats — 5 seeded + 1 new (debug) = 6 params; exactly 2 sets.
     let (count, lookups, sets, unconsumed_count, ops) = stats();
     assert_eq!(count, 6);
     assert!(lookups >= 3);
-    assert!(sets >= 2);
-    let _ = unconsumed_count;
+    assert_eq!(sets, 2);
+    assert_eq!(unconsumed_count, 5);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     crate::serial_println!("kernparam::self_test() — all 8 tests passed");
 }

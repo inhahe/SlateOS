@@ -253,3 +253,45 @@ pub fn kernel_file_address() -> Option<(u64, usize)> {
     }
     Some((file.address as u64, file.size as usize))
 }
+
+/// The kernel command line the bootloader booted us with, if any.
+///
+/// Returns the null-terminated cmdline string from the Limine kernel-file
+/// descriptor. Returns `None` when no cmdline was provided, it is empty, or it
+/// is not valid UTF-8. The returned slice lives for the entire kernel lifetime
+/// (Limine guarantees its boot info persists). This is the single source of
+/// truth for boot parameters — nothing should fabricate a command line.
+pub fn kernel_cmdline() -> Option<&'static str> {
+    let response = KERNEL_FILE_REQUEST.response()?;
+    let file_ptr = response.kernel_file;
+    if file_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Limine guarantees the response and file descriptor are valid and
+    // live for the entire kernel lifetime.
+    let file = unsafe { &*file_ptr };
+    if file.cmdline.is_null() {
+        return None;
+    }
+    // Measure the null-terminated cmdline length, capped to a sane bound so a
+    // malformed pointer cannot cause a runaway scan.
+    const MAX_CMDLINE: usize = 4096;
+    let mut len = 0usize;
+    while len < MAX_CMDLINE {
+        // SAFETY: file.cmdline is a non-null, null-terminated string from Limine
+        // that lives for the kernel lifetime. We read at most MAX_CMDLINE bytes
+        // and stop at the terminator, never reading past the allocation.
+        let byte = unsafe { *file.cmdline.add(len) };
+        if byte == 0 {
+            break;
+        }
+        len = len.saturating_add(1);
+    }
+    if len == 0 {
+        return None;
+    }
+    // SAFETY: bytes 0..len are valid, initialized, and live for the kernel
+    // lifetime per the Limine guarantee above.
+    let bytes = unsafe { core::slice::from_raw_parts(file.cmdline, len) };
+    core::str::from_utf8(bytes).ok()
+}

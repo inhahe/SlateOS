@@ -1937,6 +1937,20 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     // this is in the 0..39 range.  nice is 0 (native scheduler has no nice).
     let priority = i64::from(task.priority);
 
+    // pgrp (field 5) and session (field 6).  We don't track process groups
+    // or sessions as distinct objects; our model is "every process is its
+    // own group and session leader", which is exactly what sys_getpgid /
+    // sys_getsid / sys_getpgrp report (pgid == sid == pid).  Mirror that
+    // here so a tool reading pgrp/session from /proc/<pid>/stat agrees with
+    // the getpgid(pid) syscall.  Bare scheduler tasks (kernel threads, no
+    // PCB) have no group/session — getpgid returns ESRCH for them — so they
+    // report 0/0, matching Linux's kernel-thread convention.
+    let pgrp_sid = if crate::proc::pcb::state(task_id).is_some() {
+        task.id
+    } else {
+        0
+    };
+
     // Field order matches proc(5) / Linux fs/proc/array.c do_task_stat().
     // 1:pid 2:comm 3:state 4:ppid 5:pgrp 6:session 7:tty_nr 8:tpgid 9:flags
     // 10:minflt 11:cminflt 12:majflt 13:cmajflt 14:utime 15:stime 16:cutime
@@ -1948,14 +1962,15 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     // 44:cguest_time 45:start_data 46:end_data 47:start_brk 48:arg_start
     // 49:arg_end 50:env_start 51:env_end 52:exit_code
     // One space between every field, terminated by a single newline.
-    // Placeholders left-to-right: pid comm state ppid <pgrp..flags=0/0/0/-1/0>
-    // <minflt..cmajflt=0> utime <stime..cstime=0> priority nice=0 num_threads
-    // itrealvalue=0 starttime=0 vsize rss rsslim <startcode..wchan=0>
-    // <nswap/cnswap=0> exit_signal=17 <processor..env_end=0> exit_code.
+    // Placeholders left-to-right: pid comm state ppid pgrp session
+    // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime
+    // <stime..cstime=0> priority nice=0 num_threads itrealvalue=0
+    // starttime=0 vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
+    // exit_signal=17 <processor..env_end=0> exit_code.
     let text = format!(
-        "{} ({}) {} {} 0 0 0 -1 0 0 0 0 0 {} 0 0 0 {} 0 {} 0 0 {} {} {} \
+        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} 0 0 0 {} 0 {} 0 0 {} {} {} \
          0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
-        task.id, name, state_char, ppid,
+        task.id, name, state_char, ppid, pgrp_sid, pgrp_sid,
         utime, priority, num_threads,
         vsize, rss_pages, rsslim,
         exit_code,
@@ -11392,6 +11407,24 @@ pub fn self_test() -> KernelResult<()> {
         .all(|f| f.parse::<i64>().is_ok() || f.parse::<u64>().is_ok())
     {
         serial_println!("[procfs]   FAIL: stat has a non-integer numeric field");
+        return Err(KernelError::InternalError);
+    }
+    // Fields 5 (pgrp) and 6 (session) must agree with the getpgid/getsid
+    // model: pgrp == session, and both equal the pid for a real process or
+    // 0 for a bare kernel task (no PCB).  rest_fields is field3-based, so
+    // index 2 == field 5 (pgrp) and index 3 == field 6 (session).
+    let pgrp_field = rest_fields.get(2).and_then(|f| f.parse::<u64>().ok());
+    let session_field = rest_fields.get(3).and_then(|f| f.parse::<u64>().ok());
+    let expected_pgrp = if crate::proc::pcb::state(current_tid).is_some() {
+        current_tid
+    } else {
+        0
+    };
+    if pgrp_field != Some(expected_pgrp) || session_field != Some(expected_pgrp) {
+        serial_println!(
+            "[procfs]   FAIL: stat pgrp/session = {:?}/{:?}, expected {}/{}",
+            pgrp_field, session_field, expected_pgrp, expected_pgrp
+        );
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   {}/stat: 52 fields OK", current_tid);

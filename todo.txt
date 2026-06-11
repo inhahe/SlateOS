@@ -6,6 +6,33 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## FOLLOW-UP (2026-06-10): real /proc/<pid>/auxv + kernel-side saved_auxv
+## /proc/<pid>/auxv is NOT yet served.  Implementing it properly requires
+## the same kernel-side auxv storage that PR_GET_AUXV is already waiting
+## on (see kernel/src/syscall/linux.rs ~7123-7192: PR_GET_AUXV returns a
+## single AT_NULL terminator because "the ELF loader does not store the
+## auxv kernel-side").  Right now there is NO real auxv construction
+## anywhere — setup_user_stack (kernel/src/proc/spawn.rs:1043) just
+## allocates a zeroed stack; nothing pushes AT_PHDR/AT_PHENT/AT_PHNUM/
+## AT_PAGESZ/AT_ENTRY/AT_BASE/AT_RANDOM/AT_NULL.  Proper fix: build the
+## System V auxiliary vector during exec (Linux + native), push it onto
+## the user stack above envp, AND save a Vec<u8> copy into the PCB
+## (Process::saved_auxv).  Then add get_saved_auxv(pid) and have BOTH
+## PR_GET_AUXV and a new gen_pid_auxv() return it.  High value: glibc/
+## ld.so/WINE read /proc/self/auxv at startup.  Deferred because it
+## touches the process-launch critical path (risky to land unattended).
+##
+## FOLLOW-UP (2026-06-10): /proc/<pid>/task/<tid>/ thread directory
+## procfs classify_path (kernel/src/fs/procfs.rs ~11031) only supports
+## one level under a PID dir ("no nested subdirs").  A task/ thread
+## directory (htop thread view, ps -L) needs nested-dir support across
+## classify_path, readdir, stat, read_file, and readlink.  get_threads(pid)
+## already enumerates a process's threads, so the data exists.  Proper
+## fix: add ProcPath::PidTaskDir(pid)/PidTaskTidDir(pid,tid)/
+## PidTaskFile(pid,tid,name) variants and route them to the existing
+## per-PID generators keyed by tid.  Deferred: structural change, larger
+## than a single autonomous tick warrants without review.
+##
 ## FOLLOW-UP (2026-06-10): writable /proc/<pid>/oom_score_adj
 ## /proc/<pid>/oom_score and /proc/<pid>/oom_score_adj are now served
 ## read-only (kernel/src/fs/procfs.rs: gen_pid_oom_score{,_adj},

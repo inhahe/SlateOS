@@ -555,6 +555,8 @@ const PID_FILES: &[&str] = &[
     "oom_score",
     "oom_score_adj",
     "schedstat",
+    "loginuid",
+    "sessionid",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -2309,6 +2311,45 @@ fn gen_pid_schedstat(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(render_schedstat(cpu_ns, run_delay_ns, task.schedule_count))
 }
 
+/// The audit "unset" sentinel — `(uid_t)-1` / `(unsigned)-1`.
+///
+/// Linux reports this for `loginuid`/`sessionid` on any task the audit
+/// subsystem has not bound to a login session.  We do not track a kernel
+/// audit login session, so every process is genuinely unset — this value
+/// is the correct, truthful answer, not a placeholder.
+const AUDIT_UNSET: u32 = u32::MAX;
+
+/// Render an audit uid/session value as Linux does: the decimal integer
+/// with **no trailing newline** (`proc_loginuid_read` / `proc_sessionid_read`
+/// use a bare `scnprintf("%u")`).  Pure helper, unit-testable.
+fn render_audit_id(value: u32) -> Vec<u8> {
+    format!("{value}").into_bytes()
+}
+
+/// `/proc/<pid>/loginuid` — audit login UID.
+///
+/// Reports the audit "unset" sentinel (`u32::MAX`) because we do not
+/// track a kernel audit login session; this matches Linux for a process
+/// outside any login session.  `systemd-logind` and `pam_loginuid` read
+/// this.  Gated on process existence (NotFound for bare scheduler tasks).
+fn gen_pid_loginuid(task_id: u64) -> KernelResult<Vec<u8>> {
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    Ok(render_audit_id(AUDIT_UNSET))
+}
+
+/// `/proc/<pid>/sessionid` — audit session ID.
+///
+/// Reports the audit "unset" sentinel (`u32::MAX`); see
+/// [`gen_pid_loginuid`].  Gated on process existence.
+fn gen_pid_sessionid(task_id: u64) -> KernelResult<Vec<u8>> {
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    Ok(render_audit_id(AUDIT_UNSET))
+}
+
 /// `/proc/<pid>/caps` — capability table listing.
 ///
 /// Shows the count and types of capabilities granted to this process,
@@ -2541,6 +2582,8 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "oom_score" => gen_pid_oom_score(task_id),
         "oom_score_adj" => gen_pid_oom_score_adj(task_id),
         "schedstat" => gen_pid_schedstat(task_id),
+        "loginuid" => gen_pid_loginuid(task_id),
+        "sessionid" => gen_pid_sessionid(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11730,6 +11773,28 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   schedstat render: OK");
     }
 
+    // --- /proc/<pid>/loginuid,sessionid rendering ---
+    // Pure formatter: bare decimal, NO trailing newline (Linux audit
+    // files); unset audit id is u32::MAX.
+    {
+        let cases = [
+            (render_audit_id(AUDIT_UNSET), "4294967295"),
+            (render_audit_id(0), "0"),
+            (render_audit_id(1000), "1000"),
+        ];
+        for (got, want) in &cases {
+            let got_text = core::str::from_utf8(got)
+                .map_err(|_| KernelError::InternalError)?;
+            if got_text != *want {
+                serial_println!(
+                    "[procfs]   FAIL: audit_id render {:?} != {:?}", got_text, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   loginuid/sessionid render: {} cases OK", cases.len());
+    }
+
     // --- New per-PID files: comm, statm, limits ---
 
     // /proc/<pid>/comm — non-empty, newline-terminated, <= 16 bytes
@@ -11913,6 +11978,34 @@ pub fn self_test() -> KernelResult<()> {
         Err(e) => {
             serial_println!("[procfs]   FAIL: schedstat unexpected error {:?}", e);
             return Err(KernelError::InternalError);
+        }
+    }
+
+    // /proc/<pid>/loginuid and sessionid — process-only audit files.  When
+    // they succeed, each must be a bare decimal integer with no trailing
+    // newline (Linux audit-file convention).
+    for name in ["loginuid", "sessionid"] {
+        match fs.read_file(&format!("/{current_tid}/{name}")) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data)
+                    .map_err(|_| KernelError::InternalError)?;
+                if text.ends_with('\n') || text.parse::<u32>().is_err() {
+                    serial_println!(
+                        "[procfs]   FAIL: {} not a bare decimal ({:?})", name, text
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                serial_println!("[procfs]   {}/{}: {} OK", current_tid, name, text);
+            }
+            Err(KernelError::NotFound) => {
+                serial_println!(
+                    "[procfs]   {}/{}: NotFound (bare task, no PCB) OK", current_tid, name
+                );
+            }
+            Err(e) => {
+                serial_println!("[procfs]   FAIL: {} unexpected error {:?}", name, e);
+                return Err(KernelError::InternalError);
+            }
         }
     }
 

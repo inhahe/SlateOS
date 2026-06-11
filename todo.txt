@@ -2546,6 +2546,27 @@
 ##     sample next: the bulk *stat.rs metric modules (ksmstat, inodestat, budstat,
 ##     cgiostat, compstat, numastat, diskstat, cpustat, pagestat, etc.) — spot
 ##     pattern so far is honest empty-init; confirm none seed nonzero observations.
+##     cputopo FIXED 2026-06-11 (FABRICATOR → READ-THROUGH): init_defaults() seeded
+##     a fabricated "Simulated x86_64 CPU" — a quad-core/8-thread/1-package layout
+##     with invented L1d/L1i(32KB)/L2(256KB)/L3(8MB) caches (comment literally said
+##     "Simulate a quad-core with SMT"). /proc/cputopo (procfs.rs:8931) and the
+##     `cputopo` shell command surfaced this as the machine's REAL CPU topology.
+##     Fixed by READ-THROUGH from crate::cpu_topology (populated by
+##     cpu_topology::detect() at boot, main.rs:2331, before this lazy init runs):
+##     each LogicalCpu is built from cpu_topology::cpu_topo(i) (package_id/core_id/
+##     smt_id), packages summarised from the live CPU list, smt_enabled from
+##     cpu_topology::smt_active(). Honest unknowns left EMPTY rather than invented:
+##     caches=Vec::new() (no cache enumerator wired), model_name=String::new() (no
+##     CPUID brand-string reader), numa_node=0/numa_nodes=1 (no ACPI SRAT parse).
+##     DEFERRED PROPER FIX: (1) populate caches from CPUID leaf-0x4 (Intel) /
+##     0x8000_001D (AMD); (2) read brand string from CPUID 0x8000_0002..=0004;
+##     (3) derive NUMA nodes from ACPI SRAT. self_test rewritten hardware-agnostic
+##     (monitors.rs split pattern): Part A asserts only host-independent invariants
+##     of the read-through (cpu_count>=1, all online, packages cover all CPUs,
+##     caches empty, model_name empty, numa==1); Part B installs a deterministic
+##     8-CPU/4-core/2-thread fixture directly into STATE to exercise the accessors
+##     with exact expectations, then resets STATE to None (residue-free start+end).
+##     boot-test PASSED (29s). No fabricated procfs data.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

@@ -118,39 +118,86 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Build the topology snapshot by reading the real, already-detected CPU
+/// topology from `crate::cpu_topology` (populated by `cpu_topology::detect()`
+/// during early boot, before this lazy init can run).
+///
+/// We never fabricate topology. Every logical CPU and package is derived from
+/// the live per-CPU topology array. Fields we cannot honestly source are left
+/// empty rather than invented:
+///   - `caches`: no cache enumerator is wired yet. DEFERRED: populate from a
+///     CPUID leaf-0x4 (Intel) / leaf-0x8000_001D (AMD) cache descriptor pass.
+///   - `model_name`: no CPUID brand-string reader is wired yet. DEFERRED:
+///     read the 48-byte brand string from CPUID 0x8000_0002..=0x8000_0004.
+///   - `numa_node` / `numa_nodes`: no ACPI SRAT parse yet, so every CPU maps to
+///     node 0 and the node count is 1. DEFERRED: derive from ACPI SRAT.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    // Simulate a quad-core with SMT (8 logical CPUs).
-    let mut cpus = Vec::new();
-    for core in 0..4u32 {
-        for thread in 0..2u32 {
-            cpus.push(LogicalCpu {
-                id: core * 2 + thread,
+
+    let num_cpus = crate::smp::cpu_count().max(1);
+
+    // Read each logical CPU straight from the detected topology.
+    let mut cpus = Vec::with_capacity(num_cpus.min(MAX_CPUS));
+    for i in 0..num_cpus.min(MAX_CPUS) {
+        let cpu = crate::cpu_topology::cpu_topo(i).map_or_else(
+            // Topology not detected / out of range: present a single-thread
+            // core in package 0 — the honest "we don't know better" layout,
+            // matching cpu_topology's own no-detect fallbacks.
+            || LogicalCpu {
+                id: i as u32,
                 package_id: 0,
-                core_id: core,
-                thread_id: thread,
+                core_id: i as u32,
+                thread_id: 0,
                 numa_node: 0,
                 online: true,
+            },
+            |t| LogicalCpu {
+                id: i as u32,
+                package_id: u32::from(t.package_id),
+                core_id: u32::from(t.core_id),
+                thread_id: u32::from(t.smt_id),
+                numa_node: 0,
+                online: true,
+            },
+        );
+        cpus.push(cpu);
+    }
+
+    // Summarise packages directly from the CPU list (unique package_ids; per
+    // package count its logical threads and distinct cores).
+    let mut packages: Vec<PackageInfo> = Vec::new();
+    for cpu in &cpus {
+        if let Some(pkg) = packages.iter_mut().find(|p| p.id == cpu.package_id) {
+            pkg.total_threads = pkg.total_threads.saturating_add(1);
+        } else {
+            packages.push(PackageInfo {
+                id: cpu.package_id,
+                model_name: String::new(),
+                cores: 0,
+                threads_per_core: 0,
+                total_threads: 1,
             });
         }
     }
+    for pkg in &mut packages {
+        // Count distinct core_ids within this package.
+        let mut cores: Vec<u32> = Vec::new();
+        for cpu in cpus.iter().filter(|c| c.package_id == pkg.id) {
+            if !cores.contains(&cpu.core_id) {
+                cores.push(cpu.core_id);
+            }
+        }
+        pkg.cores = cores.len() as u32;
+        pkg.threads_per_core = pkg.total_threads.checked_div(pkg.cores.max(1)).unwrap_or(1);
+    }
+
     *guard = Some(State {
         cpus,
-        caches: alloc::vec![
-            CacheInfo { cache_type: CacheType::L1Data, size_kb: 32, line_size: 64, associativity: 8, shared_by_threads: 2 },
-            CacheInfo { cache_type: CacheType::L1Instruction, size_kb: 32, line_size: 64, associativity: 8, shared_by_threads: 2 },
-            CacheInfo { cache_type: CacheType::L2Unified, size_kb: 256, line_size: 64, associativity: 4, shared_by_threads: 2 },
-            CacheInfo { cache_type: CacheType::L3Unified, size_kb: 8192, line_size: 64, associativity: 16, shared_by_threads: 8 },
-        ],
-        packages: alloc::vec![
-            PackageInfo {
-                id: 0, model_name: String::from("Simulated x86_64 CPU"),
-                cores: 4, threads_per_core: 2, total_threads: 8,
-            },
-        ],
+        caches: Vec::new(),
+        packages,
         numa_nodes: 1,
-        smt_enabled: true,
+        smt_enabled: crate::cpu_topology::smt_active(),
         total_queries: 0,
         ops: 0,
     });
@@ -241,32 +288,85 @@ pub fn stats() -> (usize, usize, u32, bool, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("cputopo::self_test() — running tests...");
-    init_defaults();
 
-    // 1: Default CPUs.
+    // Residue-free: start from a known-empty state.
+    *STATE.lock() = None;
+
+    // -- Part A: read-through sanity (hardware-agnostic) --------------------
+    // init_defaults() reads the live topology, which on the test machine
+    // (QEMU, no -smp) is a single CPU but could be anything. Assert only the
+    // invariants that hold regardless of the underlying hardware.
+    init_defaults();
+    let n = cpu_count();
+    assert!(n >= 1, "expected at least one logical CPU");
+    assert_eq!(online_count(), n, "every CPU starts online");
+    let pkgs = packages();
+    assert!(!pkgs.is_empty(), "expected at least one package");
+    // Sum of per-package total_threads must equal the logical CPU count.
+    let pkg_thread_sum: u32 = pkgs.iter().map(|p| p.total_threads).sum();
+    assert_eq!(pkg_thread_sum as usize, n, "package threads must cover all CPUs");
+    // Honest unknowns: no cache enumerator, no brand string, no SRAT.
+    assert!(cache_info().is_empty(), "caches must be empty (not fabricated)");
+    assert!(pkgs.iter().all(|p| p.model_name.is_empty()), "model_name must be empty");
+    let (_c, _p, numa, _smt, _q, _o) = stats();
+    assert_eq!(numa, 1, "numa_nodes is honestly 1 until SRAT is parsed");
+    crate::serial_println!("  [1/8] read-through sanity: OK");
+
+    // -- Part B: deterministic fixture -------------------------------------
+    // Install a known 8-CPU / 4-core / 2-thread / 1-package layout directly so
+    // the accessors can be exercised with exact expectations independent of the
+    // host. (Same split-test pattern used by monitors.rs.)
+    {
+        let mut cpus = Vec::new();
+        for core in 0..4u32 {
+            for thread in 0..2u32 {
+                cpus.push(LogicalCpu {
+                    id: core * 2 + thread,
+                    package_id: 0,
+                    core_id: core,
+                    thread_id: thread,
+                    numa_node: 0,
+                    online: true,
+                });
+            }
+        }
+        *STATE.lock() = Some(State {
+            cpus,
+            caches: alloc::vec![
+                CacheInfo { cache_type: CacheType::L1Data, size_kb: 32, line_size: 64, associativity: 8, shared_by_threads: 2 },
+                CacheInfo { cache_type: CacheType::L1Instruction, size_kb: 32, line_size: 64, associativity: 8, shared_by_threads: 2 },
+                CacheInfo { cache_type: CacheType::L2Unified, size_kb: 256, line_size: 64, associativity: 4, shared_by_threads: 2 },
+                CacheInfo { cache_type: CacheType::L3Unified, size_kb: 8192, line_size: 64, associativity: 16, shared_by_threads: 8 },
+            ],
+            packages: alloc::vec![
+                PackageInfo { id: 0, model_name: String::new(), cores: 4, threads_per_core: 2, total_threads: 8 },
+            ],
+            numa_nodes: 1,
+            smt_enabled: true,
+            total_queries: 0,
+            ops: 0,
+        });
+    }
+
+    // 2: CPU list.
     assert_eq!(list_cpus().len(), 8);
     assert_eq!(cpu_count(), 8);
     assert_eq!(online_count(), 8);
-    crate::serial_println!("  [1/8] defaults: OK");
+    crate::serial_println!("  [2/8] fixture cpus: OK");
 
-    // 2: Package info.
-    let pkgs = packages();
-    assert_eq!(pkgs.len(), 1);
-    assert_eq!(pkgs[0].cores, 4);
-    assert_eq!(pkgs[0].threads_per_core, 2);
-    crate::serial_println!("  [2/8] packages: OK");
+    // 3: Package info.
+    let fpkgs = packages();
+    assert_eq!(fpkgs.len(), 1);
+    assert_eq!(fpkgs[0].cores, 4);
+    assert_eq!(fpkgs[0].threads_per_core, 2);
+    crate::serial_println!("  [3/8] packages: OK");
 
-    // 3: Cache info.
-    let caches = cache_info();
-    assert_eq!(caches.len(), 4);
-    crate::serial_println!("  [3/8] caches: OK");
+    // 4: Cache info.
+    assert_eq!(cache_info().len(), 4);
+    crate::serial_println!("  [4/8] caches: OK");
 
-    // 4: CPUs in package.
-    let pkg_cpus = cpus_in_package(0);
-    assert_eq!(pkg_cpus.len(), 8);
-    crate::serial_println!("  [4/8] cpus in package: OK");
-
-    // 5: Thread siblings.
+    // 5: CPUs in package / thread siblings.
+    assert_eq!(cpus_in_package(0).len(), 8);
     let siblings = thread_siblings(0);
     assert_eq!(siblings.len(), 1); // CPU 0 and 1 share core 0.
     assert_eq!(siblings[0], 1);
@@ -285,13 +385,16 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] online/offline: OK");
 
     // 8: Stats.
-    let (cpus, pkgs, numa, smt, _queries, ops) = stats();
+    let (cpus, pkgs2, numa2, smt, _queries, ops) = stats();
     assert_eq!(cpus, 8);
-    assert_eq!(pkgs, 1);
-    assert_eq!(numa, 1);
+    assert_eq!(pkgs2, 1);
+    assert_eq!(numa2, 1);
     assert!(smt);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Residue-free: leave no fixture behind.
+    *STATE.lock() = None;
 
     crate::serial_println!("cputopo::self_test() — all 8 tests passed");
 }

@@ -174,43 +174,24 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the USB device registry as EMPTY.
+///
+/// We never fabricate connected hardware. A desktop may have any (or no) USB
+/// devices, so the registry starts empty and real devices are added only via
+/// `device_connected()`, called by the USB host-controller driver as it
+/// enumerates ports (and on hotplug).
+///
+/// DEFERRED PROPER FIX: wire `device_connected()` / `device_disconnected()` to
+/// a real USB host-controller driver (xHCI/EHCI enumeration + hotplug events)
+/// once one exists. Until then the registry is honestly empty rather than
+/// seeded with a phantom keyboard and mouse.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
 
-    // Default: keyboard and mouse connected.
-    let devices = alloc::vec![
-        UsbDevice {
-            bus: 1, port: 1, address: 1,
-            vendor_id: 0x046d, product_id: 0xc52b,
-            manufacturer: String::from("Logitech"),
-            product: String::from("USB Keyboard"),
-            serial: String::from("KB-001"),
-            class: UsbClass::HumanInterface,
-            speed: UsbSpeed::Full,
-            power_ma: 100,
-            removable: true,
-            driver: String::from("usbhid"),
-            connected_ns: 0,
-        },
-        UsbDevice {
-            bus: 1, port: 2, address: 2,
-            vendor_id: 0x046d, product_id: 0xc077,
-            manufacturer: String::from("Logitech"),
-            product: String::from("USB Mouse"),
-            serial: String::from("MS-001"),
-            class: UsbClass::HumanInterface,
-            speed: UsbSpeed::Full,
-            power_ma: 100,
-            removable: true,
-            driver: String::from("usbhid"),
-            connected_ns: 0,
-        },
-    ];
-
     *guard = Some(State {
-        devices,
-        total_connects: 2,
+        devices: Vec::new(),
+        total_connects: 0,
         total_disconnects: 0,
         total_safe_removes: 0,
         ops: 0,
@@ -308,12 +289,26 @@ pub fn stats() -> (usize, u64, u64, u64, u32, u64) {
 
 pub fn self_test() {
     crate::serial_println!("usbmgr::self_test() — running tests...");
+
+    // Residue-free: start from a known-empty registry.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default devices.
-    let devs = list_devices();
-    assert_eq!(devs.len(), 2);
-    crate::serial_println!("  [1/11] default devices: OK");
+    // 1: Registry starts empty — we never fabricate connected hardware.
+    assert_eq!(list_devices().len(), 0);
+    let (c0, conn0, _d0, _s0, _p0, _o0) = stats();
+    assert_eq!(c0, 0);
+    assert_eq!(conn0, 0);
+    crate::serial_println!("  [1/11] empty registry: OK");
+
+    // Build deterministic fixtures via the real connect entry point: a
+    // keyboard and a mouse (what the old fabricated default invented, now
+    // installed explicitly inside the test rather than at boot).
+    device_connected(1, 1, 0x046d, 0xc52b, "Logitech", "USB Keyboard",
+        UsbClass::HumanInterface, UsbSpeed::Full, 100).expect("connect kb");
+    device_connected(1, 2, 0x046d, 0xc077, "Logitech", "USB Mouse",
+        UsbClass::HumanInterface, UsbSpeed::Full, 100).expect("connect mouse");
+    assert_eq!(list_devices().len(), 2);
 
     // 2: Device info.
     let kb = get_device(1, 1).expect("get keyboard");
@@ -330,9 +325,8 @@ pub fn self_test() {
     assert_eq!(list_devices().len(), 3);
     crate::serial_println!("  [3/11] connect device: OK");
 
-    // 4: Power draw.
-    let power = total_power_draw();
-    assert!(power >= 1096); // 100 + 100 + 896.
+    // 4: Power draw (100 + 100 + 896 = 1096, exact).
+    assert_eq!(total_power_draw(), 1096);
     crate::serial_println!("  [4/11] power draw: OK");
 
     // 5: Safe remove.
@@ -370,15 +364,20 @@ pub fn self_test() {
     assert_eq!(list_devices().len(), 7);
     crate::serial_println!("  [10/11] batch connect: OK");
 
-    // 11: Stats.
+    // 11: Stats — exact totals.
+    // connects: kb,mouse,flash,hub + 5 batch = 9; disconnects: flash(safe)+hub = 2;
+    // safe_removes: 1; power: kb 100 + mouse 100 + 5×50 = 450.
     let (count, connects, disconnects, safe_removes, power, ops) = stats();
     assert_eq!(count, 7);
-    assert!(connects >= 9);
-    assert!(disconnects >= 2);
-    assert!(safe_removes >= 1);
-    assert!(power > 0);
+    assert_eq!(connects, 9);
+    assert_eq!(disconnects, 2);
+    assert_eq!(safe_removes, 1);
+    assert_eq!(power, 450);
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
+
+    // Residue-free: leave no fixtures behind.
+    *STATE.lock() = None;
 
     crate::serial_println!("usbmgr::self_test() — all 11 tests passed");
 }

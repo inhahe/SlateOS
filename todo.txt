@@ -2582,6 +2582,52 @@
 ##     modules (battery, webcam, cputopo, monitors, ipcns, ioport, hwrng), NOT the
 ##     stat family. REMAINING to sample: non-stat fs diagnostic modules not yet
 ##     covered (e.g. *info, *mgr, *mon, *dev naming patterns).
+##     usbmgr FIXED 2026-06-11 (FABRICATOR → empty-init, case a): init_defaults()
+##     seeded a phantom Logitech "USB Keyboard" (0x046d/0xc52b) + "USB Mouse"
+##     (0x046d/0xc077) as connected HID devices (total_connects:2), which /proc and
+##     the `usbmgr` shell command surfaced as REAL enumerated USB hardware. A desktop
+##     may have any/no USB devices. Fixed: registry starts empty (total_connects:0);
+##     real devices arrive only via device_connected() from the USB host-controller
+##     driver. self_test rewritten residue-free (reset STATE None at start+end,
+##     assert empty, build kb+mouse fixtures via device_connected, EXACT totals:
+##     connects=9, disconnects=2, safe_removes=1, power=450, count=7). DEFERRED PROPER
+##     FIX: wire device_connected()/device_disconnected() to a real xHCI/EHCI
+##     enumeration + hotplug path once a USB host-controller driver exists. boot-test
+##     PASSED (29s).
+##     SWEEP PROGRESS 2026-06-11 (*mgr/*mon/*info/*dev pass — modules IDENTIFIED):
+##     Audited init_defaults() across certmgr, fileinfo, fontmgr, groupmgr, netdev,
+##     netmon, partmgr, perfmon, pkgmgr, printmgr, progmgr, raidmgr, servicemgr,
+##     sessionmgr, swapmon, sysinfo, taskmon, tracemon, updatemgr, usbmgr.
+##       CLEAN (empty/zero or legitimate config/read-through): certmgr (empty certs +
+##       renewal threshold config), netdev, netmon, raidmgr, sessionmgr, taskmon
+##       (empty + zero); swapmon (EMPTY init + real read-through of mm::swap::summary
+##       — exemplary); perfmon + updatemgr (settings config only, empty histories);
+##       sysinfo (real detect_cpu/detect_memory + OS constants; storage/gpu/net left
+##       EMPTY with deferred note — already honest); tracemon (FIXED TAXONOMY of 6
+##       tracepoint DEFINITIONS, all disabled + hit_count 0 — case c, legitimate).
+##       FABRICATORS STILL TO FIX (seed fake observed entries surfaced as real):
+##         - servicemgr: seeds network/audio/... services as Running with fake PIDs
+##           (100/101) — presents running daemons that don't exist. FIX: empty-init;
+##           services registered via a real service-manager entry point.
+##         - pkgmgr: seeds repos (packages.example.os placeholder URLs) + "base
+##           system packages" (kernel/coreutils) as Installed with fabricated sizes —
+##           presents a package DB that isn't real. FIX: empty-init / read-through a
+##           real content-addressed store once one exists.
+##         - groupmgr: seeds root/wheel/users/daemon. System GIDs are a legitimate
+##           /etc/group skeleton, BUT member lists [0,1000]/[1000,1001] presume
+##           fabricated user UIDs. FIX: keep standard system groups (structural
+##           default) but EMPTY their member lists until a real user DB populates them
+##           — verify against any usermgr module for consistency.
+##         - fontmgr: seeds Noto Sans/Serif/JetBrains Mono/Noto Color Emoji with
+##           paths + fabricated glyph counts (3500/3200/800/3600). If these fonts
+##           genuinely ship in the base image the family list is a legitimate
+##           manifest, but the glyph counts are observed metadata that must come from
+##           parsing the actual files. FIX: either read-through a real font scan, or
+##           keep the bundled-font manifest with glyph_count 0 until a parser exists.
+##         BORDERLINE-LEGITIMATE (built-in virtuals / app manifest — likely keep):
+##         printmgr (Print-to-PDF + File virtual printers are software constructs that
+##         truly exist, like loopback); progmgr (core bundled apps manifest — File
+##         Explorer etc. that genuinely ship). Decide per-module on their own ticks.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

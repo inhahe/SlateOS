@@ -1818,6 +1818,22 @@ extern "C" fn kernel_main() -> ! {
     // capacity, six-source breakdown) and resets afterward, so it is safe at
     // boot and /proc/hwrng reads as a truthful empty pool.
     fs::hwrng::self_test();
+    // Certificate-manager self-test.  certmgr previously seeded five well-known
+    // root CAs (ISRG Root X1, DigiCert Global Root G2, GlobalSign, Baltimore
+    // CyberTrust, Amazon Root CA 1) into init_defaults, each marked Root/System/
+    // Valid/pinned but carrying FABRICATED cryptographic material — FNV-hash
+    // "fingerprints" instead of real SHA-256 digests, made-up serials, a
+    // synthetic 10-year validity window, and no backing PEM file.  /proc/certmgr
+    // and the certmgr kshell command surface that list as the real trust store,
+    // so presenting phantom Valid/trusted roots is a dangerous fabrication on a
+    // security surface.  init_defaults now starts with an EMPTY trust store; a
+    // certificate enters only through a real import_cert (a bundled CA PEM) or
+    // the ACME path.  The residue-free self_test (clear_all at start and end,
+    // returns KernelResult) imports/looks-up/renews via the real API with exact
+    // assertions and verifies the empty default, so it is safe at boot.
+    if let Err(e) = fs::certmgr::self_test() {
+        serial_println!("WARNING: Certificate manager self-test failed: {:?}", e);
+    }
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

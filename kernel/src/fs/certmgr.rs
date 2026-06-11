@@ -540,68 +540,35 @@ pub fn list_needing_renewal() -> Vec<CertInfo> {
 // Init / stats
 // ---------------------------------------------------------------------------
 
-/// Initialize with default system trust store roots.
+/// Initialise the certificate-manager state.
+///
+/// Starts with an EMPTY trust store (no certificates, no pending requests) and
+/// the default 30-day renewal threshold. A certificate enters the store only
+/// through a real [`import_cert`] (a CA bundle or user-imported cert) or through
+/// the ACME path ([`request_cert`] / [`complete_request`]). The `/proc/certmgr`
+/// generator and the `certmgr` kshell command surface the certificate list (and
+/// [`list_certs`] / [`stats`]) as if it reflects the real trust store, so
+/// seeding it with well-known root CAs would be fabricated procfs data — and
+/// uniquely dangerous on a security surface, because those phantom roots carried
+/// FABRICATED cryptographic material: FNV-hash fingerprints (not real SHA-256
+/// digests), made-up serial numbers, a synthetic 10-year validity window, and
+/// no backing PEM file at all. Presenting them as `Valid`, pinned, system-
+/// trusted roots would claim the OS trusts CAs it has never actually loaded a
+/// certificate for. A real default trust store is legitimate OS behaviour, but
+/// it must come from importing an actual bundled CA PEM via [`import_cert`], not
+/// from inventing entries here.
+///
+/// (Previously this seeded five well-known root CAs — ISRG Root X1, DigiCert
+/// Global Root G2, GlobalSign Root CA, Baltimore CyberTrust Root and Amazon Root
+/// CA 1 — each marked Root/System/Valid/pinned with an RSA-4096 key type, an
+/// FNV-hash "fingerprint", a `{id:08X}` serial, a now..now+10y validity window
+/// and an empty `key_path` — i.e. no real certificate behind any of them.)
 pub fn init_defaults() {
     let mut state = STATE.lock();
     if !state.certs.is_empty() {
         return;
     }
-
-    let now = crate::hpet::elapsed_ns();
-    let far_future = now.wrapping_add(10 * 365 * 24 * 3600 * 1_000_000_000); // ~10 years
-
-    // Add some well-known root CAs.
-    let roots: &[(&str, &str)] = &[
-        ("ISRG Root X1", "Internet Security Research Group"),
-        ("DigiCert Global Root G2", "DigiCert Inc"),
-        ("GlobalSign Root CA", "GlobalSign"),
-        ("Baltimore CyberTrust Root", "Baltimore"),
-        ("Amazon Root CA 1", "Amazon"),
-    ];
-
-    for (cn, issuer) in roots {
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let fp = {
-            use alloc::format;
-            let hash = cn.bytes().fold(0x811c9dc5_u64, |h, b| {
-                (h ^ b as u64).wrapping_mul(0x100000001b3)
-            });
-            format!("{:016x}", hash)
-        };
-        let cert_path = {
-            use alloc::format;
-            format!("/etc/ssl/certs/{}.pem", cn.replace(' ', "_").to_lowercase())
-        };
-        state.certs.push(CertInfo {
-            id,
-            common_name: String::from(*cn),
-            alt_names: Vec::new(),
-            cert_type: CertType::Root,
-            source: CertSource::System,
-            status: CertStatus::Valid,
-            key_type: KeyType::Rsa4096,
-            issuer: String::from(*issuer),
-            serial: {
-                use alloc::format;
-                format!("{:08X}", id)
-            },
-            not_before_ns: now,
-            not_after_ns: far_future,
-            fingerprint: fp,
-            service: String::new(),
-            auto_renew: false,
-            acme_email: String::new(),
-            challenge_type: ChallengeType::Http01,
-            cert_path,
-            key_path: String::new(), // roots have no private key stored
-            last_renewal_ns: 0,
-            renewal_count: 0,
-            pinned: true,
-        });
-    }
-
     state.renewal_threshold_days = 30;
-    state.changes += 1;
 }
 
 /// Return (cert_count, root_count, server_count, request_count, ops).
@@ -692,13 +659,15 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(le_cert.source, CertSource::LetsEncrypt);
     assert!(le_cert.auto_renew);
 
-    // Test 7: init_defaults.
+    // Test 7: init_defaults — the trust store starts EMPTY (no phantom roots);
+    // certificates appear only through a real import. After init the store has
+    // zero certs and zero roots.
     serial_println!("certmgr::self_test 7: init defaults");
     clear_all();
     init_defaults();
     let (total, roots, _, _, _) = stats();
-    assert_eq!(total, 5); // 5 root CAs
-    assert_eq!(roots, 5);
+    assert_eq!(total, 0); // empty trust store — no fabricated roots
+    assert_eq!(roots, 0);
 
     clear_all();
     serial_println!("certmgr::self_test: all 7 tests passed");

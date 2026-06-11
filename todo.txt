@@ -1267,6 +1267,37 @@
 ##                    pool status reflects genuine entropy — wire when the entropy
 ##                    pool / CSPRNG is implemented. Until then the pool correctly
 ##                    reports NOT ready (no entropy gathered).
+##   - certmgr (2026-06-11): FIXED — fabrication case (a) (full real API exists,
+##                    just emptied init_defaults). Certificate manager / trust
+##                    store, surfaced via /proc/certmgr and the `certmgr` kshell
+##                    command (list/show/init/test). init_defaults seeded FIVE
+##                    well-known root CAs (ISRG Root X1, DigiCert Global Root G2,
+##                    GlobalSign Root CA, Baltimore CyberTrust Root, Amazon Root
+##                    CA 1) each marked Root/System/Valid/pinned with key type
+##                    Rsa4096 — but carrying FABRICATED cryptographic material:
+##                    FNV-hash "fingerprints" (not real SHA-256 digests), made-up
+##                    {id:08X} serials, a synthetic now..now+10y validity window,
+##                    and an EMPTY key_path (no backing PEM file behind any of
+##                    them). Presenting phantom Valid/trusted/pinned roots is a
+##                    particularly dangerous lie on a security surface — it claims
+##                    the OS trusts CAs it has never loaded a certificate for.
+##                    Emptied init_defaults to an EMPTY trust store (only the
+##                    default 30-day renewal threshold kept; certs enter ONLY via
+##                    a real import_cert or the ACME request/complete path). The
+##                    existing import_cert/request_cert/complete_request/renew/etc.
+##                    API is the real registration path (case a). self_test already
+##                    used clear_all() at start AND end and returns KernelResult;
+##                    updated Test 7 to assert the empty default (0 certs / 0
+##                    roots) instead of 5 fabricated roots. Wired into the boot
+##                    self-test path (was kshell-only; uses `if let Err(e)` since
+##                    self_test returns KernelResult). /proc/certmgr now 149 bytes
+##                    (truthful empty trust store). PROPER FIX DEFERRED: a real
+##                    default trust store IS legitimate OS behaviour — once the OS
+##                    ships a bundled CA PEM file, parse it and import each root
+##                    via import_cert (with REAL SHA-256 fingerprints, real serials
+##                    and real validity windows read from the certificate) at boot.
+##                    Until then the trust store correctly reports empty rather than
+##                    fabricating trusted roots.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1280,20 +1311,21 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng (just fixed) were thirty-seven. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr (just fixed) were thirty-eight. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     certmgr. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     authbroker. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
 ##     namespaces / port regions, case (a). hwrng fixed 2026-06-11: zeroed fake
 ##     entropy activity, kept 6-source dimension + pool capacity, case (c). See
-##     audit notes above.) Remaining flagged names incl.:
-##     certmgr, authbroker, secmod, binfmt,
+##     audit notes above. certmgr fixed 2026-06-11: emptied 5 fabricated root CAs
+##     to an empty trust store, case (a) — security surface.) Remaining flagged
+##     names incl.: authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed

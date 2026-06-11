@@ -1539,6 +1539,18 @@ extern "C" fn kernel_main() -> ! {
     // free self_test builds its fixtures via the real API with exact assertions
     // and resets the tables afterward, so it is safe at boot.
     fs::softirq::self_test();
+    // timerq backs /proc/timerq (kernel timer queue: per-timer id/name/type/
+    // state/deadline/interval/fire-count/overruns plus created/fired/cancelled/
+    // overrun totals).  Its init_defaults() previously seeded three fictional
+    // pending timers — "tick" (periodic 10ms), "watchdog" (periodic 1s), and
+    // "rcu_callback" (deferrable 50ms) — claiming timers were scheduled in the
+    // queue that no subsystem actually armed; that phantom data was removed.
+    // Timers are scheduled through the existing add() API and counters advance
+    // only on real fire/fire_expired/cancel calls.  The residue-free self_test
+    // builds its fixtures via the real API with exact assertions (using a far-
+    // future periodic deadline so fire_expired is deterministic) and resets the
+    // queue afterward, so it is safe at boot.
+    fs::timerq::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

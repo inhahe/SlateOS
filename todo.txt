@@ -837,6 +837,23 @@
 ##                    not-found. Wired into boot. /proc/softirq now 76 bytes.
 ##                    NOTE: the softirq dispatch subsystem should call
 ##                    softirq::register_cpu for each online CPU at SMP bringup.)
+##   - timerq.rs     (fixed 2026-06-11; fs/timerq.rs statistics module backing
+##                    /proc/timerq and the `timerq` kshell command; was: three
+##                    fictional pending timers — "tick" (periodic 10ms),
+##                    "watchdog" (periodic 1s), "rcu_callback" (deferrable 50ms) —
+##                    plus total_created 3, claiming timers were scheduled in the
+##                    queue that no subsystem actually armed. Pure statistics
+##                    module with a full add/cancel/fire/fire_expired/cleanup API
+##                    already present (case a) → emptied init_defaults (no timers,
+##                    next_id 1, all totals 0); no new API needed. Rebuilt
+##                    self_test residue-free with exact assertions: monotonic ids,
+##                    one-shot ends Fired, double-cancel error, periodic stays
+##                    Pending with deadline advancing by interval (far-future
+##                    deadline so fire_expired stays deterministic), fire-non-
+##                    pending/unknown-id errors, fire_expired fires only the past-
+##                    deadline one-shot, cleanup retains only Pending/Active, and
+##                    final totals created 4 / fired 3 / cancelled 1 / overruns 0.
+##                    Wired into boot. /proc/timerq now 73 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -850,14 +867,13 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq (just fixed) were eighteen. Next ticks: work through the
+##     + softirq + timerq (just fixed) were nineteen. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     timerq. Remaining flagged names incl.:
-##     timerq,
+##     schedclass. Remaining flagged names incl.:
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,

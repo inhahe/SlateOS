@@ -124,18 +124,27 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the timer-queue state.
+///
+/// Starts with no timers and all created/fired/cancelled/overrun totals at
+/// zero. The `/proc/timerq` generator and the `timerq` kshell command
+/// surface this table (and `list_pending`) as if it reflects the real set
+/// of scheduled kernel timers, so seeding it with phantom timers would be
+/// fabricated procfs data — it would claim timers are pending in the queue
+/// that no subsystem actually scheduled. Timers are scheduled through
+/// [`add`] and the counters advance only through real [`fire`] /
+/// [`fire_expired`] / [`cancel`] calls.
+///
+/// (Previously this seeded three fictional pending timers — "tick"
+/// (periodic 10ms), "watchdog" (periodic 1s), and "rcu_callback"
+/// (deferrable 50ms) — and a total_created of 3.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        timers: alloc::vec![
-            Timer { id: 1, name: String::from("tick"), timer_type: TimerType::Periodic, state: TimerState::Pending, deadline_ns: now + 10_000_000, interval_ns: 10_000_000, fire_count: 0, overruns: 0, cpu: 0, created_ns: now },
-            Timer { id: 2, name: String::from("watchdog"), timer_type: TimerType::Periodic, state: TimerState::Pending, deadline_ns: now + 1_000_000_000, interval_ns: 1_000_000_000, fire_count: 0, overruns: 0, cpu: 0, created_ns: now },
-            Timer { id: 3, name: String::from("rcu_callback"), timer_type: TimerType::Deferrable, state: TimerState::Pending, deadline_ns: now + 50_000_000, interval_ns: 0, fire_count: 0, overruns: 0, cpu: 0, created_ns: now },
-        ],
-        next_id: 4,
-        total_created: 3,
+        timers: Vec::new(),
+        next_id: 1,
+        total_created: 0,
         total_fired: 0,
         total_cancelled: 0,
         total_overruns: 0,
@@ -261,61 +270,76 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("timerq::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live timer queue afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_all().len(), 3);
-    assert_eq!(list_pending().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom timers, all totals zero.
+    assert_eq!(list_all().len(), 0);
+    assert_eq!(list_pending().len(), 0);
+    let (total0, pending0, created0, fired0, cancelled0, overruns0, _) = stats();
+    assert_eq!((total0, pending0, created0, fired0, cancelled0, overruns0), (0, 0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Add timer.
-    let now = crate::hpet::elapsed_ns();
-    let id = add("test_timer", TimerType::OneShot, now + 1000, 0, 0).expect("add");
-    assert!(id >= 4);
-    crate::serial_println!("  [2/8] add: OK");
-
-    // 3: Fire.
-    fire(id).expect("fire");
-    let t = list_all().iter().find(|t| t.id == id).expect("find").clone();
+    // 2: Add + fire a one-shot — ids monotonic from 1; one-shot ends Fired.
+    let id1 = add("oneshot", TimerType::OneShot, 1_000, 0, 0).expect("add");
+    assert_eq!(id1, 1);
+    fire(id1).expect("fire");
+    let t = list_all().into_iter().find(|t| t.id == id1).expect("find");
     assert_eq!(t.state, TimerState::Fired);
     assert_eq!(t.fire_count, 1);
-    crate::serial_println!("  [3/8] fire: OK");
+    crate::serial_println!("  [2/8] add + fire: OK");
 
-    // 4: Cancel.
-    let id2 = add("cancel_me", TimerType::OneShot, now + 999999, 0, 0).expect("add2");
+    // 3: Cancel — state becomes Cancelled; double-cancel errors.
+    let id2 = add("cancel_me", TimerType::OneShot, 999_999, 0, 0).expect("add2");
     cancel(id2).expect("cancel");
-    let t = list_all().iter().find(|t| t.id == id2).expect("find2").clone();
-    assert_eq!(t.state, TimerState::Cancelled);
-    crate::serial_println!("  [4/8] cancel: OK");
+    assert_eq!(list_all().into_iter().find(|t| t.id == id2).expect("f2").state, TimerState::Cancelled);
+    assert!(cancel(id2).is_err()); // already cancelled
+    crate::serial_println!("  [3/8] cancel: OK");
 
-    // 5: Periodic fire.
-    let pid = add("periodic_test", TimerType::Periodic, now, 1000, 0).expect("add3");
+    // 4: Periodic fire — stays Pending and the deadline advances by interval.
+    //    Use a far-future deadline so fire_expired (test 6) never fires it.
+    let pid = add("periodic", TimerType::Periodic, 1_000_000_000_000, 1_000, 0).expect("add3");
     fire(pid).expect("fire_p");
-    let t = list_all().iter().find(|t| t.id == pid).expect("find3").clone();
-    assert_eq!(t.state, TimerState::Pending); // Still pending (periodic).
+    let t = list_all().into_iter().find(|t| t.id == pid).expect("f3");
+    assert_eq!(t.state, TimerState::Pending);
     assert_eq!(t.fire_count, 1);
-    crate::serial_println!("  [5/8] periodic: OK");
+    assert_eq!(t.deadline_ns, 1_000_000_000_000 + 1_000);
+    crate::serial_println!("  [4/8] periodic: OK");
 
-    // 6: Cleanup.
-    let cleaned = cleanup().expect("cleanup");
-    assert!(cleaned >= 2); // Fired + cancelled.
-    crate::serial_println!("  [6/8] cleanup: OK");
+    // 5: Firing a non-pending timer errors; unknown ids are NotFound.
+    assert!(fire(id1).is_err()); // id1 is Fired, not Pending
+    assert!(fire(9999).is_err());
+    assert!(cancel(9999).is_err());
+    crate::serial_println!("  [5/8] invalid + not found: OK");
 
-    // 7: Fire expired.
+    // 6: fire_expired fires only the past-deadline pending one-shot.
+    let id4 = add("expired", TimerType::OneShot, 0, 0, 0).expect("add4");
     let fired = fire_expired().expect("expired");
-    let _ = fired;
-    crate::serial_println!("  [7/8] fire expired: OK");
+    assert_eq!(fired, 1); // only id4 (periodic pid is far-future)
+    assert_eq!(list_all().into_iter().find(|t| t.id == id4).expect("f4").state, TimerState::Fired);
+    crate::serial_println!("  [6/8] fire expired: OK");
 
-    // 8: Stats.
+    // 7: Cleanup retains only Pending/Active timers (removes id1+id2+id4).
+    let cleaned = cleanup().expect("cleanup");
+    assert_eq!(cleaned, 3);
+    assert_eq!(list_all().len(), 1); // only the periodic remains
+    crate::serial_println!("  [7/8] cleanup: OK");
+
+    // 8: Final stats reflect only the real activity above. created: 4 adds;
+    //    fired: id1 + periodic + id4 = 3; cancelled: 1; overruns: 0.
     let (total, pending, created, fired_count, cancelled, overruns, ops) = stats();
-    assert!(total >= 3);
-    let _ = pending;
-    assert!(created >= 6);
-    assert!(fired_count >= 2);
-    assert!(cancelled >= 1);
-    let _ = overruns;
+    assert_eq!(total, 1);
+    assert_eq!(pending, 1);
+    assert_eq!(created, 4);
+    assert_eq!(fired_count, 3);
+    assert_eq!(cancelled, 1);
+    assert_eq!(overruns, 0);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("timerq::self_test() — all 8 tests passed");
 }

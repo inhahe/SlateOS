@@ -1537,6 +1537,31 @@
 ##                    already measure real foreground time via HPET; real usage
 ##                    will accrue when the compositor/window manager reports focus
 ##                    changes (it reads real apps, no fabrication).
+##   - screentime (2026-06-11): AUDITED — LEGITIMATE tracker, NOT fabricating;
+##                    only made self_test residue-free (the usagetime/gamemode
+##                    precedent). User-activity / app-focus / digital-wellbeing
+##                    tracker, surfaced via /proc/screentime (tracked_apps /
+##                    active_secs_today / idle_secs_today / switches_today /
+##                    total_focus_events) and the `screentime` (alias `stime`)
+##                    kshell command. init_defaults seeds only the enabled flag,
+##                    initial Active activity state and default (unlimited) usage
+##                    limits, with NO fabricated app records or daily history (apps
+##                    empty, counters 0), so /proc/screentime honestly reports 0
+##                    tracked apps. The PROBLEM was the self_test: it recorded
+##                    org.editor/org.browser focus events, added 120s active time,
+##                    set a 60-min daily limit and ran reset_daily (which creates a
+##                    daily-history entry), and never cleared STATE, so the kshell
+##                    `screentime test` subcommand (line 31915) would leak those
+##                    fabricated activity records into the live /proc/screentime.
+##                    Rebuilt self_test residue-free (clears STATE at start AND
+##                    restores clean defaults at end) and TIGHTENED the loose `>=`
+##                    assertions to EXACT (app_switches == 3, focus_events == 2,
+##                    final 2 apps / 0 active / 0 switches / 3 focus events). Wired
+##                    into the boot self-test path. /proc/screentime 103 bytes (0
+##                    tracked apps — truthful). No PROPER FIX DEFERRED: app_focus/
+##                    add_active_time already measure real time via HPET; real data
+##                    accrues when the compositor reports focus changes and the
+##                    idle detector feeds add_active_time (reads real apps).
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1556,7 +1581,7 @@
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     screentime. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     startupopt. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1577,9 +1602,10 @@
 ##     gamemode audited 2026-06-11: LEGITIMATE settings module — config defaults
 ##     left alone, only made self_test residue-free. usagetime audited
 ##     2026-06-11: LEGITIMATE tracker — no fabrication, only made self_test
-##     residue-free.)
+##     residue-free. screentime audited 2026-06-11: LEGITIMATE tracker — no
+##     fabrication, only made self_test residue-free + tightened assertions.)
 ##     Remaining flagged
-##     names incl.: screentime,
+##     names incl.:
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
 ##     legitimate config — audit carefully, do not blind-empty. memlayout was

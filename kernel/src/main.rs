@@ -1934,6 +1934,18 @@ extern "C" fn kernel_main() -> ! {
     // usage).  It is now residue-free (clears STATE and restores clean defaults
     // at the end) and wired here so its exact assertions are exercised at boot.
     fs::usagetime::self_test();
+    // Screen-time self-test.  screentime is a user-activity / app-focus TRACKER,
+    // not a fabricator: its init_defaults seeds only the enabled flag, the
+    // initial Active state and default (unlimited) usage limits, with NO
+    // fabricated app records or daily history (apps empty, counters 0), so
+    // /proc/screentime honestly reports 0 tracked apps at boot.  The self_test,
+    // however, records org.editor/org.browser focus events, adds active time,
+    // sets a daily limit and runs reset_daily (which creates a history entry),
+    // and never cleared STATE — so the kshell `screentime test` subcommand would
+    // leak those fabricated activity records into the live /proc/screentime
+    // table.  It is now residue-free (clears STATE and restores clean defaults
+    // at the end) and wired here so its exact assertions are exercised at boot.
+    fs::screentime::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

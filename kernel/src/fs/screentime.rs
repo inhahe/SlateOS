@@ -387,24 +387,34 @@ pub fn stats() -> (usize, u64, u64, u32, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("screentime::self_test() — running tests...");
+    // Start from a clean, freshly-defaulted state so the assertions below are
+    // exact and the tracked apps / daily-history / limit fixtures this test
+    // creates do not leak into the live /proc/screentime table afterward (the
+    // kshell `screentime test` subcommand calls this directly, and
+    // /proc/screentime reports tracked_apps / focus events — leaked fixtures
+    // would look like real activity).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Enabled by default.
+    // 1: Enabled by default (config), with NO fabricated apps — init_defaults
+    //    seeds only the enabled flag, Active state and default (unlimited) limits.
     assert!(is_enabled());
-    crate::serial_println!("  [1/11] enabled by default: OK");
+    assert_eq!(app_usage().len(), 0);
+    let (a0, ac0, id0, sw0, fe0, _) = stats();
+    assert_eq!((a0, ac0, id0, sw0, fe0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/11] clean defaults: OK");
 
-    // 2: Activity state.
+    // 2: Activity state starts Active.
     assert_eq!(activity_state(), ActivityState::Active);
     crate::serial_println!("  [2/11] activity state: OK");
 
-    // 3: App focus.
+    // 3: App focus — two distinct apps tracked.
     app_focus("org.editor", "Text Editor").expect("focus 1");
     app_focus("org.browser", "Web Browser").expect("focus 2");
-    let apps = app_usage();
-    assert_eq!(apps.len(), 2);
+    assert_eq!(app_usage().len(), 2);
     crate::serial_println!("  [3/11] app focus: OK");
 
-    // 4: Focus count.
+    // 4: Focus count — re-focusing the editor bumps its count to 2.
     app_focus("org.editor", "Text Editor").expect("focus 3");
     let apps = app_usage();
     let editor = apps.iter().find(|a| a.app_id == "org.editor").expect("find editor");
@@ -421,36 +431,39 @@ pub fn self_test() {
     assert_eq!(activity_state(), ActivityState::Active);
     crate::serial_println!("  [6/11] mark active: OK");
 
-    // 7: Add active time.
+    // 7: Add active time — 120s accrues to today's active total.
     add_active_time(120).expect("add time");
     let (_, active, _, _, _, _) = stats();
     assert_eq!(active, 120);
     crate::serial_println!("  [7/11] add active time: OK");
 
-    // 8: Today's summary.
+    // 8: Today's summary — 120 active secs and 3 app switches (3 app_focus calls).
     let summary = today_summary();
     assert_eq!(summary.active_secs, 120);
-    assert!(summary.app_switches >= 3);
+    assert_eq!(summary.app_switches, 3);
     crate::serial_println!("  [8/11] today summary: OK");
 
-    // 9: Daily limit.
+    // 9: Daily limit — 60-min limit not exceeded by 120s (= 2 min) of activity.
     set_daily_limit(60).expect("set limit");
-    assert!(!limit_exceeded()); // 120 secs = 2 mins < 60 min limit.
+    assert!(!limit_exceeded());
     crate::serial_println!("  [9/11] daily limit: OK");
 
-    // 10: Reset daily.
+    // 10: Reset daily — today's counters zero out (app entries are kept, with
+    //     their focus_secs/count reset).
     reset_daily().expect("reset");
     let (_, active, _, switches, _, _) = stats();
-    assert_eq!(active, 0);
-    assert_eq!(switches, 0);
+    assert_eq!((active, switches), (0, 0));
     crate::serial_println!("  [10/11] reset daily: OK");
 
-    // 11: Stats.
+    // 11: Stats — still 2 known apps, exactly 3 focus events recorded.
     let (apps, _, _, _, focus_events, ops) = stats();
-    assert_eq!(apps, 2);
-    assert!(focus_events >= 3);
+    assert_eq!((apps, focus_events), (2, 3));
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
 
+    // Restore the clean default state so no test fixtures (tracked apps, daily
+    // history, limit) leak into the live module.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("screentime::self_test() — all 11 tests passed");
 }

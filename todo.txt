@@ -1700,6 +1700,30 @@
 ##                    and its `pub mod irqbalance;` in fs/mod.rs. /proc/irqbalance now
 ##                    90 bytes reflecting the running balancer (single CPU in QEMU →
 ##                    balancer disabled, irq_count 0 — honest). No deferral.
+##   - netmon (2026-06-11): FIXED — fabrication case (a) (full add/close API
+##                    already existed; added the missing record_traffic primitive).
+##                    Active TCP/UDP connection tracker (like ss/netstat), surfaced
+##                    via /proc/netmon and the `netmon` kshell command. init_defaults()
+##                    FABRICATED three fictional connections — sshd LISTEN :22, a
+##                    browser ESTABLISHED to 93.184.216.34:443 with 4096/65536 bytes,
+##                    resolved to 8.8.8.8:53 with 512/2048 bytes — plus invented
+##                    totals (total_created 3, total_bytes_sent 4608, total_bytes_recv
+##                    67584). LIVE fabrication: the kshell `netmon` show/stats
+##                    subcommands call init_defaults(), so running `netmon` displayed
+##                    those phantom sockets. Fixed: init_defaults() now seeds an EMPTY
+##                    table; added record_traffic(id, sent, recv) (the byte counters
+##                    were previously dead — only ever set by the fabricated seed —
+##                    so a real net stack now has a wiring point). Rebuilt self_test
+##                    residue-free (clears STATE at start AND end) with EXACT
+##                    assertions (empty init, add listen→id 1, add TCP+UDP → 3 conns,
+##                    record_traffic 4096/65536 exact, filters by proto/state/pid,
+##                    close → 2 conns, double-close errors, final 2 active / 3 created
+##                    / 1 closed / 4096 sent / 65536 recv). Wired into the boot
+##                    self-test path. /proc/netmon 126 bytes (empty connection table —
+##                    truthful). PROPER FIX DEFERRED: the TCP/UDP stack must call
+##                    add_connection on socket open, record_traffic as bytes flow, and
+##                    close_connection on teardown — wire when socket lifecycle hooks
+##                    exist.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1713,7 +1737,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance (just fixed) were forty-six. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon (just fixed) were forty-seven. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

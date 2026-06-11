@@ -141,39 +141,31 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** connection table.
+///
+/// Seeds NO connections and zero totals.  Real connections are tracked through
+/// [`add_connection`] / [`close_connection`] / [`record_traffic`] as the network
+/// stack opens and closes sockets; until then `/proc/netmon` and the `netmon`
+/// kshell command report an empty table rather than fabricated connections —
+/// the kernel's hard "never invent data in procfs" rule.
+///
+/// (Previously this seeded three fictional connections — sshd LISTEN on :22, a
+/// browser ESTABLISHED to 93.184.216.34:443 with 4096/65536 bytes, and resolved
+/// to 8.8.8.8:53 with 512/2048 bytes — plus invented aggregate totals
+/// (total_created 3, total_bytes_sent 4608, total_bytes_recv 67584), which
+/// `/proc/netmon` and the `netmon` command then displayed as if they were real
+/// active connections.  The self-test now builds its own fixtures explicitly via
+/// the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        connections: alloc::vec![
-            Connection {
-                id: 1, protocol: Protocol::Tcp, state: ConnState::Listen,
-                local_addr: String::from("0.0.0.0"), local_port: 22,
-                remote_addr: String::from("0.0.0.0"), remote_port: 0,
-                pid: 100, process_name: String::from("sshd"),
-                bytes_sent: 0, bytes_recv: 0, created_ns: now,
-            },
-            Connection {
-                id: 2, protocol: Protocol::Tcp, state: ConnState::Established,
-                local_addr: String::from("10.0.2.15"), local_port: 45678,
-                remote_addr: String::from("93.184.216.34"), remote_port: 443,
-                pid: 200, process_name: String::from("browser"),
-                bytes_sent: 4096, bytes_recv: 65536, created_ns: now,
-            },
-            Connection {
-                id: 3, protocol: Protocol::Udp, state: ConnState::Established,
-                local_addr: String::from("10.0.2.15"), local_port: 53000,
-                remote_addr: String::from("8.8.8.8"), remote_port: 53,
-                pid: 50, process_name: String::from("resolved"),
-                bytes_sent: 512, bytes_recv: 2048, created_ns: now,
-            },
-        ],
-        next_id: 4,
-        total_created: 3,
+        connections: Vec::new(),
+        next_id: 1,
+        total_created: 0,
         total_closed: 0,
-        total_bytes_sent: 4608,
-        total_bytes_recv: 67584,
+        total_bytes_sent: 0,
+        total_bytes_recv: 0,
         ops: 0,
     });
 }
@@ -210,6 +202,23 @@ pub fn add_connection(proto: Protocol, state: ConnState,
         });
         st.total_created += 1;
         Ok(id)
+    })
+}
+
+/// Record traffic on a connection.
+///
+/// Called by the network stack as bytes flow on a tracked connection; updates
+/// both the per-connection counters and the aggregate totals so `/proc/netmon`
+/// reflects real throughput rather than seeded values.
+pub fn record_traffic(id: u32, sent: u64, recv: u64) -> KernelResult<()> {
+    with_state(|state| {
+        let c = state.connections.iter_mut().find(|c| c.id == id)
+            .ok_or(KernelError::NotFound)?;
+        c.bytes_sent += sent;
+        c.bytes_recv += recv;
+        state.total_bytes_sent += sent;
+        state.total_bytes_recv += recv;
+        Ok(())
     })
 }
 
@@ -261,57 +270,69 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("netmon::self_test() — running tests...");
+    // Residue-free: begin from a clean EMPTY table and build every fixture via
+    // the real API so the assertions are exact and no test connections leak into
+    // the live /proc/netmon table (the kshell `netmon test` subcommand calls
+    // this directly).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default connections.
+    // 1: Empty after init — no fabricated connections.
+    assert_eq!(list_connections().len(), 0);
+    let (a0, c0, cl0, s0, r0, _o0) = stats();
+    assert_eq!((a0, c0, cl0, s0, r0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
+
+    // 2: Add a listening TCP connection (ids start at 1).
+    let listen_id = add_connection(Protocol::Tcp, ConnState::Listen,
+        "0.0.0.0", 22, "0.0.0.0", 0, 100, "sshd").expect("add listen");
+    assert_eq!(listen_id, 1);
+    assert_eq!(list_connections().len(), 1);
+    crate::serial_println!("  [2/8] add: OK");
+
+    // 3: Add an established TCP and a UDP connection for the filters below.
+    let tcp_id = add_connection(Protocol::Tcp, ConnState::Established,
+        "10.0.2.15", 45678, "1.2.3.4", 443, 200, "browser").expect("add tcp");
+    let _udp_id = add_connection(Protocol::Udp, ConnState::Established,
+        "10.0.2.15", 53000, "8.8.8.8", 53, 50, "resolved").expect("add udp");
     assert_eq!(list_connections().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    crate::serial_println!("  [3/8] add more: OK");
 
-    // 2: Get connection.
-    let conn = get_connection(1).expect("get");
-    assert_eq!(conn.protocol, Protocol::Tcp);
-    assert_eq!(conn.state, ConnState::Listen);
-    assert_eq!(conn.local_port, 22);
-    crate::serial_println!("  [2/8] get: OK");
+    // 4: Get connection — exact fields.
+    let conn = get_connection(listen_id).expect("get");
+    assert_eq!((conn.protocol, conn.state, conn.local_port),
+               (Protocol::Tcp, ConnState::Listen, 22));
+    crate::serial_println!("  [4/8] get: OK");
 
-    // 3: Add connection.
-    let id = add_connection(Protocol::Tcp, ConnState::Established,
-        "10.0.2.15", 12345, "1.2.3.4", 80, 300, "curl").expect("add");
-    assert_eq!(list_connections().len(), 4);
-    crate::serial_println!("  [3/8] add: OK");
+    // 5: Record traffic (exact, from zero) on the established TCP connection.
+    record_traffic(tcp_id, 4096, 65536).expect("traffic");
+    let c = get_connection(tcp_id).expect("get tcp");
+    assert_eq!((c.bytes_sent, c.bytes_recv), (4096, 65536));
+    crate::serial_println!("  [5/8] traffic: OK");
 
-    // 4: Per-process.
-    let proc_conns = per_process(200);
-    assert_eq!(proc_conns.len(), 1);
-    assert_eq!(proc_conns[0].process_name, "browser");
-    crate::serial_println!("  [4/8] per_process: OK");
+    // 6: Filters reflect exact membership.
+    assert_eq!(by_protocol(Protocol::Tcp).len(), 2);
+    assert_eq!(by_protocol(Protocol::Udp).len(), 1);
+    assert_eq!(by_state(ConnState::Listen).len(), 1);
+    assert_eq!(per_process(200).len(), 1);
+    crate::serial_println!("  [6/8] filters: OK");
 
-    // 5: By protocol.
-    let tcp = by_protocol(Protocol::Tcp);
-    assert!(tcp.len() >= 3);
-    let udp = by_protocol(Protocol::Udp);
-    assert_eq!(udp.len(), 1);
-    crate::serial_println!("  [5/8] by_protocol: OK");
-
-    // 6: By state.
-    let listening = by_state(ConnState::Listen);
-    assert_eq!(listening.len(), 1);
-    crate::serial_println!("  [6/8] by_state: OK");
-
-    // 7: Close.
-    close_connection(id).expect("close");
-    assert_eq!(list_connections().len(), 3);
+    // 7: Close the listening connection; double-close fails.
+    close_connection(listen_id).expect("close");
+    assert_eq!(list_connections().len(), 2);
     assert!(close_connection(999).is_err());
     crate::serial_println!("  [7/8] close: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (active, created, closed, sent, recv, ops) = stats();
-    assert_eq!(active, 3);
-    assert!(created >= 4);
-    assert!(closed >= 1);
-    let _ = (sent, recv);
+    assert_eq!((active, created, closed, sent, recv), (2, 3, 1, 4096, 65536));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/netmon table with its fixtures.  Reset to the uninitialised state so
+    // production reads report an empty table until the network stack wires real
+    // connection tracking.
+    *STATE.lock() = None;
     crate::serial_println!("netmon::self_test() — all 8 tests passed");
 }

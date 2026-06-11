@@ -2003,6 +2003,17 @@ extern "C" fn kernel_main() -> ! {
     // assertions against a synthetic map, then restores the real map so no test
     // fixtures leak into the live /proc/memlayout table.
     fs::memlayout::self_test();
+    // netmon backs /proc/netmon and the `netmon` kshell command.  Its
+    // init_defaults() previously seeded three FABRICATED connections (sshd
+    // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking
+    // byte counts, resolved to 8.8.8.8:53) plus invented aggregate totals, which
+    // the kshell command surfaced as if they were live sockets.  It now seeds an
+    // EMPTY table (connections are tracked via add_connection / record_traffic /
+    // close_connection once the network stack is wired).  This residue-free
+    // self_test builds its own fixtures via the real API with exact assertions
+    // and resets to empty afterward so no test connections leak into
+    // /proc/netmon.
+    fs::netmon::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

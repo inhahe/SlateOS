@@ -10762,6 +10762,11 @@ enum ProcPath<'a> {
     PidFile(u64, &'a str),
     /// A per-PID symbolic link (e.g. "1/cwd"). Resolved via `readlink`.
     PidLink(u64, &'a str),
+    /// The magic `/proc/self` symlink itself (the bare path, no trailing
+    /// component).  Linux makes this a symlink whose target is the caller's
+    /// pid; `readlink` resolves it.  A path *under* self (e.g. `self/status`)
+    /// is resolved to the current pid's file/link instead, not this variant.
+    SelfLink,
     NotFound,
 }
 
@@ -10783,6 +10788,15 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
     // Try root-level file first.
     if rest.is_empty() && ROOT_FILES.contains(&first) {
         return ProcPath::RootFile(first);
+    }
+
+    // The bare `/proc/self` path is a symlink, not a directory: Linux's
+    // readlink("/proc/self") yields the caller's pid.  Classify it as
+    // SelfLink so stat reports a symlink and readlink resolves the pid.
+    // A path *under* self (self/<file>) still resolves to the current
+    // pid's file via the alias below.
+    if first == "self" && rest.is_empty() {
+        return ProcPath::SelfLink;
     }
 
     // "self" is a magic alias for the current task's PID.
@@ -10882,7 +10896,8 @@ impl FileSystem for ProcFs {
                 }
                 Ok(entries)
             }
-            ProcPath::RootFile(_) | ProcPath::PidFile(_, _) | ProcPath::PidLink(_, _) => {
+            ProcPath::RootFile(_) | ProcPath::PidFile(_, _)
+            | ProcPath::PidLink(_, _) | ProcPath::SelfLink => {
                 Err(KernelError::NotADirectory)
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
@@ -10906,7 +10921,9 @@ impl FileSystem for ProcFs {
             // Reading a symlink's bytes directly is invalid; the VFS follows
             // it via readlink instead.  Mirrors Linux read() → EINVAL on a
             // symlink opened without O_PATH.
-            ProcPath::PidLink(_, _) => Err(KernelError::InvalidArgument),
+            ProcPath::PidLink(_, _) | ProcPath::SelfLink => {
+                Err(KernelError::InvalidArgument)
+            }
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -10959,6 +10976,11 @@ impl FileSystem for ProcFs {
                     size: 0,
                 })
             }
+            ProcPath::SelfLink => Ok(DirEntry {
+                name: String::from("self"),
+                entry_type: EntryType::Symlink,
+                size: 0,
+            }),
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -11002,6 +11024,9 @@ impl FileSystem for ProcFs {
                 String::from_utf8(exe).map_err(|_| KernelError::InvalidArgument)
             }
             ProcPath::PidLink(_, _) => Err(KernelError::NotFound),
+            // `/proc/self` → the caller's pid, as a relative target (Linux
+            // returns the bare pid number, e.g. "7", resolved against /proc).
+            ProcPath::SelfLink => Ok(format!("{}", crate::sched::current_task_id())),
             _ => Err(KernelError::InvalidArgument),
         }
     }
@@ -11232,6 +11257,37 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   stat /999999: NotFound OK");
+
+    // --- /proc/self magic symlink ---
+    // The bare /proc/self must be a SYMLINK (not a directory), readlink must
+    // resolve to the caller's pid, reading its bytes directly must be
+    // rejected, and a path *under* it (self/status) must resolve to the
+    // current task's file — matching Linux's /proc/self semantics.
+    let self_stat = fs.stat("/self")?;
+    if self_stat.entry_type != EntryType::Symlink {
+        serial_println!(
+            "[procfs]   FAIL: /self is {:?}, expected Symlink", self_stat.entry_type
+        );
+        return Err(KernelError::InternalError);
+    }
+    let self_target = fs.readlink("/self")?;
+    if self_target.parse::<u64>() != Ok(current_tid) {
+        serial_println!(
+            "[procfs]   FAIL: /self -> {:?}, expected pid {}", self_target, current_tid
+        );
+        return Err(KernelError::InternalError);
+    }
+    if fs.read_file("/self") != Err(KernelError::InvalidArgument) {
+        serial_println!("[procfs]   FAIL: read_file(/self) should be InvalidArgument");
+        return Err(KernelError::InternalError);
+    }
+    // self/status must resolve to the live current task's status file.
+    let self_status = fs.read_file("/self/status")?;
+    if self_status.is_empty() {
+        serial_println!("[procfs]   FAIL: /self/status returned empty");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   /self -> {:?} (symlink) OK", self_target);
 
     // --- New per-PID files: comm, statm, limits ---
 

@@ -2237,6 +2237,19 @@
 ##     `pkg` content-addressed store's available-package list or a package
 ##     repository index — so /proc/appstore reflects genuinely installable apps
 ##     with real (or absent, never fabricated) ratings/download metrics.
+##     kernelbuild fixed 2026-06-11: case (c) counter-zeroing. init_defaults
+##     seeds 6 real OS components (kernel/drivers/compositor/shell/init/
+##     bootloader) with legitimate menuconfig-style build params — that part is
+##     real config and stays. But every component was seeded with
+##     `build_count: 1` while `last_build_ns: 0` (never built this session),
+##     and kshell (kshell.rs:24125) surfaces it as "Builds: 1" — a fabricated
+##     claim each component had been built once. Zeroed build_count to 0 on all
+##     6 (now consistent with last_build_ns: 0 and honestly "Builds: 0"). Kept
+##     status: UpToDate (a real derived fact: current_source_hash ==
+##     last_source_hash). self_test already residue-free (clear_all at start +
+##     end) and its build_count == 1 / == 2 assertions are on the API-built
+##     test-kern fixture, not the seeded components, so unaffected. boot-test
+##     PASSED (27s). procfs gen_kernelbuild does not surface build_count.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

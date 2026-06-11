@@ -504,6 +504,10 @@ pub fn all_build_logs() -> Vec<BuildLog> {
 
 /// Initialise with default OS components.
 pub fn init_defaults() {
+    // Seed the real OS component taxonomy and its legitimate build-parameter
+    // configuration. Per-component `build_count` is 0 and `last_build_ns` is 0:
+    // these components have never been built in this session, so any non-zero
+    // build_count would be a fabricated claim (kshell surfaces it as "Builds: N").
     let mut state = STATE.lock();
 
     let hash_kernel = simple_hash("/src/kernel");
@@ -568,7 +572,7 @@ pub fn init_defaults() {
             current_source_hash: hash_kernel,
             last_build_ns: 0,
             last_build_duration_ms: 0,
-            build_count: 1,
+            build_count: 0,
             system_critical: true,
             dependencies: Vec::new(),
             auto_rebuild: false,
@@ -595,7 +599,7 @@ pub fn init_defaults() {
             current_source_hash: hash_drivers,
             last_build_ns: 0,
             last_build_duration_ms: 0,
-            build_count: 1,
+            build_count: 0,
             system_critical: false,
             dependencies: vec![String::from("kernel")],
             auto_rebuild: false,
@@ -626,7 +630,7 @@ pub fn init_defaults() {
             current_source_hash: hash_compositor,
             last_build_ns: 0,
             last_build_duration_ms: 0,
-            build_count: 1,
+            build_count: 0,
             system_critical: true,
             dependencies: vec![String::from("kernel")],
             auto_rebuild: false,
@@ -644,7 +648,7 @@ pub fn init_defaults() {
             current_source_hash: hash_shell,
             last_build_ns: 0,
             last_build_duration_ms: 0,
-            build_count: 1,
+            build_count: 0,
             system_critical: false,
             dependencies: Vec::new(),
             auto_rebuild: false,
@@ -662,7 +666,7 @@ pub fn init_defaults() {
             current_source_hash: hash_init,
             last_build_ns: 0,
             last_build_duration_ms: 0,
-            build_count: 1,
+            build_count: 0,
             system_critical: true,
             dependencies: vec![String::from("kernel")],
             auto_rebuild: false,
@@ -689,7 +693,7 @@ pub fn init_defaults() {
             current_source_hash: hash_boot,
             last_build_ns: 0,
             last_build_duration_ms: 0,
-            build_count: 1,
+            build_count: 0,
             system_critical: true,
             dependencies: Vec::new(),
             auto_rebuild: false,

@@ -2290,7 +2290,9 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
 /// start-end perms offset dev inode pathname
 /// ```
 ///
-/// - `start`/`end`: lowercase hex, no `0x` prefix (Linux convention).
+/// - `start`/`end`: lowercase hex, no `0x` prefix, zero-padded to a minimum
+///   of 8 digits (Linux's `%08lx` / `seq_put_hex_ll(.., 8)`); addresses wider
+///   than 32 bits print their natural width.
 /// - `perms`: exactly four chars `r`/`w`/`x`/(`p`|`s`).  We map `r` from
 ///   PRESENT (a mapped page is readable), `w` from WRITABLE, `x` from the
 ///   absence of NO_EXECUTE.  All our VMAs are private mappings, so the
@@ -2323,9 +2325,13 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
             VmaKind::Anonymous => "",
         };
         // `write!` into a String is infallible; the Result is ignored.
+        // Linux zero-pads start/end to a minimum of 8 hex digits
+        // (fs/proc/task_mmu.c show_vma_header_prefix -> seq_put_hex_ll(.., 8));
+        // addresses wider than 32 bits print their natural width.  Match that
+        // with `{:08x}` so sub-4 GiB addresses align byte-for-byte with Linux.
         let _ = writeln!(
             text,
-            "{:x}-{:x} {r}{w}{x}p 00000000 00:00 0 {pathname}",
+            "{:08x}-{:08x} {r}{w}{x}p 00000000 00:00 0 {pathname}",
             vma.start, vma.end
         );
     }
@@ -12619,15 +12625,27 @@ pub fn self_test() -> KernelResult<()> {
                 kind: VmaKind::Guard,
                 flags: PageFlags::empty(),
             },
+            // Large (>32-bit) address: must print natural width, NOT padded
+            // beyond its own digits — verifies the {:08x} minimum-width does
+            // not truncate or over-pad wide addresses (executable text page).
+            Vma {
+                start: 0x5555_5555_0000,
+                end: 0x5555_5556_0000,
+                kind: VmaKind::Anonymous,
+                flags: PageFlags::PRESENT,
+            },
         ];
         let rendered = render_maps(&vmas);
         let maps_text = core::str::from_utf8(&rendered)
             .map_err(|_| KernelError::InternalError)?;
         let lines: Vec<&str> = maps_text.lines().collect();
+        // Start/end zero-padded to a minimum of 8 hex digits, matching Linux's
+        // %08lx; the wide address keeps its natural 12-digit width.
         let expected = [
-            "10000-20000 rw-p 00000000 00:00 0 ",
-            "100000-140000 rw-p 00000000 00:00 0 [stack]",
-            "c0000-100000 ---p 00000000 00:00 0 [guard]",
+            "00010000-00020000 rw-p 00000000 00:00 0 ",
+            "00100000-00140000 rw-p 00000000 00:00 0 [stack]",
+            "000c0000-00100000 ---p 00000000 00:00 0 [guard]",
+            "555555550000-555555560000 r-xp 00000000 00:00 0 ",
         ];
         if lines.len() != expected.len() {
             serial_println!(

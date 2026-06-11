@@ -2188,6 +2188,36 @@
 ##     already residue-free: it both starts AND ends with clear_all(), leaving the
 ##     pristine empty default state. Verified by reading the module + kshell
 ##     dispatch (kshell.rs:24043-24058). No edit, no commit beyond this note.
+##     sysinfo FIXED 2026-06-11: a MAJOR fabricator — the system-information
+##     explorer (design.txt line 886), whose entire purpose is to report the
+##     user's ACTUAL hardware, was inventing the whole machine spec in
+##     init_defaults() and surfacing it via /proc/sysinfo + the `sysinfo` kshell
+##     command + Settings>System Info as if real: a "Generic x86_64 Processor"
+##     hard-coded to 8 cores/16 threads, 3.6/5.0 GHz, 32/32/256/16384 KiB caches
+##     and a fixed feature list; 16 GiB / 4 GiB-used DDR5-5600 across "2 DIMMs";
+##     two "Generic NVMe SSD" partitions (/dev/nvme0n1p1 at /, p2 at /home); a
+##     "Generic GPU" 8 GiB VRAM 1920x1080 144Hz; eth0 at 192.168.1.100 with a fake
+##     MAC + a wlan0. FIXED via READ-THROUGH (proper fix, mirroring sysprofiler):
+##     CPU now from live CPUID/topology (crate::cpu vendor/brand/family-model-
+##     stepping/cache_topology/features + cpu_topology::num_physical_cores +
+##     smp::cpu_count), Memory from the real buddy allocator (mm::frame::stats →
+##     total/free/used, page size from FRAME_SIZE). Fields with no reliable source
+##     are left zero/empty rather than fabricated: CPU base/boost freq (CPUID 0x16
+##     absent under TCG), swap, DIMM count, mem_type (no SMBIOS parser). OS identity
+##     (name/version/codename/arch/website) kept as legitimate build config (akin to
+##     /etc/os-release). kernel_params kept as TRUE kernel facts (page_size from
+##     FRAME_SIZE, real PriorityRoundRobin/Full/Buddy/Never models, debug_assertions
+##     from cfg!). Storage/GPU/Network EMPTIED (case a). self_test rewritten to
+##     assert read-through INVARIANTS (threads>=1, used==total-available, no
+##     fabricated freq/swap/mem_type, storage/gpu/net empty) instead of the old
+##     8c/16t/2-drive/1-gpu/2-nic magic numbers, residue-free (ends clear_all()).
+##     Removed now-unused `use alloc::vec`. makes sixty-two.
+##     DEFERRED PROPER FIX: Storage/GPU/Network sections stay empty until real
+##     enumerators exist — read storage from the mount table / block layer, GPUs
+##     from PCI display-class devices (pci::scan_bus0 + pciids), NICs from the net
+##     stack interface list. Also CPU base/boost freq + RAM SMBIOS (DIMM/type/speed)
+##     once those detectors are wired. Until then the panel honestly shows only
+##     CPU + memory + OS + kernel params, with empty storage/GPU/net.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

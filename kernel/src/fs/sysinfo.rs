@@ -29,7 +29,6 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::vec;
 use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
@@ -424,6 +423,118 @@ fn format_bytes(bytes: u64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Initialise with simulated hardware information.
+/// Convert a fixed CPUID byte buffer (vendor / brand string) to a trimmed
+/// UTF-8 `String`, stopping at the first NUL.  Returns an empty string when the
+/// buffer is not valid UTF-8 (never fabricates a placeholder).
+fn cpuid_str(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let s = bytes
+        .get(..end)
+        .and_then(|sl| core::str::from_utf8(sl).ok())
+        .unwrap_or("");
+    String::from(s.trim())
+}
+
+/// Build [`CpuInfo`] from **live** CPUID + topology detection
+/// (`crate::cpu`, `crate::cpu_topology`, `crate::smp`).
+///
+/// Fields with no reliable detection source (base/boost frequency — CPUID
+/// leaf 0x16 is absent under TCG and many hypervisors) are left ZERO rather
+/// than fabricated.  The feature list contains only flags the detector
+/// actually observed.
+fn detect_cpu() -> CpuInfo {
+    let vendor = cpuid_str(&crate::cpu::vendor_string());
+    let model = cpuid_str(&crate::cpu::brand_string());
+    let (family, model_num, stepping) = crate::cpu::cpu_family_model_stepping();
+    let cores = u32::try_from(crate::cpu_topology::num_physical_cores()).unwrap_or(0);
+    let threads = u32::try_from(crate::smp::cpu_count().max(1)).unwrap_or(1);
+
+    // Map the detected cache topology onto the L1d/L1i/L2/L3 slots (bytes → KiB).
+    let (mut l1d, mut l1i, mut l2, mut l3) = (0u32, 0u32, 0u32, 0u32);
+    for c in crate::cpu::cache_topology() {
+        let kib = c.size / 1024;
+        match (c.level, c.cache_type) {
+            (1, 1) => l1d = kib,            // L1 data.
+            (1, 2) => l1i = kib,            // L1 instruction.
+            (1, 3) => { l1d = kib; l1i = kib; } // Unified L1 (rare).
+            (2, _) => l2 = kib,
+            (3, _) => l3 = kib,
+            _ => {}
+        }
+    }
+
+    // Surface only the ISA features the detector actually saw.
+    let mut features = Vec::new();
+    if let Some(f) = crate::cpu::features() {
+        let flags: &[(bool, &str)] = &[
+            (f.sse3, "SSE3"), (f.ssse3, "SSSE3"), (f.sse4_1, "SSE4.1"),
+            (f.sse4_2, "SSE4.2"), (f.popcnt, "POPCNT"), (f.avx, "AVX"),
+            (f.avx2, "AVX2"), (f.avx512f, "AVX-512F"), (f.aes_ni, "AES-NI"),
+            (f.sha, "SHA"), (f.rdrand, "RDRAND"), (f.rdseed, "RDSEED"),
+            (f.rdtscp, "RDTSCP"), (f.smep, "SMEP"), (f.smap, "SMAP"),
+        ];
+        for &(present, name) in flags {
+            if present { features.push(String::from(name)); }
+        }
+    }
+
+    CpuInfo {
+        model, vendor, cores, threads,
+        base_freq_mhz: 0,
+        max_freq_mhz: 0,
+        l1d_cache_kib: l1d, l1i_cache_kib: l1i, l2_cache_kib: l2, l3_cache_kib: l3,
+        features, family, model_num, stepping,
+    }
+}
+
+/// Build [`MemoryInfo`] from the **real** buddy-allocator statistics
+/// (`crate::mm::frame::stats`).  Swap and DIMM/SMBIOS details are left zero/empty
+/// because no swap subsystem or SMBIOS parser is wired for inventory yet — they
+/// are NOT fabricated.
+fn detect_memory() -> MemoryInfo {
+    let (total, available) = match crate::mm::frame::stats() {
+        Some(s) => {
+            let total = (s.total_frames as u64)
+                .saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
+            (total, s.free_bytes as u64)
+        }
+        None => (0, 0),
+    };
+    MemoryInfo {
+        total_bytes: total,
+        used_bytes: total.saturating_sub(available),
+        available_bytes: available,
+        swap_total: 0,
+        swap_used: 0,
+        dimm_count: 0,
+        mem_type: String::new(),
+        speed_mts: 0,
+    }
+}
+
+/// Populate the system-info snapshot with **real** boot-time facts.
+///
+/// - **OS** identity (name/version/codename/arch/website) is the OS build's own
+///   declared identity — legitimate configuration, analogous to `/etc/os-release`.
+/// - **CPU** and **Memory** are read through to live detection ([`detect_cpu`],
+///   [`detect_memory`]) — no invented core counts, caches, or RAM totals.
+/// - **Kernel params** are true kernel facts (page size from
+///   `frame::FRAME_SIZE`, the real scheduler / allocator / overcommit models,
+///   `debug_assertions` from the actual build profile).
+/// - **Storage / GPU / Network** are left EMPTY rather than fabricated; they
+///   will be filled in once the block layer, GPU driver, and NIC stack expose
+///   real enumeration (see DEFERRED PROPER FIX in todo.txt).
+///
+/// (Previously this seeded an entirely FABRICATED machine spec that
+/// `/proc/sysinfo` and the `sysinfo` kshell command surfaced as the real
+/// hardware: a "Generic x86_64 Processor" with a hard-coded 8 cores / 16
+/// threads, 3.6/5.0 GHz, 32/32/256/16384 KiB caches and a fixed feature list;
+/// 16 GiB / 4 GiB-used DDR5-5600 across "2 DIMMs"; two "Generic NVMe SSD"
+/// partitions (`/dev/nvme0n1p1` at `/`, `p2` at `/home`); a "Generic GPU" with
+/// 8 GiB VRAM at 1920x1080 144 Hz; and `eth0` at `192.168.1.100` with a fake
+/// MAC plus a `wlan0`.  All of it was fiction — a direct violation of the
+/// kernel's "never invent data in procfs" rule for a panel whose entire purpose
+/// is to report the user's actual hardware.)
 pub fn init_defaults() {
     let mut state = STATE.lock();
 
@@ -436,113 +547,29 @@ pub fn init_defaults() {
         arch: String::from("x86_64"),
         kernel_version: String::from("1.0.0"),
         website: String::from("https://mintos.dev"),
-        uptime_secs: 0,
+        uptime_secs: crate::hpet::elapsed_ns() / 1_000_000_000,
         boot_ns: crate::hpet::elapsed_ns(),
     };
 
-    state.cpu = CpuInfo {
-        model: String::from("Generic x86_64 Processor"),
-        vendor: String::from("GenuineIntel"),
-        cores: 8,
-        threads: 16,
-        base_freq_mhz: 3600,
-        max_freq_mhz: 5000,
-        l1d_cache_kib: 32,
-        l1i_cache_kib: 32,
-        l2_cache_kib: 256,
-        l3_cache_kib: 16384,
-        features: vec![
-            String::from("SSE4.2"),
-            String::from("AVX2"),
-            String::from("AES-NI"),
-            String::from("SHA"),
-            String::from("BMI2"),
-            String::from("FMA"),
-        ],
-        family: 6,
-        model_num: 151,
-        stepping: 2,
-    };
+    state.cpu = detect_cpu();
+    state.memory = detect_memory();
 
-    state.memory = MemoryInfo {
-        total_bytes: 16 * 1024 * 1024 * 1024, // 16 GiB
-        used_bytes: 4 * 1024 * 1024 * 1024,
-        available_bytes: 12 * 1024 * 1024 * 1024,
-        swap_total: 4 * 1024 * 1024 * 1024,
-        swap_used: 0,
-        dimm_count: 2,
-        mem_type: String::from("DDR5"),
-        speed_mts: 5600,
-    };
-
-    state.storage = vec![
-        StorageDevice {
-            device: String::from("/dev/nvme0n1p1"),
-            model: String::from("Generic NVMe SSD"),
-            capacity_bytes: 512 * 1024 * 1024 * 1024,
-            free_bytes: 350 * 1024 * 1024 * 1024,
-            fs_type: String::from("ext4"),
-            mount_point: String::from("/"),
-            network: false,
-            removable: false,
-            interface: String::from("NVMe"),
-        },
-        StorageDevice {
-            device: String::from("/dev/nvme0n1p2"),
-            model: String::from("Generic NVMe SSD"),
-            capacity_bytes: 512 * 1024 * 1024 * 1024,
-            free_bytes: 480 * 1024 * 1024 * 1024,
-            fs_type: String::from("ext4"),
-            mount_point: String::from("/home"),
-            network: false,
-            removable: false,
-            interface: String::from("NVMe"),
-        },
-    ];
-
-    state.gpus = vec![
-        GpuInfo {
-            name: String::from("Generic GPU"),
-            vendor: String::from("Generic"),
-            vram_mib: 8192,
-            driver_version: String::from("1.0.0"),
-            api_support: vec![
-                String::from("Vulkan 1.3"),
-                String::from("OpenGL 4.6"),
-            ],
-            resolution: String::from("1920x1080"),
-            refresh_hz: 144,
-        },
-    ];
-
-    state.net_ifaces = vec![
-        NetIfaceInfo {
-            name: String::from("eth0"),
-            iface_type: String::from("Ethernet"),
-            ip_address: String::from("192.168.1.100"),
-            mac_address: String::from("52:54:00:12:34:56"),
-            speed_mbps: 1000,
-            connected: true,
-        },
-        NetIfaceInfo {
-            name: String::from("wlan0"),
-            iface_type: String::from("Wi-Fi"),
-            ip_address: String::new(),
-            mac_address: String::from("52:54:00:ab:cd:ef"),
-            speed_mbps: 0,
-            connected: false,
-        },
-    ];
+    // Storage / GPU / Network inventory is not yet wired — leave empty rather
+    // than fabricate. (DEFERRED PROPER FIX: read storage from the mount table /
+    // block layer, GPUs from PCI display-class devices, NICs from the net stack.)
+    state.storage = Vec::new();
+    state.gpus = Vec::new();
+    state.net_ifaces = Vec::new();
 
     state.kernel_params = KernelParams {
-        page_size: 16384,
+        page_size: crate::mm::frame::FRAME_SIZE as u32,
         sched_model: String::from("PriorityRoundRobin"),
         preempt_model: String::from("Full"),
         alloc_model: String::from("Buddy"),
         overcommit_mode: String::from("Never"),
         max_cpus: 256,
         root_fs: String::from("ext4"),
-        debug_assertions: false,
+        debug_assertions: cfg!(debug_assertions),
     };
 
     state.changes += 1;
@@ -597,58 +624,72 @@ pub fn self_test() -> KernelResult<()> {
 
     clear_all();
 
-    // Test 1: init_defaults.
+    // Test 1: init_defaults — OS identity is legitimate build config.
     serial_println!("sysinfo::self_test 1: defaults");
     init_defaults();
     let os = os_info();
     assert_eq!(os.name, "MintOS");
     assert_eq!(os.arch, "x86_64");
 
-    // Test 2: CPU info.
+    // Test 2: CPU info — READ-THROUGH from live CPUID/topology. Core/thread
+    // counts and the feature list are hardware-dependent (and may be empty under
+    // a minimal hypervisor CPU), so assert INVARIANTS, not the old fabricated
+    // 8-core/16-thread magic numbers: at least one logical CPU, and no invented
+    // base/boost frequency.
     serial_println!("sysinfo::self_test 2: CPU");
     let cpu = cpu_info();
-    assert_eq!(cpu.cores, 8);
-    assert_eq!(cpu.threads, 16);
-    assert!(!cpu.features.is_empty());
+    assert!(cpu.threads >= 1);
+    assert!(cpu.cores <= cpu.threads || cpu.cores == 0);
+    assert_eq!(cpu.base_freq_mhz, 0); // No reliable source — not fabricated.
+    assert_eq!(cpu.max_freq_mhz, 0);
 
-    // Test 3: memory info.
+    // Test 3: memory info — READ-THROUGH from the real buddy allocator.
     serial_println!("sysinfo::self_test 3: memory");
     let mem = memory_info();
-    assert!(mem.total_bytes > 0);
+    assert!(mem.total_bytes > 0); // Frame allocator is up by boot.
     assert!(mem.available_bytes <= mem.total_bytes);
+    assert_eq!(mem.used_bytes, mem.total_bytes - mem.available_bytes);
+    assert_eq!(mem.swap_total, 0); // No swap inventory — not fabricated.
+    assert_eq!(mem.mem_type, ""); // No SMBIOS — not a fabricated "DDR5".
 
-    // Test 4: update memory.
+    // Test 4: update memory — mutator still works over the real snapshot.
     serial_println!("sysinfo::self_test 4: update memory");
     update_memory(8_000_000_000, 8_000_000_000, 100_000_000);
     let mem = memory_info();
     assert_eq!(mem.used_bytes, 8_000_000_000);
     assert_eq!(mem.swap_used, 100_000_000);
 
-    // Test 5: storage.
+    // Test 5: storage — EMPTY by default now (no fabricated NVMe drives).
     serial_println!("sysinfo::self_test 5: storage");
-    let devs = storage_info();
-    assert!(devs.len() >= 2);
-    assert_eq!(devs[0].mount_point, "/");
+    assert!(storage_info().is_empty());
 
-    // Test 6: update storage free.
-    serial_println!("sysinfo::self_test 6: update storage");
+    // Test 6: add a storage device, then update its free space.
+    serial_println!("sysinfo::self_test 6: add + update storage");
+    add_storage(StorageDevice {
+        device: String::from("/dev/nvme0n1p1"),
+        model: String::from("Test SSD"),
+        capacity_bytes: 512 * 1024 * 1024 * 1024,
+        free_bytes: 350 * 1024 * 1024 * 1024,
+        fs_type: String::from("ext4"),
+        mount_point: String::from("/"),
+        network: false,
+        removable: false,
+        interface: String::from("NVMe"),
+    })?;
     update_storage_free("/dev/nvme0n1p1", 100_000_000_000)?;
     let devs = storage_info();
+    assert_eq!(devs.len(), 1);
     assert_eq!(devs[0].free_bytes, 100_000_000_000);
 
-    // Test 7: GPU.
+    // Test 7: GPU — EMPTY by default now (no fabricated "Generic GPU").
     serial_println!("sysinfo::self_test 7: GPU");
-    let gpus = gpu_info();
-    assert_eq!(gpus.len(), 1);
-    assert!(gpus[0].vram_mib > 0);
+    assert!(gpu_info().is_empty());
 
-    // Test 8: network.
+    // Test 8: network — EMPTY by default now (no fabricated eth0/wlan0).
     serial_println!("sysinfo::self_test 8: network");
-    let nets = network_info();
-    assert!(nets.len() >= 2);
-    assert!(nets[0].connected);
+    assert!(network_info().is_empty());
 
-    // Test 9: kernel params.
+    // Test 9: kernel params — true kernel facts.
     serial_println!("sysinfo::self_test 9: kernel params");
     let kp = kernel_params();
     assert_eq!(kp.page_size, 16384);
@@ -659,7 +700,7 @@ pub fn self_test() -> KernelResult<()> {
     assert!(format_bytes(1024).contains("KiB"));
     assert!(format_bytes(1_073_741_824).contains("GiB"));
 
-    // Test 11: add extra devices.
+    // Test 11: add extra device — count rises to exactly 2.
     serial_println!("sysinfo::self_test 11: add devices");
     add_storage(StorageDevice {
         device: String::from("/dev/sdb1"),
@@ -672,8 +713,10 @@ pub fn self_test() -> KernelResult<()> {
         removable: true,
         interface: String::from("USB"),
     })?;
-    assert_eq!(storage_info().len(), 3);
+    assert_eq!(storage_info().len(), 2);
 
+    // Reset so the test leaves the pristine empty state (sysinfo is not
+    // boot-wired, so uninitialised is the natural state for /proc/sysinfo).
     clear_all();
     serial_println!("sysinfo::self_test: all 11 tests passed");
     Ok(())

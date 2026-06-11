@@ -2353,6 +2353,29 @@
 ##     2 detaches, 8_294_400 bytes). boot-test PASSED (28s). DEFERRED PROPER
 ##     FIX: wire this diagnostic view to the real kernel shared-memory/IPC
 ##     subsystem so /proc/shmem reflects genuinely mapped segments.
+##     netsettings fixed 2026-06-11: case (a) empty-init (mixed module — kept the
+##     legitimate parts). init_defaults() FABRICATED observed network state: a
+##     phantom eth0 with assigned IPv4 192.168.1.100 / gateway 192.168.1.1 / MAC
+##     52:54:00:12:34:56 / link Up / 1000 Mbps / DNS 1.1.1.1+8.8.8.8, a wlan0, a
+##     REACHABLE router at 192.168.1.1, and two invented Wi-Fi scan results
+##     (HomeNetwork WPA3 signal 85, NeighborWifi WPA2) — all surfaced through
+##     /proc/netsettings (gen_netsettings) and the `netsettings list/wifi/router/
+##     stats` shell commands as if those NICs, that gateway, and those SSIDs had
+##     really been detected (a privacy surface: phantom nearby Wi-Fi networks).
+##     Reduced init_defaults to ONLY deterministic, non-observed facts: the
+##     loopback interface lo (127.0.0.1/::1 are RFC constants, not measured) and
+##     the default hostname "mintos" (a config default). Router emptied
+##     (unreachable, no gateway), scanned_wifi cleared. Real interfaces now arrive
+##     via add_interface() from driver enumeration; scans via wifi_scan(); gateway
+##     via real probing. self_test was already residue-free (clear_all at start
+##     AND end); rewrote test 11 to assert the honest defaults EXACTLY (1 iface =
+##     lo loopback, router NOT reachable, wifi_scan empty, hostname "mintos").
+##     boot-test PASSED (29s). NOTE: hostname default "mintos" here vs sysctlfs
+##     kernel.hostname "localhost" — a second divergent literal (cf. the osrelease
+##     note above); pick one canonical hostname source. Low priority, not a
+##     fabrication. DEFERRED PROPER FIX: wire add_interface()/set_link_state()/
+##     set_router_info() to the real network driver + DHCP client so this panel
+##     reflects genuine NICs, links, gateway reachability, and live scan results.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

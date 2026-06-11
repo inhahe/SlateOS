@@ -619,7 +619,26 @@ pub fn hostname() -> String {
 // Init / stats
 // ---------------------------------------------------------------------------
 
-/// Initialise with default interfaces.
+/// Initialise with deterministic, non-fabricated defaults.
+///
+/// Seeds ONLY facts that are true by construction rather than observed:
+///   - the loopback interface `lo` — 127.0.0.1 / ::1 are RFC constants that
+///     exist on every networked system, not measured hardware state, and
+///   - the default hostname (a configuration default).
+///
+/// It deliberately does NOT seed eth0/wlan0 with assigned IP addresses, MAC
+/// addresses, link-up state, link speeds, or DNS servers; nor a reachable
+/// gateway; nor Wi-Fi scan results. Those are all *observed* facts about real
+/// hardware and the surrounding network. Inventing them (the previous
+/// "192.168.1.100 eth0 up", a reachable "192.168.1.1" router, and phantom
+/// "HomeNetwork"/"NeighborWifi" scan entries) surfaced fabricated interfaces,
+/// a fake router, and phantom Wi-Fi networks — a privacy surface — through
+/// `/proc/netsettings` and the `netsettings` shell command as if they had
+/// really been detected. Real interfaces arrive via add_interface() from
+/// driver enumeration; scan results via wifi_scan(); the gateway via probing.
+///
+/// DEFERRED PROPER FIX: wire add_interface()/set_link_state()/set_router_info()
+/// to the real network driver + DHCP client so this panel reflects genuine NICs.
 pub fn init_defaults() {
     let mut state = STATE.lock();
 
@@ -655,103 +674,22 @@ pub fn init_defaults() {
             rx_bytes: 0,
             tx_bytes: 0,
         },
-        NetworkInterface {
-            name: String::from("eth0"),
-            display_name: String::from("Ethernet"),
-            iface_type: InterfaceType::Ethernet,
-            link_state: LinkState::Up,
-            mac_address: String::from("52:54:00:12:34:56"),
-            mtu: 1500,
-            ipv4: Ipv4Config {
-                method: IpMethod::Auto,
-                address: String::from("192.168.1.100"),
-                netmask: String::from("255.255.255.0"),
-                gateway: String::from("192.168.1.1"),
-            },
-            ipv6: Ipv6Config {
-                method: IpMethod::Auto,
-                address: String::from("fe80::5054:ff:fe12:3456"),
-                prefix_len: 64,
-                gateway: String::new(),
-                privacy_extensions: true,
-            },
-            dns: DnsConfig {
-                auto_dns: true,
-                servers: vec![
-                    String::from("1.1.1.1"),
-                    String::from("8.8.8.8"),
-                ],
-                doh_url: String::new(),
-                search_domains: Vec::new(),
-            },
-            connected_ssid: String::new(),
-            speed_mbps: 1000,
-            rx_bytes: 0,
-            tx_bytes: 0,
-        },
-        NetworkInterface {
-            name: String::from("wlan0"),
-            display_name: String::from("Wi-Fi"),
-            iface_type: InterfaceType::Wifi,
-            link_state: LinkState::Down,
-            mac_address: String::from("52:54:00:ab:cd:ef"),
-            mtu: 1500,
-            ipv4: Ipv4Config {
-                method: IpMethod::Auto,
-                address: String::new(),
-                netmask: String::from("255.255.255.0"),
-                gateway: String::new(),
-            },
-            ipv6: Ipv6Config {
-                method: IpMethod::Auto,
-                address: String::new(),
-                prefix_len: 64,
-                gateway: String::new(),
-                privacy_extensions: true,
-            },
-            dns: DnsConfig {
-                auto_dns: true,
-                servers: Vec::new(),
-                doh_url: String::new(),
-                search_domains: Vec::new(),
-            },
-            connected_ssid: String::new(),
-            speed_mbps: 0,
-            rx_bytes: 0,
-            tx_bytes: 0,
-        },
     ];
 
+    // No detected gateway until real probing populates it.
     state.router = RouterInfo {
-        gateway_ip: String::from("192.168.1.1"),
-        reachable: true,
+        gateway_ip: String::new(),
+        reachable: false,
         model: String::new(),
         external_ipv4: String::new(),
         external_ipv6: String::new(),
     };
 
+    // Hostname is a configuration default, not observed data.
     state.hostname = String::from("mintos");
 
-    // Populate some example Wi-Fi scan results.
-    state.scanned_wifi = vec![
-        WifiNetwork {
-            ssid: String::from("HomeNetwork"),
-            signal: 85,
-            security: WifiSecurity::Wpa3Personal,
-            band: WifiBand::Band5g,
-            channel: 36,
-            saved: false,
-        },
-        WifiNetwork {
-            ssid: String::from("NeighborWifi"),
-            signal: 42,
-            security: WifiSecurity::Wpa2Personal,
-            band: WifiBand::Band2g,
-            channel: 6,
-            saved: false,
-        },
-    ];
-
+    // No phantom Wi-Fi scan results: scans come from wifi_scan() / real radios.
+    state.scanned_wifi.clear();
     state.saved_networks.clear();
     state.changes += 1;
     OP_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -866,11 +804,18 @@ pub fn self_test() -> KernelResult<()> {
     set_hostname("myhost");
     assert_eq!(hostname(), "myhost");
 
-    // Test 11: init_defaults.
+    // Test 11: init_defaults seeds only honest, non-fabricated defaults —
+    // just the loopback interface and a hostname, with no phantom eth0/wlan0,
+    // no reachable gateway, and no invented Wi-Fi scan results.
     serial_println!("netsettings::self_test 11: defaults");
     init_defaults();
-    assert!(list_interfaces().len() >= 3);
-    assert!(router_info().reachable);
+    let ifaces = list_interfaces();
+    assert_eq!(ifaces.len(), 1);
+    assert_eq!(ifaces[0].name, "lo");
+    assert_eq!(ifaces[0].iface_type, InterfaceType::Loopback);
+    assert!(!router_info().reachable);
+    assert!(wifi_scan().is_empty());
+    assert_eq!(hostname(), "mintos");
 
     clear_all();
     serial_println!("netsettings::self_test: all 11 tests passed");

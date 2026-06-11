@@ -2400,6 +2400,20 @@
 ##     PASSED (26s). DEFERRED PROPER FIX: enumerate monitors + parse real EDID
 ##     (connector/refresh/manufacturer/serial/physical size/modes) from the
 ##     DRM-KMS driver instead of approximating a single framebuffer monitor.
+##     fstune audited 2026-06-11: LEGITIMATE settings/presets module — NOT a
+##     fabricator, NO code change needed. init_defaults() seeds 5 ext4 workload
+##     PRESETS (desktop/database/server/development/gaming) + ~12 static tradeoff
+##     reference entries (advantages/disadvantages per design.txt line 1279).
+##     The profiles are named parameter TEMPLATES, not observations: each has
+##     applied=false and modified_ns=0, and TuneProfile has no device/partition
+##     field tying it to a real filesystem, so nothing claims to reflect a real
+##     mounted FS. block_size 4096 / journal Ordered / commit 5s etc. are
+##     recommended defaults (analogous to sysctlfs tunables and the gamemode/
+##     logrotate/eyeprotect preset modules already audited as legitimate). The
+##     tradeoff text is pure documentation. stats() applied_count is 0 at boot
+##     (honest). self_test was ALREADY residue-free: clear_all() at start AND
+##     end, all fixtures built via create_profile(), exact assertions — left
+##     untouched. No fabricated procfs data here.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

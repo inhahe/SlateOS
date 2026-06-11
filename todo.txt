@@ -2132,7 +2132,33 @@
 ##     / SATA SMART READ DATA, a userspace driver not yet wired). Kept the
 ##     AlertConfig::default() thresholds (legitimate alerting config, not data).
 ##     self_test rebuilt via the real API, exact totals, residue-free. makes
-##     sixty. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     sixty.
+##     UPDATE 2026-06-11: devicemgr was another String-seeded fabricator: its
+##     init_defaults() seeded THREE fixed fake devices — a "CPU"
+##     (Platform/Processor, driver "cpu" v1.0, "cpu0"), a "System Memory"
+##     (Platform/Memory, driver "memory" v1.0, "mem0"), and a "PCI Host Bridge"
+##     (Pci/Bridge, Intel 8086:0001, driver "pci-bridge" v1.0, "00:00.0"), all
+##     stamped DeviceStatus::Ok with made-up driver names/versions — which
+##     /proc/devicemgr and the `devicemgr` kshell command listed as if really
+##     detected + really driver-bound. FIXED via READ-THROUGH (proper fix, NOT
+##     empty-init): init_defaults now enumerates the genuine PCI bus via
+##     crate::pci::scan_bus0(), naming each device through crate::pciids
+##     (describe/vendor_name) and mapping the PCI base class to our DeviceClass
+##     (new pci_class_to_device_class helper, sub-class-sensitive for
+##     audio/USB/Bluetooth). Devices register with honest DeviceStatus::Unknown
+##     and EMPTY driver fields — driver binding is reported only once a real
+##     driver subsystem calls bind_driver, never invented. self_test rewritten
+##     residue-free: phase 1 asserts read-through INVARIANTS (every entry bus==Pci,
+##     status==Unknown, no driver, count hardware-dependent so not asserted) +
+##     the class-map; phase 2 switches to a controlled empty State for exact
+##     behavioural totals (register USB device → bind → unbind → disable →
+##     re-enable → filter → remove → stats total 0/hotplug 2/ops>0); resets STATE
+##     to None at start AND end (not boot-wired). makes sixty-one.
+##     DEFERRED PROPER FIX: the read-through covers PCI only. CPU, system RAM,
+##     and USB/ACPI/I2C/platform devices are absent until those buses gain real
+##     enumerators that call register_device on detection (USB driver, ACPI
+##     parser). When they exist, wire them so /proc/devicemgr is a complete,
+##     truthful device tree rather than PCI-only. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional

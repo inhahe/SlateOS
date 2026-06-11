@@ -740,6 +740,19 @@
 ##                    transition counting (idempotent on same level), and OOM
 ##                    proximity clamp to 100. Wired into boot. /proc/mempress now
 ##                    129 bytes (fixed-format PSI rows, all values zero).)
+##   - devfreq.rs    (fixed 2026-06-11; was: two fictional frequency-scalable
+##                    devices — "gpu0" 200MHz-2GHz OnDemand / cur 1.5GHz / 500k
+##                    transitions / time-in-state [100k,200k,300k,500k,200k]ms;
+##                    "membus" 400MHz-3.2GHz Performance / cur 3.2GHz / 10k
+##                    transitions — plus invented total_transitions 510k, shown
+##                    via /proc/devfreq and the devfreq kshell command as real
+##                    devices. The register/record_transition/set_governor/
+##                    unregister API already existed, so no new API was needed.
+##                    Emptied init_defaults (no devices, next_id 1, 0 transitions)
+##                    and rebuilt self_test residue-free with exact assertions
+##                    incl. monotonic ids, cur=min default, transition counting,
+##                    [min,max] clamping both directions, and exact total. Wired
+##                    into boot. /proc/devfreq now 67 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -752,14 +765,14 @@
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
-##     + netfilter + mempress (just fixed) were twelve. Next ticks: work through
-##     the remaining candidates ONE PER TICK, auditing each before acting. The
-##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
-##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
-##     real topology (LEAVE ALONE). Verify each is a statistics module
-##     fabricating observed numbers surfaced via /proc before emptying it. Next
-##     candidate: devfreq. Remaining flagged names incl.:
-##     devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
+##     + netfilter + mempress + devfreq (just fixed) were thirteen. Next ticks:
+##     work through the remaining candidates ONE PER TICK, auditing each before
+##     acting. The 52-file list includes both STATISTICS modules (fix: empty /
+##     zero-counters) AND SETTINGS or structural modules that seed LEGITIMATE
+##     config defaults or real topology (LEAVE ALONE). Verify each is a
+##     statistics module fabricating observed numbers surfaced via /proc before
+##     emptying it. Next candidate: memcg. Remaining flagged names incl.:
+##     memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,

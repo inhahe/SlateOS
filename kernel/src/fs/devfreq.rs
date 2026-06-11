@@ -99,16 +99,27 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the device-frequency-scaling statistics state.
+///
+/// Starts with no registered devices and zero transitions. The
+/// `/proc/devfreq` generator and the `devfreq` kshell command surface this
+/// table as if it reflects real frequency-scalable devices, so seeding it
+/// with invented devices and transition counts would be fabricated procfs
+/// data. Devices are registered through [`register`] by the power-
+/// management subsystem as it discovers real frequency-scalable hardware,
+/// and the counters advance only through real [`record_transition`] calls.
+///
+/// (Previously this seeded two fictional devices — "gpu0" 200MHz-2GHz
+/// OnDemand with 500k transitions, and "membus" 400MHz-3.2GHz Performance
+/// with 10k transitions — plus invented per-bucket time-in-state values
+/// and a 510k total-transitions count.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        devices: alloc::vec![
-            DevFreqInfo { id: 1, name: String::from("gpu0"), min_freq_khz: 200_000, max_freq_khz: 2_000_000, cur_freq_khz: 1_500_000, governor: Governor::OnDemand, transitions: 500_000, time_in_state_ms: [100_000, 200_000, 300_000, 500_000, 200_000] },
-            DevFreqInfo { id: 2, name: String::from("membus"), min_freq_khz: 400_000, max_freq_khz: 3_200_000, cur_freq_khz: 3_200_000, governor: Governor::Performance, transitions: 10_000, time_in_state_ms: [10_000, 20_000, 30_000, 50_000, 1_000_000] },
-        ],
-        next_id: 3,
-        total_transitions: 510_000,
+        devices: Vec::new(),
+        next_id: 1,
+        total_transitions: 0,
         ops: 0,
     });
 }
@@ -180,53 +191,66 @@ pub fn stats() -> (usize, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("devfreq::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live device table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated devices, no transitions.
+    assert_eq!(list().len(), 0);
+    let (devs0, trans0, _) = stats();
+    assert_eq!((devs0, trans0), (0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
+    // 2: Register — ids are monotonic starting at 1; cur defaults to min.
     let id = register("test_dev", 100_000, 1_000_000).expect("register");
-    assert!(id >= 3);
-    assert_eq!(list().len(), 3);
+    assert_eq!(id, 1);
+    assert_eq!(list().len(), 1);
+    let d = list().into_iter().find(|d| d.id == id).expect("dev");
+    assert_eq!(d.cur_freq_khz, 100_000);
+    assert_eq!(d.transitions, 0);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Transition.
+    // 3: Transition updates current frequency and counts.
     record_transition(id, 500_000).expect("transition");
-    let d = list().iter().find(|d| d.id == id).cloned().unwrap();
+    let d = list().into_iter().find(|d| d.id == id).expect("dev");
     assert_eq!(d.cur_freq_khz, 500_000);
     assert_eq!(d.transitions, 1);
     crate::serial_println!("  [3/8] transition: OK");
 
-    // 4: Clamping.
+    // 4: Out-of-range targets clamp to [min, max].
     record_transition(id, 9_999_999).expect("clamp_high");
-    let d = list().iter().find(|d| d.id == id).cloned().unwrap();
-    assert_eq!(d.cur_freq_khz, 1_000_000); // clamped to max
+    assert_eq!(list().into_iter().find(|d| d.id == id).expect("dev").cur_freq_khz, 1_000_000);
+    record_transition(id, 1).expect("clamp_low");
+    assert_eq!(list().into_iter().find(|d| d.id == id).expect("dev").cur_freq_khz, 100_000);
     crate::serial_println!("  [4/8] clamp: OK");
 
-    // 5: Governor.
+    // 5: Governor change is recorded.
     set_governor(id, Governor::Performance).expect("governor");
-    let d = list().iter().find(|d| d.id == id).cloned().unwrap();
-    assert_eq!(d.governor, Governor::Performance);
+    assert_eq!(list().into_iter().find(|d| d.id == id).expect("dev").governor, Governor::Performance);
     crate::serial_println!("  [5/8] governor: OK");
 
-    // 6: Unregister.
+    // 6: Total transitions accumulated exactly (3 record_transition calls).
+    let (_, trans, _) = stats();
+    assert_eq!(trans, 3);
+    crate::serial_println!("  [6/8] total transitions: OK");
+
+    // 7: Unregister removes the device; double-unregister and unknown-id
+    //    operations error.
     unregister(id).expect("unregister");
-    assert_eq!(list().len(), 2);
+    assert_eq!(list().len(), 0);
     assert!(unregister(id).is_err());
-    crate::serial_println!("  [6/8] unregister: OK");
-
-    // 7: Not found.
     assert!(record_transition(99, 0).is_err());
-    crate::serial_println!("  [7/8] not found: OK");
+    crate::serial_println!("  [7/8] unregister + not found: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above.
     let (devs, trans, ops) = stats();
-    assert_eq!(devs, 2);
-    assert!(trans > 510_000);
+    assert_eq!(devs, 0);
+    assert_eq!(trans, 3);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("devfreq::self_test() — all 8 tests passed");
 }

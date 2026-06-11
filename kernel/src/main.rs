@@ -1471,6 +1471,17 @@ extern "C" fn kernel_main() -> ! {
     // residue-free self_test builds its fixtures via the real API with exact
     // assertions and resets the table afterward, so it is safe at boot.
     fs::mempress::self_test();
+    // devfreq backs /proc/devfreq (per-device frequency governors, current
+    // frequency, transition counts, time-in-state).  Its init_defaults()
+    // previously seeded two fictional devices — "gpu0" 200MHz-2GHz OnDemand with
+    // 500k transitions and "membus" 400MHz-3.2GHz Performance with 10k
+    // transitions — plus invented time-in-state buckets and a 510k total; that
+    // demo data was removed (devices are registered via register() by the power-
+    // management subsystem and counters advance only on real record_transition
+    // calls).  The residue-free self_test builds its fixtures via the real API
+    // with exact assertions and resets the table afterward, so it is safe at
+    // boot.
+    fs::devfreq::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -1875,6 +1875,20 @@ extern "C" fn kernel_main() -> ! {
     // assertions (register/load/average/max/error/breakdown) and clears the
     // state afterward.
     fs::binfmt::self_test();
+    // Recovery-partition self-test.  recoverypart previously seeded a fabricated
+    // 500 MB "Healthy" recovery partition (85 MB used) with four pre-installed
+    // tools — System Repair, Boot Repair, Memory Test, Command Shell — into
+    // init_defaults, none backed by a real partition or tool image.
+    // /proc/recoverypart and the recoverypart kshell command surface the
+    // partition status, tool list and space usage as a real recovery
+    // environment, so claiming recovery tools exist when none are installed
+    // could mislead an operator into thinking recovery is available.
+    // init_defaults now starts with NO partition (status Missing, no tools, zero
+    // space); a real partition is registered via the new register_partition API
+    // (when one is detected on disk) and tools via add_tool.  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions
+    // (register/verify/add/repair/boot/remove) and clears the state afterward.
+    fs::recoverypart::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

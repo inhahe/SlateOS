@@ -128,26 +128,59 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the recovery-partition state.
+///
+/// Starts with NO recovery partition present: status [`PartitionStatus::Missing`],
+/// no installed tools, zero partition/used bytes, and zeroed repair/verify/boot
+/// counters. A real recovery partition is registered through
+/// [`register_partition`] when one is actually detected on disk or created, and
+/// tools are added through [`add_tool`]; the repair/verify/boot counters advance
+/// only through real [`run_repair`] / [`verify_integrity`] / [`boot_recovery`]
+/// calls. The `/proc/recoverypart` generator and the `recoverypart` kshell
+/// command surface the partition status, tool list and space usage as if they
+/// reflect a real recovery environment, so seeding a "Healthy" partition with
+/// pre-installed tools would be fabricated procfs data — it would claim a
+/// recovery partition and emergency-repair tools exist when none have been
+/// detected or installed, which could lead an operator to believe recovery is
+/// available when it is not.
+///
+/// (Previously this seeded a 500 MB "Healthy" partition with 85 MB used and four
+/// fictional tools — System Repair (50 MB), Boot Repair (20 MB), Memory Test
+/// (5 MB) and Command Shell (10 MB), all version "1.0" — none backed by a real
+/// recovery partition or installed tool image.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        status: PartitionStatus::Healthy,
-        tools: alloc::vec![
-            RecoveryTool { id: 1, name: String::from("System Repair"), tool_type: ToolType::SystemRepair, version: String::from("1.0"), size_bytes: 50_000_000, installed_ns: now },
-            RecoveryTool { id: 2, name: String::from("Boot Repair"), tool_type: ToolType::BootRepair, version: String::from("1.0"), size_bytes: 20_000_000, installed_ns: now },
-            RecoveryTool { id: 3, name: String::from("Memory Test"), tool_type: ToolType::MemoryTest, version: String::from("1.0"), size_bytes: 5_000_000, installed_ns: now },
-            RecoveryTool { id: 4, name: String::from("Command Shell"), tool_type: ToolType::CommandShell, version: String::from("1.0"), size_bytes: 10_000_000, installed_ns: now },
-        ],
-        partition_size_bytes: 500_000_000,
-        used_bytes: 85_000_000,
-        next_id: 5,
+        status: PartitionStatus::Missing,
+        tools: Vec::new(),
+        partition_size_bytes: 0,
+        used_bytes: 0,
+        next_id: 1,
         total_repairs: 0,
         total_verifications: 0,
         total_boots: 0,
         ops: 0,
     });
+}
+
+/// Register a real recovery partition with its on-disk capacity.
+///
+/// Called when a recovery partition is actually detected on disk or created.
+/// Sets the partition capacity and marks the partition [`PartitionStatus::Healthy`]
+/// so that tools can be installed via [`add_tool`]. Returns
+/// [`KernelError::AlreadyExists`] if a partition is already registered (status
+/// is anything other than `Missing`).
+pub fn register_partition(size_bytes: u64) -> KernelResult<()> {
+    with_state(|state| {
+        if state.status != PartitionStatus::Missing {
+            return Err(KernelError::AlreadyExists);
+        }
+        state.partition_size_bytes = size_bytes;
+        state.used_bytes = 0;
+        state.status = PartitionStatus::Healthy;
+        Ok(())
+    })
 }
 
 /// Add a recovery tool.
@@ -255,53 +288,67 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("recoverypart::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and no
+    // fixtures leak into the live partition state afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
+    // 1: Empty defaults — no partition present (Missing), no tools, no space,
+    //    zeroed counters. boot_recovery fails while the partition is Missing.
+    assert_eq!(get_status(), PartitionStatus::Missing);
+    assert_eq!(list_tools().len(), 0);
+    assert_eq!(space_usage(), (0, 0, 0));
+    let (t0, r0, v0, b0, _) = stats();
+    assert_eq!((t0, r0, v0, b0), (0, 0, 0, 0));
+    assert!(boot_recovery().is_err()); // Missing → cannot boot recovery
+    crate::serial_println!("  [1/8] empty defaults: OK");
+
+    // 2: Register partition — a real 500 MB partition is detected; status goes
+    //    Healthy and space becomes available. A second register is AlreadyExists.
+    register_partition(500_000_000).expect("register");
     assert_eq!(get_status(), PartitionStatus::Healthy);
-    assert_eq!(list_tools().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    assert_eq!(space_usage(), (500_000_000, 0, 500_000_000));
+    assert!(register_partition(1).is_err());
+    crate::serial_println!("  [2/8] register partition: OK");
 
-    // 2: Verify.
-    let ok = verify_integrity().expect("verify");
-    assert!(ok);
-    crate::serial_println!("  [2/8] verify: OK");
+    // 3: Verify — a Healthy partition verifies OK and bumps the verify counter.
+    assert!(verify_integrity().expect("verify"));
+    crate::serial_println!("  [3/8] verify: OK");
 
-    // 3: Add tool.
+    // 4: Add tool — first tool gets id 1; used bytes and the tool list advance.
     let id = add_tool("File Recovery", ToolType::FileRecovery, "1.0", 30_000_000).expect("add");
-    assert_eq!(list_tools().len(), 5);
-    crate::serial_println!("  [3/8] add tool: OK");
-
-    // 4: Space check.
+    assert_eq!(id, 1);
+    assert_eq!(list_tools().len(), 1);
     let (total, used, free) = space_usage();
-    assert_eq!(total, 500_000_000);
-    assert_eq!(used, 115_000_000);
-    assert_eq!(free, 385_000_000);
-    crate::serial_println!("  [4/8] space: OK");
+    assert_eq!((total, used, free), (500_000_000, 30_000_000, 470_000_000));
+    crate::serial_println!("  [4/8] add tool + space: OK");
 
-    // 5: Run repair.
-    run_repair(1).expect("repair");
+    // 5: Run repair — repairing via a real tool id bumps the repair counter;
+    //    an unknown tool id errors.
+    run_repair(id).expect("repair");
+    assert!(run_repair(999).is_err());
     crate::serial_println!("  [5/8] repair: OK");
 
-    // 6: Boot recovery.
+    // 6: Boot recovery — now the partition is Healthy, booting succeeds.
     boot_recovery().expect("boot");
     crate::serial_println!("  [6/8] boot: OK");
 
-    // 7: Remove tool.
+    // 7: Remove tool — the tool drops out and its space is reclaimed; a second
+    //    remove of the same id errors.
     remove_tool(id).expect("remove");
-    assert_eq!(list_tools().len(), 4);
-    let (_, used2, _) = space_usage();
-    assert_eq!(used2, 85_000_000);
+    assert_eq!(list_tools().len(), 0);
+    assert_eq!(space_usage(), (500_000_000, 0, 500_000_000));
+    assert!(remove_tool(id).is_err());
     crate::serial_println!("  [7/8] remove: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above: 0 tools, 1 repair,
+    //    1 verification, 1 boot.
     let (tools, repairs, verifications, boots, ops) = stats();
-    assert_eq!(tools, 4);
-    assert_eq!(repairs, 1);
-    assert_eq!(verifications, 1);
-    assert_eq!(boots, 1);
+    assert_eq!((tools, repairs, verifications, boots), (0, 1, 1, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("recoverypart::self_test() — all 8 tests passed");
 }

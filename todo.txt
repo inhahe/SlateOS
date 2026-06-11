@@ -1385,6 +1385,35 @@
 ##                    record_load/record_error on the exec path so the stats
 ##                    reflect genuine executions — wire when the exec/loader path
 ##                    is instrumented.
+##   - recoverypart (2026-06-11): FIXED — fabrication case (b) (added the missing
+##                    register_partition API + emptied init_defaults). Recovery-
+##                    partition / emergency-repair environment, surfaced via
+##                    /proc/recoverypart and the `recoverypart` kshell command.
+##                    init_defaults seeded a fabricated 500 MB "Healthy" partition
+##                    (85 MB used) with FOUR pre-installed tools — System Repair
+##                    (50 MB), Boot Repair (20 MB), Memory Test (5 MB), Command
+##                    Shell (10 MB), all v1.0 — none backed by a real partition or
+##                    tool image. Claiming a healthy recovery partition with repair
+##                    tools exists when none is installed could mislead an operator
+##                    into believing recovery is available. add_tool checks new
+##                    tools against partition_size_bytes (so an empty partition with
+##                    size 0 rejects every add as DiskFull), so this was case (b):
+##                    added register_partition(size_bytes) (sets capacity + marks
+##                    Healthy; AlreadyExists if a partition is already registered)
+##                    and emptied init_defaults to status Missing, no tools, zero
+##                    space, zeroed counters. Rebuilt self_test residue-free (clears
+##                    STATE at start AND end) with EXACT assertions — Missing
+##                    default + boot fails, register → Healthy + space, verify, add
+##                    tool id 1 + exact space, repair (+unknown-id error), boot
+##                    succeeds, remove + space reclaimed (+double-remove error),
+##                    final stats (0 tools, 1 repair, 1 verify, 1 boot). Wired into
+##                    the boot self-test path (was kshell-only). /proc/recoverypart
+##                    now 103 bytes (truthful empty). PROPER FIX DEFERRED: real
+##                    recovery-partition detection (a GPT/partition scan for a
+##                    recovery partition) should call register_partition with the
+##                    actual on-disk size and add_tool for each real tool image —
+##                    wire when partition enumeration / the recovery environment is
+##                    implemented. Until then it correctly reports Missing.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1398,13 +1427,13 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt (just fixed) were forty-one. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart (just fixed) were forty-two. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     recoverypart. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     logrotate. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1416,8 +1445,10 @@
 ##     security surface. secmod fixed 2026-06-11: emptied 2 fabricated LSM
 ##     modules (~160M checks) to no modules, case (a). binfmt fixed 2026-06-11:
 ##     added missing register_format API + emptied 3 fabricated formats (610K
-##     loads), case (b).) Remaining flagged
-##     names incl.: recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
+##     loads), case (b). recoverypart fixed 2026-06-11: added register_partition
+##     API + emptied fabricated 500MB Healthy partition / 4 tools, case (b).)
+##     Remaining flagged
+##     names incl.: logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
 ##     legitimate config — audit carefully, do not blind-empty. memlayout was

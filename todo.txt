@@ -1882,6 +1882,42 @@
 ##                    a naive hook. Do both as a focused task once fault accounting
 ##                    has a per-process source and a hot-path-safe record sink. Until
 ##                    then the empty table is honest.
+##   - vmfrag (2026-06-11): FIXED — fabrication case (a) (full register_zone/
+##                    update_index/record_compaction API already existed). Kernel-side
+##                    VM-fragmentation monitor behind /proc/vmfrag and the `vmfrag`
+##                    kshell command. init_defaults() FABRICATED two zones — DMA32
+##                    (frag_index [0,50,120,250,400,550,700,800,850,900,950], 5000
+##                    compactions / 4000 success / 1000 fail) and Normal (frag_index
+##                    [0,30,80,150,300,450,600,700,780,850,920], 50000/40000/10000) —
+##                    plus invented totals (55000 compactions / 44000 success / 11000
+##                    fail), which /proc/vmfrag and the per_zone view displayed as if
+##                    real. DMA32/Normal are Linux zone names; this kernel has a single
+##                    global buddy allocator (crate::mm::frame, free_lists per order)
+##                    with NO named-zone taxonomy and NO memory-compaction subsystem,
+##                    so register_zone/update_index/record_compaction have NO real
+##                    callers — the module is entirely unwired (only kshell interactive
+##                    subcommands + procfs reads). Fixed: init_defaults() now seeds an
+##                    EMPTY table (no zones, zero totals). Also: the self_test was
+##                    NEVER wired into boot AND relied on the fabricated zones (asserted
+##                    len==2, compactions>55000) with no end-reset — so wiring it would
+##                    have leaked a TestZone fixture into /proc/vmfrag. Rewrote it
+##                    residue-free (clears STATE at start AND end) with EXACT assertions
+##                    (empty init, register→1 zone, dup rejected, update_index 100,
+##                    invalid index/order rejected, compaction success/fail, not-found,
+##                    final 1 zone / 2 compactions / 1 success / 1 fail) and WIRED it
+##                    into the boot self-test path. /proc/vmfrag now reports an empty
+##                    table (truthful).
+##                    DEFERRED PROPER FIX: the fragmentation index for an order is
+##                    derived from the buddy allocator's free-block counts per order
+##                    (Linux's frag-index formula over /proc/buddyinfo). The proper fix
+##                    is to expose crate::mm::frame's per-order free_lists counts via a
+##                    buddyinfo-style accessor and compute real indices from it, with a
+##                    single "global" zone (this kernel has no DMA32/Normal split).
+##                    Deferred because: (1) mm::frame does not yet expose per-order free
+##                    counts publicly, and (2) the compaction counters need a real
+##                    memory-compaction subsystem, which this kernel does not have. Do
+##                    as a focused task once a buddyinfo accessor and a compaction path
+##                    exist. Until then the empty table is honest.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1895,7 +1931,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack (just fixed) were fifty-two. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag (just fixed) were fifty-three. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

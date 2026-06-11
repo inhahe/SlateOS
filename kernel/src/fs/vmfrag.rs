@@ -78,27 +78,36 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** fragmentation-tracking table.
+///
+/// Seeds NO zones and zero totals.  Zones are registered through
+/// [`register_zone`] and their fragmentation indices / compaction counts are
+/// tracked through [`update_index`] / [`record_compaction`] as the memory manager
+/// computes them; until that wiring exists, `/proc/vmfrag` and the `vmfrag` kshell
+/// command report an empty table rather than fabricated indices — the kernel's
+/// hard "never invent data in procfs" rule.
+///
+/// (Previously this seeded two fabricated zones — `DMA32` (frag_index
+/// [0,50,120,250,400,550,700,800,850,900,950], 5000 compactions / 4000 success /
+/// 1000 fail) and `Normal` (frag_index [0,30,80,150,300,450,600,700,780,850,920],
+/// 50000 / 40000 / 10000) — plus invented totals (55000 compactions, 44000
+/// success, 11000 fail), which `/proc/vmfrag` and the `per_zone` view then
+/// displayed as if they were real measured fragmentation.  Those zone names are
+/// Linux's (`DMA32`/`Normal`); this kernel has a single global buddy allocator
+/// (`crate::mm::frame`, free_lists per order) with no named-zone taxonomy and no
+/// memory-compaction subsystem, so none of register_zone/update_index/
+/// record_compaction has a real caller — the module is entirely unwired.  See the
+/// DEFERRED PROPER FIX note in todo.txt for computing real indices from the buddy
+/// allocator's per-order free counts.  The self-test now builds its own fixtures
+/// via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        zones: alloc::vec![
-            ZoneFragInfo {
-                zone_name: String::from("DMA32"),
-                frag_index: [0, 50, 120, 250, 400, 550, 700, 800, 850, 900, 950],
-                compactions: 5_000, compact_success: 4_000, compact_fail: 1_000,
-                last_index_update: 0,
-            },
-            ZoneFragInfo {
-                zone_name: String::from("Normal"),
-                frag_index: [0, 30, 80, 150, 300, 450, 600, 700, 780, 850, 920],
-                compactions: 50_000, compact_success: 40_000, compact_fail: 10_000,
-                last_index_update: 0,
-            },
-        ],
-        total_compactions: 55_000,
-        total_success: 44_000,
-        total_fail: 11_000,
+        zones: Vec::new(),
+        total_compactions: 0,
+        total_success: 0,
+        total_fail: 0,
         ops: 0,
     });
 }
@@ -164,54 +173,62 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("vmfrag::self_test() — running tests...");
+    // Start from a clean slate so the fixtures built below can never leak into
+    // the live /proc/vmfrag table (this self-test now runs at boot).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_zone().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated zones.
+    assert_eq!(per_zone().len(), 0);
+    assert_eq!(stats(), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
-    register_zone("Test").expect("register");
-    assert_eq!(per_zone().len(), 3);
-    assert!(register_zone("Test").is_err());
+    // 2: Register a zone (duplicate registration is rejected).
+    register_zone("TestZone").expect("register");
+    assert_eq!(per_zone().len(), 1);
+    assert!(register_zone("TestZone").is_err());
     crate::serial_println!("  [2/8] register: OK");
 
     // 3: Update index.
-    update_index("Test", 0, 100).expect("update");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().unwrap();
+    update_index("TestZone", 0, 100).expect("update");
+    let z = per_zone().into_iter().find(|z| z.zone_name == "TestZone").expect("find");
     assert_eq!(z.frag_index[0], 100);
     crate::serial_println!("  [3/8] update index: OK");
 
-    // 4: Invalid index.
-    assert!(update_index("Test", 0, 1001).is_err());
-    assert!(update_index("Test", MAX_ORDER, 100).is_err());
+    // 4: Invalid index / order are rejected.
+    assert!(update_index("TestZone", 0, 1001).is_err());
+    assert!(update_index("TestZone", MAX_ORDER, 100).is_err());
     crate::serial_println!("  [4/8] invalid: OK");
 
     // 5: Compaction success.
-    record_compaction("Test", true).expect("compact_ok");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().unwrap();
+    record_compaction("TestZone", true).expect("compact_ok");
+    let z = per_zone().into_iter().find(|z| z.zone_name == "TestZone").expect("find2");
     assert_eq!(z.compact_success, 1);
     crate::serial_println!("  [5/8] compact success: OK");
 
     // 6: Compaction fail.
-    record_compaction("Test", false).expect("compact_fail");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().unwrap();
+    record_compaction("TestZone", false).expect("compact_fail");
+    let z = per_zone().into_iter().find(|z| z.zone_name == "TestZone").expect("find3");
     assert_eq!(z.compact_fail, 1);
     assert_eq!(z.compactions, 2);
     crate::serial_println!("  [6/8] compact fail: OK");
 
     // 7: Not found.
     assert!(update_index("nonexist", 0, 100).is_err());
+    assert!(record_compaction("nonexist", true).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact totals (1 zone, 2 compactions, 1 success, 1 fail).
     let (zones, compactions, success, fail, ops) = stats();
-    assert!(zones >= 3);
-    assert!(compactions > 55_000);
-    assert!(success > 44_000);
-    assert!(fail > 11_000);
+    assert_eq!(zones, 1);
+    assert_eq!(compactions, 2);
+    assert_eq!(success, 1);
+    assert_eq!(fail, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the boot self-test leaves no fixtures behind in /proc/vmfrag.
+    *STATE.lock() = None;
 
     crate::serial_println!("vmfrag::self_test() — all 8 tests passed");
 }

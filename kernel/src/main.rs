@@ -2079,6 +2079,22 @@ extern "C" fn kernel_main() -> ! {
     // end-reset) builds its own fixtures via the real API with exact assertions
     // and resets STATE afterward so nothing leaks into /proc/pftrack.
     fs::pftrack::self_test();
+    // vmfrag is the kernel-side VM-fragmentation monitor behind /proc/vmfrag and
+    // the `vmfrag` kshell command.  Its init_defaults() previously seeded two
+    // FABRICATED zones — `DMA32` and `Normal` (Linux zone names) — with invented
+    // per-order fragmentation indices and compaction counts (5000/50000
+    // compactions) plus invented totals (55000 compactions / 44000 success /
+    // 11000 fail), which /proc/vmfrag displayed as if real.  This kernel has a
+    // single global buddy allocator (crate::mm::frame) with no named-zone taxonomy
+    // and no memory-compaction subsystem, so register_zone/update_index/
+    // record_compaction have NO real callers — the module is entirely unwired.
+    // vmfrag now seeds an EMPTY table (zones arrive via register_zone; see the
+    // DEFERRED PROPER FIX note in todo.txt for computing real indices from the
+    // buddy allocator's per-order free counts).  This self_test (never wired
+    // before, and whose old version relied on the fabricated zones with no
+    // end-reset) builds its own fixtures via the real API with exact assertions
+    // and resets STATE afterward so nothing leaks into /proc/vmfrag.
+    fs::vmfrag::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

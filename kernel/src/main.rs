@@ -1304,6 +1304,13 @@ extern "C" fn kernel_main() -> ! {
     // previously lacked (it was only reachable via the `powerstat test` kshell
     // subcommand).
     fs::powerstat::self_test();
+    // procstat backs /proc/procstat (per-process CPU/memory/IO/fault/ctx-switch
+    // accounting, top-CPU/top-mem views); like its siblings the self-test now
+    // builds fixtures via the real register/update_cpu/update_memory/unregister
+    // API and resets the table afterward (leaving no fabricated rows), so it is
+    // safe at boot and gives the module automated coverage it previously lacked
+    // (it was only reachable via the `procstat test` kshell subcommand).
+    fs::procstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

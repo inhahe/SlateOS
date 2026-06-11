@@ -104,34 +104,29 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** per-process statistics table.
+///
+/// Seeds NO processes and zero counters.  Real per-process accounting is wired
+/// through [`register`] (one row per live process the scheduler/loader creates)
+/// and the `update_cpu`/`update_memory` functions; until those are called the
+/// table is genuinely empty, so `/proc/procstat` and the `procstat` kshell
+/// command report zeros rather than fabricated numbers — the kernel's hard
+/// "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded three fictional processes ("init" pid 1: cpu
+/// 5ms / mem 8KiB; "sshd" pid 100: cpu 15ms / mem 32KiB / 2 threads; "browser"
+/// pid 200: cpu 500ms / mem 512KiB / 128 rss pages / 8 threads / 1MiB io read),
+/// which `/proc/procstat` (and the `top_cpu`/`top_mem` views) then displayed as
+/// if they were real measured per-process resource usage.  That demo data was
+/// removed; the self-test now builds its own fixtures explicitly via the real
+/// API (see [`self_test`]).  The process layer is expected to call [`register`]
+/// when a process is created, the update functions as it runs, and
+/// [`unregister`] when it exits.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        processes: alloc::vec![
-            ProcessStats {
-                pid: 1, name: String::from("init"), state: ProcState::Sleeping,
-                cpu_time_us: 5000, user_time_us: 2000, sys_time_us: 3000,
-                memory_bytes: 8192, rss_pages: 2, io_read_bytes: 4096,
-                io_write_bytes: 1024, page_faults: 10, ctx_switches: 50,
-                threads: 1, started_ns: now,
-            },
-            ProcessStats {
-                pid: 100, name: String::from("sshd"), state: ProcState::Sleeping,
-                cpu_time_us: 15000, user_time_us: 8000, sys_time_us: 7000,
-                memory_bytes: 32768, rss_pages: 8, io_read_bytes: 65536,
-                io_write_bytes: 16384, page_faults: 25, ctx_switches: 200,
-                threads: 2, started_ns: now,
-            },
-            ProcessStats {
-                pid: 200, name: String::from("browser"), state: ProcState::Running,
-                cpu_time_us: 500000, user_time_us: 400000, sys_time_us: 100000,
-                memory_bytes: 524288, rss_pages: 128, io_read_bytes: 1048576,
-                io_write_bytes: 262144, page_faults: 500, ctx_switches: 5000,
-                threads: 8, started_ns: now,
-            },
-        ],
+        processes: Vec::new(),
         total_updates: 0,
         ops: 0,
     });
@@ -232,57 +227,79 @@ pub fn stats() -> (usize, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("procstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/procstat must never surface).
+    // Resetting first clears any residue from a prior `procstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_processes().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated processes or updates.
+    assert_eq!(list_processes().len(), 0);
+    let (c0, u0, _o0) = stats();
+    assert_eq!((c0, u0), (0, 0));
+    assert!(get_process(1).is_none());
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Get process.
-    let p = get_process(200).expect("get");
-    assert_eq!(p.name, "browser");
+    // 2: Register processes — zeroed counters, Running state; dup pid fails.
+    register(100, "alpha").expect("reg1");
+    register(200, "beta").expect("reg2");
+    assert!(register(100, "dup").is_err());
+    assert_eq!(list_processes().len(), 2);
+    let p = get_process(100).expect("get");
+    assert_eq!(p.name, "alpha");
     assert_eq!(p.state, ProcState::Running);
-    crate::serial_println!("  [2/8] get: OK");
+    assert_eq!((p.cpu_time_us, p.memory_bytes), (0, 0));
+    crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Register.
-    register(500, "test_app").expect("reg");
-    assert_eq!(list_processes().len(), 4);
-    assert!(register(500, "dup").is_err());
-    crate::serial_println!("  [3/8] register: OK");
+    // 3: Update CPU — user/sys accumulate, cpu_time is their sum.
+    update_cpu(100, 1000, 500).expect("cpu");
+    update_cpu(100, 200, 100).expect("cpu2");
+    let p = get_process(100).expect("get2");
+    assert_eq!(p.user_time_us, 1200);
+    assert_eq!(p.sys_time_us, 600);
+    assert_eq!(p.cpu_time_us, 1800);
+    crate::serial_println!("  [3/8] cpu: OK");
 
-    // 4: Update CPU.
-    update_cpu(500, 1000, 500).expect("cpu");
-    let p = get_process(500).expect("get2");
-    assert_eq!(p.cpu_time_us, 1500);
-    assert_eq!(p.user_time_us, 1000);
-    crate::serial_println!("  [4/8] cpu: OK");
-
-    // 5: Update memory.
-    update_memory(500, 65536, 16).expect("mem");
-    let p = get_process(500).expect("get3");
+    // 4: Update memory sets bytes + rss exactly.
+    update_memory(100, 65536, 16).expect("mem");
+    let p = get_process(100).expect("get3");
     assert_eq!(p.memory_bytes, 65536);
-    crate::serial_println!("  [5/8] memory: OK");
+    assert_eq!(p.rss_pages, 16);
+    crate::serial_println!("  [4/8] memory: OK");
 
-    // 6: Top CPU.
+    // 5: Give beta more CPU + memory so ordering is deterministic.
+    update_cpu(200, 9000, 1000).expect("cpu beta");   // cpu_time 10000 > 1800
+    update_memory(200, 1_000_000, 256).expect("mem beta");
+    crate::serial_println!("  [5/8] second process: OK");
+
+    // 6: Top CPU ranks beta (10000us) above alpha (1800us).
     let top = top_cpu(2);
     assert_eq!(top.len(), 2);
-    assert_eq!(top[0].pid, 200); // browser has most CPU time.
+    assert_eq!(top[0].pid, 200);
+    assert_eq!(top[1].pid, 100);
     crate::serial_println!("  [6/8] top_cpu: OK");
 
-    // 7: Top memory.
+    // 7: Top memory ranks beta (1MB) above alpha (64KB); unknown pid → NotFound.
     let top = top_mem(2);
-    assert_eq!(top.len(), 2);
-    assert_eq!(top[0].pid, 200); // browser has most memory.
-    crate::serial_println!("  [7/8] top_mem: OK");
+    assert_eq!(top[0].pid, 200);
+    assert!(update_cpu(999, 1, 1).is_err());
+    assert!(unregister(999).is_err());
+    crate::serial_println!("  [7/8] top_mem + not found: OK");
 
-    // 8: Unregister + stats.
-    unregister(500).expect("unreg");
-    assert_eq!(list_processes().len(), 3);
+    // 8: Unregister removes a process; counts exact.
+    unregister(100).expect("unreg");
+    assert_eq!(list_processes().len(), 1);
     let (count, updates, ops) = stats();
-    assert_eq!(count, 3);
-    assert!(updates >= 2);
+    assert_eq!(count, 1);
+    assert_eq!(updates, 5); // 2 cpu + 1 mem (alpha) + 1 cpu + 1 mem (beta)
     assert!(ops > 0);
     crate::serial_println!("  [8/8] unregister+stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/procstat table.
+    *STATE.lock() = None;
 
     crate::serial_println!("procstat::self_test() — all 8 tests passed");
 }

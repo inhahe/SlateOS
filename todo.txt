@@ -491,13 +491,24 @@
 ##                    (zeroed counters, real HPET timestamp); emptied
 ##                    init_defaults and rebuilt self_test with exact assertions,
 ##                    wired into boot.)
+##   - procstat.rs   (fixed 2026-06-11; was: three fake processes "init" pid 1
+##                    (cpu 5ms / mem 8KiB), "sshd" pid 100 (cpu 15ms / mem 32KiB
+##                    / 2 threads), "browser" pid 200 (cpu 500ms / mem 512KiB /
+##                    128 rss / 8 threads / 1MiB io read) shown via procfs and
+##                    the top_cpu/top_mem views as real per-process usage. Note:
+##                    backs /proc/procstat (per-process), DISTINCT from /proc/stat
+##                    (system-wide). Already had a full register/unregister/
+##                    update_cpu/update_memory API; just emptied init_defaults
+##                    (dropped the hpet::elapsed_ns seed timestamp) and rebuilt
+##                    self_test with exact assertions incl. deterministic
+##                    top_cpu/top_mem ordering, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): procstat,
-##     ratestat, rqstat, schedlat, ttystat, zramstat. NOTE: some may be SETTINGS
-##     modules seeding legitimate config defaults — verify each is a STATISTICS
-##     module seeding fake OBSERVATIONS before emptying it.)
+##     by grep (init_defaults with alloc::vec!/String::from/push): ratestat,
+##     rqstat, schedlat, ttystat, zramstat. NOTE: some may be SETTINGS modules
+##     seeding legitimate config defaults — verify each is a STATISTICS module
+##     seeding fake OBSERVATIONS before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

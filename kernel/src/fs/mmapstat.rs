@@ -114,19 +114,36 @@ fn type_index(t: MapType) -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** mmap statistics table.
+///
+/// Seeds NO processes and zero counters.  Real mmap accounting is wired through
+/// [`register_process`] (one row per process the VM layer tracks) and the
+/// `record_map`/`record_unmap`/`record_protect` functions; until those are
+/// called the table is genuinely empty, so `/proc/mmapstat` and the `mmapstat`
+/// kshell command report zeros rather than fabricated numbers — the kernel's
+/// hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional processes ("init" pid 1: regions
+/// 50 / 200MB / maps 500k / unmaps 499950 / protects 10k; "shell" pid 100:
+/// regions 30 / 100MB / maps 100k / unmaps 99970 / protects 5k) plus invented
+/// per-type counts ([anon 300k, file 200k, shared_anon 50k, shared_file 30k,
+/// stack 10k, vdso 2k]) and aggregate totals (total_maps 600k,
+/// total_unmaps 599920, total_protects 15k, total_bytes_mapped 300MB), which
+/// `/proc/mmapstat` then displayed as if they were real measured mapping
+/// activity.  That demo data was removed; the self-test now builds its own
+/// fixtures explicitly via the real API (see [`self_test`]).  The VM layer is
+/// expected to call [`register_process`] when it begins tracking a process and
+/// the record functions as it maps, unmaps, and reprotects regions.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        processes: alloc::vec![
-            ProcessMapStats { pid: 1, name: String::from("init"), regions: 50, total_bytes: 200_000_000, maps: 500_000, unmaps: 499_950, protects: 10_000 },
-            ProcessMapStats { pid: 100, name: String::from("shell"), regions: 30, total_bytes: 100_000_000, maps: 100_000, unmaps: 99_970, protects: 5_000 },
-        ],
-        type_counts: [300_000, 200_000, 50_000, 30_000, 10_000, 2_000],
-        total_maps: 600_000,
-        total_unmaps: 599_920,
-        total_protects: 15_000,
-        total_bytes_mapped: 300_000_000,
+        processes: Vec::new(),
+        type_counts: [0; 6],
+        total_maps: 0,
+        total_unmaps: 0,
+        total_protects: 0,
+        total_bytes_mapped: 0,
         ops: 0,
     });
 }
@@ -217,55 +234,78 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("mmapstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/mmapstat must never surface).
+    // Resetting first clears any residue from a prior `mmapstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_process().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated processes, type counts, or totals.
+    assert_eq!(per_process().len(), 0);
+    let (p0, m0, u0, pr0, b0, _o0) = stats();
+    assert_eq!((p0, m0, u0, pr0, b0), (0, 0, 0, 0, 0));
+    assert!(type_breakdown().iter().all(|(_, c)| *c == 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register processes — zeroed rows; dup pid fails.
     register_process(200, "test").expect("register");
+    register_process(201, "other").expect("register2");
     assert!(register_process(200, "dup").is_err());
+    assert_eq!(per_process().len(), 2);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Map.
+    // 3: Map — maps/regions/total_bytes increment exactly from zero.
     record_map(200, 4096, MapType::Anonymous).expect("map");
-    let p = per_process().iter().find(|p| p.pid == 200).cloned().unwrap();
-    assert_eq!(p.maps, 1);
-    assert_eq!(p.total_bytes, 4096);
+    record_map(200, 8192, MapType::File).expect("map2");
+    let p = per_process().iter().find(|p| p.pid == 200).cloned().expect("p200");
+    assert_eq!(p.maps, 2);
+    assert_eq!(p.regions, 2);
+    assert_eq!(p.total_bytes, 4096 + 8192);
     crate::serial_println!("  [3/8] map: OK");
 
-    // 4: Unmap.
+    // 4: Unmap — unmaps increments, regions/total_bytes decrement.
     record_unmap(200, 4096).expect("unmap");
-    let p = per_process().iter().find(|p| p.pid == 200).cloned().unwrap();
+    let p = per_process().iter().find(|p| p.pid == 200).cloned().expect("p200");
     assert_eq!(p.unmaps, 1);
-    assert_eq!(p.total_bytes, 0);
+    assert_eq!(p.regions, 1);
+    assert_eq!(p.total_bytes, 8192);
     crate::serial_println!("  [4/8] unmap: OK");
 
-    // 5: Protect.
+    // 5: Protect increments exactly from zero.
     record_protect(200).expect("protect");
-    let p = per_process().iter().find(|p| p.pid == 200).cloned().unwrap();
+    let p = per_process().iter().find(|p| p.pid == 200).cloned().expect("p200");
     assert_eq!(p.protects, 1);
     crate::serial_println!("  [5/8] protect: OK");
 
-    // 6: Type breakdown.
+    // 6: Type breakdown reflects exactly the two maps above (1 anon, 1 file).
     let types = type_breakdown();
-    assert!(types[0].1 > 300_000); // Anonymous.
+    assert_eq!(types[0].1, 1); // Anonymous
+    assert_eq!(types[1].1, 1); // File
+    assert_eq!(types[2].1, 0); // SharedAnon
     crate::serial_println!("  [6/8] types: OK");
 
-    // 7: Not found.
+    // 7: Unregistered process → NotFound.
     assert!(record_map(999, 0, MapType::Anonymous).is_err());
+    assert!(record_protect(999).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate stats equal the exact sums of the operations above.
     let (procs, maps, unmaps, protects, bytes, ops) = stats();
-    assert!(procs >= 3);
-    assert!(maps > 600_000);
-    assert!(unmaps > 599_920);
-    assert!(protects > 15_000);
-    assert!(bytes > 300_000_000);
+    assert_eq!(procs, 2);
+    assert_eq!(maps, 2);
+    assert_eq!(unmaps, 1);
+    assert_eq!(protects, 1);
+    assert_eq!(bytes, 4096 + 8192); // total mapped is cumulative, not net
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/mmapstat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the VM layer wires real
+    // accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("mmapstat::self_test() — all 8 tests passed");
 }

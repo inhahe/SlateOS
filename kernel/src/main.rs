@@ -1264,6 +1264,14 @@ extern "C" fn kernel_main() -> ! {
     // gives the module automated coverage it previously lacked (it was only
     // reachable via the `ksmstat test` kshell subcommand).
     fs::ksmstat::self_test();
+    // mmapstat backs /proc/mmapstat (per-process mmap/munmap/mprotect counts,
+    // per-type breakdown, total bytes mapped); like its siblings the self-test
+    // now builds fixtures via the real register_process/record_map/record_unmap/
+    // record_protect API and resets the table afterward (leaving no fabricated
+    // rows), so it is safe at boot and gives the module automated coverage it
+    // previously lacked (it was only reachable via the `mmapstat test` kshell
+    // subcommand).
+    fs::mmapstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

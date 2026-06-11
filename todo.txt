@@ -429,14 +429,25 @@
 ##                    record_unmerge/record_scan/update_process API; just emptied
 ##                    init_defaults (all counters zeroed) and rebuilt self_test
 ##                    with exact assertions, wired into boot.)
+##   - mmapstat.rs   (fixed 2026-06-11; was: two fake processes "init" pid 1
+##                    (regions 50 / 200MB / maps 500k / unmaps 499950 / protects
+##                    10k) and "shell" pid 100 (regions 30 / 100MB / maps 100k /
+##                    unmaps 99970 / protects 5k); plus invented per-type counts
+##                    [anon 300k, file 200k, shared_anon 50k, shared_file 30k,
+##                    stack 10k, vdso 2k] and aggregates total_maps 600k,
+##                    total_unmaps 599920, total_protects 15k, total_bytes_mapped
+##                    300MB. Already had a full register_process/record_map/
+##                    record_unmap/record_protect API; just emptied init_defaults
+##                    (all counters/type_counts zeroed) and rebuilt self_test with
+##                    exact assertions, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): mmapstat,
-##     pagestat, pidstat, pmcstat, powerstat, procstat, ratestat, rqstat,
-##     schedlat, ttystat, zramstat. NOTE: some may be SETTINGS modules seeding
-##     legitimate config defaults — verify each is a STATISTICS module seeding
-##     fake OBSERVATIONS before emptying it.)
+##     by grep (init_defaults with alloc::vec!/String::from/push): pagestat,
+##     pidstat, pmcstat, powerstat, procstat, ratestat, rqstat, schedlat,
+##     ttystat, zramstat. NOTE: some may be SETTINGS modules seeding legitimate
+##     config defaults — verify each is a STATISTICS module seeding fake
+##     OBSERVATIONS before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

@@ -775,16 +775,22 @@ fn gen_config() -> Vec<u8> {
 
 /// `/proc/mounts` — mounted filesystems.
 ///
-/// Format: `<mount_path> <fs_type>` per line (similar to Linux `/proc/mounts`
-/// but simplified — we don't have mount options yet).
+/// Format matches Linux `show_vfsmnt` (`fs/proc_namespace.c`):
+/// `source mount_point fstype options dump pass` per line, where `dump`
+/// and `pass` are always `0`.  The source is `none` (we track no backing
+/// device); the mount point and fstype are escaped with the same
+/// `mangle()`-equivalent that `mountinfo` uses (see [`mangle_mount_field`])
+/// so whitespace in a mount point does not corrupt the space-separated
+/// layout for `getmntent`/`mount(8)`.
 fn gen_mounts() -> Vec<u8> {
     let mounts = crate::fs::Vfs::mounts_full();
     let mut s = String::with_capacity(256);
 
-    // Format like Linux /proc/mounts: device mountpoint fstype options 0 0
     for (path, fs_type, options) in &mounts {
         let opts = options.to_string();
-        s.push_str(&format!("none {path} {fs_type} {opts} 0 0\n"));
+        let mount_point = mangle_mount_field(path);
+        let fstype = mangle_mount_field(fs_type);
+        s.push_str(&format!("none {mount_point} {fstype} {opts} 0 0\n"));
     }
 
     s.into_bytes()
@@ -2357,6 +2363,35 @@ fn gen_pid_maps(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(render_maps(&vmas))
 }
 
+/// Escape a mount-table field the way Linux's `mangle()` does.
+///
+/// `/proc/mounts` and `/proc/<pid>/mountinfo` are space-separated, so the
+/// four bytes that would otherwise corrupt the layout — space, tab,
+/// newline and backslash — are rendered as 3-digit octal escapes
+/// (`\040`, `\011`, `\012`, `\134`).  This mirrors `seq_escape(m, s,
+/// " \t\n\\")` in `fs/proc_namespace.c` (`mangle()`), so mount points
+/// containing whitespace round-trip correctly through `findmnt`,
+/// `mount(8)` and glibc's `getmntent`.  Our filesystem allows every byte
+/// except `/` and NUL in path components, so a mount point genuinely can
+/// contain a space — without this, such a mount would be misparsed.
+///
+/// Iterating over `char`s (not bytes) keeps multi-byte UTF-8 sequences
+/// intact; the four escaped characters are all ASCII (`< 0x80`) and so
+/// never appear as UTF-8 continuation bytes.
+fn mangle_mount_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' => out.push_str("\\040"),
+            '\t' => out.push_str("\\011"),
+            '\n' => out.push_str("\\012"),
+            '\\' => out.push_str("\\134"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Render the mount table as Linux `/proc/<pid>/mountinfo` lines.
 ///
 /// Pure helper (no VFS / lock access) so it can be unit-tested with a
@@ -2401,11 +2436,17 @@ fn render_mountinfo(mounts: &[(String, String, crate::fs::vfs::MountOptions)]) -
         let mount_id = MOUNT_ID_BASE.saturating_add(i);
         let minor = i.saturating_add(1);
         let opts = options.to_string();
+        // Linux mangles the mount-point and fstype fields (see
+        // `mangle_mount_field`); the options string is composed of
+        // comma-separated flag tokens with no whitespace, so it is emitted
+        // verbatim, matching `show_mnt_opts`.
+        let mount_point = mangle_mount_field(path);
+        let fstype = mangle_mount_field(fs_type);
         // 11 fields, optional-field section empty (separator `-` follows
         // the per-mount options directly).
         let _ = writeln!(
             text,
-            "{mount_id} {root_id} 0:{minor} / {path} {opts} - {fs_type} none {opts}",
+            "{mount_id} {root_id} 0:{minor} / {mount_point} {opts} - {fstype} none {opts}",
         );
     }
     text.into_bytes()
@@ -12679,6 +12720,14 @@ pub fn self_test() -> KernelResult<()> {
                 String::from("tmpfs"),
                 MountOptions::parse("ro,noatime"),
             ),
+            // A mount point containing a space exercises the Linux
+            // `mangle()`-equivalent escaping: the space must become `\040`
+            // so the space-separated layout stays parseable.
+            (
+                String::from("/mnt/my disk"),
+                String::from("ext4"),
+                MountOptions::defaults(),
+            ),
         ];
         let rendered = render_mountinfo(&mounts);
         let mi_text = core::str::from_utf8(&rendered)
@@ -12687,6 +12736,7 @@ pub fn self_test() -> KernelResult<()> {
         let expected = [
             "20 20 0:1 / / rw - ext4 none rw",
             "21 20 0:2 / /tmp ro,noatime - tmpfs none ro,noatime",
+            "22 20 0:3 / /mnt/my\\040disk rw - ext4 none rw",
         ];
         if lines.len() != expected.len() {
             serial_println!(

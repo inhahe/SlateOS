@@ -2721,6 +2721,17 @@ fn gen_pid_limits(task_id: u64) -> KernelResult<Vec<u8>> {
         ("Max realtime timeout", "us"),
     ];
 
+    // Compile-time guard: the row-label table and the per-process defaults
+    // table must each cover exactly NUM_RLIMITS resources.  The loop below
+    // indexes ROWS[resource] and DEFAULT_RLIMITS[resource] over
+    // 0..NUM_RLIMITS with indexing_slicing allowed; if a new RLIMIT_* is ever
+    // added and NUM_RLIMITS bumped without extending these arrays in lockstep,
+    // that indexing would panic at runtime (a DoS in this kernel's threat
+    // model).  These asserts turn that latent runtime panic into a build
+    // failure instead, justifying the #[allow] annotations below.
+    const _: () = assert!(ROWS.len() == NUM_RLIMITS as usize);
+    const _: () = assert!(DEFAULT_RLIMITS.len() == NUM_RLIMITS as usize);
+
     // Validate the task id resolves to *something* (process or task) so
     // a bogus pid yields NotFound rather than a default table.
     if pcb::state(task_id).is_none() {

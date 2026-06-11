@@ -362,16 +362,25 @@
 ##                    state, not data); rebuilt self_test with exact assertions,
 ##                    wired into boot. /proc/acpistat is a fixed-layout table so
 ##                    it renders ~244 bytes of all-zero rows when empty.)
+##   - bpfstat.rs    (fixed 2026-06-11; was: three fake programs "tcp_retransmit"
+##                    (kprobe run_count 50k), "xdp_filter" (XDP run_count 10M),
+##                    "sched_trace" (tracepoint run_count 1M); six fake maps;
+##                    aggregates total_loaded 50, total_unloaded 47, total_runs
+##                    11_050_000, verifier_errors 15. Already had a full
+##                    load_program/unload_program/record_run/create_map/
+##                    record_verifier_error API; just emptied init_defaults
+##                    (next ids reset to 1) and rebuilt self_test with exact
+##                    assertions, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): bpfstat,
-##     budstat, cgiostat, compstat, dmastat, inodestat, ksmstat, mmapstat,
-##     pagestat, pidstat, pmcstat, powerstat, procstat, ratestat, rqstat,
-##     schedlat, ttystat, zramstat. NOTE: some may be SETTINGS modules seeding
-##     legitimate config defaults — verify each is a STATISTICS module seeding
-##     fake OBSERVATIONS before emptying it.)
-## After acpistat, continue auditing the remaining *stat/*latency/*stats siblings.
+##     by grep (init_defaults with alloc::vec!/String::from/push): budstat,
+##     cgiostat, compstat, dmastat, inodestat, ksmstat, mmapstat, pagestat,
+##     pidstat, pmcstat, powerstat, procstat, ratestat, rqstat, schedlat,
+##     ttystat, zramstat. NOTE: some may be SETTINGS modules seeding legitimate
+##     config defaults — verify each is a STATISTICS module seeding fake
+##     OBSERVATIONS before emptying it.)
+## After bpfstat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

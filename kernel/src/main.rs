@@ -1210,6 +1210,14 @@ extern "C" fn kernel_main() -> ! {
     // and gives the module automated coverage it previously lacked (it was only
     // reachable via the `acpistat test` kshell subcommand).
     fs::acpistat::self_test();
+    // bpfstat backs /proc/bpfstat (loaded eBPF programs, maps, run counts,
+    // verifier errors); like its siblings the self-test now builds fixtures via
+    // the real load_program/unload_program/record_run/create_map/
+    // record_verifier_error API and resets the table afterward (leaving no
+    // fabricated rows), so it is safe at boot and gives the module automated
+    // coverage it previously lacked (it was only reachable via the
+    // `bpfstat test` kshell subcommand).
+    fs::bpfstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

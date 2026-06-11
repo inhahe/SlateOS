@@ -118,30 +118,36 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** BPF statistics table.
+///
+/// Seeds NO programs, NO maps, and zero totals.  Real BPF accounting is wired
+/// through [`load_program`]/[`unload_program`]/[`record_run`]/[`create_map`]/
+/// [`record_verifier_error`]; until those are called the table is genuinely
+/// empty, so the `/proc/bpfstat` file and the `bpfstat` kshell command report
+/// zeros rather than fabricated numbers — the kernel's hard "never invent data
+/// in procfs" rule.
+///
+/// NOTE: this previously seeded three fictional programs ("tcp_retransmit"
+/// kprobe run_count 50000; "xdp_filter" XDP run_count 10M; "sched_trace"
+/// tracepoint run_count 1M), six fictional maps, and invented aggregate totals
+/// (total_loaded 50, total_unloaded 47, total_runs 11_050_000, verifier_errors
+/// 15), which `/proc/bpfstat` then displayed as if they were real loaded-program
+/// and execution measurements.  That demo data was removed; the self-test now
+/// builds its own fixtures explicitly via the real API (see [`self_test`]).
+/// The BPF subsystem is expected to call [`load_program`]/[`create_map`] when
+/// programs/maps are installed and the record_* functions as they execute.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        programs: alloc::vec![
-            BpfProgram { id: 1, name: String::from("tcp_retransmit"), prog_type: BpfProgType::Kprobe, insn_count: 128, run_count: 50_000, run_time_ns: 5_000_000, map_count: 2, loaded_ns: now },
-            BpfProgram { id: 2, name: String::from("xdp_filter"), prog_type: BpfProgType::Xdp, insn_count: 256, run_count: 10_000_000, run_time_ns: 500_000_000, map_count: 3, loaded_ns: now },
-            BpfProgram { id: 3, name: String::from("sched_trace"), prog_type: BpfProgType::TracePoint, insn_count: 64, run_count: 1_000_000, run_time_ns: 50_000_000, map_count: 1, loaded_ns: now },
-        ],
-        maps: alloc::vec![
-            BpfMap { id: 1, name: String::from("retransmit_counts"), max_entries: 10000, key_size: 16, value_size: 8, used_entries: 500 },
-            BpfMap { id: 2, name: String::from("retransmit_addrs"), max_entries: 10000, key_size: 4, value_size: 16, used_entries: 500 },
-            BpfMap { id: 3, name: String::from("xdp_stats"), max_entries: 256, key_size: 4, value_size: 16, used_entries: 64 },
-            BpfMap { id: 4, name: String::from("xdp_blacklist"), max_entries: 100000, key_size: 4, value_size: 1, used_entries: 1000 },
-            BpfMap { id: 5, name: String::from("xdp_counters"), max_entries: 64, key_size: 4, value_size: 8, used_entries: 4 },
-            BpfMap { id: 6, name: String::from("sched_hist"), max_entries: 1024, key_size: 4, value_size: 8, used_entries: 256 },
-        ],
-        next_prog_id: 4,
-        next_map_id: 7,
-        total_loaded: 50,
-        total_unloaded: 47,
-        total_runs: 11_050_000,
-        verifier_errors: 15,
+        programs: Vec::new(),
+        maps: Vec::new(),
+        next_prog_id: 1,
+        next_map_id: 1,
+        total_loaded: 0,
+        total_unloaded: 0,
+        total_runs: 0,
+        verifier_errors: 0,
         ops: 0,
     });
 }
@@ -238,59 +244,78 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("bpfstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/bpfstat must never surface).
+    // Resetting first clears any residue from a prior `bpfstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_programs().len(), 3);
-    assert_eq!(list_maps().len(), 6);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated programs, maps, or totals.
+    assert_eq!(list_programs().len(), 0);
+    assert_eq!(list_maps().len(), 0);
+    let (p0, m0, l0, r0, v0, _o0) = stats();
+    assert_eq!((p0, m0, l0, r0, v0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Load program.
-    let id = load_program("test_prog", BpfProgType::SocketFilter, 32).expect("load");
-    assert!(id >= 4);
-    assert_eq!(list_programs().len(), 4);
+    // 2: Load programs — ids start at 1 and increment.
+    let id1 = load_program("prog_a", BpfProgType::SocketFilter, 32).expect("load1");
+    let id2 = load_program("prog_b", BpfProgType::Xdp, 64).expect("load2");
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    assert_eq!(list_programs().len(), 2);
     crate::serial_println!("  [2/8] load: OK");
 
-    // 3: Record run.
-    record_run(id, 500).expect("run");
-    let p = list_programs().iter().find(|p| p.id == id).cloned().unwrap();
+    // 3: Record run increments count + time exactly from zero.
+    record_run(id1, 500).expect("run");
+    let p = list_programs().iter().find(|p| p.id == id1).cloned().expect("prog");
     assert_eq!(p.run_count, 1);
     assert_eq!(p.run_time_ns, 500);
+    assert!(record_run(9999, 1).is_err()); // unknown id
     crate::serial_println!("  [3/8] run: OK");
 
-    // 4: Create map.
+    // 4: Create maps — ids start at 1, used_entries zeroed.
     let map_id = create_map("test_map", 1024, 4, 8).expect("create_map");
-    assert!(map_id >= 7);
-    assert_eq!(list_maps().len(), 7);
+    assert_eq!(map_id, 1);
+    assert_eq!(list_maps().len(), 1);
+    let m = list_maps().iter().find(|m| m.id == map_id).cloned().expect("map");
+    assert_eq!(m.used_entries, 0);
     crate::serial_println!("  [4/8] create map: OK");
 
-    // 5: Verifier error.
-    let (_, _, _, _, ve_before, _) = stats();
+    // 5: Verifier error increments exactly from zero.
     record_verifier_error().expect("verifier");
-    let (_, _, _, _, ve_after, _) = stats();
-    assert_eq!(ve_after, ve_before + 1);
+    let (_, _, _, _, ve, _) = stats();
+    assert_eq!(ve, 1);
     crate::serial_println!("  [5/8] verifier error: OK");
 
-    // 6: By type.
+    // 6: by_type filters correctly (one XDP program: prog_b).
     let xdp = by_type(BpfProgType::Xdp);
     assert_eq!(xdp.len(), 1);
+    assert_eq!(xdp[0].id, id2);
     crate::serial_println!("  [6/8] by type: OK");
 
-    // 7: Unload.
-    unload_program(id).expect("unload");
-    assert_eq!(list_programs().len(), 3);
-    assert!(unload_program(id).is_err());
+    // 7: Unload removes the program; unloading again fails.
+    unload_program(id1).expect("unload");
+    assert_eq!(list_programs().len(), 1);
+    assert!(unload_program(id1).is_err());
     crate::serial_println!("  [7/8] unload: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (progs, maps, loaded, runs, verr, ops) = stats();
-    assert_eq!(progs, 3);
-    assert!(maps >= 7);
-    assert!(loaded > 50);
-    assert!(runs > 11_050_000);
-    assert!(verr > 15);
+    assert_eq!(progs, 1);    // two loaded, one unloaded
+    assert_eq!(maps, 1);
+    assert_eq!(loaded, 2);   // two load_program calls
+    assert_eq!(runs, 1);     // one successful record_run
+    assert_eq!(verr, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/bpfstat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the BPF subsystem wires
+    // real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("bpfstat::self_test() — all 8 tests passed");
 }

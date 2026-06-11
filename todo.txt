@@ -2175,6 +2175,19 @@
 ##     are declared but not yet wired to real probe sites (nothing calls record()
 ##     from kernel hot paths yet), so hit counts stay zero — honest, but wire them
 ##     to the syscall/sched/irq/vfs/page-fault paths when tracing is productised.
+##     appnotify audited 2026-06-11: LEGITIMATE settings module, NO change needed.
+##     init_defaults() seeds a static notification-sound ASSET catalog (chime/ding/
+##     pop/alert/... per design.txt line 898) plus default per-app notification
+##     CONFIGS (system + file-explorer notification types, sound choices, display
+##     modes, priorities) — configuration, not observed data. stats() surfaces only
+##     config cardinalities (app_count, sound_count, total_types, ops); there is NO
+##     fired-notification counter or observation history to fabricate. STATE is a
+##     non-Option Mutex<State> initialised EMPTY; init_defaults() is called ONLY on
+##     the explicit `appnotify init` kshell subcommand (not boot-wired, not lazy),
+##     so /proc/appnotify is honestly empty until the user inits. self_test() is
+##     already residue-free: it both starts AND ends with clear_all(), leaving the
+##     pristine empty default state. Verified by reading the module + kshell
+##     dispatch (kshell.rs:24043-24058). No edit, no commit beyond this note.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

@@ -796,60 +796,87 @@ fn gen_mounts() -> Vec<u8> {
     s.into_bytes()
 }
 
-/// `/proc/stat` — system-wide task/scheduler statistics.
+/// `/proc/stat` — system-wide kernel/scheduler statistics in Linux format.
+///
+/// Follows Linux `fs/proc/stat.c` `show_stat()`. All fields are backed by
+/// honest data sources — fields the kernel does not yet track are reported as
+/// zero rather than fabricated:
+///
+/// - `cpu`/`cpuN` jiffy columns come from [`crate::cputime`], which performs
+///   real per-CPU TSC-precision accounting hooked into the live ISR, idle, and
+///   softirq paths. We track a four-way split (system / idle / irq / softirq),
+///   so the `user`, `nice`, `iowait`, `steal`, `guest`, and `guest_nice`
+///   columns are honestly zero — we do not yet separate user-vs-kernel CPU time.
+/// - `intr` total is the real hardware-IRQ count; per-IRQ breakdown is omitted
+///   (we do not yet keep a per-vector histogram here).
+/// - `ctxt` is the sum of every task's `schedule_count` (real dispatch count).
+/// - `btime` is the wall-clock boot epoch from [`crate::timekeeping`].
+/// - `processes` is the cumulative fork/create count from [`crate::proc::pcb`].
+/// - `procs_running` / `procs_blocked` are live scheduler state counts.
+/// - `softirq` total is the real softirq dispatch count.
 fn gen_stat() -> Vec<u8> {
-    let tasks = crate::sched::task_list();
-
-    let mut s = String::with_capacity(512);
-    s.push_str(&format!("tasks: {}\n", tasks.len()));
-
     use crate::sched::task::TaskState;
 
-    // Count by state.
-    let mut running = 0u32;
-    let mut ready = 0u32;
-    let mut blocked = 0u32;
-    let mut suspended = 0u32;
-    let mut dead = 0u32;
+    // Linux reports CPU time in USER_HZ jiffies. We use a 100 Hz tick, so one
+    // jiffy is 10 ms = 10_000_000 ns. Genuinely-untracked columns stay zero.
+    const NS_PER_JIFFY: u64 = 10_000_000;
 
-    for t in &tasks {
-        match t.state {
-            TaskState::Running => running = running.wrapping_add(1),
-            TaskState::Ready => ready = ready.wrapping_add(1),
-            TaskState::Blocked => blocked = blocked.wrapping_add(1),
-            TaskState::Suspended => suspended = suspended.wrapping_add(1),
-            TaskState::Dead => dead = dead.wrapping_add(1),
-        }
-    }
-
-    s.push_str(&format!("running: {running}\n"));
-    s.push_str(&format!("ready: {ready}\n"));
-    s.push_str(&format!("blocked: {blocked}\n"));
-    s.push_str(&format!("suspended: {suspended}\n"));
-    s.push_str(&format!("dead: {dead}\n"));
-
-    // Total CPU ticks across all tasks.
-    let total_ticks: u64 = tasks.iter().map(|t| t.total_ticks).sum();
-    s.push_str(&format!("total_cpu_ticks: {total_ticks}\n"));
-
-    // Per-task detail.
-    s.push('\n');
-    s.push_str("# pid  name                state      prio  ticks      cpu\n");
-    for t in &tasks {
-        let name = core::str::from_utf8(t.name.get(..t.name_len).unwrap_or(&[]))
-            .unwrap_or("???");
-        let state_str = match t.state {
-            TaskState::Running => "running",
-            TaskState::Ready => "ready",
-            TaskState::Blocked => "blocked",
-            TaskState::Suspended => "suspended",
-            TaskState::Dead => "dead",
-        };
+    // Emit one `user nice system idle iowait irq softirq steal guest guest_nice`
+    // row from a CpuTimeStats sample. We track only the system/idle/irq/softirq
+    // split, so the remaining columns are honestly zero.
+    fn push_cpu_row(s: &mut String, label: &str, st: &crate::cputime::CpuTimeStats) {
+        let system = st.system_ns / NS_PER_JIFFY;
+        let idle = st.idle_ns / NS_PER_JIFFY;
+        let irq = st.irq_ns / NS_PER_JIFFY;
+        let softirq = st.softirq_ns / NS_PER_JIFFY;
+        // user nice system idle iowait irq softirq steal guest guest_nice
         s.push_str(&format!(
-            "  {:<4} {:<19} {:<10} {:<5} {:<10} {}\n",
-            t.id, name, state_str, t.priority, t.total_ticks, t.last_cpu
+            "{label} 0 0 {system} {idle} 0 {irq} {softirq} 0 0 0\n"
         ));
     }
+
+    let mut s = String::with_capacity(512);
+
+    // Aggregate line uses the label "cpu" followed by TWO spaces (Linux quirk).
+    let agg = crate::cputime::aggregate_stats();
+    push_cpu_row(&mut s, "cpu ", &agg);
+
+    // Per-CPU lines: "cpuN" with a single space.
+    for (cpu, st) in crate::cputime::all_cpu_stats() {
+        push_cpu_row(&mut s, &format!("cpu{cpu}"), &st);
+    }
+
+    // Hardware interrupt total. Per-IRQ breakdown is omitted (not tracked here).
+    s.push_str(&format!("intr {}\n", agg.irq_count));
+
+    // Context switches: sum of real per-task dispatch counts.
+    let tasks = crate::sched::task_list();
+    let ctxt: u64 = tasks.iter().map(|t| t.schedule_count).sum();
+    s.push_str(&format!("ctxt {ctxt}\n"));
+
+    // Boot wall-clock time (seconds since the Unix epoch).
+    s.push_str(&format!("btime {}\n", crate::timekeeping::boot_time_epoch_secs()));
+
+    // Cumulative processes created (forks) since boot.
+    s.push_str(&format!("processes {}\n", crate::proc::pcb::processes_created()));
+
+    // Live scheduler state: runnable vs. blocked.
+    let mut procs_running = 0u64;
+    let mut procs_blocked = 0u64;
+    for t in &tasks {
+        match t.state {
+            TaskState::Running | TaskState::Ready => {
+                procs_running = procs_running.saturating_add(1);
+            }
+            TaskState::Blocked => procs_blocked = procs_blocked.saturating_add(1),
+            TaskState::Suspended | TaskState::Dead => {}
+        }
+    }
+    s.push_str(&format!("procs_running {procs_running}\n"));
+    s.push_str(&format!("procs_blocked {procs_blocked}\n"));
+
+    // Softirq total dispatch count. Per-type breakdown omitted (not tracked here).
+    s.push_str(&format!("softirq {}\n", agg.softirq_count));
 
     s.into_bytes()
 }

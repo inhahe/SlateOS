@@ -42,8 +42,29 @@ pub type ProcessId = u64;
 /// Starts at 1 (PID 0 = kernel).
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 
+/// Cumulative count of processes created since boot.
+///
+/// Incremented once per successful process creation — both fresh
+/// [`create`] and [`fork_create`].  This is a monotonic forks-since-boot
+/// counter (it never decrements when a process exits), which is exactly
+/// the semantics Linux's `/proc/stat` `processes` field reports.  It is
+/// distinct from the live process count (the size of `PROCESS_TABLE`):
+/// `NEXT_PID` also advances but is an implementation detail of PID
+/// allocation, so we keep a dedicated counter rather than deriving the
+/// value from it.
+static PROCESSES_CREATED: AtomicU64 = AtomicU64::new(0);
+
 fn alloc_pid() -> ProcessId {
     NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Cumulative number of processes created since boot.
+///
+/// Backs `/proc/stat`'s `processes` field.  Counts every successful
+/// process creation (initial spawn and fork) and never decreases.
+#[must_use]
+pub fn processes_created() -> u64 {
+    PROCESSES_CREATED.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,6 +1149,7 @@ pub fn create(name: &str, parent: ProcessId) -> ProcessId {
 
     let mut table = PROCESS_TABLE.lock();
     table.insert(pid, proc);
+    PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
 
     pid
 }
@@ -1459,6 +1481,7 @@ pub fn fork_create(
     };
 
     table.insert(pid, child);
+    PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
     Ok(pid)
 }
 

@@ -1578,6 +1578,18 @@ extern "C" fn kernel_main() -> ! {
     // real API with exact assertions (including exact histogram-bucket placement)
     // and resets the tables afterward, so it is safe at boot.
     fs::schedwait::self_test();
+    // kthread backs /proc/kthread (kernel-thread lifecycle: per-thread id/name/
+    // cpu/state/cpu-time/wakeups plus created/exited totals).  Its
+    // init_defaults() previously seeded five fictional kernel threads —
+    // "kswapd0", "ksoftirqd/0", "kworker/0:0", "kworker/1:0", and "writeback" —
+    // with invented CPU times and wakeup counts, plus totals of 100 created / 95
+    // exited; that phantom data was removed.  Kernel threads are dynamic (no
+    // fixed taxonomy) so the list starts empty, with threads tracked as they
+    // register via the existing register()/unregister() API and activity
+    // advancing only on real set_state/record_cpu_time calls.  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions and
+    // resets the list afterward, so it is safe at boot.
+    fs::kthread::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

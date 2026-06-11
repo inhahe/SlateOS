@@ -99,21 +99,30 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the kernel-thread tracking state.
+///
+/// Starts with no tracked threads and zero created/exited totals. The
+/// `/proc/kthread` generator and the `kthread` kshell command surface this
+/// list (and `on_cpu`) as if it reflects the real set of running kernel
+/// threads, so seeding it with phantom threads would be fabricated procfs
+/// data — it would claim kernel threads exist that nothing actually spawned.
+/// Kernel threads are registered through [`register`] when they are created
+/// and removed through [`unregister`] on exit; counters and per-thread
+/// activity advance only through real [`register`] / [`unregister`] /
+/// [`set_state`] / [`record_cpu_time`] calls.
+///
+/// (Previously this seeded five fictional kernel threads — "kswapd0",
+/// "ksoftirqd/0", "kworker/0:0", "kworker/1:0", and "writeback" — with
+/// invented CPU times and wakeup counts, plus totals of 100 created / 95
+/// exited.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        threads: alloc::vec![
-            KernelThread { id: 1, name: String::from("kswapd0"), cpu: 0, state: KthreadState::Sleeping, cpu_time_ns: 500_000_000, wakeups: 100_000, created_ns: now },
-            KernelThread { id: 2, name: String::from("ksoftirqd/0"), cpu: 0, state: KthreadState::Sleeping, cpu_time_ns: 200_000_000, wakeups: 500_000, created_ns: now },
-            KernelThread { id: 3, name: String::from("kworker/0:0"), cpu: 0, state: KthreadState::Idle, cpu_time_ns: 1_000_000_000, wakeups: 1_000_000, created_ns: now },
-            KernelThread { id: 4, name: String::from("kworker/1:0"), cpu: 1, state: KthreadState::Idle, cpu_time_ns: 900_000_000, wakeups: 900_000, created_ns: now },
-            KernelThread { id: 5, name: String::from("writeback"), cpu: 0, state: KthreadState::Sleeping, cpu_time_ns: 100_000_000, wakeups: 50_000, created_ns: now },
-        ],
-        next_id: 6,
-        total_created: 100,
-        total_exited: 95,
+        threads: Vec::new(),
+        next_id: 1,
+        total_created: 0,
+        total_exited: 0,
         ops: 0,
     });
 }
@@ -193,54 +202,67 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("kthread::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live kernel-thread list afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 5);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom threads, zero totals.
+    assert_eq!(list().len(), 0);
+    let (threads0, created0, exited0, _) = stats();
+    assert_eq!((threads0, created0, exited0), (0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
+    // 2: Register — id starts at 1, thread begins Running with zeroed activity.
     let id = register("test_kthread", 2).expect("register");
-    assert!(id >= 6);
-    assert_eq!(list().len(), 6);
+    assert_eq!(id, 1);
+    assert_eq!(list().len(), 1);
+    let t = list().into_iter().find(|t| t.id == id).expect("find");
+    assert_eq!(t.state, KthreadState::Running);
+    assert_eq!((t.cpu_time_ns, t.wakeups), (0, 0));
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Set state.
+    // 3: Set state — a non-Running transition does not count a wakeup.
     set_state(id, KthreadState::Sleeping).expect("state");
-    let t = list().iter().find(|t| t.id == id).cloned().unwrap();
+    let t = list().into_iter().find(|t| t.id == id).expect("f3");
     assert_eq!(t.state, KthreadState::Sleeping);
+    assert_eq!(t.wakeups, 0);
     crate::serial_println!("  [3/8] state: OK");
 
-    // 4: Wakeup counting.
+    // 4: Wakeup counting — a transition to Running increments wakeups.
     set_state(id, KthreadState::Running).expect("wake");
-    let t = list().iter().find(|t| t.id == id).cloned().unwrap();
-    assert_eq!(t.wakeups, 1);
+    assert_eq!(list().into_iter().find(|t| t.id == id).expect("f4").wakeups, 1);
     crate::serial_println!("  [4/8] wakeups: OK");
 
-    // 5: CPU time.
+    // 5: CPU time accumulates exactly.
     record_cpu_time(id, 50_000).expect("cpu_time");
-    let t = list().iter().find(|t| t.id == id).cloned().unwrap();
-    assert_eq!(t.cpu_time_ns, 50_000);
+    assert_eq!(list().into_iter().find(|t| t.id == id).expect("f5").cpu_time_ns, 50_000);
     crate::serial_println!("  [5/8] cpu time: OK");
 
-    // 6: On CPU.
-    let cpu2 = on_cpu(2);
-    assert!(!cpu2.is_empty());
+    // 6: on_cpu filters by CPU. Register a second thread on a different CPU.
+    let id2 = register("other_kthread", 5).expect("register2");
+    assert_eq!(id2, 2);
+    assert_eq!(on_cpu(2).len(), 1);
+    assert_eq!(on_cpu(5).len(), 1);
+    assert_eq!(on_cpu(99).len(), 0);
     crate::serial_println!("  [6/8] on cpu: OK");
 
-    // 7: Unregister.
+    // 7: Unregister removes the thread; double/unknown unregister is NotFound.
     unregister(id).expect("unregister");
-    assert_eq!(list().len(), 5);
+    assert_eq!(list().len(), 1); // id2 remains
     assert!(unregister(id).is_err());
+    assert!(unregister(9999).is_err());
     crate::serial_println!("  [7/8] unregister: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above.
     let (threads, created, exited, ops) = stats();
-    assert_eq!(threads, 5);
-    assert!(created > 100);
-    assert!(exited > 95);
+    assert_eq!(threads, 1);   // id2 still tracked
+    assert_eq!(created, 2);   // two registers
+    assert_eq!(exited, 1);    // one unregister
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("kthread::self_test() — all 8 tests passed");
 }

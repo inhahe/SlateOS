@@ -552,6 +552,7 @@ const PID_FILES: &[&str] = &[
     "environ",
     "mountinfo",
     "cgroup",
+    "cpuset",
     "oom_score",
     "oom_score_adj",
     "schedstat",
@@ -2183,14 +2184,24 @@ fn gen_pid_mountinfo(task_id: u64) -> KernelResult<Vec<u8>> {
 /// assigned to any group lives in the root cgroup `/`, which is exactly
 /// what Linux reports.  `systemd`, container runtimes, and
 /// `systemd-detect-virt` parse this line.
+/// Resolve a process's cgroup path in the unified (v2) hierarchy.
+///
+/// cgroup membership is keyed by the 32-bit PID the cgroup API uses.  A
+/// process not explicitly assigned to any group lives in the root cgroup
+/// `/`, matching Linux.  Shared by [`render_cgroup`] (which prefixes the
+/// `0::` hierarchy field) and [`render_cpuset`] (which reports the bare
+/// path), so both files always agree on a process's membership.
+fn cgroup_path_for(pid: u64, groups: &[crate::fs::cgroupfs::Cgroup]) -> &str {
+    u32::try_from(pid)
+        .ok()
+        .and_then(|p| groups.iter().find(|g| g.processes.contains(&p)))
+        .map_or("/", |g| g.path.as_str())
+}
+
 fn render_cgroup(pid: u64, groups: &[crate::fs::cgroupfs::Cgroup]) -> Vec<u8> {
     use core::fmt::Write as _;
 
-    // cgroup membership is keyed by the 32-bit PID the cgroup API uses.
-    let path = u32::try_from(pid)
-        .ok()
-        .and_then(|p| groups.iter().find(|g| g.processes.contains(&p)))
-        .map_or("/", |g| g.path.as_str());
+    let path = cgroup_path_for(pid, groups);
 
     let mut text = String::with_capacity(path.len().saturating_add(4));
     // `writeln!` into a String is infallible; the Result is ignored.
@@ -2212,6 +2223,43 @@ fn gen_pid_cgroup(task_id: u64) -> KernelResult<Vec<u8>> {
     }
     let groups = crate::fs::cgroupfs::list_groups();
     Ok(render_cgroup(task_id, &groups))
+}
+
+/// Render `/proc/<pid>/cpuset` — the process's cpuset cgroup path.
+///
+/// Pure helper (no cgroupfs lock access) so it can be unit-tested with a
+/// synthetic group list in kernel context.  In a cgroup v2 unified
+/// hierarchy the cpuset controller shares the single cgroup tree, so a
+/// process's cpuset path *is* its cgroup path: a single newline-terminated
+/// line such as `/` or `/app.slice` (no `0::` prefix — this legacy file
+/// predates the unified-hierarchy line format).  `numactl`/`libnuma` read
+/// this to discover which NUMA-affine cpuset a task is confined to; with no
+/// explicit assignment the task lives in the root cpuset `/`.
+fn render_cpuset(pid: u64, groups: &[crate::fs::cgroupfs::Cgroup]) -> Vec<u8> {
+    use core::fmt::Write as _;
+
+    let path = cgroup_path_for(pid, groups);
+
+    let mut text = String::with_capacity(path.len().saturating_add(1));
+    // `writeln!` into a String is infallible; the Result is ignored.
+    let _ = writeln!(text, "{path}");
+    text.into_bytes()
+}
+
+/// `/proc/<pid>/cpuset` — the process's cpuset cgroup path, Linux-format.
+///
+/// Reflects the same cgroup membership as [`render_cgroup`] (we run a
+/// unified v2 hierarchy, so cpuset and cgroup paths coincide); see
+/// [`render_cpuset`] for the exact format.  Gated on process existence so
+/// bare scheduler tasks (kernel threads with no PCB) return `NotFound`,
+/// matching every other process-only per-PID file.
+fn gen_pid_cpuset(task_id: u64) -> KernelResult<Vec<u8>> {
+    // Process-only file: a bare scheduler task has no process record.
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    let groups = crate::fs::cgroupfs::list_groups();
+    Ok(render_cpuset(task_id, &groups))
 }
 
 /// Render `/proc/<pid>/oom_score` — the current OOM badness, Linux-format.
@@ -2579,6 +2627,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "environ" => gen_pid_environ(task_id),
         "mountinfo" => gen_pid_mountinfo(task_id),
         "cgroup" => gen_pid_cgroup(task_id),
+        "cpuset" => gen_pid_cpuset(task_id),
         "oom_score" => gen_pid_oom_score(task_id),
         "oom_score_adj" => gen_pid_oom_score_adj(task_id),
         "schedstat" => gen_pid_schedstat(task_id),
@@ -11730,6 +11779,31 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   cgroup render: assigned + root fallback OK");
+
+        // /proc/<pid>/cpuset shares the unified hierarchy with cgroup, so it
+        // reports the same membership path but as a bare newline-terminated
+        // line (no "0::" prefix).  Reuse the same synthetic group list.
+        let cs_assigned = render_cpuset(42, &groups);
+        let cs_unassigned = render_cpuset(99, &groups);
+        let cs_assigned_text = core::str::from_utf8(&cs_assigned)
+            .map_err(|_| KernelError::InternalError)?;
+        let cs_unassigned_text = core::str::from_utf8(&cs_unassigned)
+            .map_err(|_| KernelError::InternalError)?;
+        if cs_assigned_text != "/app.slice\n" {
+            serial_println!(
+                "[procfs]   FAIL: cpuset assigned {:?} != \"/app.slice\\n\"",
+                cs_assigned_text
+            );
+            return Err(KernelError::InternalError);
+        }
+        if cs_unassigned_text != "/\n" {
+            serial_println!(
+                "[procfs]   FAIL: cpuset unassigned {:?} != \"/\\n\"",
+                cs_unassigned_text
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   cpuset render: assigned + root fallback OK");
     }
 
     // --- /proc/<pid>/oom_score{,_adj} rendering ---
@@ -11917,6 +11991,35 @@ pub fn self_test() -> KernelResult<()> {
         }
         Err(e) => {
             serial_println!("[procfs]   FAIL: cgroup unexpected error {:?}", e);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // /proc/<pid>/cpuset — process-only; when it succeeds it must be a
+    // single absolute-path line (starts with "/", no "0::" prefix), the
+    // bare cgroup path shared with the cgroup file.
+    match fs.read_file(&format!("/{current_tid}/cpuset")) {
+        Ok(cs_data) => {
+            let cs_text = core::str::from_utf8(&cs_data)
+                .map_err(|_| KernelError::InternalError)?;
+            if !cs_text.starts_with('/') || cs_text.lines().count() != 1 {
+                serial_println!(
+                    "[procfs]   FAIL: cpuset malformed ({:?})", cs_text
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[procfs]   {}/cpuset: {} bytes OK", current_tid, cs_data.len()
+            );
+        }
+        Err(KernelError::NotFound) => {
+            serial_println!(
+                "[procfs]   {}/cpuset: NotFound (bare task, no PCB) OK",
+                current_tid
+            );
+        }
+        Err(e) => {
+            serial_println!("[procfs]   FAIL: cpuset unexpected error {:?}", e);
             return Err(KernelError::InternalError);
         }
     }

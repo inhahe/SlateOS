@@ -28,16 +28,21 @@
 ## routes the `task/` subtree, every PID dir now lists a `task` subdir,
 ## and readdir/read_file/stat handle the three levels. thread_belongs()
 ## gates each path on get_threads(pid).contains(tid). Files served per
-## thread: comm + schedstat (TASK_FILES) via generate_task(tid,name) — both
-## gen_pid_comm/gen_pid_schedstat key on the scheduler task id (not the
-## process id), so passing the thread tid yields that thread's own data
-## with no field mixing. Self-tested (7 classify cases + live gating).
-## REMAINING: add stat/status to TASK_FILES. They are omitted because their
-## ppid/tgid/num_threads fields need the OWNING process's context (a thread
-## tid is not a process-table key), so serving them via gen_pid_stat(tid)
-## would report ppid=0/num_threads=1 for non-main threads. Proper fix:
-## thread-aware variants gen_thread_stat(pid,tid)/gen_thread_status(pid,tid)
-## that take process fields from `pid` and thread fields from `tid`.
+## thread: comm + schedstat + stat (TASK_FILES) via
+## generate_task(pid,tid,name). comm/schedstat key purely on the scheduler
+## task id; stat is served via gen_thread_stat(pid,tid) which splits the
+## 52-field line into thread fields (field1=tid, comm, state, utime,
+## priority, exit_code — from the scheduler task `tid`) and process-wide
+## fields (ppid, pgrp/session, num_threads, vsize, rss, rsslim — from the
+## owning `pid`). build_pid_stat(task, proc_id) is the shared core; the
+## process's own /proc/<pid>/stat calls it with proc_id==task.id so the two
+## id sources coincide. Self-tested (8 classify cases + live gating + live
+## thread-stat: bogus tid -> NotFound, field1==probe).
+## REMAINING: add `status` to TASK_FILES. Same approach as stat: a
+## thread-aware gen_thread_status(pid,tid) that takes the Tgid/Ppid/Threads
+## and other process-wide lines from `pid` while the per-thread Pid/Name/
+## State come from `tid`. Omitted for now only to keep this commit to one
+## logical change; the stat refactor (build_pid_stat split) is the template.
 ##
 ## DONE (2026-06-10): writable /proc/<pid>/oom_score_adj
 ## /proc/<pid>/oom_score_adj now accepts writes (kernel/src/fs/procfs.rs:

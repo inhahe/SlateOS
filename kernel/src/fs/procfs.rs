@@ -589,7 +589,7 @@ const PID_LINKS: &[&str] = &["cwd", "root", "exe"];
 /// either fabricate those fields or require threading the owner pid
 /// through the per-thread generators — tracked as a follow-up in
 /// `todo.txt` rather than shipped wrong.
-const TASK_FILES: &[&str] = &["comm", "schedstat"];
+const TASK_FILES: &[&str] = &["comm", "schedstat", "stat"];
 
 // ---------------------------------------------------------------------------
 // Content generators
@@ -1956,11 +1956,38 @@ fn gen_pid_environ(task_id: u64) -> KernelResult<Vec<u8>> {
 /// sizes use the Linux ABI page size of 4096 bytes (see [`gen_pid_statm`]),
 /// not the native 16 KiB frame size.
 fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
-    use crate::sched::task::TaskState;
-
     let tasks = crate::sched::task_list();
     let task = tasks.iter().find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
+    Ok(build_pid_stat(task, task_id))
+}
+
+/// `/proc/<pid>/task/<tid>/stat` — per-thread task statistics.
+///
+/// Same 52-field layout as [`gen_pid_stat`], but the thread-specific fields
+/// (pid=field 1, comm, state, utime, priority, exit_code) come from the
+/// thread's scheduler task `tid`, while the process-wide fields (ppid,
+/// pgrp/session, num_threads, vsize, rss, rsslim) come from the owning
+/// process `proc_id`.  This is what Linux's `task/<tid>/stat` reports and is
+/// strictly more correct than serving `gen_pid_stat(tid)` (which would key
+/// the process-wide fields off the non-process tid).
+fn gen_thread_stat(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
+    let tasks = crate::sched::task_list();
+    let task = tasks.iter().find(|t| t.id == tid)
+        .ok_or(KernelError::NotFound)?;
+    Ok(build_pid_stat(task, proc_id))
+}
+
+/// Build a Linux 52-field stat line.
+///
+/// Thread-specific fields come from `task` (field 1 = `task.id`, plus comm,
+/// state, utime, priority, and exit code); process-wide fields come from
+/// `proc_id` (ppid, pgrp/session, num_threads, vsize, rss, rsslim).  For a
+/// process's own `/proc/<pid>/stat`, the caller passes `proc_id == task.id`
+/// so the two id sources coincide; for a thread's `task/<tid>/stat` they
+/// differ (`task.id == tid`, `proc_id == owning pid`).
+fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
+    use crate::sched::task::TaskState;
 
     let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
         .unwrap_or("???");
@@ -1973,8 +2000,8 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
         TaskState::Dead => 'Z',     // zombie
     };
 
-    let ppid = crate::proc::pcb::parent(task_id).unwrap_or(0);
-    let num_threads = crate::proc::pcb::get_threads(task_id)
+    let ppid = crate::proc::pcb::parent(proc_id).unwrap_or(0);
+    let num_threads = crate::proc::pcb::get_threads(proc_id)
         .map_or(1, |t| t.len());
 
     // utime: clock ticks consumed.  USER_HZ == TICK_RATE_HZ == 100, so the
@@ -1983,19 +2010,21 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
 
     // Virtual size (bytes) and resident pages, in Linux ABI page units.
     // Bare scheduler tasks (no process / address-space charge) report 0,
-    // exactly as Linux does for kernel threads.
+    // exactly as Linux does for kernel threads.  Threads share the owning
+    // process's address space, so this is a process-wide charge.
     const ABI_PAGE_SIZE: u64 = 4096;
-    let vsize = crate::proc::pcb::linux_as_used(task_id).unwrap_or(0);
+    let vsize = crate::proc::pcb::linux_as_used(proc_id).unwrap_or(0);
     let rss_pages = vsize / ABI_PAGE_SIZE;
 
     // rsslim: RLIMIT_RSS hard limit (resource index 5).  Default unlimited.
-    let rsslim = crate::proc::pcb::get_rlimit(task_id, 5)
+    let rsslim = crate::proc::pcb::get_rlimit(proc_id, 5)
         .map_or(crate::proc::pcb::RLIM_INFINITY, |(_soft, hard)| hard);
 
     // exit_code is only meaningful once the task is a zombie; Linux encodes
     // it the same way `wait()` does (status << 8).  We store the raw exit
     // code, so shift it into the wait-status high byte to match the ABI.
-    let exit_code = crate::proc::pcb::exit_code(task_id)
+    // This is per-task (the thread's own exit status).
+    let exit_code = crate::proc::pcb::exit_code(task.id)
         .map_or(0i64, |c| (i64::from(c) & 0xff) << 8);
 
     // priority: Linux reports the kernel-internal priority; for normal tasks
@@ -2005,13 +2034,13 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     // pgrp (field 5) and session (field 6).  We don't track process groups
     // or sessions as distinct objects; our model is "every process is its
     // own group and session leader", which is exactly what sys_getpgid /
-    // sys_getsid / sys_getpgrp report (pgid == sid == pid).  Mirror that
-    // here so a tool reading pgrp/session from /proc/<pid>/stat agrees with
-    // the getpgid(pid) syscall.  Bare scheduler tasks (kernel threads, no
-    // PCB) have no group/session — getpgid returns ESRCH for them — so they
-    // report 0/0, matching Linux's kernel-thread convention.
-    let pgrp_sid = if crate::proc::pcb::state(task_id).is_some() {
-        task.id
+    // sys_getsid / sys_getpgrp report (pgid == sid == pid).  These are
+    // process-wide, so they key off `proc_id`.  Bare scheduler tasks
+    // (kernel threads, no PCB) have no group/session — getpgid returns
+    // ESRCH for them — so they report 0/0, matching Linux's kernel-thread
+    // convention.
+    let pgrp_sid = if crate::proc::pcb::state(proc_id).is_some() {
+        proc_id
     } else {
         0
     };
@@ -2040,7 +2069,7 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
         vsize, rss_pages, rsslim,
         exit_code,
     );
-    Ok(text.into_bytes())
+    text.into_bytes()
 }
 
 /// Render a process's VMA list as Linux `/proc/<pid>/maps` lines.
@@ -2693,16 +2722,20 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
 
 /// Generate the contents of a `/proc/<pid>/task/<tid>/<file>` thread file.
 ///
-/// `tid` is the scheduler task id of the thread.  Only the files in
-/// [`TASK_FILES`] are served, and each is rendered purely from the
-/// scheduler task (the underlying `gen_pid_*` helpers key on the task id,
-/// not the process id), so passing the thread's tid yields that thread's
-/// own data with no process/thread field mixing.  The caller must already
-/// have verified the tid belongs to the process via [`thread_belongs`].
-fn generate_task(tid: u64, file_name: &str) -> KernelResult<Vec<u8>> {
+/// `pid` is the owning process id; `tid` is the scheduler task id of the
+/// thread.  Only the files in [`TASK_FILES`] are served.  `comm` and
+/// `schedstat` are rendered purely from the scheduler task (the underlying
+/// `gen_pid_*` helpers key on the task id, not the process id), so passing
+/// the thread's tid yields that thread's own data with no process/thread
+/// field mixing.  `stat` needs both ids: thread-specific fields come from
+/// `tid` while the process-wide fields (ppid, num_threads, vsize, …) come
+/// from `pid` — see [`gen_thread_stat`].  The caller must already have
+/// verified the tid belongs to the process via [`thread_belongs`].
+fn generate_task(pid: u64, tid: u64, file_name: &str) -> KernelResult<Vec<u8>> {
     match file_name {
         "comm" => gen_pid_comm(tid),
         "schedstat" => gen_pid_schedstat(tid),
+        "stat" => gen_thread_stat(pid, tid),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11385,7 +11418,7 @@ impl FileSystem for ProcFs {
                 let entries = TASK_FILES
                     .iter()
                     .map(|name| {
-                        let size = generate_task(tid, name)
+                        let size = generate_task(pid, tid, name)
                             .map_or(0, |d| d.len() as u64);
                         DirEntry {
                             name: String::from(*name),
@@ -11424,7 +11457,7 @@ impl FileSystem for ProcFs {
                 if !thread_belongs(pid, tid) {
                     return Err(KernelError::NotFound);
                 }
-                generate_task(tid, file_name)
+                generate_task(pid, tid, file_name)
             }
             // Reading a symlink's bytes directly is invalid; the VFS follows
             // it via readlink instead.  Mirrors Linux read() → EINVAL on a
@@ -11533,7 +11566,7 @@ impl FileSystem for ProcFs {
                 if !thread_belongs(pid, tid) {
                     return Err(KernelError::NotFound);
                 }
-                let size = generate_task(tid, file_name).map_or(0, |d| d.len() as u64);
+                let size = generate_task(pid, tid, file_name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
                     name: String::from(file_name),
                     entry_type: EntryType::File,
@@ -11794,7 +11827,8 @@ pub fn self_test() -> KernelResult<()> {
             ("5/task/7", "tiddir"),
             ("5/task/7/comm", "file"),
             ("5/task/7/schedstat", "file"),
-            ("5/task/7/stat", "notfound"),   // stat not in TASK_FILES
+            ("5/task/7/stat", "file"),       // stat is a thread file too
+            ("5/task/7/maps", "notfound"),   // maps not in TASK_FILES
             ("5/task/abc", "notfound"),      // non-numeric tid
             ("5/task/7/comm/x", "notfound"), // nested beyond a thread file
         ];
@@ -11859,6 +11893,35 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
         serial_println!("[procfs]   task/ directory: gating OK");
+    }
+
+    // --- thread stat, live ---
+    // gen_thread_stat keys its thread-specific fields off the tid and its
+    // process-wide fields off the owning pid.  A bogus tid must be NotFound;
+    // for the probe task (which is a live scheduler task), calling it with
+    // proc_id == tid == probe must succeed and report the probe as field 1.
+    {
+        let probe = crate::sched::current_task_id();
+        match gen_thread_stat(probe, 999999) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!(
+                    "[procfs]   FAIL: gen_thread_stat bogus tid = {:?}, want NotFound",
+                    other.map(|d| d.len())
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        let stat = gen_thread_stat(probe, probe)?;
+        let text = core::str::from_utf8(&stat).unwrap_or("");
+        let field1 = text.split(' ').next().unwrap_or("");
+        if field1 != format!("{probe}") {
+            serial_println!(
+                "[procfs]   FAIL: thread stat field1 = {:?}, want {}", field1, probe
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   thread stat: field1=={} OK", probe);
     }
 
     // --- Per-PID directory tests ---

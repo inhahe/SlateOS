@@ -52833,6 +52833,7 @@ fn cmd_netspeed(args: &str) {
         "test" => {
             let iface = parts.get(1).copied().unwrap_or("eth0");
             netspeed::init_defaults();
+            let _ = iface; // honest run_test no longer takes a measurement
             match netspeed::run_test(iface) {
                 Ok(r) => {
                     shell_println!("=== Speed Test: {} ===", r.interface);
@@ -52841,6 +52842,13 @@ fn cmd_netspeed(args: &str) {
                     shell_println!("  Latency:  {} ms", r.latency_ms);
                     shell_println!("  Jitter:   {} ms", r.jitter_ms);
                     shell_println!("  Server:   {}", r.server);
+                }
+                // run_test no longer fabricates results; speed testing needs a
+                // real throughput-measurement backend (see fs::netspeed).
+                Err(crate::error::KernelError::NotSupported) => {
+                    shell_println!("Speed testing is not yet implemented.");
+                    shell_println!("(It requires a network measurement backend to record real throughput.)");
+                    shell_println!("Use `netspeed bandwidth` to view real per-interface byte counters.");
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
             }

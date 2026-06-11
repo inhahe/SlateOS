@@ -91,48 +91,52 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** netspeed table.
+///
+/// Seeds NO interfaces, NO test results, and zero counters.  Real bandwidth
+/// snapshots are wired through [`update_bandwidth`] (the net stack reports an
+/// interface's true rx/tx byte/packet counters) and [`record_errors`]; until
+/// those are called the table is genuinely empty, so `/proc/netspeed` and the
+/// `netspeed` kshell command report nothing rather than fabricated numbers — the
+/// kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded a single "eth0" [`BandwidthSnapshot`] with zeroed
+/// traffic counters.  Although the counters were zero, the row fabricated the
+/// *existence* of an eth0 interface that may not be present, which
+/// `bandwidth_snapshots`/`interface_bandwidth` (and the `netspeed bandwidth`
+/// command) then surfaced as a real interface.  That placeholder was removed;
+/// interfaces now appear only once the net stack reports real traffic via
+/// [`update_bandwidth`].  The self-test builds its own fixtures explicitly via
+/// the real API (see [`self_test`]).
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
         results: Vec::new(),
-        snapshots: alloc::vec![
-            BandwidthSnapshot {
-                interface: String::from("eth0"),
-                rx_bytes: 0, tx_bytes: 0, rx_packets: 0, tx_packets: 0,
-                rx_errors: 0, tx_errors: 0, last_update_ns: now,
-            },
-        ],
+        snapshots: Vec::new(),
         next_id: 1,
         total_tests: 0,
         ops: 0,
     });
 }
 
-/// Run a speed test (simulated).
-pub fn run_test(interface: &str) -> KernelResult<SpeedResult> {
-    with_state(|state| {
-        let now = crate::hpet::elapsed_ns();
-        let id = state.next_id;
-        state.next_id += 1;
-        // Simulate realistic speeds (100 Mbps down, 50 Mbps up).
-        let result = SpeedResult {
-            id, interface: String::from(interface),
-            download_bps: 100_000_000 + (now % 20_000_000),
-            upload_bps: 50_000_000 + (now % 10_000_000),
-            latency_ms: 12 + (now % 8) as u32,
-            jitter_ms: 2 + (now % 3) as u32,
-            timestamp_ns: now,
-            server: String::from("speedtest.local"),
-        };
-        if state.results.len() >= MAX_RESULTS {
-            state.results.remove(0);
-        }
-        state.results.push(result.clone());
-        state.total_tests += 1;
-        Ok(result)
-    })
+/// Run a network speed test.
+///
+/// Returns [`KernelError::NotSupported`]: a real speed test must saturate the
+/// link to a measurement server and compute the actual achieved throughput,
+/// latency, and jitter, which requires a network measurement backend the kernel
+/// does not yet have.
+///
+/// NOTE: this previously **fabricated** results — it invented a ~100 Mbps
+/// download / ~50 Mbps upload (plus latency/jitter) from the HPET timestamp and
+/// recorded them in the history as if they were a genuine measurement.  The
+/// `netspeed test` command then displayed those conjured speeds to the user as a
+/// real result, violating the kernel's hard "never invent data" rule.  Until a
+/// real measurement backend exists, this honestly reports that speed testing is
+/// unavailable rather than returning invented numbers.  See todo.txt
+/// ("netspeed::run_test needs a real throughput-measurement backend").
+pub fn run_test(_interface: &str) -> KernelResult<SpeedResult> {
+    Err(KernelError::NotSupported)
 }
 
 /// Update bandwidth snapshot for an interface.
@@ -217,52 +221,70 @@ pub fn stats() -> (usize, usize, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("netspeed::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/netspeed must never surface).  Resetting
+    // first clears any residue from a prior `netspeed test` run.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default interface.
-    assert_eq!(bandwidth_snapshots().len(), 1);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated interfaces or test results.
+    assert_eq!(bandwidth_snapshots().len(), 0);
+    assert_eq!(test_history().len(), 0);
+    let (r0, i0, t0, _o0) = stats();
+    assert_eq!((r0, i0, t0), (0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Run speed test.
-    let result = run_test("eth0").expect("test");
-    assert!(result.download_bps > 0);
-    assert!(result.upload_bps > 0);
-    assert!(result.latency_ms > 0);
-    crate::serial_println!("  [2/8] speed test: OK");
+    // 2: run_test is honest — it no longer fabricates speeds; with no real
+    // measurement backend it reports NotSupported instead of inventing numbers.
+    assert!(matches!(run_test("eth0"), Err(KernelError::NotSupported)));
+    assert_eq!(test_history().len(), 0); // nothing fabricated into history
+    crate::serial_println!("  [2/8] run_test honest (NotSupported): OK");
 
-    // 3: Test history.
-    assert_eq!(test_history().len(), 1);
-    crate::serial_println!("  [3/8] history: OK");
-
-    // 4: Update bandwidth.
+    // 3: update_bandwidth creates a snapshot from REAL reported counters.
     update_bandwidth("eth0", 1_000_000, 500_000, 1000, 500).expect("update");
     let snap = interface_bandwidth("eth0").expect("get");
     assert_eq!(snap.rx_bytes, 1_000_000);
-    crate::serial_println!("  [4/8] update bandwidth: OK");
+    assert_eq!(snap.tx_bytes, 500_000);
+    assert_eq!(snap.rx_packets, 1000);
+    assert_eq!(bandwidth_snapshots().len(), 1);
+    crate::serial_println!("  [3/8] update bandwidth: OK");
 
-    // 5: New interface.
+    // 4: Re-update overwrites the same interface row (no duplicate).
+    update_bandwidth("eth0", 3_000_000, 1_500_000, 3000, 1500).expect("update2");
+    assert_eq!(bandwidth_snapshots().len(), 1);
+    assert_eq!(interface_bandwidth("eth0").expect("get").rx_bytes, 3_000_000);
+    crate::serial_println!("  [4/8] re-update: OK");
+
+    // 5: A second interface adds a distinct row.
     update_bandwidth("wlan0", 2_000_000, 1_000_000, 2000, 1000).expect("new_iface");
     assert_eq!(bandwidth_snapshots().len(), 2);
     crate::serial_println!("  [5/8] new interface: OK");
 
-    // 6: Record errors.
+    // 6: Record errors — accumulates on the matching interface; unknown fails.
     record_errors("eth0", 5, 2).expect("errors");
     let snap = interface_bandwidth("eth0").expect("get2");
-    assert_eq!(snap.rx_errors, 5);
+    assert_eq!((snap.rx_errors, snap.tx_errors), (5, 2));
+    assert!(record_errors("nonexist", 1, 1).is_err());
     crate::serial_println!("  [6/8] errors: OK");
 
-    // 7: Format speed.
+    // 7: format_speed is a pure formatter (no fabricated state).
     assert_eq!(format_speed(100_000_000), "100.0 Mbps");
     assert_eq!(format_speed(1_500_000_000), "1.5 Gbps");
+    assert_eq!(format_speed(500), "500 bps");
     crate::serial_println!("  [7/8] format: OK");
 
-    // 8: Stats.
+    // 8: Stats reflect exactly what we recorded: 0 test results, 2 interfaces.
     let (results, ifaces, total_tests, ops) = stats();
-    assert!(results >= 1);
-    assert!(ifaces >= 2);
-    assert!(total_tests >= 1);
+    assert_eq!(results, 0);
+    assert_eq!(ifaces, 2);
+    assert_eq!(total_tests, 0); // run_test never fabricates a recorded test
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/netspeed table.
+    *STATE.lock() = None;
 
     crate::serial_println!("netspeed::self_test() — all 8 tests passed");
 }

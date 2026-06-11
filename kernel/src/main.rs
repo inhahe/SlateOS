@@ -1422,6 +1422,15 @@ extern "C" fn kernel_main() -> ! {
     // self_test builds its fixtures via the real API with exact assertions and
     // resets the table afterward, so it is safe at boot.
     fs::taskio::self_test();
+    // netspeed backs /proc/netspeed (per-interface bandwidth snapshots + speed
+    // test history).  Its init_defaults() previously seeded a placeholder "eth0"
+    // snapshot (fabricating an interface's existence) and its run_test()
+    // fabricated ~100 Mbps download speeds from the HPET clock and showed them as
+    // a real measurement.  Both were removed: init_defaults is empty (interfaces
+    // appear only via update_bandwidth from real net-stack counters) and run_test
+    // now honestly returns NotSupported until a real measurement backend exists.
+    // The residue-free self_test verifies both and resets the table afterward.
+    fs::netspeed::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

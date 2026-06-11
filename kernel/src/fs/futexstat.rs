@@ -114,22 +114,33 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** futex-statistics table.
+///
+/// Seeds NO address or per-process rows and zero totals.  Real accounting is
+/// wired through [`record_wait`]/[`record_wake`]/[`record_timeout`]/
+/// [`record_contention`]; until those are called the table is genuinely
+/// empty, so the `/proc/futexstat` file and the `futexstat` kshell command
+/// report zeros rather than fabricated numbers — the kernel's hard "never
+/// invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional futex addresses (e.g.
+/// 0x7FFF_0000_1000 with waits 500000, total_wait_ns 50_000_000_000) and two
+/// fictional per-process rows (pid 1/100) plus invented aggregate totals
+/// (total_waits 600000), which `/proc/futexstat` then displayed as if they
+/// were real lock-contention statistics.  That demo data was removed; the
+/// self-test now builds its own fixtures explicitly via the real API (see
+/// [`self_test`]).  The futex syscall path is expected to call
+/// [`record_wait`]/[`record_wake`] as userspace mutexes block and wake.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        addrs: alloc::vec![
-            FutexAddr { address: 0x7FFF_0000_1000, waits: 500000, wakes: 499000, timeouts: 1000, requeues: 0, current_waiters: 2, max_waiters: 8, total_wait_ns: 50_000_000_000 },
-            FutexAddr { address: 0x7FFF_0000_2000, waits: 100000, wakes: 100000, timeouts: 0, requeues: 500, current_waiters: 0, max_waiters: 4, total_wait_ns: 5_000_000_000 },
-        ],
-        procs: alloc::vec![
-            ProcessFutexStats { pid: 1, total_waits: 300000, total_wakes: 200000, total_timeouts: 500, total_contention_ns: 30_000_000_000 },
-            ProcessFutexStats { pid: 100, total_waits: 300000, total_wakes: 399000, total_timeouts: 500, total_contention_ns: 25_000_000_000 },
-        ],
-        total_waits: 600000,
-        total_wakes: 599000,
-        total_timeouts: 1000,
-        total_requeues: 500,
+        addrs: Vec::new(),
+        procs: Vec::new(),
+        total_waits: 0,
+        total_wakes: 0,
+        total_timeouts: 0,
+        total_requeues: 0,
         ops: 0,
     });
 }
@@ -236,57 +247,80 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("futexstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/futexstat must never surface).
+    // Resetting first clears any residue from a prior `futexstat test` run so
+    // the totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(hotspots(10).len(), 2);
-    assert_eq!(process_stats().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    const ADDR_A: u64 = 0x7FFF_0000_1000;
+    const ADDR_B: u64 = 0xDEAD_BEEF;
 
-    // 2: Record wait.
-    record_wait(1, 0x7FFF_0000_1000).expect("wait");
+    // 1: Empty after init — no fabricated rows.
+    assert_eq!(hotspots(10).len(), 0);
+    assert_eq!(process_stats().len(), 0);
+    let (a0, p0, w0, k0, t0, _o0) = stats();
+    assert_eq!((a0, p0, w0, k0, t0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
+
+    // 2: record_wait auto-creates the address + process rows (exact, from 0).
+    record_wait(1, ADDR_A).expect("wait");
     let top = hotspots(1);
-    assert_eq!(top[0].address, 0x7FFF_0000_1000);
-    assert_eq!(top[0].waits, 500001);
+    assert_eq!(top[0].address, ADDR_A);
+    assert_eq!(top[0].waits, 1);
+    assert_eq!(top[0].current_waiters, 1);
+    assert_eq!(process_stats().len(), 1);
     crate::serial_println!("  [2/8] wait: OK");
 
-    // 3: Record wake.
-    record_wake(100, 0x7FFF_0000_1000, 1).expect("wake");
+    // 3: record_wake bumps wakes and clears the waiter.
+    record_wake(1, ADDR_A, 1).expect("wake");
     let top = hotspots(1);
-    assert_eq!(top[0].wakes, 499001);
+    assert_eq!(top[0].wakes, 1);
+    assert_eq!(top[0].current_waiters, 0);
     crate::serial_println!("  [3/8] wake: OK");
 
-    // 4: Timeout.
-    record_timeout(0x7FFF_0000_1000).expect("timeout");
+    // 4: Timeout increments the aggregate count exactly.
+    record_timeout(ADDR_A).expect("timeout");
     let (_, _, _, _, timeouts, _) = stats();
-    assert!(timeouts > 1000);
+    assert_eq!(timeouts, 1);
     crate::serial_println!("  [4/8] timeout: OK");
 
-    // 5: New address.
-    record_wait(1, 0xDEAD_BEEF).expect("new_addr");
-    assert_eq!(hotspots(10).len(), 3);
+    // 5: A wait on a new address creates a second row.
+    record_wait(1, ADDR_B).expect("new_addr");
+    assert_eq!(hotspots(10).len(), 2);
     crate::serial_println!("  [5/8] new address: OK");
 
-    // 6: Contention.
-    record_contention(1, 0x7FFF_0000_1000, 1_000_000).expect("contention");
+    // 6: Contention time accrues to the process row (exact, from 0).
+    record_contention(1, ADDR_A, 1_000_000).expect("contention");
     let ps = process_stats();
-    let p1 = ps.iter().find(|p| p.pid == 1).unwrap();
-    assert!(p1.total_contention_ns > 30_000_000_000);
+    let p1 = ps.iter().find(|p| p.pid == 1).expect("pid 1");
+    assert_eq!(p1.total_contention_ns, 1_000_000);
     crate::serial_println!("  [6/8] contention: OK");
 
-    // 7: Hotspots ordering.
+    // 7: A second waiter on ADDR_A (new pid 2) makes it the top hotspot.
+    record_wait(2, ADDR_A).expect("wait2");
     let top = hotspots(2);
+    assert_eq!(top[0].address, ADDR_A);
+    assert_eq!(top[0].waits, 2);
     assert!(top[0].waits >= top[1].waits);
     crate::serial_println!("  [7/8] hotspot ordering: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (addrs, procs, waits, wakes, _timeouts, ops) = stats();
-    assert_eq!(addrs, 3);
-    assert_eq!(procs, 2);
-    assert!(waits > 600000);
-    assert!(wakes > 599000);
+    assert_eq!(addrs, 2); // ADDR_A + ADDR_B
+    assert_eq!(procs, 2); // pid 1 + pid 2
+    assert_eq!(waits, 3); // wait(1,A) + wait(1,B) + wait(2,A)
+    assert_eq!(wakes, 1); // wake(1,A,1)
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/futexstat table with its fixtures.  Reset to the uninitialised
+    // state so production reads report an empty table until the futex syscall
+    // path wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("futexstat::self_test() — all 8 tests passed");
 }

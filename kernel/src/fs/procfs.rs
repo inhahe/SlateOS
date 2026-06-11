@@ -11598,6 +11598,38 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   oom_score_adj write: rejects malformed OK");
     }
 
+    // End-to-end write path: prove a write reaches ProcFs::write_file
+    // through the full VFS stack (check_writable + mount routing), not just
+    // the direct fs call above.  procfs is mounted rw, so the VFS must not
+    // short-circuit with ReadOnlyFilesystem; the fs itself decides.
+    // - A root file rejects the write at the fs layer (NotSupported).
+    // - A well-formed oom_score_adj write to a non-existent PID reaches the
+    //   fs and returns NotFound (task_exists() false) — *not*
+    //   ReadOnlyFilesystem, which would mean the write never routed here.
+    {
+        match crate::fs::Vfs::write_file("/proc/version", b"x") {
+            Err(KernelError::NotSupported) => {}
+            other => {
+                serial_println!(
+                    "[procfs]   FAIL: VFS write /proc/version = {:?}, want NotSupported",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        match crate::fs::Vfs::write_file("/proc/999999/oom_score_adj", b"100") {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!(
+                    "[procfs]   FAIL: VFS write /proc/999999/oom_score_adj = {:?}, want NotFound",
+                    other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   oom_score_adj write: end-to-end VFS routing OK");
+    }
+
     // --- Per-PID directory tests ---
 
     // Get the current task ID to test against a known-live PID.

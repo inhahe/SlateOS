@@ -2516,6 +2516,23 @@
 ##     remaining *stat.rs metric modules (zramstat, ttystat, ratestat, ksmstat,
 ##     inodestat, cgiostat, budstat, pidstat, powerstat, pmcstat) — check whether
 ##     any seed NONZERO fabricated observed values vs a legitimate zeroed taxonomy.
+##     webcam fixed 2026-06-11: FABRICATOR — init_defaults() seeded a phantom
+##     "Integrated Webcam" (Builtin connection, 640/720/1080p resolutions,
+##     is_default, PromptRequired privacy) that /proc/webcam (procfs.rs:7284,
+##     camera_count) and the `webcam` shell command surfaced as a real detected
+##     capture device. A desktop may have NO camera, and a fabricated device with
+##     a privacy prompt implies a capture surface that does not exist. Case (a)
+##     empty-init: cameras start empty (next_camera_id 1, default_camera_id 0);
+##     real cameras arrive only via register_camera() from a UVC/USB driver on
+##     hotplug. self_test rewritten residue-free (reset STATE None at start AND
+##     end; build "Integrated Webcam" + "USB Webcam" fixtures via register_camera;
+##     first registered becomes default). DEFERRED PROPER FIX: wire
+##     register_camera()/unregister_camera() to a real UVC webcam driver once one
+##     exists. boot-test PASSED (28s). No fabricated procfs data. ALSO verified
+##     ALREADY-CLEAN this pass: powerstat (empty domains/wake_log, zero counters)
+##     and pidstat (seeds only the root PID namespace ns_id=0 with ALL counters
+##     zeroed — a legitimate structural default like loopback, not a fabricated
+##     observation).
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

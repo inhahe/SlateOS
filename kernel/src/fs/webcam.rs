@@ -159,32 +159,28 @@ where
 // ---------------------------------------------------------------------------
 
 pub fn init_defaults() {
+    // Start with NO cameras. A webcam is enumerated hardware, not a configurable
+    // default. Seeding a phantom "Integrated Webcam" (Builtin, 640/720/1080p)
+    // would surface a fabricated capture device through /proc/webcam and the
+    // `webcam` shell command as if a real camera had been detected — and a
+    // desktop may have no camera at all. Worse, a fabricated device with a
+    // PromptRequired privacy setting implies a capture surface that does not
+    // exist. Real cameras appear only when a UVC/USB or platform driver calls
+    // register_camera() on hotplug/enumeration.
+    //
+    // DEFERRED PROPER FIX: wire register_camera()/unregister_camera() to a real
+    // UVC webcam driver once one exists; until then this stays empty so
+    // /proc/webcam reports "camera_count: 0" rather than inventing a device.
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
 
-    let default_resolutions = alloc::vec![
-        Resolution { width: 640, height: 480, max_fps: 30 },
-        Resolution { width: 1280, height: 720, max_fps: 30 },
-        Resolution { width: 1920, height: 1080, max_fps: 30 },
-    ];
-
-    let camera = Camera {
-        id: 1,
-        name: String::from("Integrated Webcam"),
-        connection: CameraConnection::Builtin,
-        resolutions: default_resolutions,
-        privacy: PrivacySetting::PromptRequired,
-        is_default: true,
-        registered_ns: crate::hpet::elapsed_ns(),
-    };
-
     *guard = Some(State {
-        cameras: alloc::vec![camera],
+        cameras: Vec::new(),
         streams: Vec::new(),
         blocked_apps: Vec::new(),
-        next_camera_id: 2,
+        next_camera_id: 1,
         next_stream_id: 1,
-        default_camera_id: 1,
+        default_camera_id: 0,
         total_streams: 0,
         total_denied: 0,
         ops: 0,
@@ -384,14 +380,22 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("webcam::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity (init_defaults early-returns
+    // when STATE is already populated), and build every camera through the real
+    // register_camera() hotplug API rather than a seeded phantom device.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default camera exists.
-    let cams = list_cameras();
-    assert!(!cams.is_empty());
-    let cam_id = cams[0].id;
-    assert!(cams[0].is_default);
-    crate::serial_println!("  [1/10] default camera: OK");
+    // 1: Empty defaults — no cameras until a driver enumerates one.
+    assert_eq!(list_cameras().len(), 0);
+    crate::serial_println!("  [1/10] empty defaults: OK");
+
+    // Build a fixture camera the way a UVC driver would on hotplug; the first
+    // registered camera becomes the default.
+    let cam_id = register_camera("Integrated Webcam", CameraConnection::Builtin).expect("register first");
+    assert!(list_cameras()[0].is_default);
 
     // 2: Register another camera.
     let cam2 = register_camera("USB Webcam", CameraConnection::Usb).expect("register");
@@ -449,6 +453,11 @@ pub fn self_test() {
     assert!(total >= 3);
     assert!(denied >= 1);
     assert!(ops > 0);
+
+    // Leave no residue for later callers / the live /proc/webcam view: the test
+    // registered cameras and opened streams, none of which represents real
+    // hardware. Reset to None so production reads report camera_count: 0.
+    *STATE.lock() = None;
 
     crate::serial_println!("webcam::self_test() — all 10 tests passed");
 }

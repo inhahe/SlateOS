@@ -1443,6 +1443,42 @@
 ##                    real file I/O); when syslog/eventlog write real log files,
 ##                    wire these to stat the real file, compress it, and remove
 ##                    archives past retention.
+##   - diskclean (2026-06-11): FIXED — fabrication was in scan(), NOT
+##                    init_defaults (which was already empty). Disk-cleanup /
+##                    reclaimable-space scanner, surfaced via /proc/diskclean and
+##                    the `diskclean` kshell command (scan/clean/estimate/items/
+##                    stats). scan() used to INJECT nine hardcoded phantom
+##                    reclaimable items totalling ~1.46 GB — /tmp/session-* (50 MB),
+##                    /tmp/build-* (120 MB), /var/cache/apt (300 MB),
+##                    /home/.cache/app1 (75 MB), /var/log/old/*.gz (25 MB),
+##                    /var/cache/packages (500 MB), /home/.thumbnails (40 MB),
+##                    /home/.trash (200 MB), /var/crash (150 MB) — none backed by a
+##                    real filesystem walk. The /proc/diskclean generator and the
+##                    kshell command surface scan results and cleaned-byte totals as
+##                    if real, so cleaning the phantom items bumped
+##                    total_cleaned_bytes by fake sizes, making the user believe
+##                    gigabytes of junk existed and that cleaning freed real space.
+##                    scan() now honestly finds NOTHING (clears items, records the
+##                    scan, returns empty per-category summaries) because no
+##                    filesystem-walk backend exists yet. Added the real primitive
+##                    add_item(category, path, size, safe_to_remove) (respects
+##                    MAX_ITEMS → ResourceExhausted) that a real scanner (or a test)
+##                    uses to report each reclaimable file, plus summarize() for
+##                    per-category summaries from the current item set. Rebuilt
+##                    self_test residue-free (clears STATE at start AND end) with
+##                    EXACT assertions — empty defaults, honest empty scan
+##                    (total_scans=1, no items), add 4 items via add_item, TempFiles
+##                    summary (2 items / 3000 bytes), estimate 8000 (excludes the
+##                    unsafe crash dump), clean TempFiles = (2, 3000), clean
+##                    SystemCache+CrashDumps = (1, 5000) (unsafe crash dump
+##                    retained), final stats (1 item, 1 scan, 8000 cleaned bytes, 3
+##                    cleaned items). Wired into the boot self-test path.
+##                    /proc/diskclean now 91 bytes (truthful — 0 items / 0 scans
+##                    persisted since self_test clears STATE). PROPER FIX DEFERRED:
+##                    scan() must walk the real reclaimable locations (/tmp,
+##                    /var/cache, the trash bin, crash dumps, …) and report each
+##                    real file via add_item — wire when a filesystem-walk backend
+##                    exists. Until then it correctly reports nothing reclaimable.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1456,13 +1492,13 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart (just fixed) were forty-two. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean (just fixed) were forty-three. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     diskclean. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     gamemode. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1477,9 +1513,11 @@
 ##     loads), case (b). recoverypart fixed 2026-06-11: added register_partition
 ##     API + emptied fabricated 500MB Healthy partition / 4 tools, case (b).
 ##     logrotate audited 2026-06-11: LEGITIMATE settings module — default
-##     rotation rules left alone, only made self_test residue-free.)
+##     rotation rules left alone, only made self_test residue-free. diskclean
+##     fixed 2026-06-11: fabrication was in scan() not init_defaults — scan()
+##     now honestly finds nothing, added add_item primitive + summarize.)
 ##     Remaining flagged
-##     names incl.: diskclean, gamemode, usagetime, screentime,
+##     names incl.: gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
 ##     legitimate config — audit carefully, do not blind-empty. memlayout was

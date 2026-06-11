@@ -1900,6 +1900,17 @@ extern "C" fn kernel_main() -> ! {
     // is wired here so its exact assertions (rule ids, rotation/byte totals) are
     // actually exercised at boot.
     fs::logrotate::self_test();
+    // Disk-cleanup self-test.  diskclean's init_defaults was already empty, but
+    // the fabrication lived in scan(): it used to inject nine hardcoded phantom
+    // reclaimable items (~1.46 GB of fake /tmp, /var/cache, trash and crash-dump
+    // junk) that the /proc/diskclean generator and the diskclean kshell command
+    // surfaced as if real, so an operator would believe gigabytes of junk existed
+    // and that cleaning them freed real space.  scan() now honestly finds NOTHING
+    // (no filesystem-walk backend exists yet), reporting each real reclaimable
+    // file via add_item only when a real scanner is implemented.  The residue-free
+    // self_test exercises the honest empty scan plus the real add_item/summarize/
+    // estimate/clean primitives with exact assertions and clears STATE afterward.
+    fs::diskclean::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

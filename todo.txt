@@ -2325,6 +2325,21 @@
 ##     uses clear_all at start+end (non-Option Mutex<State>); rewrote test 6 to
 ##     assert init_defaults adds zero profiles and test 7 to connect a user-
 ##     created profile. boot-test PASSED (26s).
+##     sysctlfs audited 2026-06-11: LEGITIMATE settings/tunables module — NOT a
+##     fabricator. init_defaults seeds 10 kernel tunables (kernel.hostname,
+##     kernel.ostype=MintOS, kernel.osrelease, vm.swappiness=60, vm.dirty_ratio,
+##     vm.overcommit=0, net.ipv4.ip_forward, net.core.somaxconn=128, fs.file-max,
+##     fs.inotify.max_user_watches) — these are CONFIGURATION DEFAULTS (analogous
+##     to Linux sysctl defaults) plus real OS-identity facts, not fake observed
+##     measurements. Left the config alone. Only fixed the self_test, which was
+##     NOT residue-free (it relied on init_defaults early-returning on dirty
+##     state, mutated kernel.hostname -> myhost, added custom.test, and never
+##     reset): now resets STATE None at start AND end and asserts EXACT totals
+##     (10 defaults, 11 after add, 3 reads, 1 write, 1 modified). boot-test
+##     PASSED (28s). MINOR CONSISTENCY NOTE: sysctlfs kernel.osrelease = "0.1.0"
+##     but fs/sysinfo reports OS version "1.0.0" (MintOS 1.0.0). One is stale;
+##     pick a single canonical version constant and source both from it. Low
+##     priority — not a fabrication, just a duplicated/divergent literal.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

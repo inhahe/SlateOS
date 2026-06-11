@@ -225,10 +225,15 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
 
 pub fn self_test() {
     crate::serial_println!("sysctlfs::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled default config so the
+    // assertions are deterministic regardless of prior kshell/procfs activity
+    // (init_defaults early-returns when STATE is already populated).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default params.
-    assert!(list_all().len() >= 10);
+    // 1: Default tunables — sysctl ships a fixed set of configuration defaults.
+    assert_eq!(list_all().len(), 10);
     crate::serial_println!("  [1/8] defaults: OK");
 
     // 2: Get.
@@ -251,9 +256,9 @@ pub fn self_test() {
     assert!(get("custom.test").is_ok());
     crate::serial_println!("  [5/8] add: OK");
 
-    // 6: Prefix search.
+    // 6: Prefix search (kernel.hostname / kernel.ostype / kernel.osrelease).
     let kernel_params = list_prefix("kernel.");
-    assert!(kernel_params.len() >= 3);
+    assert_eq!(kernel_params.len(), 3);
     crate::serial_println!("  [6/8] prefix: OK");
 
     // 7: Modified list.
@@ -261,14 +266,18 @@ pub fn self_test() {
     assert!(modified.iter().any(|p| p.key == "kernel.hostname"));
     crate::serial_println!("  [7/8] modified: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact: 11 params (10 defaults + custom.test), 3 reads, 1 write,
+    //    1 modified (kernel.hostname).
     let (count, reads, writes, modified_count, ops) = stats();
-    assert!(count >= 10);
-    assert!(reads >= 3);
-    assert!(writes >= 1);
-    assert!(modified_count >= 1);
+    assert_eq!(count, 11);
+    assert_eq!(reads, 3);
+    assert_eq!(writes, 1);
+    assert_eq!(modified_count, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     crate::serial_println!("sysctlfs::self_test() — all 8 tests passed");
 }

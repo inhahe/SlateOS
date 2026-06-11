@@ -138,18 +138,33 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the font-preview state.
+///
+/// Seeds only CONFIGURATION — the default preview sample text (a pangram), which
+/// is a legitimate compiled-in default. It seeds NO font records.
+///
+/// A FontEntry carries OBSERVED metadata (`glyph_count`, `version`, an on-disk
+/// `file_path` assumed to exist) that cannot be known without parsing the actual
+/// font file. The previous implementation fabricated five fonts (Inter, JetBrains
+/// Mono, Noto Serif) with invented glyph counts (2548/1086/3400) and version
+/// strings — surfaced via the `fontpreview` shell view / `/proc` as REAL
+/// installed fonts. Tellingly, `fontmgr` fabricated the SAME families with
+/// DIFFERENT invented numbers, which is what exposed both as made-up. So the
+/// font list now starts EMPTY; entries are added via `add_font()`.
+///
+/// DEFERRED PROPER FIX (tech debt): `fontpreview` should NOT keep its own font
+/// registry at all — it should read through to `fontmgr` (the single source of
+/// truth for installed fonts) and track only its preview-specific state
+/// (`preview_count`, sample text). Unifying the two registries is a larger
+/// refactor (type mapping between `fontmgr::FontInfo` and the local `FontEntry`,
+/// and deciding where `preview_count` lives) and is deferred until the font
+/// subsystem is consolidated. Until then both registries are honestly empty.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        fonts: alloc::vec![
-            FontEntry { id: 1, family: String::from("Inter"), style: FontStyle::Regular, category: FontCategory::SansSerif, file_path: String::from("/usr/share/fonts/inter-regular.ttf"), version: String::from("3.19"), glyph_count: 2548, preview_count: 0 },
-            FontEntry { id: 2, family: String::from("Inter"), style: FontStyle::Bold, category: FontCategory::SansSerif, file_path: String::from("/usr/share/fonts/inter-bold.ttf"), version: String::from("3.19"), glyph_count: 2548, preview_count: 0 },
-            FontEntry { id: 3, family: String::from("JetBrains Mono"), style: FontStyle::Regular, category: FontCategory::Monospace, file_path: String::from("/usr/share/fonts/jetbrainsmono-regular.ttf"), version: String::from("2.304"), glyph_count: 1086, preview_count: 0 },
-            FontEntry { id: 4, family: String::from("Noto Serif"), style: FontStyle::Regular, category: FontCategory::Serif, file_path: String::from("/usr/share/fonts/notoserif-regular.ttf"), version: String::from("2.013"), glyph_count: 3400, preview_count: 0 },
-            FontEntry { id: 5, family: String::from("Noto Serif"), style: FontStyle::Italic, category: FontCategory::Serif, file_path: String::from("/usr/share/fonts/notoserif-italic.ttf"), version: String::from("2.013"), glyph_count: 3400, preview_count: 0 },
-        ],
-        next_id: 6,
+        fonts: Vec::new(),
+        next_id: 1,
         default_sample: String::from("The quick brown fox jumps over the lazy dog"),
         total_previews: 0,
         total_comparisons: 0,
@@ -271,11 +286,24 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("fontpreview::self_test() — running tests...");
+
+    // Residue-free: start from a known-empty state.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default fonts.
+    // init_defaults seeds NO fonts (we never fabricate installed fonts); only the
+    // default sample text is configured. Build the test fixtures explicitly via
+    // add_font(). add_font assigns ids from next_id (1), so these land on 1..=5.
+    assert!(list_fonts().is_empty());
+    let _ = add_font("Inter", FontStyle::Regular, FontCategory::SansSerif, "/fonts/inter-regular.ttf", "0.0", 0).expect("fixture 1");
+    let _ = add_font("Inter", FontStyle::Bold, FontCategory::SansSerif, "/fonts/inter-bold.ttf", "0.0", 0).expect("fixture 2");
+    let _ = add_font("JetBrains Mono", FontStyle::Regular, FontCategory::Monospace, "/fonts/jetbrainsmono-regular.ttf", "0.0", 0).expect("fixture 3");
+    let _ = add_font("Noto Serif", FontStyle::Regular, FontCategory::Serif, "/fonts/notoserif-regular.ttf", "0.0", 0).expect("fixture 4");
+    let _ = add_font("Noto Serif", FontStyle::Italic, FontCategory::Serif, "/fonts/notoserif-italic.ttf", "0.0", 0).expect("fixture 5");
+
+    // 1: Fixtures present.
     assert_eq!(list_fonts().len(), 5);
-    crate::serial_println!("  [1/8] defaults: OK");
+    crate::serial_println!("  [1/8] fixtures: OK");
 
     // 2: Preview a font.
     let p = preview(1, None, 16).expect("preview");
@@ -318,6 +346,9 @@ pub fn self_test() {
     assert_eq!(comparisons, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Residue-free: leave no fixtures behind.
+    *STATE.lock() = None;
 
     crate::serial_println!("fontpreview::self_test() — all 8 tests passed");
 }

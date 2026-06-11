@@ -2678,6 +2678,25 @@
 ##           single source of truth rather than maintaining a second registry.
 ##           This completes the *mgr-family fabricator list. fontpreview is the next
 ##           font-subsystem fabricator to address.
+##         - fontpreview: FIXED 2026-06-11 (case a — empty-init, keep config). Same
+##           anti-pattern as fontmgr: init_defaults() seeded FIVE FontEntry records
+##           (Inter ×2, JetBrains Mono, Noto Serif ×2) with fabricated glyph counts
+##           (2548/1086/3400), invented version strings (3.19/2.304/2.013), and
+##           /usr/share/fonts/... paths — surfaced via the `fontpreview` shell view /
+##           /proc as REAL installed fonts. (These are the SAME families fontmgr
+##           fabricated but with DIFFERENT numbers, which is how both were exposed as
+##           made-up.) init_defaults() now seeds CONFIG ONLY (the default preview
+##           pangram, legitimate) and an EMPTY font list; entries are added via
+##           add_font(). self_test rewritten residue-free (reset STATE None start+end;
+##           assert empty after init; build 5 deterministic fixtures via add_font with
+##           zeroed glyph counts so ids land on 1..=5 for the existing preview/search/
+##           category assertions). boot-test PASSED (26s). DEFERRED (tech debt):
+##           fontpreview should NOT keep its own font registry — it should read through
+##           to fontmgr (single source of truth) and track only preview-specific state
+##           (preview_count, sample text). Unifying the two is a larger refactor (type
+##           mapping fontmgr::FontInfo <-> local FontEntry; deciding where preview_count
+##           lives) deferred until the font subsystem is consolidated. Both registries
+##           are now honestly empty in the meantime.
 ##         BORDERLINE-LEGITIMATE (built-in virtuals / app manifest — likely keep):
 ##         printmgr (Print-to-PDF + File virtual printers are software constructs that
 ##         truly exist, like loopback); progmgr (core bundled apps manifest — File

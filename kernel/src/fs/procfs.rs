@@ -2016,44 +2016,73 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(text.into_bytes())
 }
 
-/// `/proc/<pid>/maps` — virtual memory area listing.
+/// Render a process's VMA list as Linux `/proc/<pid>/maps` lines.
 ///
-/// Shows the VMAs (lazy/demand-paged regions) for the process, similar
-/// to Linux's `/proc/<pid>/maps`.  Format:
-/// `start-end perms offset name`
+/// Pure helper (no PCB / lock access) so it can be unit-tested with
+/// synthetic VMAs in kernel context.  Each line matches Linux's
+/// `fs/proc/task_mmu.c` format closely enough for parsers (`pmap`,
+/// debuggers, language runtimes):
+///
+/// ```text
+/// start-end perms offset dev inode pathname
+/// ```
+///
+/// - `start`/`end`: lowercase hex, no `0x` prefix (Linux convention).
+/// - `perms`: exactly four chars `r`/`w`/`x`/(`p`|`s`).  We map `r` from
+///   PRESENT (a mapped page is readable), `w` from WRITABLE, `x` from the
+///   absence of NO_EXECUTE.  All our VMAs are private mappings, so the
+///   fourth char is always `p`.  Guard VMAs are never backed and carry no
+///   access rights → `---p`.
+/// - `offset`/`dev`/`inode`: we do not track file-backed mappings yet, so
+///   these are `0`/`00:00`/`0`, exactly as Linux reports for anonymous
+///   mappings.
+/// - `pathname`: a bracketed tag identifying the region kind (`[stack]`,
+///   `[guard]`, anonymous = empty, fixed = `[fixed]`), mirroring Linux's
+///   `[stack]`/`[heap]` pseudo-paths.
+fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
+    use crate::mm::page_table::PageFlags;
+    use crate::mm::vma::VmaKind;
+    use core::fmt::Write as _;
+
+    let mut text = String::with_capacity(vmas.len().saturating_mul(64).max(16));
+    for vma in vmas {
+        let f = vma.flags;
+        // Guard pages are never mapped (no PRESENT): report no access.
+        let is_guard = matches!(vma.kind, VmaKind::Guard);
+        let r = if !is_guard && f.contains(PageFlags::PRESENT) { 'r' } else { '-' };
+        let w = if !is_guard && f.contains(PageFlags::WRITABLE) { 'w' } else { '-' };
+        let x = if !is_guard && !f.contains(PageFlags::NO_EXECUTE) { 'x' } else { '-' };
+        // All current VMAs are private mappings.
+        let pathname = match vma.kind {
+            VmaKind::Stack => "[stack]",
+            VmaKind::Guard => "[guard]",
+            VmaKind::Fixed => "[fixed]",
+            VmaKind::Anonymous => "",
+        };
+        // `write!` into a String is infallible; the Result is ignored.
+        let _ = writeln!(
+            text,
+            "{:x}-{:x} {r}{w}{x}p 00000000 00:00 0 {pathname}",
+            vma.start, vma.end
+        );
+    }
+    text.into_bytes()
+}
+
+/// `/proc/<pid>/maps` — virtual memory area listing, Linux-format.
+///
+/// Lists the process's registered VMAs (demand-paged anonymous/stack
+/// regions, guard pages, fixed mappings) one per line in Linux
+/// `/proc/<pid>/maps` format; see [`render_maps`] for the exact layout.
+/// Bare scheduler tasks (kernel threads with no PCB) carry no VMAs and
+/// return `NotFound`, matching how every other process-only per-PID file
+/// behaves.  A process that has registered no VMAs yet yields an empty
+/// file, exactly as Linux does for a task with an empty address space.
 fn gen_pid_maps(task_id: u64) -> KernelResult<Vec<u8>> {
-    use crate::proc::pcb;
-
-    // VMAs are only tracked for processes (not bare tasks).
-    if pcb::state(task_id).is_none() {
-        // Not a process — return empty.
-        return Ok(b"(no process VMAs)\n".to_vec());
-    }
-
-    // Read the VMA list via the public API.
-    // We can't directly access the VMA list from procfs, but we can
-    // use the PCB's fault resolution to infer info.  Actually, let me
-    // just report what we know from the process table.
-    let mut text = String::from("START            END              PERMS  DESCRIPTION\n");
-
-    // PML4 address (page table root).
-    if let Some(pml4) = pcb::get_pml4(task_id) {
-        if pml4 != 0 {
-            text.push_str(&format!("pml4: 0x{:016x}\n", pml4));
-        } else {
-            text.push_str("pml4: (kernel address space)\n");
-        }
-    }
-
-    // Report process state and thread count — useful alongside maps.
-    if let Some(threads) = pcb::get_threads(task_id) {
-        text.push_str(&format!("threads: {}\n", threads.len()));
-    }
-    if let Some(exit_code) = pcb::exit_code(task_id) {
-        text.push_str(&format!("exit_code: {}\n", exit_code));
-    }
-
-    Ok(text.into_bytes())
+    // VMAs are only tracked for processes, not bare scheduler tasks.
+    let vmas = crate::proc::pcb::list_vmas(task_id)
+        .ok_or(KernelError::NotFound)?;
+    Ok(render_maps(&vmas))
 }
 
 /// `/proc/<pid>/caps` — capability table listing.
@@ -11288,6 +11317,63 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   /self -> {:?} (symlink) OK", self_target);
+
+    // --- /proc/<pid>/maps rendering ---
+    // render_maps is the pure formatter behind the maps file; exercise it
+    // with synthetic VMAs (no PCB needed) to lock down the Linux line
+    // format and the perms/pathname mapping for each VMA kind.
+    {
+        use crate::mm::page_table::PageFlags;
+        use crate::mm::vma::{Vma, VmaKind};
+        let vmas = [
+            // Anonymous data: present, writable, no-exec → "rw-p", no path.
+            Vma {
+                start: 0x1_0000,
+                end: 0x2_0000,
+                kind: VmaKind::Anonymous,
+                flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
+            },
+            // Stack: present, writable, no-exec → "rw-p [stack]".
+            Vma {
+                start: 0x10_0000,
+                end: 0x14_0000,
+                kind: VmaKind::Stack,
+                flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
+            },
+            // Guard: never mapped → "---p [guard]".
+            Vma {
+                start: 0x0c_0000,
+                end: 0x10_0000,
+                kind: VmaKind::Guard,
+                flags: PageFlags::empty(),
+            },
+        ];
+        let rendered = render_maps(&vmas);
+        let maps_text = core::str::from_utf8(&rendered)
+            .map_err(|_| KernelError::InternalError)?;
+        let lines: Vec<&str> = maps_text.lines().collect();
+        let expected = [
+            "10000-20000 rw-p 00000000 00:00 0 ",
+            "100000-140000 rw-p 00000000 00:00 0 [stack]",
+            "c0000-100000 ---p 00000000 00:00 0 [guard]",
+        ];
+        if lines.len() != expected.len() {
+            serial_println!(
+                "[procfs]   FAIL: maps rendered {} lines, expected {}",
+                lines.len(), expected.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        for (got, want) in lines.iter().zip(expected.iter()) {
+            if got != want {
+                serial_println!(
+                    "[procfs]   FAIL: maps line {:?} != expected {:?}", got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   maps render: {} VMA lines OK", lines.len());
+    }
 
     // --- New per-PID files: comm, statm, limits ---
 

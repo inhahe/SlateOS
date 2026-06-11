@@ -2935,6 +2935,19 @@ pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
     Ok(())
 }
 
+/// Snapshot a process's VMA list, sorted by start address.
+///
+/// Returns a cloned `Vec` (the live list is behind the process-table
+/// lock, which we must not hand out by reference) so callers such as
+/// `/proc/<pid>/maps` can render it without holding the lock.  Returns
+/// `None` if the PID has no live process record; `Some(empty)` for a
+/// process that has registered no VMAs yet.
+#[must_use]
+pub fn list_vmas(pid: ProcessId) -> Option<Vec<Vma>> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|proc| proc.vmas.clone())
+}
+
 /// Remove a VMA from a process's VMA list by start address.
 ///
 /// Returns `true` if a VMA was found and removed, `false` otherwise.

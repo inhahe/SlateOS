@@ -184,12 +184,17 @@
 ## cancelled_write_bytes) is intentionally NOT served.  WARNING for any future
 ## session: the obvious-looking backing source crate::fs::taskstats (it has a
 ## get(pid)->TaskAccounting with read_bytes/write_bytes/read_syscalls/
-## write_syscalls) is DEMO-ONLY.  Verified 2026-06-11: taskstats::update_io,
-## update_cpu and register have ZERO callers outside taskstats.rs itself — the
-## table is populated solely by init_defaults() with fabricated numbers
-## (kernel/src/fs/taskstats.rs:133-145, e.g. read_bytes: 1_073_741_824).  So
-## taskstats::get() returns invented data, and wiring /proc/<pid>/io to it
-## would violate the hard "never invent data in procfs" rule.  Proper fix is
+## write_syscalls) is NON-FUNCTIONAL.  Verified 2026-06-11: taskstats::update_io,
+## update_cpu and register have ZERO callers outside taskstats.rs itself, so the
+## table is permanently EMPTY in production — it has no real accounting source.
+## (UPDATE 2026-06-11: init_defaults() previously seeded two fabricated tasks
+## with invented numbers, e.g. read_bytes: 1_073_741_824, which /proc/taskstats
+## and the `taskstats` kshell command displayed as real; that fabricated seed
+## was removed — init_defaults() now creates an empty table and the self-test
+## builds its own fixtures via the real API and resets afterward.  So
+## taskstats::get() now returns None/zeros rather than invented data.)  Wiring
+## /proc/<pid>/io to taskstats would therefore give an all-zero file with no
+## real backing — still the wrong source.  Proper fix is
 ## structural: add real per-process IO byte/syscall counters to the PCB (or
 ## make taskstats real), increment them from the VFS read/write syscall path
 ## (kernel/src/syscall/ read/write/pread/pwrite handlers) and register tasks at

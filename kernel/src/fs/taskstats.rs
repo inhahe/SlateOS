@@ -122,37 +122,27 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** accounting table.
+///
+/// Seeds NO task rows and zero totals.  Real per-task accounting is wired
+/// through [`register`] plus the `update_*` functions; until those are
+/// called the table is genuinely empty, so the `/proc/taskstats` file and
+/// the `taskstats` kshell command report zeros rather than fabricated
+/// numbers — the kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional tasks ("init"/"shell") with
+/// invented byte/CPU/delay counts (e.g. 1 GiB read_bytes), which the
+/// `/proc/taskstats` surface then displayed as if they were real system
+/// statistics.  That demo data was removed; the self-test now builds its
+/// own fixtures explicitly via the real API (see [`self_test`]).
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        tasks: alloc::vec![
-            TaskAccounting {
-                pid: 1, name: String::from("init"), cpu_time_ns: 5_000_000_000,
-                user_time_ns: 2_000_000_000, sys_time_ns: 3_000_000_000,
-                read_bytes: 1_073_741_824, write_bytes: 536_870_912,
-                read_syscalls: 100000, write_syscalls: 50000,
-                rss_pages: 1024, vm_pages: 4096,
-                minor_faults: 50000, major_faults: 100,
-                voluntary_switches: 200000, involuntary_switches: 10000,
-                delays_ns: [1_000_000_000, 500_000_000, 100_000_000, 50_000_000, 0, 0],
-                delay_counts: [10000, 5000, 1000, 500, 0, 0],
-            },
-            TaskAccounting {
-                pid: 100, name: String::from("shell"), cpu_time_ns: 1_000_000_000,
-                user_time_ns: 800_000_000, sys_time_ns: 200_000_000,
-                read_bytes: 134_217_728, write_bytes: 67_108_864,
-                read_syscalls: 20000, write_syscalls: 10000,
-                rss_pages: 512, vm_pages: 2048,
-                minor_faults: 10000, major_faults: 20,
-                voluntary_switches: 50000, involuntary_switches: 2000,
-                delays_ns: [200_000_000, 100_000_000, 0, 0, 0, 0],
-                delay_counts: [2000, 1000, 0, 0, 0, 0],
-            },
-        ],
-        total_cpu_ns: 6_000_000_000,
-        total_io_bytes: 1_811_939_328,
-        total_delays_ns: 1_950_000_000,
+        tasks: Vec::new(),
+        total_cpu_ns: 0,
+        total_io_bytes: 0,
+        total_delays_ns: 0,
         ops: 0,
     });
 }
@@ -251,30 +241,40 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("taskstats::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies
+    // on fabricated seed data (which /proc/taskstats must never surface).
+    // Resetting first clears any residue from a prior `taskstats test` run
+    // so the totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_tasks().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated rows.
+    assert_eq!(list_tasks().len(), 0);
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register three tasks (starting from zeroed counters).
+    register(1, "init").expect("register init");
+    register(100, "shell").expect("register shell");
     register(200, "test_task").expect("register");
     assert_eq!(list_tasks().len(), 3);
     assert!(register(200, "dup").is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Update CPU.
+    // 3: CPU accounting sums user+sys into cpu_time_ns.
     update_cpu(200, 1_000_000, 500_000).expect("cpu");
     let t = get(200).expect("get");
     assert_eq!(t.cpu_time_ns, 1_500_000);
     assert_eq!(t.user_time_ns, 1_000_000);
     crate::serial_println!("  [3/8] cpu: OK");
 
-    // 4: Update I/O.
+    // 4: I/O accounting (a non-zero read and write each bump a syscall).
     update_io(200, 4096, 8192).expect("io");
     let t = get(200).expect("get2");
     assert_eq!(t.read_bytes, 4096);
     assert_eq!(t.write_bytes, 8192);
+    assert_eq!(t.read_syscalls, 1);
+    assert_eq!(t.write_syscalls, 1);
     crate::serial_println!("  [4/8] io: OK");
 
     // 5: Delay accounting.
@@ -284,24 +284,38 @@ pub fn self_test() {
     assert_eq!(t.delay_counts[0], 1);
     crate::serial_println!("  [5/8] delay: OK");
 
-    // 6: Top CPU.
+    // Larger consumers for the ordering and totals checks below.
+    update_cpu(1, 2_000_000_000, 3_000_000_000).expect("cpu init");
+    update_cpu(100, 800_000_000, 200_000_000).expect("cpu shell");
+    update_io(1, 1_073_741_824, 536_870_912).expect("io init");
+    update_delay(1, DelayType::BlockIo, 500_000_000).expect("delay init");
+
+    // 6: Top CPU consumers sorted descending (pid 1 = 5.0e9, pid 100 = 1.0e9).
     let top = top_cpu(2);
     assert_eq!(top.len(), 2);
+    assert_eq!(top[0].pid, 1);
+    assert_eq!(top[1].pid, 100);
     assert!(top[0].cpu_time_ns >= top[1].cpu_time_ns);
     crate::serial_println!("  [6/8] top cpu: OK");
 
-    // 7: Not found.
+    // 7: Updating an unregistered pid fails.
     assert!(update_cpu(999, 0, 0).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the updates above.
     let (tasks, cpu, io, delays, ops) = stats();
     assert_eq!(tasks, 3);
-    assert!(cpu > 6_000_000_000);
-    assert!(io > 1_811_939_328);
-    assert!(delays > 1_950_000_000);
+    assert_eq!(cpu, 6_001_500_000); // 1_500_000 + 5_000_000_000 + 1_000_000_000
+    assert_eq!(io, 1_610_625_024); // (4096+8192) + (1_073_741_824+536_870_912)
+    assert_eq!(delays, 500_100_000); // 100_000 + 500_000_000
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/taskstats table with its fixtures.  Reset to the uninitialised
+    // state so production reads report an empty table until real accounting
+    // is wired.
+    *STATE.lock() = None;
 
     crate::serial_println!("taskstats::self_test() — all 8 tests passed");
 }

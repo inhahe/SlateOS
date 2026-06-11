@@ -1089,6 +1089,12 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::mime::self_test() {
         serial_println!("WARNING: MIME detection self-test failed: {:?}", e);
     }
+    // taskstats backs /proc/taskstats; its self-test builds fixtures via the
+    // real accounting API and resets the table afterward (leaving no
+    // fabricated rows), so it is safe to run during boot and gives the
+    // module automated coverage it otherwise lacks (it was previously only
+    // reachable via the `taskstats test` kshell subcommand).
+    fs::taskstats::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

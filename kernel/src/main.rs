@@ -1159,6 +1159,13 @@ extern "C" fn kernel_main() -> ! {
     // the module automated coverage it previously lacked (it was only reachable
     // via the `rcustat test` kshell subcommand).
     fs::rcustat::self_test();
+    // tlbstat backs /proc/tlbstat (per-CPU TLB hit/miss/shootdown/flush stats);
+    // like its siblings the self-test now builds fixtures via the real
+    // register_cpu/record_hit/record_miss/record_shootdown/record_flush API and
+    // resets the table afterward (leaving no fabricated rows), so it is safe at
+    // boot and gives the module automated coverage it previously lacked (it was
+    // only reachable via the `tlbstat test` kshell subcommand).
+    fs::tlbstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

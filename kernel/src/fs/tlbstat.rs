@@ -113,32 +113,56 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** TLB-statistics table.
+///
+/// Seeds NO per-CPU rows, no shootdown log, and zero totals.  Real TLB
+/// accounting is wired through [`register_cpu`] (one zero-counter row per online
+/// CPU, populated by the memory subsystem at bring-up) and the
+/// `record_hit`/`record_miss`/`record_shootdown`/`record_flush` functions;
+/// until those are called the tables are genuinely empty, so the
+/// `/proc/tlbstat` file and the `tlbstat` kshell command report zeros rather
+/// than fabricated numbers — the kernel's hard "never invent data in procfs"
+/// rule.
+///
+/// NOTE: this previously seeded four fictional per-CPU rows (cpu0..3 with hits
+/// 5_000_000–8_000_000, misses 50_000–80_000, shootdowns/flushes/walk_cycles)
+/// plus invented aggregate totals (total_hits 26_000_000, total_misses 200_000,
+/// total_shootdowns 550, total_flushes 3400), which `/proc/tlbstat` then
+/// displayed as if they were real TLB hit-rate/shootdown measurements.  That
+/// demo data was removed; the self-test now builds its own fixtures explicitly
+/// via the real API (see [`self_test`]).  The memory subsystem is expected to
+/// call [`register_cpu`] per online CPU and the record_* functions as the TLB
+/// is exercised.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let mut cpu_states = Vec::new();
-    for i in 0..4u32 {
-        cpu_states.push(CpuTlbState {
-            cpu_id: i,
-            hits: 5_000_000 + i as u64 * 1_000_000,
-            misses: 50_000 + i as u64 * 10_000,
-            shootdowns_sent: 100 + i as u64 * 25,
-            shootdowns_recv: 200 + i as u64 * 50,
-            flushes: 500 + i as u64 * 100,
-            flush_all: 50 + i as u64 * 10,
-            flush_range: 450 + i as u64 * 90,
-            walk_cycles: 1_000_000 + i as u64 * 250_000,
-        });
-    }
     *guard = Some(State {
-        cpu_states,
+        cpu_states: Vec::new(),
         shootdown_log: Vec::new(),
-        total_hits: 26_000_000,
-        total_misses: 200_000,
-        total_shootdowns: 550,
-        total_flushes: 3400,
+        total_hits: 0,
+        total_misses: 0,
+        total_shootdowns: 0,
+        total_flushes: 0,
         ops: 0,
     });
+}
+
+/// Register a CPU for TLB tracking.
+///
+/// The memory subsystem calls this once per online CPU at bring-up so the
+/// per-CPU TLB state table reflects the real topology with zeroed counters.
+/// The `record_hit`/`record_miss`/`record_flush` functions return `NotFound`
+/// for an unregistered CPU id.
+pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
+        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
+        state.cpu_states.push(CpuTlbState {
+            cpu_id, hits: 0, misses: 0, shootdowns_sent: 0, shootdowns_recv: 0,
+            flushes: 0, flush_all: 0, flush_range: 0, walk_cycles: 0,
+        });
+        Ok(())
+    })
 }
 
 /// Record a TLB hit.
@@ -237,59 +261,83 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("tlbstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/tlbstat must never surface).
+    // Resetting first clears any residue from a prior `tlbstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(cpu_stats().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated CPUs or totals; hit_rate is 100 when
+    //    there are no samples yet.
+    assert_eq!(cpu_stats().len(), 0);
+    let (c0, h0, m0, s0, f0, _o0) = stats();
+    assert_eq!((c0, h0, m0, s0, f0), (0, 0, 0, 0, 0));
+    assert_eq!(hit_rate(), 100);
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Record hit.
-    let before = cpu_stats()[0].hits;
+    // 2: Register CPUs (zeroed); record a hit exactly from zero.
+    register_cpu(0).expect("cpu0");
+    register_cpu(1).expect("cpu1");
+    register_cpu(2).expect("cpu2");
+    assert!(register_cpu(0).is_err());
     record_hit(0, 100).expect("hit");
-    let after = cpu_stats()[0].hits;
-    assert_eq!(after, before + 100);
+    let c = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    assert_eq!(c.hits, 100);
     crate::serial_println!("  [2/8] hit: OK");
 
-    // 3: Record miss.
-    let before = cpu_stats()[1].misses;
+    // 3: Record miss with page-walk cycles.
     record_miss(1, 5, 500).expect("miss");
-    let after = cpu_stats()[1].misses;
-    assert_eq!(after, before + 5);
+    let c = cpu_stats().iter().find(|c| c.cpu_id == 1).cloned().expect("cpu1");
+    assert_eq!(c.misses, 5);
+    assert_eq!(c.walk_cycles, 500);
     crate::serial_println!("  [3/8] miss: OK");
 
-    // 4: Hit rate.
+    // 4: Hit rate is exact: 100 hits / (100 + 5) = 95%.
     let rate = hit_rate();
-    assert!(rate > 90);
+    assert_eq!(rate, 95);
     crate::serial_println!("  [4/8] hit rate: OK ({}%)", rate);
 
-    // 5: Shootdown.
+    // 5: Shootdown logs an event and bumps sent/recv counters exactly.
     record_shootdown(0, 3, 4, FlushReason::MunMap).expect("shootdown");
     let log = shootdown_log(5);
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].source_cpu, 0);
+    let c0 = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let c1 = cpu_stats().iter().find(|c| c.cpu_id == 1).cloned().expect("cpu1");
+    assert_eq!(c0.shootdowns_sent, 1);
+    assert_eq!(c1.shootdowns_recv, 1); // every non-source CPU receives
     crate::serial_println!("  [5/8] shootdown: OK");
 
-    // 6: Flush.
-    let before = cpu_stats()[2].flushes;
+    // 6: Flush (full + range) increments exactly from zero.
     record_flush(2, true).expect("flush_full");
     record_flush(2, false).expect("flush_range");
-    let after = cpu_stats()[2].flushes;
-    assert_eq!(after, before + 2);
+    let c = cpu_stats().iter().find(|c| c.cpu_id == 2).cloned().expect("cpu2");
+    assert_eq!(c.flushes, 2);
+    assert_eq!(c.flush_all, 1);
+    assert_eq!(c.flush_range, 1);
     crate::serial_println!("  [6/8] flush: OK");
 
-    // 7: Not found.
+    // 7: Recording on an unregistered CPU fails with NotFound.
     assert!(record_hit(99, 1).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (cpus, hits, misses, shootdowns, flushes, ops) = stats();
-    assert_eq!(cpus, 4);
-    assert!(hits > 26_000_000);
-    assert!(misses > 200_000);
-    assert!(shootdowns > 550);
-    assert!(flushes > 3400);
+    assert_eq!(cpus, 3);
+    assert_eq!(hits, 100);
+    assert_eq!(misses, 5);
+    assert_eq!(shootdowns, 1);
+    assert_eq!(flushes, 2);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/tlbstat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the memory subsystem
+    // wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("tlbstat::self_test() — all 8 tests passed");
 }

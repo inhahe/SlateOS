@@ -298,14 +298,20 @@
 ##                    6000. Added register_cpu(cpu_id) for zeroed per-CPU rows;
 ##                    emptied init_defaults and rebuilt self_test with exact
 ##                    assertions, wired into boot.)
-## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - tlbstat.rs    (per-CPU: fake hits 5_000_000+, misses 50_000+, shootdowns,
-##                    walk_cycles; aggregate total_hits 26_000_000. Same migstat/
-##                    rcustat register_cpu pattern: add register_cpu(cpu_id) for
-##                    zeroed per-CPU rows, empty init_defaults, rebuild self_test.)
-## After tlbstat, audit the remaining *stat/*latency/*stats siblings for the same
-## fabricated-observation pattern (numastat, cpustat, irqstat, wqstat, … — each
-## needs the statistics-vs-settings judgment before emptying).
+##   - tlbstat.rs    (fixed 2026-06-11; was: fake per-CPU rows cpu0..3 hits
+##                    5_000_000–8_000_000, misses 50_000–80_000, shootdowns/
+##                    flushes/walk_cycles; aggregate total_hits 26_000_000,
+##                    total_misses 200_000, total_shootdowns 550, total_flushes
+##                    3400. Added register_cpu(cpu_id) for zeroed per-CPU rows;
+##                    emptied init_defaults and rebuilt self_test with exact
+##                    assertions (incl. exact 95% hit_rate), wired into boot.)
+## Next candidates to audit (same fabricated-observation pattern likely; each
+## needs the statistics-vs-settings judgment before emptying):
+##   - numastat, cpustat, irqstat, wqstat, and the other *stat/*latency/*stats
+##     siblings under kernel/src/fs/. For per-CPU/per-node tables with no
+##     registration API, add a register_* fn (see migstat/rcustat/tlbstat) rather
+##     than seeding rows; for tables with a real API already, just empty
+##     init_defaults and rebuild the self_test residue-free.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

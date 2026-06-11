@@ -294,58 +294,68 @@ pub fn stats() -> (usize, u64, u64, usize, u64) {
 
 pub fn self_test() {
     crate::serial_println!("usagetime::self_test() — running tests...");
+    // Start from a clean, freshly-defaulted state so the assertions below are
+    // exact and the tracked apps / limits / categories this test creates do not
+    // leak into the live /proc/usagetime table afterward (the kshell
+    // `usagetime test` subcommand calls this directly, and /proc/usagetime lists
+    // per-app foreground time — leaked fixtures would look like real usage).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Empty.
+    // 1: Empty defaults — no tracked apps, zeroed counters. init_defaults seeds
+    //    only the tracking_enabled flag (config), never fabricated usage records.
     assert_eq!(top_apps(10).len(), 0);
-    crate::serial_println!("  [1/8] empty: OK");
+    let (a0, s0, t0, l0, _) = stats();
+    assert_eq!((a0, s0, t0, l0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Track app focus.
+    // 2: Track app focus — focus then blur records one session for "browser".
     app_focused("browser").expect("focus1");
     app_blurred("browser").expect("blur1");
     let usage = get_usage("browser").expect("get");
     assert_eq!(usage.session_count, 1);
     crate::serial_println!("  [2/8] focus/blur: OK");
 
-    // 3: Multiple sessions.
+    // 3: Multiple sessions — a second browser session plus one editor session.
     app_focused("browser").expect("focus2");
     app_blurred("browser").expect("blur2");
     app_focused("editor").expect("focus3");
     app_blurred("editor").expect("blur3");
-    let usage = get_usage("browser").expect("get2");
-    assert_eq!(usage.session_count, 2);
+    assert_eq!(get_usage("browser").expect("get2").session_count, 2);
+    assert_eq!(get_usage("editor").expect("get-ed").session_count, 1);
     crate::serial_println!("  [3/8] multi-session: OK");
 
-    // 4: Top apps.
-    let top = top_apps(10);
-    assert_eq!(top.len(), 2);
+    // 4: Top apps — exactly the two tracked apps.
+    assert_eq!(top_apps(10).len(), 2);
     crate::serial_println!("  [4/8] top apps: OK");
 
-    // 5: Set limit.
-    set_limit("browser", 60000).expect("limit"); // 60s limit.
-    let usage = get_usage("browser").expect("get3");
-    assert!(usage.daily_limit_ms.is_some());
+    // 5: Set limit — 60s daily limit on browser.
+    set_limit("browser", 60_000).expect("limit");
+    assert!(get_usage("browser").expect("get3").daily_limit_ms.is_some());
     crate::serial_println!("  [5/8] limit: OK");
 
-    // 6: Category.
+    // 6: Category — assign and read back.
     set_category("browser", UsageCategory::Productivity).expect("cat");
-    let cat = get_category("browser");
-    assert_eq!(cat, Some(UsageCategory::Productivity));
+    assert_eq!(get_category("browser"), Some(UsageCategory::Productivity));
     crate::serial_println!("  [6/8] category: OK");
 
-    // 7: Reset.
+    // 7: Reset — zeroes per-app usage/sessions (keeps the app entries, their
+    //    limits and categories).
     reset_usage().expect("reset");
     let usage = get_usage("browser").expect("get4");
     assert_eq!(usage.session_count, 0);
     assert_eq!(usage.total_foreground_ms, 0);
     crate::serial_println!("  [7/8] reset: OK");
 
-    // 8: Stats.
-    let (apps, _sessions, _tracked_ms, limited, ops) = stats();
-    assert_eq!(apps, 2);
-    assert_eq!(limited, 1);
+    // 8: Stats — still 2 known apps, 1 with a limit, sessions reset to 0.
+    let (apps, sessions, _tracked_ms, limited, ops) = stats();
+    assert_eq!((apps, sessions, limited), (2, 0, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Restore the clean default state so no test fixtures (tracked apps, limits,
+    // categories) leak into the live module.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("usagetime::self_test() — all 8 tests passed");
 }

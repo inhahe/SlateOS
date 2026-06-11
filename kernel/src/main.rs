@@ -1923,6 +1923,17 @@ extern "C" fn kernel_main() -> ! {
     // so its exact assertions (game id, session/activation totals) are exercised
     // at boot now that it is safe.
     fs::gamemode::self_test();
+    // Usage-time self-test.  usagetime is a per-app foreground-time TRACKER, not
+    // a fabricator: its init_defaults seeds only the tracking_enabled flag with
+    // NO fabricated app-usage records (apps empty, all counters 0), so
+    // /proc/usagetime honestly reports 0 tracked apps at boot.  The self_test,
+    // however, tracks "browser"/"editor" sessions and sets a limit + a category,
+    // and never cleared STATE — so the kshell `usagetime test` subcommand would
+    // leak those fabricated usage records into the live /proc/usagetime listing
+    // (which prints per-app foreground hours, making the leak look like real
+    // usage).  It is now residue-free (clears STATE and restores clean defaults
+    // at the end) and wired here so its exact assertions are exercised at boot.
+    fs::usagetime::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

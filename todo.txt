@@ -1511,6 +1511,32 @@
 ##                    durations via HPET; auto-detection from running game
 ##                    processes is the only future wiring (it reads real registered
 ##                    games, no fabrication).
+##   - usagetime (2026-06-11): AUDITED — LEGITIMATE tracker, NOT fabricating;
+##                    only made self_test residue-free (the gamemode/logrotate
+##                    precedent). Per-app foreground-time tracker, surfaced via
+##                    /proc/usagetime (tracked_apps / total_sessions /
+##                    total_tracked_ms / apps_with_limits + a per-app foreground
+##                    hours/sessions listing) and the `usagetime` (alias `utime`)
+##                    kshell command. init_defaults seeds only the tracking_enabled
+##                    flag (config) with NO fabricated app-usage records (apps
+##                    empty, categories empty, all counters 0), so /proc/usagetime
+##                    honestly reports 0 tracked apps. The PROBLEM was the
+##                    self_test: it tracked "browser"/"editor" focus/blur sessions,
+##                    set a 60s limit and a Productivity category, and never cleared
+##                    STATE, so the kshell `usagetime test` subcommand (line 47132)
+##                    would leak those fabricated usage records into the live
+##                    /proc/usagetime listing (which prints per-app foreground
+##                    hours — the leak would look like real usage). Rebuilt
+##                    self_test residue-free (clears STATE at start AND restores
+##                    clean defaults at end) with EXACT assertions (empty defaults
+##                    0/0/0/0, browser 1 then 2 sessions + editor 1, top_apps 2,
+##                    limit set, category Productivity, reset zeroes usage keeping
+##                    entries, final 2 apps / 0 sessions / 1 limited). Wired into
+##                    the boot self-test path. /proc/usagetime 100 bytes (0 tracked
+##                    apps — truthful). No PROPER FIX DEFERRED: app_focused/blurred
+##                    already measure real foreground time via HPET; real usage
+##                    will accrue when the compositor/window manager reports focus
+##                    changes (it reads real apps, no fabrication).
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1530,7 +1556,7 @@
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     usagetime. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     screentime. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1549,9 +1575,11 @@
 ##     fixed 2026-06-11: fabrication was in scan() not init_defaults — scan()
 ##     now honestly finds nothing, added add_item primitive + summarize.
 ##     gamemode audited 2026-06-11: LEGITIMATE settings module — config defaults
-##     left alone, only made self_test residue-free.)
+##     left alone, only made self_test residue-free. usagetime audited
+##     2026-06-11: LEGITIMATE tracker — no fabrication, only made self_test
+##     residue-free.)
 ##     Remaining flagged
-##     names incl.: usagetime, screentime,
+##     names incl.: screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
 ##     legitimate config — audit carefully, do not blind-empty. memlayout was

@@ -6,6 +6,59 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## FOLLOW-UP (2026-06-11): /proc/stat is NOT in Linux format (gen_stat,
+## kernel\src\fs\procfs.rs ~line 800).  Every per-PID procfs file was
+## converted to exact Linux layout, but the SYSTEM-WIDE /proc/stat still
+## emits a custom native format ("tasks: N", "running: N", "ready: N",
+## ... plus a human-readable per-task table).  Real Linux /proc/stat
+## (fs/proc/stat.c show_stat) is parsed by top/htop/vmstat/glibc
+## get_nprocs/sysconf and has a fixed layout:
+##   cpu  <user> <nice> <system> <idle> <iowait> <irq> <softirq> <steal> <guest> <guest_nice>
+##   cpu0 ... (one per CPU)
+##   intr <total> <per-irq...>
+##   ctxt <total context switches>
+##   btime <boot time, unix epoch seconds>
+##   processes <total forks since boot>
+##   procs_running <count>
+##   procs_blocked <count>
+##   softirq <total> <per-type...>
+## Data-sourcing analysis (per the "never invent procfs data" rule):
+##   * btime: GENUINE — crate::timekeeping::boot_time_epoch_secs().
+##   * procs_running / procs_blocked: GENUINE — count TaskState::Running
+##     (+Ready) and ::Blocked from crate::sched::task_list() (gen_stat
+##     already computes these counts).
+##   * ctxt: APPROXIMATE-but-honest — sum of per-task schedule_count
+##     across task_list() = total dispatches since boot.
+##   * cpu jiffies line (user/nice/system/idle/iowait/...): NO BACKING.
+##     We track per-task total_ticks but NOT a user/system/idle split,
+##     and no per-CPU idle accounting.  This is the FIRST and most-read
+##     line (top/htop compute %CPU from successive deltas of it).  Cannot
+##     be emitted truthfully without adding user/system/idle tick
+##     accounting to the scheduler tick path.  Reporting busy=total_ticks
+##     and idle=(uptime_ticks - busy) per CPU is a defensible derivation
+##     IF per-CPU busy ticks are tracked; verify last_cpu/total_ticks can
+##     be aggregated per CPU before relying on it.
+##   * intr / softirq totals: need an IRQ counter sum (check whether an
+##     interrupt-stats module already totals these; do NOT fabricate).
+##   * processes (cumulative forks since boot): NO BACKING — reslimit
+##     process_count is the CURRENT live count, not cumulative.  Needs a
+##     monotonic fork counter incremented on every process creation.
+## PROPER FIX: (1) add a global AtomicU64 fork counter bumped in the
+## process-creation path; (2) add per-CPU user/system/idle tick
+## accounting (or a defensible idle derivation from uptime); (3) sum IRQ
+## counts from the interrupt subsystem; (4) rewrite gen_stat to the
+## Linux layout above.  BEFORE rewriting, grep the in-tree shell/tools
+## (userspace/shell, apps/) for readers of the CURRENT custom /proc/stat
+## format — the rewrite is a breaking change for anything parsing
+## "tasks:"/"running:" lines; migrate or dual-serve as needed.
+## DEFERRED because it is a multi-field implementation requiring new
+## scheduler counters + a format-break migration decision, NOT a
+## surgical single-format-string fidelity fix (unlike the maps 8-digit
+## padding and mountinfo whitespace-escaping fixes).  TRIGGER: when
+## per-CPU tick accounting or a fork counter is added for another
+## reason, or when a Linux tool (top/htop/vmstat) is brought up and
+## needs a real /proc/stat.
+
 ## DONE (2026-06-11): /proc/<pid>/status Mems_allowed + Mems_allowed_list
 ## Linux always prints `Mems_allowed:`/`Mems_allowed_list:` (the NUMA memory
 ## nodes a task may allocate from) right after the Cpus_allowed lines; numactl

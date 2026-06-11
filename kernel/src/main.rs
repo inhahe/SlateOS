@@ -1889,6 +1889,17 @@ extern "C" fn kernel_main() -> ! {
     // self_test builds its fixtures via the real API with exact assertions
     // (register/verify/add/repair/boot/remove) and clears the state afterward.
     fs::recoverypart::self_test();
+    // Log-rotation self-test.  Unlike the statistics modules above, logrotate's
+    // init_defaults seeds CONFIGURATION (three default rotation rules for
+    // syslog/kern.log/auth.log — the analogue of a shipped /etc/logrotate.d
+    // policy) with ZEROED activity, so it is a legitimate settings module and the
+    // default rules are deliberately kept.  The self_test, however, performs
+    // simulated rotations (rotate/check_all), so it is made residue-free (clears
+    // STATE and restores the clean default policy at the end) to ensure those
+    // simulated rotations never leak into the live /proc/logrotate counters.  It
+    // is wired here so its exact assertions (rule ids, rotation/byte totals) are
+    // actually exercised at boot.
+    fs::logrotate::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -127,6 +127,19 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the log-rotation state with the default rotation policy.
+///
+/// Unlike the statistics modules in this directory, the rules seeded here are
+/// CONFIGURATION (rotation policy), not fabricated observations — the analogue
+/// of a shipped `/etc/logrotate.d` configuration. Each default rule carries
+/// ZEROED activity (`last_rotated_ns = 0`, `total_rotations = 0`), and the
+/// global rotation/byte/cleanup counters all start at zero, so the
+/// `/proc/logrotate` generator and the `logrotate` kshell command report the
+/// policy honestly: three configured rules, zero rotations performed. Rules are
+/// added/removed through [`add_rule`] / [`remove_rule`]; the rotation counters
+/// advance only through real [`rotate`] / [`check_all`] / [`cleanup`] calls. The
+/// default rules (syslog, kern.log, auth.log) are sensible policy defaults and
+/// are deliberately kept — they are settings, not invented activity.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
@@ -289,14 +302,22 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("logrotate::self_test() — running tests...");
+    // Start from a clean state with the default policy so the assertions below
+    // are exact, and clear at the end so the simulated rotations performed by
+    // this test do NOT leak into the live /proc/logrotate counters.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default rules.
+    // 1: Default rules — the shipped rotation policy (3 rules), zero rotations
+    //    performed yet (counters are config, not activity).
     assert_eq!(list_rules().len(), 3);
+    let (rc0, rot0, by0, cl0, _) = stats();
+    assert_eq!((rc0, rot0, by0, cl0), (3, 0, 0, 0));
     crate::serial_println!("  [1/8] defaults: OK");
 
-    // 2: Add rule.
+    // 2: Add rule — the fourth rule gets id 4 (next_id after the 3 defaults).
     let id = add_rule("/var/log/app.log", RotateTrigger::Daily, CompressMethod::Zstd, 5).expect("add");
+    assert_eq!(id, 4);
     assert_eq!(list_rules().len(), 4);
     crate::serial_println!("  [2/8] add rule: OK");
 
@@ -304,38 +325,43 @@ pub fn self_test() {
     assert!(add_rule("/var/log/app.log", RotateTrigger::Weekly, CompressMethod::None, 3).is_err());
     crate::serial_println!("  [3/8] duplicate: OK");
 
-    // 4: Rotate single.
+    // 4: Rotate single — one simulated 1 MB rotation; one event recorded.
     let bytes = rotate(id).expect("rotate");
-    assert!(bytes > 0);
+    assert_eq!(bytes, 1_000_000);
     assert_eq!(list_events().len(), 1);
+    assert_eq!(stats().1, 1); // total_rotations
     crate::serial_println!("  [4/8] rotate: OK");
 
     // 5: Disable/enable.
     set_enabled(id, false).expect("disable");
-    let rule = list_rules().iter().find(|r| r.id == id).cloned().expect("find");
+    let rule = list_rules().into_iter().find(|r| r.id == id).expect("find");
     assert!(!rule.enabled);
     set_enabled(id, true).expect("enable");
     crate::serial_println!("  [5/8] enable/disable: OK");
 
-    // 6: Check all.
+    // 6: Check all — rotates every enabled rule (all 4); total rotations now
+    //    1 (from step 4) + 4 = 5, and 5 events recorded.
     let count = check_all().expect("check_all");
-    assert!(count > 0);
+    assert_eq!(count, 4);
+    assert_eq!(list_events().len(), 5);
     crate::serial_println!("  [6/8] check all: OK");
 
-    // 7: Remove rule.
+    // 7: Remove rule — back to the 3 default rules; double remove errors.
     remove_rule(id).expect("remove");
     assert_eq!(list_rules().len(), 3);
     assert!(remove_rule(id).is_err());
     crate::serial_println!("  [7/8] remove: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above: 3 rules, 5 rotations,
+    //    5 MB rotated, 0 cleanups.
     let (rule_count, rotations, bytes_rotated, cleanups, ops) = stats();
-    assert_eq!(rule_count, 3);
-    assert!(rotations > 0);
-    assert!(bytes_rotated > 0);
+    assert_eq!((rule_count, rotations, bytes_rotated, cleanups), (3, 5, 5_000_000, 0));
     assert!(ops > 0);
-    let _ = cleanups;
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state — restore the clean default policy so
+    // /proc/logrotate shows the shipped rules with zero performed rotations.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("logrotate::self_test() — all 8 tests passed");
 }

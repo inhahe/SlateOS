@@ -1414,6 +1414,35 @@
 ##                    actual on-disk size and add_tool for each real tool image —
 ##                    wire when partition enumeration / the recovery environment is
 ##                    implemented. Until then it correctly reports Missing.
+##   - logrotate (2026-06-11): AUDITED — LEGITIMATE settings module, default
+##                    rules LEFT ALONE; only made self_test residue-free (the
+##                    sysmaint precedent). Log-rotation policy, surfaced via
+##                    /proc/logrotate and the `logrotate` kshell command.
+##                    init_defaults seeds THREE rotation rules (/var/log/syslog
+##                    SizeOrDaily(10MB)/gzip/7, /var/log/kern.log Weekly/gzip/4,
+##                    /var/log/auth.log Size(5MB)/zstd/12) — but these are CONFIG
+##                    (rotation policy, the analogue of a shipped /etc/logrotate.d),
+##                    NOT fabricated observations: each rule has ZEROED activity
+##                    (last_rotated_ns=0, total_rotations=0) and the global
+##                    rotation/byte/cleanup counters all start at 0, so
+##                    /proc/logrotate honestly reports "3 rules, 0 rotations
+##                    performed". Default rules deliberately KEPT (settings, like
+##                    sysmaint's default maintenance schedule). The PROBLEM was the
+##                    self_test: it ran rotate()/check_all() (simulated rotations)
+##                    and never cleared STATE, so the kshell `logrotate test`
+##                    subcommand would leak fabricated rotation events + counters
+##                    into the live /proc/logrotate. Rebuilt self_test residue-free
+##                    (clears STATE at start, restores clean default policy at end)
+##                    with EXACT assertions (add gives id 4, single rotate = 1 MB /
+##                    1 event, check_all rotates all 4 enabled rules, final 3 rules
+##                    / 5 rotations / 5 MB / 0 cleanups). Wired into the boot
+##                    self-test path so the exact assertions are exercised (safe
+##                    now that it is residue-free). /proc/logrotate 96 bytes (3
+##                    rules, 0 rotations — truthful). PROPER FIX DEFERRED: rotate/
+##                    check_all/cleanup currently SIMULATE (fixed 1 MB size, no
+##                    real file I/O); when syslog/eventlog write real log files,
+##                    wire these to stat the real file, compress it, and remove
+##                    archives past retention.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1433,7 +1462,7 @@
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     logrotate. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     diskclean. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1446,9 +1475,11 @@
 ##     modules (~160M checks) to no modules, case (a). binfmt fixed 2026-06-11:
 ##     added missing register_format API + emptied 3 fabricated formats (610K
 ##     loads), case (b). recoverypart fixed 2026-06-11: added register_partition
-##     API + emptied fabricated 500MB Healthy partition / 4 tools, case (b).)
+##     API + emptied fabricated 500MB Healthy partition / 4 tools, case (b).
+##     logrotate audited 2026-06-11: LEGITIMATE settings module — default
+##     rotation rules left alone, only made self_test residue-free.)
 ##     Remaining flagged
-##     names incl.: logrotate, diskclean, gamemode, usagetime, screentime,
+##     names incl.: diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
 ##     legitimate config — audit carefully, do not blind-empty. memlayout was

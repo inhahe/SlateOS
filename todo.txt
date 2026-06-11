@@ -265,14 +265,16 @@
 ##                    1_199_996_000. Real API create/destroy/record_write/
 ##                    record_read already present; fix emptied init_defaults and
 ##                    rebuilt self_test.)
+##   - epollstat.rs  (fixed 2026-06-11; was: fake epoll instances id 1/2,
+##                    wait_calls 100000, events_delivered 250000; aggregate
+##                    total_events 330000. Real API create_instance/add_fd/
+##                    record_wait already present; fix emptied init_defaults and
+##                    rebuilt self_test.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - epollstat.rs  (fake epoll instances id 1/2, wait_calls 100000,
-##                    events_delivered 250000; aggregate total_events 330000.
-##                    Real API create_instance/... — fix next, same recipe.)
 ##   - aiostat.rs    (fake io_uring rings id 1/2, submitted 50_000_000/
 ##                    200_000_000; aggregate total_submitted 250_000_000.
-##                    Real API create_ring/... — fix after epollstat.)
-## Audit the remaining *stat/*latency/*stats siblings after those (netlat,
+##                    Real API create_ring/... — fix next, same recipe.)
+## Audit the remaining *stat/*latency/*stats siblings after aiostat (netlat,
 ## rcustat, migstat, tlbstat, …).
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

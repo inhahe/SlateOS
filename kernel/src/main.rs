@@ -1125,6 +1125,12 @@ extern "C" fn kernel_main() -> ! {
     // safe at boot and gives the module automated coverage it previously
     // lacked (it was only reachable via the `pipestat test` kshell subcommand).
     fs::pipestat::self_test();
+    // epollstat backs /proc/epollstat; like its siblings the self-test now
+    // builds fixtures via the real create_instance/add_fd/record_wait API and
+    // resets the table afterward (leaving no fabricated instances), so it is
+    // safe at boot and gives the module automated coverage it previously
+    // lacked (it was only reachable via the `epollstat test` kshell subcommand).
+    fs::epollstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

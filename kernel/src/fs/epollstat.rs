@@ -105,20 +105,33 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** epoll-instance table.
+///
+/// Seeds NO instance rows and zero totals.  Real epoll accounting is wired
+/// through [`create_instance`]/[`destroy_instance`]/[`add_fd`]/[`remove_fd`]/
+/// [`record_wait`]; until those are called the table is genuinely empty, so
+/// the `/proc/epollstat` file and the `epollstat` kshell command report zeros
+/// rather than fabricated numbers — the kernel's hard "never invent data in
+/// procfs" rule.
+///
+/// NOTE: this previously seeded two fictional epoll instances (id 1/2 with
+/// wait_calls 100000, events_delivered 250000) plus invented aggregate totals
+/// (total_waits 150000, total_events 330000), which `/proc/epollstat` then
+/// displayed as if they were real event-multiplexing statistics.  That demo
+/// data was removed; the self-test now builds its own fixtures explicitly via
+/// the real API (see [`self_test`]).  The epoll syscall path is expected to
+/// call [`create_instance`] on epoll_create and [`record_wait`] on each
+/// epoll_wait.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        instances: alloc::vec![
-            EpollInstance { id: 1, owner_pid: 1, registered_fds: 5, max_events: 64, wait_calls: 100000, events_delivered: 250000, timeouts: 5000, created_ns: now },
-            EpollInstance { id: 2, owner_pid: 100, registered_fds: 12, max_events: 128, wait_calls: 50000, events_delivered: 80000, timeouts: 2000, created_ns: now },
-        ],
-        next_id: 3,
-        total_creates: 2,
-        total_waits: 150000,
-        total_events: 330000,
-        total_timeouts: 7000,
+        instances: Vec::new(),
+        next_id: 1,
+        total_creates: 0,
+        total_waits: 0,
+        total_events: 0,
+        total_timeouts: 0,
         ops: 0,
     });
 }
@@ -213,58 +226,79 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("epollstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/epollstat must never surface).
+    // Resetting first clears any residue from a prior `epollstat test` run so
+    // the totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_instances().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated rows.
+    assert_eq!(list_instances().len(), 0);
+    let (c0, cr0, w0, e0, t0, _o0) = stats();
+    assert_eq!((c0, cr0, w0, e0, t0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Create instance.
+    // 2: Create instance (ids start at 1).
     let id = create_instance(200, 64).expect("create");
-    assert!(id >= 3);
-    assert_eq!(list_instances().len(), 3);
+    assert_eq!(id, 1);
+    assert_eq!(list_instances().len(), 1);
     crate::serial_println!("  [2/8] create: OK");
 
-    // 3: Add FD.
+    // 3: Add FDs (exact, from zero).
     add_fd(id).expect("add");
     add_fd(id).expect("add2");
-    let inst = list_instances().iter().find(|i| i.id == id).cloned().unwrap();
+    let inst = list_instances().iter().find(|i| i.id == id).cloned().expect("inst");
     assert_eq!(inst.registered_fds, 2);
+    assert!(add_fd(9999).is_err()); // NotFound on unknown instance
     crate::serial_println!("  [3/8] add fd: OK");
 
     // 4: Remove FD.
     remove_fd(id).expect("remove");
-    let inst = list_instances().iter().find(|i| i.id == id).cloned().unwrap();
+    let inst = list_instances().iter().find(|i| i.id == id).cloned().expect("inst");
     assert_eq!(inst.registered_fds, 1);
     crate::serial_println!("  [4/8] remove fd: OK");
 
-    // 5: Record wait.
+    // 5: Record wait (delivers 3 events).
     record_wait(id, 3, false).expect("wait");
-    let inst = list_instances().iter().find(|i| i.id == id).cloned().unwrap();
+    let inst = list_instances().iter().find(|i| i.id == id).cloned().expect("inst");
     assert_eq!(inst.wait_calls, 1);
     assert_eq!(inst.events_delivered, 3);
     crate::serial_println!("  [5/8] wait: OK");
 
-    // 6: Timeout.
+    // 6: A timed-out wait bumps the timeout counter exactly.
     record_wait(id, 0, true).expect("timeout");
-    let inst = list_instances().iter().find(|i| i.id == id).cloned().unwrap();
+    let inst = list_instances().iter().find(|i| i.id == id).cloned().expect("inst");
     assert_eq!(inst.timeouts, 1);
+    assert_eq!(inst.wait_calls, 2);
     crate::serial_println!("  [6/8] timeout: OK");
 
-    // 7: Destroy.
+    // 7: A second instance for a different pid; instances_for_pid is exact.
+    let id2 = create_instance(201, 128).expect("create2");
+    assert_eq!(instances_for_pid(200).len(), 1);
+    assert_eq!(instances_for_pid(201).len(), 1);
     destroy_instance(id).expect("destroy");
-    assert_eq!(list_instances().len(), 2);
+    assert_eq!(list_instances().len(), 1); // only id2 remains
     assert!(destroy_instance(id).is_err());
+    let _ = id2;
     crate::serial_println!("  [7/8] destroy: OK");
 
-    // 8: Stats.
-    let (count, creates, waits, events, _timeouts, ops) = stats();
-    assert_eq!(count, 2);
-    assert!(creates >= 3);
-    assert!(waits > 150000);
-    assert!(events > 330000);
+    // 8: Aggregate totals equal the exact sums of the operations above.
+    let (count, creates, waits, events, timeouts, ops) = stats();
+    assert_eq!(count, 1); // id2
+    assert_eq!(creates, 2); // two create_instance calls
+    assert_eq!(waits, 2); // two record_wait calls
+    assert_eq!(events, 3); // 3 + 0
+    assert_eq!(timeouts, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/epollstat table with its fixtures.  Reset to the uninitialised
+    // state so production reads report an empty table until the epoll syscall
+    // path wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("epollstat::self_test() — all 8 tests passed");
 }

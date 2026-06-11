@@ -1387,6 +1387,14 @@ extern "C" fn kernel_main() -> ! {
     // it is safe at boot and gives the module automated coverage it previously
     // lacked (it was only reachable via the `writeback test` kshell subcommand).
     fs::writeback::self_test();
+    // blkqueue backs /proc/blkqueue (per-device block I/O queue depth, request
+    // merges, plug/unplug events).  Its init_defaults() previously seeded two
+    // fictional devices (sda/nvme0n1) with ~60M fabricated submitted I/Os; that
+    // demo data was removed (real queues are wired via register_device + the
+    // submit/complete/merge/plug/unplug record functions).  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions and
+    // resets the table afterward, so it is safe at boot.
+    fs::blkqueue::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

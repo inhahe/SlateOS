@@ -604,17 +604,34 @@
 ##                    set_threshold). Emptied init_defaults and rebuilt self_test
 ##                    with exact assertions incl. writeback_pages = dirty/2 on
 ##                    flush and threshold clamp to 100, wired into boot.)
+##   - blkqueue.rs   (fixed 2026-06-11; was: two fake block devices "sda"
+##                    (queue_depth 12 / max 128 / 10M submitted / 9,999,900
+##                    completed / 2M merged / 500k plug+unplug / 6M read / 4M
+##                    write) and "nvme0n1" (queue_depth 64 / max 1024 / 50M
+##                    submitted / 49,999,500 completed / 10M merged / 2M plug+
+##                    unplug / 30M read / 20M write) plus invented aggregates
+##                    total_submitted 60M / total_completed 59,999,400 /
+##                    total_merged 12M / total_plugs 2.5M, shown via
+##                    /proc/blkqueue and the device_queues/queue_for views as
+##                    real block I/O traffic. submit/complete/merge/plug/unplug
+##                    returned NotFound for unknown devices and there was no
+##                    register API, so added register_device(dev, max_depth)
+##                    (zeroed row, AlreadyExists/ResourceExhausted checks).
+##                    Emptied init_defaults and rebuilt self_test with exact
+##                    assertions incl. complete underflow saturating to 0 and
+##                    idempotent plug/unplug (double plug counts once), wired
+##                    into boot. /proc/blkqueue now 87 bytes.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed. Broadened the SEEDED-module grep on 2026-06-11
 ##     to `fn init_defaults` bodies containing a large numeric literal
-##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback
-##     (just fixed) were three. Next ticks: work through the remaining candidates
-##     ONE PER TICK, auditing each before acting. The 52-file list includes both
-##     STATISTICS modules (fix: empty / zero-counters) AND SETTINGS or structural
-##     modules that seed LEGITIMATE config defaults or real topology (LEAVE ALONE).
-##     Verify each is a statistics module fabricating observed numbers surfaced via
-##     /proc before emptying it. Remaining flagged names incl.: blkqueue,
-##     netqueue, pagecache, taskio, netspeed, diskhealth, netdev, netfilter,
+##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
+##     blkqueue (just fixed) were four. Next ticks: work through the remaining
+##     candidates ONE PER TICK, auditing each before acting. The 52-file list
+##     includes both STATISTICS modules (fix: empty / zero-counters) AND SETTINGS
+##     or structural modules that seed LEGITIMATE config defaults or real topology
+##     (LEAVE ALONE). Verify each is a statistics module fabricating observed
+##     numbers surfaced via /proc before emptying it. Remaining flagged names
+##     incl.: netqueue, pagecache, taskio, netspeed, diskhealth, netdev, netfilter,
 ##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,

@@ -58,6 +58,17 @@
 ## per-CPU tick accounting or a fork counter is added for another
 ## reason, or when a Linux tool (top/htop/vmstat) is brought up and
 ## needs a real /proc/stat.
+## RELATED (same root cause): /proc/uptime (gen_uptime, procfs.rs ~line
+## 609) emits only ONE field "secs.frac" with 9 decimals; real Linux
+## /proc/uptime (fs/proc/uptime.c) emits TWO centisecond fields
+## "<uptime> <idle>" where idle = summed per-CPU idle seconds.  A strict
+## two-field parser (sscanf "%lf %lf") breaks on our single field.  The
+## missing second field needs the SAME per-CPU idle accounting as the
+## /proc/stat cpu line above, so fix both together; do NOT fabricate an
+## idle value to paper over it.  NOTE: /proc/meminfo and /proc/cpuinfo
+## are INTENTIONALLY native-format (their doc comments say "our own
+## field names"); converting THOSE to Linux layout is a separate design
+## decision, not a bug — leave them unless the user asks.
 
 ## DONE (2026-06-11): /proc/<pid>/status Mems_allowed + Mems_allowed_list
 ## Linux always prints `Mems_allowed:`/`Mems_allowed_list:` (the NUMA memory

@@ -699,6 +699,16 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
     }
 
+    // Capture the real boot timestamp now that HPET is running, so the
+    // `sysuptime` command reports uptime since actual boot rather than since
+    // the first time someone runs the command.  init_defaults() records
+    // hpet::elapsed_ns() as the boot instant; doing it here (early, right after
+    // the HPET clock starts) is the closest honest approximation of boot time
+    // available to a kernel that does not yet persist a wall-clock boot record.
+    // It is idempotent, so the lazy init in the kshell handler is a harmless
+    // no-op afterwards.
+    fs::sysuptime::init_defaults();
+
     // Step 19c¼: Detect IOMMU hardware (Intel VT-d / AMD-Vi).
     // Probes for DMAR/IVRS ACPI tables.  Detection only — actual DMA
     // remapping page tables are set up below.

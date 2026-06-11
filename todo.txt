@@ -1139,6 +1139,32 @@
 ##                    is still simulated ("all tests pass") — a real RAM test
 ##                    (walking-bits/address-line patterns over a reserved range)
 ##                    is deferred until a safe scratch-mapping path exists.
+##   - sysuptime (2026-06-11): AUDITED — NOT a fabrication case, LEFT FUNCTIONAL
+##                    (do NOT empty it). Uptime/session tracker. Its
+##                    init_defaults() records the REAL boot timestamp from
+##                    hpet::elapsed_ns(); the current session genuinely IS session
+##                    1 (total_sessions=1 counts the live session), history starts
+##                    empty, and longest/total uptime are zeroed. No fabricated
+##                    observations — emptying boot_timestamp_ns would BREAK real
+##                    uptime tracking. Surfaced only via the `sysuptime` kshell
+##                    command (no /proc generator), which prints real current
+##                    uptime + session. TWO improvements made this tick: (1) fixed
+##                    a latent correctness bug — init_defaults() was only ever
+##                    called lazily from kshell, so "uptime" was measured from the
+##                    first `sysuptime` command, not from boot; now main.rs calls
+##                    fs::sysuptime::init_defaults() right after hpet::init() so
+##                    the boot instant is captured early (idempotent, so the lazy
+##                    kshell init is a harmless no-op afterwards). (2) Made the
+##                    self_test residue-free (clears STATE at start AND end, then
+##                    re-inits a clean live session) — it records 3 shutdowns, so
+##                    without the reset it would leave fabricated session history
+##                    resident; NOT wired into boot (even residue-free it resets
+##                    the live boot timestamp, discarding the early-captured boot
+##                    time). PROPER FIX DEFERRED: a kernel that persists a
+##                    wall-clock boot record (RTC + on-disk uptime log) could
+##                    report true boot time and real cross-boot session history;
+##                    until then the HPET-relative boot instant is the honest best
+##                    approximation and history is empty across boots.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1158,8 +1184,9 @@
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     sysuptime. Remaining flagged names incl.:
-##     sysuptime,
+##     sysmaint. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     timestamp, left functional; see the audit note above.) Remaining flagged
+##     names incl.:
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that

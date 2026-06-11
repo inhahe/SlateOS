@@ -211,11 +211,20 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("sysuptime::self_test() — running tests...");
+    // Start from a clean state so the assertions below are exact, and reset at
+    // the end — this self_test records shutdowns, which would otherwise leave
+    // fabricated session history resident in the live uptime state.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Boot time set.
+    // 1: Boot time set — init_defaults() records the real HPET instant as the
+    //    boot timestamp; honest history starts empty with zeroed totals.
     let boot = boot_time_ns();
     assert!(boot > 0);
+    assert!(history().is_empty());
+    let (h0, ts0, longest0, total0, _) = stats();
+    assert_eq!((h0, longest0, total0), (0, 0, 0));
+    assert_eq!(ts0, 1); // current session is genuinely session 1
     crate::serial_println!("  [1/8] boot time: OK");
 
     // 2: Current uptime.
@@ -263,5 +272,9 @@ pub fn self_test() {
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue: drop the fixture sessions and re-establish a clean live
+    // session so the boot-time uptime tracking is not polluted by the test.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("sysuptime::self_test() — all 8 tests passed");
 }

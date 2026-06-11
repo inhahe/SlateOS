@@ -2085,6 +2085,12 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // from `task`, not `proc_id`.
     let starttime = task.start_tick;
 
+    // processor (field 39): the CPU number this task last executed on.
+    // `top -1` / htop's "P" column read this to show per-task CPU placement.
+    // We snapshot last_cpu on every dispatch, so this is a real, current
+    // value rather than a 0 stub.  Thread/task property → from `task`.
+    let processor = task.last_cpu;
+
     // Field order matches proc(5) / Linux fs/proc/array.c do_task_stat().
     // 1:pid 2:comm 3:state 4:ppid 5:pgrp 6:session 7:tty_nr 8:tpgid 9:flags
     // 10:minflt 11:cminflt 12:majflt 13:cmajflt 14:utime 15:stime 16:cutime
@@ -2100,13 +2106,14 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime
     // <stime..cstime=0> priority nice=0 num_threads itrealvalue=0
     // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
-    // exit_signal=17 <processor..env_end=0> exit_code.
+    // exit_signal=17 processor <rt_priority..env_end=0> exit_code.
     let text = format!(
         "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} 0 0 0 {} 0 {} 0 {} {} {} {} \
-         0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+         0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         task.id, name, state_char, ppid, pgrp_sid, pgrp_sid,
         utime, priority, num_threads, starttime,
         vsize, rss_pages, rsslim,
+        processor,
         exit_code,
     );
     text.into_bytes()
@@ -12018,7 +12025,7 @@ pub fn self_test() -> KernelResult<()> {
             total_cycles: 0,
             schedule_count: 0,
             start_tick: 99_999,
-            last_cpu: 0,
+            last_cpu: 3,
             cpu_quota_pct: 0,
             throttled: false,
             total_wait_ticks: 0,
@@ -12041,12 +12048,20 @@ pub fn self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // field 39 (processor) sits at index 39 - 3 == 36; must echo last_cpu.
+        if rest.get(36).and_then(|f| f.parse::<usize>().ok()) != Some(3) {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat processor (field 39) = {:?}, want 3",
+                rest.get(36)
+            );
+            return Err(KernelError::InternalError);
+        }
         // field 1 must be the synthetic task id (sanity on the whole line).
         if line.split(' ').next() != Some("4242") {
             serial_println!("[procfs]   FAIL: synthetic stat field1 != 4242");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[procfs]   build_pid_stat: synthetic starttime OK");
+        serial_println!("[procfs]   build_pid_stat: synthetic starttime+processor OK");
     }
 
     // --- Per-PID directory tests ---

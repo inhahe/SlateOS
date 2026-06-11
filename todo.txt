@@ -6,6 +6,15 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## DONE (2026-06-10): /proc/<pid>/stat processor (field 39) is now real
+## Field 39 (processor — the CPU a task last ran on) was hardcoded 0.
+## top -1 and htop's "P" column read it.  We already snapshot last_cpu on
+## every dispatch and expose it via TaskInfo.last_cpu, so build_pid_stat now
+## emits it directly (thread/task property).  Field count stays 52 (one of
+## the trailing zeros becomes the placeholder).  Tested via the synthetic
+## build_pid_stat check (last_cpu=3 -> field 39 == 3), which also guards the
+## column position.
+##
 ## DONE (2026-06-10): /proc/<pid>/stat starttime (field 22) is now real
 ## Field 22 was hardcoded 0, making every process look like it started at
 ## boot (ps/top/htop derive process age and normalise CPU% from it).  Added

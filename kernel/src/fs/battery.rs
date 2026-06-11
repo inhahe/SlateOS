@@ -204,37 +204,28 @@ fn health_from_capacity(design: u32, current: u32) -> HealthStatus {
 // ---------------------------------------------------------------------------
 
 pub fn init_defaults() {
+    // Start with NO power sources. A battery/UPS is observed hardware state
+    // (charge %, cycle count, capacity, voltage, temperature) — not a
+    // configurable default. Seeding a phantom "BAT0" at 75% with 200 cycles and
+    // a 50 Wh design capacity, or an "AC0" adapter, would surface fabricated
+    // hardware readings through /proc/battery and the `battery` shell command as
+    // if a real ACPI power source had reported them. A desktop may have no
+    // battery at all. Real sources appear only when an ACPI/power driver calls
+    // register_source() and reports live values via update_status().
+    //
+    // DEFERRED PROPER FIX: wire register_source()/update_status() to a real ACPI
+    // battery driver (_BIF/_BST objects) once one exists; until then this stays
+    // empty so /proc/battery reports "sources: 0" rather than inventing a cell.
+    //
+    // The alert thresholds (low/critical %, critical action, charge limit) are
+    // genuine user-tunable policy defaults, not observations, so they are kept.
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
 
-    // Default: one battery + AC adapter (common laptop setup).
-    let sources = alloc::vec![
-        PowerSource {
-            id: 1, name: String::from("BAT0"), source_type: PowerSourceType::Battery,
-            state: ChargeState::Discharging, charge_pct: 75,
-            design_capacity_mwh: 50_000, full_charge_capacity_mwh: 45_000,
-            energy_remaining_mwh: 33_750, power_rate_mw: 15_000,
-            time_remaining_min: 135, voltage_mv: 11_400, cycle_count: 200,
-            health: HealthStatus::Good, temperature_mc: 35_000,
-            manufacturer: String::from("Generic"), model: String::from("Li-ion"),
-            serial: String::from("BAT0001"), present: true, ac_connected: false,
-        },
-        PowerSource {
-            id: 2, name: String::from("AC0"), source_type: PowerSourceType::AcAdapter,
-            state: ChargeState::NotCharging, charge_pct: 100,
-            design_capacity_mwh: 0, full_charge_capacity_mwh: 0,
-            energy_remaining_mwh: 0, power_rate_mw: 65_000,
-            time_remaining_min: 0, voltage_mv: 19_500, cycle_count: 0,
-            health: HealthStatus::Good, temperature_mc: 0,
-            manufacturer: String::from("Generic"), model: String::from("65W Adapter"),
-            serial: String::new(), present: true, ac_connected: false,
-        },
-    ];
-
     *guard = Some(State {
-        sources,
+        sources: Vec::new(),
         alerts: BatteryAlerts::default(),
-        next_id: 3,
+        next_id: 1,
         alert_count: 0,
         ops: 0,
     });
@@ -395,36 +386,48 @@ pub fn stats() -> (usize, u8, &'static str, u32, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("battery::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity (init_defaults early-returns
+    // when STATE is already populated), and build every fixture through the real
+    // register_source()/update_status() driver API rather than seeded hardware.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default sources present.
-    let sources = list_sources();
-    assert!(sources.len() >= 2);
-    crate::serial_println!("  [1/11] default sources: OK");
+    // 1: Empty defaults — no power sources until a driver registers one.
+    assert_eq!(list_sources().len(), 0);
+    assert!(primary_battery().is_none());
+    assert_eq!(charge_pct(), 0);
+    crate::serial_println!("  [1/11] empty defaults: OK");
 
-    // 2: Primary battery.
+    // Build a fixture battery the way an ACPI driver would: register it, then
+    // report a live reading.
+    let bat_id = register_source("BAT0", PowerSourceType::Battery, 50_000).expect("register bat");
+    update_status(bat_id, ChargeState::Discharging, 75, 33_750, 15_000).expect("seed reading");
+
+    // 2: Primary battery now visible with the reported charge.
     let bat = primary_battery().expect("primary battery");
     assert_eq!(bat.source_type, PowerSourceType::Battery);
     assert_eq!(bat.charge_pct, 75);
     crate::serial_println!("  [2/11] primary battery: OK");
 
     // 3: Update status.
-    update_status(1, ChargeState::Discharging, 50, 25_000, 10_000).expect("update");
-    let bat = get_source(1).expect("get after update");
+    update_status(bat_id, ChargeState::Discharging, 50, 25_000, 10_000).expect("update");
+    let bat = get_source(bat_id).expect("get after update");
     assert_eq!(bat.charge_pct, 50);
     assert!(bat.time_remaining_min > 0);
     crate::serial_println!("  [3/11] update status: OK");
 
     // 4: AC connect.
     set_ac_connected(true).expect("ac connect");
-    let bat = get_source(1).expect("get after ac");
+    let bat = get_source(bat_id).expect("get after ac");
     assert_eq!(bat.state, ChargeState::Charging);
     assert!(bat.ac_connected);
     crate::serial_println!("  [4/11] AC connect: OK");
 
     // 5: AC disconnect.
     set_ac_connected(false).expect("ac disconnect");
-    let bat = get_source(1).expect("get after ac off");
+    let bat = get_source(bat_id).expect("get after ac off");
     assert_eq!(bat.state, ChargeState::Discharging);
     crate::serial_println!("  [5/11] AC disconnect: OK");
 
@@ -460,13 +463,16 @@ pub fn self_test() {
     assert_eq!(pct, 50);
     crate::serial_println!("  [10/11] quick charge pct: OK");
 
-    // 11: Stats.
+    // 11: Stats — exact: 2 sources (BAT0 + UPS0), battery at 50% discharging.
     let (count, pct, state_label, _cycles, _alerts, ops) = stats();
-    assert!(count >= 3);
+    assert_eq!(count, 2);
     assert_eq!(pct, 50);
     assert_eq!(state_label, "Discharging");
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
+
+    // Leave no residue for later callers / the live /proc/battery view.
+    *STATE.lock() = None;
 
     crate::serial_println!("battery::self_test() — all 11 tests passed");
 }

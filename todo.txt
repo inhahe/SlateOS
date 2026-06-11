@@ -2468,6 +2468,21 @@
 ##     `wifiscan` kshell activity had populated it) and left 3 networks + a
 ##     connection in the live /proc/wifiscan view afterward. Now resets STATE to
 ##     None at start AND end. boot-test PASSED (27s). No fabricated procfs data.
+##     battery fixed 2026-06-11: FABRICATOR — init_defaults() seeded a phantom
+##     "BAT0" at 75% charge with 200 cycles, 50 Wh design / 45 Wh full capacity,
+##     11.4 V, 35°C, plus an "AC0" 65W adapter — all fabricated OBSERVED hardware
+##     readings that /proc/battery (procfs.rs:6837) and the `battery` shell
+##     command surfaced as if a real ACPI power source had reported them. A
+##     desktop may have NO battery at all. Case (a) empty-init: sources start
+##     empty; real sources arrive only when an ACPI/power driver calls
+##     register_source() and reports live values via update_status(). Kept the
+##     BatteryAlerts::default() thresholds (low 20% / critical 5% / hibernate /
+##     charge-limit) — those are genuine user-tunable POLICY defaults, not
+##     observations. self_test rewritten residue-free (reset STATE None at start
+##     AND end; build BAT0 + UPS0 fixtures via register_source/update_status;
+##     EXACT stats: count==2, pct==50, "Discharging"). DEFERRED PROPER FIX: wire
+##     register_source()/update_status() to a real ACPI battery driver
+##     (_BIF/_BST) once one exists. boot-test PASSED (28s). No fabricated data.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

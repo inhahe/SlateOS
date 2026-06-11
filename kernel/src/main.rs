@@ -1166,6 +1166,13 @@ extern "C" fn kernel_main() -> ! {
     // boot and gives the module automated coverage it previously lacked (it was
     // only reachable via the `tlbstat test` kshell subcommand).
     fs::tlbstat::self_test();
+    // wqstat backs /proc/wqstat (kernel workqueue work-item stats); like its
+    // siblings the self-test now builds fixtures via the real register/enqueue/
+    // activate/complete/cancel API and resets the table afterward (leaving no
+    // fabricated workqueues), so it is safe at boot and gives the module
+    // automated coverage it previously lacked (it was only reachable via the
+    // `wqstat test` kshell subcommand).
+    fs::wqstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

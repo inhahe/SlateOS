@@ -305,13 +305,25 @@
 ##                    3400. Added register_cpu(cpu_id) for zeroed per-CPU rows;
 ##                    emptied init_defaults and rebuilt self_test with exact
 ##                    assertions (incl. exact 95% hit_rate), wired into boot.)
-## Next candidates to audit (same fabricated-observation pattern likely; each
-## needs the statistics-vs-settings judgment before emptying):
-##   - numastat, cpustat, irqstat, wqstat, and the other *stat/*latency/*stats
-##     siblings under kernel/src/fs/. For per-CPU/per-node tables with no
-##     registration API, add a register_* fn (see migstat/rcustat/tlbstat) rather
-##     than seeding rows; for tables with a real API already, just empty
-##     init_defaults and rebuild the self_test residue-free.
+##   - wqstat.rs     (fixed 2026-06-11; was: four fake workqueues events/
+##                    events_highpri/kblockd/writeback, completed 15000–50000;
+##                    aggregate total_enqueued 75000, total_completed 75000,
+##                    total_cancelled 15. Full real API register/enqueue/activate/
+##                    complete/cancel already present; fix emptied init_defaults
+##                    and rebuilt self_test residue-free, wired into boot.)
+## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
+##   - numastat.rs   (fake NUMA nodes 0/1, total_memory 8 GiB each, local_allocs
+##                    50000, accesses 1_000_000; distances seeded; aggregate
+##                    total_allocs 87000. Per-node table — likely needs a
+##                    register_node(id, ...) API like migstat's register_cpu.)
+##   - cpustat.rs    (fake per-CPU time breakdowns cpu0..3, times_ns in the
+##                    trillions, context_switches 35M–50M; aggregate
+##                    total_context_switches 170M. Per-CPU table — add register_cpu.)
+##   - irqstat.rs    (fake IRQ lines 0/1/14/19/23 HPET/i8042/ahci0/eth0/xhci0
+##                    count up to 10M; fake per-CPU rows; aggregate total_irqs
+##                    12_650_000. Two tables: IRQ lines have a register-style API?
+##                    verify; per-CPU rows need register_cpu.)
+## After these, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

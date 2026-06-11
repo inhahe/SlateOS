@@ -103,20 +103,32 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** workqueue table.
+///
+/// Seeds NO workqueue rows and zero totals.  Real workqueue accounting is wired
+/// through [`register`]/[`enqueue`]/[`activate`]/[`complete`]/[`cancel`]; until
+/// those are called the table is genuinely empty, so the `/proc/wqstat` file
+/// and the `wqstat` kshell command report zeros rather than fabricated numbers
+/// — the kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded four fictional workqueues (events completed
+/// 15000; events_highpri 2000; kblockd 50000; writeback 8000) plus invented
+/// aggregate totals (total_enqueued 75000, total_completed 75000,
+/// total_cancelled 15), which `/proc/wqstat` then displayed as if they were
+/// real work-item throughput statistics.  That demo data was removed; the
+/// self-test now builds its own fixtures explicitly via the real API (see
+/// [`self_test`]).  The workqueue subsystem is expected to call [`register`]
+/// when a workqueue is created and the enqueue/activate/complete/cancel
+/// functions as work items flow.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        queues: alloc::vec![
-            Workqueue { id: 1, name: String::from("events"), wq_type: WqType::Bound, pending: 3, active: 1, completed: 15000, cancelled: 5, max_pending: 32, avg_latency_us: 50, max_latency_us: 5000, workers: 4, cpu_affinity: None },
-            Workqueue { id: 2, name: String::from("events_highpri"), wq_type: WqType::Highpri, pending: 0, active: 0, completed: 2000, cancelled: 0, max_pending: 8, avg_latency_us: 10, max_latency_us: 500, workers: 4, cpu_affinity: None },
-            Workqueue { id: 3, name: String::from("kblockd"), wq_type: WqType::Bound, pending: 5, active: 2, completed: 50000, cancelled: 10, max_pending: 64, avg_latency_us: 200, max_latency_us: 50000, workers: 2, cpu_affinity: None },
-            Workqueue { id: 4, name: String::from("writeback"), wq_type: WqType::Unbound, pending: 12, active: 3, completed: 8000, cancelled: 0, max_pending: 128, avg_latency_us: 5000, max_latency_us: 100000, workers: 2, cpu_affinity: None },
-        ],
-        next_id: 5,
-        total_enqueued: 75000,
-        total_completed: 75000,
-        total_cancelled: 15,
+        queues: Vec::new(),
+        next_id: 1,
+        total_enqueued: 0,
+        total_completed: 0,
+        total_cancelled: 0,
         ops: 0,
     });
 }
@@ -212,59 +224,76 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("wqstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/wqstat must never surface).
+    // Resetting first clears any residue from a prior `wqstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated workqueues.
+    assert_eq!(list().len(), 0);
+    let (c0, e0, cm0, cn0, _o0) = stats();
+    assert_eq!((c0, e0, cm0, cn0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register (ids start at 1); duplicate name fails.
     let id = register("test_wq", WqType::Ordered, 1).expect("reg");
-    assert!(id >= 5);
+    assert_eq!(id, 1);
     assert!(register("test_wq", WqType::Ordered, 1).is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Enqueue.
+    // 3: Enqueue (exact, from zero).
     enqueue(id).expect("enq");
     enqueue(id).expect("enq2");
     let q = get("test_wq").expect("get");
     assert_eq!(q.pending, 2);
     crate::serial_println!("  [3/8] enqueue: OK");
 
-    // 4: Activate.
+    // 4: Activate moves pending → active.
     activate(id).expect("act");
     let q = get("test_wq").expect("get2");
     assert_eq!(q.pending, 1);
     assert_eq!(q.active, 1);
     crate::serial_println!("  [4/8] activate: OK");
 
-    // 5: Complete.
+    // 5: Complete records latency exactly (first sample → avg == sample).
     complete(id, 100).expect("comp");
     let q = get("test_wq").expect("get3");
     assert_eq!(q.active, 0);
     assert_eq!(q.completed, 1);
     assert_eq!(q.avg_latency_us, 100);
+    assert_eq!(q.max_latency_us, 100);
     crate::serial_println!("  [5/8] complete: OK");
 
-    // 6: Cancel.
+    // 6: Cancel drains a pending item; cancelling with nothing pending fails.
     cancel(id).expect("cancel");
     let q = get("test_wq").expect("get4");
     assert_eq!(q.pending, 0);
     assert_eq!(q.cancelled, 1);
+    assert!(cancel(id).is_err()); // nothing left pending
     crate::serial_println!("  [6/8] cancel: OK");
 
-    // 7: Max pending tracked.
+    // 7: Max pending watermark held at the peak (2).
     assert_eq!(q.max_pending, 2);
+    assert!(enqueue(9999).is_err()); // NotFound on unknown id
     crate::serial_println!("  [7/8] max pending: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (count, enqueued, completed, cancelled, ops) = stats();
-    assert_eq!(count, 5);
-    assert!(enqueued > 75000);
-    assert!(completed > 75000);
-    assert!(cancelled > 15);
+    assert_eq!(count, 1);
+    assert_eq!(enqueued, 2); // two enqueue calls
+    assert_eq!(completed, 1); // one complete
+    assert_eq!(cancelled, 1); // one cancel
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/wqstat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the workqueue subsystem
+    // wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("wqstat::self_test() — all 8 tests passed");
 }

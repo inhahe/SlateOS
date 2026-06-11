@@ -2025,6 +2025,18 @@ extern "C" fn kernel_main() -> ! {
     // this self_test asserts the reporting views are exactly consistent with the
     // real subsystem (no fabricated fixtures, nothing to leak).
     fs::swapmon::self_test();
+    // netusage backs /proc/netusage and the `netusage` kshell command.  Its
+    // init_defaults() previously seeded three FABRICATED interfaces (eth0
+    // Ethernet, wlan0 Wi-Fi, lo loopback) with zeroed counters, which the
+    // `netusage interfaces` view displayed as if those NICs existed — presuming
+    // a wired+wifi machine and inconsistent with the real interface registry
+    // (fs::netdev), which seeds empty and registers interfaces only as they come
+    // up.  netusage now seeds an EMPTY table (interfaces appear via
+    // add_interface; per-app usage via record_traffic).  This residue-free
+    // self_test builds its own fixtures via the real API with exact assertions
+    // (including the cap-warning counter, which the old test asserted loosely)
+    // and resets to empty afterward so nothing leaks into /proc/netusage.
+    fs::netusage::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

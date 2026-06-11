@@ -1751,6 +1751,29 @@
 ##                    mm::fault (no fixtures, nothing to leak) and WIRED it into the
 ##                    boot self-test path (it had never been wired before). /proc/swapmon
 ##                    171 bytes (real, empty in QEMU — no swap configured). No deferral.
+##   - netusage (2026-06-11): FIXED — fabrication case (a) (full add_interface /
+##                    record_traffic API already existed). Per-app bandwidth + data
+##                    cap tracker surfaced via /proc/netusage and the `netusage`
+##                    kshell command. init_defaults() FABRICATED three interfaces —
+##                    eth0 Ethernet, wlan0 Wi-Fi, lo loopback (zeroed counters) —
+##                    which the `netusage interfaces` view (after `netusage init`)
+##                    displayed as if those NICs existed, presuming a wired+wifi
+##                    machine and inconsistent with the real interface registry
+##                    (fs::netdev, already fixed to seed empty + register on link-up).
+##                    Fixed: init_defaults() now seeds an EMPTY table (interfaces via
+##                    add_interface, per-app usage via record_traffic). Found the
+##                    self_test was NEVER wired into the boot path (its old
+##                    `assert!(warnings >= 1)` could never have held — no browser
+##                    record_traffic ran after set_cap, so cap_warnings stayed 0);
+##                    rewrote it residue-free (clears STATE start AND end) with EXACT
+##                    assertions (empty init, add eth0, record dl/ul, exact iface
+##                    counters, cap set + over-cap upload triggering exactly 1 warning,
+##                    1 connection, top_apps order, final 2 apps / 1 iface / 1000 sent
+##                    / 10100 recv / 1 conn / 1 warning) and WIRED it into the boot
+##                    self-test path. /proc/netusage 140 bytes (empty — truthful).
+##                    PROPER FIX DEFERRED: the network stack must call add_interface
+##                    on NIC discovery and record_traffic/record_connection as app
+##                    traffic flows — wire when per-app socket accounting exists.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1764,7 +1787,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon (just fixed) were forty-eight. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage (just fixed) were forty-nine. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

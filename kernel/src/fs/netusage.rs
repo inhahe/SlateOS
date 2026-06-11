@@ -129,16 +129,29 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** usage table.
+///
+/// Seeds NO interfaces and NO apps.  Interfaces are registered through
+/// [`add_interface`] as the network stack discovers NICs, and per-app usage is
+/// accumulated through [`record_traffic`] / [`record_connection`]; until then
+/// `/proc/netusage` and the `netusage` kshell command report an empty table
+/// rather than fabricated interfaces — the kernel's hard "never invent data in
+/// procfs" rule.
+///
+/// (Previously this seeded three fictional interfaces — `eth0` Ethernet, `wlan0`
+/// Wi-Fi, and `lo` loopback — with zeroed counters, which `/proc/netusage` and
+/// the `netusage interfaces` view then displayed as if those NICs existed.  That
+/// presumed a wired-ethernet + wifi machine and was inconsistent with the real
+/// interface registry [`crate::fs::netdev`], which itself seeds an empty list and
+/// registers interfaces only as they come up.  netusage now matches: interfaces
+/// appear via [`add_interface`] when the stack discovers them.  The self-test
+/// builds its own fixtures explicitly via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
         apps: Vec::new(),
-        interfaces: alloc::vec![
-            InterfaceStats { name: String::from("eth0"), iface_type: InterfaceType::Ethernet, bytes_sent: 0, bytes_received: 0, packets_sent: 0, packets_received: 0 },
-            InterfaceStats { name: String::from("wlan0"), iface_type: InterfaceType::Wifi, bytes_sent: 0, bytes_received: 0, packets_sent: 0, packets_received: 0 },
-            InterfaceStats { name: String::from("lo"), iface_type: InterfaceType::Loopback, bytes_sent: 0, bytes_received: 0, packets_sent: 0, packets_received: 0 },
-        ],
+        interfaces: Vec::new(),
         total_bytes_sent: 0,
         total_bytes_received: 0,
         total_connections: 0,
@@ -322,17 +335,27 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("netusage::self_test() — running tests...");
+    // Residue-free: begin from a clean EMPTY table and build every fixture via
+    // the real API so the assertions are exact and no test interfaces/apps leak
+    // into the live /proc/netusage table (the kshell `netusage test` subcommand
+    // calls this directly).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default interfaces.
-    assert_eq!(list_interfaces().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated interfaces or apps.
+    assert_eq!(list_interfaces().len(), 0);
+    assert_eq!(top_apps(10).len(), 0);
+    let (a0, i0, s0, r0, c0, w0, _o0) = stats();
+    assert_eq!((a0, i0, s0, r0, c0, w0), (0, 0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Record traffic creates app.
+    // 2: Register an interface, then record traffic creates an app.
+    add_interface("eth0", InterfaceType::Ethernet).expect("add eth0");
+    assert_eq!(list_interfaces().len(), 1);
     record_traffic("browser", "eth0", Direction::Download, 10000).expect("traffic");
     let usage = get_app_usage("browser").expect("app");
     assert_eq!(usage.bytes_received, 10000);
-    crate::serial_println!("  [2/8] record: OK");
+    crate::serial_println!("  [2/8] add iface + record: OK");
 
     // 3: Upload traffic.
     record_traffic("browser", "eth0", Direction::Upload, 500).expect("upload");
@@ -341,16 +364,21 @@ pub fn self_test() {
     assert_eq!(usage.bytes_received, 10000);
     crate::serial_println!("  [3/8] upload: OK");
 
-    // 4: Interface stats updated.
+    // 4: Interface stats updated to the exact recorded totals.
     let ifaces = list_interfaces();
     let eth = ifaces.iter().find(|i| i.name == "eth0").expect("eth0");
-    assert!(eth.bytes_received > 0);
-    assert!(eth.bytes_sent > 0);
+    assert_eq!(eth.bytes_received, 10000);
+    assert_eq!(eth.bytes_sent, 500);
+    assert_eq!((eth.packets_received, eth.packets_sent), (1, 1));
     crate::serial_println!("  [4/8] interface: OK");
 
-    // 5: Data cap.
+    // 5: Data cap.  Setting a cap below the current usage marks the app over
+    // cap; the warning counter only ticks when the *next* recorded traffic
+    // observes the breach, so record a further upload to trigger exactly one
+    // warning (browser total 10500 → 11000, both over the 5000 cap).
     set_cap("browser", Some(5000)).expect("cap");
-    assert!(is_over_cap("browser")); // 10500 > 5000.
+    assert!(is_over_cap("browser")); // 10500 >= 5000.
+    record_traffic("browser", "eth0", Direction::Upload, 500).expect("over-cap upload");
     crate::serial_println!("  [5/8] cap: OK");
 
     // 6: Connections.
@@ -359,22 +387,26 @@ pub fn self_test() {
     assert_eq!(usage.connections, 1);
     crate::serial_println!("  [6/8] connections: OK");
 
-    // 7: Top apps.
+    // 7: Top apps — browser leads editor by total bytes.
     record_traffic("editor", "eth0", Direction::Download, 100).expect("ed");
     let top = top_apps(5);
     assert_eq!(top[0].app_name, "browser");
     crate::serial_println!("  [7/8] top apps: OK");
 
-    // 8: Stats.
+    // 8: Aggregate stats equal the exact sums of the operations above.
+    //    sent = 500 (browser up) + 500 (over-cap up) = 1000.
+    //    recv = 10000 (browser down) + 100 (editor down) = 10100.
     let (apps, ifaces, sent, recv, conns, warnings, ops) = stats();
-    assert_eq!(apps, 2);
-    assert_eq!(ifaces, 3);
-    assert!(sent > 0);
-    assert!(recv > 0);
-    assert_eq!(conns, 1);
-    assert!(warnings >= 1);
+    assert_eq!((apps, ifaces), (2, 1));
+    assert_eq!((sent, recv), (1000, 10100));
+    assert_eq!((conns, warnings), (1, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/netusage table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the network stack wires
+    // real per-app/interface usage tracking.
+    *STATE.lock() = None;
     crate::serial_println!("netusage::self_test() — all 8 tests passed");
 }

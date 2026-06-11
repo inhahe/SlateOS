@@ -79,19 +79,37 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** per-task I/O table.
+///
+/// Seeds NO tasks and zero counters.  Real per-task accounting is wired through
+/// [`register`] (one row per process the scheduler/process layer tracks) and the
+/// `record_read`/`record_write`/`record_cancelled`/`record_io_wait`/
+/// `record_page_fault_io` functions; until those are called the table is
+/// genuinely empty, so `/proc/taskio` and the `taskio` kshell command report
+/// zeros rather than fabricated numbers — the kernel's hard "never invent data in
+/// procfs" rule.
+///
+/// NOTE: this previously seeded three fictional tasks (pid 1: 500MB read / 200MB
+/// write / 1M read syscalls / 500k write syscalls / 10MB cancelled / 50s io_wait
+/// / 50k major faults; pid 100: 2GB read / 1GB write / 5M+3M syscalls / 50MB
+/// cancelled / 200s io_wait / 200k faults; pid 200: 100MB read / 50MB write /
+/// 200k+100k syscalls / 1MB cancelled / 10s io_wait / 10k faults) plus invented
+/// aggregate totals (total_read_bytes 2.6GB, total_write_bytes 1.25GB,
+/// total_cancelled 61MB, total_io_wait_ns 260s), which `/proc/taskio` (and the
+/// `per_task` view) then displayed as if they were real measured per-process I/O.
+/// That demo data was removed; the self-test now builds its own fixtures
+/// explicitly via the real API (see [`self_test`]).  The process layer is
+/// expected to call [`register`] when a task starts and the record functions on
+/// every I/O event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        tasks: alloc::vec![
-            TaskIoStats { pid: 1, read_bytes: 500_000_000, write_bytes: 200_000_000, read_syscalls: 1_000_000, write_syscalls: 500_000, cancelled_write_bytes: 10_000_000, io_wait_ns: 50_000_000_000, page_faults_io: 50_000 },
-            TaskIoStats { pid: 100, read_bytes: 2_000_000_000, write_bytes: 1_000_000_000, read_syscalls: 5_000_000, write_syscalls: 3_000_000, cancelled_write_bytes: 50_000_000, io_wait_ns: 200_000_000_000, page_faults_io: 200_000 },
-            TaskIoStats { pid: 200, read_bytes: 100_000_000, write_bytes: 50_000_000, read_syscalls: 200_000, write_syscalls: 100_000, cancelled_write_bytes: 1_000_000, io_wait_ns: 10_000_000_000, page_faults_io: 10_000 },
-        ],
-        total_read_bytes: 2_600_000_000,
-        total_write_bytes: 1_250_000_000,
-        total_cancelled: 61_000_000,
-        total_io_wait_ns: 260_000_000_000,
+        tasks: Vec::new(),
+        total_read_bytes: 0,
+        total_write_bytes: 0,
+        total_cancelled: 0,
+        total_io_wait_ns: 0,
         ops: 0,
     });
 }
@@ -196,58 +214,84 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("taskio::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/taskio must never surface).  Resetting
+    // first clears any residue from a prior `taskio test` run so the totals
+    // asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_task().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated tasks or counters; record on an
+    // unregistered pid fails.
+    assert_eq!(per_task().len(), 0);
+    let (c0, rb0, wb0, can0, iow0, _o0) = stats();
+    assert_eq!((c0, rb0, wb0, can0, iow0), (0, 0, 0, 0, 0));
+    assert!(record_read(500, 1).is_err()); // no phantom task exists yet
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register — zeroed counters; dup fails.
     register(500).expect("register");
-    assert_eq!(per_task().len(), 4);
+    let t = per_task().into_iter().find(|t| t.pid == 500).expect("find");
+    assert_eq!((t.read_bytes, t.write_bytes, t.io_wait_ns), (0, 0, 0));
     assert!(register(500).is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Read.
+    // 3: Read — bytes accumulate, syscall count rises once per call.
     record_read(500, 4096).expect("read");
-    let t = per_task().iter().find(|t| t.pid == 500).cloned().unwrap();
-    assert_eq!(t.read_bytes, 4096);
-    assert_eq!(t.read_syscalls, 1);
+    record_read(500, 4096).expect("read2");
+    let t = per_task().into_iter().find(|t| t.pid == 500).expect("find");
+    assert_eq!(t.read_bytes, 8192);
+    assert_eq!(t.read_syscalls, 2);
     crate::serial_println!("  [3/8] read: OK");
 
-    // 4: Write.
+    // 4: Write — bytes + syscall count.
     record_write(500, 8192).expect("write");
-    let t = per_task().iter().find(|t| t.pid == 500).cloned().unwrap();
+    let t = per_task().into_iter().find(|t| t.pid == 500).expect("find");
     assert_eq!(t.write_bytes, 8192);
     assert_eq!(t.write_syscalls, 1);
     crate::serial_println!("  [4/8] write: OK");
 
-    // 5: Cancelled.
+    // 5: Cancelled + io_wait + major fault — independent counters.
     record_cancelled(500, 1024).expect("cancel");
-    let t = per_task().iter().find(|t| t.pid == 500).cloned().unwrap();
-    assert_eq!(t.cancelled_write_bytes, 1024);
-    crate::serial_println!("  [5/8] cancelled: OK");
-
-    // 6: IO wait.
     record_io_wait(500, 5000).expect("wait");
-    let t = per_task().iter().find(|t| t.pid == 500).cloned().unwrap();
+    record_page_fault_io(500).expect("fault");
+    let t = per_task().into_iter().find(|t| t.pid == 500).expect("find");
+    assert_eq!(t.cancelled_write_bytes, 1024);
     assert_eq!(t.io_wait_ns, 5000);
-    crate::serial_println!("  [6/8] io wait: OK");
+    assert_eq!(t.page_faults_io, 1);
+    crate::serial_println!("  [5/8] cancelled/wait/fault: OK");
 
-    // 7: Unregister.
+    // 6: Unregister — row removed; second unregister fails; record then fails.
     unregister(500).expect("unregister");
-    assert_eq!(per_task().len(), 3);
+    assert_eq!(per_task().len(), 0);
     assert!(unregister(500).is_err());
-    crate::serial_println!("  [7/8] unregister: OK");
+    assert!(record_read(500, 1).is_err());
+    crate::serial_println!("  [6/8] unregister: OK");
 
-    // 8: Stats.
-    let (tasks, rb, wb, cancelled, _io_wait, ops) = stats();
-    assert_eq!(tasks, 3);
-    assert!(rb > 2_600_000_000);
-    assert!(wb > 1_250_000_000);
-    assert!(cancelled > 61_000_000);
+    // 7: Unknown task → NotFound on every record path.
+    assert!(record_read(999, 1).is_err());
+    assert!(record_write(999, 1).is_err());
+    assert!(record_cancelled(999, 1).is_err());
+    assert!(record_io_wait(999, 1).is_err());
+    assert!(record_page_fault_io(999).is_err());
+    crate::serial_println!("  [7/8] not found: OK");
+
+    // 8: Aggregate totals persist across unregister: 8192 read, 8192 write,
+    // 1024 cancelled, 5000 io_wait (per-task rows are gone but totals are
+    // monotonic lifetime counters).
+    let (tasks, rb, wb, cancelled, io_wait, ops) = stats();
+    assert_eq!(tasks, 0);
+    assert_eq!(rb, 8192);
+    assert_eq!(wb, 8192);
+    assert_eq!(cancelled, 1024);
+    assert_eq!(io_wait, 5000);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/taskio table.
+    *STATE.lock() = None;
 
     crate::serial_println!("taskio::self_test() — all 8 tests passed");
 }

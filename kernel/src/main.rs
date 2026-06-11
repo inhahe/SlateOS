@@ -1413,6 +1413,15 @@ extern "C" fn kernel_main() -> ! {
     // (including hit_rate/readahead_rate) and resets the table afterward, so it
     // is safe at boot.
     fs::pagecache::self_test();
+    // taskio backs /proc/taskio (per-process read/write bytes, syscall counts,
+    // cancelled writes, io-wait time, major faults).  Its init_defaults()
+    // previously seeded three fictional tasks (pid 1/100/200) with 2.6GB/1.25GB
+    // fabricated read/write bytes; that demo data was removed (real tasks are
+    // wired via register + the record_read/record_write/record_cancelled/
+    // record_io_wait/record_page_fault_io functions).  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions and
+    // resets the table afterward, so it is safe at boot.
+    fs::taskio::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

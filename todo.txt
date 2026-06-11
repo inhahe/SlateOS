@@ -649,17 +649,30 @@
 ##                    self_test with exact assertions incl. eviction saturating to
 ##                    0, readahead_rate=8000 and hit_rate=5000, wired into boot.
 ##                    /proc/pagecache now 101 bytes.)
+##   - taskio.rs     (fixed 2026-06-11; was: three fake tasks (pid 1: 500MB read /
+##                    200MB write / 1M+500k syscalls / 10MB cancelled / 50s
+##                    io_wait / 50k faults; pid 100: 2GB read / 1GB write / 5M+3M
+##                    syscalls / 50MB cancelled / 200s io_wait / 200k faults; pid
+##                    200: 100MB read / 50MB write / 200k+100k syscalls / 1MB
+##                    cancelled / 10s io_wait / 10k faults) plus invented
+##                    aggregates total_read_bytes 2.6GB / total_write_bytes 1.25GB
+##                    / total_cancelled 61MB / total_io_wait_ns 260s, shown via
+##                    /proc/taskio and the per_task view as real per-process I/O.
+##                    Full register/unregister/record_* API already existed, so
+##                    just emptied init_defaults and rebuilt self_test with exact
+##                    assertions incl. monotonic lifetime totals surviving
+##                    unregister, wired into boot. /proc/taskio now 112 bytes.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed. Broadened the SEEDED-module grep on 2026-06-11
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
-##     blkqueue + netqueue + pagecache (just fixed) were six. Next ticks: work
-##     through the remaining candidates ONE PER TICK, auditing each before acting.
-##     The 52-file list includes both STATISTICS modules (fix: empty /
-##     zero-counters) AND SETTINGS or structural modules that seed LEGITIMATE
-##     config defaults or real topology (LEAVE ALONE). Verify each is a statistics
-##     module fabricating observed numbers surfaced via /proc before emptying it.
-##     Remaining flagged names incl.: taskio, netspeed, diskhealth, netdev, netfilter,
+##     blkqueue + netqueue + pagecache + taskio (just fixed) were seven. Next
+##     ticks: work through the remaining candidates ONE PER TICK, auditing each
+##     before acting. The 52-file list includes both STATISTICS modules (fix:
+##     empty / zero-counters) AND SETTINGS or structural modules that seed
+##     LEGITIMATE config defaults or real topology (LEAVE ALONE). Verify each is a
+##     statistics module fabricating observed numbers surfaced via /proc before
+##     emptying it. Remaining flagged names incl.: netspeed, diskhealth, netdev, netfilter,
 ##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,

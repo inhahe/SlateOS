@@ -1526,6 +1526,19 @@ extern "C" fn kernel_main() -> ! {
     // builds its fixtures via the real API with exact assertions and resets the
     // status afterward, so it is safe at boot.
     fs::vmballoon::self_test();
+    // softirq backs /proc/softirq (deferred-interrupt stats: per-CPU softirq/
+    // tasklet/ksoftirqd counts and per-type raised/executed/time).  Its
+    // init_defaults() previously seeded four fictional CPUs with invented
+    // per-type counts (Timer 500k+, NetRx 200k+, Block 100k+, RCU 300k+ each)
+    // and ten type rows with invented bases (Timer 2.6M executed, NetRx 1M, RCU
+    // 1.5M) plus totals (5.71M raised, 5.7M executed, 5200 tasklets); that demo
+    // data was removed.  The ten softirq-vector rows are a fixed kernel taxonomy
+    // so they are kept with ZEROED counters, while per-CPU state is created as
+    // each CPU comes online via the new register_cpu() API; counters advance
+    // only on real raise/run/tasklet_run/ksoftirqd_wakeup calls.  The residue-
+    // free self_test builds its fixtures via the real API with exact assertions
+    // and resets the tables afterward, so it is safe at boot.
+    fs::softirq::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

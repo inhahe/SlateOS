@@ -817,6 +817,26 @@
 ##                    /proc/vmballoon now 101 bytes (all zero). NOTE: when a real
 ##                    VM balloon driver is added it should call
 ##                    vmballoon::configure(max) on attach.)
+##   - softirq.rs    (fixed 2026-06-11; fs/softirq.rs statistics module, distinct
+##                    from the real kernel softirq-dispatch subsystem; was: four
+##                    fictional CPUs with invented per-type counts (Timer 500k+,
+##                    NetRx 200k+, Block 100k+, RCU 300k+ each) and ten type rows
+##                    with invented bases (Timer 2.6M executed, NetRx 1M, Block
+##                    550k, RCU 1.5M) plus totals (5.71M raised, 5.7M executed,
+##                    5200 tasklets), shown via /proc/softirq. MIXED structure:
+##                    the ten softirq-vector rows (HI/TIMER/NET_TX/NET_RX/BLOCK/
+##                    IRQ_POLL/TASKLET/SCHED/HRTIMER/RCU) are a fixed kernel
+##                    taxonomy → KEPT with ZEROED counters (case c). The per-CPU
+##                    states were fabricated and had no register API → emptied and
+##                    added register_cpu(cpu_id) (AlreadyExists/ResourceExhausted
+##                    checks) for the softirq subsystem to call as each CPU comes
+##                    online. Counters advance only on real raise/run/tasklet_run/
+##                    ksoftirqd_wakeup calls. Rebuilt self_test residue-free with
+##                    exact assertions incl. raise-vs-execute separation, per-CPU
+##                    type_counts routing, tasklet counting, and unregistered-CPU
+##                    not-found. Wired into boot. /proc/softirq now 76 bytes.
+##                    NOTE: the softirq dispatch subsystem should call
+##                    softirq::register_cpu for each online CPU at SMP bringup.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -830,14 +850,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     (just fixed) were seventeen. Next ticks: work through the remaining
-##     candidates ONE PER TICK, auditing each before acting. The 52-file list
-##     includes both STATISTICS modules (fix: empty / zero-counters) AND SETTINGS
-##     or structural modules that seed LEGITIMATE config defaults or real topology
-##     (LEAVE ALONE). Verify each is a statistics module fabricating observed
-##     numbers surfaced via /proc before emptying it. Next candidate: softirq.
-##     Remaining flagged names incl.:
-##     softirq, timerq,
+##     + softirq (just fixed) were eighteen. Next ticks: work through the
+##     remaining candidates ONE PER TICK, auditing each before acting. The
+##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
+##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
+##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
+##     observed numbers surfaced via /proc before emptying it. Next candidate:
+##     timerq. Remaining flagged names incl.:
+##     timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,

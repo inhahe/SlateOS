@@ -139,43 +139,62 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the softirq statistics state.
+///
+/// Pre-populates the ten softirq-vector rows (HI/TIMER/NET_TX/NET_RX/
+/// BLOCK/IRQ_POLL/TASKLET/SCHED/HRTIMER/RCU — a fixed kernel taxonomy)
+/// with ZEROED counters, and starts with no per-CPU state and all totals
+/// at zero. The `/proc/softirq` generator and the `softirq` kshell command
+/// surface this table as if it reflects real deferred-interrupt activity,
+/// so seeding it with invented per-CPU counts and execution totals would
+/// be fabricated procfs data. Per-CPU state is created as each CPU comes
+/// online through [`register_cpu`], and the counters advance only through
+/// real [`raise`] / [`run`] / [`tasklet_run`] / [`ksoftirqd_wakeup`]
+/// calls.
+///
+/// (Previously this seeded four fictional CPUs with invented per-type
+/// counts — Timer 500k+, NetRx 200k+, Block 100k+, RCU 300k+ per CPU —
+/// plus ten type rows with invented bases (Timer 2.6M executed, NetRx 1M,
+/// Block 550k, RCU 1.5M) and totals (5.71M raised, 5.7M executed, 5200
+/// tasklets).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let mut cpu_states = Vec::new();
-    for i in 0..4u32 {
-        let mut counts = [0u64; 10];
-        counts[1] = 500000 + i as u64 * 100000; // Timer.
-        counts[3] = 200000 + i as u64 * 50000;  // NetRx.
-        counts[4] = 100000 + i as u64 * 25000;  // Block.
-        counts[9] = 300000 + i as u64 * 75000;  // RCU.
-        let total: u64 = counts.iter().sum();
-        cpu_states.push(CpuSoftirqState {
-            cpu_id: i, total_softirqs: total, total_tasklets: 1000 + i as u64 * 200,
-            ksoftirqd_wakeups: 50 + i as u64 * 10, type_counts: counts,
-        });
-    }
     let mut type_stats = Vec::new();
     for st in SoftirqType::all() {
-        let base = match st {
-            SoftirqType::Timer => 2_600_000,
-            SoftirqType::NetRx => 1_000_000,
-            SoftirqType::Block => 550_000,
-            SoftirqType::Rcu => 1_500_000,
-            _ => 10000,
-        };
         type_stats.push(SoftirqTypeStats {
-            softirq_type: *st, raised: base + 1000, executed: base, total_ns: base * 500,
+            softirq_type: *st, raised: 0, executed: 0, total_ns: 0,
         });
     }
     *guard = Some(State {
-        cpu_states,
+        cpu_states: Vec::new(),
         type_stats,
-        total_raised: 5_710_000,
-        total_executed: 5_700_000,
-        total_tasklets: 5200,
+        total_raised: 0,
+        total_executed: 0,
+        total_tasklets: 0,
         ops: 0,
     });
+}
+
+/// Register a CPU's softirq state as it comes online.
+///
+/// Creates a zeroed per-CPU softirq state. Returns `AlreadyExists` if the
+/// CPU is already registered and `ResourceExhausted` once `MAX_CPU` CPUs
+/// are registered. The softirq subsystem calls this for each online CPU
+/// so that [`run`], [`tasklet_run`], and [`ksoftirqd_wakeup`] can account
+/// real activity against it.
+pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
+        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) {
+            return Err(KernelError::AlreadyExists);
+        }
+        state.cpu_states.push(CpuSoftirqState {
+            cpu_id, total_softirqs: 0, total_tasklets: 0,
+            ksoftirqd_wakeups: 0, type_counts: [0; 10],
+        });
+        Ok(())
+    })
 }
 
 /// Raise a softirq.
@@ -255,59 +274,76 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("softirq::self_test() — running tests...");
+    // Start from a clean state so the assertions below are exact and no
+    // fixtures leak into the live tables afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_cpu().len(), 4);
+    // 1: Defaults — all 10 zeroed type rows, no CPUs, all totals zero.
+    assert_eq!(per_cpu().len(), 0);
     assert_eq!(type_stats().len(), 10);
-    crate::serial_println!("  [1/8] defaults: OK");
+    assert!(type_stats().iter().all(|t| t.raised == 0 && t.executed == 0 && t.total_ns == 0));
+    let (cpus0, types0, raised0, executed0, tasklets0, _) = stats();
+    assert_eq!((cpus0, types0, raised0, executed0, tasklets0), (0, 10, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Raise.
-    let before = type_stats().iter().find(|t| t.softirq_type == SoftirqType::Timer).unwrap().raised;
+    // 2: Register CPUs — duplicate registration errors.
+    register_cpu(0).expect("reg0");
+    register_cpu(1).expect("reg1");
+    assert_eq!(per_cpu().len(), 2);
+    assert!(register_cpu(0).is_err());
+    crate::serial_println!("  [2/8] register cpu: OK");
+
+    // 3: Raise increments the type's raised counter and the total exactly.
     raise(SoftirqType::Timer).expect("raise");
-    let after = type_stats().iter().find(|t| t.softirq_type == SoftirqType::Timer).unwrap().raised;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [2/8] raise: OK");
+    let ts = type_stats().into_iter().find(|t| t.softirq_type == SoftirqType::Timer).expect("ts");
+    assert_eq!(ts.raised, 1);
+    assert_eq!(ts.executed, 0); // raised but not yet run
+    crate::serial_println!("  [3/8] raise: OK");
 
-    // 3: Run.
-    let before = per_cpu()[0].total_softirqs;
+    // 4: Run executes on a CPU and accrues duration into the type row.
     run(0, SoftirqType::NetRx, 1000).expect("run");
-    let after = per_cpu()[0].total_softirqs;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [3/8] run: OK");
+    let cpu0 = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("cpu0");
+    assert_eq!(cpu0.total_softirqs, 1);
+    assert_eq!(cpu0.type_counts[SoftirqType::NetRx.index()], 1);
+    let ts = type_stats().into_iter().find(|t| t.softirq_type == SoftirqType::NetRx).expect("ts");
+    assert_eq!(ts.executed, 1);
+    assert_eq!(ts.total_ns, 1000);
+    crate::serial_println!("  [4/8] run: OK");
 
-    // 4: Tasklet.
-    let before = per_cpu()[1].total_tasklets;
+    // 5: Tasklet runs count as a softirq and a tasklet on that CPU.
     tasklet_run(1).expect("tasklet");
-    let after = per_cpu()[1].total_tasklets;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [4/8] tasklet: OK");
+    let cpu1 = per_cpu().into_iter().find(|c| c.cpu_id == 1).expect("cpu1");
+    assert_eq!(cpu1.total_tasklets, 1);
+    assert_eq!(cpu1.total_softirqs, 1);
+    assert_eq!(cpu1.type_counts[SoftirqType::Tasklet.index()], 1);
+    crate::serial_println!("  [5/8] tasklet: OK");
 
-    // 5: Ksoftirqd wakeup.
-    let before = per_cpu()[2].ksoftirqd_wakeups;
-    ksoftirqd_wakeup(2).expect("wakeup");
-    let after = per_cpu()[2].ksoftirqd_wakeups;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [5/8] ksoftirqd: OK");
+    // 6: ksoftirqd wakeup accounting.
+    ksoftirqd_wakeup(1).expect("wakeup");
+    assert_eq!(per_cpu().into_iter().find(|c| c.cpu_id == 1).expect("cpu1").ksoftirqd_wakeups, 1);
+    crate::serial_println!("  [6/8] ksoftirqd: OK");
 
-    // 6: Type stats ns.
-    let ts = type_stats().iter().find(|t| t.softirq_type == SoftirqType::NetRx).cloned().unwrap();
-    assert!(ts.total_ns > 0);
-    crate::serial_println!("  [6/8] type ns: OK");
-
-    // 7: CPU not found.
+    // 7: Operations on an unregistered CPU error.
     assert!(run(99, SoftirqType::Timer, 0).is_err());
+    assert!(tasklet_run(99).is_err());
+    assert!(ksoftirqd_wakeup(99).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Final totals reflect only the real activity above. total_raised
+    //    counts both raise (1) and the implicit raise inside run/tasklet?
+    //    No — only raise() bumps total_raised; run/tasklet bump
+    //    total_executed. So raised=1, executed=2 (run + tasklet), tasklets=1.
     let (cpus, types, raised, executed, tasklets, ops) = stats();
-    assert_eq!(cpus, 4);
+    assert_eq!(cpus, 2);
     assert_eq!(types, 10);
-    assert!(raised > 5_710_000);
-    assert!(executed > 5_700_000);
-    assert!(tasklets > 5200);
+    assert_eq!(raised, 1);
+    assert_eq!(executed, 2);
+    assert_eq!(tasklets, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("softirq::self_test() — all 8 tests passed");
 }

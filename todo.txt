@@ -2291,6 +2291,18 @@
 ##     if a cmdline is ever configured. self_test rewritten residue-free: tests
 ##     parse_cmdline as a pure fn, installs a known controlled State for the
 ##     stateful API tests, ends with STATE = None. boot-test PASSED (26s).
+##     audiodevice fixed 2026-06-11: case (a) empty-init. init_defaults seeded 2
+##     fabricated audio endpoints ("Built-in Speakers"/"Built-in Microphone")
+##     with the LINUX driver name snd-hda-intel and invented volume/latency/
+##     sample-rate — surfaced through /proc and the Settings > Sound panel as if
+##     the hardware physically existed. Emptied devices to Vec::new() (next_id
+##     1); add_device() hotplug is the honest entry point. self_test rewritten
+##     residue-free: builds the 2 base devices via add_device (asserting the
+##     first-of-direction auto-default), runs all 11 tests, ends with STATE =
+##     None. boot-test PASSED (28s). DEFERRED PROPER FIX: wire add_device() to
+##     the real audio-driver stack. A PCI scan finds audio CONTROLLERS (class
+##     0x04) but not endpoint-level volume/sample-rate/channels, so endpoint
+##     registration must come from the driver, not a fabricated PCI read-through.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

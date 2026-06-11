@@ -212,49 +212,30 @@ where
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Initialize audio device management with default devices.
+/// Initialize audio device management with an empty device set.
+///
+/// We do NOT seed any devices here. Audio devices describe real hardware
+/// endpoints (a specific set of speakers/microphone with a real driver,
+/// volume, sample rate, and latency). Seeding "Built-in Speakers"/"Built-in
+/// Microphone" with a Linux driver name (`snd-hda-intel`) and invented
+/// volume/latency would surface fabricated hardware through /proc and the
+/// Settings → Sound panel as if it physically existed. Devices appear only
+/// when a driver registers them through add_device() (hotplug).
+///
+/// DEFERRED PROPER FIX: wire add_device() to the real audio-driver stack so
+/// that enumerated HDA/USB/Bluetooth endpoints register here. A PCI scan can
+/// find audio *controllers* (class 0x04) but not the endpoint-level details
+/// (volume/sample-rate/channels) this model needs, so endpoint registration
+/// must come from the driver, not a fabricated PCI read-through.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {
         return;
     }
 
-    let defaults = alloc::vec![
-        AudioDevice {
-            id: 1,
-            name: String::from("Built-in Speakers"),
-            device_type: AudioDeviceType::Speakers,
-            direction: DeviceDirection::Output,
-            state: DeviceState::Active,
-            volume: 70,
-            muted: false,
-            is_default: true,
-            sample_rate: SampleRate::Rate48000,
-            bit_depth: 16,
-            channels: 2,
-            latency_ms: 10,
-            driver: String::from("snd-hda-intel"),
-        },
-        AudioDevice {
-            id: 2,
-            name: String::from("Built-in Microphone"),
-            device_type: AudioDeviceType::Microphone,
-            direction: DeviceDirection::Input,
-            state: DeviceState::Idle,
-            volume: 80,
-            muted: false,
-            is_default: true,
-            sample_rate: SampleRate::Rate48000,
-            bit_depth: 16,
-            channels: 1,
-            latency_ms: 10,
-            driver: String::from("snd-hda-intel"),
-        },
-    ];
-
     *guard = Some(AudioDeviceState {
-        devices: defaults,
-        next_id: 3,
+        devices: Vec::new(),
+        next_id: 1,
         auto_switch_on_connect: true,
         ops: 0,
     });
@@ -498,13 +479,18 @@ pub fn self_test() {
     *STATE.lock() = None;
     init_defaults();
 
-    // Test 1: default devices.
+    // Test 1: empty defaults, then build a fixture through the real add_device
+    // hotplug API (first device of each direction auto-becomes the default).
     {
-        let devices = list_devices();
-        assert_eq!(devices.len(), 2);
+        assert_eq!(list_devices().len(), 0);
+        let spk = add_device("Built-in Speakers", AudioDeviceType::Speakers, DeviceDirection::Output, "hda").unwrap();
+        let mic = add_device("Built-in Microphone", AudioDeviceType::Microphone, DeviceDirection::Input, "hda").unwrap();
+        assert_eq!(list_devices().len(), 2);
         let out = default_output().unwrap();
+        assert_eq!(out.id, spk);
         assert_eq!(out.name, "Built-in Speakers");
         let inp = default_input().unwrap();
+        assert_eq!(inp.id, mic);
         assert_eq!(inp.name, "Built-in Microphone");
     }
     serial_println!("[audiodevice]  1/11 defaults OK");
@@ -606,6 +592,9 @@ pub fn self_test() {
         assert!(ops > 0);
     }
     serial_println!("[audiodevice] 11/11 stats OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     serial_println!("[audiodevice] All self-tests passed.");
 }

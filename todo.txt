@@ -2250,6 +2250,19 @@
 ##     end) and its build_count == 1 / == 2 assertions are on the API-built
 ##     test-kern fixture, not the seeded components, so unaffected. boot-test
 ##     PASSED (27s). procfs gen_kernelbuild does not surface build_count.
+##     oomkiller fixed 2026-06-11: case (a) empty-init. init_defaults seeded 4
+##     fabricated OOM scores (init/sshd/browser/game) with invented pids,
+##     scores, and memory footprints — surfaced through /proc/oomkiller
+##     (list_scores) and the `oom` kshell command as if they were real
+##     processes / kill candidates. Emptied scores to Vec::new() (kept Kill as
+##     the genuine default policy). The existing register_process() API is the
+##     honest entry point. self_test rewritten residue-free: resets STATE None
+##     at start AND end, asserts empty defaults, builds the 4-process fixture
+##     via register_process (base score derived from supplied memory), then
+##     exercises victim/adjust/exempt/kill/history with exact stats. boot-test
+##     PASSED (28s). DEFERRED PROPER FIX: wire register_process() to the real
+##     process table so /proc/oomkiller reflects actual live processes and
+##     their memory footprints rather than only manually-registered entries.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

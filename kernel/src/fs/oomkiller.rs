@@ -109,15 +109,19 @@ where
 // ---------------------------------------------------------------------------
 
 pub fn init_defaults() {
+    // Start with an empty score table. OOM scores describe *live* processes —
+    // their pid, name, memory footprint, and kill likelihood. Seeding invented
+    // processes (init/sshd/browser/game) here would surface fabricated victims
+    // through /proc/oomkiller and the `oom` shell command as if they were real.
+    // The Kill policy is the genuine default; everything else stays empty until
+    // real processes register via register_process().
+    //
+    // DEFERRED PROPER FIX: wire register_process() to the real process table so
+    // /proc/oomkiller reflects actual processes and their memory footprints.
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        scores: alloc::vec![
-            OomScore { pid: 1, process_name: String::from("init"), score: 0, adj: -1000, memory_bytes: 4096, exempt: true },
-            OomScore { pid: 100, process_name: String::from("sshd"), score: 100, adj: -500, memory_bytes: 16384, exempt: false },
-            OomScore { pid: 200, process_name: String::from("browser"), score: 500, adj: 0, memory_bytes: 524288, exempt: false },
-            OomScore { pid: 300, process_name: String::from("game"), score: 800, adj: 200, memory_bytes: 1048576, exempt: false },
-        ],
+        scores: Vec::new(),
         history: Vec::new(),
         policy: OomPolicy::Kill,
         total_kills: 0,
@@ -248,22 +252,33 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("oomkiller::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_scores().len(), 4);
+    // 1: Defaults — empty score table, genuine Kill policy.
+    assert_eq!(list_scores().len(), 0);
     assert_eq!(get_policy(), OomPolicy::Kill);
     crate::serial_println!("  [1/8] defaults: OK");
 
-    // 2: Get score.
+    // 2: Register processes via the real API. Base score is derived from the
+    //    supplied memory footprint (memory / 1024, capped at 1000).
+    register_process(1, "init", 4096).expect("reg init");      // base 4
+    register_process(100, "sshd", 16384).expect("reg sshd");   // base 16
+    register_process(200, "browser", 524288).expect("reg br"); // base 512
+    register_process(300, "game", 1048576).expect("reg game"); // base 1000 (capped)
+    set_exempt(1, true).expect("exempt init");
+    assert_eq!(list_scores().len(), 4);
     let s = get_score(200).expect("get");
     assert_eq!(s.process_name, "browser");
-    assert_eq!(s.score, 500);
-    crate::serial_println!("  [2/8] get: OK");
+    assert_eq!(s.score, 512);
+    crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Select victim (highest effective score).
+    // 3: Select victim (highest effective score, non-exempt).
     let victim = select_victim().expect("victim");
-    assert_eq!(victim.pid, 300); // game has highest effective score (800+200=1000).
+    assert_eq!(victim.pid, 300); // game has highest effective score (1000).
     crate::serial_println!("  [3/8] victim: OK");
 
     // 4: Adjust score.
@@ -299,6 +314,9 @@ pub fn self_test() {
     assert!(invocations >= 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     crate::serial_println!("oomkiller::self_test() — all 8 tests passed");
 }

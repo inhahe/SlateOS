@@ -2081,7 +2081,23 @@
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
 ##     none currently flagged — re-run the seeded-init_defaults grep to find the
-##     next batch. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     next batch. SWEEP STATUS (audited 2026-06-11): ran a structural scan over
+##     all 52 flagged candidates extracting each init_defaults body and counting
+##     the large-literal fabrication signature (..._000_000 / 4+-digit numbers).
+##     Only fnotify and telemetry still contain large literals in init_defaults,
+##     and BOTH are legitimate: fnotify's are max_watches/max_queue_depth capacity
+##     limits (8192/4096/1024/2048/256/512 — real fixed structure, case (c), all
+##     activity counters zeroed); telemetry's is collection_interval_ms: 5000 (real
+##     config default, empty metrics Vec, zero counters). thpstat + pagecache
+##     spot-read directly and confirmed fully zeroed. The remaining ~48 candidates
+##     all show ZERO large literals in init_defaults — i.e. they were fixed in
+##     prior ticks and no longer match the original fabrication signature. The
+##     fabricated-procfs-data sweep over the originally-flagged set is therefore
+##     COMPLETE; no statistics module among them still seeds fake observed numbers.
+##     A future tick may broaden the grep (smaller seed literals, String-seeded
+##     fixtures like fake device/interface names) to catch any fabricator that
+##     slipped past the large-literal filter, but no further large-literal
+##     fabricators remain. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional

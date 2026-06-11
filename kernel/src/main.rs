@@ -1328,6 +1328,16 @@ extern "C" fn kernel_main() -> ! {
     // boot and gives the module automated coverage it previously lacked (it was
     // only reachable via the `rqstat test` kshell subcommand).
     fs::rqstat::self_test();
+    // schedlat backs /proc/schedlat (per-CPU scheduling-latency stats: wakeup-to-
+    // run / runqueue-wait / preemption latencies + per-CPU latency histograms);
+    // record functions return NotFound for unknown CPUs and there was no register
+    // API, so added register_cpu(cpu_id) (zeroed counters + empty histogram). The
+    // self-test now builds fixtures via register_cpu/record_wakeup/
+    // record_runq_wait/record_preempt with exact bucket-placement assertions and
+    // resets the table afterward (leaving no fabricated rows), so it is safe at
+    // boot and gives the module automated coverage it previously lacked (it was
+    // only reachable via the `schedlat test` kshell subcommand).
+    fs::schedlat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -528,11 +528,26 @@
 ##                    self_test with exact assertions incl. max_depth high-water
 ##                    tracking, saturating dequeue underflow guard, and exact
 ##                    aggregate totals, wired into boot.)
+##   - schedlat.rs   (fixed 2026-06-11; was: four fake per-CPU scheduling-latency
+##                    rows cpu0..3 (cpu0 10M wakeups / 50s total / 5M runq waits /
+##                    2M preempts / fully-populated latency histogram; cpu1 9M
+##                    wakeups; cpu2 8M; cpu3 7M) plus invented aggregates
+##                    total_wakeups 34M / total_runq_waits 17M / total_preempts
+##                    6.5M / global_max_ns 10ms, shown via /proc/schedlat and the
+##                    per_cpu/global_histogram views as real measured scheduling
+##                    latency. Record functions returned NotFound for unknown CPUs
+##                    and there was no register API, so added register_cpu(cpu_id)
+##                    (zeroed counters + empty histogram, AlreadyExists/
+##                    ResourceExhausted checks); emptied init_defaults and rebuilt
+##                    self_test with exact bucket-placement assertions (5us→bkt1,
+##                    50us→bkt2, 100ns→bkt0, 50ms→bkt5), global-max tracking
+##                    (preempt does NOT move it), and exact aggregate totals,
+##                    wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): schedlat,
-##     ttystat, zramstat. NOTE: some may be SETTINGS modules
+##     by grep (init_defaults with alloc::vec!/String::from/push): ttystat,
+##     zramstat. NOTE: some may be SETTINGS modules
 ##     seeding legitimate config defaults — verify each is a STATISTICS module
 ##     seeding fake OBSERVATIONS before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.

@@ -100,22 +100,55 @@ fn bucket_index(ns: u64) -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** per-CPU scheduling-latency table.
+///
+/// Seeds NO CPUs and zero counters.  Real latency accounting is wired through
+/// [`register_cpu`] (one row per online CPU the scheduler brings up, with zeroed
+/// counters and an empty histogram) and the `record_wakeup`/`record_runq_wait`/
+/// `record_preempt` functions; until those are called the table is genuinely
+/// empty, so `/proc/schedlat` and the `schedlat` kshell command report zeros
+/// rather than fabricated numbers — the kernel's hard "never invent data in
+/// procfs" rule.
+///
+/// NOTE: this previously seeded four fictional per-CPU rows (cpu0: 10M wakeups /
+/// 50s total / 5M runq waits / 2M preempts / a fully-populated latency histogram;
+/// cpu1: 9M wakeups; cpu2: 8M; cpu3: 7M) plus invented aggregate totals
+/// (total_wakeups 34M, total_runq_waits 17M, total_preempts 6.5M, global_max_ns
+/// 10ms), which `/proc/schedlat` (and the `per_cpu`/`global_histogram` views)
+/// then displayed as if they were real measured scheduling latencies.  That demo
+/// data was removed; the self-test now builds its own fixtures explicitly via the
+/// real API (see [`self_test`]).  The scheduler is expected to call
+/// [`register_cpu`] for each CPU it brings online and the record functions on
+/// every wakeup/runqueue-wait/preemption event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        cpus: alloc::vec![
-            CpuSchedLat { cpu_id: 0, wakeup_count: 10_000_000, wakeup_total_ns: 50_000_000_000, wakeup_max_ns: 5_000_000, runq_wait_count: 5_000_000, runq_wait_total_ns: 25_000_000_000, runq_wait_max_ns: 10_000_000, preempt_count: 2_000_000, preempt_total_ns: 10_000_000_000, histogram: [2000000, 5000000, 3000000, 1000000, 500000, 100000, 10000, 100] },
-            CpuSchedLat { cpu_id: 1, wakeup_count: 9_000_000, wakeup_total_ns: 45_000_000_000, wakeup_max_ns: 4_000_000, runq_wait_count: 4_500_000, runq_wait_total_ns: 22_500_000_000, runq_wait_max_ns: 8_000_000, preempt_count: 1_800_000, preempt_total_ns: 9_000_000_000, histogram: [1800000, 4500000, 2700000, 900000, 450000, 90000, 9000, 90] },
-            CpuSchedLat { cpu_id: 2, wakeup_count: 8_000_000, wakeup_total_ns: 40_000_000_000, wakeup_max_ns: 3_500_000, runq_wait_count: 4_000_000, runq_wait_total_ns: 20_000_000_000, runq_wait_max_ns: 7_000_000, preempt_count: 1_500_000, preempt_total_ns: 7_500_000_000, histogram: [1500000, 4000000, 2500000, 800000, 400000, 80000, 8000, 80] },
-            CpuSchedLat { cpu_id: 3, wakeup_count: 7_000_000, wakeup_total_ns: 35_000_000_000, wakeup_max_ns: 3_000_000, runq_wait_count: 3_500_000, runq_wait_total_ns: 17_500_000_000, runq_wait_max_ns: 6_000_000, preempt_count: 1_200_000, preempt_total_ns: 6_000_000_000, histogram: [1200000, 3500000, 2200000, 700000, 350000, 70000, 7000, 70] },
-        ],
-        total_wakeups: 34_000_000,
-        total_runq_waits: 17_000_000,
-        total_preempts: 6_500_000,
-        global_max_ns: 10_000_000,
+        cpus: Vec::new(),
+        total_wakeups: 0,
+        total_runq_waits: 0,
+        total_preempts: 0,
+        global_max_ns: 0,
         ops: 0,
     });
+}
+
+/// Register a CPU's scheduling-latency row with zeroed counters.
+///
+/// Called by the scheduler when it brings a CPU online.  Duplicate `cpu_id`
+/// fails with [`KernelError::AlreadyExists`]; exceeding [`MAX_CPUS`] fails with
+/// [`KernelError::ResourceExhausted`].
+pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        if state.cpus.len() >= MAX_CPUS { return Err(KernelError::ResourceExhausted); }
+        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
+        state.cpus.push(CpuSchedLat {
+            cpu_id, wakeup_count: 0, wakeup_total_ns: 0, wakeup_max_ns: 0,
+            runq_wait_count: 0, runq_wait_total_ns: 0, runq_wait_max_ns: 0,
+            preempt_count: 0, preempt_total_ns: 0, histogram: [0; 8],
+        });
+        Ok(())
+    })
 }
 
 /// Record a wakeup-to-run latency.
@@ -191,56 +224,97 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("schedlat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/schedlat must never surface).  Resetting
+    // first clears any residue from a prior `schedlat test` run so the totals
+    // asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_cpu().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated CPUs or counters.
+    assert_eq!(per_cpu().len(), 0);
+    let (c0, w0, r0, p0, m0, _o0) = stats();
+    assert_eq!((c0, w0, r0, p0, m0), (0, 0, 0, 0, 0));
+    assert_eq!(global_histogram().iter().sum::<u64>(), 0);
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Wakeup.
-    let before = per_cpu()[0].wakeup_count;
-    record_wakeup(0, 5000).expect("wakeup");
-    let after = per_cpu()[0].wakeup_count;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [2/8] wakeup: OK");
+    // 2: Register CPUs — zeroed counters; dup id fails; record before register
+    // fails (no phantom CPU is created).
+    assert!(record_wakeup(0, 5000).is_err());
+    register_cpu(0).expect("reg0");
+    register_cpu(1).expect("reg1");
+    assert!(register_cpu(0).is_err());
+    assert_eq!(per_cpu().len(), 2);
+    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    assert_eq!((c.wakeup_count, c.runq_wait_count, c.preempt_count), (0, 0, 0));
+    assert_eq!(c.histogram.iter().sum::<u64>(), 0);
+    crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Runq wait.
-    let before = per_cpu()[0].runq_wait_count;
+    // 3: Wakeup — count/total/max rise; 5us lands in bucket 1 (<10us); the
+    // global max tracks it.
+    record_wakeup(0, 5_000).expect("wakeup");
+    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    assert_eq!(c.wakeup_count, 1);
+    assert_eq!(c.wakeup_total_ns, 5_000);
+    assert_eq!(c.wakeup_max_ns, 5_000);
+    assert_eq!(c.histogram[1], 1);
+    let (_, _, _, _, gmax, _) = stats();
+    assert_eq!(gmax, 5_000);
+    crate::serial_println!("  [3/8] wakeup: OK");
+
+    // 4: Runq wait — 50us lands in bucket 2 (<100us).
     record_runq_wait(0, 50_000).expect("runq");
-    let after = per_cpu()[0].runq_wait_count;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [3/8] runq wait: OK");
+    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    assert_eq!(c.runq_wait_count, 1);
+    assert_eq!(c.runq_wait_total_ns, 50_000);
+    assert_eq!(c.histogram[2], 1);
+    crate::serial_println!("  [4/8] runq wait: OK");
 
-    // 4: Preempt.
-    let before = per_cpu()[0].preempt_count;
+    // 5: Preempt — 100ns lands in bucket 0 (<1us); preempt does NOT move the
+    // global max (only wakeups do, per record_wakeup).
     record_preempt(0, 100).expect("preempt");
-    let after = per_cpu()[0].preempt_count;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [4/8] preempt: OK");
+    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    assert_eq!(c.preempt_count, 1);
+    assert_eq!(c.histogram[0], 1);
+    let (_, _, _, _, gmax, _) = stats();
+    assert_eq!(gmax, 5_000); // unchanged by the 100ns preempt
+    // global histogram so far = one event in buckets 0, 1, 2 = sum 3.
+    let g = global_histogram();
+    assert_eq!((g[0], g[1], g[2]), (1, 1, 1));
+    assert_eq!(g.iter().sum::<u64>(), 3);
+    crate::serial_println!("  [5/8] preempt + histogram: OK");
 
-    // 5: Histogram.
-    let hist = global_histogram();
-    assert!(hist.iter().sum::<u64>() > 0);
-    crate::serial_println!("  [5/8] histogram: OK");
-
-    // 6: Max tracking.
+    // 6: Max tracking — a 50ms wakeup lands in bucket 5 (<100ms) and raises the
+    // global max and the per-CPU wakeup max.
     record_wakeup(0, 50_000_000).expect("big_wakeup");
-    let (_, _, _, _, max, _) = stats();
-    assert!(max >= 50_000_000);
+    let c = per_cpu().into_iter().find(|c| c.cpu_id == 0).expect("find0");
+    assert_eq!(c.wakeup_max_ns, 50_000_000);
+    assert_eq!(c.histogram[5], 1);
+    let (_, _, _, _, gmax, _) = stats();
+    assert_eq!(gmax, 50_000_000);
     crate::serial_println!("  [6/8] max: OK");
 
-    // 7: Not found.
+    // 7: Unknown CPU → NotFound on every record path.
     assert!(record_wakeup(99, 0).is_err());
+    assert!(record_runq_wait(99, 0).is_err());
+    assert!(record_preempt(99, 0).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
-    let (cpus, wakes, runqs, preempts, _max, ops) = stats();
-    assert_eq!(cpus, 4);
-    assert!(wakes > 34_000_000);
-    assert!(runqs > 17_000_000);
-    assert!(preempts > 6_500_000);
+    // 8: Aggregate stats are exact: 2 wakeups + 1 runq wait + 1 preempt on cpu0;
+    // cpu1 untouched.
+    let (cpus, wakes, runqs, preempts, max, ops) = stats();
+    assert_eq!(cpus, 2);
+    assert_eq!(wakes, 2);
+    assert_eq!(runqs, 1);
+    assert_eq!(preempts, 1);
+    assert_eq!(max, 50_000_000);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/schedlat table.
+    *STATE.lock() = None;
 
     crate::serial_println!("schedlat::self_test() — all 8 tests passed");
 }

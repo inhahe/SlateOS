@@ -550,6 +550,7 @@ const PID_FILES: &[&str] = &[
     "statm",
     "limits",
     "environ",
+    "mountinfo",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -2088,6 +2089,77 @@ fn gen_pid_maps(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(render_maps(&vmas))
 }
 
+/// Render the mount table as Linux `/proc/<pid>/mountinfo` lines.
+///
+/// Pure helper (no VFS / lock access) so it can be unit-tested with a
+/// synthetic mount list in kernel context.  Each line matches the
+/// 11-field layout from Linux `fs/proc_namespace.c`
+/// (`show_mountinfo`) closely enough for parsers (`findmnt`, glibc's
+/// `__mount_proc`, systemd):
+///
+/// ```text
+/// mount_id parent_id major:minor root mount_point options - fstype source super_options
+/// ```
+///
+/// We have no mount namespaces, so every process sees the same global
+/// mount table — `/proc/<pid>/mountinfo` is identical for all PIDs,
+/// which is accurate rather than fabricated.  Field choices:
+///
+/// - `mount_id`: a stable small integer per mount (`base + index`).  Linux
+///   assigns these from a global counter; the exact values are opaque to
+///   parsers, which only require uniqueness and stability within one read.
+/// - `parent_id`: the root mount's id for every entry.  We do not model a
+///   mount tree, so all mounts are reported as children of the root mount;
+///   the root reports itself.  Parsers that build a tree tolerate this.
+/// - `major:minor`: `0:<index+1>`.  We have no block-device numbers, and
+///   Linux uses `0:N` minors for anonymous/virtual filesystems anyway.
+/// - `root`: always `/` (we mount whole filesystems, never subtrees).
+/// - optional fields: none, so the separator `-` follows the options
+///   directly (a valid, common case in real `mountinfo`).
+/// - `source`: `none` (we do not track backing devices), matching what we
+///   already emit in `/proc/mounts`.
+/// - per-mount and super options are the same `MountOptions` string.
+fn render_mountinfo(mounts: &[(String, String, crate::fs::vfs::MountOptions)]) -> Vec<u8> {
+    use core::fmt::Write as _;
+
+    /// Base for synthetic mount ids.  Linux ids are arbitrary positive
+    /// integers; starting above a small reserved range keeps them clearly
+    /// distinct from the parent-id we report for the root mount.
+    const MOUNT_ID_BASE: usize = 20;
+    let root_id = MOUNT_ID_BASE;
+
+    let mut text = String::with_capacity(mounts.len().saturating_mul(96).max(16));
+    for (i, (path, fs_type, options)) in mounts.iter().enumerate() {
+        let mount_id = MOUNT_ID_BASE.saturating_add(i);
+        let minor = i.saturating_add(1);
+        let opts = options.to_string();
+        // 11 fields, optional-field section empty (separator `-` follows
+        // the per-mount options directly).
+        let _ = writeln!(
+            text,
+            "{mount_id} {root_id} 0:{minor} / {path} {opts} - {fs_type} none {opts}",
+        );
+    }
+    text.into_bytes()
+}
+
+/// `/proc/<pid>/mountinfo` — per-process mount table, Linux-format.
+///
+/// Because we have no mount namespaces, this is the same global mount
+/// table for every process (the data behind `/proc/mounts`), rendered in
+/// the richer `mountinfo` layout that `findmnt`, glibc and systemd parse;
+/// see [`render_mountinfo`] for the exact format.  Gated on process
+/// existence so bare scheduler tasks (kernel threads with no PCB) return
+/// `NotFound`, matching every other process-only per-PID file.
+fn gen_pid_mountinfo(task_id: u64) -> KernelResult<Vec<u8>> {
+    // Process-only file: a bare scheduler task has no process record.
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    let mounts = crate::fs::Vfs::mounts_full();
+    Ok(render_mountinfo(&mounts))
+}
+
 /// `/proc/<pid>/caps` — capability table listing.
 ///
 /// Shows the count and types of capabilities granted to this process,
@@ -2315,6 +2387,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "statm" => gen_pid_statm(task_id),
         "limits" => gen_pid_limits(task_id),
         "environ" => gen_pid_environ(task_id),
+        "mountinfo" => gen_pid_mountinfo(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11378,6 +11451,47 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   maps render: {} VMA lines OK", lines.len());
     }
 
+    // --- /proc/<pid>/mountinfo rendering ---
+    // render_mountinfo is the pure formatter behind the mountinfo file;
+    // exercise it with a synthetic mount list (no VFS lock needed) to lock
+    // down the 11-field Linux layout, the id/minor numbering, and that the
+    // options string appears in both the per-mount and super-options slots.
+    {
+        use crate::fs::vfs::MountOptions;
+        let mounts = [
+            (String::from("/"), String::from("ext4"), MountOptions::defaults()),
+            (
+                String::from("/tmp"),
+                String::from("tmpfs"),
+                MountOptions::parse("ro,noatime"),
+            ),
+        ];
+        let rendered = render_mountinfo(&mounts);
+        let mi_text = core::str::from_utf8(&rendered)
+            .map_err(|_| KernelError::InternalError)?;
+        let lines: Vec<&str> = mi_text.lines().collect();
+        let expected = [
+            "20 20 0:1 / / rw - ext4 none rw",
+            "21 20 0:2 / /tmp ro,noatime - tmpfs none ro,noatime",
+        ];
+        if lines.len() != expected.len() {
+            serial_println!(
+                "[procfs]   FAIL: mountinfo rendered {} lines, expected {}",
+                lines.len(), expected.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        for (got, want) in lines.iter().zip(expected.iter()) {
+            if got != want {
+                serial_println!(
+                    "[procfs]   FAIL: mountinfo line {:?} != expected {:?}", got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   mountinfo render: {} mount lines OK", lines.len());
+    }
+
     // --- New per-PID files: comm, statm, limits ---
 
     // /proc/<pid>/comm — non-empty, newline-terminated, <= 16 bytes
@@ -11437,6 +11551,40 @@ pub fn self_test() -> KernelResult<()> {
         }
         Err(e) => {
             serial_println!("[procfs]   FAIL: statm unexpected error {:?}", e);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // /proc/<pid>/mountinfo — process-only (like statm), so a bare
+    // scheduler task legitimately returns NotFound.  When it succeeds,
+    // every line must carry the `-` separator field and at least the 10
+    // mandatory positional fields that precede the super-options.
+    match fs.read_file(&format!("/{current_tid}/mountinfo")) {
+        Ok(mi_data) => {
+            let mi_text = core::str::from_utf8(&mi_data)
+                .map_err(|_| KernelError::InternalError)?;
+            for line in mi_text.lines() {
+                let fields: Vec<&str> = line.split(' ').collect();
+                // mount_id parent maj:min root mp opts - fstype src superopts
+                if fields.len() < 10 || !fields.iter().any(|f| *f == "-") {
+                    serial_println!(
+                        "[procfs]   FAIL: mountinfo line malformed ({:?})", line
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            serial_println!(
+                "[procfs]   {}/mountinfo: {} bytes OK", current_tid, mi_data.len()
+            );
+        }
+        Err(KernelError::NotFound) => {
+            serial_println!(
+                "[procfs]   {}/mountinfo: NotFound (bare task, no PCB) OK",
+                current_tid
+            );
+        }
+        Err(e) => {
+            serial_println!("[procfs]   FAIL: mountinfo unexpected error {:?}", e);
             return Err(KernelError::InternalError);
         }
     }

@@ -2,14 +2,41 @@
 # boot-test.sh — Build the kernel, boot it in QEMU, verify BOOT_OK.
 #
 # Exit codes:
-#   0 — BOOT_OK detected
-#   1 — Timeout or PANIC detected
+#   0 — BOOT_OK detected AND no self-test failures
+#   1 — Timeout, PANIC, or a non-fatal self-test failure detected
 #
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test
 #   ./scripts/boot-test.sh --no-build   # skip build
 
 set -euo pipefail
+
+# Scan the serial log for self-test failures that do NOT halt the boot.
+#
+# Many fs/subsystem self-tests are NON-FATAL: on failure main.rs logs a
+# "WARNING: <X> self-test failed" (or "[WARN] ..."/"[hpet] WARNING:
+# Self-test failed") and boots on, so BOOT_OK still prints and a naive
+# "grep BOOT_OK" reports PASSED even though a test regressed (this exact
+# gap hid a stale procfs readdir-count assertion — see todo.txt).
+#
+# We match the wrapper marker "self-test failed" (case-insensitive),
+# which every main.rs self-test failure path emits.  We deliberately do
+# NOT grep raw "FAIL:"/"WARNING:": those have legitimate occurrences in a
+# passing log — e.g. "[drm-atomic] check FAIL: CRTC 9999 not found"
+# (intentional negative tests) and "[lockdep] WARNING: potential deadlock"
+# (a deliberately-triggered detector test) — so they would false-positive.
+#
+# Returns 0 if clean, 1 if any self-test failure marker is present.
+check_selftest_failures() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    if grep -iq "self-test failed" "$file"; then
+        echo "SELF-TEST FAILURE detected in serial log:"
+        grep -in "self-test failed" "$file" || true
+        return 1
+    fi
+    return 0
+}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -158,6 +185,10 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
         echo "BOOT_OK detected after ${ELAPSED}s!"
         kill "$QEMU_PID" 2>/dev/null || true
         wait "$QEMU_PID" 2>/dev/null || true
+        if ! check_selftest_failures "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED (BOOT_OK reached but a self-test failed) ==="
+            exit 1
+        fi
         echo "=== Boot test PASSED ==="
         exit 0
     fi
@@ -171,6 +202,10 @@ wait "$QEMU_PID" 2>/dev/null || true
 if [ -f "$SERIAL_FILE" ]; then
     if grep -q "BOOT_OK" "$SERIAL_FILE"; then
         echo "BOOT_OK found."
+        if ! check_selftest_failures "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED (BOOT_OK reached but a self-test failed) ==="
+            exit 1
+        fi
         echo "=== Boot test PASSED ==="
         exit 0
     elif grep -q "PANIC\|FATAL" "$SERIAL_FILE"; then

@@ -144,11 +144,20 @@
 ## self-test failed" and boots on, so BOOT_OK still prints and
 ## boot-test.sh reports PASSED.  Fixed the count (+1 for `task`) and added
 ## an explicit assertion that the extra entry IS the `task` directory.
-## TOOLING GAP (process note): boot-test.sh's BOOT_OK grep does NOT catch
-## non-fatal self-test failures.  Until that is hardened (option: make the
-## fs self-tests fatal, or have boot-test.sh grep the serial log for
-## "FAIL:"/"WARNING:"), ALWAYS grep build/serial-test.txt for FAIL/WARNING
-## after a boot test — do not rely on "Boot test PASSED" alone.
+## TOOLING GAP (process note) — FIXED 2026-06-11: boot-test.sh's BOOT_OK
+## grep did NOT catch non-fatal self-test failures.  Now hardened:
+## check_selftest_failures() scans build/serial-test.txt for the wrapper
+## marker "self-test failed" (case-insensitive) in BOTH BOOT_OK success
+## paths and exits 1 if found, so a regressed non-fatal self-test now turns
+## the boot test red instead of silently PASSING.  Chose the "self-test
+## failed" marker over raw "FAIL:"/"WARNING:" because the latter have
+## legitimate hits in a passing log — "[drm-atomic] check FAIL: CRTC 9999
+## not found" (intentional negative tests) and "[lockdep] WARNING:
+## potential deadlock" (a deliberately-triggered detector) — which would
+## false-positive.  Verified: real passing log stays green; synthetic
+## "WARNING: ProcFs self-test failed" and "[hpet] WARNING: Self-test
+## failed" logs both correctly flag red.  (You may still grep the log
+## manually, but the harness now enforces it automatically.)
 ##
 ## FOLLOW-UP (2026-06-11): real /proc/<pid>/io — do NOT back it with taskstats
 ## /proc/<pid>/io (rchar/wchar/syscr/syscw/read_bytes/write_bytes/

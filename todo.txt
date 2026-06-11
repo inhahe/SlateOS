@@ -2097,7 +2097,30 @@
 ##     A future tick may broaden the grep (smaller seed literals, String-seeded
 ##     fixtures like fake device/interface names) to catch any fabricator that
 ##     slipped past the large-literal filter, but no further large-literal
-##     fabricators remain. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     fabricators remain. UPDATE 2026-06-11: ran the broadened String-seeded
+##     scan over fs/*.rs init_defaults bodies. hwmonitor was a fabricator that
+##     the large-literal filter missed (its seed values 45_000/1200/38_000/
+##     32_000/12_050 are sensor readings, not the ..._000_000 signature):
+##     init_defaults seeded 5 FAKE sensor readings (CPU Temp 45.0°C, CPU Fan
+##     1200 RPM, GPU Temp 38.0°C, System Temp 32.0°C, +12V Rail 12.050V) across
+##     3 invented components, surfaced via /proc/hwmonitor + the `hwmonitor`
+##     list view as if real. FIXED via empty-init (case a): no components/
+##     sensors until a real sensor driver registers them via the existing
+##     add_component/add_sensor/update_sensor API; values couldn't be zeroed
+##     (a temp sensor at 0 reads as fabricated "0.0°C", a fan at 0 RPM trips a
+##     false Critical alert) so empty is the only truthful state; self_test now
+##     builds fixtures via the real API and is residue-free. makes fifty-nine.
+##     DEFERRED PROPER FIX: CPU package temp IS available in-kernel via the
+##     MSR-backed crate::thermal (thermal::info().current_temp) which has its
+##     own truthful path; a future userspace hwmon driver or a thin in-kernel
+##     bridge with a periodic update_sensor hook could register a "CPU Temp"
+##     sensor fed live from thermal::info(). NOT done now: hwmonitor stores a
+##     static snapshot not a live source, so a read-through needs an update hook
+##     that doesn't exist and would duplicate /proc/thermal. The String-seeded
+##     scan's other high-hit files (mmtune/schedtune/fstune/locale/timezone/
+##     defaultapps/netsettings/pkgmgr/useracct/fontmgr/bootcfg/autostart/etc.)
+##     are SETTINGS modules seeding LEGITIMATE config defaults — left alone.
+##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional

@@ -281,17 +281,44 @@ fn add_sensor_inner(
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Initialise the hardware monitor with default components and sensors.
+/// Initialise an **empty** hardware monitor — no components, no sensors.
 ///
-/// Creates CPU (temp + fan), GPU (temp), and Motherboard (temp + voltage)
-/// components.  Safe to call multiple times — subsequent calls are no-ops.
+/// Seeds an empty registry.  Components and sensors appear only when a real
+/// sensor driver registers them via [`add_component`]/[`add_sensor`] and feeds
+/// readings via [`update_sensor`]; until that wiring exists, `/proc/hwmonitor`
+/// and the `hwmonitor` kshell command report an empty monitor (zero sensors,
+/// zero readings) rather than fabricated values — the kernel's hard "never
+/// invent data in procfs" rule.  Safe to call multiple times — subsequent
+/// calls are no-ops.
+///
+/// (Previously this seeded five FABRICATED sensor readings — CPU Temp 45.0 °C,
+/// CPU Fan 1200 RPM, GPU Temp 38.0 °C, System Temp 32.0 °C, +12 V Rail 12.050 V
+/// across three invented components — which `/proc/hwmonitor`, the `hwmonitor`
+/// list view, and the per-sensor query then displayed as if they were real
+/// hardware sensor readings.  No sensor driver calls the record API: hardware
+/// sensors (SuperIO fan/voltage, ACPI thermal zones, GPU temps) are userspace
+/// drivers under the microkernel design and are not yet wired.  The values
+/// could not simply be zeroed either — a temperature sensor at 0 reads as a
+/// fabricated "0.0 °C" and a fan at 0 RPM would trip a false Critical alert —
+/// so the only truthful state is an empty registry.  The self-test now builds
+/// its own fixtures via the real API; see [`self_test`].
+///
+/// DEFERRED PROPER FIX: CPU *package* temperature IS available in-kernel via the
+/// MSR-backed `crate::thermal` module (`thermal::info().current_temp`), which
+/// has its own truthful path.  A future userspace hwmon driver — or a thin
+/// in-kernel bridge with a periodic `update_sensor` hook — could register a
+/// "CPU Temp" sensor here and feed it live from `thermal::info()` to give a
+/// unified sensor view.  That is intentionally NOT done now: hwmonitor stores a
+/// static snapshot rather than a live source, so a read-through would require a
+/// periodic-update hook that does not yet exist and would duplicate the data
+/// `crate::thermal` already exposes.  See todo.txt.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {
         return;
     }
 
-    let mut state = State {
+    *guard = Some(State {
         sensors: Vec::new(),
         components: Vec::new(),
         alerts: Vec::new(),
@@ -300,59 +327,7 @@ pub fn init_defaults() {
         total_readings: 0,
         total_alerts: 0,
         ops: 0,
-    };
-
-    // --- CPU ---
-    let cpu_id = state.next_component_id;
-    state.next_component_id += 1;
-    state.components.push(HwComponent {
-        id: cpu_id,
-        name: String::from("CPU"),
-        component_type: String::from("CPU"),
-        sensors: Vec::new(),
     });
-
-    // CPU Temperature: 45.0 °C, warn at 85 °C, critical at 100 °C
-    let _ = add_sensor_inner(&mut state, cpu_id, "CPU Temp", SensorType::Temperature, 45_000, 85_000, 100_000);
-    // CPU Fan: 1200 RPM, warn below 500 RPM, critical below 300 RPM
-    let _ = add_sensor_inner(&mut state, cpu_id, "CPU Fan", SensorType::FanSpeed, 1200, 500, 300);
-
-    // --- GPU ---
-    let gpu_id = state.next_component_id;
-    state.next_component_id += 1;
-    state.components.push(HwComponent {
-        id: gpu_id,
-        name: String::from("GPU"),
-        component_type: String::from("GPU"),
-        sensors: Vec::new(),
-    });
-
-    // GPU Temperature: 38.0 °C (same thresholds as CPU)
-    let _ = add_sensor_inner(&mut state, gpu_id, "GPU Temp", SensorType::Temperature, 38_000, 85_000, 100_000);
-
-    // --- Motherboard ---
-    let mb_id = state.next_component_id;
-    state.next_component_id += 1;
-    state.components.push(HwComponent {
-        id: mb_id,
-        name: String::from("Motherboard"),
-        component_type: String::from("Motherboard"),
-        sensors: Vec::new(),
-    });
-
-    // System Temperature: 32.0 °C
-    let _ = add_sensor_inner(&mut state, mb_id, "System Temp", SensorType::Temperature, 32_000, 85_000, 100_000);
-    // +12 V rail: 12.050 V (warn < 11.400 V, critical < 10.800 V — stored in millivolts).
-    // Voltage rails are *low* bad like fans? No — spec says only FanSpeed uses
-    // below-threshold logic.  For voltage, above-threshold is bad.  But for a
-    // 12 V rail the danger is *under*-voltage.  We model the thresholds as
-    // "value > threshold triggers" per spec; the caller sets thresholds that
-    // make sense for over-voltage monitoring.  Under-voltage monitoring can
-    // be done by the caller comparing value < some floor.  The spec is explicit:
-    // only FanSpeed uses inverted logic.
-    let _ = add_sensor_inner(&mut state, mb_id, "+12V Rail", SensorType::Voltage, 12_050, 11_400, 10_800);
-
-    *guard = Some(state);
 }
 
 /// Register a new hardware component.
@@ -535,86 +510,100 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("hwmonitor::self_test() — running tests...");
+    // Reset to a clean, EMPTY registry and build every fixture via the real
+    // add_component/add_sensor/update_sensor API.  init_defaults no longer
+    // seeds fabricated sensors, so the test must construct its own component
+    // and sensors; resetting first guarantees the counts asserted below are
+    // exact and that a `hwmonitor test` run never leaves fixtures resident in
+    // the live /proc/hwmonitor registry.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default components created.
-    let comps = list_components();
-    assert_eq!(comps.len(), 3);
-    crate::serial_println!("  [1/11] default components: OK");
+    // 1: Empty after init — no fabricated components or sensors.
+    assert_eq!(list_components().len(), 0);
+    assert_eq!(list_sensors().len(), 0);
+    let (sc0, cc0, rd0, al0, _o0) = stats();
+    assert_eq!((sc0, cc0, rd0, al0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/11] empty init: OK");
 
-    // 2: Default sensors created (2 CPU + 1 GPU + 2 MB = 5).
-    let sensors = list_sensors();
-    assert_eq!(sensors.len(), 5);
-    crate::serial_println!("  [2/11] default sensors: OK");
+    // 2: Register a CPU component and two sensors via the real API.
+    let cpu_id = add_component("CPU", "CPU").expect("add cpu");
+    let cpu_temp_id =
+        add_sensor(cpu_id, "CPU Temp", SensorType::Temperature, 85_000, 100_000).expect("add temp");
+    let cpu_fan_id =
+        add_sensor(cpu_id, "CPU Fan", SensorType::FanSpeed, 500, 300).expect("add fan");
+    assert_eq!(list_components().len(), 1);
+    assert_eq!(list_sensors().len(), 2);
+    crate::serial_println!("  [2/11] register component + sensors: OK");
 
-    // 3: CPU temp sensor has correct initial value (45 000 millidegrees).
-    let cpu_temp = sensors.iter().find(|s| s.name == "CPU Temp").expect("cpu temp");
-    assert_eq!(cpu_temp.value, 45_000);
+    // 3: A freshly-registered sensor starts at value 0 — no reading recorded
+    //    yet, which is honest "no data" rather than a fabricated measurement.
+    let cpu_temp = get_sensor(cpu_temp_id).expect("get temp");
+    assert_eq!(cpu_temp.value, 0);
     assert_eq!(cpu_temp.sensor_type, SensorType::Temperature);
     assert_eq!(cpu_temp.status, SensorStatus::Normal);
-    crate::serial_println!("  [3/11] CPU temp initial value: OK");
+    crate::serial_println!("  [3/11] zeroed sensor: OK");
 
     // 4: Update sensor — normal value keeps Normal status.
-    let result = update_sensor(cpu_temp.id, 60_000).expect("update normal");
+    let result = update_sensor(cpu_temp_id, 60_000).expect("update normal");
     assert!(result.is_none());
-    let s = get_sensor(cpu_temp.id).expect("get");
+    let s = get_sensor(cpu_temp_id).expect("get");
     assert_eq!(s.value, 60_000);
     assert_eq!(s.status, SensorStatus::Normal);
     crate::serial_println!("  [4/11] update sensor normal: OK");
 
     // 5: Update sensor — warning threshold (temperature > 85 000).
-    let result = update_sensor(cpu_temp.id, 87_000).expect("update warn");
+    let result = update_sensor(cpu_temp_id, 87_000).expect("update warn");
     assert_eq!(result, Some(false));
-    let s = get_sensor(cpu_temp.id).expect("get");
-    assert_eq!(s.status, SensorStatus::Warning);
+    assert_eq!(get_sensor(cpu_temp_id).expect("get").status, SensorStatus::Warning);
     crate::serial_println!("  [5/11] temperature warning: OK");
 
     // 6: Update sensor — critical threshold (temperature > 100 000).
-    let result = update_sensor(cpu_temp.id, 105_000).expect("update crit");
+    let result = update_sensor(cpu_temp_id, 105_000).expect("update crit");
     assert_eq!(result, Some(true));
-    let s = get_sensor(cpu_temp.id).expect("get");
-    assert_eq!(s.status, SensorStatus::Critical);
+    assert_eq!(get_sensor(cpu_temp_id).expect("get").status, SensorStatus::Critical);
     crate::serial_println!("  [6/11] temperature critical: OK");
 
     // 7: Fan speed — inverted thresholds (low = bad).
-    let cpu_fan = sensors.iter().find(|s| s.name == "CPU Fan").expect("cpu fan");
-    // Normal: 1200 RPM is above warning=500, so Normal.
-    assert_eq!(cpu_fan.status, SensorStatus::Normal);
-    // Drop below warning threshold.
-    let result = update_sensor(cpu_fan.id, 400).expect("fan warn");
+    let result = update_sensor(cpu_fan_id, 1_200).expect("fan normal");
+    assert!(result.is_none()); // 1200 RPM >= warning 500 → Normal.
+    let result = update_sensor(cpu_fan_id, 400).expect("fan warn");
     assert_eq!(result, Some(false));
-    // Drop below critical threshold.
-    let result = update_sensor(cpu_fan.id, 200).expect("fan crit");
+    let result = update_sensor(cpu_fan_id, 200).expect("fan crit");
     assert_eq!(result, Some(true));
     crate::serial_println!("  [7/11] fan speed inverted thresholds: OK");
 
-    // 8: Min/max tracking.
-    let s = get_sensor(cpu_temp.id).expect("get");
-    assert_eq!(s.min_value, 45_000); // original value
-    assert_eq!(s.max_value, 105_000); // critical update
+    // 8: Min/max tracking — min stays at the registration value (0), max rises
+    //    to the highest reading seen.
+    let s = get_sensor(cpu_temp_id).expect("get");
+    assert_eq!(s.min_value, 0);
+    assert_eq!(s.max_value, 105_000);
     crate::serial_println!("  [8/11] min/max tracking: OK");
 
-    // 9: Alerts generated.
+    // 9: Alerts generated — exactly 4 (temp warn + crit, fan warn + crit).
     let alerts = get_alerts(10);
-    assert!(alerts.len() >= 4); // 1 warn + 1 crit for temp, 1 warn + 1 crit for fan
-    assert!(alerts.first().expect("first alert").is_critical);
+    assert_eq!(alerts.len(), 4);
+    assert!(alerts.first().expect("first alert").is_critical); // newest first = fan crit
     crate::serial_println!("  [9/11] alerts: OK");
 
     // 10: Clear alerts.
     let count = clear_alerts();
-    assert!(count >= 4);
-    let alerts = get_alerts(10);
-    assert!(alerts.is_empty());
+    assert_eq!(count, 4);
+    assert!(get_alerts(10).is_empty());
     crate::serial_println!("  [10/11] clear alerts: OK");
 
-    // 11: Stats reflect activity.
+    // 11: Stats — exact totals: 2 sensors, 1 component, 6 readings, 4 alerts.
     let (sensor_count, component_count, total_readings, total_alerts, ops) = stats();
-    assert_eq!(sensor_count, 5);
-    assert_eq!(component_count, 3);
-    assert!(total_readings >= 4);
-    assert!(total_alerts >= 4);
+    assert_eq!(sensor_count, 2);
+    assert_eq!(component_count, 1);
+    assert_eq!(total_readings, 6); // 1 temp-normal + 2 temp-alert + 3 fan updates.
+    assert_eq!(total_alerts, 4);
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/hwmonitor registry.
+    *STATE.lock() = None;
 
     crate::serial_println!("hwmonitor::self_test() — all 11 tests passed");
 }

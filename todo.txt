@@ -311,11 +311,17 @@
 ##                    total_cancelled 15. Full real API register/enqueue/activate/
 ##                    complete/cancel already present; fix emptied init_defaults
 ##                    and rebuilt self_test residue-free, wired into boot.)
+##   - numastat.rs   (fixed 2026-06-11; was: fake NUMA nodes 0/1, total_memory
+##                    8 GiB each, local_allocs 50000, accesses 1_000_000; seeded
+##                    2x2 distance matrix; aggregate total_allocs 87000,
+##                    total_remote 7000, total_migrations 250. Added
+##                    register_node(id, total_memory, cpus) + set_distance(from,
+##                    to, dist) so the memory subsystem can register real ACPI
+##                    SRAT/SLIT topology with zeroed counters; emptied
+##                    init_defaults and rebuilt self_test with exact assertions
+##                    (incl. exact 50% remote pct, 135ns blended latency), wired
+##                    into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - numastat.rs   (fake NUMA nodes 0/1, total_memory 8 GiB each, local_allocs
-##                    50000, accesses 1_000_000; distances seeded; aggregate
-##                    total_allocs 87000. Per-node table — likely needs a
-##                    register_node(id, ...) API like migstat's register_cpu.)
 ##   - cpustat.rs    (fake per-CPU time breakdowns cpu0..3, times_ns in the
 ##                    trillions, context_switches 35M–50M; aggregate
 ##                    total_context_switches 170M. Per-CPU table — add register_cpu.)

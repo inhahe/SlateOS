@@ -1173,6 +1173,13 @@ extern "C" fn kernel_main() -> ! {
     // automated coverage it previously lacked (it was only reachable via the
     // `wqstat test` kshell subcommand).
     fs::wqstat::self_test();
+    // numastat backs /proc/numastat (per-NUMA-node memory placement stats);
+    // like its siblings the self-test now builds fixtures via the real
+    // register_node/set_distance/record_* API and resets the table afterward
+    // (leaving no fabricated nodes), so it is safe at boot and gives the module
+    // automated coverage it previously lacked (it was only reachable via the
+    // `numastat test` kshell subcommand).
+    fs::numastat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

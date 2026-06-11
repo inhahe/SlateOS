@@ -98,17 +98,33 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the userfaultfd statistics state.
+///
+/// Starts with no registered handlers and zero fault/resolve/copy/zero
+/// totals. A handler is added through [`register`] when a process actually
+/// creates a userfaultfd, removed through [`unregister`], and its fault and
+/// resolution counters advance only through real [`record_fault`] /
+/// [`record_resolve`] calls. The `/proc/userfault` generator and the
+/// `userfault` kshell command surface the per-process table (and
+/// [`per_process`]) as if it reflects real userfaultfd registrations, so
+/// seeding it with a phantom handler would be fabricated procfs data — it
+/// would claim a process is handling page faults in userspace when nothing
+/// registered a uffd.
+///
+/// (Previously this seeded one fictional handler — pid 1 with 5 registered
+/// ranges, 100,000 missing / 50,000 write-protect / 10,000 minor faults,
+/// 160,000 resolves, 100,000 copy pages and 60,000 zero pages — plus global
+/// totals of 160,000 faults / 160,000 resolves / 100,000 copies / 60,000
+/// zeros.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        handlers: alloc::vec![
-            UffdStats { pid: 1, registered_ranges: 5, faults_missing: 100_000, faults_wp: 50_000, faults_minor: 10_000, resolves: 160_000, total_resolve_ns: 800_000_000, max_resolve_ns: 50_000, copy_pages: 100_000, zero_pages: 60_000 },
-        ],
-        total_faults: 160_000,
-        total_resolves: 160_000,
-        total_copies: 100_000,
-        total_zeros: 60_000,
+        handlers: Vec::new(),
+        total_faults: 0,
+        total_resolves: 0,
+        total_copies: 0,
+        total_zeros: 0,
         ops: 0,
     });
 }
@@ -187,57 +203,74 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("userfault::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live handler table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_process().len(), 1);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no phantom handlers, zero totals.
+    assert_eq!(per_process().len(), 0);
+    let (h0, f0, r0, c0, z0, _) = stats();
+    assert_eq!((h0, f0, r0, c0, z0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
+    // 2: Register — handler appears zeroed; duplicate is AlreadyExists.
     register(200).expect("register");
+    let h = per_process().into_iter().find(|h| h.pid == 200).expect("find");
+    assert_eq!((h.registered_ranges, h.faults_missing, h.faults_wp, h.faults_minor), (0, 0, 0, 0));
+    assert_eq!((h.resolves, h.copy_pages, h.zero_pages), (0, 0, 0));
+    assert_eq!(per_process().len(), 1);
     assert!(register(200).is_err());
-    assert_eq!(per_process().len(), 2);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Fault.
-    record_fault(200, FaultType::Missing).expect("fault");
-    let h = per_process().iter().find(|h| h.pid == 200).cloned().unwrap();
-    assert_eq!(h.faults_missing, 1);
+    // 3: Faults — each fault type lands in its own counter; global total tracks.
+    record_fault(200, FaultType::Missing).expect("missing");
+    record_fault(200, FaultType::WriteProtect).expect("wp");
+    record_fault(200, FaultType::Minor).expect("minor");
+    let h = per_process().into_iter().find(|h| h.pid == 200).expect("p3");
+    assert_eq!((h.faults_missing, h.faults_wp, h.faults_minor), (1, 1, 1));
+    assert_eq!(stats().1, 3); // total_faults
     crate::serial_println!("  [3/8] fault: OK");
 
-    // 4: Resolve copy.
+    // 4: Resolve copy — resolves + copy_pages advance; global copy/resolve too.
     record_resolve(200, 5000, true).expect("resolve_copy");
-    let h = per_process().iter().find(|h| h.pid == 200).cloned().unwrap();
-    assert_eq!(h.resolves, 1);
-    assert_eq!(h.copy_pages, 1);
+    let h = per_process().into_iter().find(|h| h.pid == 200).expect("p4");
+    assert_eq!((h.resolves, h.copy_pages, h.total_resolve_ns), (1, 1, 5000));
+    let (_, _, resolves, copies, _, _) = stats();
+    assert_eq!((resolves, copies), (1, 1));
     crate::serial_println!("  [4/8] resolve copy: OK");
 
-    // 5: Resolve zero.
+    // 5: Resolve zero — zero_pages advance; global zero/resolve too.
     record_resolve(200, 2000, false).expect("resolve_zero");
-    let h = per_process().iter().find(|h| h.pid == 200).cloned().unwrap();
-    assert_eq!(h.zero_pages, 1);
+    let h = per_process().into_iter().find(|h| h.pid == 200).expect("p5");
+    assert_eq!((h.zero_pages, h.resolves), (1, 2));
+    let (_, _, resolves, _, zeros, _) = stats();
+    assert_eq!((resolves, zeros), (2, 1));
     crate::serial_println!("  [5/8] resolve zero: OK");
 
-    // 6: Max latency.
-    let h = per_process().iter().find(|h| h.pid == 200).cloned().unwrap();
+    // 6: Max latency holds the larger of the two resolve durations (5000 > 2000).
+    let h = per_process().into_iter().find(|h| h.pid == 200).expect("p6");
     assert_eq!(h.max_resolve_ns, 5000);
     crate::serial_println!("  [6/8] max latency: OK");
 
-    // 7: Unregister.
+    // 7: Unregister — list empties; double/unknown unregister + unknown
+    //    fault/resolve all NotFound.
     unregister(200).expect("unregister");
-    assert_eq!(per_process().len(), 1);
+    assert_eq!(per_process().len(), 0);
     assert!(unregister(200).is_err());
+    assert!(record_fault(200, FaultType::Missing).is_err());
+    assert!(record_resolve(200, 0, true).is_err());
     crate::serial_println!("  [7/8] unregister: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above. Global totals are
+    //    cumulative and not decremented on unregister: 3 faults, 2 resolves,
+    //    1 copy, 1 zero.
     let (handlers, faults, resolves, copies, zeros, ops) = stats();
-    assert_eq!(handlers, 1);
-    assert!(faults > 160_000);
-    assert!(resolves > 160_000);
-    assert!(copies > 100_000);
-    assert!(zeros > 60_000);
+    assert_eq!((handlers, faults, resolves, copies, zeros), (0, 3, 2, 1, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("userfault::self_test() — all 8 tests passed");
 }

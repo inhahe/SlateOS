@@ -1703,6 +1703,21 @@ extern "C" fn kernel_main() -> ! {
     // math, level→index mapping) and resets the table afterward, so it is safe
     // at boot.
     fs::cpucache::self_test();
+    // userfault backs /proc/userfault (userfaultfd diagnostics: per-process
+    // registered ranges, missing/write-protect/minor fault counts, resolves,
+    // total/max resolve latency, copy/zero page counts, plus global fault/
+    // resolve/copy/zero totals).  Its init_defaults() previously seeded one
+    // fictional handler — pid 1 with 5 ranges, 100K missing / 50K wp / 10K minor
+    // faults, 160K resolves, 100K copy pages and 60K zero pages — plus global
+    // totals of 160K faults / 160K resolves / 100K copies / 60K zeros, surfaced
+    // as if a process were actually handling page faults in userspace.  That
+    // demo data was removed; the handler list now fills only when a process
+    // really creates a userfaultfd via register().  The residue-free self_test
+    // builds its fixtures via the real API with exact assertions (per-fault-type
+    // counters, copy vs zero resolve accounting, max-latency tracking, cumulative
+    // global totals not decremented on unregister) and resets the table
+    // afterward, so it is safe at boot.
+    fs::userfault::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

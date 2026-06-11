@@ -1050,6 +1050,25 @@
 ##                    PROPER FIX DEFERRED: a CPUID cache-topology probe at startup
 ##                    should call cpucache::set_geometry() for each level — wire
 ##                    that when CPUID cache enumeration exists.)
+##   - userfault.rs  (fixed 2026-06-11; fs/userfault.rs statistics module backing
+##                    /proc/userfault and the `userfault` kshell command; was: one
+##                    fictional handler — pid 1 with 5 registered ranges, 100K
+##                    missing / 50K wp / 10K minor faults, 160K resolves, 100K copy
+##                    pages and 60K zero pages — plus global totals of 160K faults
+##                    / 160K resolves / 100K copies / 60K zeros, surfaced as if a
+##                    process were actually handling page faults in userspace.
+##                    Case (a): register/unregister/record_fault/record_resolve
+##                    already exist → init_defaults simply emptied (no handlers,
+##                    zero totals). Rebuilt self_test residue-free with exact
+##                    assertions: register adds a zeroed handler, duplicate
+##                    AlreadyExists, each fault type lands in its own counter +
+##                    global total, copy vs zero resolve accounting, max-latency
+##                    holds the larger duration, unregister empties + double/
+##                    unknown unregister/fault/resolve NotFound, cumulative global
+##                    totals not decremented on unregister (3 faults / 2 resolves /
+##                    1 copy / 1 zero). NOTE: userfault was NOT previously wired
+##                    into the boot self-test path — now added. /proc/userfault now
+##                    105 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1063,14 +1082,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache (just fixed) were thirty. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault (just fixed) were thirty-one. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     userfault. Remaining flagged names incl.:
-##     userfault, iomem, pgtable, memdiag, sysuptime,
+##     iomem. Remaining flagged names incl.:
+##     iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify. SETTINGS-looking names in that set

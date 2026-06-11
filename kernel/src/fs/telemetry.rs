@@ -126,40 +126,33 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** telemetry registry.
+///
+/// Seeds NO metrics and zero samples.  Metrics are registered through
+/// [`register_metric`] and fed data through [`record`] as subsystems publish
+/// their telemetry; until that wiring exists, `/proc/telemetry` and the
+/// `telemetry` kshell command report an empty registry rather than fabricated
+/// measurements — the kernel's hard "never invent data in procfs" rule.
+/// `collection_enabled` (true) and `collection_interval_ms` (5000) are real
+/// settings and are preserved.
+///
+/// (Previously this seeded four fabricated metrics with invented OBSERVED values —
+/// `cpu.usage_pct` 15%, `mem.used_mb` 512, `disk.iops` 1200, `net.rx_bytes`
+/// 1048576 — plus a fabricated total_samples of 4, which `/proc/telemetry` and the
+/// `list_metrics`/`by_category` views then displayed as if they were real measured
+/// system telemetry.  None of [`record`]/[`register_metric`]'s callers are real —
+/// no subsystem publishes telemetry yet — so the registry is entirely unwired; see
+/// the DEFERRED PROPER FIX note in todo.txt for wiring real producers (cpu/mem/
+/// disk/net) to `record`.  The self-test now builds its own fixtures via the real
+/// API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        metrics: alloc::vec![
-            Metric {
-                name: String::from("cpu.usage_pct"), metric_type: MetricType::Gauge,
-                category: MetricCategory::System, value: 15, min_value: 0,
-                max_value: 100, sample_count: 1, total_sum: 15,
-                last_updated_ns: now, unit: String::from("%"), enabled: true,
-            },
-            Metric {
-                name: String::from("mem.used_mb"), metric_type: MetricType::Gauge,
-                category: MetricCategory::Memory, value: 512, min_value: 256,
-                max_value: 1024, sample_count: 1, total_sum: 512,
-                last_updated_ns: now, unit: String::from("MB"), enabled: true,
-            },
-            Metric {
-                name: String::from("disk.iops"), metric_type: MetricType::Rate,
-                category: MetricCategory::Disk, value: 1200, min_value: 0,
-                max_value: 50000, sample_count: 1, total_sum: 1200,
-                last_updated_ns: now, unit: String::from("ops/s"), enabled: true,
-            },
-            Metric {
-                name: String::from("net.rx_bytes"), metric_type: MetricType::Counter,
-                category: MetricCategory::Network, value: 1048576, min_value: 0,
-                max_value: 1048576, sample_count: 1, total_sum: 1048576,
-                last_updated_ns: now, unit: String::from("bytes"), enabled: true,
-            },
-        ],
+        metrics: Vec::new(),
         collection_enabled: true,
         collection_interval_ms: 5000,
-        total_samples: 4,
+        total_samples: 0,
         total_exports: 0,
         ops: 0,
     });
@@ -277,34 +270,44 @@ pub fn stats() -> (usize, u64, u64, bool, u64) {
 
 pub fn self_test() {
     crate::serial_println!("telemetry::self_test() — running tests...");
+    // Start from a clean slate so the fixtures built below can never leak into
+    // the live /proc/telemetry registry (this self-test now runs at boot).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default metrics.
-    assert_eq!(list_metrics().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated metrics.
+    assert_eq!(list_metrics().len(), 0);
+    let (c0, s0, e0, en0, _o0) = stats();
+    assert_eq!((c0, s0, e0), (0, 0, 0));
+    assert!(en0); // collection enabled by default.
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Query metric.
+    // 2: Register a gauge metric — starts at zero with no samples.
+    register_metric("cpu.usage_pct", MetricType::Gauge, MetricCategory::System, "%").expect("reg");
     let m = query("cpu.usage_pct").expect("query");
     assert_eq!(m.metric_type, MetricType::Gauge);
-    assert_eq!(m.value, 15);
-    crate::serial_println!("  [2/8] query: OK");
+    assert_eq!(m.value, 0);
+    assert_eq!(m.sample_count, 0);
+    crate::serial_println!("  [2/8] register gauge: OK");
 
-    // 3: Record data.
+    // 3: Record a gauge data point — value replaces, sample_count rises.
     record("cpu.usage_pct", 42).expect("record");
     let m = query("cpu.usage_pct").expect("query2");
     assert_eq!(m.value, 42);
-    assert_eq!(m.sample_count, 2);
-    crate::serial_println!("  [3/8] record: OK");
+    assert_eq!(m.sample_count, 1);
+    crate::serial_println!("  [3/8] record gauge: OK");
 
-    // 4: Counter increment.
-    record("net.rx_bytes", 4096).expect("counter");
+    // 4: Counter accumulates across data points.
+    register_metric("net.rx_bytes", MetricType::Counter, MetricCategory::Network, "bytes").expect("reg2");
+    record("net.rx_bytes", 4096).expect("counter1");
+    record("net.rx_bytes", 1024).expect("counter2");
     let m = query("net.rx_bytes").expect("query3");
-    assert_eq!(m.value, 1048576 + 4096);
+    assert_eq!(m.value, 4096 + 1024);
     crate::serial_println!("  [4/8] counter: OK");
 
-    // 5: Register custom.
-    register_metric("custom.test", MetricType::Gauge, MetricCategory::Custom, "units").expect("reg");
-    assert_eq!(list_metrics().len(), 5);
+    // 5: Register custom — duplicate registration is rejected.
+    register_metric("custom.test", MetricType::Gauge, MetricCategory::Custom, "units").expect("reg3");
+    assert_eq!(list_metrics().len(), 3);
     assert!(register_metric("custom.test", MetricType::Gauge, MetricCategory::Custom, "").is_err());
     crate::serial_println!("  [5/8] register: OK");
 
@@ -315,19 +318,22 @@ pub fn self_test() {
     assert_eq!(custom.len(), 1);
     crate::serial_println!("  [6/8] by_category: OK");
 
-    // 7: Export.
+    // 7: Export — returns all metrics, bumps the export count.
     let exported = export().expect("export");
-    assert_eq!(exported.len(), 5);
+    assert_eq!(exported.len(), 3);
     crate::serial_println!("  [7/8] export: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact totals (3 metrics, 3 samples, 1 export).
     let (count, samples, exports, enabled, ops) = stats();
-    assert_eq!(count, 5);
-    assert!(samples > 0);
-    assert!(exports >= 1);
+    assert_eq!(count, 3);
+    assert_eq!(samples, 3);
+    assert_eq!(exports, 1);
     assert!(enabled);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the boot self-test leaves no fixtures behind in /proc/telemetry.
+    *STATE.lock() = None;
 
     crate::serial_println!("telemetry::self_test() — all 8 tests passed");
 }

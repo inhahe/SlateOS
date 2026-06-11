@@ -2109,6 +2109,21 @@ extern "C" fn kernel_main() -> ! {
     // API with exact assertions and resets STATE afterward so nothing leaks into
     // /proc/ipclog.
     fs::ipclog::self_test();
+    // telemetry is the kernel-side metric registry behind /proc/telemetry and the
+    // `telemetry` kshell command.  Its init_defaults() previously seeded four
+    // FABRICATED metrics with invented OBSERVED values — cpu.usage_pct 15%,
+    // mem.used_mb 512, disk.iops 1200, net.rx_bytes 1048576 — plus a fabricated
+    // total_samples of 4, which /proc/telemetry and the list_metrics/by_category
+    // views displayed as if real measured telemetry.  record()/register_metric()
+    // have NO real callers — no subsystem publishes telemetry yet — so the registry
+    // is entirely unwired.  telemetry now seeds an EMPTY registry (metrics arrive
+    // via register_metric + record once producers wire it; collection_enabled /
+    // interval are real settings, preserved; see the DEFERRED PROPER FIX note in
+    // todo.txt).  This self_test (never wired before, and whose old version relied
+    // on the fabricated metrics with no end-reset) builds its own fixtures via the
+    // real API with exact assertions and resets STATE afterward so nothing leaks
+    // into /proc/telemetry.
+    fs::telemetry::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

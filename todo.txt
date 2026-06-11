@@ -1952,6 +1952,37 @@
 ##                    the channel_id → name mapping must come from the real channel
 ##                    registry. Do as a focused task once the IPC layer exposes a
 ##                    hot-path-safe trace hook. Until then the empty log is honest.
+##   - telemetry (2026-06-11): FIXED — fabrication case (a) (full register_metric/
+##                    record/remove/export API already existed). Kernel-side metric
+##                    registry behind /proc/telemetry and the `telemetry` kshell
+##                    command. init_defaults() FABRICATED four metrics with invented
+##                    OBSERVED values — cpu.usage_pct 15%, mem.used_mb 512, disk.iops
+##                    1200, net.rx_bytes 1048576 — plus a fabricated total_samples of
+##                    4, which /proc/telemetry and list_metrics/by_category displayed
+##                    as if real measured telemetry. record()/register_metric() have NO
+##                    real callers (no subsystem publishes telemetry); procfs/kshell
+##                    only read or run interactive subcommands. Fixed: init_defaults()
+##                    now seeds an EMPTY registry (no metrics, zero samples;
+##                    collection_enabled true + interval 5000ms kept as real settings).
+##                    Also: the self_test was NEVER wired into boot AND relied on the
+##                    fabricated metrics (asserted len==4, cpu value==15) with no
+##                    end-reset — so wiring it would have leaked fixtures into
+##                    /proc/telemetry. Rewrote it residue-free (clears STATE at start
+##                    AND end) with EXACT assertions (empty init, register→0 value/0
+##                    samples, gauge record→42, counter accumulates 4096+1024, dup
+##                    rejected, by_category, export bumps count, final 3 metrics / 3
+##                    samples / 1 export) and WIRED it into the boot self-test path.
+##                    /proc/telemetry now reports an empty registry (truthful).
+##                    DEFERRED PROPER FIX: the proper fix is for real producers to
+##                    register and feed metrics — cpu usage from sched, mem from
+##                    crate::mm, disk iops from the block layer, net bytes from the NIC
+##                    drivers — by calling register_metric at init and record() on each
+##                    collection interval. Deferred because: (1) there is no periodic
+##                    telemetry collector task yet (collection_interval_ms is stored but
+##                    nothing consumes it), and (2) each producer needs a real sampled
+##                    source (cpu% needs delta sampling, etc.) that isn't centrally
+##                    exposed. Do as a focused task once a collector task and the
+##                    per-source sampling exist. Until then the empty registry is honest.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1965,7 +1996,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog (just fixed) were fifty-four. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog + telemetry (just fixed) were fifty-five. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

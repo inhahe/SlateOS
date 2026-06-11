@@ -281,12 +281,25 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("sysmaint::self_test() — running tests...");
+    // Start from a clean default schedule so the assertions below are exact.
+    // This self_test runs tasks (run_task / run_pending), which bumps run_count
+    // and marks tasks Completed; without resetting afterwards it would leave
+    // every task looking as though maintenance had actually executed, which
+    // `sysmaint show` would then report as real run history.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default tasks.
+    // 1: Default tasks — the seeded schedule is legitimate config (default
+    //    intervals), but every activity counter starts honestly zeroed.
     let tasks = list_tasks();
     assert_eq!(tasks.len(), 10);
     assert_eq!(tasks[0].task_type, TaskType::DiskTrim);
+    for t in &tasks {
+        assert_eq!(t.status, TaskStatus::Idle);
+        assert_eq!((t.last_run_ns, t.last_duration_ms, t.run_count, t.fail_count), (0, 0, 0, 0));
+    }
+    let (_, runs0, fails0, _) = stats();
+    assert_eq!((runs0, fails0), (0, 0));
     crate::serial_println!("  [1/8] default tasks: OK");
 
     // 2: All tasks are due (never run).
@@ -331,5 +344,10 @@ pub fn self_test() {
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave the live state as a clean default schedule (not the fixture state
+    // with tasks marked run), so `sysmaint show` afterwards reports the honest
+    // default config with zeroed run counts rather than fabricated activity.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("sysmaint::self_test() — all 8 tests passed");
 }

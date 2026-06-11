@@ -1165,6 +1165,34 @@
 ##                    report true boot time and real cross-boot session history;
 ##                    until then the HPET-relative boot instant is the honest best
 ##                    approximation and history is empty across boots.
+##   - sysmaint (2026-06-11): AUDITED — LEGITIMATE settings module, init_defaults
+##                    LEFT ALONE (do NOT empty it). Scheduled-maintenance task
+##                    manager. Its init_defaults() seeds 10 default task configs
+##                    (DiskTrim weekly, IndexRebuild daily, UpdateCheck twice
+##                    daily, IntegrityScan/PerformanceTune/BackupVerify monthly,
+##                    etc.) — this is legitimate POLICY/CONFIG (the default
+##                    maintenance schedule), exactly the settings pattern the
+##                    sweep leaves alone, not fabricated observations. Every
+##                    activity counter is honestly zeroed (status Idle,
+##                    last_run_ns/last_duration_ms/run_count/fail_count = 0,
+##                    total_runs/total_failures = 0). The ONE issue fixed: the
+##                    self_test was NOT residue-free — it calls run_task/
+##                    run_pending (which mark tasks Completed and bump run_count),
+##                    and it is reachable on demand via the `sysmaint test` kshell
+##                    subcommand, so afterwards `sysmaint show` would report every
+##                    task as run (runs=1+, status Completed) — fabricated
+##                    maintenance history resident in live state. Made self_test
+##                    residue-free: clears STATE and re-inits the clean default
+##                    schedule at BOTH start and end (a settings module's truthful
+##                    resident state is its default config with zeroed counters,
+##                    not None), and added exact assertions that the seeded
+##                    defaults start with all counters zeroed. NOT wired into boot
+##                    (correctly — it is a config/on-demand module). PROPER FIX
+##                    DEFERRED: run_task() only SIMULATES execution (sets
+##                    last_duration_ms=100, marks Completed) — it does not actually
+##                    invoke fstrim/findex/updatemgr/integrity-scan. Wire each
+##                    TaskType to its real subsystem when those exist; until then
+##                    run_task is a scheduler stub, not a real maintenance run.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1184,10 +1212,12 @@
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     sysmaint. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
-##     timestamp, left functional; see the audit note above.) Remaining flagged
+##     ipcns. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
+##     settings module — default maintenance schedule, left alone; only made its
+##     self_test residue-free. See audit notes above.) Remaining flagged
 ##     names incl.:
-##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
+##     ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed

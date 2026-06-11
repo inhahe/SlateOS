@@ -543,13 +543,24 @@
 ##                    50us→bkt2, 100ns→bkt0, 50ms→bkt5), global-max tracking
 ##                    (preempt does NOT move it), and exact aggregate totals,
 ##                    wired into boot.)
+##   - ttystat.rs    (fixed 2026-06-11; was: three fake TTY rows "tty0" console
+##                    (1MB read / 50MB write / 10k signals), "ttyS0" serial (10MB
+##                    read / 100MB write / 50 overruns), "pts/0" pty (5MB read /
+##                    20MB write / 5k signals) plus invented aggregates
+##                    total_read_bytes 16MB / total_write_bytes 170MB /
+##                    total_signals 15k / total_overruns 50, shown via
+##                    /proc/ttystat and the per_tty view as real terminal I/O.
+##                    Already had a full register/record_read/record_write/
+##                    record_signal/record_overrun/set_buf_used API; just emptied
+##                    init_defaults and rebuilt self_test with exact byte/op
+##                    assertions + NotFound on every record path, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): ttystat,
-##     zramstat. NOTE: some may be SETTINGS modules
-##     seeding legitimate config defaults — verify each is a STATISTICS module
-##     seeding fake OBSERVATIONS before emptying it.)
+##     by grep (init_defaults with alloc::vec!/String::from/push): zramstat.
+##     NOTE: some may be SETTINGS modules seeding legitimate config defaults —
+##     verify each is a STATISTICS module seeding fake OBSERVATIONS before
+##     emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

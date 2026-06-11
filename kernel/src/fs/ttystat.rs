@@ -102,19 +102,35 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** per-TTY statistics table.
+///
+/// Seeds NO TTY devices and zero counters.  Real per-TTY accounting is wired
+/// through [`register`] (one row per TTY the console/serial/pty layer creates)
+/// and the `record_read`/`record_write`/`record_signal`/`record_overrun`/
+/// `set_buf_used` functions; until those are called the table is genuinely empty,
+/// so `/proc/ttystat` and the `ttystat` kshell command report zeros rather than
+/// fabricated numbers — the kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded three fictional TTY rows ("tty0" console: 1MB
+/// read / 50MB write / 500k read ops / 2M write ops / 10k signals; "ttyS0"
+/// serial: 10MB read / 100MB write / 50 overruns; "pts/0" pty: 5MB read / 20MB
+/// write / 5k signals) plus invented aggregate totals (total_read_bytes 16MB,
+/// total_write_bytes 170MB, total_signals 15k, total_overruns 50), which
+/// `/proc/ttystat` (and the `per_tty` view) then displayed as if they were real
+/// measured terminal I/O.  That demo data was removed; the self-test now builds
+/// its own fixtures explicitly via the real API (see [`self_test`]).  The TTY
+/// layer (console, serial driver, pty subsystem) is expected to call [`register`]
+/// when a device is created and the record functions on every read/write/signal/
+/// overrun.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        ttys: alloc::vec![
-            TtyStats { name: String::from("tty0"), tty_type: TtyType::Console, read_bytes: 1_000_000, write_bytes: 50_000_000, read_ops: 500_000, write_ops: 2_000_000, signals_sent: 10_000, overruns: 0, buf_size: 4096, buf_used: 256 },
-            TtyStats { name: String::from("ttyS0"), tty_type: TtyType::Serial, read_bytes: 10_000_000, write_bytes: 100_000_000, read_ops: 5_000_000, write_ops: 10_000_000, signals_sent: 0, overruns: 50, buf_size: 4096, buf_used: 1024 },
-            TtyStats { name: String::from("pts/0"), tty_type: TtyType::Pty, read_bytes: 5_000_000, write_bytes: 20_000_000, read_ops: 1_000_000, write_ops: 3_000_000, signals_sent: 5_000, overruns: 0, buf_size: 4096, buf_used: 512 },
-        ],
-        total_read_bytes: 16_000_000,
-        total_write_bytes: 170_000_000,
-        total_signals: 15_000,
-        total_overruns: 50,
+        ttys: Vec::new(),
+        total_read_bytes: 0,
+        total_write_bytes: 0,
+        total_signals: 0,
+        total_overruns: 0,
         ops: 0,
     });
 }
@@ -209,59 +225,81 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("ttystat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/ttystat must never surface).  Resetting
+    // first clears any residue from a prior `ttystat test` run so the totals
+    // asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_tty().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated TTYs or counters.
+    assert_eq!(per_tty().len(), 0);
+    let (c0, rb0, wb0, s0, o0, _op0) = stats();
+    assert_eq!((c0, rb0, wb0, s0, o0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
-    register("pts/99", TtyType::Pty, 4096).expect("register");
-    assert_eq!(per_tty().len(), 4);
-    assert!(register("pts/99", TtyType::Pty, 4096).is_err());
+    // 2: Register — zeroed counters, type/buf preserved; dup name fails; record
+    // before register fails (no phantom TTY is created).
+    assert!(record_read("pts/0", 1).is_err());
+    register("pts/0", TtyType::Pty, 4096).expect("register");
+    let t = per_tty().into_iter().find(|t| t.name == "pts/0").expect("find");
+    assert_eq!(t.tty_type, TtyType::Pty);
+    assert_eq!(t.buf_size, 4096);
+    assert_eq!((t.read_bytes, t.write_bytes, t.signals_sent, t.overruns), (0, 0, 0, 0));
+    assert!(register("pts/0", TtyType::Pty, 4096).is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Read.
-    record_read("pts/99", 100).expect("read");
-    let t = per_tty().iter().find(|t| t.name == "pts/99").cloned().unwrap();
-    assert_eq!(t.read_bytes, 100);
-    assert_eq!(t.read_ops, 1);
+    // 3: Read — bytes accumulate, ops increment.
+    record_read("pts/0", 100).expect("read");
+    record_read("pts/0", 50).expect("read2");
+    let t = per_tty().into_iter().find(|t| t.name == "pts/0").expect("find");
+    assert_eq!(t.read_bytes, 150);
+    assert_eq!(t.read_ops, 2);
     crate::serial_println!("  [3/8] read: OK");
 
-    // 4: Write.
-    record_write("pts/99", 200).expect("write");
-    let t = per_tty().iter().find(|t| t.name == "pts/99").cloned().unwrap();
+    // 4: Write — bytes accumulate, ops increment.
+    record_write("pts/0", 200).expect("write");
+    let t = per_tty().into_iter().find(|t| t.name == "pts/0").expect("find");
     assert_eq!(t.write_bytes, 200);
     assert_eq!(t.write_ops, 1);
     crate::serial_println!("  [4/8] write: OK");
 
     // 5: Signal.
-    record_signal("pts/99").expect("signal");
-    let t = per_tty().iter().find(|t| t.name == "pts/99").cloned().unwrap();
+    record_signal("pts/0").expect("signal");
+    let t = per_tty().into_iter().find(|t| t.name == "pts/0").expect("find");
     assert_eq!(t.signals_sent, 1);
     crate::serial_println!("  [5/8] signal: OK");
 
     // 6: Overrun.
-    record_overrun("pts/99").expect("overrun");
-    let t = per_tty().iter().find(|t| t.name == "pts/99").cloned().unwrap();
+    record_overrun("pts/0").expect("overrun");
+    let t = per_tty().into_iter().find(|t| t.name == "pts/0").expect("find");
     assert_eq!(t.overruns, 1);
     crate::serial_println!("  [6/8] overrun: OK");
 
-    // 7: Buffer.
-    set_buf_used("pts/99", 2048).expect("buf");
-    let t = per_tty().iter().find(|t| t.name == "pts/99").cloned().unwrap();
+    // 7: Buffer set; unknown TTY → NotFound on every record path.
+    set_buf_used("pts/0", 2048).expect("buf");
+    let t = per_tty().into_iter().find(|t| t.name == "pts/0").expect("find");
     assert_eq!(t.buf_used, 2048);
-    crate::serial_println!("  [7/8] buffer: OK");
+    assert!(record_write("missing", 1).is_err());
+    assert!(record_signal("missing").is_err());
+    assert!(record_overrun("missing").is_err());
+    assert!(set_buf_used("missing", 1).is_err());
+    crate::serial_println!("  [7/8] buffer + not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate stats are exact: 150 read / 200 write / 1 signal / 1 overrun.
     let (ttys, rb, wb, sigs, overruns, ops) = stats();
-    assert!(ttys >= 4);
-    assert!(rb > 16_000_000);
-    assert!(wb > 170_000_000);
-    assert!(sigs > 15_000);
-    assert!(overruns > 50);
+    assert_eq!(ttys, 1);
+    assert_eq!(rb, 150);
+    assert_eq!(wb, 200);
+    assert_eq!(sigs, 1);
+    assert_eq!(overruns, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/ttystat table.
+    *STATE.lock() = None;
 
     crate::serial_println!("ttystat::self_test() — all 8 tests passed");
 }

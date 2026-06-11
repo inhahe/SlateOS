@@ -1338,6 +1338,15 @@ extern "C" fn kernel_main() -> ! {
     // boot and gives the module automated coverage it previously lacked (it was
     // only reachable via the `schedlat test` kshell subcommand).
     fs::schedlat::self_test();
+    // ttystat backs /proc/ttystat (per-TTY read/write bytes+ops, line-discipline
+    // signals, buffer overruns, buffer usage); already had a full register/
+    // record_read/record_write/record_signal/record_overrun/set_buf_used API, so
+    // just emptied init_defaults. The self-test now builds fixtures via that real
+    // API with exact byte/op assertions and resets the table afterward (leaving no
+    // fabricated rows), so it is safe at boot and gives the module automated
+    // coverage it previously lacked (it was only reachable via the `ttystat test`
+    // kshell subcommand).
+    fs::ttystat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

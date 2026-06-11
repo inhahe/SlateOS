@@ -81,23 +81,40 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** KSM (Kernel Same-page Merging) statistics table.
+///
+/// Seeds NO processes and zero counters.  Real KSM accounting is wired through
+/// [`register_process`] (one row per process the KSM scanner tracks) and the
+/// `record_merge`/`record_unmerge`/`record_scan`/`update_process` functions;
+/// until those are called the table is genuinely empty, so `/proc/ksmstat` and
+/// the `ksmstat` kshell command report zeros rather than fabricated numbers —
+/// the kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional processes ("init" pid 1: shared
+/// 500 / unshared 10k / volatile 200; "vm-worker" pid 100: shared 50k /
+/// unshared 100k / volatile 5k) plus invented global counters (pages_shared
+/// 50k, pages_sharing 150k, pages_unshared 110k, pages_volatile 5200,
+/// full_scans 1000, pages_scanned 500M, merges 200k, unmerges 50k, bytes_saved
+/// 50k×16KiB ≈ 800MB), which `/proc/ksmstat` then displayed as if they were
+/// real measured page-deduplication activity.  That demo data was removed; the
+/// self-test now builds its own fixtures explicitly via the real API (see
+/// [`self_test`]).  The KSM scanner is expected to call [`register_process`]
+/// when it begins tracking a process and the record functions as it merges,
+/// unmerges, and scans pages.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        processes: alloc::vec![
-            ProcessKsmStats { pid: 1, name: String::from("init"), shared_pages: 500, unshared_pages: 10_000, volatile_pages: 200 },
-            ProcessKsmStats { pid: 100, name: String::from("vm-worker"), shared_pages: 50_000, unshared_pages: 100_000, volatile_pages: 5_000 },
-        ],
-        pages_shared: 50_000,
-        pages_sharing: 150_000,
-        pages_unshared: 110_000,
-        pages_volatile: 5_200,
-        full_scans: 1_000,
-        pages_scanned: 500_000_000,
-        merges: 200_000,
-        unmerges: 50_000,
-        bytes_saved: 50_000 * 16384, // 50k pages × 16KiB
+        processes: Vec::new(),
+        pages_shared: 0,
+        pages_sharing: 0,
+        pages_unshared: 0,
+        pages_volatile: 0,
+        full_scans: 0,
+        pages_scanned: 0,
+        merges: 0,
+        unmerges: 0,
+        bytes_saved: 0,
         ops: 0,
     });
 }
@@ -185,57 +202,70 @@ pub fn scan_stats() -> (u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("ksmstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/ksmstat must never surface).
+    // Resetting first clears any residue from a prior `ksmstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_process().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated processes or counters.
+    assert_eq!(per_process().len(), 0);
+    let (s0, sh0, m0, u0, b0, _o0) = stats();
+    assert_eq!((s0, sh0, m0, u0, b0), (0, 0, 0, 0, 0));
+    let (fs0, ps0) = scan_stats();
+    assert_eq!((fs0, ps0), (0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register processes — zeroed rows; dup pid fails.
     register_process(200, "test").expect("register");
+    register_process(201, "other").expect("register2");
     assert!(register_process(200, "dup").is_err());
+    assert_eq!(per_process().len(), 2);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Merge.
-    let (shared_before, _, _, _, _, _) = stats();
+    // 3: Merge — shared/sharing/merges/bytes_saved increment exactly from zero.
     record_merge().expect("merge");
-    let (shared_after, _, _, _, _, _) = stats();
-    assert_eq!(shared_after, shared_before + 1);
+    record_merge().expect("merge2");
+    let (shared, sharing, merges, _, saved, _) = stats();
+    assert_eq!((shared, sharing, merges, saved), (2, 2, 2, 2 * 16384));
     crate::serial_println!("  [3/8] merge: OK");
 
-    // 4: Unmerge.
-    let (shared_before, _, _, _, _, _) = stats();
+    // 4: Unmerge — shared/bytes_saved decrement, unmerges increments.
     record_unmerge().expect("unmerge");
-    let (shared_after, _, _, _, _, _) = stats();
-    assert_eq!(shared_after, shared_before - 1);
+    let (shared, _, _, unmerges, saved, _) = stats();
+    assert_eq!((shared, unmerges, saved), (1, 1, 16384));
     crate::serial_println!("  [4/8] unmerge: OK");
 
-    // 5: Scan.
-    let (scans_before, _) = scan_stats();
+    // 5: Scan — pages_scanned accumulates, full_scans counts only full passes.
     record_scan(10_000, true).expect("scan");
-    let (scans_after, _) = scan_stats();
-    assert_eq!(scans_after, scans_before + 1);
+    record_scan(5_000, false).expect("scan2");
+    let (full_scans, pages_scanned) = scan_stats();
+    assert_eq!((full_scans, pages_scanned), (1, 15_000));
     crate::serial_println!("  [5/8] scan: OK");
 
-    // 6: Update process.
+    // 6: Update process sets per-process sharing counts exactly.
     update_process(200, 100, 500, 10).expect("update");
-    let p = per_process().iter().find(|p| p.pid == 200).cloned().unwrap();
-    assert_eq!(p.shared_pages, 100);
+    let p = per_process().iter().find(|p| p.pid == 200).cloned().expect("p200");
+    assert_eq!((p.shared_pages, p.unshared_pages, p.volatile_pages), (100, 500, 10));
     crate::serial_println!("  [6/8] update: OK");
 
-    // 7: Not found.
+    // 7: Unregistered process → NotFound.
     assert!(update_process(999, 0, 0, 0).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate stats equal the exact sums of the operations above.
     let (shared, sharing, merges, unmerges, saved, ops) = stats();
-    assert!(shared > 49_000);
-    assert!(sharing > 150_000);
-    assert!(merges > 200_000);
-    assert!(unmerges > 50_000);
-    assert!(saved > 0);
+    assert_eq!((shared, sharing, merges, unmerges, saved), (1, 2, 2, 1, 16384));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/ksmstat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the KSM scanner wires real
+    // accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("ksmstat::self_test() — all 8 tests passed");
 }

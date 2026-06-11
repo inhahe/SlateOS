@@ -1256,6 +1256,14 @@ extern "C" fn kernel_main() -> ! {
     // gives the module automated coverage it previously lacked (it was only
     // reachable via the `inodestat test` kshell subcommand).
     fs::inodestat::self_test();
+    // ksmstat backs /proc/ksmstat (Kernel Same-page Merging: per-process
+    // sharing, merges/unmerges, scan progress, bytes saved); like its siblings
+    // the self-test now builds fixtures via the real register_process/
+    // record_merge/record_unmerge/record_scan/update_process API and resets the
+    // table afterward (leaving no fabricated rows), so it is safe at boot and
+    // gives the module automated coverage it previously lacked (it was only
+    // reachable via the `ksmstat test` kshell subcommand).
+    fs::ksmstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

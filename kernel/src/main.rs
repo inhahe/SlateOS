@@ -1449,6 +1449,18 @@ extern "C" fn kernel_main() -> ! {
     // fixtures via the real API with exact assertions and resets the table
     // afterward, so it is safe at boot.
     fs::netdev::self_test();
+    // netfilter backs /proc/netfilter (firewall rules + connection tracking +
+    // packet accept/drop/reject totals).  Its init_defaults() previously seeded
+    // four fictional rules ("allow established" 5M matches/10GB, "allow ssh",
+    // "default deny", "allow all out" 4M matches/8GB), two fabricated conntrack
+    // entries (192.168.0.1→…:22 and 192.168.0.1→8.8.8.8:443) and invented
+    // totals (9.15M packets / 9.05M accepted / 100k dropped); that demo data was
+    // removed.  Rules are registered via add_rule, connections via the new
+    // track_connection/update_connection/set_conn_state/untrack_connection API,
+    // and totals advance only on real record_match calls.  The residue-free
+    // self_test builds its fixtures via the real API with exact assertions and
+    // resets the table afterward, so it is safe at boot.
+    fs::netfilter::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

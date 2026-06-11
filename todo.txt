@@ -702,6 +702,29 @@
 ##                    checks). Emptied init_defaults and rebuilt self_test with
 ##                    exact assertions incl. rx/tx error+drop direction routing,
 ##                    wired into boot. /proc/netdev now 88 bytes.)
+##   - netfilter.rs  (fixed 2026-06-11; was: four fake firewall rules ("allow
+##                    established" 5M matches / 10GB bytes_matched; "allow ssh"
+##                    50k/100MB; "default deny" 100k/50MB; "allow all out" 4M /
+##                    8GB) plus two fabricated conntrack entries (192.168.0.1:
+##                    12345→192.168.0.100:22 ESTABLISHED 500 pkts/50KB; 192.168.
+##                    0.1:54321→8.8.8.8:443 ESTABLISHED 2000 pkts/500KB) plus
+##                    invented totals total_packets 9.15M / total_accepted 9.05M /
+##                    total_dropped 100k, surfaced via /proc/netfilter and the
+##                    netfilter kshell command as real firewall activity. Rules
+##                    already had add_rule, but conntrack had NO population API —
+##                    it was only ever seeded by init_defaults, so emptying it
+##                    would leave the feature inert. Added the proper API:
+##                    track_connection(5-tuple) (idempotent, NEW state, zeroed
+##                    counters, ResourceExhausted at MAX_CONNTRACK), plus
+##                    update_connection (account real pkts/bytes),
+##                    set_conn_state, untrack_connection (all NotFound on unknown
+##                    5-tuple). Emptied init_defaults (rules/conntrack empty,
+##                    next_rule_id 1, all totals 0) and rebuilt self_test
+##                    residue-free with exact assertions incl. action-routed
+##                    totals (3 record_match → packets 3/accepted 2/dropped 1),
+##                    disabled-rule non-matching, chain filtering, and the full
+##                    conntrack lifecycle. Wired into boot. /proc/netfilter now
+##                    81 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -714,12 +737,13 @@
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
-##     (just fixed) were ten. Next ticks: work through the remaining candidates
-##     ONE PER TICK, auditing each before acting. The 52-file list includes both
-##     STATISTICS modules (fix: empty / zero-counters) AND SETTINGS or structural
-##     modules that seed LEGITIMATE config defaults or real topology (LEAVE
-##     ALONE). Verify each is a statistics module fabricating observed numbers
-##     surfaced via /proc before emptying it. Remaining flagged names incl.: netfilter,
+##     + netfilter (just fixed) were eleven. Next ticks: work through the
+##     remaining candidates ONE PER TICK, auditing each before acting. The
+##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
+##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
+##     real topology (LEAVE ALONE). Verify each is a statistics module
+##     fabricating observed numbers surfaced via /proc before emptying it. Next
+##     candidate: mempress. Remaining flagged names incl.:
 ##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,

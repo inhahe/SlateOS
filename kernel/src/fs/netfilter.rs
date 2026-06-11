@@ -162,24 +162,31 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the netfilter statistics state.
+///
+/// Starts empty: no firewall rules, no connection-tracking entries, and
+/// all packet/accept/drop/reject counters at zero. The `/proc/netfilter`
+/// generator and the `netfilter` kshell command surface this table as if
+/// it reflects real kernel firewall activity, so seeding it with invented
+/// rows would be fabricated procfs data. Rules are registered through
+/// [`add_rule`], connection-tracking entries through [`track_connection`],
+/// and the counters are advanced only by real [`record_match`] calls.
+///
+/// (Previously this seeded 4 fictional rules — "allow established"
+/// 5M matches/10GB, "allow ssh", "default deny", "allow all out"
+/// 4M matches/8GB — plus 2 fabricated conntrack entries
+/// (192.168.0.1→…:22 and 192.168.0.1→8.8.8.8:443) and invented totals
+/// (9.15M packets, 9.05M accepted, 100k dropped).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        rules: alloc::vec![
-            FilterRule { id: 1, chain: Chain::Input, action: Action::Accept, description: String::from("allow established"), matches: 5_000_000, bytes_matched: 10_000_000_000, enabled: true },
-            FilterRule { id: 2, chain: Chain::Input, action: Action::Accept, description: String::from("allow ssh"), matches: 50000, bytes_matched: 100_000_000, enabled: true },
-            FilterRule { id: 3, chain: Chain::Input, action: Action::Drop, description: String::from("default deny"), matches: 100000, bytes_matched: 50_000_000, enabled: true },
-            FilterRule { id: 4, chain: Chain::Output, action: Action::Accept, description: String::from("allow all out"), matches: 4_000_000, bytes_matched: 8_000_000_000, enabled: true },
-        ],
-        conntrack: alloc::vec![
-            ConnTrackEntry { src_ip: 0xC0A80001, dst_ip: 0xC0A80064, src_port: 12345, dst_port: 22, protocol: 6, packets: 500, bytes: 50000, state: ConnState::Established },
-            ConnTrackEntry { src_ip: 0xC0A80001, dst_ip: 0x08080808, src_port: 54321, dst_port: 443, protocol: 6, packets: 2000, bytes: 500000, state: ConnState::Established },
-        ],
-        next_rule_id: 5,
-        total_packets: 9_150_000,
-        total_accepted: 9_050_000,
-        total_dropped: 100000,
+        rules: Vec::new(),
+        conntrack: Vec::new(),
+        next_rule_id: 1,
+        total_packets: 0,
+        total_accepted: 0,
+        total_dropped: 0,
         total_rejected: 0,
         ops: 0,
     });
@@ -256,6 +263,108 @@ pub fn conntrack() -> Vec<ConnTrackEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| s.conntrack.clone())
 }
 
+/// Begin tracking a connection.
+///
+/// Registers a new connection-tracking entry for the given 5-tuple in the
+/// `New` state with zeroed packet/byte counters. If an entry for the same
+/// 5-tuple already exists it is returned unchanged (idempotent). Real
+/// traffic is accounted via [`update_connection`], and the connection's
+/// lifecycle state is advanced via [`set_conn_state`]. Returns
+/// `ResourceExhausted` once the conntrack table is full.
+pub fn track_connection(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+) -> KernelResult<()> {
+    with_state(|state| {
+        if state.conntrack.iter().any(|c| {
+            c.src_ip == src_ip && c.dst_ip == dst_ip
+                && c.src_port == src_port && c.dst_port == dst_port
+                && c.protocol == protocol
+        }) {
+            return Ok(());
+        }
+        if state.conntrack.len() >= MAX_CONNTRACK {
+            return Err(KernelError::ResourceExhausted);
+        }
+        state.conntrack.push(ConnTrackEntry {
+            src_ip, dst_ip, src_port, dst_port, protocol,
+            packets: 0, bytes: 0, state: ConnState::New,
+        });
+        Ok(())
+    })
+}
+
+/// Account real traffic against a tracked connection.
+///
+/// Adds `packets` and `bytes` to the matching 5-tuple's counters. Returns
+/// `NotFound` if the connection is not being tracked.
+pub fn update_connection(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    packets: u64,
+    bytes: u64,
+) -> KernelResult<()> {
+    with_state(|state| {
+        let entry = state.conntrack.iter_mut().find(|c| {
+            c.src_ip == src_ip && c.dst_ip == dst_ip
+                && c.src_port == src_port && c.dst_port == dst_port
+                && c.protocol == protocol
+        }).ok_or(KernelError::NotFound)?;
+        entry.packets = entry.packets.saturating_add(packets);
+        entry.bytes = entry.bytes.saturating_add(bytes);
+        Ok(())
+    })
+}
+
+/// Advance the lifecycle state of a tracked connection.
+///
+/// Returns `NotFound` if the connection is not being tracked.
+pub fn set_conn_state(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    new_state: ConnState,
+) -> KernelResult<()> {
+    with_state(|state| {
+        let entry = state.conntrack.iter_mut().find(|c| {
+            c.src_ip == src_ip && c.dst_ip == dst_ip
+                && c.src_port == src_port && c.dst_port == dst_port
+                && c.protocol == protocol
+        }).ok_or(KernelError::NotFound)?;
+        entry.state = new_state;
+        Ok(())
+    })
+}
+
+/// Stop tracking a connection (e.g. on close/timeout).
+///
+/// Returns `NotFound` if the connection is not being tracked.
+pub fn untrack_connection(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+) -> KernelResult<()> {
+    with_state(|state| {
+        let idx = state.conntrack.iter().position(|c| {
+            c.src_ip == src_ip && c.dst_ip == dst_ip
+                && c.src_port == src_port && c.dst_port == dst_port
+                && c.protocol == protocol
+        }).ok_or(KernelError::NotFound)?;
+        state.conntrack.remove(idx);
+        Ok(())
+    })
+}
+
 /// Statistics: (rule_count, conntrack_count, total_packets, total_accepted, total_dropped, ops).
 pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
     let guard = STATE.lock();
@@ -271,58 +380,85 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("netfilter::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live /proc/netfilter table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_rules().len(), 4);
-    assert_eq!(conntrack().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated rules, conntrack, or counters.
+    assert_eq!(list_rules().len(), 0);
+    assert_eq!(conntrack().len(), 0);
+    let (rules0, ct0, packets0, accepted0, dropped0, _) = stats();
+    assert_eq!((rules0, ct0, packets0, accepted0, dropped0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Add rule.
-    let id = add_rule(Chain::Forward, Action::Accept, "allow forward").expect("add");
-    assert!(id >= 5);
-    assert_eq!(list_rules().len(), 5);
-    crate::serial_println!("  [2/8] add rule: OK");
+    // 2: Add rules — ids are monotonic starting at 1.
+    let r_in = add_rule(Chain::Input, Action::Accept, "allow ssh").expect("add in");
+    let r_drop = add_rule(Chain::Input, Action::Drop, "default deny").expect("add drop");
+    let r_fwd = add_rule(Chain::Forward, Action::Accept, "allow forward").expect("add fwd");
+    assert_eq!((r_in, r_drop, r_fwd), (1, 2, 3));
+    assert_eq!(list_rules().len(), 3);
+    crate::serial_println!("  [2/8] add rules: OK");
 
-    // 3: Remove rule.
-    remove_rule(id).expect("remove");
-    assert_eq!(list_rules().len(), 4);
-    assert!(remove_rule(id).is_err());
+    // 3: Remove rule — gone, and double-remove errors.
+    remove_rule(r_fwd).expect("remove");
+    assert_eq!(list_rules().len(), 2);
+    assert!(remove_rule(r_fwd).is_err());
     crate::serial_println!("  [3/8] remove rule: OK");
 
-    // 4: Record match.
-    let before = list_rules()[0].matches;
-    record_match(Chain::Input, Action::Accept, 1500).expect("match");
-    let after = list_rules()[0].matches;
-    assert_eq!(after, before + 1);
+    // 4: Record match routes to the matching enabled rule and the totals.
+    record_match(Chain::Input, Action::Accept, 1500).expect("match accept");
+    record_match(Chain::Input, Action::Drop, 64).expect("match drop");
+    let accept_rule = list_rules().into_iter().find(|r| r.id == r_in).expect("rule");
+    assert_eq!(accept_rule.matches, 1);
+    assert_eq!(accept_rule.bytes_matched, 1500);
+    let (_, _, packets, accepted, dropped, _) = stats();
+    assert_eq!((packets, accepted, dropped), (2, 1, 1));
     crate::serial_println!("  [4/8] record match: OK");
 
-    // 5: Toggle.
-    let enabled = toggle_rule(1).expect("toggle");
+    // 5: Toggle disables the rule so it no longer matches.
+    let enabled = toggle_rule(r_in).expect("toggle");
     assert!(!enabled);
-    let enabled2 = toggle_rule(1).expect("toggle2");
-    assert!(enabled2);
+    record_match(Chain::Input, Action::Accept, 999).expect("match disabled");
+    let still = list_rules().into_iter().find(|r| r.id == r_in).expect("rule");
+    assert_eq!(still.matches, 1); // unchanged — rule disabled
+    assert!(toggle_rule(r_in).expect("toggle back"));
     crate::serial_println!("  [5/8] toggle: OK");
 
-    // 6: Chain filter.
+    // 6: Chain filter only returns matching-chain rules.
     let input_rules = rules_for_chain(Chain::Input);
-    assert!(input_rules.len() >= 3);
+    assert_eq!(input_rules.len(), 2);
+    assert!(input_rules.iter().all(|r| r.chain == Chain::Input));
+    assert_eq!(rules_for_chain(Chain::Output).len(), 0);
     crate::serial_println!("  [6/8] chain filter: OK");
 
-    // 7: Drop stats.
-    record_match(Chain::Input, Action::Drop, 64).expect("drop");
-    let (_, _, _, _, dropped, _) = stats();
-    assert!(dropped > 100000);
-    crate::serial_println!("  [7/8] drop stats: OK");
+    // 7: Connection tracking — register, dedup, account, advance, untrack.
+    track_connection(0x0A000001, 0x0A000002, 40000, 80, 6).expect("track");
+    track_connection(0x0A000001, 0x0A000002, 40000, 80, 6).expect("track dup");
+    assert_eq!(conntrack().len(), 1); // idempotent on the same 5-tuple
+    update_connection(0x0A000001, 0x0A000002, 40000, 80, 6, 3, 4096).expect("update");
+    set_conn_state(0x0A000001, 0x0A000002, 40000, 80, 6, ConnState::Established).expect("state");
+    let entry = conntrack().into_iter().next().expect("entry");
+    assert_eq!(entry.packets, 3);
+    assert_eq!(entry.bytes, 4096);
+    assert_eq!(entry.state, ConnState::Established);
+    assert!(update_connection(1, 2, 3, 4, 6, 1, 1).is_err()); // untracked → NotFound
+    untrack_connection(0x0A000001, 0x0A000002, 40000, 80, 6).expect("untrack");
+    assert_eq!(conntrack().len(), 0);
+    crate::serial_println!("  [7/8] conntrack: OK");
 
-    // 8: Stats.
-    let (rules, ct, packets, accepted, _dropped, ops) = stats();
-    assert_eq!(rules, 4);
-    assert_eq!(ct, 2);
-    assert!(packets > 9_150_000);
-    assert!(accepted > 9_050_000);
+    // 8: Final stats reflect only the real activity above. record_match
+    //    advances the per-action totals unconditionally (independent of
+    //    whether an enabled rule matched), so the 3 record_match calls
+    //    (2 Accept + 1 Drop) give packets=3, accepted=2, dropped=1.
+    let (rules, ct, packets, accepted, dropped, ops) = stats();
+    assert_eq!(rules, 2);
+    assert_eq!(ct, 0);
+    assert_eq!((packets, accepted, dropped), (3, 2, 1));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("netfilter::self_test() — all 8 tests passed");
 }

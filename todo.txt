@@ -29,12 +29,13 @@
 ## cpu line's user/nice columns are non-zero), the scheduler tick path would need
 ## to attribute time to user vs. kernel mode — defer until a real userspace
 ## workload makes top/htop's %us column matter.
-## RELATED (now UNBLOCKED): /proc/uptime (gen_uptime, procfs.rs ~line 609) emits
-## only ONE field "secs.frac"; real Linux /proc/uptime (fs/proc/uptime.c) emits
-## TWO centisecond fields "<uptime> <idle>" where idle = summed per-CPU idle
-## seconds.  cputime now provides honest per-CPU idle_ns (aggregate_stats().idle_ns
-## / 1e9 = idle seconds), so the second field can now be emitted truthfully.
-## TRIGGER: next procfs-fidelity tick — add the second field using cputime idle_ns.
+## DONE (2026-06-11): /proc/uptime converted to Linux format (gen_uptime,
+## procfs.rs).  Now emits the real Linux fs/proc/uptime.c layout: TWO
+## space-separated centisecond fields "<uptime> <idle>" instead of the old
+## single 9-decimal "secs.frac" field.  The idle field is the sum of idle time
+## across ALL CPUs, sourced honestly from cputime::aggregate_stats().idle_ns
+## (real per-CPU TSC idle accounting) — never fabricated.  Strict two-field
+## parsers (sscanf "%lf %lf") now work.  boot-test PASSED.
 ## NOTE: /proc/meminfo and /proc/cpuinfo
 ## are INTENTIONALLY native-format (their doc comments say "our own
 ## field names"); converting THOSE to Linux layout is a separate design

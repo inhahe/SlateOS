@@ -605,12 +605,29 @@ fn gen_version() -> Vec<u8> {
     text.into_bytes()
 }
 
-/// `/proc/uptime` — system uptime in seconds (decimal with nanosecond precision).
+/// `/proc/uptime` — system uptime and total idle time, Linux format.
+///
+/// Follows Linux `fs/proc/uptime.c`: two space-separated fields, each in
+/// seconds with centisecond (2-decimal) precision:
+///
+///   `<uptime_seconds> <idle_seconds>`
+///
+/// The second field is the sum of idle time across ALL CPUs (so on an N-CPU
+/// machine it can be up to N× the uptime). It is sourced honestly from
+/// [`crate::cputime`], which performs real per-CPU TSC idle accounting hooked
+/// into the live idle path — never fabricated. `uptime::ProcessUptime` and
+/// strict two-field parsers (`sscanf "%lf %lf"`) rely on both fields existing.
 fn gen_uptime() -> Vec<u8> {
     let ns = crate::hpet::elapsed_ns();
     let secs = ns / 1_000_000_000;
-    let frac = ns % 1_000_000_000;
-    let text = format!("{secs}.{frac:09}\n");
+    let centis = (ns % 1_000_000_000) / 10_000_000;
+
+    // Total idle across all CPUs (summed), from real per-CPU TSC accounting.
+    let idle_ns = crate::cputime::aggregate_stats().idle_ns;
+    let idle_secs = idle_ns / 1_000_000_000;
+    let idle_centis = (idle_ns % 1_000_000_000) / 10_000_000;
+
+    let text = format!("{secs}.{centis:02} {idle_secs}.{idle_centis:02}\n");
     text.into_bytes()
 }
 

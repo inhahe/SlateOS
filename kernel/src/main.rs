@@ -1296,6 +1296,14 @@ extern "C" fn kernel_main() -> ! {
     // automated coverage it previously lacked (it was only reachable via the
     // `pmcstat test` kshell subcommand).
     fs::pmcstat::self_test();
+    // powerstat backs /proc/powerstat (per-domain power state, energy in uJ,
+    // transitions, wake-event log); like its siblings the self-test now builds
+    // fixtures via the real register_domain/record_transition/update_energy/
+    // record_wake API and resets the table afterward (leaving no fabricated
+    // rows), so it is safe at boot and gives the module automated coverage it
+    // previously lacked (it was only reachable via the `powerstat test` kshell
+    // subcommand).
+    fs::powerstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

@@ -479,13 +479,25 @@
 ##                    init_defaults and rebuilt self_test with exact assertions
 ##                    (incl. exact IPC=50 and cache-miss-rate=500 from recorded
 ##                    samples), wired into boot.)
+##   - powerstat.rs  (fixed 2026-06-11; was: four fake domains cpu (active /
+##                    energy 50J / transitions 100k / 3600s active), gpu (idle /
+##                    20J / 5k transitions), memory (active / 10J), storage
+##                    (active / 5J / 50k transitions); plus aggregates
+##                    total_energy_uj 85J, total_transitions 156k, total_wakes
+##                    50k. init_defaults also called hpet::elapsed_ns() to stamp
+##                    fake last_transition_ns. record_transition returned NotFound
+##                    for an unregistered domain and there was NO registration
+##                    API, so added register_domain(domain, initial_state)
+##                    (zeroed counters, real HPET timestamp); emptied
+##                    init_defaults and rebuilt self_test with exact assertions,
+##                    wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): powerstat,
-##     procstat, ratestat, rqstat, schedlat, ttystat, zramstat. NOTE: some may
-##     be SETTINGS modules seeding legitimate config defaults — verify each is a
-##     STATISTICS module seeding fake OBSERVATIONS before emptying it.)
+##     by grep (init_defaults with alloc::vec!/String::from/push): procstat,
+##     ratestat, rqstat, schedlat, ttystat, zramstat. NOTE: some may be SETTINGS
+##     modules seeding legitimate config defaults — verify each is a STATISTICS
+##     module seeding fake OBSERVATIONS before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

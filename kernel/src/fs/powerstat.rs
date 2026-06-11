@@ -159,23 +159,62 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** power statistics table.
+///
+/// Seeds NO power domains, an empty wake log, and zero counters.  Real power
+/// accounting is wired through [`register_domain`] (one row per power domain the
+/// power-management layer brings online, with its real initial [`PowerState`])
+/// and the `record_transition`/`update_energy`/`record_wake` functions; until
+/// those are called the table is genuinely empty, so `/proc/powerstat` and the
+/// `powerstat` kshell command report zeros rather than fabricated numbers — the
+/// kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded four fictional domains (cpu: active / energy
+/// 50J / transitions 100k / 3600s active; gpu: idle / 20J / 5k transitions;
+/// memory: active / 10J; storage: active / 5J / 50k transitions) plus invented
+/// aggregate totals (total_energy_uj 85J, total_transitions 156k, total_wakes
+/// 50k), which `/proc/powerstat` then displayed as if they were real measured
+/// energy consumption and power-state activity.  That demo data was removed; the
+/// self-test now builds its own fixtures explicitly via the real API (see
+/// [`self_test`]).  The power-management layer is expected to call
+/// [`register_domain`] for each domain and the record functions on every state
+/// transition, energy update, and wake event.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        domains: alloc::vec![
-            DomainStats { domain: PowerDomain::Cpu, current_state: PowerState::Active, energy_uj: 50_000_000, transitions: 100_000, active_time_ns: 3_600_000_000_000, idle_time_ns: 7_200_000_000_000, last_transition_ns: now },
-            DomainStats { domain: PowerDomain::Gpu, current_state: PowerState::Idle, energy_uj: 20_000_000, transitions: 5_000, active_time_ns: 600_000_000_000, idle_time_ns: 10_200_000_000_000, last_transition_ns: now },
-            DomainStats { domain: PowerDomain::Memory, current_state: PowerState::Active, energy_uj: 10_000_000, transitions: 1_000, active_time_ns: 10_800_000_000_000, idle_time_ns: 0, last_transition_ns: now },
-            DomainStats { domain: PowerDomain::Storage, current_state: PowerState::Active, energy_uj: 5_000_000, transitions: 50_000, active_time_ns: 1_800_000_000_000, idle_time_ns: 9_000_000_000_000, last_transition_ns: now },
-        ],
+        domains: Vec::new(),
         wake_log: Vec::new(),
-        total_energy_uj: 85_000_000,
-        total_transitions: 156_000,
-        total_wakes: 50_000,
+        total_energy_uj: 0,
+        total_transitions: 0,
+        total_wakes: 0,
         ops: 0,
     });
+}
+
+/// Register a power domain the power-management layer has brought online.
+///
+/// The domain starts in `initial_state` with zeroed energy/transition/time
+/// counters; `last_transition_ns` is stamped with the current HPET time so the
+/// first real transition accounts elapsed time correctly.  Returns
+/// [`KernelError::AlreadyExists`] if the domain is already registered.
+pub fn register_domain(domain: PowerDomain, initial_state: PowerState) -> KernelResult<()> {
+    with_state(|state| {
+        if state.domains.iter().any(|d| d.domain == domain) {
+            return Err(KernelError::AlreadyExists);
+        }
+        let now = crate::hpet::elapsed_ns();
+        state.domains.push(DomainStats {
+            domain,
+            current_state: initial_state,
+            energy_uj: 0,
+            transitions: 0,
+            active_time_ns: 0,
+            idle_time_ns: 0,
+            last_transition_ns: now,
+        });
+        Ok(())
+    })
 }
 
 /// Record a power state transition.
@@ -247,57 +286,78 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("powerstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/powerstat must never surface).
+    // Resetting first clears any residue from a prior `powerstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(domain_stats().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated domains, wakes, or totals.
+    assert_eq!(domain_stats().len(), 0);
+    assert_eq!(wake_log(10).len(), 0);
+    let (d0, e0, t0, w0, _o0) = stats();
+    assert_eq!((d0, e0, t0, w0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Transition.
+    // 2: Register domains — zeroed counters, given initial state; dup fails.
+    register_domain(PowerDomain::Cpu, PowerState::Active).expect("reg cpu");
+    register_domain(PowerDomain::Gpu, PowerState::Idle).expect("reg gpu");
+    assert!(register_domain(PowerDomain::Cpu, PowerState::Off).is_err()); // AlreadyExists
+    assert_eq!(domain_stats().len(), 2);
+    let cpu = domain_stats().iter().find(|d| d.domain == PowerDomain::Cpu).cloned().expect("cpu");
+    assert_eq!(cpu.current_state, PowerState::Active);
+    assert_eq!((cpu.energy_uj, cpu.transitions, cpu.active_time_ns), (0, 0, 0));
+    crate::serial_println!("  [2/8] register: OK");
+
+    // 3: Transition updates state + transition count exactly from zero.
     record_transition(PowerDomain::Cpu, PowerState::Idle).expect("transition");
-    let d = domain_stats().iter().find(|d| d.domain == PowerDomain::Cpu).cloned().unwrap();
-    assert_eq!(d.current_state, PowerState::Idle);
-    assert!(d.transitions > 100_000);
-    crate::serial_println!("  [2/8] transition: OK");
+    let cpu = domain_stats().iter().find(|d| d.domain == PowerDomain::Cpu).cloned().expect("cpu");
+    assert_eq!(cpu.current_state, PowerState::Idle);
+    assert_eq!(cpu.transitions, 1);
+    crate::serial_println!("  [3/8] transition: OK");
 
-    // 3: Back to active.
+    // 4: Second transition counts again; state follows.
     record_transition(PowerDomain::Cpu, PowerState::Active).expect("transition2");
-    let d = domain_stats().iter().find(|d| d.domain == PowerDomain::Cpu).cloned().unwrap();
-    assert_eq!(d.current_state, PowerState::Active);
-    crate::serial_println!("  [3/8] back to active: OK");
+    let cpu = domain_stats().iter().find(|d| d.domain == PowerDomain::Cpu).cloned().expect("cpu");
+    assert_eq!(cpu.current_state, PowerState::Active);
+    assert_eq!(cpu.transitions, 2);
+    crate::serial_println!("  [4/8] back to active: OK");
 
-    // 4: Energy update.
-    let before = domain_stats().iter().find(|d| d.domain == PowerDomain::Gpu).cloned().unwrap().energy_uj;
+    // 5: Energy accumulates exactly from zero.
     update_energy(PowerDomain::Gpu, 1000).expect("energy");
-    let after = domain_stats().iter().find(|d| d.domain == PowerDomain::Gpu).cloned().unwrap().energy_uj;
-    assert_eq!(after, before + 1000);
-    crate::serial_println!("  [4/8] energy: OK");
+    update_energy(PowerDomain::Gpu, 500).expect("energy2");
+    let gpu = domain_stats().iter().find(|d| d.domain == PowerDomain::Gpu).cloned().expect("gpu");
+    assert_eq!(gpu.energy_uj, 1500);
+    crate::serial_println!("  [5/8] energy: OK");
 
-    // 5: Wake event.
+    // 6: Wake events are logged in order, count tracked.
     record_wake(WakeSource::Timer, PowerDomain::Cpu).expect("wake");
-    let log = wake_log(5);
-    assert_eq!(log.len(), 1);
-    crate::serial_println!("  [5/8] wake: OK");
-
-    // 6: Multiple wakes.
-    record_wake(WakeSource::UserInput, PowerDomain::Display).expect("wake2");
-    record_wake(WakeSource::Network, PowerDomain::Network).expect("wake3");
+    record_wake(WakeSource::UserInput, PowerDomain::Gpu).expect("wake2");
     let log = wake_log(10);
-    assert_eq!(log.len(), 3);
-    crate::serial_println!("  [6/8] multiple wakes: OK");
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0].source, WakeSource::Timer);
+    assert_eq!(log[1].source, WakeSource::UserInput);
+    crate::serial_println!("  [6/8] wakes: OK");
 
-    // 7: Not found.
+    // 7: Unregistered domain → NotFound.
     assert!(record_transition(PowerDomain::Audio, PowerState::Off).is_err());
+    assert!(update_energy(PowerDomain::Audio, 1).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (domains, energy, transitions, wakes, ops) = stats();
-    assert_eq!(domains, 4);
-    assert!(energy > 85_000_000);
-    assert!(transitions > 156_000);
-    assert!(wakes > 50_000);
+    assert_eq!(domains, 2);
+    assert_eq!(energy, 1500);     // 1000 + 500 on gpu
+    assert_eq!(transitions, 2);   // 2 cpu transitions
+    assert_eq!(wakes, 2);         // 2 wake events
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/powerstat table.
+    *STATE.lock() = None;
 
     crate::serial_println!("powerstat::self_test() — all 8 tests passed");
 }
